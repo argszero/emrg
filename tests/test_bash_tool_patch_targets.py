@@ -121,6 +121,18 @@ READ_FORMS = (
     ("dry run with an output", f"patch --dry-run -o {OUTSIDE}/out {WORKSPACE}/in"),
 )
 
+# A word a cluster's letter ate, so the scan must step over it. `patch -d -sd <dir> f` is
+# `-d` taking the *word* `-sd` as its directory: the eaten `-sd` is not a cluster, and a
+# reader that scans it again reports the `d` inside it and names `<dir>` a second time.
+# The name itself is not this row's claim — the operand reader eats `-sd` as `-d`'s spaced
+# value and reads `<dir>` as an operand either way — so the *duplicate* is the
+# discriminator, and `test_the_step_is_what_keeps_the_eaten_word_out_of_the_cluster_read`
+# is the arm that flips it. Measured on the landing tree of #1451 (issue #1454).
+EATEN_WORD_FORMS = (
+    ("chdir eats the cluster", f"patch -d -sd {OUTSIDE}/dir {WORKSPACE}/f",
+     (f"{OUTSIDE}/dir", f"{WORKSPACE}/f", "-sd")),
+)
+
 # (row, command) — the residual: with no operand and no `-o`, the paths come from the
 # diff's own content, which no static scan can read. Pinned as a measured hole with the
 # verdict it really gets, the shape `tests/test_bash_tool_option_destinations.py` uses
@@ -179,6 +191,23 @@ def test_the_chdir_value_is_named_beside_the_operand(row, cmd, named) -> None:
     # block it reports can only be the outside directory — which is where the write lands.
     allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir=WORKSPACE)
     assert OUTSIDE in reason, f"{row}: workspace-write block does not name {OUTSIDE}"
+
+
+@pytest.mark.parametrize(
+    "row,cmd,named", EATEN_WORD_FORMS, ids=[r for r, *_ in EATEN_WORD_FORMS]
+)
+def test_a_word_a_cluster_ate_is_stepped_over_not_read_twice(row, cmd, named) -> None:
+    """Exactly the list a run names — the duplicate is the whole assertion.
+
+    `patch -d -sd <dir> f` is `-d` taking the word `-sd` as its directory, and the run
+    writes `<dir>/f`. Both readings name that path; what separates them is that a reader
+    which scans the eaten `-sd` again finds the `d` inside it and reports a cluster too,
+    so the same directory lands in the list twice. Asserting the *tuple* rather than a
+    verdict is therefore the only way to pin it: the verdict is identical either way, which
+    is why the step went unpinned until issue #1454 — and why a row that only says "BLOCK"
+    here would pass on the mutated tree as well.
+    """
+    assert tuple(_extract_write_targets(cmd)) == named, row
 
 
 @pytest.mark.parametrize("row,cmd", READ_FORMS, ids=[r for r, _ in READ_FORMS])
@@ -502,4 +531,24 @@ def test_the_spellings_that_are_not_clusters_survive_the_cluster_arm(
     allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir=WORKSPACE)
     assert allowed is False and OUTSIDE in reason, (
         f"{row}: the plain spelling is still read, so this write is still refused"
+    )
+
+
+def test_the_step_is_what_keeps_the_eaten_word_out_of_the_cluster_read(monkeypatch) -> None:
+    """Stop stepping over the eaten word and the same path is named twice.
+
+    The arm is the shared advance itself (`_words_eaten`), not the letters and not a
+    verdict: with it at ``1`` every token is looked at, so the `-sd` that `-d` ate is
+    scanned as a cluster and its `d` reports `<dir>` a second time. The verdict does not
+    move at either tier, which is exactly why the row above asserts the *list* — and the
+    proof that it is a genuine arm is that the unmutated reading is asserted first, so a
+    future reader cannot make this test pass by breaking the step in the source.
+    """
+    cmd = f"patch -d -sd {OUTSIDE}/dir {WORKSPACE}/f"
+    unmutated = (f"{OUTSIDE}/dir", f"{WORKSPACE}/f", "-sd")
+    assert tuple(_extract_write_targets(cmd)) == unmutated, "not the unmutated reading"
+    monkeypatch.setattr(bash_tool, "_words_eaten", lambda attached: 1)
+    assert tuple(_extract_write_targets(cmd)) == unmutated + (f"{OUTSIDE}/dir",), (
+        "with the step gone the eaten `-sd` must be read as a cluster and name the same "
+        "directory again — otherwise the step is not what keeps it out"
     )
