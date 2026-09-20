@@ -5018,6 +5018,28 @@ def _quoted_char_indexes(cmd: str) -> set[int]:
     return protected
 
 
+def _separator_is_escaped(cmd: str, start: int) -> bool:
+    """True when the word-boundary character before ``start`` is itself escaped.
+
+    The shell ends a word at white space or a metacharacter *unless* that character is
+    quoted or escaped, and an escaped one was never a boundary: in ``cp src dst\\ 2>…``
+    the space belongs to the word ``dst 2``, so the digits after it do not begin one and
+    masking them rewrites the name the guard reports (issue #1484).
+
+    Escaped means an **odd** number of backslashes in front of the separator, which is
+    the shell's own rule: ``x\\\\ 2>`` keeps a real separator (and a real descriptor)
+    because the two backslashes are one literal backslash, and ``dst\\ 2>`` does not.
+    """
+    if start == 0:
+        return False
+    backslashes = 0
+    j = start - 2
+    while j >= 0 and cmd[j] == "\\":
+        backslashes += 1
+        j -= 1
+    return backslashes % 2 == 1
+
+
 def _mask_fd_redirect_prefixes(cmd: str) -> str:
     """Blank the digits of a descriptor prefix that is *attached* to its redirect.
 
@@ -5071,12 +5093,22 @@ def _mask_fd_redirect_prefixes(cmd: str) -> str:
     Named limit, in the safe direction: a quoted or escaped operator is left to the
     walk's own quoting rules, so `echo '>' 2` still names nothing extra — the prefix
     here is always the digits that sit directly against an unquoted operator.
+
+    An *escaped* separator is not a separator: the digits in `dst\\ 2>/dev/null` do not
+    begin a word, because the space in front of them is part of the word `dst 2`. The
+    lookbehind admits that space (it is white space), and `_quoted_char_indexes`
+    protects the character *behind* the backslash — the space — not the digit that
+    follows it, so the mask blanked the digit and the guard reported ``dst `` for a run
+    that really created the file ``dst 2`` (issue #1484). `_separator_is_escaped`
+    answers the shell's own rule, and the row is pinned beside `-2>` in
+    `tests/test_bash_tool_sandbox.py`.
     """
     if not cmd:
         return cmd
     matches = [
         m for m in _FD_PREFIX_BEFORE_REDIRECT_RE.finditer(cmd)
         if m.start(1) not in _quoted_char_indexes(cmd)
+        and not _separator_is_escaped(cmd, m.start(1))
     ]
     if not matches:
         return cmd

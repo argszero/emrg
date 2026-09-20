@@ -1507,7 +1507,11 @@ def test_a_descriptor_attached_to_its_operator_is_masked_and_a_spaced_one_is_not
     named ``2``**. A rule that dropped the number before any operator would fix one
     direction and break the other, which is why the row pair is the test.
     """
-    for cmd in ("cp src dst 2>/dev/null", "cp src dst 2>&1", "cp src dst 3>err.txt"):
+    for cmd in ("cp src dst 2>/dev/null", "cp src dst 2>&1", "cp src dst 3>err.txt",
+                # Two backslashes are one literal backslash, so this separator is real
+                # and the descriptor attached behind it is a descriptor (issue #1484's
+                # row pair: one backslash escapes the space, two do not).
+                "cp src dst\\\\ 2>/dev/null"):
         assert _mask_fd_redirect_prefixes(cmd) != cmd, f"{cmd!r} carries an attached descriptor"
     for cmd in (
         "cp src dst 2 >/dev/null",
@@ -1516,6 +1520,10 @@ def test_a_descriptor_attached_to_its_operator_is_masked_and_a_spaced_one_is_not
         "echo x y2>/dev/null",
         'echo "a 2>b"',
         "cp src dst 2",
+        # The escaped separator is not a separator, so `dst 2` is one word (issue
+        # #1484). Without this row the mask blanks the digit and the guard reports
+        # `dst ` — a path the shell never wrote.
+        "cp src dst\\ 2>/dev/null",
     ):
         assert _mask_fd_redirect_prefixes(cmd) == cmd, f"{cmd!r} has no attached descriptor"
 
@@ -1533,6 +1541,32 @@ def test_a_word_before_a_redirect_keeps_its_name():
     """
     assert _mask_fd_redirect_prefixes("cp src dst -2>/dev/null") == "cp src dst -2>/dev/null"
     assert "2" in _extract_write_targets("cp src 2 >/dev/null")
+
+
+def test_an_escaped_separator_is_not_a_separator():
+    """Issue #1484: `dst\\ 2` is one word, so masking its digit rewrites a name.
+
+    The mask's own docstring says a *name* is the one thing it must never rewrite, and
+    this row broke that while the decision stayed safe: `/etc/hosts 2` and `/etc/hosts `
+    are both outside any workspace, so nothing was allowed that should be refused — the
+    host was simply shown a path they never typed. The lookbehind admits the space (it
+    is white space), and `_quoted_char_indexes` protects what is *behind* the backslash,
+    which is the space, not the digit after it.
+
+    Asserted on the mask text and on the target list, with the shell's own ground truth
+    beside it, the way the `-2>` row is: in a scratch directory on this host, `/bin/sh`
+    running `cp src dst\\ 2>/dev/null` really creates the file `dst 2`, while the
+    two-backslash form (`dst\\\\ 2>/dev/null`) creates `dst\\` and does send stderr to
+    the device — one backslash escapes the space, two are one literal backslash. That
+    pair is why the rule is a parity count rather than "a backslash is present".
+    """
+    single = "cp src dst\\ 2>/dev/null"
+    assert _mask_fd_redirect_prefixes(single) == single, "the escaped space was eaten"
+    assert "dst 2" in _extract_write_targets(single), "the guard renamed the destination"
+
+    double = "cp src dst\\\\ 2>/dev/null"
+    assert _mask_fd_redirect_prefixes(double) == "cp src dst\\\\  >/dev/null"
+    assert "dst\\" in _extract_write_targets(double)
 
 
 # The interior shape. The shell removes a redirection and its operand and keeps
