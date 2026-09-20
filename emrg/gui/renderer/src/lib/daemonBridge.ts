@@ -323,7 +323,13 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         transcript.handleToolEnd(data as ToolEndData, sid);
         break;
       case "cancelled":
+        // 结束这一轮的唯一陈述（rant 2026-09-20T12:50:13）。daemon 的 cancelled 是
+        // **会话级回执**，广播给订阅该会话的每个客户端，所以问的一方与旁观的一方拿到的
+        // 是同一条——曾经这条语句在 Composer.stop() 里本地生成（清 typing + 打一行 +
+        // 置 busy=false），于是「按 Esc 的一端点停止、真正跑着这轮的另一端服务端毫无反应」
+        // 而两边都显示已中断。本地那套已删除，保留这里一处。
         transcript.clearTyping(sid);
+        transcript.addSystemMessage(tt("chat.interrupted"), sid);
         releaseOwnStream(sid, null, true);
         clearTurnTimer(sid);
         break;

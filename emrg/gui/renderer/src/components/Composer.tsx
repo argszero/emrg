@@ -81,7 +81,7 @@ export interface ComposerProps {
   /** 注入图片落盘函数（默认 window.emrg.saveImage；测试传假实现） */
   saveImage?: (payload: SaveImagePayload) => Promise<SaveImageResult>;
   /** 注入中断函数（默认 window.emrg.cancel；busy 时发送按钮切换为停止按钮，rant 2026-09-02T20:30:05） */
-  cancel?: () => Promise<unknown>;
+  cancel?: (sessionId: string) => Promise<unknown>;
   /** / 指令路由回调（Batch 5 接线：/clear /model /memory …） */
   onCommand?: (routing: CommandRouting) => void;
   /** 测试注入：挂载后回填 tiptap Editor 实例（命令驱动测试用） */
@@ -193,10 +193,11 @@ export function Composer({
 
   // 中断函数解析（rant 2026-09-02T20:30:05：busy 时发送按钮切换为停止按钮，
   // 默认走 preload 桥 emrg:cancel；测试注入假实现）
+  // Rant 2026-09-20T12:50:13：cancel 必须点名会话——没有会话可点名就不发。
   const cancelFn =
     cancelProp ??
-    (() =>
-      (window as unknown as { emrg?: { cancel?: () => Promise<unknown> } }).emrg?.cancel?.() ??
+    ((sessionId: string) =>
+      (window as unknown as { emrg?: { cancel?: (sid: string) => Promise<unknown> } }).emrg?.cancel?.(sessionId) ??
       Promise.resolve());
   const cancelRef = useRef(cancelFn);
   cancelRef.current = cancelFn;
@@ -496,18 +497,18 @@ export function Composer({
 
   /**
    * 停止回复（rant 2026-09-02T20:30:05）：busy 时 stop-btn / Esc 触发。
-   * 本地乐观恢复（清 typing + 系统消息，对齐 TUI ESC 中断提示「⏸ Interrupted」）；
-   * daemon cancelled 广播随后幂等清外部 busy（daemonBridge releaseOwnStream，无需在此处理）。
+   *
+   * Rant 2026-09-20T12:50:13：这里只发一个**点名会话**的 cancel，别的什么都不做。
+   * 曾经它在本地乐观地清 typing、打「已停止响应。」、置 busy=false —— 于是按 Esc 的
+   * 一端「已经中断」，而真正跑着这轮的另一端的服务端毫无反应；现在结束这轮的唯一
+   * 陈述是 daemon 的会话级 `cancelled` 回执（daemonBridge 的 cancelled 分支：清
+   * typing、清计时、打那一行），谁问都一样，谁看也都一样。
+   * 没有会话可点名就没有可问的事：不发帧（与 TUI `request_cancel` 同一规则）。
    */
   function stop(): void {
-    setInternalBusy(false);
-    const st = storeRef.current;
     const cur = sidRef.current;
-    if (cur) {
-      st.clearTyping(cur);
-      st.addSystemMessage(tRef.current("chat.interrupted"), cur);
-    }
-    void cancelRef.current();
+    if (!cur) return;
+    void cancelRef.current(cur);
   }
   const stopRef = useRef<() => void>(stop);
   stopRef.current = stop;
