@@ -1327,6 +1327,29 @@ _STDIN_MESSAGE_READERS = {
 _STDIN_OPERAND_SEPARATE = frozenset({"-F", "--file"})
 _STDIN_OPERAND_ATTACHED = frozenset({"-F-", "--file=-"})
 
+# A third readership: a **wrapper** in front of the reader (issue #1466). The
+# consumer used to be read at `argv[0]` only, so this repository's own documented
+# spelling lost the mask and its body was scanned as shell code:
+#
+#   uv run --no-sync python3 - <<'PY'      -> BLOCKED, "targeting 'ai'" for a body
+#   (bare) python3 - <<'PY'                -> allowed, same body, same reason
+#
+# The mask's own rationale is what that violates: "the same script in a heredoc
+# must not be judged differently for its spelling" (issue #1320). `cat` loses the
+# mask under a wrapper too, so this is not about an unenumerated interpreter —
+# it is about where the consumer is read.
+#
+# The bias is the same allowlist bias as `_DATA_READER_CONSUMERS`: a wrapper not
+# named here keeps today's behaviour (the body is scanned), and the entries are
+# only the ones measured to pass stdin straight through to the command they run.
+# `uv run` is measured on uv 0.9.x: `printf 'print(1)' | uv run --no-sync python3
+# -` printed `1`, and the wrapped `sh` runs a body as shell code
+# (`uv run --no-sync sh - name` reached `sh`), which is why the wrapped command
+# word has to be located rather than assumed.
+_STDIN_PASSTHROUGH_WRAPPERS = {
+    "uv": frozenset({"run"}),
+}
+
 # ── Containment-escape guard (issue #1102) ─────────────────────────────────
 # Borrowed from Claude Code v2.1.257 ("Containment Escape"): block cloud
 # metadata-credential fetches and egress-tunnel markers. The write-target
@@ -4864,6 +4887,57 @@ def _operand_names_stdin(args: list[str]) -> bool:
     return False
 
 
+def _wrapped_command_span(words: list[str]) -> list[str] | None:
+    """The span of the command a stdin-preserving wrapper runs, or ``None``.
+
+    ``words`` is a simple command's tokens with env assignments already stripped,
+    and ``words[0]`` is the wrapper. The span starts at the wrapped **command
+    word**, so the caller can re-ask ``_owns_stdin_as_data`` on it and let the
+    reader's own rule decide — a wrapped reader keeps the mask it would have had
+    bare, and a wrapped non-reader keeps failing closed.
+
+    Locating that word is the whole difficulty, and the rule here is the
+    conservative one. Everything between the subcommand and the command word is
+    either a flag or a flag's *value*, and the two are indistinguishable without
+    a per-tool flag table — the enumeration this file refuses everywhere else
+    (see issue #1461 for the long-option half of the same trap). So the mask is
+    granted only when **exactly one non-flag token** stands after the
+    subcommand: then that token is either the command word or an option's value,
+    and the two readings agree on whether the heredoc is data — measured, uv
+    refuses to run at all without a command word (`uv run --no-sync --python
+    python3 <<EOF` printed "Provide a command or script to invoke with `uv run
+    <command>`" and executed nothing), so a span with no command word runs no
+    program to hand the body to.
+
+    A second non-flag token forfeits the mask, and that is load-bearing rather
+    than tidy: with a value-taking option in front, the first non-flag token is
+    the *value*, and reading it as the consumer masks a body that a later word
+    really executes. Measured reachable in this wrappers' own shape —
+    `uv run --no-sync sh -s cat` printed the heredoc's `echo BODY-RAN`, and `cat`
+    there is only the shell's `$0`; a rule that took the **last** non-flag token
+    as the consumer would mask that body, and one that took the **first** would
+    mask `uv run --no-sync --directory cat sh - `'s, where `cat` is
+    `--directory`'s value and `sh` is the command. Refusing costs a false
+    negative in the loud direction only: the body is scanned and a data body is
+    refused, which is issue #1466's symptom, not a hole.
+    """
+    subs = _STDIN_PASSTHROUGH_WRAPPERS.get(_basename(words[0]))
+    if subs is None:
+        return None
+    if len(words) < 3 or words[1] not in subs:
+        # The subcommand is read at argv[0] after the wrapper, the same
+        # structural test `_STDIN_MESSAGE_READERS` applies to git: a global
+        # option there (`uv --directory <dir> run …`) is how a config value
+        # decides what runs, and refusing the position is cheaper than
+        # enumerating the options.
+        return None
+    rest = words[2:]
+    non_flags = [i for i, tok in enumerate(rest) if not tok.startswith("-")]
+    if len(non_flags) != 1:
+        return None
+    return rest[non_flags[0]:]
+
+
 def _owns_stdin_as_data(prefix: list[str]) -> bool:
     """Whether this simple command reads the heredoc on its stdin as data.
 
@@ -4878,6 +4952,14 @@ def _owns_stdin_as_data(prefix: list[str]) -> bool:
     a message reader owns it only in the invocation that says so — the tool, its
     subcommand, and a stdin operand, with the subcommand read at argv[0] after
     the tool so that no global option can stand between them.
+
+    A wrapper in front of either of those changes the spelling, not the reading
+    (issue #1466): `uv run --no-sync python3 - <<'PY'` is this repository's own
+    documented spelling, and its body is the same data a bare `python3 -` reads.
+    The wrapper's span is resolved by `_wrapped_command_span`, which refuses
+    unless the wrapped command word is unambiguous, and the question is then
+    asked again on that span — so `uv run … git commit -F -` keeps its message
+    mask and `uv run … sh - name` keeps its body scanned.
     """
     words = [tok for tok in prefix if not _is_env_assignment(tok)]
     if not words:
@@ -4886,7 +4968,13 @@ def _owns_stdin_as_data(prefix: list[str]) -> bool:
         return True
     subs = _STDIN_MESSAGE_READERS.get(_basename(words[0]))
     if subs is None:
-        return False
+        # Not a reader itself: it may still be a wrapper in front of one. An env
+        # prefix forfeits this reading too, in both branches — `UV_*` reaches the
+        # wrapper's own resolver exactly as `GIT_CONFIG_*` reaches git's.
+        if len(words) != len(prefix):
+            return False
+        wrapped = _wrapped_command_span(words)
+        return wrapped is not None and _owns_stdin_as_data(wrapped)
     if len(words) != len(prefix):
         return False                      # env prefix: `GIT_CONFIG_*` lives there
     if len(words) < 2 or words[1] not in subs:
@@ -4922,7 +5010,9 @@ def _heredoc_delimiters_read_as_data(line: str) -> list[str]:
     The consumer is judged per *invocation*, not per tool (issue #1320):
     `_owns_stdin_as_data` accepts a named data reader, or the narrower case of a
     message reader — `git commit` / `git tag` — whose invocation is nothing but
-    the tool, that subcommand and an operand naming stdin.
+    the tool, that subcommand and an operand naming stdin. Since issue #1466 it
+    also follows a stdin-preserving wrapper (`uv run …`) to the command word it
+    runs, so the language spelling does not decide whether the body is scanned.
     """
     toks = _split_command_tokens(line)
     segments: list[list[int]] = [[]]      # token indices, so the pipe test
