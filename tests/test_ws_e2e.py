@@ -759,6 +759,74 @@ class TestWSProtocol:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_a_peer_clients_cancel_interrupts_the_sessions_turn(self):
+        """Rant 2026-09-20T12:50:13: an interruption is a property of the *session*,
+        not of the connection that happens to ask.
+
+        Client A starts a turn; client B — a second connection subscribed to the same
+        session and cwd — sends `cancel`. Two properties, one per half of the remedy:
+        the turn must really stop and end as cancelled, and the receipt must reach *every*
+        client of the session, A included. The round below sleeps far longer than the test
+        waits, so a cancel that reaches nothing cannot be mistaken for one that worked:
+        the turn cannot end by itself inside the window.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    async def slow_chat_stream(messages, tools=None):
+                        await asyncio.sleep(30)
+                        yield {"content": "too late", "tool_calls": None,
+                               "finish_reason": "stop", "usage": None}
+
+                    server.llm.chat_stream = slow_chat_stream
+                    sid = "s_peer_cancel"
+                    a = await connect_to_server()
+                    b = await connect_to_server()
+                    try:
+                        await a.send(json.dumps({
+                            "type": "task", "id": "t-peer", "session_id": sid,
+                            "cwd": str(cwd), "prompt": "你好", "stream": True,
+                            "timestamp": "2026-09-20T00:00:00",
+                        }, ensure_ascii=False))
+                        await asyncio.sleep(0.3)  # let the turn register
+                        await b.send(json.dumps({
+                            "type": "cancel", "session_id": sid, "cwd": str(cwd),
+                        }, ensure_ascii=False))
+
+                        got = None
+                        saw_cancelled = False
+                        try:
+                            while True:
+                                frame = json.loads(await asyncio.wait_for(a.recv(), timeout=5))
+                                if frame.get("type") == "cancelled":
+                                    saw_cancelled = True
+                                if frame.get("done"):
+                                    got = frame
+                                    break
+                        except asyncio.TimeoutError:
+                            pass
+                        assert got is not None, (
+                            "the turn never ended after a peer client cancelled — the "
+                            "cancel did not reach the session's running turn"
+                        )
+                        assert got.get("cancelled") is True, (
+                            "a peer client's cancel did not interrupt the session's "
+                            f"turn: it ended on its own ({got.get('content')!r})"
+                        )
+                        assert saw_cancelled, (
+                            "the originator never received the session's `cancelled` "
+                            "receipt — the ack is still sent to the requester alone, so "
+                            "two clients of one session read different stories"
+                        )
+                    finally:
+                        await a.close()
+                        await b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_round_complete_marker_written_on_normal_completion(
             self, tmp_path, monkeypatch):
         """Issue #1114: a genuinely completed round (final text answer after
