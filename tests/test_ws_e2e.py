@@ -759,6 +759,74 @@ class TestWSProtocol:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_a_peer_clients_cancel_interrupts_the_sessions_turn(self):
+        """Rant 2026-09-20T12:50:13: an interruption is a property of the *session*,
+        not of the connection that happens to ask.
+
+        Client A starts a turn; client B — a second connection subscribed to the same
+        session and cwd — sends `cancel`. Two properties, one per half of the remedy:
+        the turn must really stop and end as cancelled, and the receipt must reach *every*
+        client of the session, A included. The round below sleeps far longer than the test
+        waits, so a cancel that reaches nothing cannot be mistaken for one that worked:
+        the turn cannot end by itself inside the window.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    async def slow_chat_stream(messages, tools=None):
+                        await asyncio.sleep(30)
+                        yield {"content": "too late", "tool_calls": None,
+                               "finish_reason": "stop", "usage": None}
+
+                    server.llm.chat_stream = slow_chat_stream
+                    sid = "s_peer_cancel"
+                    a = await connect_to_server()
+                    b = await connect_to_server()
+                    try:
+                        await a.send(json.dumps({
+                            "type": "task", "id": "t-peer", "session_id": sid,
+                            "cwd": str(cwd), "prompt": "你好", "stream": True,
+                            "timestamp": "2026-09-20T00:00:00",
+                        }, ensure_ascii=False))
+                        await asyncio.sleep(0.3)  # let the turn register
+                        await b.send(json.dumps({
+                            "type": "cancel", "session_id": sid, "cwd": str(cwd),
+                        }, ensure_ascii=False))
+
+                        got = None
+                        saw_cancelled = False
+                        try:
+                            while True:
+                                frame = json.loads(await asyncio.wait_for(a.recv(), timeout=5))
+                                if frame.get("type") == "cancelled":
+                                    saw_cancelled = True
+                                if frame.get("done"):
+                                    got = frame
+                                    break
+                        except asyncio.TimeoutError:
+                            pass
+                        assert got is not None, (
+                            "the turn never ended after a peer client cancelled — the "
+                            "cancel did not reach the session's running turn"
+                        )
+                        assert got.get("cancelled") is True, (
+                            "a peer client's cancel did not interrupt the session's "
+                            f"turn: it ended on its own ({got.get('content')!r})"
+                        )
+                        assert saw_cancelled, (
+                            "the originator never received the session's `cancelled` "
+                            "receipt — the ack is still sent to the requester alone, so "
+                            "two clients of one session read different stories"
+                        )
+                    finally:
+                        await a.close()
+                        await b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_round_complete_marker_written_on_normal_completion(
             self, tmp_path, monkeypatch):
         """Issue #1114: a genuinely completed round (final text answer after
@@ -2183,6 +2251,255 @@ class TestWSHistoryPagination:
                             ("user", "u2"), ("assistant", "a2"),
                         ]
                         assert resp3.get("has_more") is True
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+
+class TestWSHistoryRecords:
+    """list_history records mode (rant 2026-09-20T18:58:44).
+
+    A client that replays a session must show what the live stream showed, so
+    records mode answers with the raw record sequence: message records (both
+    roles, *including* the tool-call-only assistant records the display path
+    drops) and tool_result records, in record order, each carrying its
+    absolute `record_index`. `preview` — the /rewind one-line affordance — is
+    not attached in this mode: a replay that prefers it renders 80 characters
+    of the message it claims to be showing.
+
+    Paging in this mode is a cursor (`before_index`, an absolute record
+    index), not an offset from the newest: an offset window slides when the
+    session appends, which repeats and skips records, and a history that a
+    compaction shrank makes the offset name a position that no longer exists.
+    """
+
+    @staticmethod
+    async def _cmd(ws, payload):
+        await ws.send(json.dumps(payload))
+        return json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+
+    #: user / assistant text / tool call / its result / assistant text — twice,
+    #: so every index below is a fixed coordinate of the seeded conversation.
+    CONVERSATION = [
+        {"type": "message", "role": "user", "content": "u1",
+         "timestamp": "2026-09-20T00:01:00"},
+        {"type": "message", "role": "assistant", "content": "a1",
+         "timestamp": "2026-09-20T00:02:00"},
+        {"type": "message", "role": "assistant", "content": "",
+         "timestamp": "2026-09-20T00:03:00",
+         "tool_calls": [{"id": "call_1", "type": "function",
+                         "function": {"name": "bash",
+                                      "arguments": '{"intent":"echo hi","command":"echo hi"}'}}]},
+        {"type": "tool_result", "tool_name": "bash", "tool_call_id": "call_1",
+         "content": "hi", "error": False},
+        {"type": "message", "role": "assistant", "content": "a2",
+         "timestamp": "2026-09-20T00:04:00"},
+        {"type": "message", "role": "user", "content": "u2",
+         "timestamp": "2026-09-20T00:05:00"},
+        {"type": "message", "role": "assistant", "content": "",
+         "timestamp": "2026-09-20T00:06:00",
+         "tool_calls": [{"id": "call_2", "type": "function",
+                         "function": {"name": "read", "arguments": '{"intent":"read f"}'}}]},
+        {"type": "tool_result", "tool_name": "read", "tool_call_id": "call_2",
+         "content": "boom", "error": True},
+        {"type": "message", "role": "assistant", "content": "a3",
+         "timestamp": "2026-09-20T00:07:00"},
+    ]
+
+    @classmethod
+    def _seed(cls, cwd: Path, sid: str, records=None) -> None:
+        from emrg.session import Session
+        sess = Session(sid, cwd)
+        sess._write_history(records if records is not None else cls.CONVERSATION)
+
+    def test_records_mode_returns_the_whole_ordered_sequence(self):
+        """Every record, in order, with its absolute index — and no preview.
+
+        The tool-call-only assistant record (index 2) and its result (3) are
+        both here; they are what a live turn showed and what the display path
+        (message records with non-empty content, tool_result never sent)
+        dropped. The `tool_calls` of the assistant record are carried, which
+        is where a tool row's intent lives.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_records"
+                self._seed(cwd, sid)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_records": True,
+                        })
+                        assert resp["type"] == "history_list"
+                        items = resp["messages"]
+                        assert [(m["record_index"], m["kind"],
+                                 m.get("role")) for m in items] == [
+                            (0, "message", "user"),
+                            (1, "message", "assistant"),
+                            (2, "message", "assistant"),
+                            (3, "tool_result", None),
+                            (4, "message", "assistant"),
+                            (5, "message", "user"),
+                            (6, "message", "assistant"),
+                            (7, "tool_result", None),
+                            (8, "message", "assistant"),
+                        ]
+                        # The result carries everything a tool row shows but the
+                        # elapsed time (never persisted) and the intent.
+                        assert items[3]["tool_name"] == "bash"
+                        assert items[3]["tool_call_id"] == "call_1"
+                        assert items[3]["content"] == "hi"
+                        assert items[3]["error"] is False
+                        assert items[7]["error"] is True
+                        # …and the intent is reachable from its own call record.
+                        args = json.loads(
+                            items[2]["tool_calls"][0]["function"]["arguments"])
+                        assert args["intent"] == "echo hi"
+                        assert resp.get("has_more") is False
+                        # The /rewind affordance stays in the mode that wants it:
+                        # a preview is what truncates a replayed message.
+                        assert all("preview" not in m for m in items)
+                        legacy = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_assistant": True,
+                        })
+                        assert all("preview" in m for m in legacy["messages"])
+                        assert all(m["content"].startswith(m["preview"].rstrip("…"))
+                                   for m in legacy["messages"])
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_a_cut_never_lands_inside_a_tool_pair(self):
+        """A page that would start at a tool result starts at its call instead.
+
+        before_index=4 / limit=1 asks for record 3 alone — the result of the
+        call at 2. Returning it would hand the client a tool result with no
+        call that produced it (no tool row to fill, no group to join), so the
+        page is widened down to the pair.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_records"
+                self._seed(cwd, sid)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_records": True,
+                            "limit": 1, "before_index": 4,
+                        })
+                        items = resp["messages"]
+                        assert [m["record_index"] for m in items] == [2, 3]
+                        assert items[0]["kind"] == "message"
+                        assert items[0]["tool_calls"][0]["id"] == "call_1"
+                        assert items[1]["kind"] == "tool_result"
+                        # Records 0-1 are still older than the widened page, so
+                        # the caller is told there is more to read.
+                        assert resp.get("has_more") is True
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_an_appended_turn_does_not_move_the_cursor(self):
+        """Paging before and after an append: no record twice, none skipped.
+
+        The cursor is an absolute index, so the 2 records a new turn appends
+        land above it. An offset from the newest would carry the page-1 window
+        two records up, repeating record 7 in page 2 and never showing 5.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_records"
+                self._seed(cwd, sid)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        first = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_records": True, "limit": 2,
+                        })
+                        page1 = [m["record_index"] for m in first["messages"]]
+                        # limit=2 asks for 7-8; the pair rule widens it to 6 (the
+                        # call whose result 7 is) — a cut at 7 would have split
+                        # the pair. The cursor the client page holds is 6.
+                        assert page1 == [6, 7, 8]
+                        assert first.get("has_more") is True
+                        # A new turn appends under the cursor.
+                        from emrg.session import Session
+                        grown = list(self.CONVERSATION) + [
+                            {"type": "message", "role": "user", "content": "u3",
+                             "timestamp": "2026-09-20T00:08:00"},
+                            {"type": "message", "role": "assistant", "content": "a4",
+                             "timestamp": "2026-09-20T00:09:00"},
+                        ]
+                        sess = Session(sid, cwd)
+                        sess._write_history(grown)
+                        second = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_records": True,
+                            "limit": 2, "before_index": min(page1),
+                        })
+                        page2 = [m["record_index"] for m in second["messages"]]
+                        assert page2 == [4, 5]
+                        assert not set(page1) & set(page2)
+                        assert second.get("has_more") is True
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_a_stale_cursor_still_reaches_the_oldest_records(self):
+        """A cursor past the end is clamped, not answered with 'no more'.
+
+        A compaction rewrites history.jsonl shorter than it was, so a cursor
+        held by a client can name a record that no longer exists. Answering
+        that with an empty page and has_more=False strands the older records:
+        the client has been told there is nothing more to load. The page is
+        served from the end of the file instead, and walking its cursor down
+        still ends at record 0.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_records"
+                short = self.CONVERSATION[:4]
+                self._seed(cwd, sid, short)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        stale = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_records": True,
+                            "limit": 2, "before_index": 40,
+                        })
+                        assert [m["record_index"] for m in stale["messages"]] == [2, 3]
+                        assert stale.get("has_more") is True
+                        # …and the walk reaches the top of the file.
+                        rest = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_records": True,
+                            "limit": 2, "before_index": 2,
+                        })
+                        assert [m["record_index"] for m in rest["messages"]] == [0, 1]
+                        assert rest.get("has_more") is False
                     finally:
                         await ws.close()
                 finally:
