@@ -2324,20 +2324,54 @@ def _option_destination_values(
                                                   created — ``d``'s value is ``o`` and the
                                                   URL is ``o/f``, so ``d`` must be in the
                                                   letters or the URL is named instead
+
+    A word a value-taking letter **eats** is stepped over (`_words_eaten`), whichever
+    letter ate it — the gap issue #1455 names. The cluster scan stops at the first
+    value-taking letter, and when that letter is *not* the destination letter its value
+    word was nevertheless consumed: reading it again as an option names a path the run
+    never writes. Measured 2026-09-20 on this host, one fresh directory per row with the
+    listing read back off disk (the eaten word is the *option token itself* in both rows,
+    which is what makes the defect reachable — `-T`'s value is the directory `-o`, so the
+    word after it is an input; `-A`'s value is the user agent `-o`, so the word after it
+    is a URL):
+
+      ``sort -T -o out f``                 rc=0  prints to stdout, nothing written but the
+                                                  two inputs   · walk named ``out``, a false block
+      ``sort -T . -o out2 f``              rc=0  ``out2`` created      (control: ``-o`` in force)
+      ``curl -A -o out file://…``          rc=0  bytes on stdout, the directory empty
+                                                  · walk named ``out``, a false block
+      ``curl -A UA -o out2 file://…``      rc=0  ``out2`` created       (control)
+      ``unzip -Pd secret a.zip``           rc=0  extracts into ``secret/``   (control: ``P``
+                                                  eats ``d``, so ``d`` is not the option —
+                                                  the same step, in the direction that keeps
+                                                  the *value* from being read as one)
+
+    A **long** option that eats the word is the same geometry and is *not* stepped over, so
+    it is pinned as this reader's one measured limit rather than left silent: the letters a
+    cluster is split by are short letters, and enumerating a verb's value-taking *long*
+    options would be the per-command flag table this walk keeps refusing (#461). Measured
+    on this host 2026-09-20: ``curl --user-agent -o out file:///etc/hosts`` exits **0**,
+    prints the file to stdout and creates nothing, while the walk still names ``out`` —
+    a false block of a run that writes nothing. The row is pinned, with that reason, in
+    ``tests/test_bash_tool_option_destinations.py``.
     """
     options = _OPTION_DESTINATION_VERBS[verb] if options is None else options
     longs = {opt for opt in options if opt.startswith("--")}
     letters = {opt[1:] for opt in options if not opt.startswith("--")}
     out: list[str] = []
     args = _args_after_command(tokens, i)
-    for j, tok in enumerate(args):
-        if tok == "--" and (j == 0 or args[j - 1] not in options):
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        if tok == "--" and (idx == 0 or args[idx - 1] not in options):
             # Not consumed as the previous option's value (``sort -o -- f`` names
             # the file ``--``), so it ends option parsing.
             break
+        eaten = 1
         if tok in options:
-            if j + 1 < len(args):
-                out.append(args[j + 1])
+            if idx + 1 < len(args):
+                out.append(args[idx + 1])
+            eaten = 2
         elif tok.startswith("--"):
             for long_opt in longs:
                 if tok.startswith(long_opt + "="):
@@ -2350,22 +2384,20 @@ def _option_destination_values(
             # reader, not two: it also answers the attached ``-o<f>`` form, so the
             # fallback below would name the value twice. A cluster whose first
             # value-taking letter is *not* the destination letter names nothing
-            # here: `sort -ko out.txt` is `-k o` plus an operand to read.
-            cluster = _short_cluster_option(tok, args, j, cluster_letters)
-            if cluster is not None and cluster[0] in letters and cluster[1]:
-                out.append(cluster[1])
+            # here: `sort -ko out.txt` is `-k o` plus an operand to read — but its
+            # value word is still **eaten**, and is stepped over for exactly that
+            # reason (the paragraph on the eaten word above).
+            cluster = _short_cluster_option(tok, args, idx, cluster_letters)
+            if cluster is not None:
+                letter, value, attached = cluster
+                eaten = _words_eaten(attached)
+                if letter in letters and value:
+                    out.append(value)
         else:
             attached = _leading_short_option_value(tok, letters)
             if attached is not None:
                 out.append(attached)
-            elif cluster_letters:
-                # The destination letter sits inside the cluster rather than at its
-                # head, so the scan has to stop at whichever letter the verb takes a
-                # value for first (`-so <dir>` and `-ko out.txt` differ exactly
-                # there), and only the destination's own letter contributes a path.
-                cluster = _short_cluster_option(tok, args, j, cluster_letters)
-                if cluster is not None and cluster[0] in letters and cluster[1]:
-                    out.append(cluster[1])
+        idx += eaten
     return [value for value in out if value != "-"]
 
 
@@ -3030,8 +3062,21 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
 
 def _short_target_directory(
     tok: str, args: list[str], j: int, table: frozenset
-) -> str | None:
-    """The directory a *short-option* token carries as ``-t``'s value, or ``None``.
+) -> tuple[str | None, bool] | None:
+    """The ``-t`` value a *short-option* token carries, and whether it rode in the token.
+
+    ``None`` when the token is no short-option cluster under this verb's letters;
+    otherwise the pair ``(value, attached)``, where ``attached`` False means the
+    token's value-taking letter took the **next word** — and ``value`` is ``None``
+    unless that letter was ``t`` (a letter that is not ``t`` carries a value this
+    reader does not name).
+
+    The pair, and the reason it is not filtered to ``t`` here, is the step its caller
+    owes that next word (`_words_eaten`): a reader that answered ``None`` for a token
+    whose letter was not ``t`` lost the fact that a word had been *eaten*, and the walk
+    around it re-read that word as an option — naming a path the run never writes
+    (issue #1455). Answering for every cluster is what lets the caller pay the same
+    step the rest of the walk pays; only ``letter == "t"`` ever contributes a path.
 
     getopt does not require an option's value to be a separate word, so ``-t``
     has three spellings beyond the bare token: the value rides in the same token
@@ -3058,9 +3103,10 @@ def _short_target_directory(
     cluster = _short_cluster_option(
         tok, args, j, _short_option_letters(table) | {"t"}
     )
-    if cluster is None or cluster[0] != "t":
+    if cluster is None:
         return None
-    return cluster[1]
+    letter, value, attached = cluster
+    return (value if letter == "t" else None, attached)
 
 
 def _target_directory_values(tokens: list[str], i: int, verb: str) -> list[str]:
@@ -3084,22 +3130,51 @@ def _target_directory_values(tokens: list[str], i: int, verb: str) -> list[str]:
     cannot be executed for it on this host — ``cp``/``mv``/``ln`` here implement no
     ``-t`` at all (``cp -t OUT/f -- src.txt`` exits 64 with the usage line, measured),
     so the spelling is pinned as a predicate and no executed arm is claimed for it.
+
+    A word a value-taking letter **eats** is stepped over (`_words_eaten`), whichever
+    letter ate it (issue #1455). This reader walked with `enumerate`, so a `-t` that
+    another letter had already consumed was read as an option anyway and named the word
+    *after* it. Measured 2026-09-20 on this host, one fresh directory per row, the
+    listing read back off disk (both rows are commands this host's tools **refuse**, so
+    the run writes nothing at all while the walk named a path):
+
+      ``install -m -t OUT src``       rc=71  ``install: OUT: No such file or directory``,
+                                             nothing created · walk named ``OUT``
+      ``cp -S -t OUT src.txt``        rc=64  ``cp: illegal option -- t``, nothing created
+                                             · walk named ``OUT``
+
+    With the step neither names ``OUT``: ``-m``/``-S`` consume the ``-t``, so the token
+    names no directory, and the walk reads the operands as the family's own rule does —
+    the last operand is the destination (``src``, ``src.txt``), which is the path the
+    command is aimed at. What GNU does with these two lines is *not* claimed here: this
+    host's tools refuse both, and the GNU ground truth for ``-t`` is the measurement
+    quoted above rather than a re-reading of it.
     """
     out: list[str] = []
     args = _args_after_command(tokens, i)
     table = _VERB_OPTIONS_WITH_VALUE[verb]
-    for j, tok in enumerate(args):
-        if tok == "--" and (j == 0 or args[j - 1] not in ("-t", "--target-directory")):
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        if tok == "--" and (
+            idx == 0 or args[idx - 1] not in ("-t", "--target-directory")
+        ):
             break
+        eaten = 1
         if tok in ("-t", "--target-directory"):
-            if j + 1 < len(args):
-                out.append(args[j + 1])
+            if idx + 1 < len(args):
+                out.append(args[idx + 1])
+            eaten = 2
         elif tok.startswith("--target-directory="):
             out.append(tok.split("=", 1)[1])
         else:
-            short = _short_target_directory(tok, args, j, table)
+            short = _short_target_directory(tok, args, idx, table)
             if short is not None:
-                out.append(short)
+                value, attached = short
+                if value:
+                    out.append(value)
+                eaten = _words_eaten(attached)
+        idx += eaten
     return out
 
 
@@ -3341,6 +3416,31 @@ def _pzstd_names_a_destination(args: list[str]) -> bool:
     (`-o <v>`, `-o<v>`, and a cluster like `-qo <v>`) is a destination *spelled* here,
     whether or not its value is one this walk may name (`-qo - f` is stdout, and the
     answer is then "nothing", not `f`).
+
+    Unlike `_option_destination_values` and `_target_directory_values`, this reader does
+    **not** step over a word another value-taking letter ate (issue #1455), and the
+    measurement is why: the only other value-taking short letter is `p`, whose value
+    pzstd requires to be a **number** — so a run in which `-p` ate `-o` cannot succeed,
+    and the answer "a destination is spelled" (which names *nothing*, see
+    `_pzstd_write_targets`) is right for it. Measured 2026-09-20 on this host, one fresh
+    directory per row, the listing read back off disk:
+
+      ``pzstd -p -o out.zst f``          rc=1  ``Option -p expects a number, but -o
+                                                provided``, nothing created
+      ``pzstd --processes -o out.zst f`` rc=1  the same, via the long form
+      ``pzstd -M 1 -o out.zst f``        rc=1  ``Invalid argument: -M``, nothing created
+      ``pzstd -T 2 -o out.zst f``        rc=1  ``Invalid argument: -T``, nothing created
+      ``pzstd -D dict -o out.zst f``     rc=1  ``Operation not supported: Zstd
+                                                dictionaries``, nothing created
+      ``pzstd -p 2 -o out2.zst f``       rc=0  ``out2.zst`` created   (control)
+
+    Every other value-taking spelling is refused by pzstd itself (its front-end
+    implements no `-M`/`-T`/`-D`), so an unlisted value-taking letter — the residual
+    issue #1420 is about — cannot hide a write here either. Stepping *would* change the
+    verdict, in the wrong direction: with the eaten `-o` skipped the run falls through
+    to the operand rule, which names the operands a failed run never writes, i.e. a
+    **false block** in the geometry above. Revisit this paragraph if pzstd ever gains a
+    value-taking letter that accepts arbitrary text.
     """
     for j, tok in enumerate(args):
         if tok == "--":

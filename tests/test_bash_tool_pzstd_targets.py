@@ -440,3 +440,64 @@ def test_the_order_is_what_keeps_a_read_letter_from_hiding_the_destination() -> 
         assert _extract_write_targets(read_row) == []
     finally:
         bash_tool._pzstd_read_form = scan
+
+
+# ── the word another letter ate: the one reader that need not step (issue #1455) ──
+#
+# The destination readers were asked by issue #1455 to step over the word a
+# value-taking letter eats, or to say why a given one need not. `_pzstd_names_a_destination`
+# is the one that need not, and this is the measurement rather than a preference —
+# one fresh directory per row, the listing read back off disk (pzstd 1.5.7, this
+# host, 2026-09-20):
+#
+#   pzstd -p -o out.zst f           rc=1  `Option -p expects a number, but -o provided`
+#   pzstd --processes -o out.zst f  rc=1  the same, via the long form
+#   pzstd -M 1 -o out.zst f         rc=1  `Invalid argument: -M`
+#   pzstd -T 2 -o out.zst f         rc=1  `Invalid argument: -T`
+#   pzstd -D dict -o out.zst f      rc=1  `Operation not supported: Zstd dictionaries.`
+#   pzstd -p 2 -o out2.zst f        rc=0  `out2.zst` created      (control)
+#
+# The only other value-taking short letter is `p`, and `-p`'s value must be a number,
+# so a run in which `-p` ate `-o` cannot succeed; every other value-taking spelling is
+# refused by pzstd's own front-end, not silently accepted. In every one of those rows
+# the run writes **nothing**, so this reader's answer ("a destination is spelled", which
+# names nothing at all) is the correct verdict for them. Stepping would not be: with the
+# eaten `-o` skipped, the run falls through to the operand rule, which names the
+# operands a failed run never writes — a **false block** in the geometry below. That
+# direction is asserted, so a future cycle cannot "fix" this reader blindly.
+def test_the_eaten_word_here_is_left_to_the_run_that_cannot_write() -> None:
+    """`-p` eats `-o`; naming nothing is right because pzstd refuses that line.
+
+    The control below it is the same line with `-p`'s value in place, where the
+    destination really is the option's value and really is written — so "this reader
+    does not step" is not the same as "this reader names nothing".
+    """
+    eaten = f"pzstd -p -o {OUTSIDE}/out.zst {OUTSIDE}/f"
+    control = f"pzstd -p 2 -o {OUTSIDE}/out.zst {OUTSIDE}/f"
+
+    assert _extract_write_targets(eaten) == [], (
+        "pzstd -p <non-number> writes nothing, so the run must be allowed"
+    )
+    assert _check_sandbox(eaten, "read-only", workdir="/workspace")[0] is True
+    assert _extract_write_targets(control) == [f"{OUTSIDE}/out.zst"]
+    assert _check_sandbox(control, "workspace-write", workdir="/workspace")[0] is False
+
+    seam = bash_tool._pzstd_names_a_destination
+    try:
+        # What a stepping reader would answer: the destination question is asked of the
+        # *operands* instead, and this run writes none of them.
+        bash_tool._pzstd_names_a_destination = lambda *_a, **_k: False
+        stepped = _extract_write_targets(eaten)
+        stepped_allowed = _check_sandbox(
+            eaten, "workspace-write", workdir="/workspace"
+        )[0]
+    finally:
+        bash_tool._pzstd_names_a_destination = seam
+    assert stepped == [f"{OUTSIDE}/out.zst", f"{OUTSIDE}/f"], (
+        "the step this reader does not take is what would name these two operands of a "
+        "run that exits 1 having written nothing — the false block it avoids"
+    )
+    assert stepped_allowed is False, (
+        "…and that reading is refused in this geometry, which is why the non-step is the "
+        "measured answer rather than a preference"
+    )
