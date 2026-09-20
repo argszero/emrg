@@ -1518,6 +1518,7 @@ def _positional_args(
     i: int,
     options_with_value: frozenset | None = None,
     cluster_value_letters: frozenset[str] = frozenset(),
+    cluster_optional_arg_letters: frozenset[str] = frozenset(),
 ) -> list[str]:
     """The non-option *operands* of the command starting at ``tokens[i]``.
 
@@ -1571,6 +1572,18 @@ def _positional_args(
     grammar this walk refuses to grow, and the token erring here is the safe
     direction — it is only ever *added* to a target list, and a `find` that
     really does delete is already named through the path before the ``--``.
+
+    ``cluster_optional_arg_letters`` names the verb's options whose argument is
+    **optional** (getopt's ``b::``), and it is what keeps a cluster of that shape from
+    eating a word: an optional argument takes the rest of its own token and never the
+    next word, so ``patch -bsd f`` is ``-b sd`` **plus the operand ``f``**. A reader that
+    took the ``d`` for an ordinary value-taking letter — what this one did before the
+    parameter existed — ate ``f`` instead and named *nothing*, which is the under-block
+    direction this guard treats as the worse one: the word is simply dropped, and no
+    error has to happen for it. Measured 2026-09-20 on this host (BSD
+    `patch 2.0-12u11-Apple`, one file per row, read back off disk): `patch -bsd outside/f`
+    rc=0 rewrites `outside/f`, and the same command through the predicate reported ``[]``
+    at **both** tiers.
 
     **A value-taking letter inside a cluster eats the next word too**
     (``_short_cluster_option``), and that is the spelling that displaced a
@@ -1635,9 +1648,13 @@ def _positional_args(
             ):
                 skip_next = True
             elif letters:
-                cluster = _short_cluster_option(tok, args, j, letters)
+                cluster = _short_cluster_option(
+                    tok, args, j, letters, cluster_optional_arg_letters
+                )
                 # `attached` means the value rode inside this token, so no word
-                # is eaten; the flag alone is handled by the branch above.
+                # is eaten; the flag alone is handled by the branch above. An option
+                # whose argument is *optional* is attached by construction, which is
+                # how `patch -bsd f` keeps `f` as an operand.
                 if cluster is not None and not cluster[2]:
                     skip_next = True
             continue
@@ -2029,7 +2046,11 @@ def _short_option_letters(table: frozenset) -> set[str]:
 
 
 def _short_cluster_option(
-    tok: str, args: list[str], j: int, letters: set[str]
+    tok: str,
+    args: list[str],
+    j: int,
+    letters: set[str],
+    optional_letters: frozenset[str] = frozenset(),
 ) -> tuple[str, str | None, bool] | None:
     """The value-taking option a *short-option cluster* carries, or ``None``.
 
@@ -2039,6 +2060,15 @@ def _short_cluster_option(
     everything after it is *that* option's value: ``-mD`` is a mode of ``D``, not
     a ``-D``, and reading the rest of the token as another option is the class
     ``_leading_short_option_value`` refuses to guess at.
+
+    ``optional_letters`` names the options whose argument is **optional** (getopt's
+    ``b::``), and they stop the scan just as a value-taking letter does — but an optional
+    argument is never the *next word*, so the rest of the token is its value even when
+    that rest is empty, and ``attached`` is True either way. A caller therefore sees "the
+    value rode in this token" and eats nothing, which is what getopt does. Measured on
+    this host (`patch`, whose optstring is `b::B:cCd:D:eEfF:g:i:lnNo:p:r:RstTuvV:x:Y:z:Z`):
+    `patch -b .bak f` rc=2 `too many file arguments` — `-b` took no word — while
+    `patch -bsdout f` rc=0 rewrites the cwd's `f`, `-b` having swallowed `sdout`.
 
     Returns ``(letter, value, attached)``:
 
@@ -2058,6 +2088,8 @@ def _short_cluster_option(
         return None
     body = tok[1:]
     for k, ch in enumerate(body):
+        if ch in optional_letters:
+            return (ch, body[k + 1:], True)
         if ch in letters:
             rest = body[k + 1:]
             if rest:
@@ -2236,29 +2268,145 @@ _PATCH_OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
 })
 _PATCH_READ_LONG: frozenset[str] = frozenset({"--dry-run"})
 
+# Where a *cluster* stops is this verb's own value-taking letters, **derived** from the
+# table above rather than written a second time: a letter added there cannot then be read
+# in the spaced spelling and silently missed in the clustered one. It is a module
+# constant, and not re-derived per call, so a mutation arm can empty exactly it — the
+# shape `_LZ4_VALUE_TAKING_SHORT`'s arm uses.
+_PATCH_CLUSTER_LETTERS = _short_option_letters(_PATCH_OPTIONS_WITH_VALUE)
+
+# `patch`'s own optstring, read off this host's binary (`strings /usr/bin/patch` →
+# `b::B:cCd:D:eEfF:g:i:lnNo:p:r:RstTuvV:x:Y:z:Z`), marks one option as taking an
+# **optional** argument: `-b`. getopt gives an optional argument the rest of its own
+# token and never the next word, so `-b<rest>` swallows the tail and no option spelled
+# after it in that token is live. Measured 2026-09-20 on this host (patch file named by
+# absolute path, so a chdir cannot hide it): `patch -i <abs> -bsdout f` rc=0 rewrites the
+# cwd's `f` and never `cd`s to `out`; `patch -i <abs> -bsd out f` rc=2 `too many file
+# arguments` (so `-d` did not take `out`); `patch -b .bak f` rc=2 `too many file
+# arguments` (so `-b` took no word either). Splitting such a token with the
+# required-argument letters alone gets it wrong in **both** directions, and the second is
+# the worse one: it names the tail as a directory the run never enters (`patch -bsd<dir>`),
+# and it eats the word that is in fact the operand — measured, `patch -bsd <outside>/f`
+# rc=0 rewrites `<outside>/f` while the walk reported **no target at all**, i.e. ALLOW at
+# both tiers. That is why this table is passed to the shared reader *and* to the operand
+# walk, rather than modelled in the cluster walk alone.
+_PATCH_OPTIONAL_ARG_LETTERS: frozenset[str] = frozenset({"b"})
+
+
+def _patch_cluster_values(tokens: list[str], i: int) -> list[tuple[str, str]]:
+    """Every ``(letter, value)`` getopt takes for `patch` from a **short-option cluster**.
+
+    A cluster is several short options in one word, so the value is decided by the verb's
+    grammar: the scan stops at the first letter that takes one, because everything after
+    it is *that* option's value — the rule `_short_cluster_option` documents, and the one
+    the read side (`-c`/`-l`/`-t` for the compressors) is written to.
+
+    Two things are this walk's own, and both keep it from claiming more than it knows:
+
+    * A token's **first** letter is not reported (``letter != tok[1]``). `-d<dir>`,
+      `-d <dir>`, `-o<file>` and `-o <file>` are the plain attached and spaced spellings,
+      read by the option's own set (`_leading_short_option_value` in
+      `_patch_directory_values`, `_option_destination_values` for the output), so
+      reporting them here as well would name every such path twice. Only a letter further
+      in — a real cluster — is this function's business.
+    * `-b`'s argument is optional (`_PATCH_OPTIONAL_ARG_LETTERS`), so the tail it
+      swallows is not reported as anything and eats no word.
+
+    A word a letter eats is stepped over, so it is not re-read as a token: in
+    `patch -d -sd <dir> f` the `-d` takes `-sd` as its directory, and naming `<dir>` —
+    which the run never enters — would be a false block.
+
+    Measured 2026-09-20 on this host (BSD `patch 2.0-12u11-Apple`, one fresh directory
+    per row holding `ws/f` and `out/f` (both `one`) and a diff turning `one` into `ONE`,
+    run from `ws` with the patch file named by absolute path, results read back off disk):
+
+      `patch -i <abs> -d out f`      rc=0  `out/f` = `ONE`, `ws/f` untouched (control)
+      `patch -i <abs> -dout f`       rc=0  the same (control, attached)
+      `patch -i <abs> -sd out f`     rc=0  the same — the cluster is the same write
+      `patch -i <abs> -sdout f`      rc=0  the same, value in its own token
+      `patch -i <abs> -so out.txt f` rc=0  `out.txt` holds the text, `f` is untouched
+      `patch -i <abs> -soout.txt f`  rc=0  the same, value in its own token
+      `patch -i <abs> -so - f`       rc=0  prints to stdout, **no file** named `-`
+      `patch -i <abs> -iso out/f f`  rc=2  `too many file arguments`, nothing written
+      `patch -i <abs> -isd<out> f`   rc=2  the same — `-i` took the value, no `-d` in force
+      `patch -i <abs> -bsdout f`     rc=0  `-b` swallowed `sdout`: cwd's `f` rewritten
+
+    The `-iso`/`-isd` rows are the control that says the scan stops at the **first**
+    value-taking letter rather than at the first `d` or `o`: `-i` takes the rest as its
+    value, so no destination is in force — and the word `-i` would have eaten must not be
+    named either.
+    """
+    args = _args_after_command(tokens, i)
+    found: list[tuple[str, str]] = []
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        eaten = 1
+        cluster = _short_cluster_option(
+            tok, args, idx, _PATCH_CLUSTER_LETTERS, _PATCH_OPTIONAL_ARG_LETTERS
+        )
+        if cluster is not None:
+            letter, value, attached = cluster
+            eaten = 1 if attached else 2
+            if value and letter != tok[1]:
+                found.append((letter, value))
+        idx += eaten
+    return found
+
 
 def _patch_directory_values(tokens: list[str], i: int) -> list[str]:
     """The directory ``-d``/``--directory`` changes into, in the spellings getopt takes.
 
     It is a **destination** in the sense this walk cares about: measured on this host,
     `patch -d sub v.txt` rewrites `sub/v.txt` and leaves the cwd's copy alone, so the
-    value names the directory the write lands in. The spaced, the attached (`-dsub`)
-    and the ``=``-joined long form are read; a value inside a *cluster* (`-sdsub`) is
-    not, the same limit `_leading_short_option_value` documents for the destination
-    letters and for the same reason — splitting a cluster needs a per-option grammar
-    this walk refuses to grow.
+    value names the directory the write lands in.
+
+    The spaced (``-d sub``), the attached (``-dsub``) and both long forms are read from
+    this option's **own** set, so they do not depend on the letters a cluster is split
+    with; the clustered spellings come from ``_patch_cluster_values``, which splits them
+    with this verb's value-taking letters and reports only clusters. Before that reading
+    existed, a clustered `-d` named the *cwd* copy of the operand and nothing else, so
+    `patch -sd <outside>/dir <workspace>/f` reached `workspace-write` with **allow**
+    while the file really rewritten was the one under the outside directory (#1450).
     """
+    named = _short_option_letters(_PATCH_DIRECTORY_OPTIONS)
     out: list[str] = []
     args = _args_after_command(tokens, i)
-    for j, tok in enumerate(args):
+    for idx, tok in enumerate(args):
         if tok in _PATCH_DIRECTORY_OPTIONS:
-            if j + 1 < len(args):
-                out.append(args[j + 1])
+            if idx + 1 < len(args):
+                out.append(args[idx + 1])
         elif tok.startswith("--directory="):
             out.append(tok.split("=", 1)[1])
-        elif tok.startswith("-d") and not tok.startswith("--") and len(tok) > 2:
-            out.append(tok[2:])
+        else:
+            attached = _leading_short_option_value(tok, named)
+            if attached is not None:
+                out.append(attached)
+    out.extend(value for letter, value in _patch_cluster_values(tokens, i) if letter in named)
     return out
+
+
+def _patch_output_values(tokens: list[str], i: int) -> list[str]:
+    """The file ``-o``/``--output`` is given **inside a cluster**, when it is.
+
+    `-o` is the other option on this verb that names a path, and it displaces the
+    operands — so a cluster the walk missed did not merely go unnamed, it fell through to
+    the operand rule and named the **source** instead: measured, `patch -so <out> f`
+    rc=0 creates `<out>` and leaves `f` alone, while the walk reported `f`.
+
+    A value of exactly ``-`` is skipped, as the shared reader skips it for the same
+    reason here: measured, `patch -so - f` prints the patched text to stdout and creates
+    no file named ``-``.
+
+    Only clusters are reported (``_patch_cluster_values`` reads no token's first letter);
+    the spaced, attached and long spellings are ``_option_destination_values``'.
+    """
+    named = _short_option_letters(_PATCH_OUTPUT_OPTIONS)
+    return [
+        value
+        for letter, value in _patch_cluster_values(tokens, i)
+        if letter in named and value != "-"
+    ]
 
 
 def _patch_write_targets(tokens: list[str], i: int) -> list[str]:
@@ -2272,8 +2420,17 @@ def _patch_write_targets(tokens: list[str], i: int) -> list[str]:
     if any(tok in _PATCH_READ_LONG for tok in args):
         return []
     out = _option_destination_values(tokens, i, "patch", options=_PATCH_OUTPUT_OPTIONS)
+    # The clustered spelling of that same option, added *before* the operand fallback:
+    # an output is what displaces the operands, so a cluster the walk did not read fell
+    # through to the rule below and named the source the run only reads.
+    out.extend(_patch_output_values(tokens, i))
     if not out:
-        out = _positional_args(tokens, i, _PATCH_OPTIONS_WITH_VALUE)
+        out = _positional_args(
+            tokens,
+            i,
+            _PATCH_OPTIONS_WITH_VALUE,
+            cluster_optional_arg_letters=_PATCH_OPTIONAL_ARG_LETTERS,
+        )
     out.extend(_patch_directory_values(tokens, i))
     return out
 

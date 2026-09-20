@@ -38,6 +38,19 @@ Four directions this file pins, because a rule for one can be wrong in the other
 * `--dry-run` writes nothing and must stay allowed, or the fix would refuse a run that
   changes no byte.
 
+A fifth was added with #1450: both of those path-taking options are read in their
+**clustered** spelling (`-sd<dir>`, `-so <file>`) as well, since a cluster is where
+getopt puts a value that the spaced-spelling reader never sees. Measured, `patch -sd out f`
+rc=0 leaves the cwd's copy alone and rewrites `out/f` — the same write as `-d out`, which
+was refused while the cluster was not. The letters a cluster is split with are this
+verb's own (`_PATCH_OPTIONS_WITH_VALUE`), and the two spellings that are **not** clusters
+(`-d<dir>` attached, `-d <dir>` spaced) are read from the option's own set, so a cluster
+arm cannot make them disappear. One row of that grammar cuts the other way and is pinned
+beside the rest: `-b`'s argument is **optional**, so `patch -bsd <outside>/f` really
+rewrites `<outside>/f` while the reader — taking the `d` for a value-taking letter — ate
+that word and named nothing at all; `tests/…patch_targets` names it, and
+`_positional_args`' `cluster_optional_arg_letters` is what reads it.
+
 Nothing here executes a command: `_check_sandbox` is a pure predicate that `realpath`s
 a path and opens nothing, so the protected path below is an *input* to a predicate
 rather than something a test can damage. That matters because most assertions are
@@ -82,14 +95,23 @@ OUTPUT_FORMS = (
     ("output, attached", f"patch -o{OUTSIDE}/out {WORKSPACE}/in", (f"{OUTSIDE}/out",)),
     ("output, long", f"patch --output={OUTSIDE}/out {WORKSPACE}/in", (f"{OUTSIDE}/out",)),
     ("output, no operand", f"patch -o {OUTSIDE}/out", (f"{OUTSIDE}/out",)),
+    ("output, cluster attached", f"patch -so{OUTSIDE}/out {WORKSPACE}/in",
+     (f"{OUTSIDE}/out",)),
+    ("output, cluster spaced", f"patch -so {OUTSIDE}/out {WORKSPACE}/in",
+     (f"{OUTSIDE}/out",)),
 )
 
 # `-d` changes directory first, so the operand's write lands *there*. The operand here
 # is deliberately inside the workspace: naming only it is the miss measured on master.
+# The two clustered rows are the ones #1450 measured as allowed at both tiers.
 DIRECTORY_FORMS = (
     ("chdir, spaced", f"patch -d {OUTSIDE} {WORKSPACE}/f", (f"{WORKSPACE}/f", OUTSIDE)),
     ("chdir, attached", f"patch -d{OUTSIDE} {WORKSPACE}/f", (f"{WORKSPACE}/f", OUTSIDE)),
     ("chdir, long", f"patch --directory={OUTSIDE} {WORKSPACE}/f",
+     (f"{WORKSPACE}/f", OUTSIDE)),
+    ("chdir, cluster attached", f"patch -sd{OUTSIDE} {WORKSPACE}/f",
+     (f"{WORKSPACE}/f", OUTSIDE)),
+    ("chdir, cluster spaced", f"patch -sd {OUTSIDE} {WORKSPACE}/f",
      (f"{WORKSPACE}/f", OUTSIDE)),
 )
 
@@ -243,6 +265,105 @@ def test_the_geometry_is_what_makes_this_a_fix() -> None:
     assert allowed is False
 
 
+def test_the_scan_stops_at_the_first_value_taking_letter() -> None:
+    """`-i`'s value is the rest of the token, so `-isd…` has no `-d` in force.
+
+    This is the control that makes the cluster rows a grammar rather than a search for a
+    `d`: measured, `patch -i <abs> -isd<dir> f` is rc=2 `too many file arguments` with
+    nothing written, because `-i` took `sd<dir>` as its value. Naming `<dir>` would be a
+    false block — and the *word* `-i` would have eaten must not be named either, which is
+    what an unnamed value buys.
+    """
+    attached = f"patch -isd{OUTSIDE} {WORKSPACE}/f"
+    assert _extract_write_targets(attached) == [f"{WORKSPACE}/f"], (
+        "the tail belongs to -i, so no directory is named"
+    )
+    allowed, _reason, _ = _check_sandbox(attached, "workspace-write", workdir=WORKSPACE)
+    assert allowed is True, "and the run, which writes nothing, must not be refused"
+
+    # The spaced spelling is the other side of the same grammar: `-i` took `sd` from its
+    # own token, so `<dir>` is a genuine **operand** and the operand rule names it (the
+    # run then fails on two file arguments — measured rc=2). Naming it is the operand
+    # rule's business, not this reading's: nothing here calls it a destination.
+    spaced = f"patch -isd {OUTSIDE} {WORKSPACE}/f"
+    assert _extract_write_targets(spaced) == [OUTSIDE, f"{WORKSPACE}/f"], (
+        "an operand the run is given is named, whatever it spells"
+    )
+
+
+def test_an_option_with_an_optional_argument_owns_its_tokens_tail() -> None:
+    """`-b`'s argument is optional, so `-bsdout` is `-b sdout` — no chdir, no output.
+
+    `strings /usr/bin/patch` gives this host's optstring as
+    `b::B:cCd:D:eEfF:g:i:lnNo:p:r:RstTuvV:x:Y:z:Z`; an optional argument takes the rest
+    of its own token and never the next word. Measured: `patch -i <abs> -bsdout f` rc=0
+    rewrites the cwd's `f` and never `cd`s to `out`, and `patch -i <abs> -bsd out f`
+    rc=2 `too many file arguments`, so `-d` did not take `out`. Splitting such a token
+    with the required-argument letters alone would name `out` — a directory the run
+    never enters, and a false block the moment it lies outside the workspace.
+    """
+    swallowed = f"patch -bsdout {WORKSPACE}/f"
+    assert _extract_write_targets(swallowed) == [f"{WORKSPACE}/f"], (
+        "-b swallowed the tail, so neither `out` nor a directory is named"
+    )
+    allowed, _reason, _ = _check_sandbox(swallowed, "workspace-write", workdir=WORKSPACE)
+    assert allowed is True, "and the in-workspace write it really does stays allowed"
+
+    spaced = f"patch -bsd {OUTSIDE} {WORKSPACE}/f"
+    assert _extract_write_targets(spaced) == [OUTSIDE, f"{WORKSPACE}/f"], (
+        "-b took no word, so both tokens are operands — which is why the run fails"
+    )
+
+
+def test_a_swallowed_tail_keeps_the_operand_the_run_really_writes() -> None:
+    """The same fact in the direction that was a real hole, not a false name.
+
+    With `-b` swallowing the tail there is no `-d` in force, so the word after the token
+    is an **operand** — and for the single-operand form that word is the file rewritten.
+    Measured: `patch -i <abs> -bsd outside/f` rc=0 rewrites `outside/f`. Before the
+    operand reader knew about optional arguments it ate that word (taking the `d` for a
+    value-taking letter) and reported **no target at all**, which is ALLOW at both tiers.
+    """
+    hole = f"patch -bsd {OUTSIDE}/f"
+    assert _extract_write_targets(hole) == [f"{OUTSIDE}/f"], (
+        "the word after the token is the operand, not -d's value"
+    )
+    for tier in ("read-only", "workspace-write"):
+        allowed, reason, _ = _check_sandbox(hole, tier, workdir=WORKSPACE)
+        assert allowed is False, f"{tier} allowed a rewrite of {OUTSIDE}/f"
+        assert f"{OUTSIDE}/f" in reason, reason
+
+    # The same row without the tail: `-b` and `-d` are separate options there, so `-d`
+    # takes the word and the run names the directory instead — the row the cluster fix
+    # is about, and it must keep refusing.
+    together = f"patch -b -d {OUTSIDE} {WORKSPACE}/f"
+    assert _extract_write_targets(together) == [f"{WORKSPACE}/f", OUTSIDE]
+
+
+def test_blinding_the_optional_argument_letters_names_the_swallowed_tail(monkeypatch) -> None:
+    """Empty the optional-argument table and the swallowed tail is read as a destination.
+
+    `-bdout`/`-bsdout` really rewrite the cwd's file (`-b` took `dout`/`sdout`), and
+    `-bso<out>` really rewrites its operand — so both readings the arm produces are names
+    of a path the run never writes. That is what the table is for, and it is asserted on
+    the *names*, since the verdict would not move for a relative name.
+    """
+    swallowed = f"patch -bdout {WORKSPACE}/f"
+    # And the clustered value the same token *is* not: `-bso<out> in` rewrites `in` in
+    # place (measured), so naming `<out>` would be a false block, not a miss.
+    output = f"patch -bso{OUTSIDE}/out {WORKSPACE}/in"
+    assert _extract_write_targets(swallowed) == [f"{WORKSPACE}/f"], "not the unmutated read"
+    assert _extract_write_targets(output) == [f"{WORKSPACE}/in"], "not the unmutated read"
+
+    monkeypatch.setattr(bash_tool, "_PATCH_OPTIONAL_ARG_LETTERS", frozenset())
+    assert _extract_write_targets(swallowed) == [f"{WORKSPACE}/f", "out"], (
+        "with the table empty the swallowed tail is named as a directory"
+    )
+    assert _extract_write_targets(output) == [f"{OUTSIDE}/out"], (
+        "with the table empty the swallowed tail is read as the clustered -o's value"
+    )
+
+
 # ── mutation arms: a row that cannot be flipped is not a claim ──────────────
 
 
@@ -309,4 +430,76 @@ def test_blinding_the_chdir_set_reads_an_outside_write_as_an_inside_one(monkeypa
     assert allowed is True, (
         "and the outside write is allowed again — which is exactly the hole this branch "
         "was written for"
+    )
+
+
+# The arm below empties the letters a cluster is split with, and asserts both halves of
+# the claim: the clustered spellings fall back to master's reading, and the two spellings
+# that are not clusters survive — those read the option's **own** set, so a cluster arm
+# must not reach them. (row, command, master's reading of that command)
+CLUSTER_DEPENDS_ROWS = (
+    ("chdir, cluster attached", f"patch -sd{OUTSIDE} {WORKSPACE}/f", [f"{WORKSPACE}/f"]),
+    ("chdir, cluster spaced", f"patch -sd {OUTSIDE} {WORKSPACE}/f", [f"{WORKSPACE}/f"]),
+    ("output, cluster attached", f"patch -so{OUTSIDE}/out {WORKSPACE}/in",
+     [f"{WORKSPACE}/in"]),
+    ("output, cluster spaced", f"patch -so {OUTSIDE}/out {WORKSPACE}/in",
+     [f"{WORKSPACE}/in"]),
+)
+
+CLUSTER_INDEPENDENT_ROWS = (
+    ("chdir, attached", f"patch -d{OUTSIDE} {WORKSPACE}/f", [f"{WORKSPACE}/f", OUTSIDE]),
+    ("chdir, spaced", f"patch -d {OUTSIDE} {WORKSPACE}/f", [f"{WORKSPACE}/f", OUTSIDE]),
+    ("output, attached", f"patch -o{OUTSIDE}/out {WORKSPACE}/in", [f"{OUTSIDE}/out"]),
+    ("output, spaced", f"patch -o {OUTSIDE}/out {WORKSPACE}/in", [f"{OUTSIDE}/out"]),
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd,masters_reading",
+    CLUSTER_DEPENDS_ROWS,
+    ids=[r for r, *_ in CLUSTER_DEPENDS_ROWS],
+)
+def test_blinding_the_cluster_letters_returns_the_clustered_rows_to_masters_reading(
+    row, cmd, masters_reading, monkeypatch
+) -> None:
+    """Empty the letters a cluster is split with: the destination is unnamed again.
+
+    Both halves are asserted, because either alone proves nothing. The reading *before*
+    the arm must differ from master's — otherwise the rows would not be evidence that the
+    cluster is what names the destination — and the reading *after* must be master's, with
+    the tier allowing the outside write again.
+    """
+    assert _extract_write_targets(cmd) != masters_reading, (
+        "not the reading this arm is about: the clustered destination is already unnamed"
+    )
+    assert _check_sandbox(cmd, "workspace-write", workdir=WORKSPACE)[0] is False, (
+        "and it must be refused before the arm, or there is no hole to reopen"
+    )
+    monkeypatch.setattr(bash_tool, "_PATCH_CLUSTER_LETTERS", frozenset())
+    assert _extract_write_targets(cmd) == masters_reading, (
+        f"{row}: master's reading of this command is {masters_reading}"
+    )
+    allowed, _reason, _ = _check_sandbox(cmd, "workspace-write", workdir=WORKSPACE)
+    assert allowed is True, f"{row}: with the letters gone the hole must reopen"
+
+
+@pytest.mark.parametrize(
+    "row,cmd,expected",
+    CLUSTER_INDEPENDENT_ROWS,
+    ids=[r for r, *_ in CLUSTER_INDEPENDENT_ROWS],
+)
+def test_the_spellings_that_are_not_clusters_survive_the_cluster_arm(
+    row, cmd, expected, monkeypatch
+) -> None:
+    """The attached and spaced spellings read the option's **own** set, not the letters.
+
+    That is the difference the issue's acceptance turns on: a fix that read `-d<dir>` and
+    `-d <dir>` through the cluster letters would lose them the moment those letters were
+    wrong or missing, so the arm above must not reach them.
+    """
+    monkeypatch.setattr(bash_tool, "_PATCH_CLUSTER_LETTERS", frozenset())
+    assert _extract_write_targets(cmd) == expected, row
+    allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir=WORKSPACE)
+    assert allowed is False and OUTSIDE in reason, (
+        f"{row}: the plain spelling is still read, so this write is still refused"
     )
