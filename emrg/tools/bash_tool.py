@@ -2636,6 +2636,24 @@ def _patch_write_targets(tokens: list[str], i: int) -> list[str]:
     return out
 
 
+# Every word the write-target walk below dispatches on as a verb. It exists so the
+# shell's own question can be asked *once*, before a verb spelling is believed: a
+# word that is a verb only in spelling, standing where the shell passes it as data,
+# is not an invocation and names no target (`_runs_as_a_command`).
+_WRITE_VERB_WORDS: frozenset[str] = frozenset().union(
+    _REMOVER_VERBS,
+    _CREATING_VERBS,
+    _DESTINATION_LAST_VERBS,
+    _METADATA_VERBS,
+    _INPLACE_WRITER_VERBS,
+    _COMPRESSOR_VERBS,
+    _LZ4_VERBS,
+    _PZSTD_VERBS,
+    _OPTION_DESTINATION_VERBS,
+    {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip"},
+)
+
+
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     """Write targets of ``cmd``: the paths a command appears to write.
 
@@ -2747,7 +2765,11 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     delimiter word as write targets (`_mask_data_heredoc_bodies`).
     """
     masked = _mask_data_heredoc_bodies(cmd)
-    tokens = _split_command_tokens(masked)
+    # The *separator-preserving* tokenizer (see its docstring): the walk below asks a
+    # position question now, and `_split_command_tokens` drops a newline separator, so
+    # `echo a\\` + newline + `rm -f f` would answer "no separator" about a stream that
+    # lost the one the shell acts on.
+    tokens = _tokenize_command(masked)
     # A quoted operator is not an operator: `'>'` dequotes to `>`, so the token
     # stream alone cannot say which one the shell will act on. `is_operator` is
     # the one question — shape *and* not quoted — asked wherever the walk needs
@@ -2823,6 +2845,17 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
                     targets.append(tokens[j])
                 i = j + 1
                 continue
+        elif word in _WRITE_VERB_WORDS and not _runs_as_a_command(tokens, i):
+            # A verb *spelling* is not an invocation. The walk below visits every
+            # token and matches its word against the verb sets wherever it stands,
+            # which is what reaches `sudo rm` and `find . -exec rm`; the cost was
+            # that a verb word the shell passes as *data* was believed too.
+            # `_runs_as_a_command` is the guard's own rule for the difference and
+            # is already the question the git-mutator scan asks: a separator, a
+            # grouping operator, `!`, a shell keyword, a wrapper prefix or a
+            # `VAR=value` puts a word in command position; anything else is an
+            # argument of whatever the command really is.
+            pass
         elif word in _REMOVER_VERBS:
             # Any operand is removed — NOT only with a recursive flag.
             # `rm a.txt` destroys uncommitted work exactly like `rm -rf dir`;

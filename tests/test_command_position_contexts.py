@@ -414,3 +414,79 @@ def test_ordinary_reads_are_unaffected():
         "grep -n ')' x.txt",
     ):
         assert _reads(cmd) is True, cmd
+
+
+# ── the same two directions at the *write-target* walk (#14xx) ────────────
+
+WRITE_MENTIONS = [
+    'grep -n "rm" f.txt',
+    'grep -n "patch" f.txt',
+    'grep -e mv f.txt',
+    "echo rm -rf /tmp/x",
+    "echo touch /tmp/x",
+    "printf '%s\\n' sed -i f.txt",
+    "cat mv.txt",
+    "test -f patch",
+]
+
+WRITE_INVOCATIONS = [
+    "rm -rf /tmp/x",
+    "sudo rm -rf /tmp/x",
+    "env FOO=1 rm -rf /tmp/x",
+    "FOO=1 rm -rf /tmp/x",
+    "xargs rm -rf /tmp/x",
+    "find . -exec rm -rf /tmp/x {} +",
+    "timeout 5 rm -rf /tmp/x",
+    "nice -n 5 rm -rf /tmp/x",
+    "if true; then rm -rf /tmp/x; fi",
+    "for f in a; do rm -rf /tmp/x; done",
+    "(rm -rf /tmp/x)",
+    "! rm -rf /tmp/x",
+    "cd /tmp\nrm -rf /tmp/x",
+]
+
+
+def test_a_writer_verb_in_argument_position_is_data_not_an_invocation():
+    """`grep -n "rm" f.txt` searches for the word; it does not run `rm`.
+
+    The walk visits every token and matched its word against the verb sets wherever it
+    stood, which is what reaches `sudo rm` and `find -exec rm` — and also what read the
+    word as an invocation when the shell passes it as an argument. `_runs_as_a_command`
+    is the guard's own rule for the difference, and it is the question the git-mutator
+    scan already asks.
+    """
+    for cmd in WRITE_MENTIONS:
+        assert _reads(cmd) is True, f"{cmd!r} mentions a verb and writes nothing"
+        assert _extract_write_targets(cmd) == [], cmd
+
+
+def test_every_context_that_runs_a_writer_still_names_it():
+    """The complement: a change that refused nothing would pass the test above."""
+    for cmd in WRITE_INVOCATIONS:
+        assert _reads(cmd) is False, f"{cmd!r} really runs the verb"
+        assert _extract_write_targets(cmd), cmd
+
+
+def test_a_backticked_writer_is_seen_by_the_write_target_walk():
+    """The other tokenizer's backtick half, at the *second* site (#14xx).
+
+    `_tokenize_command` was given `\\n` and the backtick in its punctuation set (issue
+    #1156, #1233), and the write-target walk kept `_split_command_tokens`, whose `shlex`
+    punctuation defaults to `();<>|&`. A backticked writer therefore stayed glued to its
+    backtick — `` `rm `` is not `rm` — and named no target: measured, every one of 26
+    writer verbs behind a backtick was ALLOWED at `read-only` while `$( ... )`, `( ... )`,
+    `if`, `do`, a pipe and a bare newline all named the same path. The walk now reads the
+    separator-preserving tokenizer, which is what the position question needs.
+    """
+    for cmd in (
+        "`rm -rf /tmp/x`",
+        "`touch /tmp/x`",
+        "`tee /tmp/x`",
+        "`sed -i s/a/b/ /tmp/x`",
+    ):
+        assert _reads(cmd) is False, f"{cmd!r} runs the verb"
+    # The complement, at the same site: a backticked read stays allowed.
+    assert _reads("`cat f.txt`") is True
+    assert _reads("echo `date`") is True
+
+
