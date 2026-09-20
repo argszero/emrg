@@ -37,6 +37,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,30 @@ HEAD = "a" * 40
 MASTER = "c" * 40
 PUSH_TIME = "2026-09-17T10:00:00Z"
 CYCLE = "cyc20260917-221117"
+#: The cycle immediately before `CYCLE`: it started at 21:59:29 in the host's own
+#: zone, 11m48s before `CYCLE`. A cycle id *is* its local start time, so this pair is
+#: what the abstention window's two ends are pinned against.
+PREV_CYCLE = "cyc20260917-215929"
+
+LOCAL = datetime.now().astimezone().tzinfo
+
+
+def _push(year, month, day, hour, minute, second=0):
+    """A push instant named in the host's own zone, as GitHub would report it.
+
+    Push times arrive as UTC while a cycle id is local, so a test that wrote a bare
+    `...Z` would be measuring the *runner's* timezone: `cyc20260917-221117` is
+    22:11:17 local wherever the cycle ran, and a push at 22:05 local is inside the
+    window on a +08 host, a +04 one, and a UTC one alike. The conversion happens here
+    rather than in the assertion so both ends of the comparison are built the same
+    way a caller would build them.
+    """
+    return (
+        datetime(year, month, day, hour, minute, second, tzinfo=LOCAL)
+        .astimezone(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _load_module():
@@ -81,12 +106,17 @@ class FakeVotes:
     DEFAULT_MIN_VOTES = 3
 
     def __init__(self, reviews: list[dict] | None = None, mergeable: str = "MERGEABLE",
-                 state: str = "CLEAN", head: str = HEAD, valid: int | None = None):
+                 state: str = "CLEAN", head: str = HEAD, valid: int | None = None,
+                 push: str | None = None, exact: bool = True):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
         self.head = head
         self.forced_valid = valid
+        #: When this head was pushed — the datum the abstention clause compares
+        #: against. `None` keeps the historical default, far from every window.
+        self.push = PUSH_TIME if push is None else push
+        self.exact = exact
         self.calls: list[tuple[int, int, float]] = []
         #: The real sibling module, attached by `_install` so the fakes can build
         #: its dataclasses instead of a lookalike that would agree with a misreading.
@@ -124,8 +154,8 @@ class FakeVotes:
             pr=number,
             title=f"pr {number}",
             head_sha=self.head,
-            push_time=PUSH_TIME,
-            push_time_exact=True,
+            push_time=self.push,
+            push_time_exact=self.exact,
             mergeable=self.mergeable,
             merge_state=self.state,
             votes=votes,
@@ -507,7 +537,11 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
     votes = FakeVotes(reviews=[_review(cycle="cyc1")])
     fresh = FakeFresh(stale=True, kind="ancestry", behind=1)
     _install(mod, monkeypatch, votes, fresh)
-    rc = mod.main(["1", "--cycle", CYCLE, "--json"])
+    # `--prev-cycle` rather than the default cycle-record directory: the shape has to
+    # be the same everywhere, and the inferred window is a fact about the host.
+    rc = mod.main(
+        ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE, "--json"]
+    )
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert len(payload) == 1
@@ -524,6 +558,12 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
         "block_reason": "",
         "veto_at_head": False,
         "voted_by_this_cycle": False,
+        "head_pushed_at": PUSH_TIME,
+        "head_pushed_exact": True,
+        "vote_window_start": (
+            datetime(2026, 9, 17, 21, 59, 29, tzinfo=LOCAL).isoformat(timespec="seconds")
+        ),
+        "vote_window_source": f"previous cycle {PREV_CYCLE} (named by --prev-cycle)",
         "stale": True,
         "stale_kind": "ancestry",
         "behind_by": 1,
@@ -543,3 +583,177 @@ def test_the_summary_counts_every_row_once(mod, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "3 PR(s): vote 3" in out
+
+
+# --- the abstention clause: whose head is it? (issue #1408) ------------------
+#
+# The counter's half of "may this cycle vote here" is the count. The other half is
+# *whose head is it*, and that is the half that has cost votes: a cycle neither votes
+# on nor merges a head it pushed, and because every cycle on a host is the same
+# instance running again, the window immediately before this one counts as its own
+# (the applied precedent is `cyc20260917-125823`). `CYCLE` began at 22:11:17 in the
+# host's zone and `PREV_CYCLE` at 21:59:29, so the two ends of the window are 11m48s
+# apart and every push below is named in that zone rather than in UTC.
+
+
+def _run(mod, monkeypatch, votes, fresh, argv):
+    """`main` with both sibling seams replaced — the shape `_read` uses, for argvs
+    `_read` does not build."""
+    _install(mod, monkeypatch, votes, fresh)
+    return mod.main(argv)
+
+
+def test_a_cycle_id_is_its_start_time_in_the_host_zone(mod):
+    """The one conversion the clause rests on: ids are local, push times are UTC, and
+    comparing the two without it is an error of whole hours that reads as an answer."""
+    start = mod.cycle_start(CYCLE)
+    assert start is not None and start.tzinfo is not None
+    assert start.isoformat(timespec="seconds") == datetime(
+        2026, 9, 17, 22, 11, 17, tzinfo=LOCAL
+    ).isoformat(timespec="seconds")
+    assert mod.cycle_start("cyc-2026-09-17") is None
+    assert mod.cycle_start("") is None
+
+
+def test_a_head_pushed_inside_this_cycle_is_an_abstain(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30))
+    fresh = FakeFresh()
+    rc = _run(mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" in out
+    assert "cast-vote.py 1" not in out  # never the command that spends the vote
+    assert "check-vote-count.py 1" in out
+
+
+def test_a_head_pushed_by_the_previous_cycle_is_an_abstain(mod, monkeypatch, capsys):
+    """The half the precedent widened: 22:05 is after the previous cycle began
+    (21:59:29) and before this one did, so the push belongs to the cycle immediately
+    before — the same instance, one window back."""
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh,
+         ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert "abstain" in out
+    assert PREV_CYCLE in out
+
+
+def test_a_push_at_the_previous_cycles_start_is_inside_the_window(mod, monkeypatch, capsys):
+    """The boundary is closed at the start: a window runs from its own id to the next
+    one, so the previous cycle's first instant belongs to it and not to the cycle
+    before it."""
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 21, 59, 29))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh,
+         ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert "abstain" in out
+
+
+def test_a_head_pushed_two_cycles_back_is_still_votable(mod, monkeypatch, capsys):
+    """The negative control for the clause: the window is one cycle wide and no
+    wider. 20:00 is before the previous cycle began, so nothing about it is one's own
+    and the row is the ordinary vote it would always have been."""
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 20, 0))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh,
+         ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert "abstain" not in out
+    assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
+
+
+def test_a_head_this_cycle_pushed_is_not_merged_either(mod, monkeypatch, capsys):
+    """The other thing the clause withholds: `3/3` at a head one pushed is not this
+    cycle's merge, so the merge command must not be printed either."""
+    votes = FakeVotes(
+        reviews=[_review(cycle=f"cyc20260917-1{n}") for n in range(3)],
+        push=_push(2026, 9, 17, 22, 30),
+    )
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE])
+    out = capsys.readouterr().out
+    assert "3/3 votes" in out
+    assert "abstain" in out
+    assert "gh pr merge 1" not in out
+
+
+def test_an_inexact_push_time_never_decides_the_window(mod, monkeypatch, capsys):
+    """A push time that fell back to the commit date is a lower bound. The counter
+    already calls such a head blocking, so the row asks for the run — the clause is
+    never applied to a datum that cannot support it."""
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30), exact=False)
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE])
+    out = capsys.readouterr().out
+    assert "unblock" in out
+    assert "abstain" not in out
+
+
+def test_the_previous_cycle_is_read_from_the_cycle_records(mod, monkeypatch, capsys,
+                                                           tmp_path):
+    """`--cycles-log`: the newest cycle record that sorts before this cycle's id — not
+    the newest record, and not an archive's filename.
+
+    The records are named `cycle-<date>-<time>.md`, without the id's `cyc` prefix, so
+    this also pins the filename-to-id mapping: the row names `PREV_CYCLE` with its
+    `cyc`, which is not what the filename says.
+    """
+    (tmp_path / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    (tmp_path / "cycle-20260917-100000.md").write_text("x", encoding="utf-8")
+    (tmp_path / f"cycle-{CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    (tmp_path / "cycle-archive-20260917.md").write_text("x", encoding="utf-8")
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh,
+         ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "abstain" in out
+    assert PREV_CYCLE in out
+
+
+def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
+        mod, monkeypatch, capsys, tmp_path):
+    """No record to read: the scan shrinks to this cycle's own start. That is a
+    strictly weaker reading, so it is reported as one — a narrowed window must never
+    be printed as if the clause had been applied in full."""
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh,
+         ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "abstain" not in out  # not a claim the tool cannot support
+    assert "note: the abstention window could not be widened" in out
+    assert "no cycle record before" in out
+    # The other half of "narrowed, and said so": the note names the boundary that
+    # *was* checked, so a reader can still apply the clause by hand to an earlier push
+    # (the push time is on the row) instead of taking the silence for a pass.
+    assert datetime(2026, 9, 17, 22, 11, 17, tzinfo=LOCAL).isoformat(timespec="seconds") \
+        in out
+
+
+def test_a_narrowed_window_still_catches_this_cycles_own_push(mod, monkeypatch, capsys,
+                                                              tmp_path):
+    """The half that survives without a previous cycle, because it needs only this
+    cycle's own id — so narrowing must not turn into not checking at all."""
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh,
+         ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "abstain" in out
+
+
+def test_without_a_cycle_the_clause_is_not_applied(mod, monkeypatch, capsys):
+    """`--cycle` is what makes the question a cycle's own. Without it the tool answers
+    the count and nothing else, and the push time stays on the row for a reader who
+    knows which window it falls in."""
+    pushed = _push(2026, 9, 17, 22, 30)
+    votes = FakeVotes(reviews=[], push=pushed)
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1"])
+    out = capsys.readouterr().out
+    assert "abstain" not in out
+    assert "vote" in out
+    assert f"pushed {pushed}" in out
