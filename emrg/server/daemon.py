@@ -342,6 +342,12 @@ class EmrgServer:
         self._session_subscribers: dict[str, dict] = {}  # session_id → {ws: cwd_str}
         self._session_task_cwds: dict[str, str] = {}     # session_id → 运行中任务的 cwd
         self._session_busy: dict[str, bool] = {}        # session_id → active task?
+        # A running turn belongs to its *session*, so the handles that interrupt it do
+        # too (rant 2026-09-20T12:50:13): any client subscribed to that session must be
+        # able to stop the turn, not only the connection that started it. Mirrors
+        # `_session_busy` — registered when the turn starts, dropped when it ends.
+        self._session_cancel: dict[str, asyncio.Event] = {}      # session_id → its turn's event
+        self._session_turn_task: dict[str, asyncio.Task] = {}    # session_id → its turn's task
         # P1 queue-injection (rant 2026-08-10T21:55:37): per-session FIFO of
         # (TaskRequest, allow_tools) received while a tool loop is busy —
         # injected at the next round boundary (aligned with codex steer_input).
@@ -984,20 +990,35 @@ class EmrgServer:
 
                 # ── Cancel: interrupt running tool loop ──────────
                 if data.get("type") == "cancel":
-                    if _cancel_event:
-                        _cancel_event.set()
-                    if _tool_task and not _tool_task.done():
-                        _tool_task.cancel()
-                        try:
-                            await _tool_task
-                        except asyncio.CancelledError:
-                            pass
-                    await self._send(ws, {
+                    # A cancel names a session, not a connection (rant 2026-09-20T12:50:13).
+                    # Resolve the turn from the session's own registration, so a peer
+                    # client's Esc interrupts the same turn the originator's would; the
+                    # connection's locals are only the fallback for a frame that carries
+                    # no session_id (that is what the TUI sends today).
+                    cancel_sid = data.get("session_id") or last_session_id or ""
+                    event = self._session_cancel.get(cancel_sid) or _cancel_event
+                    if event:
+                        event.set()
+                    cancel_task = self._session_turn_task.get(cancel_sid) or _tool_task
+                    if cancel_task and not cancel_task.done():
+                        cancel_task.cancel()
+                        # Only await a task this coroutine owns: awaiting a peer's turn
+                        # would park this connection's read loop until that turn unwinds.
+                        if cancel_task is _tool_task:
+                            try:
+                                await cancel_task
+                            except asyncio.CancelledError:
+                                pass
+                    # The receipt is a statement about the *session*, so every client
+                    # watching it gets the same one. A connection-local ack let a peer
+                    # read "cancelled" while the turn it never reached kept running.
+                    await self._broadcast(cancel_sid, {
                         "type": "cancelled",
-                        "session_id": data.get("session_id", ""),
+                        "session_id": cancel_sid,
                     })
-                    _tool_task = None
-                    _cancel_event = None
+                    if cancel_task is _tool_task:
+                        _tool_task = None
+                        _cancel_event = None
                     continue
 
                 # ── Task: run tool loop in background (non-blocking) ─
@@ -1071,6 +1092,11 @@ class EmrgServer:
                         _tool_task = asyncio.create_task(
                             self._run_tool_loop_locked(req, ws, session, _cancel_event, allow_tools=allow_tools)
                         )
+                        # Publish the turn's handles under its session (rant 2026-09-20T12:50:13);
+                        # registered synchronously with the create_task above, so no await can
+                        # slip between a turn starting and its being cancellable.
+                        self._session_cancel[session_id] = _cancel_event
+                        self._session_turn_task[session_id] = _tool_task
                     finally:
                         logcontext.session_label.reset(_ctx_token)
                     continue
@@ -2276,6 +2302,71 @@ class EmrgServer:
                 return
             session = self._get_or_create_session(session_id, Path(cwd))
             records = session._read_history()
+            # ── records mode (rant 2026-09-20T18:58:44) ──────────────────
+            # A client replaying a session must show what the live stream
+            # showed, so the answer has to be the same material: every message
+            # record (including the tool-call-only assistant records the
+            # display path drops) and every tool_result record, in record
+            # order, each carrying its absolute `record_index`.
+            #
+            # `preview` is deliberately NOT attached here. It is a /rewind
+            # affordance — a one-line rewind point — and a replay that prefers
+            # it renders 80 characters of a message it claims to be showing
+            # (measured: a 5064-char assistant message displayed as 81 chars).
+            if msg.get("include_records"):
+                limit = msg.get("limit")
+                offset = msg.get("offset", 0) or 0
+                before_index = msg.get("before_index")
+                total = len(records)
+                if before_index is None:
+                    end = max(0, total - offset)
+                else:
+                    # A cursor is an absolute record index, so an append never
+                    # moves it — the offset-from-newest window slides, which is
+                    # why paging both repeated and skipped records. A cursor
+                    # past the end of a history that a compaction shrank is
+                    # clamped rather than empty: a stale page must still reach
+                    # the oldest records instead of reporting "no more".
+                    end = min(int(before_index), total)
+                start = max(0, end - limit) if limit is not None else 0
+                # A cut must never land inside a tool pair: the assistant
+                # message carrying tool_calls and the tool_result records
+                # answering it are one group, and a page that begins with the
+                # results but not the call they answer cannot be rendered.
+                while start > 0 and records[start].get("type") == "tool_result":
+                    start -= 1
+                history_messages = []
+                for i in range(start, end):
+                    r = records[i]
+                    rtype = r.get("type")
+                    if rtype == "tool_result":
+                        history_messages.append({
+                            "record_index": i,
+                            "kind": "tool_result",
+                            "tool_call_id": r.get("tool_call_id", ""),
+                            "tool_name": r.get("tool_name", ""),
+                            "content": r.get("content", "") or "",
+                            "error": bool(r.get("error")),
+                        })
+                    elif rtype == "message" and r.get("role") in ("user", "assistant"):
+                        item: dict = {
+                            "record_index": i,
+                            "kind": "message",
+                            "role": r.get("role"),
+                            "content": r.get("content", "") or "",
+                            "timestamp": r.get("timestamp", ""),
+                        }
+                        tool_calls = r.get("tool_calls")
+                        if tool_calls:
+                            item["tool_calls"] = tool_calls
+                        history_messages.append(item)
+                await self._send(ws, {
+                    "type": "history_list",
+                    "session_id": session_id,
+                    "messages": history_messages,
+                    "has_more": start > 0,
+                })
+                return
             # Collect message records with their record index. Default is
             # user-only (TUI /rewind needs user rewind points; backward
             # compatible). include_assistant=True (GUI history loader, rant
@@ -2585,6 +2676,11 @@ class EmrgServer:
             normal_end = True
         finally:
             self._session_busy[session_id] = False
+            # Retract this turn's cancel handles (rant 2026-09-20T12:50:13) — identity-
+            # checked so a turn that already replaced this one keeps its own handles.
+            if self._session_cancel.get(session_id) is cancel_event:
+                self._session_cancel.pop(session_id, None)
+                self._session_turn_task.pop(session_id, None)
             # Rant 2026-09-02T10:36:26：turn 生命周期结束——客户端清除该会话
             # 运行计时（与 done/cancelled 帧幂等，仅作权威清理信号）。
             # 必须在 _session_task_cwds 清空之前广播：turn 帧属于任务流，
@@ -2595,9 +2691,11 @@ class EmrgServer:
             })
             self._session_task_cwds.pop(session_id, None)
             # P1 (rant 21:55:37): messages still queued when the loop ends are
-            # not lost. We do NOT start a follow-up task here (_tool_task /
-            # _cancel_event are read-loop locals — a hand-off would break
-            # cancel + busy tracking); instead:
+            # not lost. We do NOT start a follow-up task here (the hand-off is
+            # deliberately the client's re-send: _tool_task / _cancel_event are
+            # still read-loop locals, and the queue-drain contract below is what
+            # both clients implement — cancellation itself is now session-scoped,
+            # see _session_cancel); instead:
             #   normal end → queued_requeue → clients auto re-send (busy is
             #     now released, the re-send goes through the normal path)
             #   cancel / error / disconnect → queued_cancelled (queue dropped)
@@ -3269,10 +3367,28 @@ class EmrgServer:
 
         Keeps the final user turn as the actual instruction while the context
         (time snapshot) rides in the message stream right after history.
+
+        Rant 2026-09-20T18:33:52: the frame goes immediately before a *final
+        user message*, or at the very end -- never inside an assistant
+        ``tool_calls`` / ``tool`` pair. The overlong-retry rebuild
+        (:meth:`_shrink_for_overlong_retry`) is ``system + history``, and at
+        that moment history's tail is the tool result of the round the provider
+        rejected; putting the frame before that last element put a user message
+        between the assistant's ``tool_calls`` and its answer, so the provider
+        answered 400 "assistant message with 'tool_calls' must be followed by
+        tool messages" and the retry that was meant to rescue the turn killed
+        it. The two shapes that do end in a user message (round 1, and the
+        auto-compact rebuild) are placed exactly as before, so the frame still
+        rides right after history and the byte-stable system prefix is left
+        alone.
         """
         ctx = self._build_context_message(session)
-        if ctx is not None:
+        if ctx is None:
+            return
+        if messages and messages[-1].get("role") == "user":
             messages.insert(-1, ctx)
+        else:
+            messages.append(ctx)
 
     @staticmethod
     def _count_chars_for_tokens(text: str) -> int:

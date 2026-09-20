@@ -2655,16 +2655,45 @@ def _patch_directory_values(tokens: list[str], i: int) -> list[str]:
     named = _short_option_letters(_PATCH_DIRECTORY_OPTIONS)
     out: list[str] = []
     args = _args_after_command(tokens, i)
-    for idx, tok in enumerate(args):
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        eaten = 1
         if tok in _PATCH_DIRECTORY_OPTIONS:
             if idx + 1 < len(args):
                 out.append(args[idx + 1])
+            eaten = 2          # the directory is the next word, which is therefore not an option
         elif tok.startswith("--directory="):
             out.append(tok.split("=", 1)[1])
         else:
             attached = _leading_short_option_value(tok, named)
             if attached is not None:
                 out.append(attached)
+            elif tok in _PATCH_OPTIONS_WITH_VALUE:
+                # A **spaced** value is the next word, and a word this verb's own option
+                # ate is not an option — so it is stepped over, exactly as
+                # `_patch_cluster_values` steps over the word a *cluster* letter ate
+                # (`_words_eaten`). Without the step, the eaten word is read here as the
+                # option it is spelled like and the word *after* it is named as a
+                # directory the run never enters: measured, `patch -o -d <dir> f` gives
+                # `-o` the out-file `<dir>`, so no chdir is in force and the walk named
+                # `<dir>` anyway — a false block of a run that writes nothing there
+                # (issue #1464). The set is this verb's own table rather than a letter
+                # scan, so a *long* spaced value is stepped over on the same line.
+                eaten = 2
+            else:
+                cluster = _short_cluster_option(
+                    tok, args, idx, _PATCH_CLUSTER_LETTERS, _PATCH_OPTIONAL_ARG_LETTERS
+                )
+                # A **cluster** whose value-taking letter is not the token's head is the
+                # only thing this branch adds: a token that leads with that letter is the
+                # table's own business above (`-o <file>`), and reading it here as well
+                # would be the second reading the step exists to prevent — the arm in
+                # `tests/test_bash_tool_patch_targets.py` blinds the table and must be
+                # able to bring the eaten word back.
+                if cluster is not None and cluster[0] != tok[1]:
+                    eaten = _words_eaten(cluster[2])
+        idx += eaten
     out.extend(value for letter, value in _patch_cluster_values(tokens, i) if letter in named)
     return out
 
@@ -2716,6 +2745,24 @@ def _patch_write_targets(tokens: list[str], i: int) -> list[str]:
         )
     out.extend(_patch_directory_values(tokens, i))
     return out
+
+
+# Every word the write-target walk below dispatches on as a verb. It exists so the
+# shell's own question can be asked *once*, before a verb spelling is believed: a
+# word that is a verb only in spelling, standing where the shell passes it as data,
+# is not an invocation and names no target (`_runs_as_a_command`).
+_WRITE_VERB_WORDS: frozenset[str] = frozenset().union(
+    _REMOVER_VERBS,
+    _CREATING_VERBS,
+    _DESTINATION_LAST_VERBS,
+    _METADATA_VERBS,
+    _INPLACE_WRITER_VERBS,
+    _COMPRESSOR_VERBS,
+    _LZ4_VERBS,
+    _PZSTD_VERBS,
+    _OPTION_DESTINATION_VERBS,
+    {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip"},
+)
 
 
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
@@ -2829,7 +2876,11 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     delimiter word as write targets (`_mask_data_heredoc_bodies`).
     """
     masked = _mask_fd_redirect_prefixes(_mask_data_heredoc_bodies(cmd))
-    tokens = _split_command_tokens(masked)
+    # The *separator-preserving* tokenizer (see its docstring): the walk below asks a
+    # position question now, and `_split_command_tokens` drops a newline separator, so
+    # `echo a\\` + newline + `rm -f f` would answer "no separator" about a stream that
+    # lost the one the shell acts on.
+    tokens = _tokenize_command(masked)
     # A quoted operator is not an operator: `'>'` dequotes to `>`, so the token
     # stream alone cannot say which one the shell will act on. `is_operator` is
     # the one question — shape *and* not quoted — asked wherever the walk needs
@@ -2905,6 +2956,17 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
                     targets.append(tokens[j])
                 i = j + 1
                 continue
+        elif word in _WRITE_VERB_WORDS and not _runs_as_a_command(tokens, i):
+            # A verb *spelling* is not an invocation. The walk below visits every
+            # token and matches its word against the verb sets wherever it stands,
+            # which is what reaches `sudo rm` and `find . -exec rm`; the cost was
+            # that a verb word the shell passes as *data* was believed too.
+            # `_runs_as_a_command` is the guard's own rule for the difference and
+            # is already the question the git-mutator scan asks: a separator, a
+            # grouping operator, `!`, a shell keyword, a wrapper prefix or a
+            # `VAR=value` puts a word in command position; anything else is an
+            # argument of whatever the command really is.
+            pass
         elif word in _REMOVER_VERBS:
             # Any operand is removed — NOT only with a recursive flag.
             # `rm a.txt` destroys uncommitted work exactly like `rm -rf dir`;
@@ -3913,9 +3975,39 @@ def _git_output_flag_targets(tokens: list[str], i: int) -> list[str]:
     ``--output=x``), and a guard that refuses a command for *mentioning* the
     flag is the spelling-vs-effect defect fixed in #1162. As a git option the
     flag has a real position, so it is read only where git would read it.
+
+    **Where git reads it** is the subcommand's own argument list, and that is asked
+    of ``_git_invocation_at`` rather than re-derived here. This reader used to scan
+    every token after ``git``, which is a second copy of the walk that finds the verb
+    — and it read a word a *global* option had already eaten as a flag: measured on
+    this host (git 2.50.1) in one fresh repository per row,
+
+      ``git diff --output=x``          rc=0  ``x`` written (105 B)   the real write this reads for
+      ``git -C . diff --output=x``     rc=0  ``x`` written — a global option *with a value*
+                                             before the flag does not hide it
+      ``git diff --output x``          rc=0  ``x`` written — the spaced form is real
+      ``git -c --output=x diff``       rc=128 ``error: key does not contain a section: --output``,
+                                             nothing written — ``-c`` took the whole token as its
+                                             config string, so no output flag was in force
+      ``git --output=x diff``          rc=129 ``unknown option``, nothing written — git has no
+                                             *global* ``--output`` (its usage line lists none)
+      ``git status --output=x``        rc=129 ``unknown option``, nothing written
+
+    Every rc≠0 row above names a path the run never writes, and the direction is the
+    expensive one: a name outside the allowed roots refuses the command, so the guard
+    blocked a run that changes no byte (issue #1464, which measured the ``-c`` row and
+    called the global-position one a control; the executed arm above says that control
+    writes nothing either). Every token the flag can really occupy lies inside ``rest``,
+    so one walk answers the question instead of two — the converse is not claimed:
+    ``git status --output=x`` is inside ``rest`` too and git refuses the flag, a
+    per-verb table this walk does not carry and a limit pinned, rather than guessed at,
+    in ``tests/test_bash_tool_git_output_flag.py``.
     """
+    inv = _git_invocation_at(tokens, i)
+    if inv is None:
+        return []                  # a bare `git`, or one followed only by global options
+    _index, _verb, args = inv
     out: list[str] = []
-    args = _args_after_command(tokens, i)
     for j, tok in enumerate(args):
         if not _OUTPUT_FLAG_RE.match(tok):
             continue

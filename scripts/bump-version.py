@@ -41,7 +41,7 @@ After bumping, the release flow is (see Agent.md "Releasing"):
 
     1. ``uv run --no-sync pytest tests/test_version_sync.py -q``  # guard
     2. commit on ``feature/release-vX.Y.Z`` -> PR -> 3 LGTMs -> merge
-    3. ``git tag vX.Y.Z && git push origin vX.Y.Z``  # triggers Build Release
+    3. ``git tag -a vX.Y.Z -m "emrg vX.Y.Z" && git push origin vX.Y.Z``  # triggers Build Release
     4. confirm all 4 platform legs green in ``build-release.yml``
 
 Note: always run the test suite with ``uv run --no-sync`` after a bump so
@@ -352,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         "\nNext:\n"
         "  1. uv run --no-sync pytest tests/test_version_sync.py -q\n"
         f"  2. commit on feature/release-v{args.version} -> PR -> 3 LGTMs -> merge\n"
-        f"  3. git tag v{args.version} && git push origin v{args.version}\n"
+        f"  3. git tag -a v{args.version} -m \"emrg v{args.version}\" && git push origin v{args.version}\n"
         "  4. confirm all 4 platforms green in build-release.yml\n"
         "\nNote: use `uv run --no-sync` so uv does not regenerate uv.lock."
     )
