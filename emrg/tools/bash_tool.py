@@ -1519,11 +1519,45 @@ def _args_after_command(tokens: list[str], i: int) -> list[str]:
 
     Stops at the next command in a chain, so ``rm -rf a; echo hi`` yields only
     ``a`` — the shell separators are their own tokens after tokenizing.
+
+    A redirection is **stepped over**, not a cut. The shell removes the redirect
+    operator and its operand from the word list and keeps every remaining word as an
+    argument *wherever the redirect sat*, so ``cp A >/dev/null B`` hands ``cp`` the
+    operands ``A`` and ``B``. This walk used to `break` at the first redirect, which
+    silently dropped every operand after one. Measured on master `347f023e`, pure
+    calls: ``cp A >/dev/null B`` named ``['/dev/null']`` and ``cp A >|/dev/null B``
+    named ``['B', '/dev/null']`` — the destinations that follow are unjudged, the
+    #1468 direction (a destination the walk never looks at is a destination the
+    sandbox never refuses).
+
+    The cut was also asked of the wrong reader. It carried its own list,
+    ``("<", ">", ">>", "&>", "&>>")``, while `_is_redirect_operator`'s docstring
+    records that same list being two operators short and replaces it with a shape
+    test; so ``>&``, ``>|`` and ``<>`` were invisible here. Stepping over rather than
+    cutting is what makes the two readers agree, and it is also what keeps the fix
+    from trading one hole for another: widening a *cut* would have taken the ``>&``
+    spellings from "names the right operand" to "names nothing" — measured, before
+    the step existed, as ``cp A 2>&1 B`` naming ``['B']`` on master and ``[]`` after
+    the widened cut.
+
+    `<` is stepped over on the same terms even though the shape test excludes a bare
+    ``<`` (which it keeps out so `cat < /etc/passwd` does not become a refusal):
+    either way the *operand* of a redirect is not a command operand, and the walk
+    still names the redirect target through its own reader.
     """
     args: list[str] = []
+    skipping_operand = False
     for tok in tokens[i + 1:]:
-        if tok in _COMMAND_SEPARATORS or tok in ("<", ">", ">>", "&>", "&>>"):
+        if tok in _COMMAND_SEPARATORS:
             break
+        if skipping_operand:
+            # The word just after an operator is what the redirect consumes: the
+            # target file for `>`, the descriptor for `>&`, an input path for `<`.
+            skipping_operand = False
+            continue
+        if tok == "<" or _is_redirect_operator(tok):
+            skipping_operand = True
+            continue
         args.append(tok)
     return args
 
@@ -2573,16 +2607,45 @@ def _patch_directory_values(tokens: list[str], i: int) -> list[str]:
     named = _short_option_letters(_PATCH_DIRECTORY_OPTIONS)
     out: list[str] = []
     args = _args_after_command(tokens, i)
-    for idx, tok in enumerate(args):
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        eaten = 1
         if tok in _PATCH_DIRECTORY_OPTIONS:
             if idx + 1 < len(args):
                 out.append(args[idx + 1])
+            eaten = 2          # the directory is the next word, which is therefore not an option
         elif tok.startswith("--directory="):
             out.append(tok.split("=", 1)[1])
         else:
             attached = _leading_short_option_value(tok, named)
             if attached is not None:
                 out.append(attached)
+            elif tok in _PATCH_OPTIONS_WITH_VALUE:
+                # A **spaced** value is the next word, and a word this verb's own option
+                # ate is not an option — so it is stepped over, exactly as
+                # `_patch_cluster_values` steps over the word a *cluster* letter ate
+                # (`_words_eaten`). Without the step, the eaten word is read here as the
+                # option it is spelled like and the word *after* it is named as a
+                # directory the run never enters: measured, `patch -o -d <dir> f` gives
+                # `-o` the out-file `<dir>`, so no chdir is in force and the walk named
+                # `<dir>` anyway — a false block of a run that writes nothing there
+                # (issue #1464). The set is this verb's own table rather than a letter
+                # scan, so a *long* spaced value is stepped over on the same line.
+                eaten = 2
+            else:
+                cluster = _short_cluster_option(
+                    tok, args, idx, _PATCH_CLUSTER_LETTERS, _PATCH_OPTIONAL_ARG_LETTERS
+                )
+                # A **cluster** whose value-taking letter is not the token's head is the
+                # only thing this branch adds: a token that leads with that letter is the
+                # table's own business above (`-o <file>`), and reading it here as well
+                # would be the second reading the step exists to prevent — the arm in
+                # `tests/test_bash_tool_patch_targets.py` blinds the table and must be
+                # able to bring the eaten word back.
+                if cluster is not None and cluster[0] != tok[1]:
+                    eaten = _words_eaten(cluster[2])
+        idx += eaten
     out.extend(value for letter, value in _patch_cluster_values(tokens, i) if letter in named)
     return out
 
@@ -2764,7 +2827,7 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     some command's stdin, and reading it as shell code named prose and the
     delimiter word as write targets (`_mask_data_heredoc_bodies`).
     """
-    masked = _mask_data_heredoc_bodies(cmd)
+    masked = _mask_fd_redirect_prefixes(_mask_data_heredoc_bodies(cmd))
     # The *separator-preserving* tokenizer (see its docstring): the walk below asks a
     # position question now, and `_split_command_tokens` drops a newline separator, so
     # `echo a\\` + newline + `rm -f f` would answer "no separator" about a stream that
@@ -3864,9 +3927,39 @@ def _git_output_flag_targets(tokens: list[str], i: int) -> list[str]:
     ``--output=x``), and a guard that refuses a command for *mentioning* the
     flag is the spelling-vs-effect defect fixed in #1162. As a git option the
     flag has a real position, so it is read only where git would read it.
+
+    **Where git reads it** is the subcommand's own argument list, and that is asked
+    of ``_git_invocation_at`` rather than re-derived here. This reader used to scan
+    every token after ``git``, which is a second copy of the walk that finds the verb
+    — and it read a word a *global* option had already eaten as a flag: measured on
+    this host (git 2.50.1) in one fresh repository per row,
+
+      ``git diff --output=x``          rc=0  ``x`` written (105 B)   the real write this reads for
+      ``git -C . diff --output=x``     rc=0  ``x`` written — a global option *with a value*
+                                             before the flag does not hide it
+      ``git diff --output x``          rc=0  ``x`` written — the spaced form is real
+      ``git -c --output=x diff``       rc=128 ``error: key does not contain a section: --output``,
+                                             nothing written — ``-c`` took the whole token as its
+                                             config string, so no output flag was in force
+      ``git --output=x diff``          rc=129 ``unknown option``, nothing written — git has no
+                                             *global* ``--output`` (its usage line lists none)
+      ``git status --output=x``        rc=129 ``unknown option``, nothing written
+
+    Every rc≠0 row above names a path the run never writes, and the direction is the
+    expensive one: a name outside the allowed roots refuses the command, so the guard
+    blocked a run that changes no byte (issue #1464, which measured the ``-c`` row and
+    called the global-position one a control; the executed arm above says that control
+    writes nothing either). Every token the flag can really occupy lies inside ``rest``,
+    so one walk answers the question instead of two — the converse is not claimed:
+    ``git status --output=x`` is inside ``rest`` too and git refuses the flag, a
+    per-verb table this walk does not carry and a limit pinned, rather than guessed at,
+    in ``tests/test_bash_tool_git_output_flag.py``.
     """
+    inv = _git_invocation_at(tokens, i)
+    if inv is None:
+        return []                  # a bare `git`, or one followed only by global options
+    _index, _verb, args = inv
     out: list[str] = []
-    args = _args_after_command(tokens, i)
     for j, tok in enumerate(args):
         if not _OUTPUT_FLAG_RE.match(tok):
             continue
@@ -4884,6 +4977,114 @@ def _mask_data_heredoc_bodies(cmd: str) -> str:
             return cmd
     return "\n".join("" if k in body_lines else line
                      for k, line in enumerate(lines))
+
+
+_FD_PREFIX_BEFORE_REDIRECT_RE = re.compile(
+    r"(?:^|(?<=[\s;|&()<>]))([0-9]+)(?=(?:>>|>&|>\||<>|<&|<|>))"
+)
+
+
+def _quoted_char_indexes(cmd: str) -> set[int]:
+    """Indexes of ``cmd`` that sit inside a quote (or behind an escape).
+
+    Asked by `_mask_fd_redirect_prefixes`, which must not touch text the shell reads
+    as data: `echo "a 2>b"` and `cp src "d2>x"` carry digits beside a `>` that no
+    shell will act on, and blanking them would rewrite the *name* the guard reports.
+    """
+    protected: set[int] = set()
+    quote = ""
+    i = 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if quote:
+            protected.add(i)
+            if ch == "\\" and quote == '"' and i + 1 < len(cmd):
+                protected.add(i + 1)
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(cmd):
+            protected.add(i)
+            protected.add(i + 1)
+            i += 2
+            continue
+        if ch in "'\"":
+            quote = ch
+            protected.add(i)
+        i += 1
+    return protected
+
+
+def _mask_fd_redirect_prefixes(cmd: str) -> str:
+    """Blank the digits of a descriptor prefix that is *attached* to its redirect.
+
+    A destination verb's target is its last operand, and the operand collector stops
+    at the redirect *operator* but not at the descriptor prefix in front of it — so
+    the prefix was collected as an operand and, being last, was named as the
+    destination. Measured on master `347f023e`, pure calls: `cp src dst 2>/dev/null`
+    reported targets ``['2', '/dev/null']``, i.e. the real destination was dropped.
+    Two directions follow from that one cause: the write is **allowed** where it must
+    be refused (`cp /etc/hosts /etc/passwd 2>/dev/null` and
+    `cp /etc/hosts ~/.emrg/config.toml 2>/dev/null` were both ALLOWED at
+    `workspace-write`, the tier whose whole job is those two writes — issue #1468),
+    and the descriptor is reported as the destination instead of the path.
+
+    **Adjacency is the discriminator, and it is the shell's own.** The token stream
+    cannot carry it: `2>/dev/null` and `2 >/dev/null` lex identically (``2``, ``>``,
+    ``/dev/null``), because shlex splits punctuation either way. Ground truth from a
+    scratch directory on this host, `/bin/bash`, read off disk: the first copies and
+    sends stderr to the device, while the second **really creates a file named ``2``**
+    — ``cp src 2 >/dev/null`` is `cp src 2` with its output redirected. So only a
+    prefix with no separating whitespace is masked; `_FD_PREFIX_BEFORE_REDIRECT_RE`'s
+    ``(?!…)`` is a *lookahead*, and white space between the digits and the operator
+    makes it fail, which is why the spaced form keeps naming its file.
+
+    **The digits must also begin a word**, and that is a second, independent
+    discriminator — `-2>/dev/null` is a *word* `-2` followed by a redirect, not a
+    descriptor. Found by running the counter-control rather than by reasoning about
+    the first rule: with the lookbehind written as ``(?<![\\w])`` the mask blanked the
+    digit of `-2` and `./2` as well, turning the operand `-2` into a token `-` and
+    `./2` into `./` — a rewritten *name*, which is the one thing this mask must never
+    do (it is applied so that two lexings of the same text stay index-aligned, and a
+    name is what the host is shown). Ordinary shell word characters (`-`, `/`, `.`)
+    are not separators, so the prefix is accepted only at the start of the command or
+    after white space or a metacharacter — the set the shell itself uses to end a
+    word. Both counter-controls are in the battery
+    (`fd-swallows-the-destination-20260920.py`, rows `-2>` and the spaced form).
+
+    This mirrors the rule the walk already applies to ``>&``'s *operand*
+    (`_is_fd_operand`, issue #1275): the operator's spelling decides, never the
+    operand alone, and `&>1` / `echo x > 1` keep naming the file called ``1``.
+
+    Masking (not deleting) keeps every character offset, which `_fully_quoted_token_indexes`
+    and `_escaped_word_indexes` rely on: they pair two lexings of *this same text* by
+    index, so a text they both read stays consistent. Nothing the shell reads as data
+    is touched — a digit inside quotes or behind an escape is skipped
+    (`_quoted_char_indexes`).
+
+    Applied by `_extract_write_targets` only. The mutator scan does not read operand
+    positions, and the other callers of `_mask_data_heredoc_bodies` are left alone.
+
+    Named limit, in the safe direction: a quoted or escaped operator is left to the
+    walk's own quoting rules, so `echo '>' 2` still names nothing extra — the prefix
+    here is always the digits that sit directly against an unquoted operator.
+    """
+    if not cmd:
+        return cmd
+    matches = [
+        m for m in _FD_PREFIX_BEFORE_REDIRECT_RE.finditer(cmd)
+        if m.start(1) not in _quoted_char_indexes(cmd)
+    ]
+    if not matches:
+        return cmd
+    out = list(cmd)
+    for m in matches:
+        for k in range(m.start(1), m.end(1)):
+            out[k] = " "
+    return "".join(out)
 
 
 def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:

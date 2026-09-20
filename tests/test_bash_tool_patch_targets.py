@@ -552,3 +552,141 @@ def test_the_step_is_what_keeps_the_eaten_word_out_of_the_cluster_read(monkeypat
         "with the step gone the eaten `-sd` must be read as a cluster and name the same "
         "directory again — otherwise the step is not what keeps it out"
     )
+
+
+# An option that takes its value as the **next word** has already consumed it, so a reader
+# that scans the argument list on its own reads the eaten word as the option it is spelled
+# like — and then names the word *after* it. This is the **spaced** form of the class
+# `EATEN_WORD_FORMS` pins for clusters (issue #1464), and it lives in `-d`'s reader.
+#
+# Ground truth first, because the verdict is not the evidence. Measured on this host (BSD
+# `patch 2.0-12u11-Apple`), one fresh directory per row holding `f` (`one`) and a diff
+# turning `one` into `ONE` named by absolute path, results read back off disk:
+#
+#   patch -i <abs> -o -d f      rc=0  a file literally named `-d` holds the patched text and
+#                                     `f` is untouched — `-o` took `-d` as its out-file, so
+#                                     no chdir is in force and `f` is the file to patch
+#   patch -i <abs> -o out -d s  rc=0  `out` written, `s/f` untouched    (control)
+#
+# The pinning row is the one where a *recognised* `-o` suppresses the operand fallback, so
+# the eaten word's re-read is the only remaining source of a name for `<dir>`: naming it is
+# naming a path this run does not write. The masking row is named rather than used, because
+# in `patch -i -d <dir> f` the operand rule names `<dir>` with or without the fix — a test
+# written on it would pass on master too.
+SPACED_EATEN_FORMS = (
+    ("out-file eats the chdir", f"patch -o -d {OUTSIDE}/d {WORKSPACE}/f", ("-d",)),
+    ("out-file eats the chdir, patch file given",
+     f"patch -i {WORKSPACE}/d.patch -o -d {OUTSIDE}/d {WORKSPACE}/f", ("-d",)),
+    ("long out-file eats the chdir", f"patch --output -d {OUTSIDE}/d {WORKSPACE}/f",
+     ("-d",)),
+)
+
+# The same step, reached through a different option of the table: `-x` eats the `-d`, so the
+# two remaining words are *operands* — files this run really rewrites in place, which is why
+# both tiers refuse this one on their own reading of the operand. Pinned as a list because
+# the duplicate is the discriminator: master named `<dir>` twice (once as the operand it is,
+# once as the chdir it is not).
+SPACED_EATEN_LIST_ONLY = (
+    ("strip count eats the chdir", f"patch -x -d {OUTSIDE}/d {WORKSPACE}/f",
+     (f"{OUTSIDE}/d", f"{WORKSPACE}/f")),
+)
+
+# The other direction, so the rows above cannot be satisfied by a reader that stops reading
+# `-d`: with `-o`'s value in place, `-d` is an option again and the directory it names is a
+# target. One path outside per row, so the block can only be that path.
+SPACED_EATEN_CONTROLS = (
+    ("out-file outside", f"patch -o {OUTSIDE}/o -d {WORKSPACE}/d {WORKSPACE}/f",
+     (f"{OUTSIDE}/o", f"{WORKSPACE}/d"), f"{OUTSIDE}/o"),
+    ("chdir outside", f"patch -o {WORKSPACE}/o -d {OUTSIDE}/d {WORKSPACE}/f",
+     (f"{WORKSPACE}/o", f"{OUTSIDE}/d"), f"{OUTSIDE}/d"),
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd,named", SPACED_EATEN_FORMS, ids=[r for r, *_ in SPACED_EATEN_FORMS]
+)
+def test_a_word_a_spaced_option_ate_is_not_read_a_second_time(row, cmd, named) -> None:
+    """Exactly the paths the run writes — the extra name is the whole defect.
+
+    `patch -o -d <dir> f` writes the file `-d` (measured above) and never enters `<dir>`.
+    The cost of the extra name is the tier verdict rather than the list: `workspace-write`
+    must allow a write that lands inside the workspace, and while `<dir>` is named it
+    refuses — a false block of a run that changes no byte outside the root.
+    """
+    assert tuple(_extract_write_targets(cmd)) == named, row
+    allowed_ro, reason_ro = _check_sandbox(cmd, "read-only", workdir=WORKSPACE)[0:2]
+    assert allowed_ro is False and named[0] in reason_ro, (
+        f"{row}: read-only must refuse the out-file this run really writes: {reason_ro}"
+    )
+    allowed_ww, reason_ww = _check_sandbox(cmd, "workspace-write", workdir=WORKSPACE)[0:2]
+    assert allowed_ww is True, (
+        f"{row}: false block — the run writes nothing outside the workspace: {reason_ww}"
+    )
+
+
+@pytest.mark.parametrize(
+    "row,cmd,named", SPACED_EATEN_LIST_ONLY, ids=[r for r, *_ in SPACED_EATEN_LIST_ONLY]
+)
+def test_the_eaten_chdir_is_not_named_beside_the_operands(row, cmd, named) -> None:
+    """The word an option ate must not be read as the option it is spelled like, twice over.
+
+    Asserting the *tuple* is the only way to pin this row: the eaten spelling's re-read
+    names the same path the operand rule already named, so the verdict is identical either
+    way — the duplicate in the list is the difference, and it is what a reader that scans
+    the raw tokens produces.
+    """
+    assert tuple(_extract_write_targets(cmd)) == named, row
+
+
+@pytest.mark.parametrize(
+    "row,cmd,named,blocked", SPACED_EATEN_CONTROLS, ids=[r for r, *_ in SPACED_EATEN_CONTROLS]
+)
+def test_the_chdir_is_still_named_once_the_eating_option_has_its_value(
+    row, cmd, named, blocked
+) -> None:
+    """With `-o`'s value given, `-d` is an option again and the directory it names is a write.
+
+    Each row puts exactly one of the two paths outside the workspace, so the block that
+    names it can only be that path — `OUTSIDE` in a reason is not evidence on its own.
+    """
+    assert tuple(_extract_write_targets(cmd)) == named, row
+    # `read-only` refuses the *first* path it sees and reports only that one, so it is
+    # asked for a block and for a name that is one of the two writes; the outside path is
+    # the discriminating half only at `workspace-write`, which is the tier that refuses
+    # *because* a target left the root.
+    allowed_ro, reason_ro, _ = _check_sandbox(cmd, "read-only", workdir=WORKSPACE)
+    assert allowed_ro is False, f"{row}: read-only allowed a write"
+    assert any(p in reason_ro for p in named), (
+        f"{row}: read-only block names no path this run writes: {reason_ro}"
+    )
+    allowed_ww, reason_ww, _ = _check_sandbox(cmd, "workspace-write", workdir=WORKSPACE)
+    assert allowed_ww is False, f"{row}: workspace-write allowed a write to {blocked}"
+    assert blocked in reason_ww, (
+        f"{row}: workspace-write block does not name {blocked}: {reason_ww}"
+    )
+
+
+def test_the_step_is_what_keeps_the_eaten_chdir_out_of_this_reader(monkeypatch) -> None:
+    """Take `-o` out of the value table and master's reading comes back.
+
+    The arm is the table the step consults, not a verdict: with `-o` no longer known to
+    take a word, the eaten `-d` is read here as the option it is spelled like and `<dir>`
+    is named as a chdir the run never enters — exactly master `fcbe224c`'s answer. The
+    unmutated reading is asserted first, so a later reader cannot make this test pass by
+    breaking the step in the source.
+    """
+    cmd = f"patch -o -d {OUTSIDE}/d {WORKSPACE}/f"
+    assert tuple(_extract_write_targets(cmd)) == ("-d",), "not the unmutated reading"
+    monkeypatch.setattr(
+        bash_tool,
+        "_PATCH_OPTIONS_WITH_VALUE",
+        bash_tool._PATCH_OPTIONS_WITH_VALUE - {"-o", "--output"},
+    )
+    assert tuple(_extract_write_targets(cmd)) == ("-d", f"{OUTSIDE}/d"), (
+        "with `-o` out of the table the eaten `-d` must be read again and name its "
+        "neighbour — otherwise the table lookup is not what keeps it out"
+    )
+    allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir=WORKSPACE)
+    assert allowed is False and OUTSIDE in reason, (
+        f"and the false block must come back with it: {reason}"
+    )

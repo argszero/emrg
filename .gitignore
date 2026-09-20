@@ -34,6 +34,17 @@ node_modules/
 # reintroducing the exposure.
 /tests/emrg-*
 .claude
+# `patch`'s backups: `<file>.orig`, and the `.rej` left by a hunk it could not
+# apply, are artifacts of an edit rather than deliverables — and `.bak` is the same
+# shape from an editor. One really was committed: two branches of the
+# redirect-operand stack carried `emrg/tools/bash_tool.py.orig` (349,773 bytes /
+# 6218 lines, a duplicate of the file under edit), so both PR diffs showed the whole
+# copy and a reviewer had to notice it by eye. Ignoring the names here stops
+# `git add -A` from staging a new one; `tests/test_patch_backups_are_gitignored.py`
+# is the mechanic that keeps a reverted rule or a new suffix from reopening it.
+*.orig
+*.rej
+*.bak
 .pytest_cache/
 /dist/
 /emrg/gui/dist/
