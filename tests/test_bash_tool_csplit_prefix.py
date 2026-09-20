@@ -26,8 +26,10 @@ Ground truth for what csplit really does, taken in a scratch directory on this h
   no option at all;
 * `csplit -n 3 -f n3 in.txt 4` created `n3000 n3001`, so the digit count is a flag
   (`-n`) and not part of the prefix;
-* `csplit -f - in.txt 3` created `-00 -01`, and `csplit -kf cl in.txt 3` created
-  `cl00 cl01` — the two spellings whose prefix this rule does not read (below);
+* `csplit -f - in.txt 3` created `-00 -01`, the one spelling whose prefix this rule
+  does not read (below); `csplit -kf cl in.txt 3` also created `cl00 cl01` and was a
+  second such spelling until the cluster reader learned this verb's letters — a
+  cluster's value belongs to the first letter that takes one, so `-kf` is `-f`'s;
 * `csplit` with no operand, `csplit -f pfxonly`, `csplit --help`, `csplit --version`
   and `csplit missing.txt 3` each created **nothing**.
 
@@ -41,6 +43,7 @@ import sys
 
 import pytest
 
+from emrg.tools import bash_tool
 from emrg.tools.bash_tool import _check_sandbox, _extract_write_targets
 
 # Outside every allowed root (workspace, OS temp root, the evolution data dir) and used
@@ -242,20 +245,55 @@ def test_the_protected_daemon_file_is_refused_at_both_tiers():
 
 
 # ── the named limits, pinned so a later reader does not re-derive them ──────────────
-def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
-    """`-kf PREFIX` puts another letter before the destination letter, and is not read.
+def test_the_cluster_spelling_is_read_through_the_verbs_own_letters():
+    """`-kf PREFIX` carries the prefix behind another letter, and it is read.
 
     Telling `-kf cl` apart from `-nf cl` needs the verb's own grammar — `-n` takes a
     value, so in one of them the next token is a digit count and in the other it is the
-    prefix. The walk reads a *leading* option only (`_leading_short_option_value`), so
-    this spelling is judged by the default prefix instead: the real one stays unnamed
-    and an outside one is not refused, which is the bounded cost the `curl -so<dir>`
-    residual carries — and this is measured ground truth rather than a suspicion, since
-    BSD really does create `cl00 cl01` for `csplit -kf cl in.txt 3` (executed below).
+    prefix — and the walk now has that grammar for this verb
+    (`_OPTION_DESTINATION_VALUE_TAKING`, derived from `_CSPLIT_OPTIONS_WITH_VALUE`), so
+    the cluster is split the same way the operand walk splits it. This row used to be
+    pinned as a residual that named the **default** prefix instead; the ground truth
+    below is what says which of the two readings is right: BSD really does create
+    `cl00 cl01` for `csplit -kf cl in.txt 3`, so naming `xx` was a name the run never
+    writes, not merely a missing one.
     """
     cmd = f"csplit -kf {OUTSIDE}/pre {WORKSPACE}/in.txt 4"
-    assert _extract_write_targets(cmd) == ["xx"]
-    assert _check_sandbox(cmd, "workspace-write", WORKSPACE)[0] is True
+    assert _extract_write_targets(cmd) == [f"{OUTSIDE}/pre"]
+    assert _check_sandbox(cmd, "workspace-write", WORKSPACE)[0] is False
+    # The neighbours, both directions: `-n` takes a value, so in `-nf cl` the `f` is
+    # *that* value and the token names no prefix at all — the walk answers with the
+    # default it documents, and the real run writes nothing (measured: rc=1, `csplit: f:
+    # bad suffix length`). The spaced spelling still names its prefix as before.
+    assert _extract_write_targets(f"csplit -nf {OUTSIDE}/pre {WORKSPACE}/in.txt") == ["xx"]
+    assert _extract_write_targets(f"csplit -f {OUTSIDE}/pre {WORKSPACE}/in.txt") == [
+        f"{OUTSIDE}/pre"
+    ]
+
+
+def test_the_cluster_row_needs_this_verbs_letters_row():
+    """Empty this verb's letters and the cluster falls back to the default prefix.
+
+    The arm is aimed at the one thing the cluster row has that the spaced row does not,
+    so the spaced form has to survive it: `-f <prefix>` is read by the destination table
+    itself, while `-kf <prefix>` is read only because this verb's value-taking letters
+    were supplied to the cluster reader. Emptied, the walk answers what master answered
+    — the default `xx`, a name the run never writes — and that difference is the whole
+    claim the row makes. A target-list comparison alone would not say it either way; the
+    value that changes is which name comes out.
+    """
+    original = bash_tool._OPTION_DESTINATION_VALUE_TAKING["csplit"]
+    bash_tool._OPTION_DESTINATION_VALUE_TAKING["csplit"] = frozenset()
+    try:
+        assert _extract_write_targets(f"csplit -kf {OUTSIDE}/pre {WORKSPACE}/in.txt") == [
+            "xx"
+        ]
+        # ...while the spaced spelling never used the letters at all.
+        assert _extract_write_targets(f"csplit -f {OUTSIDE}/pre {WORKSPACE}/in.txt") == [
+            f"{OUTSIDE}/pre"
+        ]
+    finally:
+        bash_tool._OPTION_DESTINATION_VALUE_TAKING["csplit"] = original
 
 
 def test_a_dash_prefix_is_read_as_the_default():
@@ -348,12 +386,13 @@ def test_no_prefix_option_really_writes_xx_in_the_cwd(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="no csplit on Windows CI")
-def test_the_two_unread_prefix_spellings_really_do_write(tmp_path):
-    """The residuals above are holes, not theories — driven, and read off disk.
+def test_the_cluster_spelling_really_writes_where_the_walk_says(tmp_path):
+    """The cluster this rule now reads is driven, and its family read off disk.
 
-    Both are spellings whose prefix this rule does not read: the cluster (`-kf cl`) and
-    the dash (`-f -`). Seeing the files is what keeps the residual honest — a pinned
-    limit that turns out not to write anything is a rule that is merely incomplete.
+    A reading is only as good as the run behind it: BSD really does create `cl00 cl01`
+    for `csplit -kf cl in.txt 4`, which is why `-kf` must be read and why naming the
+    default `xx` was a name the run never writes. The dash spelling's residual is driven
+    in the same directory (below).
     """
     source = tmp_path / "in.txt"
     source.write_text("l1\nl2\nl3\nl4\nl5\nl6\n")
@@ -366,9 +405,8 @@ def test_the_two_unread_prefix_spellings_really_do_write(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("cl")) == [
         "cl00", "cl01",
     ]
-    # ...while the walk reports the default prefix for that spelling, which is the
-    # bounded cost the residual names.
-    assert _extract_write_targets(f"csplit -kf {tmp_path}/pre {source} 4") == ["xx"]
+    cmd = f"csplit -kf {tmp_path}/pre {source} 4"
+    assert _extract_write_targets(cmd) == [f"{tmp_path}/pre"]
 
     dash = subprocess.run(
         ["csplit", "-f", "-", str(source), "4"], cwd=str(tmp_path),

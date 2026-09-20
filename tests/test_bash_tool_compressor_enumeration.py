@@ -26,7 +26,7 @@ asserts.
 
 **Why the twins are pinned here and not in `UNCOVERED_WRITERS`.** That list's
 question is a destination named by an **option** rather than by an operand
-(`tar -cf`, `split -f`, `curl -so`, `git clone`); none of these has one — the hole
+(`tar -cf`, `tar -xf -C`, `git clone`); none of these has one — the hole
 is that the verb itself is absent from the enumeration, which is this file's
 question. The rows below are measured the same way that list's are: through the
 real predicate, asserting an empty target list *and* the two tier verdicts, so a
