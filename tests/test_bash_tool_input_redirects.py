@@ -34,6 +34,7 @@ files are: it covers one family, and a self-contained fixture set cannot disagre
 table it does not share.
 """
 
+import os
 import subprocess
 
 import pytest
@@ -208,28 +209,43 @@ def test_an_attached_descriptor_is_not_the_next_word(row, cmd):
 
 # ── ground truth: the shell really writes where the walk now points ─────────────────
 GROUND_TRUTH_ROWS = (
-    ("heredoc", "cp ./a d1 <<EOF", "d1"),
-    ("tab-stripping heredoc", "cp ./a d2 <<-EOF", "d2"),
-    ("here-string", "cp ./a d3 <<< here", "d3"),
-    ("input descriptor duplication", "cp ./a d4 <&0", "d4"),
-    ("bare input redirect", "cp ./a d5 < /dev/null", "d5"),
-    ("descriptor duplication after", "cp ./a d6 2>&1", "d6"),
-    ("descriptor duplication before", "cp ./a 2>&1 d7", "d7"),
+    ("heredoc", "cp ./a d1 <<EOF", "d1", "/bin/sh"),
+    ("tab-stripping heredoc", "cp ./a d2 <<-EOF", "d2", "/bin/sh"),
+    # A here-string is a bash extension, so this row names a shell that has it. The
+    # Linux runners' `/bin/sh` is dash, which refuses the line outright — measured on
+    # this repo's own macOS host against `/bin/dash`, whose message is byte-identical
+    # to the one CI produced (`rc=2 /bin/dash: 1: Syntax error: redirection
+    # unexpected`), while a probe of the `<<EOF`, `<<-EOF` and `< /dev/null` rows under
+    # the same dash created their destinations at `rc=0`. The row's *subject* is the
+    # operator's word grammar, which both shells share; only the ground-truth run needs
+    # a shell that can spell it.
+    ("here-string", "cp ./a d3 <<< here", "d3", "/bin/bash"),
+    ("input descriptor duplication", "cp ./a d4 <&0", "d4", "/bin/sh"),
+    ("bare input redirect", "cp ./a d5 < /dev/null", "d5", "/bin/sh"),
+    ("descriptor duplication after", "cp ./a d6 2>&1", "d6", "/bin/sh"),
+    ("descriptor duplication before", "cp ./a 2>&1 d7", "d7", "/bin/sh"),
 )
 
 
-@pytest.mark.parametrize("row,script,dst", GROUND_TRUTH_ROWS,
-                         ids=[r for r, _, _ in GROUND_TRUTH_ROWS])
-def test_the_shell_creates_the_destination_these_lines_name(row, script, dst, tmp_path):
+@pytest.mark.parametrize("row,script,dst,shell", GROUND_TRUTH_ROWS,
+                         ids=[r for r, _, _, _ in GROUND_TRUTH_ROWS])
+def test_the_shell_creates_the_destination_these_lines_name(row, script, dst, shell, tmp_path):
     """One file per row, in a directory this test creates, read back off disk.
 
     The predicate rows above are only a defect if the shell really writes the path the
     walk failed to name — this is that half, measured rather than asserted. Nothing here
     touches a host path: the cwd is `tmp_path`, the source is written by the test, and
     the destination is the name the row spells.
+
+    A row whose shell is absent is skipped for that reason, which is also what keeps
+    this honest on Windows (where neither `/bin/sh` nor `/bin/bash` exists) without
+    asserting a platform instead of a fact.
     """
+    if not os.path.exists(shell):
+        pytest.skip(f"{shell} is not on this host")
     (tmp_path / "a").write_text("src\n")
-    proc = subprocess.run(["/bin/sh", "-c", script], cwd=tmp_path,
-                          capture_output=True, text=True)
+    proc = subprocess.run([shell, "-c", script], cwd=tmp_path,
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     assert (tmp_path / dst).exists(), f"{row}: rc={proc.returncode} {proc.stderr!r}"
     assert (tmp_path / dst).read_text() == "src\n", row
