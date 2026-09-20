@@ -20,7 +20,7 @@ function setup(
     sid?: string | null;
     sendMessage?: (o: { sessionId: string | null; text: string; requestId: string; sandbox?: string | null }) => Promise<SendResult>;
     busy?: boolean;
-    cancel?: () => Promise<unknown>;
+    cancel?: (sessionId: string) => Promise<unknown>;
     onCommand?: (r: { type: "command" | "unknown"; cmd: string; args?: string[] }) => void;
   } = {},
 ) {
@@ -311,13 +311,13 @@ describe("Composer — 发送流", () => {
 });
 
 describe("Composer — 停止回复（rant 2026-09-02T20:30:05：React 迁移丢了 send↔stop 切换）", () => {
-  it("busy 时发送按钮切换为停止按钮；点击 → cancel 调用 + 系统消息（chat.interrupted）", async () => {
+  it("busy 时发送按钮切换为停止按钮；点击 → 点名会话的 cancel，本地不打任何字", async () => {
     const store = createTranscriptStore();
     const cancelled: string[] = [];
     const s = setup(store, {
       busy: true,
-      cancel: async () => {
-        cancelled.push("cancelled");
+      cancel: async (sessionId) => {
+        cancelled.push(sessionId);
       },
     });
     await waitEditor(s);
@@ -328,11 +328,13 @@ describe("Composer — 停止回复（rant 2026-09-02T20:30:05：React 迁移丢
     expect(stop).toHaveAttribute("aria-label", "停止回复");
     expect(stop.textContent).toBe("■");
     await userEvent.click(stop);
-    await waitFor(() => expect(cancelled).toHaveLength(1));
-    // 本地乐观系统消息（对齐 TUI ESC 中断提示「⏸ Interrupted」）
-    expect(
-      store.getEntries("s1").some((e) => e.kind === "system" && e.text === "⏹ 已停止响应。"),
-    ).toBe(true);
+    // Rant 2026-09-20T12:50:13：cancel 带的是会话 id，不是「我这个连接」。
+    await waitFor(() => expect(cancelled).toEqual(["s1"]));
+    // 结束这轮的唯一陈述是 daemon 的会话级 cancelled 回执（daemonBridge 那条）——
+    // 本地乐观的清 typing / 打「已停止响应。」/ 置 busy=false 已删除（否则按 Esc 的一端
+    // 「已中断」而真正跑着这轮的服务端毫无反应）。
+    expect(store.getEntries("s1").some((e) => e.kind === "system")).toBe(false);
+    expect(store.getEntries("s1").some((e) => e.kind === "system" && e.text.includes("已停止响应"))).toBe(false);
   });
 
   it("非 busy 时仍显示发送按钮（无 stop）", async () => {
@@ -343,22 +345,37 @@ describe("Composer — 停止回复（rant 2026-09-02T20:30:05：React 迁移丢
     expect(screen.queryByTestId("composer-stop")).not.toBeInTheDocument();
   });
 
+  it("无会话可点名时不发 cancel（与 TUI request_cancel 同一规则）", async () => {
+    const store = createTranscriptStore();
+    const cancelled: string[] = [];
+    const s = setup(store, {
+      sid: "",
+      busy: true,
+      cancel: async (sessionId) => {
+        cancelled.push(sessionId);
+      },
+    });
+    await waitEditor(s);
+    await userEvent.click(screen.getByTestId("composer-stop"));
+    // 没有会话可点名就没有可问的事：一帧都不发，本地也不陈述任何结果。
+    expect(cancelled).toEqual([]);
+    expect(store.getEntries("").some((e) => e.kind === "system")).toBe(false);
+  });
+
   it("busy + Esc → 停止（菜单未开）；菜单开着时 Esc 只关菜单不误停", async () => {
     const store = createTranscriptStore();
     const cancelled: string[] = [];
     const s = setup(store, {
       busy: true,
-      cancel: async () => {
-        cancelled.push("cancelled");
+      cancel: async (sessionId) => {
+        cancelled.push(sessionId);
       },
     });
     const editor = await waitEditor(s);
-    // 无菜单 → Esc → stop：cancel 调用 + 系统消息
+    // 无菜单 → Esc → stop：点名会话的 cancel（文案/清 busy 由回执产生，见 daemonBridge）
     s.press("Escape");
-    await waitFor(() => expect(cancelled).toHaveLength(1));
-    expect(
-      store.getEntries("s1").some((e) => e.kind === "system" && e.text === "⏹ 已停止响应。"),
-    ).toBe(true);
+    await waitFor(() => expect(cancelled).toEqual(["s1"]));
+    expect(store.getEntries("s1").some((e) => e.kind === "system")).toBe(false);
 
     // / 菜单开着时 Esc 只关菜单——busy 也不触发第二次 stop
     act(() => {
@@ -367,7 +384,7 @@ describe("Composer — 停止回复（rant 2026-09-02T20:30:05：React 迁移丢
     expect(screen.getByTestId("cmd-menu")).toBeInTheDocument();
     s.press("Escape");
     expect(screen.queryByTestId("cmd-menu")).not.toBeInTheDocument();
-    expect(cancelled).toHaveLength(1); // 未追加
+    expect(cancelled).toEqual(["s1"]); // 未追加
   });
 });
 
