@@ -1540,10 +1540,13 @@ def _args_after_command(tokens: list[str], i: int) -> list[str]:
     the step existed, as ``cp A 2>&1 B`` naming ``['B']`` on master and ``[]`` after
     the widened cut.
 
-    `<` is stepped over on the same terms even though the shape test excludes a bare
-    ``<`` (which it keeps out so `cat < /etc/passwd` does not become a refusal):
-    either way the *operand* of a redirect is not a command operand, and the walk
-    still names the redirect target through its own reader.
+    The readers and the *reading* operators are stepped over on one question
+    (`_redirect_consumes_the_next_word`), which is `_is_redirect_operator`'s shape
+    plus the spellings that predicate cannot hold: it excludes a bare ``<`` so that
+    `cat < /etc/passwd` does not become a refusal, and the same exclusion had left
+    ``<<``, ``<<-``, ``<<<`` and ``<&`` believed to be command words. Their operand is
+    not a command operand either, and leaving it in the list made it the *destination*
+    of a destination-last verb — the write then went unjudged.
     """
     args: list[str] = []
     skipping_operand = False
@@ -1555,7 +1558,7 @@ def _args_after_command(tokens: list[str], i: int) -> list[str]:
             # target file for `>`, the descriptor for `>&`, an input path for `<`.
             skipping_operand = False
             continue
-        if tok == "<" or _is_redirect_operator(tok):
+        if _redirect_consumes_the_next_word(tok):
             skipping_operand = True
             continue
         args.append(tok)
@@ -1742,6 +1745,15 @@ def _positional_args(
     return out
 
 
+# The operator shape, spelled once. A redirect token is built out of `<`, `>`, `|`,
+# `&`, digits (an fd prefix) and `-` (a closed descriptor) and of nothing else, and
+# three readers below ask about it: `_is_redirect_operator` decides which tokens
+# *name* a target, `_redirect_consumes_the_next_word` decides which ones take the
+# word behind them, and both must accept the same spelling of "operator" or they
+# drift — which is what issue #1268 was (two readers, two lists, two answers).
+_REDIRECT_SHAPE_RE = re.compile(r"[<>|&0-9-]+")
+
+
 def _is_redirect_operator(tok: str) -> bool:
     """True when ``tok`` is a redirect operator rather than a path.
 
@@ -1777,7 +1789,43 @@ def _is_redirect_operator(tok: str) -> bool:
     return (
         bool(tok)
         and ">" in tok
-        and re.fullmatch(r"[<>|&0-9-]+", tok) is not None
+        and _REDIRECT_SHAPE_RE.fullmatch(tok) is not None
+    )
+
+
+def _redirect_consumes_the_next_word(tok: str) -> bool:
+    """True when the word *behind* ``tok`` is the redirect's operand.
+
+    The step-over question, and the one place it is **not** `_is_redirect_operator`'s
+    answer. That predicate deliberately keeps a bare ``<`` out of its set, because its
+    answer decides what gets **named** and naming a ``<``'s operand would turn
+    ``cat < /etc/passwd`` into a refusal. Here the answer decides what gets **stepped
+    over**, and there the two families agree: the operator and the word behind it leave
+    the word list either way, whatever the shell then does with them. So the whole
+    shape is taken, ``<`` and all — and a spelling the naming set cannot hold is the
+    point of the predicate rather than a slip in it.
+
+    Measured on master `347f023e`, and the reason the predicate exists at all: the
+    step-over asked ``tok == "<" or _is_redirect_operator(tok)``, i.e. the naming
+    question plus one spelling of the reading family, so the reading operators with a
+    *word* operand (``<<``, ``<<-``, ``<<<``, ``<&``) were believed to be command
+    words. For a destination-last verb the last word is the destination, so the
+    leftover word *became* the named target and the real destination went unjudged.
+    Ground truth from a scratch directory on this host, ``/bin/sh``, one file per row,
+    read back off disk: ``cp ./a dst3 <<EOF`` rc=0 **created dst3** and
+    ``cp ./a dst4 <<< here`` rc=0 **created dst4**, while the walk reported ``['EOF']``
+    and ``['here']`` — so ``cp ./a /etc/outside <<EOF`` was ALLOW at
+    ``workspace-write`` for a write to a path outside the workspace.
+
+    The attached-operand spellings are unaffected, and they are why the step-over is
+    safe to ask of every operator: in ``2>&1`` the descriptor arrives as its own token
+    (``2`` ``>&`` ``1``), so the word the operator consumes is the ``1`` and the word
+    after *that* is still an operand — measured on the same tree,
+    ``cp ./a 2>&1 /etc/outside`` and ``cp ./a >&1 /etc/outside`` both name the
+    destination.
+    """
+    return _is_redirect_operator(tok) or (
+        bool(tok) and "<" in tok and _REDIRECT_SHAPE_RE.fullmatch(tok) is not None
     )
 
 
