@@ -96,6 +96,19 @@ jobs:
           node-version: "22"
       - name: Python tests (Windows)
         run: uv run pytest tests/ -v
+      # v0.2.97 教训（Build Release 35479263507）：GUI 单测此前只在 ubuntu 的 `test`
+      # job 跑过——Windows 上要等 tag 触发的 Build Release 才第一次执行。两条 #1276
+      # 测试真的拉起了 daemon；POSIX 删得掉活进程 cwd 所在的目录，Windows 删不掉
+      # （EBUSY）→ 发版构建在 "GUI unit tests" 变红，而每个 PR 的 CI 全绿。命令与
+      # build-release.yml 的同名步骤保持一致（`--omit=dev`：套件是 `node --test`，
+      # 不需要 electron/electron-builder），让平台差异在 PR 阶段就暴露，而不是在
+      # 已经打出去的 tag 上。集成测试仍只在 POSIX 跑（Windows 上 spawn+HOME 语义不同）。
+      - name: GUI unit tests (Windows)
+        working-directory: emrg/gui
+        shell: bash
+        run: |
+          npm ci --omit=dev
+          EMRG_SKIP_INTEGRATION=1 npm test
       # v0.2.30 教训（Build Release 31661378619）：Test 全绿 ≠ .iss 能编译。
       # make-installer.sh 的 emrg.iss 只在 tag 触发 Build Release 时经 iscc 编译，
       # #727 误用 LoadStringFromFile 单参数形式（Inno 真实签名是 2 参数 out-param）
