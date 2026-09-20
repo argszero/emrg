@@ -5029,7 +5029,22 @@ def _separator_is_escaped(cmd: str, start: int) -> bool:
     Escaped means an **odd** number of backslashes in front of the separator, which is
     the shell's own rule: ``x\\\\ 2>`` keeps a real separator (and a real descriptor)
     because the two backslashes are one literal backslash, and ``dst\\ 2>`` does not.
+
+    The question is about a *shell*, so the platform is part of it, and this file
+    already reads the other one: the bash tool's subprocess shell on Windows is
+    ``cmd.exe`` (module docstring), where a backslash is a path separator and never an
+    escape — which is the fact ``_protect_windows_backslashes`` exists to honour
+    (issue #1261). No escape character means nothing can be escaped, so the answer is
+    ``False`` there and the mask keeps blanking the digit. That is not a concession:
+    with the digit left in place it is the last operand of a destination verb, so the
+    guard names ``2`` where the shell passes on the word in front of it — the same
+    shape issue #1468 filed, re-opened on Windows by the fix for #1484 rather than
+    closed by it. Answering ``False`` also keeps the Windows reading byte-identical to
+    the one this rule was written against, which is what the forced arm of the row pair
+    in `tests/test_bash_tool_sandbox.py` measures.
     """
+    if _WINDOWS_SHELL:
+        return False
     if start == 0:
         return False
     backslashes = 0
@@ -5100,8 +5115,12 @@ def _mask_fd_redirect_prefixes(cmd: str) -> str:
     protects the character *behind* the backslash — the space — not the digit that
     follows it, so the mask blanked the digit and the guard reported ``dst `` for a run
     that really created the file ``dst 2`` (issue #1484). `_separator_is_escaped`
-    answers the shell's own rule, and the row is pinned beside `-2>` in
-    `tests/test_bash_tool_sandbox.py`.
+    answers the shell's own rule, which includes *which* shell: escaping is a POSIX
+    reading, and under `_WINDOWS_SHELL` (a `cmd.exe` backslash is a path separator,
+    issue #1261) it answers `False`, leaving this function's Windows behaviour exactly
+    what it was before the rule. The row is pinned beside `-2>` in
+    `tests/test_bash_tool_sandbox.py`, which drives both shells rather than whichever
+    one CI happens to run.
     """
     if not cmd:
         return cmd

@@ -1508,9 +1508,11 @@ def test_a_descriptor_attached_to_its_operator_is_masked_and_a_spaced_one_is_not
     direction and break the other, which is why the row pair is the test.
     """
     for cmd in ("cp src dst 2>/dev/null", "cp src dst 2>&1", "cp src dst 3>err.txt",
-                # Two backslashes are one literal backslash, so this separator is real
-                # and the descriptor attached behind it is a descriptor (issue #1484's
-                # row pair: one backslash escapes the space, two do not).
+                # Two backslashes are one literal backslash, so this is a real separator
+                # with a real descriptor behind it — in either shell, since the parity
+                # rule and "a Windows backslash never escapes" say the same thing here.
+                # Issue #1484's row pair (one backslash against two) is driven in
+                # `test_an_escaped_separator_is_not_a_separator` below.
                 "cp src dst\\\\ 2>/dev/null"):
         assert _mask_fd_redirect_prefixes(cmd) != cmd, f"{cmd!r} carries an attached descriptor"
     for cmd in (
@@ -1520,10 +1522,10 @@ def test_a_descriptor_attached_to_its_operator_is_masked_and_a_spaced_one_is_not
         "echo x y2>/dev/null",
         'echo "a 2>b"',
         "cp src dst 2",
-        # The escaped separator is not a separator, so `dst 2` is one word (issue
-        # #1484). Without this row the mask blanks the digit and the guard reports
-        # `dst ` — a path the shell never wrote.
-        "cp src dst\\ 2>/dev/null",
+        # The single-backslash row of the same pair is deliberately **not** in this
+        # loop: whether that space is a separator is a *shell* fact, so it lives in
+        # `test_an_escaped_separator_is_not_a_separator` below, which drives both
+        # shells (issue #1484).
     ):
         assert _mask_fd_redirect_prefixes(cmd) == cmd, f"{cmd!r} has no attached descriptor"
 
@@ -1543,8 +1545,12 @@ def test_a_word_before_a_redirect_keeps_its_name():
     assert "2" in _extract_write_targets("cp src 2 >/dev/null")
 
 
-def test_an_escaped_separator_is_not_a_separator():
-    """Issue #1484: `dst\\ 2` is one word, so masking its digit rewrites a name.
+@pytest.mark.parametrize(
+    "windows",
+    [pytest.param(False, id="posix-shell"), pytest.param(True, id="cmd-exe")],
+)
+def test_an_escaped_separator_is_not_a_separator(monkeypatch, windows):
+    """Issue #1484: `dst\\ 2` is one word — *where the shell has an escape character*.
 
     The mask's own docstring says a *name* is the one thing it must never rewrite, and
     this row broke that while the decision stayed safe: `/etc/hosts 2` and `/etc/hosts `
@@ -1553,20 +1559,43 @@ def test_an_escaped_separator_is_not_a_separator():
     is white space), and `_quoted_char_indexes` protects what is *behind* the backslash,
     which is the space, not the digit after it.
 
-    Asserted on the mask text and on the target list, with the shell's own ground truth
-    beside it, the way the `-2>` row is: in a scratch directory on this host, `/bin/sh`
-    running `cp src dst\\ 2>/dev/null` really creates the file `dst 2`, while the
-    two-backslash form (`dst\\\\ 2>/dev/null`) creates `dst\\` and does send stderr to
-    the device — one backslash escapes the space, two are one literal backslash. That
-    pair is why the rule is a parity count rather than "a backslash is present".
-    """
-    single = "cp src dst\\ 2>/dev/null"
-    assert _mask_fd_redirect_prefixes(single) == single, "the escaped space was eaten"
-    assert "dst 2" in _extract_write_targets(single), "the guard renamed the destination"
+    Both arms are driven here rather than left to whichever one CI happens to run
+    (`_WINDOWS_SHELL` is the module's own reading of that axis, forced the way
+    `tests/test_windows_path_tokens.py` forces it), because the rule is about a *shell*
+    and the two shells disagree — the first version of this row asserted the POSIX
+    reading unconditionally and turned the Windows leg red:
 
+    * **POSIX** — one backslash escapes the space, so `dst 2` is a single word and the
+      shell really creates a file of that name. Ground truth in a scratch directory:
+      `/bin/sh -c 'cp src dst\\ 2>/dev/null'` leaves `dst 2` and sends stderr to the
+      device, while `dst\\\\ 2>/dev/null` leaves `dst\\`. That pair is why the rule is a
+      parity count rather than "a backslash is present".
+    * **`cmd.exe`** (the tool's subprocess shell on Windows) — no escape character at
+      all: a backslash there is a path separator, which is what
+      `_protect_windows_backslashes` exists for (issue #1261). So the space *is* a word
+      boundary and the digit *does* begin a descriptor of handle 2, and the mask must
+      keep blanking it. This arm is not a formality: with the digit left in place it is
+      the last operand, and the guard names `2` where the shell passes on the word in
+      front of it — the issue #1468 shape, re-opened on Windows by the fix for #1484.
+    """
+    monkeypatch.setattr(bash_tool, "_WINDOWS_SHELL", windows, raising=True)
+    single = "cp src dst\\ 2>/dev/null"
     double = "cp src dst\\\\ 2>/dev/null"
+
+    if windows:
+        assert _mask_fd_redirect_prefixes(single) == "cp src dst\\  >/dev/null", (
+            "cmd.exe has no escape character, so this space is a separator"
+        )
+        # The word keeps its literal spelling: one backslash is not an escape to strip.
+        assert "dst\\" in _extract_write_targets(single)
+    else:
+        assert _mask_fd_redirect_prefixes(single) == single, "the escaped space was eaten"
+        assert "dst 2" in _extract_write_targets(single), "the guard renamed the destination"
+
     assert _mask_fd_redirect_prefixes(double) == "cp src dst\\\\  >/dev/null"
-    assert "dst\\" in _extract_write_targets(double)
+    # One backslash on POSIX (two are one literal), both on Windows (no unescaping).
+    word = "dst\\\\" if windows else "dst\\"
+    assert word in _extract_write_targets(double)
 
 
 # The interior shape. The shell removes a redirection and its operand and keeps
