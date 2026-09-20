@@ -6,73 +6,117 @@ import {
   historyPageState,
   scrollCompensation,
   shouldLoadOlder,
+  unloadedRecords,
 } from "./history";
 
 /**
  * history.test.ts — 历史分页状态机测试（Batch 2 remainder）。
- * 镜像 vanilla app.js historyPages（816-876）行为：offset 前进 / hasMore 关闭 /
- * 空页停 / 双守卫 / 滚差补偿。
+ * 游标语义自 rant 2026-09-20T18:58:44 起是 **record_index**（绝对位置）：更早一页 =
+ * `record_index < 最早已加载`，不再是从最新往回数的 offset 计数。
  */
 
+/** 造一页假记录（daemon include_records 每条都带 record_index） */
+function pageOf(indexes: number[]) {
+  return indexes.map((i) => ({ record_index: i, kind: "message", content: `m${i}` }));
+}
+
 describe("historyPageState", () => {
-  it("creates a fresh state on first access (offset 0, no more, not loading)", () => {
+  it("creates a fresh state on first access (no cursor, no more, not loading, nothing loaded)", () => {
     const pages = createHistoryPages();
     const st = historyPageState(pages, "s1");
-    expect(st).toEqual({ offset: 0, hasMore: false, loading: false });
+    expect(st).toEqual({ oldestIndex: null, hasMore: false, loading: false, loaded: new Set() });
   });
 
   it("returns the same instance for repeated access (vanilla Map semantics)", () => {
     const pages = createHistoryPages();
     const a = historyPageState(pages, "s1");
-    a.offset = 50;
+    a.oldestIndex = 50;
     expect(historyPageState(pages, "s1")).toBe(a);
   });
 
   it("keeps sessions isolated (P3 per-sid)", () => {
     const pages = createHistoryPages();
-    historyPageState(pages, "s1").offset = 50;
+    const s1 = historyPageState(pages, "s1");
+    s1.oldestIndex = 50;
+    s1.loaded.add(50);
     const s2 = historyPageState(pages, "s2");
-    expect(s2.offset).toBe(0);
+    expect(s2.oldestIndex).toBeNull();
+    expect(s2.loaded.size).toBe(0);
   });
 });
 
 describe("applyHistoryPage", () => {
-  it("advances offset and records hasMore", () => {
+  it("sets the cursor to the oldest record of the page and records hasMore", () => {
     const pages = createHistoryPages();
     const st = historyPageState(pages, "s1");
-    applyHistoryPage(st, 50, true);
-    expect(st.offset).toBe(50);
+    applyHistoryPage(st, pageOf([50, 51, 52, 99]), true);
+    expect(st.oldestIndex).toBe(50);
     expect(st.hasMore).toBe(true);
+    expect(st.loaded.size).toBe(4);
   });
 
-  it("accumulates offsets across pages (50 + 50 → 100)", () => {
+  it("carries the cursor back across pages (page 2's cursor is its own oldest)", () => {
     const pages = createHistoryPages();
     const st = historyPageState(pages, "s1");
-    applyHistoryPage(st, HISTORY_PAGE, true);
-    applyHistoryPage(st, HISTORY_PAGE, true);
-    expect(st.offset).toBe(100);
-    expect(st.hasMore).toBe(true);
+    applyHistoryPage(st, pageOf(Array.from({ length: HISTORY_PAGE }, (_, i) => 50 + i)), true);
+    applyHistoryPage(st, pageOf(Array.from({ length: HISTORY_PAGE }, (_, i) => i)), true);
+    expect(st.oldestIndex).toBe(0);
+    expect(st.loaded.size).toBe(100);
   });
 
   it("closes hasMore when server says no more", () => {
     const pages = createHistoryPages();
     const st = historyPageState(pages, "s1");
-    applyHistoryPage(st, 50, false);
+    applyHistoryPage(st, pageOf([1, 2]), false);
     expect(st.hasMore).toBe(false);
   });
 
-  it("empty page forces hasMore=false (vanilla: msgs.length===0 → hasMore=false)", () => {
+  it("empty page forces hasMore=false and leaves the cursor untouched", () => {
     const pages = createHistoryPages();
     const st = historyPageState(pages, "s1");
-    applyHistoryPage(st, 0, true);
+    st.oldestIndex = 7;
+    applyHistoryPage(st, [], true);
     expect(st.hasMore).toBe(false);
-    expect(st.offset).toBe(0);
+    expect(st.oldestIndex).toBe(7);
   });
 
-  it("returns the message count of the page", () => {
+  it("returns the record count of the page", () => {
     const pages = createHistoryPages();
     const st = historyPageState(pages, "s1");
-    expect(applyHistoryPage(st, 17, true)).toBe(17);
+    expect(applyHistoryPage(st, pageOf([0, 1, 2, 3, 4]), true)).toBe(5);
+  });
+});
+
+describe("cursor stability (rant 2026-09-20T18:58:44: an offset slid, a record_index does not)", () => {
+  it("a record appended between pages does not move an already-loaded page's window", () => {
+    const pages = createHistoryPages();
+    const st = historyPageState(pages, "s1");
+    // Page 1 = the newest 3 records of a 10-record history.
+    applyHistoryPage(st, pageOf([7, 8, 9]), true);
+    expect(st.oldestIndex).toBe(7);
+    // Paging between requests: one more record lands at the end of the history.
+    // The next window is asked for by absolute index, so it is the 3 records
+    // *below* 7 — not the 3 below the (now shifted) newest.
+    const older = pageOf([4, 5, 6]).filter((r) => r.record_index < (st.oldestIndex as number));
+    expect(older.map((r) => r.record_index)).toEqual([4, 5, 6]);
+    applyHistoryPage(st, older, true);
+    expect(st.oldestIndex).toBe(4);
+  });
+
+  it("drops records a clamped cursor made overlap (compaction shrank the history)", () => {
+    const pages = createHistoryPages();
+    const st = historyPageState(pages, "s1");
+    applyHistoryPage(st, pageOf([10, 11, 12]), true);
+    // The history shrank, so the daemon clamps the request and the same records
+    // come back once more — they must not be replayed a second time.
+    expect(unloadedRecords(st, pageOf([11, 12]))).toEqual([]);
+    expect(unloadedRecords(st, pageOf([8, 9, 11]))).toEqual([{ record_index: 8, kind: "message", content: "m8" }, { record_index: 9, kind: "message", content: "m9" }]);
+  });
+
+  it("passes a whole page through the first time", () => {
+    const pages = createHistoryPages();
+    const st = historyPageState(pages, "s1");
+    expect(unloadedRecords(st, pageOf([0, 1, 2]))).toHaveLength(3);
   });
 });
 

@@ -70,6 +70,7 @@ function mockEmrg() {
     listProjects,
     listTasks,
     listRants,
+    listHistory,
     taskCreate,
     taskUpdate,
     taskDelete,
@@ -155,6 +156,56 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByText("content-two")).toBeInTheDocument());
     expect(screen.queryByText("content-one")).not.toBeInTheDocument();
     expect((screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2"))?.className).toContain("active");
+  });
+
+  it("loads a session's history as records and replays them like the live stream (rant 2026-09-20T18:58:44)", async () => {
+    const m = mockEmrg();
+    // 一条远超 80 字的助手消息 + 一轮工具 + 收尾文本：旧路径取 preview 只会显示 81 字，
+    // 且工具活动整条不显示（list_history 当时不发 tool_result）。
+    const long = `L${"o".repeat(600)}ng`;
+    const records = [
+      { record_index: 0, kind: "message", role: "user", content: "看看这个仓库" },
+      {
+        record_index: 1,
+        kind: "message",
+        role: "assistant",
+        content: long,
+        tool_calls: [{ id: "c1", function: { name: "bash", arguments: '{"intent":"list the files"}' } }],
+      },
+      { record_index: 2, kind: "tool_result", tool_call_id: "c1", tool_name: "bash", content: "a\nb\n" },
+      { record_index: 3, kind: "message", role: "assistant", content: "结论：一切正常。" },
+    ];
+    // 桥的替身照 daemon 的两种回答来回答（缺省模式 = preview 截断、只有消息；records 模式
+    // = 完整记录序列）——于是「GUI 改回缺省模式」这个真实退化会在这里变红，而不是只断言
+    // 一个参数名。
+    m.listHistory.mockImplementation((p: { includeRecords?: boolean }) =>
+      Promise.resolve(
+        p?.includeRecords
+          ? { messages: records, hasMore: false }
+          : {
+              messages: [
+                { record_index: 0, role: "user", content: "看看这个仓库", preview: "看看这个仓库" },
+                { record_index: 1, role: "assistant", content: long, preview: `${long.slice(0, 80)}…` },
+              ],
+              hasMore: false,
+            },
+      ),
+    );
+    const { container } = render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(1));
+
+    // 1) 问的是完整记录序列（不是 preview 截断的那一版）
+    expect(m.listHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "s1", includeRecords: true }),
+    );
+    // 2) 正文完整（截断时这里只会出现 81 字）
+    await waitFor(() => expect(screen.getByText(long)).toBeInTheDocument());
+    // 3) 工具活动与 intent 在历史里也看得见
+    await waitFor(() => expect(container.querySelectorAll(".tool-row")).toHaveLength(1));
+    expect(container.querySelector(".tool-intent")?.textContent).toBe("list the files");
+    expect(screen.getByText("结论：一切正常。")).toBeInTheDocument();
   });
 
   it("shows the connection status + model from the status broadcast", async () => {
