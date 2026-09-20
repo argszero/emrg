@@ -582,6 +582,37 @@ def test_a_file_that_keeps_moving_is_refused_rather_than_overwritten(tmp_path, m
     _no_temp_left_behind(tmp_path)
 
 
+def test_a_refusal_names_the_file_that_could_not_be_read_back(tmp_path, mod, monkeypatch, capsys):
+    """The refusal names the file it is about: an unreadable archive, not the index.
+
+    The compare-and-swap reads two files. One `try` around both used to append the
+    *index* whichever read raised, so an archive this run could not read back was
+    reported as "the index changed" and the operator was sent to a file nothing had
+    written, while the unreadable one went unnamed (issue #1486). Here the index is
+    readable and byte-identical to what the plan read, throughout.
+    """
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    _write_index(index, [_row(NEW), _row(OLD)])
+    before_index = index.read_text(encoding="utf-8")
+
+    # A plan that was built while the archive was still readable; every attempt
+    # re-plans from it, exactly as the retry loop does, while the file on disk
+    # can no longer be read back.
+    plan = mod.build_plan(index, archive, 1, "2026-09-21")
+    archive.unlink(missing_ok=True)
+    archive.mkdir()
+    monkeypatch.setattr(mod, "build_plan", lambda *_a, **_k: plan)
+
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 2
+
+    err = capsys.readouterr().err
+    assert str(archive) in err, "the refusal must name the archive it could not read"
+    assert str(index) not in err, "the index was readable and unchanged throughout"
+    assert index.read_text(encoding="utf-8") == before_index, "a refused run writes nothing"
+    assert archive.is_dir(), "the unreadable archive is not this run's to replace"
+
+
 def test_a_failed_replace_leaves_the_index_exactly_as_it_was(tmp_path, mod, monkeypatch, capsys):
     """The write is a rename, so a denial cannot leave a prefix of the new index.
 

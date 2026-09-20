@@ -402,18 +402,23 @@ def changed_since_planned(index_path: Path, archive_path: Path, plan: Plan) -> l
     visible here, and the caller re-plans instead of overwriting it. Files that
     cannot be read back are reported as changed for the same reason - a file this
     run cannot read is not one it may overwrite.
+
+    Each file is read on its own, so a failure names **that** file. One `try`
+    covering both reads named the index whichever read raised - and appended it
+    even when the index read had succeeded - so an archive this run could not read
+    back was reported as "the index changed": the operator was sent to a file
+    nothing had written, and the unreadable one went unmentioned (issue #1486).
     """
     changed: list[str] = []
-    try:
-        if index_path.read_text(encoding="utf-8") != plan.index_before:
-            changed.append(str(index_path))
-        archive_on_disk = (
-            archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
-        )
-        if archive_on_disk != plan.archive_before:
-            changed.append(str(archive_path))
-    except (OSError, UnicodeDecodeError):
-        changed.append(str(index_path))
+    pairs = ((index_path, plan.index_before), (archive_path, plan.archive_before))
+    for path, before in pairs:
+        try:
+            on_disk = path.read_text(encoding="utf-8") if path.exists() else ""
+        except (OSError, UnicodeDecodeError):
+            changed.append(str(path))
+            continue
+        if on_disk != before:
+            changed.append(str(path))
     return changed
 
 
