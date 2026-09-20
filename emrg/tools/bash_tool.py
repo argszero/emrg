@@ -229,13 +229,59 @@ _REMOVER_VERBS = frozenset({"rm", "rmdir", "unlink"})
 # `zstdmt -t f.zst` tests it, neither creating a file. Those are this family's own
 # read letters and longs taken unchanged. It joins on same-bytes evidence, not on
 # the name's resemblance — the distinction `*cat` below is the other half of.
+# `pigz`/`unpigz` are the parallel twin of `gzip`/`gunzip`, and their *shape* is
+# this family's rather than a second one — measured 2026-09-20 on the binary built
+# from pigz's own release source (`madler/pigz` v2.8, `make` in a scratch dir; no
+# package of it is installed on this host), one **fresh** directory per row with
+# only the input present and the listing read back off disk afterwards:
+#
+#   pigz f            writes  f.gz          the operand is rewritten, `f` gone
+#   pigz -9 f         writes  f.gz
+#   pigz -k f         writes  f  f.gz       the keep spelling, a second file
+#   pigz -S .zz f     writes  f.zz          the family's one spaced value
+#   pigz -d f.gz      writes  f             the decompressing form writes too
+#   unpigz f.gz       writes  f
+#   pigz - f          writes  f.gz          the file beside the stream stays one
+#   pigz f -          writes  f.gz          …in either position
+#   pigz -c f         read    f             [stdout]
+#   pigz --stdout f   read    f             [stdout]
+#   pigz -t f.gz      read    f.gz          [test]
+#   pigz --test f.gz  read    f.gz          [test]
+#   pigz -l f.gz      read    f.gz          [list]
+#   pigz --list f.gz  read    f.gz          [list]
+#   pigz -dc f.gz     read    f.gz          [the zcat idiom]
+#   unpigz -c f.gz    read    f.gz
+#   unpigz -t f.gz    read    f.gz
+#   pigz -            read    nothing       [stdin to stdout]
+#
+# So it joins as a **name**: the operand is rewritten in place (unlike `lz4`, which
+# derives a sibling), the three read letters are its own three unchanged, and the
+# stream operand is the family's. Two limits travel with it and both are stated
+# where they are read rather than fixed here: its five extra spaced values, against
+# `_COMPRESSOR_OPTIONS_WITH_VALUE` below, and `pigz -h`/`--version`, which print and
+# write nothing (measured, rc=0, one fresh directory per row) while the walk still
+# names the operand after them — `gzip -h`, `gzip --help`, `bzip2 -h`, `xz -h` and
+# `zstd -h` are the same shape here, so that one is the family's limit, not this
+# verb's, and it is named rather than fixed for that reason.
 _COMPRESSOR_VERBS = frozenset({
     "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "lzma", "unlzma",
     "zstd", "unzstd", "compress", "uncompress", "zstdmt",
+    "pigz", "unpigz",
 })
 
 # `-S`/`--suffix` is the one option in this family that takes a spaced value, and
 # naming the suffix a path is the mistake `_positional_args` exists to avoid.
+# **That sentence has one exception, carried rather than fixed**: `pigz` takes five
+# more spaced values — `-b`, `-p`, `-A`, `-I`, `-J`, the same five its own source
+# names as taking an option parameter (`pigz.c`: "process option parameter for
+# -b, -p, -A, -S, -I, or -J"). Measured 2026-09-20 on the binary above, one fresh
+# directory per row: `pigz -b 65536 f`, `pigz -p 2 f`, `pigz -A nm f`, `pigz -I 5 f`
+# and `pigz -J 4 f` each write `f.gz`, so the value is really a value and the walk
+# reads it as an operand as well — an **over-naming, never a missing name**, since
+# the operand itself is still named and still refused. The one spelling where that
+# value could be a path, `pigz -p /outside/x f`, is rc=22 with nothing written. The
+# read gate refuses a per-compressor value table deliberately (its docstring says
+# so); this is that same limit one verb further, stated instead of grown.
 _COMPRESSOR_OPTIONS_WITH_VALUE = frozenset({"-S", "--suffix"})
 
 # The spellings under which that operand is a *read*: the bytes go to stdout

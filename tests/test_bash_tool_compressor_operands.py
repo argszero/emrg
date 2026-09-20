@@ -71,6 +71,32 @@ tests the frame, neither creating a file. Through the real predicate the write
 forms were ALLOW at both tiers on the protected daemon file before the name was
 added, which is the hole this row closes. It joins on same-bytes evidence, not on
 the resemblance of the name — the line the `*cat` rows draw from the other side.
+
+**`pigz` / `unpigz` — the parallel twin of `gzip`, measured before it was named**
+(2026-09-20). Issue #1420 lists it first among the verbs the enumeration is blind
+to, and unlike the rest of that list it is not hypothetical *in shape*: `pigz` is
+`gzip` with threads, so its default form rewrites the operand in place and it needs
+no branch of its own. The measurement is still what earned the name, because the
+same issue records the opposite outcome for a verb that looks like a sibling too
+(`lz4` derives `f.lz4` beside an untouched `f`) and because no package of `pigz` is
+installed here: the binary was built from its own release source (`madler/pigz`
+v2.8) in a scratch directory, one **fresh** directory per row with only the input
+present and the listing read back off disk afterwards — `pigz f`, `pigz -9 f` and
+`pigz -k f` write `f.gz` (the third keeping `f`), `pigz -S .zz f` writes `f.zz`,
+`pigz -d f.gz` and `unpigz f.gz` write `f`, `pigz - f` and `pigz f -` both write
+`f.gz`, while `pigz -c f`, `pigz --stdout f`, `pigz -t f.gz`, `pigz --test f.gz`,
+`pigz -l f.gz`, `pigz --list f.gz`, `pigz -dc f.gz`, `unpigz -c f.gz`,
+`unpigz -t f.gz` and a bare `pigz -` create no file at all. Through the real
+predicate, `pigz` and `unpigz` on the protected daemon file were **ALLOW at both
+tiers** before the name was added — the hole #1418 closed for `gzip`, one argv[0]
+over.
+
+Two limits travel with the name, and both are asserted below rather than implied:
+the five options of `pigz` that take a spaced value which the family's table does
+not carry (`-b`, `-p`, `-A`, `-I`, `-J` — its own source lists exactly those six
+with `-S`), and `pigz -h`/`--version`, which print and write nothing. In both the
+walk *adds* a name rather than losing one, which is the direction this guard's
+record accepts.
 """
 
 import pytest
@@ -119,6 +145,24 @@ WRITE_FORMS = (
     ("zstdmt", f"zstdmt {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("zstdmt level", f"zstdmt -19 {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("zstdmt decompress", f"zstdmt -d {OUTSIDE}/f.zst", (f"{OUTSIDE}/f.zst",)),
+    # `pigz`/`unpigz`: the parallel twin of `gzip`, measured before it was named —
+    # see the module docstring. Every row here rewrites its operand in place, and
+    # every one of them was ALLOW at both tiers on the master this fixes.
+    ("pigz default", f"pigz {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    ("pigz level", f"pigz -9 {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    ("pigz keep", f"pigz -k {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    # The family's one spaced value works for this verb unchanged (`pigz -S .zz f`
+    # writes `f.zz`), so the shared table is what keeps the suffix from being named.
+    ("pigz suffix", f"pigz -S .zz {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    ("pigz decompress", f"pigz -d {OUTSIDE}/f.gz", (f"{OUTSIDE}/f.gz",)),
+    ("unpigz", f"unpigz {OUTSIDE}/f.gz", (f"{OUTSIDE}/f.gz",)),
+    # Two operands: `pigz a b` rewrites both, so both are named.
+    ("pigz two operands", f"pigz {OUTSIDE}/a {OUTSIDE}/b",
+     (f"{OUTSIDE}/a", f"{OUTSIDE}/b")),
+    # The stream operand is the family's, and so is the drop: measured, `pigz - f`
+    # and `pigz f -` both write `f.gz`, so the file is named and the bare `-` is not.
+    ("pigz dash beside a file", f"pigz - {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    ("pigz dash as the last operand", f"pigz {OUTSIDE}/f -", (f"{OUTSIDE}/f",)),
     # Two operands: both are rewritten, so both are named.
     ("two operands", f"gzip {OUTSIDE}/a {OUTSIDE}/b", (f"{OUTSIDE}/a", f"{OUTSIDE}/b")),
     # …and the drop below is **per operand**, not per run: measured on the host
@@ -157,6 +201,18 @@ READ_FORMS = (
     ("zstdmt -t", f"zstdmt -t {OUTSIDE}/f.zst"),
     ("zstdmt -l", f"zstdmt -l {OUTSIDE}/f.zst"),
     ("zstdmt -dc cluster", f"zstdmt -dc {OUTSIDE}/f.zst"),
+    # `pigz` takes the family's three read letters and its long forms, measured —
+    # see the module docstring. Nothing here creates a file.
+    ("pigz -c", f"pigz -c {OUTSIDE}/f"),
+    ("pigz --stdout", f"pigz --stdout {OUTSIDE}/f"),
+    ("pigz -t", f"pigz -t {OUTSIDE}/f.gz"),
+    ("pigz --test", f"pigz --test {OUTSIDE}/f.gz"),
+    ("pigz -l", f"pigz -l {OUTSIDE}/f.gz"),
+    ("pigz --list", f"pigz --list {OUTSIDE}/f.gz"),
+    ("pigz -dc cluster", f"pigz -dc {OUTSIDE}/f.gz"),
+    ("unpigz -c", f"unpigz -c {OUTSIDE}/f.gz"),
+    ("unpigz -t", f"unpigz -t {OUTSIDE}/f.gz"),
+    ("pigz bare dash", "pigz -"),
     # A bare `-` is this family's own stdin/stdout spelling: the program reads the
     # stream and writes the stream, so no file is opened under that name. Measured
     # on the host 2026-09-19, one **fresh** directory per row with the input present
@@ -277,6 +333,40 @@ def test_the_default_form_cannot_touch_a_protected_daemon_file() -> None:
     assert _check_sandbox(f"gzip -c {PROTECTED}", "workspace-write",
                           workdir="/workspace")[0] is True
 
+    # `pigz` on that same file: the row this name was added for. Before it the verb
+    # was ALLOW at both tiers here, because a name the set does not carry produces an
+    # empty target list and both tiers allow that by construction.
+    allowed, reason, _ = _check_sandbox(f"pigz {PROTECTED}", "workspace-write",
+                                        workdir="/workspace")
+    assert allowed is False
+    assert "protected daemon file" in reason, reason
+    assert _check_sandbox(f"pigz -c {PROTECTED}", "workspace-write",
+                          workdir="/workspace")[0] is True
+
+
+def test_pigz_value_letters_are_a_stated_limit() -> None:
+    """Five spaced values `pigz` takes are read as operands — the harmless direction.
+
+    `pigz -b 65536 f`, `pigz -p 2 f`, `pigz -A nm f`, `pigz -I 5 f` and `pigz -J 4 f`
+    all write `f.gz` (measured — see the module docstring), so those tokens are the
+    option's value rather than a path. The family's table carries `-S` only, and the
+    read gate refuses to grow a per-compressor value table on purpose, so the walk
+    names the value as an extra operand.
+
+    Pinned because the limit has to stay the direction this file's record accepts: it
+    **adds** a name rather than losing one. The operand is still named, so both tiers
+    still refuse the rewrite, and the extra token is one the program cannot write —
+    a number, and `pigz -p /outside/x f` is rc=22 with nothing written.
+    """
+    for spelling in ("-b 65536", "-p 2", "-A nm", "-I 5", "-J 4"):
+        cmd = f"pigz {spelling} {OUTSIDE}/f"
+        assert _extract_write_targets(cmd) == [spelling.split()[-1], f"{OUTSIDE}/f"], (
+            f"{spelling}: the operand must still be named beside the value"
+        )
+        for tier in ("read-only", "workspace-write"):
+            allowed, reason, _ = _check_sandbox(cmd, tier, workdir="/workspace")
+            assert allowed is False, f"{spelling}: {tier} allowed the write it names"
+
 
 # ── mutation arms: a row that cannot be flipped is not a claim ──────────────
 
@@ -290,6 +380,8 @@ FAMILY_ARMS = (
     ("compress", f"compress {OUTSIDE}/f"),
     ("uncompress", f"uncompress {OUTSIDE}/f.Z"),
     ("zstdmt", f"zstdmt {OUTSIDE}/f"),
+    ("pigz", f"pigz {OUTSIDE}/f"),
+    ("unpigz", f"unpigz {OUTSIDE}/f.gz"),
 )
 
 
