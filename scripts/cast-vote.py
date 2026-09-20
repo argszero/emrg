@@ -45,12 +45,31 @@ count it could not read (`--json` / exit 2 there remains the authority).
 Usage
 -----
     uv run --no-sync python3 scripts/cast-vote.py <PR> --body-file <path>
+    uv run --no-sync python3 scripts/cast-vote.py <PR> --body-file -            # body on stdin
     uv run --no-sync python3 scripts/cast-vote.py <PR> --body-file <path> --cycle cyc20260916-020149
     uv run --no-sync python3 scripts/cast-vote.py <PR> --body-file <path> --dry-run
 
 The cycle id is read from the body. `--cycle` is optional and exists to *check*
 that reading: given one that does not appear in the body (or that is malformed),
 the tool refuses rather than posting a vote under a cycle it was not told to use.
+
+Why `-` exists (issue #1462)
+----------------------------
+A **read-only** cycle can still vote — voting is a network action, not a file
+write — but that is the tier forced exactly when the tree holds *unique* work
+(community issue #979), and there it could not use this tool at all: every route
+to a body file was refused, so the vote fell back to raw `gh pr review`, which is
+the unsafe path this tool exists to replace (measured in cycle
+`cyc20260920-104640`: that very cycle's pre-flight refused a body naming three
+cycle ids, a real defect raw `gh` would have posted). So `--body-file -` names
+stdin: the body is read once into memory, decoded as UTF-8 explicitly (the locale
+a cycle runs in is not this tool's to assume, and the same defect class — a
+reader with no `encoding=` — has already cost this repo a CI round), the existing
+checks run on those bytes, and the **same text is fed to `gh pr review --body-file -`
+on stdin**. Nothing is written to disk, and the checks are not weakened:
+`/dev/stdin` as a *path* does not work here and never did — this tool reads the
+body itself for its check, so gh would find stdin at EOF and answer
+`body cannot be blank for comment review`, which is only visible at the real post.
 
 Exit codes
 ----------
@@ -68,7 +87,8 @@ Exit codes
     2  nothing was posted, so nothing has to be rolled back. Grouped by the check
        that refused, not one line per `return`, and each cause carries a stable
        slug a wrapper can branch on (`body-unreadable`: the body could not be read
-       from `--body-file`; `cycle-id`: the body has no cycle id, or more than one,
+       from `--body-file` — a path, or `-` for stdin, and an undecodable body
+       counts here rather than crashing; `cycle-id`: the body has no cycle id, or more than one,
        or `--cycle` disagrees with it; `count-unreadable`: the vote count could
        not be read; `already-voted`: this cycle already has a counted vote or a
        veto here; `gh-failed`: `gh` failed). Fail loud, and never report a posted
@@ -91,6 +111,13 @@ from pathlib import Path
 
 REPO = "argszero/emrg"
 
+# `--body-file -` means stdin, the convention `gh` itself uses for the same flag.
+# Named rather than written as a literal in two places, because the read path and
+# the post path must agree on it: if they disagreed, the tool would read a body
+# from one place and hand gh a path of "-" — the defect this constant exists to
+# make impossible.
+STDIN_BODY = "-"
+
 # The gate this repo merges on, passed to the sibling counter explicitly rather
 # than defaulted on both sides, so a change to the gate has one place to land.
 _VOTES_NEEDED = 3
@@ -110,7 +137,7 @@ _CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
 # path that is *new*. A slug is stable, so a wrapper can branch on it; that is
 # also why the table names them.
 RC2_CAUSES = (
-    "body-unreadable",   # --body-file could not be read
+    "body-unreadable",   # --body-file (a path, or `-` for stdin) could not be read
     "cycle-id",          # no cycle id, several of them, or --cycle disagrees
     "count-unreadable",  # the sibling counter raised
     "already-voted",     # this cycle already has a counted vote or a veto here
@@ -143,21 +170,48 @@ def votes_counter():
     return _sibling
 
 
-def _gh(args: list[str]) -> subprocess.CompletedProcess:
+def _gh(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
     """Run `gh` with the program name prepended, capturing both streams.
 
     The program name is added here so no call site can forget it — measured
     2026-09-11 in the sibling tool: a call site that omitted it ran the POSIX `pr`
     utility instead, which reported `pr: cannot open view`, a message naming
     neither gh nor the real mistake.
+
+    `stdin` is how a body handed to this tool on stdin reaches gh: `gh pr review
+    --body-file -` reads the body from *its* stdin, and by then ours has been
+    consumed by the check above, so the same text is passed down rather than
+    re-read (issue #1462). The encoding is pinned for the same reason it is pinned
+    on the way in.
     """
     return subprocess.run(
         ["gh", *args],
+        input=stdin,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
     )
+
+
+def read_stdin_body() -> str:
+    """The review body when `--body-file -` names stdin instead of a path.
+
+    Decoded as UTF-8 explicitly rather than through `sys.stdin`'s locale codec: a
+    vote body is prose and may carry a ✅ or a Chinese sentence, and the locale of
+    the environment a cycle runs in is not this tool's to assume. An undecodable
+    body is a `UnicodeDecodeError` the caller reports as `body-unreadable` — the
+    same verdict as an unreadable path — rather than a traceback after which the
+    reader cannot tell whether anything was posted.
+
+    The binary arm is taken whenever it exists; under a test `sys.stdin` is an
+    `io.StringIO`, which has no `.buffer`, so the text arm is the fallback rather
+    than the primary path.
+    """
+    binary = getattr(sys.stdin, "buffer", None)
+    if binary is None:
+        return sys.stdin.read()
+    return binary.read().decode("utf-8")
 
 
 def cycles_in(body: str) -> list[str]:
@@ -310,7 +364,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Post a review vote and confirm the vote counter counted it.",
     )
     parser.add_argument("pr", type=int, help="pull request number")
-    parser.add_argument("--body-file", required=True, help="file holding the review body")
+    parser.add_argument(
+        "--body-file",
+        required=True,
+        help="file holding the review body, or `-` to read it from stdin",
+    )
     parser.add_argument(
         "--cycle",
         default=None,
@@ -350,9 +408,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    from_stdin = args.body_file == STDIN_BODY
     try:
-        body = Path(args.body_file).read_text(encoding="utf-8")
-    except OSError as exc:
+        body = (
+            read_stdin_body()
+            if from_stdin
+            else Path(args.body_file).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError) as exc:
         print(f"could not read {args.body_file}: {exc}", file=sys.stderr)
         return 2  # cause: body-unreadable
 
@@ -388,7 +451,8 @@ def main(argv: list[str] | None = None) -> int:
             "--comment",
             "--body-file",
             args.body_file,
-        ]
+        ],
+        stdin=body if from_stdin else None,
     )
     if proc.returncode != 0:
         print(
