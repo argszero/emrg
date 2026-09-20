@@ -951,3 +951,242 @@ def test_the_allowed_terminator_form_really_writes_nothing(
         f"{path(inside)!r} wrote nothing, so the absence asserted above says nothing "
         "about the tool — re-measure the row"
     )
+
+
+# ---------------------------------------------------------------------------
+# The word one value-taking letter ate, read a second time (issue #1455).
+#
+# Both readers here scan a token list, and both ask the shared cluster reader
+# (`_short_cluster_option`) which letter takes a value. The scan stops at the first such
+# letter — and when that letter is not the reader's own, the word it consumed is still
+# **gone**. Reading that word again as an ordinary token is what these rows pin: the
+# eaten word is spelled like the destination option itself, so the second reading takes
+# it for the option and names the word after it, a path the run never writes.
+#
+# Ground truth first, one fresh directory per row with the listing read back off disk
+# (this host, 2026-09-20), because the verdict is not the evidence:
+#
+#   sort -T -o out f                 rc=0   prints to stdout; only the two inputs on disk
+#   sort -T . -o out2 f              rc=0   out2 created        (control: -o in force)
+#   curl -A -o out file:///etc/hosts rc=0   bytes on stdout, directory empty
+#   curl -A UA -o out2 file://…      rc=0   out2 created        (control)
+#   install -m -t OUT src            rc=71  `install: OUT: No such file or directory`
+#   cp -S -t OUT src.txt             rc=64  `cp: illegal option -- t`
+#
+# `-T`'s value is the directory `-o`; `-A`'s value is the user agent `-o`; `-m`/`-S`
+# consume the `-t`. Every one of those runs therefore writes **nothing**, while the walk
+# named a path outside every allowed root — a false block, and the reason the step is
+# owed. The readers that already pay it (`_patch_cluster_values`, `_zip_out_values`) are
+# pinned in their own files; these are the two that did not.
+EATEN_WORD_ROWS = (
+    # (row, command, every path the walk must name)
+    ("sort -T eats -o", f"sort -T -o {OUTSIDE}/f /workspace/x", ()),
+    ("curl -A eats -o", f"curl -A -o {OUTSIDE}/f file:///workspace/x", ()),
+    ("install -m eats -t", f"install -m -t {OUTSIDE} /workspace/src", ("/workspace/src",)),
+    ("cp -S eats -t", f"cp -S -t {OUTSIDE} /workspace/src.txt", ("/workspace/src.txt",)),
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd,named", EATEN_WORD_ROWS, ids=[r for r, *_ in EATEN_WORD_ROWS],
+)
+def test_the_word_a_value_taking_letter_ate_is_not_read_a_second_time(row, cmd, named):
+    """The eaten word names nothing, and the run that writes nothing is allowed.
+
+    An exact tuple, because both halves matter: the destination rows must name
+    **nothing at all** (the run writes nothing), and the `-t` rows must name the
+    operand the family's own rule calls the destination rather than the eaten `-t`'s
+    neighbour. A verdict-only assertion would pass on the second half while the path
+    it named was the wrong one.
+    """
+    assert tuple(_extract_write_targets(cmd)) == named, row
+    allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+    assert allowed is True, f"workspace-write refused {cmd!r} — a false block: {reason}"
+    # `read-only` refuses every write, an inside one included (pinned by
+    # `test_read_only_refuses_an_option_destination_inside_the_workspace_too`), so the
+    # rows whose operand the family rule calls the destination are refused there while
+    # the ones that name nothing at all are allowed: the eaten word must not be what
+    # decides a tier, and the empty list is the fact that separates them.
+    allowed_ro, error = _check_sandbox(cmd, "read-only", workdir="/workspace")[0:2]
+    assert allowed_ro is (not named), f"read-only answered {(allowed_ro, error)!r} for {cmd!r}"
+
+
+# The other direction, so the rows above cannot be satisfied by a reader that names
+# nothing on principle: the *same* command with the letter's value in place names the
+# destination and is refused at both tiers.
+EATEN_WORD_CONTROLS = (
+    ("sort -T has its value", f"sort -T /workspace/tmpdir -o {OUTSIDE}/f /workspace/x",
+     (f"{OUTSIDE}/f",)),
+    ("curl -A has its value", f"curl -A UA -o {OUTSIDE}/f file:///workspace/x",
+     (f"{OUTSIDE}/f",)),
+    ("ln -t is in force", f"ln -t {OUTSIDE} /workspace/src", (OUTSIDE,)),
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd,named", EATEN_WORD_CONTROLS, ids=[r for r, *_ in EATEN_WORD_CONTROLS],
+)
+def test_the_destination_is_still_named_once_the_eating_letter_has_its_value(row, cmd, named):
+    """The control for every row above: the option is read when it really is one.
+
+    `sort -T <dir> -o <f>` puts `-T`'s value where it belongs, so `-o` is an option
+    again; `ln -t <dir> src` is the `-t` reader's positive control, with no other
+    value-taking letter in front of it.
+    """
+    assert tuple(_extract_write_targets(cmd)) == named, row
+    for tier in ("read-only", "workspace-write"):
+        allowed, reason, _ = _check_sandbox(cmd, tier, workdir="/workspace")
+        assert allowed is False, f"{tier} allowed {cmd!r}"
+        assert named[0] in reason, row
+
+
+def test_the_step_is_what_keeps_the_eaten_word_out_of_these_readers(monkeypatch):
+    """Stop stepping and every row above names the eaten word's neighbour again.
+
+    The arm is the shared advance itself (`_words_eaten`) at ``1``, not the letters and
+    not a verdict — the same arm the two readers that already stepped are pinned with
+    (issue #1454). With it, each row's cluster scan loses the eaten word and the
+    token after it is read as the destination option's value: the false block comes
+    back, and the unmutated reading is asserted first so this test cannot be made to
+    pass by breaking the step in the source.
+    """
+    for row, cmd, named in EATEN_WORD_ROWS:
+        assert tuple(_extract_write_targets(cmd)) == named, f"{row}: not the unmutated reading"
+
+    monkeypatch.setattr(bash_tool, "_words_eaten", lambda attached: 1)
+    arm = (
+        (f"sort -T -o {OUTSIDE}/f /workspace/x", (f"{OUTSIDE}/f",)),
+        (f"curl -A -o {OUTSIDE}/f file:///workspace/x", (f"{OUTSIDE}/f",)),
+        (f"install -m -t {OUTSIDE} /workspace/src", (OUTSIDE,)),
+        (f"cp -S -t {OUTSIDE} /workspace/src.txt", (OUTSIDE,)),
+    )
+    for cmd, expected in arm:
+        assert tuple(_extract_write_targets(cmd)) == expected, (
+            f"with the step gone {cmd!r} must read the eaten option again — otherwise "
+            "the step is not what keeps it out of this reader"
+        )
+        for tier in ("read-only", "workspace-write"):
+            allowed, _reason, _ = _check_sandbox(cmd, tier, workdir="/workspace")
+            assert allowed is False, f"{tier} allowed the armed row {cmd!r}"
+
+
+# The reader's one measured limit, pinned rather than left silent: a **long** option
+# that eats the word is the same geometry, and it is *not* stepped over — the letters a
+# cluster is split by are short letters, and enumerating a verb's value-taking *long*
+# options is the per-command flag table this walk keeps refusing (#461). Measured on
+# this host 2026-09-20, one fresh directory per row: `curl --user-agent -o out
+# file:///etc/hosts` exits **0**, prints the file to stdout and creates nothing, and
+# `sort --temporary-directory -o out f` exits 2 (`sort: No such file or directory`)
+# with nothing created — while the walk names `out` in both. A false block of a run
+# that writes nothing, i.e. the same defect as the rows above, one option form over.
+LONG_OPTION_EATS_THE_WORD = (
+    ("curl --user-agent eats -o",
+     f"curl --user-agent -o {OUTSIDE}/f file:///workspace/x", (f"{OUTSIDE}/f",)),
+    ("sort --temporary-directory eats -o",
+     f"sort --temporary-directory -o {OUTSIDE}/f /workspace/x", (f"{OUTSIDE}/f",)),
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd,named", LONG_OPTION_EATS_THE_WORD,
+    ids=[r for r, *_ in LONG_OPTION_EATS_THE_WORD],
+)
+def test_the_long_form_that_eats_the_word_is_pinned_as_a_limit(row, cmd, named):
+    """What the fix does **not** cover, asserted so it cannot be mistaken for coverage.
+
+    The short-cluster step is what these rows are outside of: the eating option is a
+    long one, so no cluster scan sees it and the eaten word is read again exactly as
+    before. Naming it here is cheaper than a reader that guesses — and the row is
+    refused, which the ground truth above the table records as a false block.
+    """
+    assert tuple(_extract_write_targets(cmd)) == named, row
+    allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+    assert allowed is False, f"the limit closed itself: {cmd!r} is now allowed ({reason})"
+
+
+# ── ground truth: the rows above really are no-ops ──────────────────────────
+#
+# Every row of `EATEN_WORD_ROWS` is allowed, so it is a command that really runs — and
+# "allowed" is correct only if it writes nothing. Each row is executed through
+# `BashTool.execute` in a tree THIS test creates, with the outside directory patched out
+# of the OS temp root (`workspace-write` legitimately allows the temp root, and without
+# the patch every row would be allowed for that reason instead of for the reader's).
+# The control beside it uses the *same* verb with the letter's value in place and writes
+# **inside** the workspace: it proves the tool exists and really writes, so "nothing
+# outside" is a fact about the command and not about a BashTool that never ran.
+EATEN_WORD_GROUND_TRUTH = (
+    # (row, tool, eaten form, its outside witness, writing control, its witness)
+    ("sort -T eats -o", "sort",
+     "sort -T -o {t}/refused.txt {w}/sub/source.txt", "{t}/refused.txt",
+     "sort -T {w}/tmpdir -o {w}/allowed.txt {w}/sub/source.txt", "{w}/allowed.txt"),
+    ("curl -A eats -o", "curl",
+     "curl -s -A -o {t}/refused.txt file://{w}/sub/source.txt", "{t}/refused.txt",
+     "curl -s -A UA -o {w}/allowed.txt file://{w}/sub/source.txt", "{w}/allowed.txt"),
+    ("install -m eats -t", "install",
+     "install -m -t {t}/refused.bin {w}/sub/source.txt", "{t}/refused.bin",
+     "install -m 644 {w}/sub/source.txt {w}/installed.bin", "{w}/installed.bin"),
+    ("cp -S eats -t", "cp",
+     "cp -S -t {t}/refused.bin {w}/sub/source.txt", "{t}/refused.bin",
+     "cp {w}/sub/source.txt {w}/copied.txt", "{w}/copied.txt"),
+)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX shell ground truth: the daemon's shell on Windows is cmd.exe, where "
+           "sort/curl/install/cp are not the tools these flags belong to",
+)
+@pytest.mark.parametrize(
+    "row,tool,eaten,witness,control,control_witness",
+    EATEN_WORD_GROUND_TRUTH, ids=[r for r, *_ in EATEN_WORD_GROUND_TRUTH],
+)
+def test_the_eaten_word_row_really_writes_nothing(
+    monkeypatch, tmp_path, row, tool, eaten, witness, control, control_witness,
+):
+    """The premise of every row above: the run writes nothing, and it is not a refusal.
+
+    Two of these rows are commands this host's tools **fail** on (rc=71 and rc=64 for
+    the `-t` pair, measured), and two succeed while printing to stdout. What they have
+    in common is what the walk's answer rests on: nothing appears on disk. A row that
+    writes nothing and is refused is a false block whichever way the tool exits.
+    """
+    if shutil.which(tool) is None:
+        pytest.skip(f"`{tool}` is not on PATH here, so this ground truth is unmeasurable")
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: "/fake-os-temp")
+    workspace = tmp_path / "ws"
+    (workspace / "sub").mkdir(parents=True)
+    (workspace / "tmpdir").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "sub" / "source.txt").write_text("hello\n", encoding="utf-8")
+    os.chmod(outside, 0o755)
+
+    def path(template: str) -> str:
+        return template.format(t=outside.as_posix(), w=workspace.as_posix())
+
+    tool_instance = BashTool()
+
+    def execute(command: str):
+        return _run(tool_instance.execute({
+            "command": command, "sandbox": "workspace-write", "workdir": str(workspace),
+        }))
+
+    result = execute(path(eaten))
+    assert "not executed" not in result.content, (
+        f"{path(eaten)!r} was refused at the sandbox — that is the false block this row "
+        f"exists for: {result.content}"
+    )
+    assert not os.path.lexists(path(witness)), (
+        f"{path(eaten)!r} really wrote {path(witness)!r}, so the walk naming nothing for "
+        "it is a hole and not a fix — re-measure the row"
+    )
+    leftovers = sorted(p.name for p in outside.iterdir())
+    assert leftovers == [], f"{path(eaten)!r} left {leftovers!r} in the outside directory"
+
+    ran = execute(path(control))
+    assert ran.error is not True, f"the control {path(control)!r} was refused: {ran.content}"
+    assert os.path.lexists(path(control_witness)), (
+        f"the control {path(control)!r} wrote nothing, so `{tool}` did not really run and "
+        "the absence asserted above says nothing about the row"
+    )
