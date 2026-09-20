@@ -163,6 +163,65 @@ def _task_open_switch(pending: tuple[str, str] | None, resumed_sid: str) -> str 
     return pending[0]
 
 
+# ── Stopping a turn: ask the session, wait for its receipt ───
+#
+# Rant 2026-09-20T12:50:13. A cancel used to be two statements about one event:
+# the client cleared busy, stopped the timer and printed "⏸ Interrupted" the
+# moment Esc was pressed, then sent a `cancel` that named no session; the daemon
+# answered the *connection* that asked. So a client could read "interrupted"
+# about a turn it never stopped (a peer client's Esc reached nothing, because the
+# turn belongs to the session, not to the connection that started it), and the
+# client that did stop one had already said so before the daemon knew.
+#
+# The daemon now resolves the turn from the session's own registration and
+# broadcasts one receipt to every client watching that session (PR #1474), so the
+# two halves below are the client's side of that: the request names the session,
+# and the receipt — not the keystroke — is what ends the turn this client shows.
+
+#: What every client prints when a cancel's receipt arrives. One wording, because
+#: the client that asked is not privileged: the same cancel from a peer reads the
+#: same here, which is the property the old optimistic branch could not have.
+CANCELLED_LINE = "⏸ Interrupted — response stopped. You can continue."
+
+
+async def request_cancel(conn, session_id: str) -> None:
+    """Ask the daemon to stop ``session_id``'s turn; send nothing if unknown.
+
+    The session is named because that is what a cancel is about: the daemon
+    resolves the turn from the session's registration, so any client watching
+    that session can stop the same turn with the same frame. A bare
+    ``{"type": "cancel"}`` is not a fallback but the defect — the daemon answers
+    it by resolving *this connection's* last session, i.e. a client that cannot
+    say which session it is stopping gets whichever one it happened to touch
+    last. With no session to name there is nothing to ask for, so nothing is
+    sent (the turn, if any, ends on its own and its `done` frame says so).
+    """
+    if not session_id:
+        return
+    await conn.send_command("cancel", session_id=session_id)
+
+
+def cancelled_line(data: dict, session_id: str) -> str | None:
+    """The line a ``cancelled`` receipt earns on the client showing that session.
+
+    ``None`` means "not this client's to narrate", and it covers two shapes a
+    plain type check would confuse: a frame that is not a receipt at all, and a
+    receipt for a *different* session — the daemon broadcasts to every client
+    watching the cancelled session, and a client that has moved to another one
+    must not print an interruption about a turn it is not showing.
+
+    A receipt carrying no ``session_id`` is narrated: the daemon stamps every
+    one it sends (`daemon.py` cancel branch), so a missing stamp means an older
+    daemon, whose broadcast went to the session's subscribers and no further.
+    """
+    if data.get("type") != "cancelled":
+        return None
+    stamp = data.get("session_id") or ""
+    if stamp and session_id and stamp != session_id:
+        return None
+    return CANCELLED_LINE
+
+
 # ── Clipboard image support (platform-adaptive) ─────────────
 
 # Reading a clipboard *file path* must not go through the console locale codec.
@@ -821,6 +880,29 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     status.update(center=_last_center)
                     # Title managed by _run_elapsed_timer during busy — don't overwrite
                     term.render()
+                    continue
+
+                if data.get("type") == "cancelled":
+                    # The receipt, not the Esc that asked for it, ends the turn
+                    # (rant 2026-09-20T12:50:13). `busy` is this client's own
+                    # claim that a turn is in flight: a receipt that arrives
+                    # after the turn already ended (`done`) is about a turn this
+                    # client is no longer showing, and narrating it would print
+                    # "interrupted" under a response that completed.
+                    line = cancelled_line(data, session_id)
+                    if line and busy:
+                        busy = False
+                        if _elapsed_task:
+                            _elapsed_task.cancel()
+                            _elapsed_task = None
+                        status.elapsed = ""
+                        # Rant 2026-09-02T10:31:11：与 done 路径（:617）一致的标题复位——中断
+                        # 漏清 term.set_title 会让标题残留 [m:ss] 计时停住。
+                        term.set_title(f"{session_title or session_id} @ {project_name}")
+                        chat.add("system", line)
+                        _last_center = server_id or "emrg"
+                        status.update(center=_last_center)
+                        chat.dirty = True; term.render()
                     continue
 
                 if data.get("type") == "turn_start":
@@ -1564,21 +1646,12 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         # Mimics Claude Code: Esc stops the current response mid-turn,
         # keeping work done so far. Dialogs (selector/autocomplete) are
         # handled below — this only fires when LLM is actively responding.
+        # Nothing is cleared or narrated here (rant 2026-09-20T12:50:13): the
+        # daemon's `cancelled` receipt is the only statement of what stopped, so
+        # a keypress cannot claim a stop the session never took. The typing
+        # indicator keeps turning until that receipt arrives.
         if data == b"\x1b" and busy:
-            busy = False
-            if _elapsed_task:
-                _elapsed_task.cancel()
-                _elapsed_task = None
-            status.elapsed = ""
-            # Rant 2026-09-02T10:31:11：与 done 路径（:617）一致的标题复位——ESC 中断
-            # 漏清 term.set_title 会让标题残留 [m:ss] 计时停住。
-            term.set_title(f"{session_title or session_id} @ {project_name}")
-            # Send cancel to daemon so it stops tool/LLM processing
-            await conn.send_command("cancel")
-            chat.add("system", "⏸ Interrupted — response stopped. You can continue.")
-            _last_center = server_id or "emrg"
-            status.update(center=_last_center)
-            chat.dirty = True; term.render()
+            await request_cancel(conn, session_id)
             return True
 
         # ── Session selector mode ──────────────────────────
