@@ -2196,6 +2196,29 @@ def _short_cluster_option(
     return None
 
 
+def _words_eaten(attached: bool) -> int:
+    """How many words a cluster reader's answer consumes: **2** when the value is the next word.
+
+    This is the advance a reader owes the shared answer above, named once because it is the
+    same fact at every site that reads it (``_patch_cluster_values``, ``_zip_out_values``)
+    and a site that gets it wrong does so quietly: stepping over the eaten word is what
+    keeps it from being read a second time as a *spelling* — of a cluster
+    (``patch -d -sd <dir> f``, where the re-read names the same directory twice) or of a
+    destination option (``zip -b -Osrc.zip a.zip f``, where the re-read names ``src.zip``
+    instead of the archive really written). Both rows are pinned, with this function as the
+    mutation arm, in ``tests/test_bash_tool_patch_targets.py`` and
+    ``tests/test_bash_tool_zip_archive.py`` (issue #1454).
+
+    ``attached`` True means the value rode inside the token, so nothing follows it and no
+    word is eaten; False means getopt took the next word, which is therefore not an operand.
+    The operand walk reaches the same effect through ``skip_next`` rather than through an
+    index — one word either way, so there is no third caller here to serve. The three
+    readers that do **not** step are named in issue #1455, which asks that question rather
+    than answering it.
+    """
+    return 1 if attached else 2
+
+
 def _option_destination_values(
     tokens: list[str],
     i: int,
@@ -2447,9 +2470,20 @@ def _patch_cluster_values(tokens: list[str], i: int) -> list[tuple[str, str]]:
     * `-b`'s argument is optional (`_PATCH_OPTIONAL_ARG_LETTERS`), so the tail it
       swallows is not reported as anything and eats no word.
 
-    A word a letter eats is stepped over, so it is not re-read as a token: in
-    `patch -d -sd <dir> f` the `-d` takes `-sd` as its directory, and naming `<dir>` —
-    which the run never enters — would be a false block.
+    A word a letter eats is stepped over (`_words_eaten`), so it is not read a second time
+    as a **cluster**: in `patch -d -sd <dir> f` the `-d` takes `-sd` as its directory, and
+    without the step the eaten `-sd` is scanned again and reported as a cluster too, naming
+    the same directory twice. What the step does **not** do is keep `<dir>` off the target
+    list — the operand reader eats `-sd` as `-d`'s spaced value and reads `<dir>` as an
+    operand straight after, which this function does not change. Measured on the landing
+    tree of #1451, `patch -d -sd <outside>/dir <ws>/f`, with and without the step:
+
+      with the step   ``['<outside>/dir', '<ws>/f', '-sd']``
+      without it      ``['<outside>/dir', '<ws>/f', '-sd', '<outside>/dir']``
+
+    The longer list is the same verdict at both tiers, which is why nothing pinned the step
+    until issue #1454 asked for it: the duplicate is the discriminator, and the row plus the
+    arm now live in `tests/test_bash_tool_patch_targets.py`.
 
     Measured 2026-09-20 on this host (BSD `patch 2.0-12u11-Apple`, one fresh directory
     per row holding `ws/f` and `out/f` (both `one`) and a diff turning `one` into `ONE`,
@@ -2482,7 +2516,7 @@ def _patch_cluster_values(tokens: list[str], i: int) -> list[tuple[str, str]]:
         )
         if cluster is not None:
             letter, value, attached = cluster
-            eaten = 1 if attached else 2
+            eaten = _words_eaten(attached)
             if value and letter != tok[1]:
                 found.append((letter, value))
         idx += eaten
@@ -3464,10 +3498,11 @@ def _zip_out_values(words: list[str]) -> list[str]:
                 # Any other letter's value is not a path here, but its word is still
                 # *eaten*: skip it rather than let it be read as a destination itself
                 # (`-b -Osrc.zip` is a temporary directory named `-Osrc.zip`, not a
-                # source run writing `src.zip`).
+                # source run writing `src.zip` — pinned, with the arm, in
+                # `tests/test_bash_tool_zip_archive.py`, issue #1454).
                 if letter != "O":
                     value = None
-                eaten = 1 if attached else 2
+                eaten = _words_eaten(attached)
         if value:
             out.append(value)
         idx += eaten
