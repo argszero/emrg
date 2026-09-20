@@ -342,6 +342,12 @@ class EmrgServer:
         self._session_subscribers: dict[str, dict] = {}  # session_id → {ws: cwd_str}
         self._session_task_cwds: dict[str, str] = {}     # session_id → 运行中任务的 cwd
         self._session_busy: dict[str, bool] = {}        # session_id → active task?
+        # A running turn belongs to its *session*, so the handles that interrupt it do
+        # too (rant 2026-09-20T12:50:13): any client subscribed to that session must be
+        # able to stop the turn, not only the connection that started it. Mirrors
+        # `_session_busy` — registered when the turn starts, dropped when it ends.
+        self._session_cancel: dict[str, asyncio.Event] = {}      # session_id → its turn's event
+        self._session_turn_task: dict[str, asyncio.Task] = {}    # session_id → its turn's task
         # P1 queue-injection (rant 2026-08-10T21:55:37): per-session FIFO of
         # (TaskRequest, allow_tools) received while a tool loop is busy —
         # injected at the next round boundary (aligned with codex steer_input).
@@ -984,20 +990,35 @@ class EmrgServer:
 
                 # ── Cancel: interrupt running tool loop ──────────
                 if data.get("type") == "cancel":
-                    if _cancel_event:
-                        _cancel_event.set()
-                    if _tool_task and not _tool_task.done():
-                        _tool_task.cancel()
-                        try:
-                            await _tool_task
-                        except asyncio.CancelledError:
-                            pass
-                    await self._send(ws, {
+                    # A cancel names a session, not a connection (rant 2026-09-20T12:50:13).
+                    # Resolve the turn from the session's own registration, so a peer
+                    # client's Esc interrupts the same turn the originator's would; the
+                    # connection's locals are only the fallback for a frame that carries
+                    # no session_id (that is what the TUI sends today).
+                    cancel_sid = data.get("session_id") or last_session_id or ""
+                    event = self._session_cancel.get(cancel_sid) or _cancel_event
+                    if event:
+                        event.set()
+                    cancel_task = self._session_turn_task.get(cancel_sid) or _tool_task
+                    if cancel_task and not cancel_task.done():
+                        cancel_task.cancel()
+                        # Only await a task this coroutine owns: awaiting a peer's turn
+                        # would park this connection's read loop until that turn unwinds.
+                        if cancel_task is _tool_task:
+                            try:
+                                await cancel_task
+                            except asyncio.CancelledError:
+                                pass
+                    # The receipt is a statement about the *session*, so every client
+                    # watching it gets the same one. A connection-local ack let a peer
+                    # read "cancelled" while the turn it never reached kept running.
+                    await self._broadcast(cancel_sid, {
                         "type": "cancelled",
-                        "session_id": data.get("session_id", ""),
+                        "session_id": cancel_sid,
                     })
-                    _tool_task = None
-                    _cancel_event = None
+                    if cancel_task is _tool_task:
+                        _tool_task = None
+                        _cancel_event = None
                     continue
 
                 # ── Task: run tool loop in background (non-blocking) ─
@@ -1071,6 +1092,11 @@ class EmrgServer:
                         _tool_task = asyncio.create_task(
                             self._run_tool_loop_locked(req, ws, session, _cancel_event, allow_tools=allow_tools)
                         )
+                        # Publish the turn's handles under its session (rant 2026-09-20T12:50:13);
+                        # registered synchronously with the create_task above, so no await can
+                        # slip between a turn starting and its being cancellable.
+                        self._session_cancel[session_id] = _cancel_event
+                        self._session_turn_task[session_id] = _tool_task
                     finally:
                         logcontext.session_label.reset(_ctx_token)
                     continue
@@ -2585,6 +2611,11 @@ class EmrgServer:
             normal_end = True
         finally:
             self._session_busy[session_id] = False
+            # Retract this turn's cancel handles (rant 2026-09-20T12:50:13) — identity-
+            # checked so a turn that already replaced this one keeps its own handles.
+            if self._session_cancel.get(session_id) is cancel_event:
+                self._session_cancel.pop(session_id, None)
+                self._session_turn_task.pop(session_id, None)
             # Rant 2026-09-02T10:36:26：turn 生命周期结束——客户端清除该会话
             # 运行计时（与 done/cancelled 帧幂等，仅作权威清理信号）。
             # 必须在 _session_task_cwds 清空之前广播：turn 帧属于任务流，
@@ -2595,9 +2626,11 @@ class EmrgServer:
             })
             self._session_task_cwds.pop(session_id, None)
             # P1 (rant 21:55:37): messages still queued when the loop ends are
-            # not lost. We do NOT start a follow-up task here (_tool_task /
-            # _cancel_event are read-loop locals — a hand-off would break
-            # cancel + busy tracking); instead:
+            # not lost. We do NOT start a follow-up task here (the hand-off is
+            # deliberately the client's re-send: _tool_task / _cancel_event are
+            # still read-loop locals, and the queue-drain contract below is what
+            # both clients implement — cancellation itself is now session-scoped,
+            # see _session_cancel); instead:
             #   normal end → queued_requeue → clients auto re-send (busy is
             #     now released, the re-send goes through the normal path)
             #   cancel / error / disconnect → queued_cancelled (queue dropped)
