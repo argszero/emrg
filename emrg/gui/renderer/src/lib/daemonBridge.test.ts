@@ -70,11 +70,28 @@ describe("createDaemonBridge", () => {
     expect((after[0] as { row: { status: string } }).row.status).toBe("done");
   });
 
-  it("cancelled → clearTyping + 释放锁（无 request_id 全清）", () => {
-    const { emit, bridge } = setup();
+  it("cancelled → clearTyping + 释放锁（无 request_id 全清）+ 打中断那一行", () => {
+    const { emit, bridge, transcript } = setup();
     bridge.handleFrame({ type: "message_delta", data: { chunks: [{ request_id: "r1", content: "partial" }] }, sid: "s1" });
     bridge.handleFrame({ type: "cancelled", data: {}, sid: "s1" });
     expect(bridge.store.get().busyBySid["s1"]).toBe(false);
+    // Rant 2026-09-20T12:50:13：结束这轮的唯一陈述是这条回执。曾经这行由 Composer.stop()
+    // 本地打（于是「按 Esc 的一端已中断，真正跑着这轮的另一端服务端毫无反应」）。
+    expect(entriesText(transcript, "s1")).toContain("s:chat.interrupted");
+  });
+
+  it("cancelled 是会话级回执：旁观的一端也打那一行，且只打进它订阅的那个会话", () => {
+    const { bridge, transcript } = setup();
+    for (const sid of ["sA", "sB"]) {
+      bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, [sid]: true } }));
+    }
+    // A 端发起的取消广播到所有订阅该会话的连接：这里扮演「看着 sA 的另一端」。
+    bridge.handleFrame({ type: "cancelled", data: { type: "cancelled", session_id: "sA" }, sid: "sA" });
+    expect(entriesText(transcript, "sA")).toContain("s:chat.interrupted");
+    expect(bridge.store.get().busyBySid["sA"]).toBe(false);
+    // 不在看 sA 的那个会话既不打字、也不被清 busy——它这轮还在跑。
+    expect(entriesText(transcript, "sB")).not.toContain("s:chat.interrupted");
+    expect(bridge.store.get().busyBySid["sB"]).toBe(true);
   });
 
   it("sessions / open_sessions → store 更新", () => {

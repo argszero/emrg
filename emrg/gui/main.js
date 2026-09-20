@@ -1009,15 +1009,25 @@ vision = false
       return { ok: true, daemon_was_running: wasRunning };
     });
 
-    ipcMain.handle("emrg:cancel", async () => {
-      // G24：无参数
+    ipcMain.handle("emrg:cancel", async (_e, sessionId) => {
+      // The cancel names the *session*, not the connection (rant 2026-09-20T12:50:13).
+      // The daemon resolves the turn from the session's own registration and broadcasts
+      // the `cancelled` receipt to every client watching it, so a stop asked for here
+      // stops the same turn for a peer client — and the peer's stop stops this one's.
+      // Nothing is asked for when there is no session to name: a bare `{type:"cancel"}`
+      // is not a fallback, it is the defect (the daemon would answer it by resolving
+      // *this connection's* last session).
+      // G24：无参 → 现在带 sid
       // G141：断连边界——ws 可能已 null/closed（_onClose 后 connected=false），sendCommand 抛异常
       // 不能让它泄漏为 IPC reject → renderer unhandled rejection（对比 sendMessage 的 try-catch 防护）
-      // P2：cancel 发到当前激活连接（自有流所在连接），并释放其 G65 锁
       const c = activeConn();
-      if (c?.ws) {
-        try { await c.sendCommand("cancel"); } catch { /* 断连时忽略 */ }
+      if (sessionId && c?.ws) {
+        try { await c.sendCommand("cancel", { session_id: sessionId }); } catch { /* 断连时忽略 */ }
       }
+      // P2：cancel 发到当前激活连接（自有流所在连接），并释放其 G65 锁。
+      // 这是连接锁（G65 切会话），不是 UI 的乐观陈述：daemon 的会话级 cancelled
+      // 回执不带 request_id，故 `daemon_client._classify` 不认领它，锁在此处释放；
+      // 「已中断」的文案与 busy 一律由那条回执产生（见 daemonBridge cancelled 分支）。
       c?._releaseOwnStream();
       return { ok: true };
     });
