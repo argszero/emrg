@@ -6278,6 +6278,19 @@ def _unresolved_wrapper_payloads(tokens: list[str]) -> list[str]:
     follows it is read as a command that may run: the same over-approximation a
     named wrapper already gets, and one that can only add blocking, never
     remove it (issue #1244).
+
+    **Where** that word stands decides whether the words behind it are a payload
+    at all, and `_runs_as_a_command` is the file's one answer to that question. A
+    variable reference in *operand* position names no program the shell will run
+    — `wc -c "$F"` hands `$F` to `wc` — and reading the rest of the line as its
+    payload turned data into a command: measured on master `c1a70c94`,
+    `wc -c "$F" && echo "patch rc=$?"` answered **BLOCK** at `read-only` naming
+    `rc=$?` as a write target, because the payload token `patch rc=$?` was
+    re-tokenized into the words `patch` and `rc=$?` and `patch` is a write verb
+    (issue #1467). Nothing in that command writes anything, and since a refusal
+    aborts the whole compound command the reads sharing the call are lost with
+    it. The wrapper class itself is unchanged: every spelling in the corpus stands
+    where a command can begin.
     """
     out: list[str] = []
     for i, tok in enumerate(tokens):
@@ -6291,7 +6304,7 @@ def _unresolved_wrapper_payloads(tokens: list[str]) -> list[str]:
         if (
             _UNRESOLVED_VAR_RE.fullmatch(tok)
             or _UNRESOLVED_VAR_RE.fullmatch(_basename(tok))
-        ):
+        ) and _runs_as_a_command(tokens, i):
             out.extend(tokens[i + 1:])
     return out
 

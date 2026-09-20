@@ -181,6 +181,49 @@ def test_workspace_write_keeps_its_boundaries(cmd: str) -> None:
     assert allowed, reason
 
 
+# Issue #1467: the same variable reference standing in **operand** position. The
+# words behind it are that command's arguments, not a wrapper's payload — and
+# reading them as one turned data into a command. Measured on master `c1a70c94`,
+# every row below answered BLOCK while writing nothing, naming `rc=$?`: the
+# argument token `patch rc=$?` was re-tokenized into the words `patch` and
+# `rc=$?`, and `patch` is a write verb. A refusal aborts the whole compound
+# command, so the reads sharing the call are lost with it.
+OPERAND_POSITION_VARIABLES = [
+    'wc -c "$F" && echo "patch rc=$?"',
+    'F=/tmp/x && wc -c "$F" && echo "patch rc=$?"',
+    'ls "$HOME" && echo "patch rc=$?"',
+    'echo $SHELL && echo "patch rc=$?"',
+    'printf %s $0 && echo "patch rc=$?"',
+    'cat "$F" | echo "patch rc=$?"',
+    'stat "$F"; echo "patch rc=$?"',
+]
+
+# The narrowing must not touch the class it was written for: a wrapper that
+# shares a command with an operand-position variable is still read.
+WRAPPER_WITH_AN_OPERAND_POSITION_VARIABLE = [
+    'wc -c "$F" && $SHELL -c \'echo x > OUT.txt\'',
+    'ls "$HOME" && ${SHELL//x/y} -c \'git checkout .\'',
+]
+
+
+@pytest.mark.parametrize("cmd", OPERAND_POSITION_VARIABLES)
+def test_a_variable_in_operand_position_is_not_a_wrapper(cmd: str) -> None:
+    """Both tiers: the false block was in the read-only arm, the rule is one rule.
+
+    The assertion is the verdict *and* its reason — a command that writes nothing
+    must not be refused for naming a target it never writes.
+    """
+    for tier in (READ_ONLY, WW):
+        allowed, reason, _enforcement = _check_sandbox(cmd, tier, WORKDIR)
+        assert allowed, (cmd, tier, reason)
+
+
+@pytest.mark.parametrize("cmd", WRAPPER_WITH_AN_OPERAND_POSITION_VARIABLE)
+def test_a_wrapper_beside_an_operand_position_variable_is_still_read(cmd: str) -> None:
+    allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
+    assert not allowed, (cmd, reason)
+
+
 def test_the_named_wrapper_is_the_control() -> None:
     """The hole was the spelling, so the named twin must reach the same verdict."""
     named, _r1, _e1 = _check_sandbox("sh -c 'git checkout .'", READ_ONLY, WORKDIR)
