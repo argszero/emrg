@@ -141,6 +141,14 @@ def test_the_verdict_is_the_reading_and_not_the_spelling() -> None:
     # guessed. This is the price of the rule, not a hole in it.
     "uv run --no-sync cat body.txt <<'PY'",
     "uv run --no-sync python3 script.py <<'PY'",
+    # …and the same shape one carrier over: git's *message* reader is read at
+    # tool **and** subcommand (`git commit -F -`), two non-flag tokens, so no
+    # span reaches it and this body stays scanned. `_owns_stdin_as_data`'s
+    # docstring used to claim the opposite ("keeps its message mask"), which two
+    # readings refute: `_wrapped_command_span(['uv','run','--no-sync','git',
+    # 'commit','-F','-'])` is `None`, and the bare spelling below masks the body
+    # this one scans.
+    "uv run --no-sync git commit -F - <<'PY'",
     # No command word at all: measured, uv runs nothing, so there is no consumer
     # to hand the body to.
     "uv run --no-sync <<'PY'",
@@ -171,7 +179,10 @@ def test_an_unresolvable_wrapper_keeps_the_body_scanned(first_line: str) -> None
 
 def test_the_bare_readers_are_unchanged() -> None:
     """The new axis is additive: the allowlist that was there still decides alone."""
-    for first_line in ("cat <<'PY'", "grep x <<'PY'", "python3 - <<'PY'", "wc -l <<'PY'"):
+    for first_line in ("cat <<'PY'", "grep x <<'PY'", "python3 - <<'PY'", "wc -l <<'PY'",
+                       # The control for the wrapped git row above: the same body
+                       # is masked bare, so the wrapper — not the reader — decides.
+                       "git commit -F - <<'PY'"):
         assert _masked(_cmd(first_line)), f"{first_line!r} was already masked"
 
 
