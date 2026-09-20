@@ -20,7 +20,9 @@ import {
   applyHistoryPage,
   createHistoryPages,
   historyPageState,
+  unloadedRecords,
 } from "../lib/history";
+import { replayHistoryRecords, replayHistoryRecordsPrepend, type HistoryRecord } from "../lib/historyReplay";
 
 /**
  * Shell — React 布局（Batch 0 骨架 + Batch 3 Sidebar/ResultPanel/WorkspaceView
@@ -76,15 +78,24 @@ interface WorkspaceBridge {
   restartDaemon?(): Promise<unknown>;
   /** /model 直切模型（rant 2026-09-01T20:22:00：对齐 TUI，preload.js 已暴露 emrg:setModel） */
   setModel?(p: { model: string }): Promise<unknown>;
-  /** 历史分页加载（rant 2026-09-01T20:19:40：切会话/滚动到顶；daemon list_history） */
+  /** 历史按需加载（rant 2026-09-01T20:19:40：GUI 打开会话不显示历史——链路从未接线） */
   listHistory?(p: {
     sessionId: string;
     limit?: number;
+    /** @deprecated 距最新的 offset；历史加载已改游标（rant 2026-09-20T18:58:44） */
     offset?: number;
     /** rant 2026-09-02T10:03:29：true → daemon 同时返回 user + assistant 消息 */
     includeAssistant?: boolean;
+    /**
+     * rant 2026-09-20T18:58:44：true → daemon 返回**完整有序的记录序列**——含
+     * `tool_result`、含只带 `tool_calls` 的助手记录，每条带绝对 `record_index`，
+     * 且不再附 `preview`（回放优先取 preview 曾把 5064 字的回答显示成 81 字）。
+     */
+    includeRecords?: boolean;
+    /** 稳定游标：只取 `record_index < beforeIndex` 的记录（分页不再用 offset 计数） */
+    beforeIndex?: number;
   }): Promise<{
-    messages: Array<{ record_index?: number; role?: string; content?: string; preview?: string; timestamp?: string }>;
+    messages?: HistoryRecord[];
     hasMore?: boolean;
   }>;
 }
@@ -398,14 +409,16 @@ export function Shell() {
   }
 
   // ── 历史按需加载（rant 2026-09-01T20:19:40：GUI 打开会话不显示历史——链路从未接线）──
-  // vanilla historyPages 移植：切会话加载最近一页（limit 50，offset 从最新往回数），
-  // 滚动到顶加载更早一页。TranscriptView 滚动监听已在（capture），这里补加载函数 +
-  // canLoadOlder/onLoadOlder 接线。historyLoaded 集合防重复加载（切换走/回来不重复 append）。
+  // 切会话加载最近一页（limit 50），滚动到顶加载更早一页；游标是绝对 record_index
+  // （daemon before_index），不再是「距最新的 offset」（rant 2026-09-20T18:58:44：offset
+  // 在翻页间来了新消息时会平移 → 重复 + 更早内容不可达）。回放复用实时那一套 handler
+  // （lib/historyReplay.ts），不再走「preview 优先」的旧路径。historyLoaded 集合防重复加载
+  // （切换走/回来不重复 append）。
   const historyPagesRef = useRef<ReturnType<typeof createHistoryPages>>(createHistoryPages());
   const historyLoadedRef = useRef<Set<string>>(new Set());
   const historyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /** 切会话：加载最近一页历史（用户消息气泡，只读；vanilla loadHistory）。 */
+  /** 切会话：加载最近一页历史（回放进 transcript）。 */
   async function loadHistory(sid: string) {
     if (historyLoadedRef.current.has(sid)) return;
     const b = wsBridge();
@@ -414,16 +427,10 @@ export function Shell() {
     if (st.loading) return;
     st.loading = true;
     try {
-      const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st.offset, includeAssistant: true });
-      const msgs = res.messages || [];
-      for (const m of msgs) {
-        const text = (m as { preview?: string; content?: string }).preview
-          || (m as { preview?: string; content?: string }).content
-          || "";
-        // rant 2026-09-02T10:03:29：assistant 角色 → 助手气泡；user → history 气泡
-        transcript.addHistoryMessage(text, sid, (m as { role?: string }).role === "assistant" ? "assistant" : undefined);
-      }
-      applyHistoryPage(st, msgs.length, !!res.hasMore);
+      const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, includeRecords: true });
+      const page = res.messages || [];
+      replayHistoryRecords(unloadedRecords(st, page), sid, transcript);
+      applyHistoryPage(st, page, !!res.hasMore);
       transcript.setLoadBar(st.hasMore ? t("app.historyLoadMore") : null, sid);
       historyLoadedRef.current.add(sid);
     } catch (e) {
@@ -436,27 +443,25 @@ export function Shell() {
     }
   }
 
-  /** 滚动到顶：加载更早一页（prepend + 滚差补偿由渲染层处理；vanilla loadOlderHistory）。 */
+  /** 滚动到顶：加载更早一页（游标 = 最早已加载记录的 record_index；整块前插 + 滚差补偿由渲染层处理）。 */
   async function loadOlderHistory(sid: string | null) {
     if (!sid) return;
     const b = wsBridge();
     if (!b?.listHistory) return;
     const st = historyPageState(historyPagesRef.current, sid);
-    if (!st.hasMore || st.loading) return;
+    if (!st.hasMore || st.loading || st.oldestIndex === null) return;
     st.loading = true;
     try {
-      const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st.offset, includeAssistant: true });
-      const msgs = res.messages || [];
-      // prepend：倒序 unshift 保持时间序（vanilla insertAfter(bar) 同序插入会页内倒序——
-      // React 版修正为逐条 unshift，倒序迭代使页底 = 上一页顶部，无缝衔接）
-      for (const m of [...msgs].reverse()) {
-        const text = (m as { preview?: string; content?: string }).preview
-          || (m as { preview?: string; content?: string }).content
-          || "";
-        // rant 2026-09-02T10:03:29：assistant 角色 → 助手气泡；user → history 气泡
-        transcript.prependHistoryMessage(text, sid, (m as { role?: string }).role === "assistant" ? "assistant" : undefined);
-      }
-      applyHistoryPage(st, msgs.length, !!res.hasMore);
+      const res = await b.listHistory({
+        sessionId: sid,
+        limit: HISTORY_PAGE,
+        includeRecords: true,
+        beforeIndex: st.oldestIndex,
+      });
+      const page = res.messages || [];
+      // 更早一页整体插到最前（回放在独立缓冲里跑同一套 handler，落点由 prependEntries 决定）
+      replayHistoryRecordsPrepend(unloadedRecords(st, page), sid, transcript);
+      applyHistoryPage(st, page, !!res.hasMore);
       transcript.setLoadBar(st.hasMore ? t("app.historyLoadMore") : t("app.historyNoMore"), sid);
     } catch (e) {
       transcript.addSystemMessage(

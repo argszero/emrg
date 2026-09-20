@@ -600,7 +600,7 @@ vision = false
       return { ok: true };
     });
 
-    ipcMain.handle("emrg:listHistory", async (_e, { sessionId, limit, offset, includeAssistant } = {}) => {
+    ipcMain.handle("emrg:listHistory", async (_e, { sessionId, limit, offset, includeAssistant, includeRecords, beforeIndex } = {}) => {
       // GUI / 指令 P2：/rewind + rant 14:15:12 历史按需加载（limit/offset 可选）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       // Rant 2026-08-25T17:38:56 根因 1（P0）：历史/记忆命令的 cwd 必须取会话真实
@@ -611,6 +611,12 @@ vision = false
       // Rant 2026-09-02T10:03:29：includeAssistant=true（历史加载）→ daemon 同时返回
       // user + assistant 消息；缺省（/rewind 弹窗）保持 user-only 向后兼容。
       if (includeAssistant != null) payload.include_assistant = includeAssistant;
+      // Rant 2026-09-20T18:58:44（GUI 回放一致性）：历史加载改问 `include_records` ——
+      // 完整有序的记录序列（含 tool_result、含只带 tool_calls 的助手记录，每条带
+      // record_index，且不含 preview 截断）；游标同步改为绝对 record_index
+      // （`before_index`），因为 offset 是从最新往回数的，翻页间来了新消息窗口就平移。
+      if (includeRecords != null) payload.include_records = includeRecords;
+      if (beforeIndex != null) payload.before_index = beforeIndex;
       const frame = await requireConn().sendCommandAndWait("list_history", payload, 5000);
       return { messages: frame.messages || [], hasMore: !!frame.has_more };
     });

@@ -156,10 +156,22 @@ export interface TranscriptStore {
   clear(sid?: string | null): void;
   addUserMessage(text: string, sid?: string | null): void;
   addSystemMessage(text: string, sid?: string | null): void;
-  /** 历史消息（rant 2026-09-02T10:03:29：role="assistant" → 助手气泡，否则 user 样式 history 气泡） */
+  /**
+   * 历史消息（rant 2026-09-02T10:03:29：role="assistant" → 助手气泡，否则 user 样式 history 气泡）。
+   *
+   * ⚠️ 自 rant 2026-09-20T18:58:44 起**已无调用方**：历史加载改由 `replayHistoryRecords`
+   * 走实时那一套 handler，`addHistoryMessage` / `prependHistoryMessage` 这条「另写一套映射」
+   * 的老路不再被使用。它们连同 `kind: "history"` 渲染分支与样式一起，删除是另一件改动
+   * （会动 TranscriptView 与 CSS），故先留在这里并标明状态。
+   */
   addHistoryMessage(text: string, sid?: string | null, role?: string): void;
-  /** 更早一页历史 prepend 到顶部（vanilla addHistoryMessage prepend 语义；loadBar 独立字段渲染在上方） */
+  /** 更早一页历史 prepend 到顶部（vanilla addHistoryMessage prepend 语义；loadBar 独立字段渲染在上方）——⚠️ 同上，已无调用方 */
   prependHistoryMessage(text: string, sid?: string | null, role?: string): void;
+  /**
+   * 把一段回放出来的条目整块插到最前（rant 2026-09-20T18:58:44：更早一页由实时 handler
+   * 回放成条目，落点在这里）。record→entry 的映射不在本方法里 —— 它只负责落点。
+   */
+  prependEntries(entries: TranscriptEntry[], sid?: string | null): void;
   setLoadBar(text: string | null, sid?: string | null): void;
   /** 输入框草稿读写（rant 2026-09-01T20:28:31：按 sid 隔离，切视图/切会话不丢） */
   getComposerDraft(sid?: string | null): string;
@@ -188,6 +200,21 @@ function updateToolGroup(group: ToolGroup): void {
     group.summary = null;
     group.barHidden = true;
     group.collapsed = false;
+  }
+}
+
+/**
+ * 往 entries 前面插入条目之后，把两张「按 entries 下标索引」的表整体后移。
+ *
+ * `groupIndex`（rid → 该流当前的助手段）与 `toolRowIndex`（tool_call_id → 条目下标/行号）
+ * 存的都是下标；前插而不移位，后续到达的实时 delta / tool_end 就会命中错位的条目。
+ * 加载更早一页正是往最前面插入，所以这不是理论问题（rant 2026-09-20T18:58:44 的回放
+ * 把它变成必然）。
+ */
+function shiftIndexes(s: SessionTranscript, delta: number): void {
+  for (const [rid, i] of s.groupIndex) s.groupIndex.set(rid, i + delta);
+  for (const [callId, loc] of s.toolRowIndex) {
+    s.toolRowIndex.set(callId, { entry: loc.entry + delta, row: loc.row });
   }
 }
 
@@ -491,7 +518,9 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     prependHistoryMessage: (text, sid, role) => {
       mutate(() => {
         const s = st(sid);
+        shiftIndexes(s, 1);
         if (role === "assistant") {
+          // 历史助手消息：封存段（无 typing），✦ 标记由渲染层统一加
           s.entries.unshift({
             kind: "assistant",
             rid: `hist-${s.entries.length}`,
@@ -501,6 +530,14 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         } else {
           s.entries.unshift({ kind: "history", text });
         }
+      });
+    },
+    prependEntries: (entries, sid) => {
+      mutate(() => {
+        const s = st(sid);
+        if (!entries.length) return;
+        shiftIndexes(s, entries.length);
+        s.entries.unshift(...entries);
       });
     },
     setLoadBar: (text, sid) => {
