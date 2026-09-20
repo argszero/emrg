@@ -25,7 +25,14 @@ cannot satisfy:
   append-only;
 * detail files are never opened for writing;
 * the check runs against the **files on disk**, and a failure restores both files
-  (the failure mode is "nothing happened", never "half a move").
+  (the failure mode is "nothing happened", never "half a move");
+* the move is a **compare-and-swap on content**: the index has other writers (every
+  task's cycles append to the same file), so a row appended while this run is
+  planning is planned *for*, and a file that keeps moving is refused rather than
+  overwritten - the conservation check above cannot see that row, because it is in
+  neither snapshot this process took;
+* both files are written by **rename**, so an index is never a truncated prefix of
+  itself when a write dies.
 
 Every violated property is pinned in both directions: the same call on a
 compliant index reports OK, so a guard that fires on everything cannot pass.
@@ -469,3 +476,131 @@ def test_a_plain_index_is_still_clean_in_both_modes(tmp_path, mod, capsys):
     archive = tmp_path / "cycle-archive-X.md"
     assert mod.main([str(index), "--cap", "2", "--archive", str(archive)]) == 0
     assert len(_targets(index)) == 2 and _targets(archive) == [f"cycle-{OLD}.md"]
+
+
+# --- the index is shared: a move must survive another writer ----------------
+#
+# `/Users/argszero/.emrg/evolution/.emrg/memory/MEMORY.md` is written by *every*
+# task's cycles, not only this repository's, and the daemon embeds it verbatim in
+# every system prompt - so a run of the archiver is never the only writer of it.
+# The conservation check the tests above pin cannot see a row another writer
+# appends between this run's read and its write: the row is in neither snapshot
+# this process took, so the verdict is `OK` and the plan drops it. These tests
+# pin what makes that window harmless - a compare-and-swap on content, and a
+# rename instead of a truncating write.
+
+
+def _appending_plan(mod, path: Path, line: str, *, times: int = 1):
+    """`build_plan` that appends `line` to `path` after its first `times` calls.
+
+    The append happens *after* the wrapped call read the file, which is exactly
+    where another task's cycle lands: between this run's read and its write.
+    """
+    real = mod.build_plan
+    calls: list[int] = []
+
+    def planning(*args, **kwargs):
+        plan = real(*args, **kwargs)
+        calls.append(1)
+        if len(calls) <= times:
+            path.write_text(path.read_text(encoding="utf-8") + line, encoding="utf-8")
+        return plan
+
+    return planning, calls
+
+
+def _no_temp_left_behind(tmp_path: Path) -> None:
+    """A leftover `.tmp-` file would be dirt next to a tracked index."""
+    leftovers = [p.name for p in tmp_path.iterdir() if ".tmp-" in p.name]
+    assert not leftovers, f"the atomic write leaked {leftovers}"
+
+
+def test_a_row_that_arrives_while_planning_is_not_overwritten(tmp_path, mod, monkeypatch):
+    """The defect: a first-write-wins move silently drops the other writer's row."""
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    _write_index(index, [_row(NEWEST), _row(NEW), _row(MID), _row(OLD)])
+    sibling = _row("20260905-100000")
+    planning, calls = _appending_plan(mod, index, sibling)
+    monkeypatch.setattr(mod, "build_plan", planning)
+
+    assert mod.main([str(index), "--cap", "2", "--archive", str(archive)]) == 0
+
+    assert _targets(index) == [f"cycle-{NEWEST}.md", "cycle-20260905-100000.md"], (
+        "the row that arrived mid-run must still be in the index"
+    )
+    assert _targets(archive) == [f"cycle-{OLD}.md", f"cycle-{MID}.md", f"cycle-{NEW}.md"], (
+        "the second plan moves the three oldest of the five rows"
+    )
+    assert len(calls) == 2, "the run must re-plan on the text on disk, not write the stale one"
+    _no_temp_left_behind(tmp_path)
+
+
+def test_a_row_another_archiver_appends_is_not_overwritten(tmp_path, mod, monkeypatch):
+    """The archive half: it is shared too, and it is append-only."""
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    _write_index(index, [_row(NEW), _row(OLD)])
+    archive.write_text(
+        "# cycle index archive (2026-09-01)\n\n" + _row("20260801-000000"), encoding="utf-8"
+    )
+    other = _row("20260802-000000")
+    planning, calls = _appending_plan(mod, archive, other)
+    monkeypatch.setattr(mod, "build_plan", planning)
+
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 0
+
+    text = archive.read_text(encoding="utf-8")
+    assert text.count(other.strip()) == 1, "the other archiver's row survives, exactly once"
+    assert other.strip() in text.splitlines()
+    assert len(calls) == 2
+
+
+def test_a_file_that_keeps_moving_is_refused_rather_than_overwritten(tmp_path, mod, monkeypatch, capsys):
+    """Bounded retries: a file rewritten on every attempt is not this run's to write."""
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    _write_index(index, [_row(NEW), _row(OLD)])
+    real = mod.build_plan
+    stamps = iter(["20260801", "20260802", "20260803", "20260804"])
+
+    def planning(*args, **kwargs):
+        plan = real(*args, **kwargs)
+        index.write_text(
+            index.read_text(encoding="utf-8") + _row(f"{next(stamps)}-000000"), encoding="utf-8"
+        )
+        return plan
+
+    monkeypatch.setattr(mod, "build_plan", planning)
+
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 2
+
+    err = capsys.readouterr().err
+    assert "refuses to write" in err and str(index) in err
+    assert not archive.exists(), "a refused run writes nothing at all"
+    assert f"cycle-{NEW}.md" in _targets(index) and f"cycle-{OLD}.md" in _targets(index)
+    _no_temp_left_behind(tmp_path)
+
+
+def test_a_failed_replace_leaves_the_index_exactly_as_it_was(tmp_path, mod, monkeypatch, capsys):
+    """The write is a rename, so a denial cannot leave a prefix of the new index.
+
+    With a truncating write there is no replace to fail: the file is overwritten
+    first and the failure arrives afterwards, which is why this arm asserts both
+    the exit code and the bytes.
+    """
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    before = _write_index(index, [_row(NEW), _row(OLD)])
+
+    def denied(*_args, **_kwargs):
+        raise OSError("injected: replace denied")
+
+    monkeypatch.setattr(mod.os, "replace", denied)
+
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 2
+
+    assert index.read_text(encoding="utf-8") == before, "the index must be the old file"
+    assert not archive.exists()
+    assert "writing failed" in capsys.readouterr().err
+    _no_temp_left_behind(tmp_path)

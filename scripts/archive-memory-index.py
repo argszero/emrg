@@ -37,6 +37,33 @@ things a hand-written one-liner cannot guarantee explicit:
 The archive is the backup for exactly this operation, so an archiver that moves
 the wrong end destroys the redundancy it is writing.
 
+A third writer, and why the conservation check cannot see it
+------------------------------------------------------------
+The index is shared: every task's cycles append their rows to the same file, and
+that file is the cross-task knowledge carrier the daemon embeds in every system
+prompt. So a run of this tool is never the only writer of it. The check above
+compares two snapshots this process took itself, which means a row another
+writer appends *between* this run's read and its write is in neither snapshot:
+from the accounting's point of view it was never there, the verdict is ``OK``,
+and ``Plan.index_after`` - built from the older text - drops it without a trace.
+
+Two things make that window safe, and neither is a lock:
+
+* **The write is a compare-and-swap on content.** A plan carries the texts it
+  read, so immediately before writing, both files are read back and compared
+  against those texts. If either moved, the plan is discarded and rebuilt from
+  what is on disk *now* - so the row that arrived is planned for rather than
+  planned over - and if the files keep moving the run refuses and writes
+  nothing. A lock would need every writer to take it; the writers here are
+  separate processes belonging to separate tasks, so the check is on the bytes.
+* **The write is a rename.** Both files are written to a temporary file beside
+  the target and then ``os.replace``d, so an index that dies mid-write is either
+  the old file or the new one, never a truncated prefix of the new one - a
+  truncation no post-write restore can undo.
+
+The retry is bounded (``MOVE_ATTEMPTS``): a refusal with an exit code is the
+honest answer when the file is being rewritten faster than one run can plan.
+
 What a row is, and what happens to a line that is almost one
 ------------------------------------------------------------
 A row is a markdown link (`- [title](cycle-<ts>.md)`); the id is taken from the
@@ -72,6 +99,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from collections import Counter
@@ -112,6 +140,11 @@ ROW_LIKE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\|)")
 ROW_MAX_CHARS = INDEX_TITLE_MAX_CHARS
 
 DEFAULT_CAP = 50
+
+#: How many times a run re-plans before it refuses. One is the common case; a
+#: second is needed only when another writer touched a file between the read and
+#: the compare; a file that moves on every attempt is not one this run may write.
+MOVE_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -337,29 +370,85 @@ def check_rules(index_path: Path, cap: int) -> list[str]:
     return problems
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` so a reader sees the old file or the new one.
+
+    ``Path.write_text`` truncates and then writes, so a process that dies in
+    between leaves a prefix of the new index where the index was - a loss no
+    post-write restore can reach, because the process that would run it is gone.
+    A temporary file beside the target plus ``os.replace`` (a rename, same
+    filesystem) removes that state: the index is never the file being written.
+
+    The temporary name is predictable on purpose: a leaked one is obvious and
+    cleaning it is a single ``rm``. It is also removed on every exit path here,
+    including the failure one, so only ``SIGKILL`` between the open and the
+    replace can leave it.
+    """
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        # No `newline=`: this must write the bytes `Path.write_text` writes.
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def changed_since_planned(index_path: Path, archive_path: Path, plan: Plan) -> list[str]:
+    """Which of the two files no longer holds the text the plan was built from.
+
+    The plan carries what it read, so this is a compare-and-swap against the
+    bytes: a row another task's cycle appended while this run was planning is
+    visible here, and the caller re-plans instead of overwriting it. Files that
+    cannot be read back are reported as changed for the same reason - a file this
+    run cannot read is not one it may overwrite.
+    """
+    changed: list[str] = []
+    try:
+        if index_path.read_text(encoding="utf-8") != plan.index_before:
+            changed.append(str(index_path))
+        archive_on_disk = (
+            archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
+        )
+        if archive_on_disk != plan.archive_before:
+            changed.append(str(archive_path))
+    except (OSError, UnicodeDecodeError):
+        changed.append(str(index_path))
+    return changed
+
+
+def announce(index_path: Path, archive_path: Path, plan: Plan) -> None:
+    """Print what is about to move, once, after the plan is the one being used."""
+    print(f"index: {index_path}")
+    print(f"archive: {archive_path}")
+    for row in plan.moved:
+        print(f"move: {row.target}")
+
+
 def apply_plan(index_path: Path, archive_path: Path, plan: Plan) -> None:
     """Write the archive first, then the index.
 
     Writing the archive first is the safe order for a move: a failure between the
     two leaves a row in *both* files (visible, recoverable) rather than in
-    neither. The post-write check below restores both texts either way.
+    neither. The post-write check below restores both texts either way, and both
+    writes are renames, so neither file is ever a partial one.
     """
     if plan.archive_after != plan.archive_before:
         archive_path.parent.mkdir(parents=True, exist_ok=True)
-        archive_path.write_text(plan.archive_after, encoding="utf-8")
-    index_path.write_text(plan.index_after, encoding="utf-8")
+        atomic_write_text(archive_path, plan.archive_after)
+    atomic_write_text(index_path, plan.index_after)
 
 
 def restore(index_path: Path, archive_path: Path, plan: Plan) -> list[str]:
     """Put both files back exactly as they were; report anything that failed."""
     failures: list[str] = []
     try:
-        index_path.write_text(plan.index_before, encoding="utf-8")
+        atomic_write_text(index_path, plan.index_before)
     except OSError as exc:  # pragma: no cover - a failing restore is reported loudly
         failures.append(f"could not restore the index: {exc}")
     try:
         if plan.archive_before:
-            archive_path.write_text(plan.archive_before, encoding="utf-8")
+            atomic_write_text(archive_path, plan.archive_before)
         else:
             archive_path.unlink(missing_ok=True)
     except OSError as exc:  # pragma: no cover
@@ -475,35 +564,52 @@ def main(argv: list[str] | None = None) -> int:
         print("OK: the index respects the row rules")
         return 0
 
-    plan = build_plan(index_path, archive_path, args.cap, f"{date.today():%Y-%m-%d}")
-    problems = verify_plan(plan, args.cap)
-    if problems:
-        for problem in problems:
-            print(f"error: {problem}", file=sys.stderr)
-        return 2
+    today = f"{date.today():%Y-%m-%d}"
+    for attempt in range(1, MOVE_ATTEMPTS + 1):
+        plan = build_plan(index_path, archive_path, args.cap, today)
+        problems = verify_plan(plan, args.cap)
+        if problems:
+            for problem in problems:
+                print(f"error: {problem}", file=sys.stderr)
+            return 2
 
-    if not plan.moved:
-        print(f"index: {index_path}")
-        print(f"nothing to move: the index is within its {args.cap}-row cap")
-        return 0
+        if not plan.moved:
+            print(f"index: {index_path}")
+            print(f"nothing to move: the index is within its {args.cap}-row cap")
+            return 0
 
-    print(f"index: {index_path}")
-    print(f"archive: {archive_path}")
-    for row in plan.moved:
-        print(f"move: {row.target}")
+        if args.dry_run:
+            announce(index_path, archive_path, plan)
+            print(f"dry run: {len(plan.moved)} row(s) would move, nothing written")
+            return 0
 
-    if args.dry_run:
-        print(f"dry run: {len(plan.moved)} row(s) would move, nothing written")
-        return 0
+        # The compare half of the compare-and-swap: another task's cycle appends
+        # to this index continuously, so a plan built from text that has since
+        # moved is a plan that would overwrite the other writer's rows.
+        changed = changed_since_planned(index_path, archive_path, plan)
+        if changed:
+            if attempt < MOVE_ATTEMPTS:
+                continue
+            print(
+                f"error: the files changed (or could not be read back) on each of "
+                f"{MOVE_ATTEMPTS} attempts, so this run refuses to write (nothing "
+                "written, nothing moved); re-run it once the other writer has finished:",
+                file=sys.stderr,
+            )
+            for name in changed:
+                print(f"  {name}", file=sys.stderr)
+            return 2
 
-    try:
-        apply_plan(index_path, archive_path, plan)
-    except OSError as exc:
-        failures = restore(index_path, archive_path, plan)
-        print(f"error: writing failed: {exc}", file=sys.stderr)
-        for failure in failures:
-            print(f"error: {failure}", file=sys.stderr)
-        return 2
+        announce(index_path, archive_path, plan)
+        try:
+            apply_plan(index_path, archive_path, plan)
+        except OSError as exc:
+            failures = restore(index_path, archive_path, plan)
+            print(f"error: writing failed: {exc}", file=sys.stderr)
+            for failure in failures:
+                print(f"error: {failure}", file=sys.stderr)
+            return 2
+        break
 
     problems = measure_on_disk(index_path, archive_path, plan, args.cap)
     if problems:
