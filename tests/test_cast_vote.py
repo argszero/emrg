@@ -35,6 +35,7 @@ ones would, so no test can pass by never calling them.
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -132,15 +133,17 @@ class FakeCounter:
 
 
 class FakeGh:
-    """A stand-in for `_gh`: records the argv, answers with a fixed rc."""
+    """A stand-in for `_gh`: records the argv and stdin, answers with a fixed rc."""
 
     def __init__(self, rc: int = 0, stderr: str = ""):
         self.rc = rc
         self.stderr = stderr
         self.calls: list[list[str]] = []
+        self.stdins: list[str | None] = []
 
-    def __call__(self, args: list[str]):
+    def __call__(self, args: list[str], stdin: str | None = None):
         self.calls.append(list(args))
+        self.stdins.append(stdin)
         return _Proc(self.rc, self.stderr)
 
 
@@ -719,6 +722,104 @@ def test_the_body_is_sent_byte_for_byte(mod, monkeypatch, capsys, body_file):
     assert rc == 0
     assert Path(path).read_text(encoding="utf-8") == body
     assert gh.calls[0][-1] == path, "the file is passed to gh, not its text"
+    assert gh.stdins[0] is None, "a body that came from a file feeds gh no stdin"
+
+
+# ── the body may come from stdin, so a read-only cycle can still vote ───────
+
+
+class _StdinWithBuffer:
+    """A stand-in for a real `sys.stdin`: bytes on `.buffer`, text on `.read()`.
+
+    Both arms are present so a test can tell *which* one the tool took — a real
+    stdin has both, and the tool documents that it reads the binary arm for the
+    explicit UTF-8 pin. The text arm answers a sentinel rather than a faithful
+    decoding, so an implementation that read `sys.stdin` directly cannot pass by
+    coincidence: what is asserted is the true text reaching gh.
+    """
+
+    def __init__(self, text: str):
+        self.buffer = io.BytesIO(text.encode("utf-8"))
+
+    def read(self) -> str:  # pragma: no cover - only reached by the arm being guarded against
+        return "READ-THROUGH-THE-TEXT-ARM"
+
+
+def test_a_body_fed_on_stdin_is_posted_from_stdin_with_no_file_named(
+    mod, monkeypatch, capsys
+):
+    """Issue #1462: a read-only cycle can vote, and must not need a file to do it.
+
+    The four file routes were all refused by the read-only tier, so the vote fell
+    back to raw `gh pr review` — the unsafe path whose body checks this tool
+    exists for. Here the body is fed on stdin and reaches gh the same way: `gh
+    pr review --body-file -` reads its own stdin, and ours is at EOF by then.
+    """
+    body = f"{CYCLE} — ✅ LGTM\n\n| a | b |\n|---|---|\n| x | y |\n"
+    monkeypatch.setattr(mod.sys, "stdin", _StdinWithBuffer(body))
+    counter = FakeCounter(
+        verdict_with(),
+        verdict_with([vote()], counted=[True], valid_count=1),
+    )
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", "-"])
+    assert rc == 0
+    assert gh.calls[0][-2:] == ["--body-file", "-"], (
+        "gh is told to read stdin: naming a path here is what made `--body-file "
+        "/dev/stdin` fail at the real post while the dry run passed"
+    )
+    assert gh.stdins[0] == body, (
+        "the same text the checks ran on is fed to gh, decoded as UTF-8 rather "
+        "than through the locale's codec"
+    )
+    assert counter.calls == [(1255, 3), (1255, 3)], "one pre-flight read, one confirm read"
+
+
+def test_a_stdin_body_with_no_cycle_id_is_still_refused_before_the_post(
+    mod, monkeypatch, capsys
+):
+    """The check is not weakened by the new route: nothing is sent, nothing asked."""
+    monkeypatch.setattr(mod.sys, "stdin", _StdinWithBuffer("LGTM, looks good\n"))
+    counter = FakeCounter(verdict_with())
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", "-"])
+    assert rc == 2
+    assert not gh.calls, "a body the counter cannot attribute is never posted"
+    assert not counter.calls, "and the count is not read for a body that was refused"
+    assert "no cycle id" in capsys.readouterr().err
+
+
+def test_a_stdin_body_naming_two_cycle_ids_is_refused_too(mod, monkeypatch, capsys):
+    """Two ids is worse than none: the counter takes the first, so the owner is prose order."""
+    body = f"{CYCLE} supersedes {OTHER_CYCLE} — ✅ LGTM\n"
+    monkeypatch.setattr(mod.sys, "stdin", _StdinWithBuffer(body))
+    counter = FakeCounter(verdict_with())
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", "-"])
+    assert rc == 2
+    assert not gh.calls
+    assert "more than one cycle id" in capsys.readouterr().err
+
+
+def test_an_undecodable_stdin_body_is_body_unreadable_not_a_traceback(
+    mod, monkeypatch, capsys
+):
+    """A body that is not UTF-8 is reported like an unreadable path, before any post."""
+
+    class _BadStdin:
+        buffer = io.BytesIO(b"\xff\xfe not utf-8")
+
+    monkeypatch.setattr(mod.sys, "stdin", _BadStdin())
+    counter = FakeCounter(verdict_with())
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", "-"])
+    assert rc == 2
+    assert not gh.calls, "nothing is posted for a body that could not be read"
+    err = capsys.readouterr().err
+    assert "could not read -" in err, (
+        "the reader has to be able to tell 'nothing was posted' from 'posted and "
+        "not counted' - a traceback says neither"
+    )
 
 
 # ── the two regexes must agree: this tool refuses what the counter reads ────
