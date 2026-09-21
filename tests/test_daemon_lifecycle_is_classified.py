@@ -66,6 +66,20 @@ THE_ACT = [
     "env emrg server stop",
     "nohup emrg server restart",
     "timeout 5 emrg server stop",
+    # one string that `env` splits into an argv and execs (`-S` on BSD/macOS,
+    # `--split-string` on GNU coreutils — both read, `=` spelling included)
+    'env -S "emrg server stop"',
+    "env -S 'emrg server restart'",
+    'env --split-string "emrg server stop"',
+    "env --split-string='emrg server stop'",
+    # the tokens after the string join that argv, so the act is there too
+    "env -S emrg server stop",
+    "env -i -S 'emrg server restart'",
+    # a known cost of reading the string: the act rule takes *any* position for
+    # the program word (measured beside `echo emrg server stop`, which it has
+    # refused since the rule landed), so a mention in a string `env` would never
+    # see is refused too. Loud and cheap, the side this guard takes.
+    "echo env -S 'emrg server stop'",
     # a flag between the program and its verb
     "emrg --verbose server stop",
     # a signaller whose operand names emrg, in all three spellings
@@ -104,8 +118,10 @@ NOT_THE_ACT = [
     "pkill -f firefox",
     "kill 12345",
     "killall python",
-    # a string handed over by a non-shell program — the other stated limit
-    'env -S "emrg server stop"',
+    # a string handed over by a program that cannot run it: `printf` prints its
+    # argument, so the act is not in it. This is where `env -S "…"` used to sit
+    # (it *does* run the string, and is now refused on both readers).
+    'printf %s "emrg server stop"',
 ]
 
 
@@ -191,6 +207,10 @@ _ARGV_ROWS = [
     ["timeout", "5", "emrg", "server", "restart"],
     ["uv", "run", "emrg", "server", "stop"],
     ["python", "-m", "emrg", "server", "stop"],
+    # `env -S` hands over one string that it splits and execs: read by the argv
+    # side since this revision, and by the command-line side for the same reason
+    ["env", "-S", "emrg server stop"],
+    ["env", "--split-string", "emrg server stop"],
     ["nice", "-n", "5", "pkill", "-f", "emrg.server"],
     ["sh", "-c", "emrg server stop"],
     ["sh", "-c", "(emrg server restart)"],
@@ -213,16 +233,30 @@ def test_the_two_readers_of_the_act_agree(argv):
     )
 
 
-def test_the_env_string_handover_is_the_argv_side_only():
-    """A measured asymmetry, pinned so it is a limit rather than a surprise.
+def test_the_env_string_handover_is_read_by_the_act_and_not_by_the_write_walk():
+    """Two readings of one string, and the measurement that separates them.
 
-    `env -S "emrg server stop"` hands one string to be split into an argv. The
-    argv side reads it (it is looking at an argv); the command-line side does
-    not, because reading every quoted argument as a command is the over-block
-    #1513 removed from this file. Stating the difference here keeps the two
-    readers' scopes honest without widening either.
+    `env -S "<string>"` splits its value into an argv and execs it, so the act is
+    *in the string* — the reader that decides "is this the act" has to read it.
+    The string is not shell text: measured on this host,
+    `env -S 'printf %s RAN > <marker>'` prints `RAN>` and writes **no file**,
+    because there is no shell to read the `>`. So the write walk must keep
+    reading it as an opaque argument, and reading it there would refuse a write
+    that cannot happen — the over-block #1513 removed from this file.
     """
-    assert _argv_side_reader()(
-        ["sh", "-c", 'env -S "emrg server stop"'], shell_parsed=True
-    )
-    assert _stops_or_restarts_the_daemon('env -S "emrg server stop"') is None
+    act = 'env -S "emrg server stop"'
+    assert _stops_or_restarts_the_daemon(act) == "emrg server stop"
+    for mode in ("read-only", "workspace-write"):
+        allowed, _reason, _enforcement = _check_sandbox(act, mode, "/tmp")
+        assert allowed is False
+
+    # the argv side reads the same spelling (a list argv was the gap there)
+    assert _argv_side_reader()(["env", "-S", "emrg server stop"], shell_parsed=False)
+
+    # and the string stays opaque to the write walk, which is what makes the
+    # `>` in it harmless: no nested text, no redirect target, no refusal
+    write_like = "env -S 'printf %s RAN > /tmp/emrg-1324-marker'"
+    assert _nested_command_texts(_tokenize_command(write_like)) == []
+    for mode in ("read-only", "workspace-write"):
+        allowed, reason, _enforcement = _check_sandbox(write_like, mode, "/tmp")
+        assert allowed is True, f"{write_like!r} was refused at {mode}: {reason}"

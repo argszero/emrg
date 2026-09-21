@@ -527,7 +527,51 @@ def _emrg_entry_index(tokens, *, shell_parsed: bool = False) -> int:
     return -1
 
 
-def _spawns_a_daemon_stop_or_restart(args, *, shell_parsed: bool = False) -> bool:
+#: `env`'s string handover: the flag whose *value* `env` splits into an argv and
+#: execs. BSD/macOS `env` takes `-S <string>` (measured on this host: `env -S
+#: 'printf RAN'` prints `RAN`, `env -S 'printf %s' MARK` prints `MARK`), GNU
+#: coreutils also takes `--split-string`.
+_ENV_SPLIT_STRING_FLAGS = ("-S", "--split-string")
+
+
+def _env_split_string_argvs(tokens) -> list[list[str]]:
+    """The argvs an ``env -S <string> …`` hands over, for the guard to classify.
+
+    `env -S "emrg server stop"` execs `emrg` with the argv `["server", "stop"]`:
+    the act, spelled as somebody else's argument. Measured, the tokens written
+    after the string join the argv `env` execs, so both are read together.
+
+    A **list** argv is where this reader is reachable. A shell line is split on
+    whitespace before it arrives, so `sh -c 'env -S "emrg server stop"'` already
+    arrives as the act's own token stream (that is the corpus row pinned in
+    `tests/test_hermeticity_guard.py`); the argv spelling did not, which left the
+    one reading of the act the harness could really spawn.
+
+    The string is split on whitespace and judged with ``shell_parsed=True``,
+    which is what `env`'s own splitter does with quotes and escapes (`env -S
+    'printf "RAN"'` prints `RAN`, not `"RAN"` — measured) — and that reading can
+    only widen, the direction this guard takes. Nesting is bounded rather than
+    trusted, for the same reason the product's classifier bounds it: neither is
+    allowed to hang on adversarial input.
+    """
+    out: list[list[str]] = []
+    for i, token in enumerate(tokens):
+        if "env" not in _basenames(token):
+            continue
+        for j in range(i + 1, len(tokens)):
+            tok = str(tokens[j])
+            if tok in _ENV_SPLIT_STRING_FLAGS:
+                value, rest = tokens[j + 1 : j + 2], tokens[j + 2 :]
+            elif tok.startswith("--split-string="):
+                value, rest = [tok.split("=", 1)[1]], tokens[j + 1 :]
+            else:
+                continue
+            if value:
+                out.append(str(value[0]).split() + [str(t) for t in rest])
+    return out
+
+
+def _spawns_a_daemon_stop_or_restart(args, *, shell_parsed: bool = False, _depth: int = 0) -> bool:
     """Would this `Popen` argv stop or restart the emrg daemon?
 
     Keyed on the **act**, not on the mention: the emrg program carrying a
@@ -566,6 +610,17 @@ def _spawns_a_daemon_stop_or_restart(args, *, shell_parsed: bool = False) -> boo
     * `sh -c 'env -S "emrg server stop"'` — `env -S` handing over one string;
     * `[..., "emrg", "server", "(stop)"]` — the *verb* glued to punctuation, no
       shell involved at all.
+
+    **`env -S` is read on both sides of that line**, which is the second revision
+    of this rule (review of cycle `cyc20260922-032844`): the *string* is what
+    `env` splits and execs, so it is the act in a shell line (`sh -c 'env -S
+    "emrg server stop"'`, above — the split-on-whitespace path already reaches
+    it) and in a list argv (`["env", "-S", "emrg server stop"]`, which this
+    reader missed while the product's classifier reads it). What is *not* read is
+    the same string in the **write** walk — it is argv-shaped, not shell text:
+    measured, `env -S 'printf %s RAN > <marker>'` prints `RAN>` and writes no
+    file, so reading it as shell text there would refuse a write that cannot
+    happen.
 
     The rules they all sit on top of are unchanged, and the shapes that must stay
     allowed are pinned beside these in `tests/test_hermeticity_guard.py`: the verb
@@ -640,6 +695,13 @@ def _spawns_a_daemon_stop_or_restart(args, *, shell_parsed: bool = False) -> boo
             and "emrg" in " ".join(tokens[i + 1 :]).lower()
         ):
             return True
+
+    if _depth < 3:
+        for borrowed in _env_split_string_argvs(tokens):
+            if _spawns_a_daemon_stop_or_restart(
+                borrowed, shell_parsed=True, _depth=_depth + 1
+            ):
+                return True
 
     entry = _emrg_entry_index(tokens, shell_parsed=shell_parsed)
     if entry < 0:

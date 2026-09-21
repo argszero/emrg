@@ -1533,6 +1533,56 @@ def _operand_naming_emrg(tokens: list[str], start: int) -> str | None:
     return None
 
 
+#: `env`'s string handover — the flag whose value `env` splits into an argv and
+#: execs. BSD/macOS `env` takes the short form only (measured on this host:
+#: `env --split-string <string>` answers `illegal option -- s`, while
+#: `env -S 'printf RAN'` prints `RAN`), GNU coreutils takes both spellings, so
+#: both are read: this is a static reading and the tree is developed on both.
+_ENV_SPLIT_STRING_FLAGS = frozenset({"-S", "--split-string"})
+
+
+def _env_split_string_texts(tokens: list[str]) -> list[str]:
+    """The command texts an `env` invocation hands over as one argument.
+
+    `env -S 'emrg server stop'` splits its value into an argv and execs it, so
+    the act is *in the string*, whatever the spelling — measured on this host
+    with harmless payloads: `env -S 'printf RAN'` prints `RAN`, and
+    `env -S 'printf %s' MARK` prints `MARK`, i.e. the tokens written after the
+    string join the argv `env` execs.
+
+    The text is **argv-shaped, not shell text**: there is no shell to read a
+    redirect, so `env -S 'printf %s RAN > <marker>'` prints `RAN>` and writes no
+    file (measured). That is why this reader belongs to the act classifier and
+    is deliberately **not** a source inside `_nested_command_texts`: reading the
+    string as shell text there would refuse writes that cannot happen — the
+    #1513 over-block, one level down.
+
+    Joining the string with the tokens that follow it and re-tokenising can only
+    widen the reading (`env` itself splits on whitespace and honours quotes), and
+    widening is the side this guard takes.
+    """
+    out: list[str] = []
+    for i, tok in enumerate(tokens):
+        if _basename(tok) != "env":
+            continue
+        j = i + 1
+        while j < len(tokens) and not _is_a_command_border(tokens[j]):
+            tok_j = tokens[j]
+            if tok_j in _ENV_SPLIT_STRING_FLAGS:
+                value = tokens[j + 1 : j + 2]
+                if value:
+                    rest: list[str] = []
+                    k = j + 2
+                    while k < len(tokens) and not _is_a_command_border(tokens[k]):
+                        rest.append(tokens[k])
+                        k += 1
+                    out.append(" ".join(value + rest))
+            elif tok_j.startswith("--split-string="):
+                out.append(tok_j.split("=", 1)[1])
+            j += 1
+    return out
+
+
 def _stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
     """The spelling of the act, if ``cmd`` stops or restarts the emrg daemon.
 
@@ -1548,7 +1598,10 @@ def _stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
     for the texts a shell re-parses, so `sh -c 'emrg server stop'` and
     `eval 'emrg server restart'` are classified as the same act rather than as a
     string literal — the same walk the write-target rule already recurses
-    through.
+    through. `env -S "<string>"` is read by `_env_split_string_texts`: execing
+    the argv that string splits into is `env`'s documented job, so that spelling
+    is the act too, and it is read *here* rather than in the write walk because
+    the text is argv-shaped — no shell reads the redirects in it.
 
     **Stated limits** (refused-direction bias does not apply here: each of these
     is *allowed*, and none is an ordinary route to the daemon):
@@ -1557,13 +1610,12 @@ def _stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
       `pkill -f 'python -m emrg'` without the name in the text, `kill 12345`.
       A process table is not a static reading, and widening the signaller to
       every interpreter name would refuse ordinary `pkill node` work;
-    * a single string handed over by a *non-shell* program —
-      `env -S "emrg server stop"`. Reading every quoted argument as a command is
-      the over-block #1513 removed from this file (`echo sh "patch /etc/hosts"`
-      was a false refusal), so the payload of a shell (`sh -c`, `eval`) is read
-      and the payload of everything else is data. The argv-side reader of the
-      same act (`tests/conftest.py::_spawns_a_daemon_stop_or_restart`) does
-      cover this spelling, and that is the route a *test* goes through;
+    * a quoted argument of a program that cannot run it — `echo "emrg server
+      stop"` is one argument and prints it. Reading every quoted argument as a
+      command is the over-block #1513 removed from this file (`echo sh "patch
+      /etc/hosts"` was a false refusal), so the payload read is the shell's
+      (`sh -c`, `eval`) and `env -S`'s, whose whole purpose is to split and exec
+      it;
     * a name built at runtime (`$EMRG server stop`, `emrg${X} server stop`).
     """
     if _depth >= 3:
@@ -1592,7 +1644,7 @@ def _stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
                 for t in tokens[entry : verb[1] + 1]
                 if t not in _DAEMON_GROUPING_TOKENS
             )
-    for nested in _nested_command_texts(tokens):
+    for nested in _nested_command_texts(tokens) + _env_split_string_texts(tokens):
         hit = _stops_or_restarts_the_daemon(nested, _depth + 1)
         if hit is not None:
             return hit
