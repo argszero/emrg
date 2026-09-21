@@ -6821,11 +6821,30 @@ def _payload_code_words(tokens: list[str], i: int) -> list[str]:
     reads one token. `_text_position_words` hands the substitution over instead of
     the single token, and the words it returns are still a subset of master's
     `tokens[i + 1:]`, so the monotone-direction claim above holds for this half too.
+
+    **And the backtick spelling of that operand** (reported by the same Contributor one
+    cycle later, measured on this head `f247459b`). A backtick substitution carries no
+    parenthesis, and the tokenizer glues a backtick written against an operator to that
+    operator — measured, the here-string whose program is a backtick substitution
+    tokenizes to ``['$SHELL', '<<<`', 'echo', 'git checkout .', '`']`` — so the opener
+    stands *inside* the operator's own token and the operand that follows it is read as
+    though the redirection delivered it. Written with a space after the operator the
+    opener is its own token and reaches the same dead end one position over. Both answer
+    ALLOW at both tiers while master blocks them, because master's blanket collection
+    covered the body incidentally. `_backtick_body` hands the body over for both
+    spellings, and the words it returns are again a subset of master's `tokens[i + 1:]`.
     """
     out: list[str] = []
     for j in range(i + 1, len(tokens)):
-        if tokens[j - 1].startswith(("-", "<")):
-            out.extend(_text_position_words(tokens, j))
+        prev = tokens[j - 1]
+        if not prev.startswith(("-", "<")):
+            continue
+        if _has_open_backtick(prev):
+            # The opener is fused into the operator itself (`<<<`echo …`), so the
+            # text position begins at ``j`` and the operator token owns the open.
+            out.extend(_backtick_body(tokens, j - 1))
+            continue
+        out.extend(_text_position_words(tokens, j))
     return out
 
 
@@ -6844,6 +6863,11 @@ def _text_position_words(tokens: list[str], j: int) -> list[str]:
     """
     opener = _substitution_paren(tokens, j)
     if opener is None:
+        if _has_open_backtick(tokens[j]):
+            # The other spelling, one position over: the operand token holds the
+            # opener itself (``<<< `echo …` ``), which is the shape a backtick
+            # written apart from its operator takes.
+            return _backtick_body(tokens, j)
         return [tokens[j]]
     depth = 0
     k = opener
@@ -6870,6 +6894,54 @@ def _substitution_paren(tokens: list[str], j: int) -> int | None:
     if tok.endswith("(") and tok[:-1] in ("$", "<", ">"):
         return j
     return None
+
+
+def _has_open_backtick(tok: str) -> bool:
+    """Whether this token is left holding an unterminated backtick opener.
+
+    A count rather than a prefix test, because the tokenizer makes a backtick
+    punctuation: it is its own token when written apart from the words beside it
+    (`<<<` + backtick) and fused to whatever punctuation it touches when it is not
+    (the operator `<<<` carrying the opener, `;` carrying the closer). An odd count
+    in the token means the opener is here and its partner is somewhere later; a token
+    holding a pair of them is closed, and is not an opener.
+
+    The paired spelling ``${…}`` is deliberately not read the same way: a parameter
+    expansion produces a word, not a command, which is why `_substitution_paren`
+    refuses it and why a ``$`` here is not an opener either.
+    """
+    return tok.count("`") % 2 == 1
+
+
+def _backtick_body(tokens: list[str], opener: int) -> list[str]:
+    """The words of the backtick substitution whose opener is token ``opener``.
+
+    Walks forward to the token that closes it — the first one carrying a backtick
+    that brings the count back to even — and returns the words between, the body the
+    shell would run and whose output becomes the text at this position. Measured on
+    this host, both spellings of the same command reach here and return the same
+    words: the here-string with the backtick fused to its operator returns
+    ``['echo', 'git checkout .']`` from the operator token, the spaced one returns
+    the same list from the opener a position later.
+
+    Unclosed, it hands the rest over rather than nothing: that is what master's
+    blanket collection did for every spelling, so the words stay a subset of it.
+
+    The count is per token, so a token holding three backticks (an opener, its
+    closer and a second opener) over-collects into the following words rather than
+    stopping inside itself. Both readings are subsets of master's, which is the
+    direction this half is allowed to be wrong in: it can restore a refusal master
+    made without ever making one master did not.
+    """
+    depth = tokens[opener].count("`")
+    k = opener + 1
+    while k < len(tokens):
+        if "`" in tokens[k]:
+            depth += tokens[k].count("`")
+            if depth % 2 == 0:
+                return tokens[opener + 1:k]
+        k += 1
+    return tokens[opener + 1:]
 
 
 def _unresolved_wrapper_targets(cmd: str, _depth: int = 0) -> list[str]:
