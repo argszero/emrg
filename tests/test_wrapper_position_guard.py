@@ -52,6 +52,17 @@ WW = "workspace-write"
 # A wrapper word standing where the shell reads it as data. Each line only *prints*
 # the quoted payload; the payload is spelled with an absolute path (or a git mutator)
 # so that believing it is what makes the difference between ALLOW and BLOCK.
+#
+# A double-quoted **command substitution** was in this list and is not data: the shell
+# runs `$( … )` there, so `echo "$(sh -c 'git checkout .')"` really performs the checkout.
+# It read as data only while the substitution reached the walk as one opaque token, which
+# is issue #1516 — the row moved to `tests/test_quoted_substitution_guard.py`, where the
+# refusal is asserted through the reading that can see into the body. Removing it here
+# rather than leaving it is the point: pinned as data it asserted an ALLOW for a line that
+# mutates, and the same tree asserted the *unquoted* twin as an invocation two lines below
+# (`echo $(sh -c "git checkout .")`), so the file contradicted itself about one shell
+# behaviour. Measured with both readings on one tree (PR #1518 merged into this branch):
+# the row is refused at `read-only` — `blocked git mutating command 'git checkout'`.
 DATA_SHAPES = [
     'echo sh "patch /etc/hosts"',
     'echo bash "git checkout ."',
@@ -60,7 +71,6 @@ DATA_SHAPES = [
     'echo eval "patch /etc/hosts"',
     'printf %s sh "patch /etc/hosts"',
     'echo "sh"',
-    "echo \"$(sh -c 'git checkout .')\"",
 ]
 
 # The same wrapper word where the shell *runs* it. Every row is either a destructive
