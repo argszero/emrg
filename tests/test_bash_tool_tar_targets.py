@@ -44,6 +44,7 @@ it covers one family, and a self-contained fixture set cannot disagree with a ta
 does not share.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -51,6 +52,7 @@ import sys
 import pytest
 
 from emrg.tools.bash_tool import (
+    _TAR_PROGRAM_WORDS,
     _check_sandbox,
     _extract_write_targets,
     _positional_args,
@@ -371,3 +373,82 @@ def test_tar_really_writes_where_the_rule_says(tmp_path):
 
     # `-t` is a read whatever the archive is.
     assert run("-tf", "a.tar") == 0
+
+
+# ── the program's other name is the same binary, so it is the same rule ─────────────
+#
+# `/usr/bin/tar` is a symlink to `/usr/bin/bsdtar` on this host (measured 2026-09-22:
+# `tar -> bsdtar`), so the word `bsdtar` names the very program every row above was
+# measured with. Reading only the word `tar` left the other name naming nothing at all:
+# on the head this section was added to, `bsdtar -cf <outside>/a.tar f` and
+# `bsdtar -xf a.tar -C <outside>` were ALLOW with an empty target list.
+#
+# The words are listed **here**, not read off `_TAR_PROGRAM_WORDS`: a parametrisation
+# derived from the set under test shrinks with it, so dropping a name from the rule would
+# have removed its own rows and left the file green (measured — the first version of this
+# section did exactly that, 64 → 62 passed and no failure). The literal tuple plus the
+# agreement test below make that mutation red instead.
+COVERED_PROGRAM_WORDS = ("bsdtar", "tar")
+
+
+def test_the_rule_reads_both_of_the_words_this_host_s_tar_answers_to():
+    """The list above is the expectation; this is where it meets the module's set.
+
+    A name dropped from `_TAR_PROGRAM_WORDS` — or one added without a row — fails here,
+    which is what keeps the parametrised rows from being the only witness.
+    """
+    assert sorted(COVERED_PROGRAM_WORDS) == sorted(_TAR_PROGRAM_WORDS)
+
+
+@pytest.mark.parametrize("prog", COVERED_PROGRAM_WORDS)
+def test_each_program_word_reads_the_archive_and_the_extract_directory(prog):
+    """One rule for both words: the create names the archive, the extract names `-C`.
+
+    `_command_word` reduces a word to its bare spelling, so the path spelling is the
+    same question and is asserted beside it — `/usr/bin/bsdtar` is how a script that
+    wants this binary without a PATH lookup spells it.
+    """
+    archive = f"{OUTSIDE}/a.tar"
+    dest = f"{OUTSIDE}/dest"
+    assert _extract_write_targets(f"{prog} -cf {archive} f") == [archive]
+    assert _extract_write_targets(f"/usr/bin/{prog} -cf {archive} f") == [archive]
+    assert _extract_write_targets(f"{prog} -xf a.tar -C {dest}") == [dest]
+    for cmd, target in ((f"{prog} -cf {archive} f", archive),
+                        (f"{prog} -xf a.tar -C {dest}", dest)):
+        for tier in ("read-only", "workspace-write"):
+            allowed, reason, _ = _check_sandbox(cmd, tier, WORKSPACE)
+            assert allowed is False, f"{prog}: {tier} allowed a write to {target}"
+            assert target in (reason or ""), f"{prog}: {tier} refused without naming it"
+
+
+@pytest.mark.parametrize("prog", COVERED_PROGRAM_WORDS)
+def test_each_program_word_in_data_position_is_still_a_mention(prog):
+    """The drift guard: a name the walk dispatches on must also be a *word* it distrusts.
+
+    The two sites hold one fact — the dispatch reads `_TAR_PROGRAM_WORDS` and
+    `_WRITE_VERB_WORDS` carries the same words so that a spelling in data position is not
+    believed. A name added to the first without the second would refuse `echo bsdtar -cf
+    out.tar f`, which is the #1513 over-block; this row fails in that direction, and the
+    command-position row above fails if the dispatch does not know the name at all.
+    """
+    assert _extract_write_targets(f'echo "{prog} -cf {OUTSIDE}/a.tar f"') == []
+    assert _extract_write_targets(f"printf %s {prog} -cf {OUTSIDE}/a.tar f") == []
+    for tier in ("read-only", "workspace-write"):
+        allowed, reason, _ = _check_sandbox(
+            f'echo "{prog} -cf {OUTSIDE}/a.tar f"', tier, WORKSPACE
+        )
+        assert allowed is True, f"{prog}: {tier} refused a mention ({reason})"
+
+
+def test_the_two_program_words_really_name_one_binary_on_this_host():
+    """Why one table covers both words, measured rather than argued.
+
+    Skipped where the host has no `bsdtar` (a GNU-tar machine), because the claim being
+    pinned is about *this* host: the table in `emrg/tools/bash_tool.py` was measured with
+    bsdtar 3.5.3, and `tar` here is a link to it — so a name that resolved to a different
+    program would be a different subject and would belong in issue #1538's list instead.
+    """
+    tar, bsdtar = shutil.which("tar"), shutil.which("bsdtar")
+    if not tar or not bsdtar:
+        pytest.skip("no bsdtar on this host: the two words are not one binary here")
+    assert os.path.samefile(tar, bsdtar), f"{tar} is not {bsdtar} on this host"

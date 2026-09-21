@@ -3115,7 +3115,7 @@ _WRITE_VERB_WORDS: frozenset[str] = frozenset().union(
     _PZSTD_VERBS,
     _OPTION_DESTINATION_VERBS,
     {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip",
-     "tar"},
+     "tar", "bsdtar"},
 )
 
 
@@ -3451,12 +3451,13 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # remaining row). The rule, its measured table and its two named
             # limits are in `_zip_write_targets`.
             targets.extend(_zip_write_targets(tokens, i))
-        elif word == "tar":
+        elif word in _TAR_PROGRAM_WORDS:
             # `tar -cf <archive> f` creates the archive and `tar -xf <archive> -C <dir>`
             # extracts into the directory — neither is an operand position a shared rule
             # can reach, because `-f` is a write in one operation and a read in the next.
             # The rule, its measured table and its named limits are in
-            # `_tar_write_targets`.
+            # `_tar_write_targets`; the set it is asked about holds both of the words this
+            # host's tar answers to, because they name one binary.
             targets.extend(_tar_write_targets(tokens, i))
         elif word == "sed":
             # `sed -i` rewrites its file operands in place; a bare `sed` is a
@@ -4492,6 +4493,24 @@ _TAR_LONG_WITH_VALUE = frozenset({
     "--newer-mtime", "--newer-than", "--newer-mtime-than", "--older", "--older-mtime",
     "--older-than", "--older-mtime-than", "--strip-components",
 })
+# The programs this rule is about, which is **two words for one binary** rather than two
+# tools: on this host `/usr/bin/tar` is a symlink to `/usr/bin/bsdtar` (measured 2026-09-22:
+# `ls -l /usr/bin/tar` → `tar -> bsdtar`, and `/usr/bin/bsdtar --version` prints the
+# `bsdtar 3.5.3 - libarchive 3.7.4` the table below was measured with), so every row in
+# that table is this program's row whatever word reached it. The walk read only the word
+# `tar`, which left the same binary's other name naming nothing at all: measured on the
+# head of PR #1537, `bsdtar -cf <outside>/a.tar f` and `bsdtar -xf a.tar -C <outside>` were
+# ALLOW with an empty target list while their `tar` twins were refused. `_command_word`
+# already reduces a path or a `.exe` to its bare spelling, so `/usr/bin/bsdtar` is covered
+# by the same set. GNU tar keeps its own name (`gtar`) on systems that carry two tars; it is
+# a different implementation whose option list this table has not measured, so it is named
+# in issue #1538 with the rest of the measured remainder rather than read as if it were here.
+#
+# Two sites hold this fact and the tests keep them in step: the dispatch below reads this
+# set, and `_WRITE_VERB_WORDS` carries the same words so a name in **data** position stays a
+# mention (`echo bsdtar -cf out.tar f` names nothing) — a name added here without that entry
+# would refuse the mention, which the parametrised rows fail on.
+_TAR_PROGRAM_WORDS = frozenset({"tar", "bsdtar"})
 # `-t` is named although it writes nothing, because "this run writes nothing" is a
 # different answer from "this run has no operation" and the rule must not fuse them: the
 # first is a reading of the line, the second is a line tar itself refuses.
