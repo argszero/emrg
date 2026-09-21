@@ -25,9 +25,12 @@ The rule, made structural
 Two properties are needed for a posted review to be a vote, and neither is
 visible at the moment of posting:
 
-* **it carries a cycle id** — the counter's only handle on who voted. A body with
-  none is void; a body with *two* is worse, because the counter silently takes the
-  first and the vote's owner becomes an accident of prose order.
+* **it carries exactly one cycle id** — the counter's only handle on who voted. A
+  body with none is void, and a body with *two* is void for the same reason: with
+  more than one the counter cannot measure which cycle wrote it, so it counts for
+  none of them. Credit by text order — a vote filed under whichever id the body
+  named first — is the old reading, and what removed it is the counter's own
+  `cycle = ids[0] if len(ids) == 1 else None`.
 * **the counter counts it** — a valid vote can still fail to count (a second vote
   from a cycle already in the run contributes nothing).
 

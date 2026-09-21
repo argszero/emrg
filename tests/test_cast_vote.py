@@ -15,10 +15,10 @@ The counter reads the voting cycle out of the body, so a body without one is a
 vote nobody cast. Both halves of that loss are pinned here, because they are the
 two properties that are invisible at the moment of posting:
 
-* **attribution** - the body must carry exactly one cycle id. None is void; two
-  is worse (the counter reads every id the body names and gives such a body no
-  owner, so the vote counts for none of them). `--cycle` may check that reading
-  but cannot replace it, since the counter never sees the flag.
+* **attribution** - the body must carry exactly one cycle id. None is void, and two
+  is void for the same reason (the counter reads every id the body names and gives
+  such a body no owner, so the vote counts for none of them). `--cycle` may check
+  that reading but cannot replace it, since the counter never sees the flag.
 * **counting** - a posted review can still fail to count (a second vote from a
   cycle already in the run contributes nothing), and only the counter knows.
 
@@ -886,7 +886,7 @@ def test_a_stdin_body_with_no_cycle_id_is_still_refused_before_the_post(
 
 
 def test_a_stdin_body_naming_two_cycle_ids_is_refused_too(mod, monkeypatch, capsys):
-    """Two ids is worse than none: the counter takes the first, so the owner is prose order."""
+    """Two ids counts for none, not for the first: unattributable is unattributable."""
     body = f"{CYCLE} supersedes {OTHER_CYCLE} — ✅ LGTM\n"
     monkeypatch.setattr(mod.sys, "stdin", _StdinWithBuffer(body))
     counter = FakeCounter(verdict_with())
@@ -895,6 +895,30 @@ def test_a_stdin_body_naming_two_cycle_ids_is_refused_too(mod, monkeypatch, caps
     assert rc == 2
     assert not gh.calls
     assert "more than one cycle id" in capsys.readouterr().err
+
+    # The *reason* here is prose, and prose is the one carrier an assertion about
+    # behaviour cannot reach: this test drives the refusal, but the module docstring's
+    # own account of it said the counter "silently takes the first" — a defect it no
+    # longer has, and the same rot #1503 repaired in the refusal message. Joined to the
+    # counter's own expression and its own sentence, so the two carriers cannot drift
+    # apart while the suite stays green.
+    counter_source = COUNTER_SCRIPT.read_text(encoding="utf-8")
+    assert "cycle = ids[0] if len(ids) == 1 else None" in counter_source, (
+        "precondition: only a body naming exactly one id is attributed to a cycle"
+    )
+    assert "it counts for none of them" in counter_source, (
+        "precondition: the counter's own consequence for a body naming more than one"
+    )
+    # Read with the wrapping collapsed: this is a paragraph, and a claim must not come
+    # out false because the text breaks between two of its words (the shape that made a
+    # neighbouring pin red on #1511's first cut).
+    doc = " ".join((mod.__doc__ or "").split())
+    assert "counts for none of them" in doc, (
+        "the docstring must state the counter's consequence for a two-id body"
+    )
+    assert "takes the first" not in doc, (
+        "the docstring claimed the counter takes the first id, which it does not"
+    )
 
 
 def test_an_undecodable_stdin_body_is_body_unreadable_not_a_traceback(
