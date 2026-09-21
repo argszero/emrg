@@ -4554,29 +4554,25 @@ def _tar_operation_and_values(
     operation: str | None = None
     archive_values: list[str] = []
     directory_values: list[str] = []
-    next_is_a_value = False
     idx = 0
     while idx < len(words):
         tok = words[idx]
-        if next_is_a_value:
-            # The word a value-taking option just ate. It is not an option word, however
-            # option-shaped it looks — the case a scan without this cannot tell.
-            next_is_a_value = False
-            idx += 1
-            continue
         if tok == "--":
             break
         if tok.startswith("--"):
-            name, _, attached = tok.partition("=")
+            name, sep, attached = tok.partition("=")
             if name in _TAR_LONG_OPERATIONS:
                 if operation is None:
                     operation = _TAR_LONG_OPERATIONS[name]
             elif name in _TAR_LONG_WITH_VALUE:
-                value = attached
-                if not attached:
-                    next_is_a_value = True
-                    if idx + 1 < len(words):
-                        value = words[idx + 1]
+                # The value is the text after `=`, or the next word — which is then
+                # *eaten* and must not be read back as an option word. How many words an
+                # eaten value costs is not this reader's own fact to decide: it is
+                # `_words_eaten`, the one definition the walk's readers share.
+                value = attached if sep else (
+                    words[idx + 1] if idx + 1 < len(words) else ""
+                )
+                idx += _words_eaten(bool(sep)) - 1
                 if value and value != "-":
                     if name in _TAR_FILE_OPTIONS:
                         archive_values.append(value)
@@ -4591,11 +4587,8 @@ def _tar_operation_and_values(
                 ch = body[k]
                 if ch in _TAR_VALUE_TAKING_LETTERS:
                     rest = body[k + 1:]
-                    if rest:
-                        value = rest
-                    else:
-                        next_is_a_value = True
-                        value = words[idx + 1] if idx + 1 < len(words) else ""
+                    value = rest or (words[idx + 1] if idx + 1 < len(words) else "")
+                    idx += _words_eaten(bool(rest)) - 1
                     if value and value != "-":
                         if ch == "f":
                             archive_values.append(value)
