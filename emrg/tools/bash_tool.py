@@ -6647,21 +6647,38 @@ def _unresolved_wrapper_payloads(tokens: list[str]) -> list[str]:
 def _payload_code_words(tokens: list[str], i: int) -> list[str]:
     """The arguments of wrapper ``tokens[i]`` the shell hands back as text.
 
-    One position carries text rather than an operand: the value of a flag. The
-    wrapper is unresolved, so *which* flag — `-c`, `--command`, `-e` — is a fact
-    about a program the guard cannot name, and enumerating them is the #461 class
-    `_nested_command_texts` refuses (its docstring carries the measurement). The
-    flag itself is therefore what is matched, and every value of every flag is
-    read as code: an over-approximation, in the direction that keeps blocking.
+    Two positions carry text rather than an operand: the value of a flag, and what
+    an input redirection delivers. The wrapper is unresolved, so *which* flag —
+    `-c`, `--command`, `-e` — is a fact about a program the guard cannot name, and
+    enumerating them is the #461 class `_nested_command_texts` refuses (its
+    docstring carries the measurement). The flag itself is therefore what is
+    matched, and every value of every flag is read as code: an over-approximation,
+    in the direction that keeps blocking.
 
     Every other argument is one word the wrapper consumes — a script name, a
     positional parameter, the word a stream filter eats — and re-reading one as a
     command line is what named `rc=$?` in `$SHELL "patch rc=$?"` (issue #1492).
+
+    **The redirection half is not an argument** (issue #1523, reported against the
+    commit that added this function). The first version tested the flag alone, and
+    `<<<` is not a flag — it is stdin, and a shell with no `-c` reads its *program*
+    from stdin, which is the #979 loss path this whole walk exists for. Measured on
+    this host through `_check_sandbox` at `read-only`, the three-token command
+    `$SHELL <<< 'git checkout .'` and its `<<< "…"`, `0<<< …`, `git stash drop` and
+    `rm -rf /tmp/x` spellings all answered **BLOCK** on master `5ff1db1` and
+    **ALLOW** at the branch head, because with the flag-only test the payload came
+    back `[]` and neither the mutator rule nor the write-target rule ran. The fix
+    is a prefix rather than a set of operators, so the shell's own redirection
+    spellings (`<`, `<<`, `<<-`, `<<<`, and the `<(` / `<&` forms beside them) are
+    text positions by construction — still not a per-program table, so the
+    enumeration concern above is untouched; and the widened rule stays a subset of
+    master's own `tokens[i + 1:]`, so it can only restore what the narrowing
+    dropped, never refuse a command master allowed.
     """
     return [
         tokens[j]
         for j in range(i + 1, len(tokens))
-        if tokens[j - 1].startswith("-")
+        if tokens[j - 1].startswith(("-", "<"))
     ]
 
 

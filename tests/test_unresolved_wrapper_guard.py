@@ -267,6 +267,58 @@ def test_the_flag_rule_does_not_lose_the_shapes_the_walk_to_c_lost(cmd: str) -> 
     assert "git" in (reason or ""), (cmd, reason)
 
 
+# Issue #1523: the argument rule described one position that carries text and
+# there are two. A redirection operator is not a flag, and a shell with no `-c`
+# reads its **program** from stdin — so `sh <<< 'git checkout .'` runs the
+# mutator. The flag-only test read these as operands and so came back with an
+# empty payload, which released exactly the rows master `5ff1db1` blocked:
+# measured on this host, every row below answered BLOCK on master and ALLOW at
+# the head before this repair.
+STDIN_FEEDING_MUTATORS = [
+    "$SHELL <<< 'git checkout .'",
+    '$SHELL <<< "git checkout ."',
+    "$SHELL 0<<< 'git checkout .'",
+    "$SHELL <<< 'git stash drop'",
+]
+
+# The same position carrying a write: the operand rule would have read it as a
+# word the wrapper consumes, so the target rule is the only reader that sees it.
+STDIN_FEEDING_A_WRITE = [
+    "$SHELL <<< 'rm -rf /tmp/x'",
+]
+
+# The control that keeps the widening honest: the same position, a program that
+# reads. A rule that blocked these would be refusing the read to reach the write.
+STDIN_CARRYING_A_READ = [
+    "$SHELL <<< 'git status'",
+    "$SHELL 0<<< 'ls -la'",
+]
+
+
+@pytest.mark.parametrize("cmd", STDIN_FEEDING_MUTATORS)
+def test_a_redirection_that_feeds_the_wrapper_a_program_is_read(cmd: str) -> None:
+    allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
+    assert not allowed, (cmd, reason)
+    # The reason names the payload, not the wrapper: a block for some unrelated
+    # reason would be a different explanation for the same verdict.
+    assert "git" in (reason or ""), (cmd, reason)
+
+
+@pytest.mark.parametrize("cmd", STDIN_FEEDING_A_WRITE)
+def test_a_here_string_can_carry_the_write_too(cmd: str) -> None:
+    """Blocked at both tiers: at read-only as a write, at workspace-write as one
+    landing outside the workspace — the destination is /tmp, not the workdir."""
+    for tier in (READ_ONLY, WW):
+        allowed, reason, _enforcement = _check_sandbox(cmd, tier, WORKDIR)
+        assert not allowed, (cmd, tier, reason)
+
+
+@pytest.mark.parametrize("cmd", STDIN_CARRYING_A_READ)
+def test_a_redirection_that_feeds_the_wrapper_a_read_is_allowed(cmd: str) -> None:
+    allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
+    assert allowed, (cmd, reason)
+
+
 def test_the_named_wrapper_is_the_control() -> None:
     """The hole was the spelling, so the named twin must reach the same verdict."""
     named, _r1, _e1 = _check_sandbox("sh -c 'git checkout .'", READ_ONLY, WORKDIR)
