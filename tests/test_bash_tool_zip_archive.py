@@ -26,7 +26,11 @@ are:
 
 * a run with **no list** writes nothing (`zip a.zip`, `zip -d a.zip`, `zip -v a.zip`
   all exit 12 with "Nothing to do!"), so naming the archive there would be a block
-  on a command that writes nothing;
+  on a command that writes nothing — **unless the names come from stdin**: `-@` gives
+  that same lone operand a name source, and `printf 'f\n' | zip -@ a` is rc=0 and
+  creates `a.zip` (issue #1529, measured by its reporter on Info-ZIP 3.0). This file
+  used to pin the opposite as a "named limit", on the reading that the archive is
+  named anyway; it is not, because the exemption returns before the archive is read;
 * `-T` is *not* a read — `zip -T a.zip f` rewrote the archive (mtime moved) while
   `zip -T a.zip` tested it and left it alone;
 * `-m`/`--move` **deletes** every listed file, so the operands after the archive are
@@ -390,15 +394,78 @@ def test_the_exclusion_list_is_the_documented_residual():
     ]
 
 
-def test_names_read_from_stdin_are_the_documented_residual():
-    """`-@` takes its names from stdin, which the walk cannot see.
+def test_names_read_from_stdin_are_not_a_residual_of_the_operand_count():
+    """`-@` is a name source: the same lone operand means two different runs.
 
-    The archive is still named, so the run is judged by where its own write lands;
-    the names the standard input supplies stay unnamed, which is the same limit every
-    other stdin-driven form has.
+    This replaces the arm that pinned the opposite (`zip -@ <outside>/a.zip` naming
+    nothing), which read the flag as a limit on the ground that "the archive is still
+    named". It is not named — the lone-operand exemption returned before the first
+    operand was ever looked at, so the one flag that gives that operand a name source
+    produced exactly the write the walk had already decided not to judge (issue
+    #1529; measured by its reporter, `printf 'f\\n' | zip -@ a` is rc=0 and creates
+    `a.zip` while `zip a` is rc=12 and creates nothing).
+
+    Both rows are asserted together so the pair cannot drift apart again, and the
+    `-@` row is the one `test_the_stdin_rule_is_what_names_the_lone_operand` brings
+    back by blinding the reader.
+    """
+    bare = f"zip {OUTSIDE}/a.zip"
+    from_stdin = f"zip -@ {OUTSIDE}/a.zip"
+
+    assert _extract_write_targets(bare) == [], (
+        "the exemption's own row is unchanged: `zip a.zip` exits 12 and writes nothing"
+    )
+    assert _extract_write_targets(from_stdin) == [f"{OUTSIDE}/a.zip"], (
+        "with `-@` the same lone operand is the archive the run creates"
+    )
+
+    assert tiers(bare)["workspace-write"] is True
+    assert tiers(from_stdin)["workspace-write"] is False, (
+        "the issue's row: this was ALLOW at both tiers while it wrote the archive"
+    )
+    assert tiers(from_stdin)["read-only"] is False, (
+        "read-only refuses every named target, and this one is named now"
+    )
+
+
+def test_the_two_spellings_zip_rejects_keep_the_exemption():
+    """`--@` and `-@-` are refused by zip itself, so they are not name sources.
+
+    Measured by the issue's reporter: `zip --@ a` is rc=16 ("long option '@' not
+    supported") and `zip -@- a` is rc=16 ("option '@' ... not negatable"), both with
+    nothing on disk. Reading either as the flag would refuse a run that cannot write,
+    which is why the scan drops a long spelling and a negated letter rather than
+    matching the character wherever it appears.
+    """
+    for row in (f"zip --@ {OUTSIDE}/a.zip", f"zip -@- {OUTSIDE}/a.zip"):
+        assert _extract_write_targets(row) == [], row
+        assert tiers(row)["workspace-write"] is True, row
+
+
+def test_the_stdin_rule_is_what_names_the_lone_operand():
+    """Blind the reader and the hole the issue measured comes back, both ways.
+
+    With `_zip_takes_names_from_stdin` answering nothing the exemption is
+    unconditional again: `zip -@ <outside>/a.zip` names nothing and is ALLOW at
+    `workspace-write` while the run really creates the archive there. That is what
+    makes the row above a claim about this predicate rather than an observation about
+    the command.
     """
     cmd = f"zip -@ {OUTSIDE}/a.zip"
-    assert _extract_write_targets(cmd) == []
+    assert tiers(cmd)["workspace-write"] is False, "the control: unblinded, refused"
+
+    original = bash_tool._zip_takes_names_from_stdin
+    try:
+        bash_tool._zip_takes_names_from_stdin = lambda words: False
+        assert _extract_write_targets(cmd) == []
+        assert tiers(cmd)["workspace-write"] is True, (
+            "the row must hang on the flag reader, not on the operand count"
+        )
+    finally:
+        bash_tool._zip_takes_names_from_stdin = original
+        assert _extract_write_targets(cmd) == [f"{OUTSIDE}/a.zip"], (
+            "the reader must be restored byte-for-byte"
+        )
 
 
 # ── ground truth, executed: the derivation the rule is built on ─────────────────────
