@@ -54,7 +54,9 @@ from emrg.tools.bash_tool import (
     _is_within,
     _split_command_tokens,
     _temp_write_roots,
+    _tokenize_command,
     _trusted_write_zones,
+    _unresolved_wrapper_payloads,
 )
 
 READ_ONLY = "read-only"
@@ -343,6 +345,83 @@ def test_a_here_string_can_carry_the_write_too(cmd: str) -> None:
 def test_a_redirection_that_feeds_the_wrapper_a_read_is_allowed(cmd: str) -> None:
     allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
     assert allowed, (cmd, reason)
+
+
+# The residual of #1523, taken one spelling in — and the reason the rule reads the
+# substitution rather than the word after the operator. `<<<$(echo …)` tokenizes to
+# `['<<<', '$', '(', 'echo', …]`: the operator and its operand are separate tokens
+# when the operand opens a substitution, so a rule that hands over the word after
+# the operator hands over `$` and leaves the program text behind. Master's blanket
+# collection covered these incidentally, so this is the fail-open direction — the
+# one this walk must never move in. Measured on master `1f2feef` and on this
+# branch's head `8b160d82` before the repair, both tiers, through `_check_sandbox`:
+# every mutator row below answered BLOCK on master and ALLOW at the head.
+SUBSTITUTION_FEEDING_MUTATORS = [
+    "$SHELL <<<$(echo 'git checkout .')",
+    "$SHELL <<<$(printf %s 'git checkout .')",
+    "$SHELL < <(echo 'git checkout .')",
+    "$SHELL < <(printf %s 'git checkout .')",
+    "$SHELL <<$(echo 'git checkout .')",
+    "$SHELL 2< <(echo 'git checkout .')",
+    "$SHELL <<<$(echo 'git checkout .') x",
+    "echo hi && $SHELL <<<$(echo 'git checkout .')",
+]
+
+# The write, through the same position: named by the target rule, refused at both
+# tiers because `OUTSIDE` is outside every allowed root (the premise below pins
+# that for the here-string rows, and this is the same destination).
+SUBSTITUTION_FEEDING_A_WRITE = [
+    f"$SHELL <<<$(echo 'rm -rf {OUTSIDE}')",
+    f"$SHELL < <(printf %s 'rm -rf {OUTSIDE}')",
+]
+
+# The control the hand-over is admitted against: the same position, substitutions
+# that read. A rule that blocked these would be refusing the read to reach the write.
+SUBSTITUTION_CARRYING_A_READ = [
+    "$SHELL <<<$(echo hi)",
+    "$SHELL <<<$(date)",
+    "$SHELL < <(echo hi)",
+]
+
+
+@pytest.mark.parametrize("cmd", SUBSTITUTION_FEEDING_MUTATORS)
+def test_a_redirection_whose_operand_is_a_substitution_is_read(cmd: str) -> None:
+    allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
+    assert not allowed, (cmd, reason)
+    assert "git" in (reason or ""), (cmd, reason)
+
+
+@pytest.mark.parametrize("cmd", SUBSTITUTION_FEEDING_A_WRITE)
+def test_a_substituted_here_string_can_carry_the_write_too(cmd: str) -> None:
+    for tier in (READ_ONLY, WW):
+        allowed, reason, _enforcement = _check_sandbox(cmd, tier, WORKDIR)
+        assert not allowed, (cmd, tier, reason)
+        assert "emrg-1523" in (reason or ""), (cmd, tier, reason)
+
+
+@pytest.mark.parametrize("cmd", SUBSTITUTION_CARRYING_A_READ)
+def test_a_redirection_whose_operand_substitutes_a_read_is_allowed(cmd: str) -> None:
+    allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
+    assert allowed, (cmd, reason)
+
+
+def test_the_hand_over_is_the_substitution_not_the_token_at_the_operator() -> None:
+    """The mechanism, not the verdicts above: the words handed to the reader.
+
+    A verdict test cannot see the difference between handing over `$` and handing
+    over the substitution — both can produce a block for the right reason on some
+    row — so this pins the words the collector hands the readers
+    (`_unresolved_wrapper_payloads`, the caller of `_payload_code_words`). It is
+    also the shape a tokenizer change would move while the verdicts above stayed
+    green.
+    """
+    for cmd, program in (
+        ("$SHELL <<<$(echo 'git checkout .')", "git checkout ."),
+        ("$SHELL < <(printf %s 'rm -rf /x')", "rm -rf /x"),
+        ("$SHELL <<<$(echo hi)", "hi"),
+    ):
+        words = _unresolved_wrapper_payloads(_tokenize_command(cmd))
+        assert program in words, (cmd, words)
 
 
 def test_the_named_wrapper_is_the_control() -> None:

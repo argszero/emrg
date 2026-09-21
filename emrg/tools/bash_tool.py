@@ -6805,12 +6805,71 @@ def _payload_code_words(tokens: list[str], i: int) -> list[str]:
     enumeration concern above is untouched; and the widened rule stays a subset of
     master's own `tokens[i + 1:]`, so it can only restore what the narrowing
     dropped, never refuse a command master allowed.
+
+    **And the operand of a redirection can be a *substitution*** (the residual of
+    #1523, measured by a Contributor on this branch's head `8b160d82`). The
+    operator and its operand are separate tokens when the operand opens a
+    substitution — `<<<$(echo 'git checkout .')` tokenizes to
+    ``['$SHELL', '<<<', '$', '(', 'echo', 'git checkout .', ')']`` — so a rule that
+    hands over the *word* after the operator hands over `$` and nothing else.
+    Measured this cycle on master `1f2feef` and head `8b160d82`, both tiers, through
+    `_check_sandbox`: `$SHELL <<<$(echo 'git checkout .')`, its `printf %s` twin,
+    `$SHELL < <(echo 'git checkout .')`, `$SHELL < <(printf %s 'git checkout .')`
+    and `$SHELL <<<$(echo 'rm -rf /tmp/x')` answered **BLOCK** on master and
+    **ALLOW** at the head — the same loss one spelling over, because master's
+    blanket collection covered the substitution incidentally and the narrowing
+    reads one token. `_text_position_words` hands the substitution over instead of
+    the single token, and the words it returns are still a subset of master's
+    `tokens[i + 1:]`, so the monotone-direction claim above holds for this half too.
     """
-    return [
-        tokens[j]
-        for j in range(i + 1, len(tokens))
-        if tokens[j - 1].startswith(("-", "<"))
-    ]
+    out: list[str] = []
+    for j in range(i + 1, len(tokens)):
+        if tokens[j - 1].startswith(("-", "<")):
+            out.extend(_text_position_words(tokens, j))
+    return out
+
+
+def _text_position_words(tokens: list[str], j: int) -> list[str]:
+    """The words the text position at ``j`` hands to the reader.
+
+    Usually the one word there: a flag's value, or what a redirection delivers.
+    A **substitution** is the exception. The operand of `<<<` / `<` is the
+    substitution as a whole, and the tokenizer splits `$(` — measured on this
+    host, `$SHELL <<<$(echo hi)` is
+    ``['$SHELL', '<<<', '$', '(', 'echo', 'hi', ')']`` while `< <(echo hi)` keeps
+    `<(` whole — so reading the token after the operator reads `$` and leaves the
+    program text behind. That text is what the shell runs: `$(echo 'git checkout
+    .')` puts the mutator on the shell's own stdin, the #979 loss path (issue
+    #1523's residual, measured on master `1f2feef` vs head `8b160d82`).
+    """
+    opener = _substitution_paren(tokens, j)
+    if opener is None:
+        return [tokens[j]]
+    depth = 0
+    k = opener
+    while k < len(tokens):
+        depth += tokens[k].count("(") - tokens[k].count(")")
+        k += 1
+        if depth <= 0:
+            break
+    # Unclosed: hand the rest over, which is what master's blanket collection did
+    # and keeps this half a subset of it rather than a new reading of its own.
+    return tokens[j:k]
+
+
+def _substitution_paren(tokens: list[str], j: int) -> int | None:
+    """Index of the token holding the `(` a substitution at ``j`` opens, else None.
+
+    Two spellings, because the tokenizer splits `$(` and keeps `<(` / `>(` whole:
+    ``['$', '(']`` versus ``['<(']``. `${…}` is deliberately not one of them — a
+    parameter expansion produces a word, not a command, so its braces are data.
+    """
+    tok = tokens[j]
+    if tok == "$" and j + 1 < len(tokens) and tokens[j + 1].startswith("("):
+        return j + 1
+    if tok.endswith("(") and tok[:-1] in ("$", "<", ">"):
+        return j
+    return None
 
 
 def _unresolved_wrapper_targets(cmd: str, _depth: int = 0) -> list[str]:
