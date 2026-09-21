@@ -12,6 +12,7 @@ from pathlib import Path
 
 from emrg._win import win32_no_window_kwargs
 from emrg.config import config_dir
+from emrg.server.atomic import atomic_write_bytes
 
 INSTALL_BIN = Path.home() / ".emrg" / "install" / "bin"
 INSTALL_INFO = config_dir() / "install-info.json"
@@ -297,3 +298,115 @@ def git_cmd(*args: str, cwd: str | None = None, timeout: int = 10) -> subprocess
         encoding="utf-8", timeout=timeout, env=no_prompt_env(),
         **win32_no_window_kwargs(),
     )
+
+
+# ── EMRG's own runtime directory inside a repository EMRG works in ────────
+#
+# Rant 2026-09-21T10:12:01: an open-source task's clone carried `.emrg/`
+# (sessions, memory, the client log — this instance's own runtime data) as
+# *untracked and unignored* dirt. The structural dirty-tree guard asks
+# whether a tree holds work that exists nowhere else, and EMRG's own
+# bookkeeping answers "yes": 38 cycles were forced `read-only` for a
+# directory EMRG itself created, and the tier that followed from it is what
+# refused the git verbs that would have converged the tree.
+#
+# The dirt is EMRG's, not the repository's, so the repository's *local*
+# ignore file is where it belongs: `.git/info/exclude` is per-clone, is
+# never committed, and never touches the upstream `.gitignore` — which is
+# the file a project's maintainers own.
+
+# Anchored to the repository root on purpose: a nested `.emrg/` inside a
+# subdirectory is some other tool's directory, and ignoring it here would be
+# a claim this repository cannot make.
+EXCLUDE_ENTRY = "/.emrg/"
+
+_EXCLUDE_NOTE = (
+    "# EMRG's own runtime directory (sessions, memory, logs). It is not part\n"
+    "# of this repository and is never committed. Ignoring it locally keeps\n"
+    "# EMRG's dirty-tree guard from reading its own runtime data as work that\n"
+    "# exists nowhere else. Written by emrg/server/git_utils.py; delete this\n"
+    "# block if you do not want it.\n"
+)
+
+
+def _exclude_path_of(repo_dir: str) -> Path | None:
+    """The ignore file git actually reads for ``repo_dir``, or None.
+
+    Asked of git rather than derived from a path, because deriving it is wrong
+    in the case that matters: ``.git`` is a directory in a clone and a *file*
+    in a linked worktree, and a worktree's excludes are read from the **common**
+    git dir (`<main>/.git/info/exclude`), not from the per-worktree one
+    (`<main>/.git/worktrees/<name>/info/exclude`) — measured here, where writing
+    the per-worktree file left the very directory still reported as untracked.
+    ``--git-path`` is git's own answer to "which file do I read for this?".
+    """
+    try:
+        cp = git_cmd("rev-parse", "--git-path", "info/exclude", cwd=repo_dir)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if cp.returncode != 0:
+        return None
+    out = (cp.stdout or "").strip()
+    if not out:
+        return None
+    candidate = Path(out)
+    return candidate if candidate.is_absolute() else (Path(repo_dir) / candidate)
+
+
+def _already_excludes_runtime_dir(text: str) -> bool:
+    """Whether an ignore file already ignores the root ``.emrg/``.
+
+    Accepts the spellings that mean it (anchored or not, trailing slash or
+    not) so the check does not rewrite a file that already says the same
+    thing in another hand's style.
+    """
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.strip("/") == ".emrg":
+            return True
+    return False
+
+
+def ensure_local_exclude(repo_dir: str) -> str:
+    """Make ``repo_dir``'s own git dir ignore EMRG's runtime directory.
+
+    Idempotent, and never raises — this runs while a session or a cycle is
+    being set up, and no repository state is worth failing that for:
+
+    * ``"present"`` — already ignored, nothing written;
+    * ``"added"`` — the entry was appended (existing content preserved);
+    * ``"not-a-repo"`` — no git dir there, or git is unavailable;
+    * ``"error: <reason>"`` — the file could not be read or written.
+
+    Only the repository's *local* exclude is touched. The upstream
+    ``.gitignore`` belongs to the project and is left alone (rant
+    2026-09-21T10:12:01).
+    """
+    repo = Path(repo_dir)
+    if not repo.is_dir():
+        return "not-a-repo"
+    exclude = _exclude_path_of(str(repo))
+    if exclude is None:
+        return "not-a-repo"
+    try:
+        existing = (
+            exclude.read_text(encoding="utf-8", errors="replace")
+            if exclude.is_file()
+            else ""
+        )
+    except OSError as exc:
+        return f"error: {exc}"
+    if _already_excludes_runtime_dir(existing):
+        return "present"
+    body = existing
+    if body and not body.endswith("\n"):
+        body += "\n"
+    body += _EXCLUDE_NOTE + EXCLUDE_ENTRY + "\n"
+    try:
+        mode = os.stat(exclude).st_mode & 0o777 if exclude.exists() else 0o644
+        atomic_write_bytes(body, exclude, mode=mode)
+    except OSError as exc:
+        return f"error: {exc}"
+    return "added"

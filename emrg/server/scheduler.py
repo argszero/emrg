@@ -31,6 +31,7 @@ from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
 from emrg.server.git_utils import (
     _detect_git_remote,
+    ensure_local_exclude,
     resolve_git_gh,
 )
 
@@ -413,6 +414,44 @@ class TaskHandler:
             if cand in SANDBOX_MODES:
                 return cand
         return "workspace-write"
+
+    def _exclude_own_runtime_dir(self) -> None:
+        """Let the repository ignore this instance's own runtime directory.
+
+        EMRG writes ``.emrg/`` (sessions, memory, the client log) into the
+        directories it works in. Where that directory is a git repository —
+        an open-source task's clone is the case that cost 38 consecutive
+        read-only cycles (rant 2026-09-21T10:12:01) — the dirt is EMRG's own
+        and must not be read as the host's uncommitted work.
+
+        The entry goes in the repository's *local* ``.git/info/exclude``:
+        per-clone, never committed, and never the upstream ``.gitignore``,
+        which belongs to the project's maintainers. Idempotent and silent by
+        design — a failure here (no git, a read-only git dir) must never stop
+        a cycle, and the probe below still answers for itself.
+        """
+        source_dir = str(self._source_dir)
+        marker = os.path.join(source_dir, ".git")
+        # The dirty-tree probe itself fails open without this marker, so there
+        # is nothing to protect when it is absent (and no git call is worth
+        # making on a directory that is not a repository).
+        if not os.path.isdir(marker) and not os.path.isfile(marker):
+            return
+        status = ensure_local_exclude(source_dir)
+        if status == "added":
+            self._logger.warning(
+                "TaskHandler[%s]: %s now ignores EMRG's own runtime directory "
+                "(.git/info/exclude, local and uncommitted) — a dirty tree "
+                "holding only this instance's bookkeeping is not the host's "
+                "work (rant 2026-09-21T10:12:01)",
+                self.name, source_dir,
+            )
+        elif status.startswith("error"):
+            self._logger.warning(
+                "TaskHandler[%s]: could not write the local exclude for %s "
+                "(%s) — the dirty-tree probe answers for the tree as it is",
+                self.name, source_dir, status,
+            )
 
     @staticmethod
     def _is_dirty_tree_sync(source_dir: str) -> bool:
@@ -1023,6 +1062,13 @@ class TaskHandler:
         (comma-separated task names, or ``*`` for all); every release of the guard is
         logged as a receipt.
         """
+        # EMRG's own runtime directory is not the host's work (rant
+        # 2026-09-21T10:12:01). Written *before* the probe below reads the
+        # tree, so the judge never sees the sessions, memory and logs this
+        # instance writes there: the dirt that forced 38 consecutive cycles to
+        # `read-only` was EMRG's own, and the tier that followed from it is
+        # what refused the git verbs that would have converged it.
+        self._exclude_own_runtime_dir()
         if dirty is None:
             dirty = await asyncio.to_thread(
                 self._is_dirty_tree_sync, str(self._source_dir)
