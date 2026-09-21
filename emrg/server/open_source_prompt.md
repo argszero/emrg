@@ -125,7 +125,7 @@ cd {{ source_dir }} && git status --short --branch 2>&1
 >   `工作树非干净（dirty working tree）— 本周期只读` in the closing summary and proceed
 >   with the read-only parts of the cycle; finish without any git write operations.
 
-> ⚠️ **Where the contribution happens (rant 2026-09-21T16:12:19):** `{{ source_dir }}` is the
+> ⚠️ **Where the contribution happens (PR #1524, rant 2026-09-21T16:12:19):** `{{ source_dir }}` is the
 > HOST's working tree and is a **read-only reference** for this task — read source in it,
 > `git show origin/main:<path>`, `git diff HEAD origin/main`. Every branch, commit and push
 > happens in the **session clone** defined in B.3
@@ -335,7 +335,7 @@ Extract from these files and strictly follow:
 
 #### B.3 Fork, clone, and branch
 
-**Never branch in `{{ source_dir }}`** (rant 2026-09-21T16:12:19). The contribution lives in a clone
+**Never branch in `{{ source_dir }}`** (PR #1524, rant 2026-09-21T16:12:19). The contribution lives in a clone
 under this session's own directory; that path is inside the workspace the sandbox allows, and the
 host tree's `.git/info/exclude` keeps it out of `git status` (PR #1505).
 
@@ -363,7 +363,7 @@ refused in the closing summary as a blocker, and finish the read-only parts of t
 #### B.4 Implement
 
 - **Work in the clone from B.3** (`cd "$DEV"`): every edit lands there — `{{ source_dir }}` stays a
-  read-only reference (rant 2026-09-21T16:12:19)
+  read-only reference (PR #1524, rant 2026-09-21T16:12:19)
 - **Read the context first**: understand the relevant code's responsibilities and conventions
 - **Small changes**: focus on a single problem; don't refactor opportunistically
 - **Follow project conventions**: strictly comply with CONTRIBUTING.md and the PR template read in B.3
@@ -456,7 +456,7 @@ For each open PR:
 
 > Every code change this phase makes — the review-feedback fix and the conflict rebase alike —
 > happens in the clone B.3 created (`cd "$DEV"`); `{{ source_dir }}` stays a read-only reference
-> (rant 2026-09-21T16:12:19).
+> (PR #1524, rant 2026-09-21T16:12:19).
 
 #### C.1.5 Parallel Recon (healthy-PR rule, PR #954, rant 2026-08-24T14:05:06)
 
