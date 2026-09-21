@@ -54,6 +54,7 @@ from emrg.tools.bash_tool import (
     _is_within,
     _split_command_tokens,
     _temp_write_roots,
+    _trusted_write_zones,
 )
 
 READ_ONLY = "read-only"
@@ -283,8 +284,16 @@ STDIN_FEEDING_MUTATORS = [
 
 # The same position carrying a write: the operand rule would have read it as a
 # word the wrapper consumes, so the target rule is the only reader that sees it.
+# The destination must be outside *every* allowed root or the row measures
+# nothing, and `/tmp` is not: on the Linux runner it **is** the OS temp root, so
+# the workspace-write tier allowed that write for the temp-root reason and the
+# row was red there while it passed here (measured 2026-09-21, run 35599007744).
+# ``OUTSIDE`` is a name no platform's ``tempfile.gettempdir()`` returns, and the
+# premise below asserts that rather than assuming it.
+OUTSIDE = "/var/tmp/emrg-1523-outside"
+
 STDIN_FEEDING_A_WRITE = [
-    "$SHELL <<< 'rm -rf /tmp/x'",
+    f"$SHELL <<< 'rm -rf {OUTSIDE}'",
 ]
 
 # The control that keeps the widening honest: the same position, a program that
@@ -304,13 +313,30 @@ def test_a_redirection_that_feeds_the_wrapper_a_program_is_read(cmd: str) -> Non
     assert "git" in (reason or ""), (cmd, reason)
 
 
+def test_premise_the_write_destination_is_outside_every_allowed_root() -> None:
+    """The write row only measures the payload reader if ``OUTSIDE`` is really out.
+
+    Without this, the row silently degrades to a measurement of the host's temp
+    root instead of of the payload reader — which is exactly how it went red on
+    the Linux runner and green here.
+    """
+    assert _is_absolute_path(OUTSIDE)
+    assert not _is_within(OUTSIDE, WORKDIR)
+    for root in (*_temp_write_roots(), *_trusted_write_zones()):
+        assert not _is_within(OUTSIDE, root), root
+
+
 @pytest.mark.parametrize("cmd", STDIN_FEEDING_A_WRITE)
 def test_a_here_string_can_carry_the_write_too(cmd: str) -> None:
     """Blocked at both tiers: at read-only as a write, at workspace-write as one
-    landing outside the workspace — the destination is /tmp, not the workdir."""
+    landing outside the workspace — the destination is ``OUTSIDE``, which the
+    premise above pins as outside every allowed root."""
     for tier in (READ_ONLY, WW):
         allowed, reason, _enforcement = _check_sandbox(cmd, tier, WORKDIR)
         assert not allowed, (cmd, tier, reason)
+        # The reason names the payload's destination: a block for some unrelated
+        # reason would be a different explanation for the same verdict.
+        assert "emrg-1523" in (reason or ""), (cmd, tier, reason)
 
 
 @pytest.mark.parametrize("cmd", STDIN_CARRYING_A_READ)
