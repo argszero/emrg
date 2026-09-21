@@ -4849,6 +4849,26 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
     invocation and stays allowed. Erring toward *blocking* is the safe
     direction for this guard; erring toward data loss is not.
 
+    **But a wrapper *word* is not a wrapper invocation** (issue #1513), and the
+    over-approximation above is not free of false blocks once the word can be
+    data. The belief is therefore gated by the same position test the verb walk
+    uses (`_runs_as_a_command`) — the reading of "may this word, standing here,
+    be believed?" — so the wrapper is recursed into only where the shell would
+    run it. Measured on master `9a7bfe65`, both tiers, by the predicate alone:
+
+      `echo sh "patch /etc/hosts"`       targets ['/etc/hosts']  BLOCK both tiers
+      `printf %s sh "patch /etc/hosts"`  targets ['/etc/hosts']  BLOCK both tiers
+      `echo eval "patch /etc/hosts"`     targets ['/etc/hosts']  BLOCK both tiers
+      `echo bash "git checkout ."`       targets []              BLOCK read-only
+      `echo foo "patch /etc/hosts"`      targets []              ALLOW both tiers
+
+    The three controls in that slot (`foo`, a non-wrapper, no word at all) were
+    allowed, so the discriminator was the wrapper word and not the payload: a
+    line that prints a string was refused at the tier whose *purpose* is to let a
+    `sh` be read. The gate is the one #1469 gave the verb walk within one text
+    ("may this verb, standing here, be believed?"), applied one site over — the
+    question here is which *texts* the walk is handed.
+
     An **un-resolvable** wrapper is treated the same way (issue #1244): a
     program word that is a variable reference may well be the shell, and the
     guard cannot tell — measured on master, `$SHELL -c 'git checkout .'`,
@@ -4859,13 +4879,27 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
     """
     out: list[str] = []
     for i, tok in enumerate(tokens):
-        if _basename(tok) in _SHELL_WRAPPERS:
+        base = _basename(tok)
+        if base in _SHELL_WRAPPERS:
             # `sh -c <text>` — take everything after the wrapper and let the
             # recursive parse decide what is a command. Do NOT locate `-c`:
             # every way of spelling an option before it is a hole.
+            #
+            # ...but the *word* is believed only where the shell would run it
+            # (issue #1513): `echo sh "patch /etc/hosts"` prints a string, and
+            # recursing into the line after that `sh` refused it at both tiers.
+            # The position test is the one the verb walk already uses, so the two
+            # readers of "is this word an invocation?" stay one rule.
+            if not _runs_as_a_command(tokens, i):
+                continue
             out.extend(tokens[i + 1:])
-        elif _basename(tok) in _SHELL_EVALUATORS:
+        elif base in _SHELL_EVALUATORS:
             # `eval <text...>`: every remaining token is re-parsed as a command.
+            # Same position gate, same reason — and the direction #1391 recorded
+            # for this payload ("reading it as a command is the security-critical
+            # direction", so narrowing it belongs in its own issue) is this one.
+            if not _runs_as_a_command(tokens, i):
+                continue
             out.extend(tokens[i + 1:])
     out.extend(_unresolved_wrapper_payloads(tokens))
     return out
