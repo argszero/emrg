@@ -3218,9 +3218,11 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     # command the shell will run is judged wherever it is written (issue
     # #1234). `_nested_command_texts` is the same over-approximating walk
     # `_find_git_mutator` uses, capped at the same depth, so the two rules
-    # cannot drift apart again.
+    # cannot drift apart again. The masked line goes with it, because a
+    # substitution between quotes is one token and only the line knows it is a
+    # command (issue #1516).
     if _depth < 3:
-        for nested in _nested_command_texts(tokens):
+        for nested in _nested_command_texts(tokens, masked):
             for t in _extract_write_targets(nested, _depth + 1):
                 if t not in targets:
                     targets.append(t)
@@ -4808,7 +4810,129 @@ def _basename(tok: str) -> str:
     return base
 
 
-def _nested_command_texts(tokens: list[str]) -> list[str]:
+def _substitution_body(text: str, i: int) -> tuple[str, int]:
+    """Body of the ``$( … )`` starting at ``text[i]``, and the index past its ``)``.
+
+    Parens are counted, so a nested substitution does not close the outer one, and a
+    *quoted* region inside the body is skipped whole, because a `)` there is a
+    character rather than the end (``$(echo ")")``). An unterminated substitution
+    takes the rest of the line: the shell refuses the whole line as a syntax error,
+    and over-reading is this guard's fail-closed side.
+    """
+    start = i + 2
+    depth = 1
+    j = start
+    while j < len(text):
+        ch = text[j]
+        if ch in ("'", '"'):
+            end = text.find(ch, j + 1)
+            if end < 0:
+                break
+            j = end + 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:j], j + 1
+        j += 1
+    return text[start:], len(text)
+
+
+def _backtick_body(text: str, i: int) -> tuple[str, int]:
+    """Body of the `` ` … ` `` starting at ``text[i]``, and the index past the close."""
+    start = i + 1
+    end = text.find("`", start)
+    if end < 0:
+        return text[start:], len(text)
+    return text[start:end], end + 1
+
+
+def _substitution_payloads(text: str) -> list[str]:
+    """Bodies of the command substitutions in ``text``, read from the raw line.
+
+    A substitution written between quotes reaches the token stream as part of a
+    single word — quote semantics are kept deliberately (issue #1162: a `>` inside a
+    quoted argument is not an operator) — so neither payload reader has a command
+    word to recurse into and the command it really runs is invisible. Measured
+    through `_check_sandbox` alone at both tiers, nothing executed: ``echo "$(git
+    checkout .)"``, ``x="$(git checkout .)"`` and ``echo "$(rm -rf /tmp/x)"``
+    answered ALLOW with an empty target list, while ``git checkout .`` on its own was
+    refused — the control (issue #1516).
+
+    The quote characters are gone by the time the walk sees tokens (``echo '$(x)'``
+    and ``echo "$(x)"`` are the same two tokens), so this reads the line where they
+    are still visible and answers the one question the readers need: which bodies is
+    the shell really going to run. A body goes back through the same recursion the
+    named wrapper already uses, so the readers judge it by their own rules instead of
+    by a second copy of them.
+
+    Three rules, each with its direction:
+
+      - **quoting decides** — a single-quoted region is literal, so ``echo '$(git
+        checkout .)'`` runs nothing and reading it would refuse a pure read; inside
+        **double** quotes a `'` is an ordinary character, which is why the scan
+        tracks the quote it is in rather than skipping to the next apostrophe
+        (``echo "it's $(git checkout .)"`` runs the substitution and is read here).
+        This is the one fact the token stream cannot supply, and the reason the raw
+        line is needed at all;
+      - ``$(( … ))`` is **arithmetic** — its text is an expression, not a command, so
+        the region is not handed over as text (``echo "$((a > b))"`` is not a
+        redirect), but it *is* still scanned for the substitutions nested inside it,
+        which do run (``echo "$(($(git checkout .)))"`` is read here);
+      - **everything else is read**, including a body inside a comment. That is the
+        rule the named-wrapper walk already follows and not an oversight: reading
+        more of the line than the shell runs cannot hide a mutator, the over-read
+        text is not executed, and the price is a refusal of a command that would have
+        done nothing — the fail-closed side. A backslash is read the way
+        `_protect_windows_backslashes` lets the tokenizer read it — an escape where
+        the shell treats it as one, a path character on Windows — so the scanner and
+        the tokenizer cannot disagree about which word a `$(` sits in.
+    """
+    escaping = not _WINDOWS_SHELL
+    out: list[str] = []
+    i = 0
+    in_double = False
+    while i < len(text):
+        ch = text[i]
+        if escaping and ch == "\\":
+            # Outside double quotes a backslash escapes anything; inside them the
+            # shell keeps it for `$`, a backtick, a quote and itself. Either way the
+            # pair is one character the shell does not read as syntax, so the scan
+            # steps over it — that is what keeps `"\$(x)"` literal without a second
+            # lexer.
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            if not in_double or nxt in ('$', "`", '"', "\\", "\n"):
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "'" and not in_double:
+            end = text.find("'", i + 1)
+            i = len(text) if end < 0 else end + 1
+            continue
+        if ch == '"':
+            in_double = not in_double
+            i += 1
+            continue
+        if ch == "$" and text.startswith("$(", i):
+            arithmetic = text.startswith("$((", i)
+            body, i = _substitution_body(text, i)
+            if arithmetic:
+                out.extend(_substitution_payloads(body))
+            else:
+                out.append(body)
+            continue
+        if ch == "`":
+            body, i = _backtick_body(text, i)
+            out.append(body)
+            continue
+        i += 1
+    return out
+
+
+def _nested_command_texts(tokens: list[str], text: str | None = None) -> list[str]:
     """The command strings a shell will itself re-parse out of ``tokens``.
 
     Returns the argument of every `sh -c <text>` (and the other wrapper
@@ -4856,6 +4980,12 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
     `sudo $SHELL -c …` all answered ALLOW at read-only and all discarded the
     uncommitted edit. Its payload is therefore read as a possible command, which
     only ever *adds* blocking — the walk stays monotone in the safe direction.
+
+    A substitution written where the tokens cannot show it — inside double quotes —
+    is covered the same way, but it cannot come from the tokens at all: the quote
+    type is gone by the time the walk runs, so the caller passes the masked line it
+    tokenized as ``text`` and `_substitution_payloads` reads the bodies off that
+    (issue #1516). Omitting ``text`` keeps the token-only reading the walk had.
     """
     out: list[str] = []
     for i, tok in enumerate(tokens):
@@ -4868,6 +4998,12 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
             # `eval <text...>`: every remaining token is re-parsed as a command.
             out.extend(tokens[i + 1:])
     out.extend(_unresolved_wrapper_payloads(tokens))
+    if text is not None:
+        # The substitutions the token stream cannot see (issue #1516): a body
+        # between quotes is one word, so it has to come off the raw line. The
+        # callers pass the same line they tokenized, and the bodies are judged by
+        # this same walk one level down, so the two readers keep one rule.
+        out.extend(_substitution_payloads(text))
     return out
 
 
@@ -5299,13 +5435,14 @@ def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     as in `_extract_write_targets`: `cat <<EOF` + `git checkout .` + `EOF` is a
     document that mentions the command, not an invocation of it.
     """
-    tokens = _tokenize_command(_mask_data_heredoc_bodies(cmd))
+    masked = _mask_data_heredoc_bodies(cmd)
+    tokens = _tokenize_command(masked)
     for verb, rest in _git_verbs(tokens):
         hit = _git_invocation_is_mutator(verb, rest)
         if hit:
             return f"git {hit}"
     if _depth < 3:
-        for nested in _nested_command_texts(tokens):
+        for nested in _nested_command_texts(tokens, masked):
             hit = _find_git_mutator(nested, _depth + 1)
             if hit:
                 return hit
@@ -5482,7 +5619,8 @@ def _cwd_left_workspace(
             expanded = os.path.join(cwd, expanded)
         return os.path.realpath(expanded)
 
-    tokens = _split_command_tokens(_mask_data_heredoc_bodies(cmd))
+    masked = _mask_data_heredoc_bodies(cmd)
+    tokens = _split_command_tokens(masked)
     for i, tok in enumerate(tokens):
         word = _command_word(tok)
         if word not in ("cd", "pushd", "popd", "env") or not _runs_as_a_command(
@@ -5574,7 +5712,7 @@ def _cwd_left_workspace(
             if leaves_workspace(cwd):
                 return cwd
     if _depth < 3:
-        for nested in _nested_command_texts(tokens):
+        for nested in _nested_command_texts(tokens, masked):
             hit = _cwd_left_workspace(nested, workspace, _depth + 1, cwd)
             if hit is not None:
                 return hit
