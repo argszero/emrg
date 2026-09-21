@@ -788,6 +788,22 @@ def test_the_exit_code_table_names_every_rc_2_cause_the_module_can_reach(mod):
         "(issue #1309)"
     )
 
+    # One cause can cover more than one family of refusal, and the entry has to name them
+    # all — this test's join is per *slug*, and a slug is not a family. `own-head-window`
+    # is reached both by a head of this cycle's own and by a head the clause cannot judge
+    # at all (the inexact push time, and a window that could not be assembled); the second
+    # family has no head of this cycle's involved. The entry named only the first, so a
+    # wrapper reading rc 2 as "the head was mine" would mis-attribute the rest. Measured,
+    # both families, in `test_a_head_with_no_ci_run_cannot_be_judged_so_nothing_is_posted`.
+    # Read with its wrapping collapsed: the entry is prose, and a claim must not come out
+    # false because the paragraph happens to break between two of its words (this pin's
+    # first cut did exactly that — "cannot be decided" sat on either side of a newline).
+    flat = " ".join(table.split())
+    assert "pushed by this cycle" in flat
+    assert "cannot be decided" in flat, (
+        "the entry must name every family that reaches this slug, not only the first"
+    )
+
 
 def test_the_body_is_sent_byte_for_byte(mod, monkeypatch, capsys, body_file):
     """The body is the caller's reading; the tool does not rewrite the vote."""
@@ -1154,6 +1170,24 @@ def test_a_head_with_no_ci_run_cannot_be_judged_so_nothing_is_posted(
     assert "no CI run" in err and "lower bound" in err
     assert "unblock" in err, "the queue's own remedy for this head, not a new one"
     assert "re-trigger" in err, "the refusal names the command, not just the state"
+
+    # The module docstring is the first carrier a reader meets, and it said the opposite
+    # about this very head until now — "left alone rather than judged", a pass — while
+    # the tool refuses, measured three lines up. Joined to *this test's outcome* rather
+    # than to a phrase of its own: the prose must state the refusal, and must not promise
+    # the pass it used to, so the two carriers cannot drift apart again with the suite
+    # green (the class this file's exit-code test was written for, one carrier over).
+    doc = mod.__doc__ or ""
+    assert "fell back to the commit date" in doc, (
+        "the docstring must still name the inexact push time this test is about"
+    )
+    paragraph = doc.split("fell back to the commit date", 1)[1].split("\n\n", 1)[0]
+    assert "refus" in paragraph.lower(), (
+        "the module docstring must state the outcome measured here, not only the input"
+    )
+    assert "left alone" not in paragraph, (
+        "the docstring promised a pass ('left alone') for a head this tool refuses"
+    )
 
 
 def test_the_previous_cycle_is_read_from_the_cycle_records(
