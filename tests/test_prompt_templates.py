@@ -754,3 +754,65 @@ git push origin <branch> 2>&1
     assert not _host_tree_git_writes(
         "```bash\ncd {{ source_dir }} && git push origin HEAD --dry-run 2>&1\n```"
     ), "a dry run writes nothing, and §0.2's role probe is one"
+
+
+# A default branch named literally. `main` and `master` are two spellings of one thing and a
+# repository's own default is whichever it happens to use — this one is `master`, so the
+# `origin/main` the first version of §0.3 told the reader to run fails with
+# `fatal: Needed a single revision` (measured 2026-09-21, PR #1524 review).
+_LITERAL_DEFAULT_BRANCH = re.compile(r"\b(?:origin|upstream)/(?:main|master)\b")
+
+
+def test_the_default_branch_is_resolved_rather_than_spelled() -> None:
+    """The template resolves the default branch and starts the branch at it.
+
+    Two claims, both from the external review of PR #1524 (measured, not argued):
+
+    1. A literal `<remote>/main` does not resolve in a repository whose default is `master`, and
+       enumerating spellings is the #461 class this repo keeps refusing to open — so the template
+       must not name one, and must keep the mechanism that resolves it (`gh repo view --json
+       defaultBranchRef`, already used for the PR base).
+    2. B.3's `git checkout -b` had no start point, so it branched off the clone's own HEAD — and a
+       fork is only as fresh as its last sync. The reviewer's fork stood **396 commits** behind
+       upstream, so B.5's suite would have measured a tree twelve days old while the PR's diff
+       stays clean (the merge base is still an ancestor). The start point is the fix.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    literals = _LITERAL_DEFAULT_BRANCH.findall(text)
+    assert not literals, (
+        f"the template names a default branch literally: {literals} — resolve it instead "
+        "(`gh repo view {{ owner }}/{{ repo }} --json defaultBranchRef`); `main` and `master` "
+        "are two spellings of one class and this repository's default is the second one"
+    )
+    assert "defaultBranchRef" in text, (
+        "the template must keep the resolution mechanism it replaced the literal with"
+    )
+
+    clone_block = text.split('DEV="{{ source_dir }}', 1)[1].split("#### B.4", 1)[0]
+    checkout = [
+        line
+        for block in _fenced_blocks("```bash\n" + clone_block)
+        for line in block
+        if "git checkout -b" in line
+    ]
+    assert checkout, "B.3 must still create the branch"
+    for line in checkout:
+        assert "upstream/$DEFAULT" in line or "$DEFAULT" in line, (
+            f"`{line.strip()}` branches off the clone's own HEAD — a fork can be hundreds of "
+            "commits behind, so the branch (and B.5's suite) must start at the upstream default"
+        )
+
+
+def test_the_default_branch_scan_answers_both_ways() -> None:
+    """The scanner's controls, on the two spellings and the resolved form."""
+    assert _LITERAL_DEFAULT_BRANCH.findall("git diff HEAD origin/main\n"), (
+        "the spelling the first version carried must be flagged — in this repository it does "
+        "not resolve"
+    )
+    assert _LITERAL_DEFAULT_BRANCH.findall("git show upstream/master:<path>\n"), (
+        "the other spelling of the same class must be flagged too"
+    )
+    assert not _LITERAL_DEFAULT_BRANCH.findall('git diff HEAD "origin/$DEFAULT"\n'), (
+        "the resolved form is what the rule asks for and must not be flagged"
+    )

@@ -126,11 +126,15 @@ cd {{ source_dir }} && git status --short --branch 2>&1
 >   with the read-only parts of the cycle; finish without any git write operations.
 
 > ⚠️ **Where the contribution happens (PR #1524, rant 2026-09-21T16:12:19):** `{{ source_dir }}` is the
-> HOST's working tree and is a **read-only reference** for this task — read source in it,
-> `git show origin/main:<path>`, `git diff HEAD origin/main`. Every branch, commit and push
+> HOST's working tree and is a **read-only reference** for this task — read source in it. Resolve the
+> default branch before naming it (`DEFAULT=$(gh repo view {{ owner }}/{{ repo }} --json
+> defaultBranchRef -q .defaultBranchRef.name)`), then `git show "origin/$DEFAULT":<path>` and
+> `git diff HEAD "origin/$DEFAULT"` — `main` and `master` are two spellings of one thing and this
+> repository's own default is the second one. Every branch, commit and push
 > happens in the **session clone** defined in B.3
-> (`{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev`): it sits under the
-> runtime directory the host tree excludes from `git status` (PR #1505), and inside the
+> (`{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev`): the tree's tracked
+> `.gitignore` covers it (`.emrg`, unanchored — so it holds in every clone, not only on a host
+> whose runtime `git/info/exclude` entry has been written by PR #1505), and it sits inside the
 > workspace the sandbox allows writes to. An earlier version of B.3 told the task to
 > `git checkout -b` in `{{ source_dir }}` itself — the one directory the dirty-tree rule and
 > the sandbox both exist to protect.
@@ -337,7 +341,8 @@ Extract from these files and strictly follow:
 
 **Never branch in `{{ source_dir }}`** (PR #1524, rant 2026-09-21T16:12:19). The contribution lives in a clone
 under this session's own directory; that path is inside the workspace the sandbox allows, and the
-host tree's `.git/info/exclude` keeps it out of `git status` (PR #1505).
+host tree's tracked `.gitignore` covers it (`.emrg`, unanchored), with the runtime
+`git/info/exclude` entry (PR #1505) as the host-side second carrier.
 
 ```bash
 DEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"
@@ -348,10 +353,17 @@ gh repo fork {{ owner }}/{{ repo }} --clone=false 2>&1
 [ -d "$DEV" ] || gh repo clone "$(gh api user -q .login)/{{ repo }}" "$DEV" 2>&1
 # 3. Keep the upstream beside the fork, as a read-only reference
 cd "$DEV" && git remote add upstream {{ repo_url }} 2>&1 || true
-# 4. Branch inside the clone, per project convention (default fix/<description>)
+# 4. Branch inside the clone off the UPSTREAM default branch — never off the clone's own HEAD
 cd "$DEV" && git fetch upstream 2>&1
-cd "$DEV" && git checkout -b <branch name per project convention> 2>&1
+DEFAULT=$(gh repo view {{ owner }}/{{ repo }} --json defaultBranchRef -q .defaultBranchRef.name)
+cd "$DEV" && git checkout -b <branch name per project convention> "upstream/$DEFAULT" 2>&1
 ```
+
+**Start the branch at `upstream/$DEFAULT`, not at the clone's HEAD** (measured 2026-09-21, PR #1524
+review): a fork is only as fresh as its last sync — the reviewer's own fork stood **396 commits**
+behind `argszero/emrg`, so branching off it and running B.5's suite there would have measured a tree
+from twelve days earlier while the PR's diff stays clean, because the merge base is still an
+ancestor. Basing on the fetched upstream ref is what keeps B.5 measuring the tree the PR would land on.
 
 **This flow needs the `workspace-write` tier — measured 2026-09-21**, not assumed: `git clone`,
 `git checkout -b`, `git add` and `git commit` are each `BLOCK` under `read-only` and each `ALLOW`
