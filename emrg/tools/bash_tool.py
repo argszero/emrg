@@ -2287,6 +2287,27 @@ _OPTION_DESTINATION_VALUE_TAKING: dict[str, frozenset[str]] = {
 # ``tests/test_bash_tool_curl_output_dir.py`` pins it with that measurement.
 _OPTION_RELOCATES_DESTINATION: dict[str, str] = {"curl": "--output-dir"}
 
+# **Which** of a verb's destinations that option relocates (issue #1504). The directory is a
+# property of two options, not of the verb: measured, `curl --output-dir D -o f.txt URL`
+# creates `D/f.txt`, while `curl --output-dir D -D dh.txt -o f.txt URL` creates `D/f.txt`
+# **and `dh.txt` in the cwd** — `--dump-header` and the rest of `_CURL_WRITING_OPTIONS`
+# ignore it, and `man curl` says the same ("the directory in which files should be stored,
+# when -O, --remote-name or -o, --output are used"). So a reader that collects the values
+# into a bag and relocates every one of them names a path the run does not write as soon as
+# a *sibling* writer meets a directory outside the workspace — a false block, the direction
+# this walk's own record treats as the costly one.
+#
+# `-O`/`--remote-name` carry no value for this list to act on (they are read by
+# `_OPTION_NAMES_AFTER_URL`, which names the *directory* itself); they are listed because
+# this table answers "which options does the directory move", and those two are among them.
+#
+# A verb absent from this table keeps the historical reading — every value it names is
+# relocated — because the default must not be "relocate nothing": that would turn the hole
+# #1504 reports (a relocated write named by its un-relocated value) back on.
+_RELOCATION_APPLIES_TO: dict[str, frozenset[str]] = {
+    "curl": frozenset({"-o", "--output", "-O", "--remote-name"}),
+}
+
 # The option that names each file after its URL: `curl -O <url>` writes the URL's last
 # segment into the cwd, and `--output-dir` relocates *that* too (measured above). The
 # basename is the operand's last segment, which this reader does not parse, so the
@@ -2607,11 +2628,24 @@ def _option_destination_values(
     destination (alone it writes nothing), which is why it is not in
     ``_OPTION_DESTINATION_VERBS``. The measurements, the `=` spelling that is read anyway,
     and the rooted value that is deliberately left alone are all recorded above that table.
+
+    The relocation is scoped to the **option** that named each value, not to the verb
+    (`_RELOCATION_APPLIES_TO`): a verb's other writers are not moved by the same directory,
+    so relocating their values names a path nothing writes. Measured on this host, `curl
+    --output-dir <outside> -D dh.txt <url>` writes ``dh.txt`` in the workdir while the
+    widened table names ``<outside>/dh.txt`` and refuses the command at workspace-write —
+    a false block, and one the reader's own note about those rows already stated. Each
+    value therefore travels with its option, and only ``-o``/``--output`` are relocated.
     """
     options = _OPTION_DESTINATION_VERBS[verb] if options is None else options
     longs = {opt for opt in options if opt.startswith("--")}
     letters = {opt[1:] for opt in options if not opt.startswith("--")}
-    out: list[str] = []
+    # Each value keeps the option that named it, because relocation belongs to the option
+    # and not to the verb: `curl --output-dir D -o f` moves `f`, while `curl --output-dir D
+    # -D h` still writes `h` in the cwd (measured, issue #1504). A bag of bare values cannot
+    # tell those apart, which is how the widened curl set below put a false block on every
+    # sibling writer.
+    pairs: list[tuple[str, str]] = []
     args = _args_after_command(tokens, i)
     idx = 0
     while idx < len(args):
@@ -2623,12 +2657,12 @@ def _option_destination_values(
         eaten = 1
         if tok in options:
             if idx + 1 < len(args):
-                out.append(args[idx + 1])
+                pairs.append((tok, args[idx + 1]))
             eaten = 2
         elif tok.startswith("--"):
             for long_opt in longs:
                 if tok.startswith(long_opt + "="):
-                    out.append(tok.split("=", 1)[1])
+                    pairs.append((long_opt, tok.split("=", 1)[1]))
                     break
         elif cluster_letters:
             # The destination letter sits **inside the cluster** rather than at its
@@ -2645,22 +2679,30 @@ def _option_destination_values(
                 letter, value, attached = cluster
                 eaten = _words_eaten(attached)
                 if letter in letters and value:
-                    out.append(value)
+                    pairs.append(("-" + letter, value))
         else:
             attached = _leading_short_option_value(tok, letters)
             if attached is not None:
-                out.append(attached)
+                pairs.append((tok[:2], attached))
         idx += eaten
-    out = [value for value in out if value != "-"]
+    pairs = [(opt, value) for opt, value in pairs if value != "-"]
     directory = _output_directory_in_force(args, verb)
     if directory is None:
-        return out
+        return [value for _, value in pairs]
     # The value is relocated, not replaced: `curl --output-dir <dir> -o f` writes
     # `<dir>/f`, and the walk must name that path rather than `f` — the row that made this
     # visible was `curl --output-dir <outside> -o f <url>`, where the old reading allowed
     # the command at workspace-write (a relative `f` resolves inside the workdir) while
     # read-only refused it for a word the command never writes (issue #1504).
-    relocated = [_relocated_under(value, directory) for value in out]
+    #
+    # Only the options the directory really moves are relocated (`_RELOCATION_APPLIES_TO`):
+    # the other writers of the same verb keep writing where they name, so relocating them
+    # would refuse a run that lands inside the workspace.
+    applicable = _RELOCATION_APPLIES_TO.get(verb, options)
+    relocated = [
+        _relocated_under(value, directory) if opt in applicable else value
+        for opt, value in pairs
+    ]
     if _names_a_file_after_the_url(args, verb):
         relocated.append(directory)
     return relocated

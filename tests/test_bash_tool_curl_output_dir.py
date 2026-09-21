@@ -36,6 +36,15 @@ stdout, and a path an option only ever reads) pinned beside them so a later wide
 the table cannot pass by naming everything. `-D` and `--trace` are also the spellings whose
 *long* form eats the word in issue #1461, so a fix there must not read one as the other.
 
+The two halves meet in a third reading, which is why they are one file: widening the writer
+table made "every value this verb names" and "the values `--output-dir` relocates" two
+different sets, and the directory was still applied to the whole first set. Measured,
+`curl --output-dir <outside> -D dh.txt <url>` writes `dh.txt` in the **workdir** — the
+directory moves `-o`/`-O` only — so naming `<outside>/dh.txt` refused a run that lands
+inside. The relocation is therefore scoped to the option that named each value
+(`_RELOCATION_APPLIES_TO`), and `DIRECTORY_MOVES_TWO_OPTIONS_ROWS` below is the arm: it
+reds in both directions (relocate everything → 15 failed; relocate nothing → 16 failed).
+
 Separate from `test_bash_tool_option_destinations.py` for the reason that file gives for
 itself: one family per file, so two fixtures need not agree about a table neither owns.
 """
@@ -299,6 +308,62 @@ def test_an_option_that_reads_its_value_names_no_write(row, cmd):
     assert tuple(_extract_write_targets(cmd)) == (), row
 
 
+# ── the directory moves two options, not every writer of the verb ───────────────
+#
+# The widened writer table above made "every value this verb names" and "the values the
+# directory relocates" two different sets, while the relocation was still applied to the
+# whole first set. Measured here: `curl --output-dir <outside> -D dh.txt <url>` writes
+# `dh.txt` in the **workdir** — the directory moves `-o`/`-O` only, and `man curl` says the
+# same ("the directory in which files should be stored, when -O, --remote-name or -o,
+# --output are used") — so naming `<outside>/dh.txt` refused a run that lands inside: a false
+# block, the direction this walk's record treats as the costly one. Each row is that command
+# with the directory outside the workspace, and each asserts both halves: the value is named
+# as it stands, and the tier admits the write the run really performs.
+DIRECTORY_MOVES_TWO_OPTIONS_ROWS = (
+    ("-D", "-D dh.txt", "dh.txt"),
+    ("-D attached", "-Ddh.txt", "dh.txt"),
+    ("--dump-header", "--dump-header dh.txt", "dh.txt"),
+    ("--dump-header=", "--dump-header=dh.txt", "dh.txt"),
+    ("-D in a cluster", "-sD dh.txt", "dh.txt"),
+    ("-c", "-c c.txt", "c.txt"),
+    ("--cookie-jar", "--cookie-jar c.txt", "c.txt"),
+    ("--etag-save", "--etag-save e.txt", "e.txt"),
+    ("--trace", "--trace t.txt", "t.txt"),
+    ("--trace-ascii", "--trace-ascii t.txt", "t.txt"),
+    ("--hsts", "--hsts hs.txt", "hs.txt"),
+    ("--alt-svc", "--alt-svc as.txt", "as.txt"),
+    ("--libcurl", "--libcurl l.c", "l.c"),
+    ("--stderr", "--stderr s.txt", "s.txt"),
+)
+
+
+@pytest.mark.parametrize(
+    "row,argument,value", DIRECTORY_MOVES_TWO_OPTIONS_ROWS,
+    ids=[r for r, *_ in DIRECTORY_MOVES_TWO_OPTIONS_ROWS],
+)
+def test_the_directory_moves_only_the_options_it_moves(row, argument, value):
+    """A sibling writer keeps writing where it names, so the directory must not move it."""
+    cmd = f"curl --output-dir {OUTSIDE} {argument} {URL}"
+    assert tuple(_extract_write_targets(cmd)) == (value,), row
+    allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+    assert allowed is True, f"workspace-write refused {cmd!r} — a false block: {reason}"
+    refused, reason, _ = _check_sandbox(cmd, "read-only", workdir="/workspace")
+    assert refused is False, f"read-only allowed {cmd!r}, which really writes {value!r}"
+
+
+def test_the_moved_and_unmoved_options_are_told_apart_on_one_line():
+    """The row this reading exists for: `-o` moves, the sibling beside it does not.
+
+    Both halves on one line, because that is what the defect was — the two were one list. A
+    "fix" that stopped relocating would pass every row above and fail this one.
+    """
+    cmd = f"curl --output-dir {OUTSIDE} -D dh.txt -o f.txt {URL}"
+    assert tuple(_extract_write_targets(cmd)) == ("dh.txt", f"{OUTSIDE}/f.txt"), cmd
+    allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+    assert allowed is False, f"workspace-write allowed {cmd!r}"
+    assert f"{OUTSIDE}/f.txt" in reason, reason
+
+
 # ── ground truth: the relocation is a fact about the tool, not about the reader ──
 #
 # Posix-only, for the reason `test_bash_tool_option_destinations.py` gives for its own
@@ -414,4 +479,53 @@ def test_the_other_writers_really_create_the_file_they_name(
         f"{command!r} did not create {expected_name!r} under the directory — the option is "
         "not a write here, so naming it would be an over-approximation; re-measure before "
         "changing the reader"
+    )
+
+
+# ── ground truth: the directory moves `-o` and not the writer beside it ─────────
+#
+# What this measures is the **premise** the rows above rest on, not the reading itself: the
+# geometry that tells the two answers apart needs a directory *outside* the workspace, and a
+# command that writes outside every allowed root is exactly what a test must never run. So
+# the walk's discriminating rows are the pure ones above, and this arm runs the same pair
+# with the directory inside, where both readings admit it — its claim is the one about curl:
+# `-o` lands under the directory while the sibling lands in the workdir. Posix-only for the
+# reason the arms above give.
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX shell ground truth: the daemon's shell on Windows is cmd.exe",
+)
+def test_the_sibling_writer_really_ignores_the_directory(monkeypatch, tmp_path):
+    """Run it: `-o out.txt` goes under the directory, `-D dh.txt` stays in the workdir."""
+    if shutil.which("curl") is None:
+        pytest.skip("`curl` is not on PATH here, so this ground truth is unmeasurable")
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: "/fake-os-temp")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = workspace / "source.txt"
+    source.write_text("hello\n", encoding="utf-8")
+    directory = workspace / "out"
+    directory.mkdir()
+
+    command = (
+        f"curl -s --output-dir {directory.as_posix()} -D dh.txt "
+        f"-o out.txt file://{source.as_posix()}"
+    )
+    tool = BashTool()
+    result = _run(tool.execute({
+        "command": command, "sandbox": "workspace-write", "workdir": str(workspace),
+    }))
+
+    assert "not executed" not in result.content, (
+        f"{command!r} was refused at the sandbox: {result.content}"
+    )
+    landed = sorted(p.name for p in directory.iterdir())
+    assert landed == ["out.txt"], (
+        f"{command!r} left {landed!r} under the directory — `-o` is the option the "
+        "directory moves, and the sibling is not"
+    )
+    assert (workspace / "dh.txt").is_file(), (
+        f"{command!r} left no `dh.txt` in the workdir — the sibling writer lands there, so "
+        "relocating its value names a path nothing writes"
     )
