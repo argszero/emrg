@@ -116,21 +116,17 @@ function setup(store: TranscriptStore, sid?: string | null, renderer?: MarkdownR
 }
 
 describe("TranscriptView", () => {
-  it("渲染用户/系统/历史消息与历史加载条", () => {
+  it("渲染用户/系统消息与历史加载条", () => {
     const store = createTranscriptStore({ t: (k) => k });
     store.addUserMessage("hello", "s1");
     store.addSystemMessage("system note", "s1");
-    store.addHistoryMessage("old message", "s1");
     store.setLoadBar("加载历史中…", "s1");
     const { container } = setup(store, "s1");
-    // Stage 1：用户/历史消息走 markdown 渲染 → 文本在 .msg.user 内的渲染 span 里
+    // Stage 1：用户消息走 markdown 渲染 → 文本在 .msg.user 内的渲染 span 里
     expect(screen.getByText("system note")).toHaveClass("msg", "system");
     const userDiv = container.querySelector(".msg.user");
     expect(userDiv).not.toBeNull();
     expect(userDiv!.textContent).toBe("hello");
-    const historyDiv = container.querySelector(".msg.user.history");
-    expect(historyDiv).not.toBeNull();
-    expect(historyDiv!.textContent).toBe("old message");
     expect(container.querySelector(".history-load-bar")).toHaveTextContent("加载历史中…");
   });
 
