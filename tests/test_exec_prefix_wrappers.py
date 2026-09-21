@@ -24,13 +24,17 @@ busybox's documented behaviour, read rather than executed — no `unshare`,
 `nsenter`, `chroot` or `busybox` binary exists on the host this was measured
 on, and none of these rows is executed here either.)
 
-The second half is a fence for issue #1513. The named-wrapper branch of
-`_nested_command_texts` takes `tokens[i + 1:]` with no position test, which is
-what reads these payloads today; a position test landing there — the fix #1513
-proposes, and the right one for the *mention* shapes it enumerates — would stop
-reading every payload behind a prefix that is not in `_COMMAND_WRAPPERS`, these
-four among them. So the rows are asserted refused here, where the change that
-opens them has to look.
+The second half is a fence for issue #1513, and it no longer describes the fix
+that landed. The named-wrapper branch of `_nested_command_texts` took
+`tokens[i + 1:]` with no position test, which is what read these payloads; a
+*position test* there was predicted to stop reading every payload behind a
+prefix not in `_COMMAND_WRAPPERS` — and the first version of that test did
+exactly that, which is why it was vetoed and rebuilt (#1515, cycle
+`cyc20260921-190928`). What landed is a gate that asks a different question
+(`_is_data_argument`: is the head of the simple command provably data-only?),
+so it never consults this set and every prefix below keeps its payload read.
+The rows stay asserted refused here, where the change that opens them has to
+look; what this file is not is the fence for that branch.
 
 Both directions are asserted, as every guard test in this repo is: a change that
 refused everything must not pass either, so the reads behind the same prefixes

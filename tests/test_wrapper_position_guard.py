@@ -194,3 +194,30 @@ def test_the_controls_stay_allowed(cmd: str, tmp_path: Path) -> None:
     for tier in (READ_ONLY, WW):
         allowed, reason, _ = _check_sandbox(cmd, tier, str(tmp_path))
         assert allowed, f"{cmd!r} names no write and no invocation: {reason}"
+
+
+def test_the_docstring_names_the_gate_the_code_calls() -> None:
+    """`_nested_command_texts` must name `_is_data_argument`, not the vetoed predicate.
+
+    The gate's paragraph is the first carrier a reader meets, and it named the verb walk's
+    `_runs_as_a_command` — the reading the veto removed. Taken literally it restores exactly
+    that: at the same index the two predicates disagree on 7 of the 11 shapes measured in
+    `_is_data_argument`, and `fakeroot sh -c "patch /etc/hosts"` is one of them, so a reader
+    following the prose re-opens the silent allow. Nothing else could catch it — the fences
+    above assert behaviour, and behaviour was already right; prose is what drifted.
+
+    The split is at the historical sentence on purpose: the paragraph *may* name the
+    superseded predicate where it says what the first version asked, and must not name it as
+    the gate.
+    """
+    doc = " ".join((_nested_command_texts.__doc__ or "").split())
+    paragraph = doc.split("**But a wrapper *word* is not a wrapper invocation**")[1]
+    paragraph = paragraph.split("An **un-resolvable** wrapper")[0]
+    gate, _, history = paragraph.partition("The first version of this gate")
+    assert history, "the paragraph must still record what the first version asked"
+    assert "_is_data_argument" in gate, (
+        "the gate paragraph must name the predicate this function actually calls"
+    )
+    assert "_runs_as_a_command" not in gate, (
+        "the gate paragraph names the verb walk's position test, which is the vetoed reading"
+    )

@@ -1168,12 +1168,15 @@ _COMMAND_WRAPPERS = frozenset({
     # prefix with `rm -rf /tmp/x` (`touch`, `patch` too) — because the word after
     # the prefix was read as an argument, so neither reader saw a mutator at all.
     # It is the `builtin` entry above one prefix further out (#1362).
-    # These names also fence issue #1513: the named-wrapper branch of
-    # `_nested_command_texts` takes `tokens[i + 1:]` with no position test, which
-    # is the only reason `unshare -r sh -c …` is read today. A position test
-    # landing there would stop reading every payload behind a prefix that is not
-    # in this set — these four among them (`tests/test_exec_prefix_wrappers.py`
-    # asserts that half, in both directions).
+    # These names also carry issue #1513's row `unshare -r sh -c …`, through the
+    # *verb* walk: naming a prefix here is what makes the word after it a
+    # command, so the `git` or `rm` behind it is read at all (the ten rows above
+    # are that half). The wrapper-payload branch of `_nested_command_texts` is
+    # **not** fenced by this set: it is gated by `_is_data_argument` (#1515),
+    # which asks the head of the simple command and never consults this list.
+    # Measured there: 27 prefix shapes *not* named here — `fakeroot`, `taskset`,
+    # `ltrace`, `strace`, `flock`, `bwrap` among them — keep their payload read,
+    # so the positive proof is the fence and this list is not.
     # `busybox <applet>` names the program the same way (`busybox sh -c …`,
     # `busybox rm -rf …`). The cost is the over-approximation every entry here
     # carries — `busybox git checkout .` is refused although busybox has no git
@@ -5157,10 +5160,18 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
 
     **But a wrapper *word* is not a wrapper invocation** (issue #1513), and the
     over-approximation above is not free of false blocks once the word can be
-    data. The belief is therefore gated by the same position test the verb walk
-    uses (`_runs_as_a_command`) — the reading of "may this word, standing here,
-    be believed?" — so the wrapper is recursed into only where the shell would
-    run it. Measured on master `9a7bfe65`, both tiers, by the predicate alone:
+    data. The belief is therefore gated — the wrapper is recursed into only
+    where the shell would run it — but the gate answers the verb walk's question
+    (#1469: "may this word, standing here, be believed?") the **other way
+    round**, through `_is_data_argument`: the payload behind the word is skipped
+    only on a *positive* proof that the word heads no invocation (the head of
+    its simple command is in `_DATA_ONLY_COMMANDS`), because at this site "not a
+    command" means "the payload is not read", which is the unsafe answer. The
+    first version of this gate asked the verb walk's `_runs_as_a_command` here
+    instead, and the veto on #1515 measured the price: all 13 unlisted exec
+    prefixes (`fakeroot`, `taskset`, `ltrace`, …) went from BLOCK to ALLOW. That
+    helper carries the rows; this one is the reading the paragraph is about.
+    Measured on master `9a7bfe65`, both tiers, by the predicate alone:
 
       `echo sh "patch /etc/hosts"`       targets ['/etc/hosts']  BLOCK both tiers
       `printf %s sh "patch /etc/hosts"`  targets ['/etc/hosts']  BLOCK both tiers
@@ -5171,9 +5182,10 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
     The three controls in that slot (`foo`, a non-wrapper, no word at all) were
     allowed, so the discriminator was the wrapper word and not the payload: a
     line that prints a string was refused at the tier whose *purpose* is to let a
-    `sh` be read. The gate is the one #1469 gave the verb walk within one text
-    ("may this verb, standing here, be believed?"), applied one site over — the
-    question here is which *texts* the walk is handed.
+    `sh` be read. The question is the one #1469 asked within a single text
+    ("may this verb, standing here, be believed?"), asked one site over — the
+    site here is which *texts* the walk is handed — and it is deliberately
+    answered by the positive proof above rather than by that walk's predicate.
 
     An **un-resolvable** wrapper is treated the same way (issue #1244): a
     program word that is a variable reference may well be the shell, and the
