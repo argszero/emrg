@@ -70,6 +70,24 @@ def _runtime_dir(repo: Path) -> None:
     )
 
 
+def _runtime_file(repo: Path) -> str:
+    """One path under the runtime directory, for `git check-ignore` to judge.
+
+    A file rather than the bare directory: git ignores what it can see, and an
+    empty directory is invisible to it either way.
+    """
+    return str(repo / ".emrg" / "sessions" / "emrg-evolution-emrg-task" / "history.jsonl")
+
+
+def _ignored(repo: Path, path: str) -> bool:
+    """git's own verdict, asked of the repository the path lives in."""
+    cp = subprocess.run(
+        ["git", "-C", str(repo), "check-ignore", "-q", path],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+    )
+    return cp.returncode == 0
+
+
 def test_the_guard_stops_seeing_this_instances_own_runtime_dir(tmp_path):
     """The acceptance the rant asks for: the dirt is EMRG's, so the probe must not
     judge the tree dirty for it — and the probe is what the tier decision reads."""
@@ -245,3 +263,71 @@ def test_registering_a_project_writes_the_exclude_too(tmp_path):
 
     assert EXCLUDE_ENTRY in _exclude_file(repo).read_text(encoding="utf-8")
     assert TaskHandler._is_dirty_tree_sync(str(repo)) is False
+
+
+def test_a_nested_project_directory_learns_to_ignore_its_own_runtime_dir(tmp_path):
+    """The daemon-side call site, one directory shape over (issue #1527).
+
+    `_touch_project` used to call the exclude helper only when `<cwd>/.git`
+    existed — the *root* question, `repo_scope`'s other answer. A project
+    registered at a directory inside a repository (a package in a monorepo, this
+    instance's own `work/` tree, a clone nested in a larger checkout) therefore
+    never learned to ignore its runtime data, and the dirt came back one gate
+    over from issue #1507.
+
+    Both directions are measured here rather than argued: the root form does not
+    reach a nested `.emrg/`, and the scoped entry does.
+    """
+    from emrg.server.daemon import EmrgServer
+
+    repo = _repo(tmp_path / "repo")
+    nested = repo / "work" / "clone"
+    nested.mkdir(parents=True)
+    _runtime_dir(nested)
+    runtime_file = _runtime_file(nested)
+    assert not (nested / ".git").exists(), "precondition: in the repo, not at its root"
+
+    # Control: the root's own entry is not a substitute for the scoped one.
+    exclude = _exclude_file(repo)
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text(EXCLUDE_ENTRY + "\n", encoding="utf-8")
+    assert not _ignored(repo, runtime_file), (
+        "`/.emrg/` is anchored at the root and must not cover a nested `.emrg/` — "
+        "which is why the scope has to be resolved, not assumed"
+    )
+    assert TaskHandler._is_dirty_tree_sync(str(nested)) is True, "precondition: real dirt"
+
+    server = object.__new__(EmrgServer)
+    server._projects_log = tmp_path / "config" / "projects.yml"
+    server._touch_project(str(nested))
+
+    entries = _exclude_file(repo).read_text(encoding="utf-8").splitlines()
+    assert "/work/clone/.emrg/" in entries, entries
+    assert _ignored(repo, runtime_file), "git check-ignore must agree with the entry"
+    assert TaskHandler._is_dirty_tree_sync(str(nested)) is False
+
+
+def test_touch_project_writes_nothing_for_a_directory_in_no_repository(tmp_path, caplog):
+    """The same deletion's other direction (issue #1527).
+
+    With the marker gate gone, the callee's own refusal is the guard: a directory
+    in no repository gains no `.git/` tree, no exclude file and no "now ignores"
+    line — while the registration this method exists for still happens.
+    """
+    from emrg.server.daemon import EmrgServer
+
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    _runtime_dir(plain)
+    before = sorted(p.name for p in plain.iterdir())
+
+    server = object.__new__(EmrgServer)
+    server._projects_log = tmp_path / "config" / "projects.yml"
+    with caplog.at_level("INFO"):
+        server._touch_project(str(plain))
+
+    assert sorted(p.name for p in plain.iterdir()) == before
+    assert not (plain / ".git").exists(), "no git dir is conjured into a plain directory"
+    assert "now ignores .emrg/" not in caplog.text, caplog.text
+    registered = (tmp_path / "config" / "projects.yml").read_text(encoding="utf-8")
+    assert str(plain) in registered, "the registration half must be unaffected"
