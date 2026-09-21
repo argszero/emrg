@@ -656,11 +656,26 @@ def test_a_fused_flag_is_latent_not_live(cmd: str) -> None:
     `sh -c'git checkout .'` looks like the same hole as `sh -c 'git checkout .'`
     and is not one: the quoting makes ``-cgit checkout .`` **a single word**, which
     a shell reads as an option cluster rather than as `-c` plus a command string.
-    Measured 2026-09-16 with `sh` (bash as sh), `bash`, `zsh`, `dash` and `ksh`:
-    ``sh -c'echo ALIVE'`` exits 1-2 with an invalid-option message and never prints
-    ALIVE, and the payload does not run end to end. So the guard's ALLOW agrees
-    with the shell. A future cycle that wants to over-approximate it belongs here
-    *with its own measurement* — not with a claim that master loses data this way.
+    `-c` declares no option-argument — the command string is the *operand* that
+    follows it — so text attached to the flag stays inside the cluster.
+
+    Re-measured 2026-09-21 (issue #1525), one row per shell with the word handed in
+    as an exact argv entry so no outer tokenizer is in the way, fused
+    ``["-cecho MARK"]`` against the detached control ``["-c", "echo MARK"]``:
+
+        bash  fused  rc=1  ran=False  "/usr/bin/bash: - : invalid option"
+        dash  fused  rc=2  ran=False  "/usr/bin/dash: 0: Illegal option -h"
+        sh    fused  rc=2  ran=False  "/usr/bin/sh: 0: Illegal option -h"
+        every detached control: rc=0, the marker printed
+
+    ubuntu-24.04, ``/bin/sh -> dash``; `dash` names `-h` and not the text behind
+    `-c`, because it walks the cluster char by char (`-c`, `-e`, `-c`, then `-h`) —
+    the mechanism printed rather than argued. The whole command line agrees
+    (`sh -c"echo MARK"` exits 2), and so do the same rows on Windows (Git bash
+    5.2.26 as `bash` and as `sh`, plus busybox ash: rc=1-2, marker never printed,
+    both quotings alike). So the guard's ALLOW agrees with the shell. A future
+    cycle that wants to over-approximate it belongs here *with its own measurement*
+    — not with a claim that master loses data this way.
     """
     tokens = _split_command_tokens(cmd)
     assert len(tokens) == 2, f"the flag and its text must be one token: {tokens}"

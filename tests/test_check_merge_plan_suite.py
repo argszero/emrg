@@ -798,6 +798,31 @@ def test_a_successful_run_leaves_no_fetched_pr_ref_behind(
     assert re.search(r"final tree [0-9a-f]{12} \([0-9a-f]{40}\)", proc.stdout)
 
 
+def test_the_ref_is_released_by_the_fetch_that_made_it_not_by_the_run(
+    queue: tuple[Path, Path], mod, monkeypatch
+) -> None:
+    """The release is scoped to the read, which no end-of-run cleanup can promise.
+
+    The three tests around this one say "no ref outlives the *run*"; this one says the
+    stronger thing the code does now, and it is the one that tells them apart: a
+    cleanup in `main`'s `finally` satisfies all three and fails here, because the run
+    this test observes has no `main` - `_fetch_head` is called on its own, the way
+    `build_plan_steps` callers and the sibling gates call it. Measured 2026-09-21
+    (`cyc20260921-172459`): the gate parked in `_fetch_head` and released a run later,
+    which `tests/test_pr_head_refs_are_released.py` reads as a parking site that never
+    releases - not a false positive of that guard's rule but the rule itself, since
+    `merge_tree.drop_ref`'s docstring argues for exactly this scoping ("an early
+    `return`, a raise or a killed process cannot skip it").
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"a.md": "a\n"})
+    head = _publish(repo, origin, 1, "one")
+    monkeypatch.chdir(repo)
+
+    assert mod._fetch_head(1) == head
+    assert _plan_refs(repo) == [], "the fetch left its own ref resident"
+
+
 def test_the_run_does_not_hand_the_suite_the_callers_dirty_tree_override(
     queue: tuple[Path, Path],
 ) -> None:
@@ -842,13 +867,14 @@ def test_the_run_does_not_hand_the_suite_the_callers_dirty_tree_override(
 def test_a_plan_that_conflicts_leaves_no_fetched_pr_ref_behind_either(
     queue: tuple[Path, Path],
 ) -> None:
-    """The cleanup covers the paths that never reach a suite.
+    """The release covers the paths that never reach a suite.
 
     A plan that conflicts (rc 3) fetched its heads exactly as a successful run did,
-    and a cleanup wired into the success path - or into `_suite_verdict`'s finally -
-    leaks on precisely the runs a reader is most likely to repeat while resolving
-    the conflict. Both directions are pinned by these two tests: drop the `finally`
-    and both fail; move it to the success path and only this one does.
+    so a release wired into the success path - or into `_suite_verdict`'s `finally` -
+    leaks on precisely the runs a reader is most likely to repeat while resolving the
+    conflict. That is what this test holds: it was written when the gate released its
+    refs from `main`'s `finally` (2026-09-21 moved the release into the fetch itself),
+    so it is the assertion that survived the change of shape.
     """
     repo, origin = queue
     _branch_with(repo, "left", {"README.md": "left\n"})
@@ -870,14 +896,14 @@ def test_a_fetch_that_fails_partway_still_leaves_no_ref_behind(
     """The refs already parked before the failing fetch are the ones a leak keeps.
 
     A run that fetches PR 1 and then dies on PR 2 exits 2 without ever reaching a
-    suite, a plan or a conflict - so a cleanup wired to any of those paths misses
+    suite, a plan or a conflict - so a release wired to any of those paths misses
     exactly the run that created a ref and asked for nothing else. Measured
-    2026-09-17 by @how2how2how2-arch on the previous revision of this fix, where the
-    fetch sat in a `try` whose `except` returned before the cleanup's `finally`:
+    2026-09-17 by @how2how2how2-arch on an earlier revision of that release, where
+    the fetch sat in a `try` whose `except` returned before the cleanup's `finally`:
     `check-merge-plan-suite.py 1323 999999` reported rc 2 and left
-    `refs/emrg-plan-suite/pr1323` behind. `_fetch_heads`' own docstring names this
-    case ("a run that dies on PR 3 of 5 has created two refs"), so the promise is
-    what this test holds the code to.
+    `refs/emrg-plan-suite/pr1323` behind. The shape changed on 2026-09-21 (the release
+    now sits in `_fetch_head`, so PR 1's ref is gone before PR 2 is even asked for);
+    what the run must never do is leave it behind.
     """
     repo, origin = queue
     _branch_with(repo, "one", {"a.md": "a\n"})
@@ -2221,3 +2247,64 @@ def test_the_run_asks_for_the_family_that_writes_the_file_attribute(
     for worktree in worktrees:
         assert report.parent == worktree.parent
         assert worktree not in report.parents
+
+
+PLAN_NAMESPACE = "refs/emrg-plan-suite/"
+
+
+def test_the_tree_under_test_is_named_by_this_process_s_own_commit(
+    queue: tuple[Path, Path], mod, monkeypatch
+) -> None:
+    """The plan's tree must not be reachable through a name another run can rewrite.
+
+    Measured 2026-09-21 (`cyc20260921-172459`): three plans were measured concurrently in
+    one repository - `for n in 1512 1515 1517; do (... &); done; wait` - and each parked
+    its tip in the one fixed `refs/emrg-plan-suite/tip`, so the run for #1512 printed **its
+    own** tree `6b7bfaf6a3f9` with `suite OK: 4731 passed`, a count that belongs to the
+    tree carrying `tests/test_exec_prefix_wrappers.py` (4753 collected node ids), while
+    the tree it named collects 4729 (4707 passed). The hash was right and the number was
+    about another plan: a verdict about a tree nobody was looking at, inside the gate this
+    family exists to keep that from happening.
+
+    Two readings, because the argv shape alone would not answer the question. First, every
+    worktree the run materialises is added from a **commit**, and the plan's is the tip
+    this same computation produces (built here with the same pinned identity and message,
+    so it is the same object). Second, the only refs the gate writes in its own namespace
+    are the fetched PR heads - named per PR, so two runs fetching the same PR write the
+    same name for the same object, which is why those are left alone.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    head = _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    seen: list[list[str]] = []
+    real_run = mod._run
+
+    def spy(argv, cwd=None, env=None):
+        seen.append(list(argv))
+        return real_run(argv, cwd=cwd, env=env)
+
+    monkeypatch.setattr(mod, "_run", spy)
+    assert mod.main(["1", "--base", "master"]) == 0
+
+    added = [argv for argv in seen if list(argv[:3]) == ["git", "worktree", "add"]]
+    assert added, "no worktree was materialised, so this arm measures nothing"
+    for argv in added:
+        assert re.fullmatch(r"[0-9a-f]{40}", argv[-1]), (
+            f"a worktree was materialised from {argv[-1]!r}, a name another run can "
+            f"rewrite while this one reads it: {argv}"
+        )
+    plan_tip = mod.build_plan_tip("refs/remotes/origin/master", [(1, head)])
+    assert plan_tip in [argv[-1] for argv in added], (plan_tip, added)
+
+    parked = [
+        argv
+        for argv in seen
+        if "update-ref" in argv and any(PLAN_NAMESPACE in part for part in argv)
+    ]
+    for argv in parked:
+        named = [part for part in argv if part.startswith(PLAN_NAMESPACE)]
+        assert all(
+            re.fullmatch(r"refs/emrg-plan-suite/pr\d+", name) for name in named
+        ), f"the gate wrote a ref of its own that is not a fetched PR head: {argv}"

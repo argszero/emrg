@@ -411,18 +411,33 @@ def _exclude_path_of(repo_dir: str) -> Path | None:
 def _already_excludes_runtime_dir(text: str, entry: str = EXCLUDE_ENTRY) -> bool:
     """Whether an ignore file already ignores the runtime directory ``entry`` names.
 
-    Accepts the spellings that mean it (anchored or not, trailing slash or not)
-    so the check does not rewrite a file that already says the same thing in
-    another hand's style — and a bare ``.emrg`` counts for a prefixed entry too,
-    because git reads an unanchored pattern at *any* depth, which is exactly the
-    directory ``/work/clone/.emrg/`` names (issue #1507).
+    Accepts the spellings that mean it (trailing slash or not) so the check does
+    not rewrite a file that already says the same thing in another hand's style —
+    and a pattern with no separator at all (``.emrg``) counts for a prefixed entry
+    too, because git reads an unanchored pattern at *any* depth, which is exactly
+    the directory ``/work/clone/.emrg/`` names (issue #1507).
+
+    Anchoring is not one of the interchangeable parts (issue #1527, measured):
+    a pattern containing a ``/`` is relative to the repository root, so a
+    root-level ``/.emrg/`` does **not** cover a nested runtime directory while a
+    bare ``.emrg`` does. Stripping the leading slash before comparing read those
+    two as one — and since every repository EMRG has already registered carries
+    the root form, that reading kept the scoped entry from ever being written
+    where it was needed, which is the dirt's other way back in.
     """
     core = entry.strip("/")
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if line.strip("/") in (core, ".emrg"):
+        candidate = line.rstrip("/")
+        if "/" not in candidate:
+            # No separator anywhere: git matches it at every depth, which is the
+            # only spelling that stands in for a scoped entry.
+            if candidate == ".emrg":
+                return True
+            continue
+        if candidate.strip("/") == core:
             return True
     return False
 

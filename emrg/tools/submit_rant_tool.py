@@ -11,6 +11,15 @@ four actions (submit / list / update / cleanup) so the evolution loop curates
 rants.jsonl exclusively through this tool — never with hand-written
 bash/python rewrites (the 2026-08-18 incident: format drift to array rows,
 field loss, history pruning).
+
+Issue #1514 (2026-09-21): `list` prints the full text for every rant that is not
+`completed`, plus for every rant a `status=` filter selected, and prints one line where a
+completed body was withheld. The rows still list every rant, so the queue is whole and
+`cleanup` (which decides by recency and status, i.e. by the row) is unchanged;
+`status="completed"` returns the history whole, so nothing this action printed before
+becomes unreachable. The read used to cost the whole queue on every call — ~52 K
+characters on the queue measured in the issue — because no task template passes a filter
+on the axis the cost is on.
 """
 
 from __future__ import annotations
@@ -61,6 +70,26 @@ def _excerpt(text: str, limit: int = _HEADER_EXCERPT) -> str:
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
+#: The status whose text is history rather than work, and therefore the one whose body the
+#: default read withholds (issue #1514). A completed rant's body is provenance: `cleanup`
+#: keeps it by recency and status — i.e. by its row — `promote` dedups against what is
+#: *queued* (pending / in_progress), and no task template reads a completed body to decide
+#: anything. Measured 2026-09-21 on the host that filed the issue: 11 of 13 rants were
+#: completed, five of them carrying 3.5–5 K-character messages, and the read cost ~52 K
+#: characters (~13 K tokens) per call — re-paid two or three times a cycle by the curation
+#: flow, on a queue whose actionable part was a small fraction of it.
+_HISTORY_STATUS = "completed"
+
+#: What a withheld body says instead. It is the same half of the contract that `_excerpt`'s
+#: `…` is: a reader who cannot tell "this rant has no message" from "this rant's message was
+#: withheld" cannot make the one call that returns it — which is how the earlier truncation
+#: stayed invisible for as long as it did. It names the remedy, not just the state.
+_WITHHELD_NOTE = (
+    '    (completed — text withheld as history; `action="list", status="completed"` '
+    "returns it)"
+)
+
+
 class SubmitRantTool(ToolExecutor):
     """Submit a user-confirmed rant / list / update / cleanup rants.jsonl.
 
@@ -83,11 +112,15 @@ class SubmitRantTool(ToolExecutor):
                 "clarify the target and polish the text, show the user the "
                 "result, and only then call. "
                 "**action=list**: list rants (optional status/project filters; "
-                "each row carries timestamp/project/status/a progress excerpt/"
-                "completed and a message excerpt — the scan view — and the full "
-                "message and progress follow as indented blocks under it. It is "
-                "the read path the task templates point at, so it has to carry "
-                "the text they point it at for). "
+                "every rant gets a row carrying timestamp/project/status/a "
+                "progress excerpt/completed and a message excerpt — the scan "
+                "view — and the full message and progress follow as indented "
+                "blocks under it, **except on a row whose status is completed**: "
+                "that text is history, so it is withheld and replaced by a line "
+                "saying so. Pass `status=\"completed\"` to read it back whole, or "
+                "any `status=` to see the selected slice in full. It is the read "
+                "path the task templates point at, so it has to carry the text "
+                "they point it at for). "
                 "**action=update**: update a rant by its timestamp (status "
                 "follows the pending→in_progress→completed state machine, no "
                 "skipping; completed timestamp auto-written). "
@@ -297,15 +330,34 @@ class SubmitRantTool(ToolExecutor):
         #
         # Measured cost on the same queue (11 rants, cleanup caps it at 10 completed plus
         # the pending/in-progress ones; messages 3504 / 4031 / 3594 … chars): the whole
-        # queue goes 15300 → 42725 characters, and `status="in_progress"` alone is 5544.
-        # The filters are the way to narrow it; the header line is still the scan view.
+        # queue went 15300 → 42725 characters. The filters were named as the way to narrow
+        # it, and the second half of that never happened: no task template passes a filter
+        # except promote's `project=`, and `project=` is **orthogonal to the axis the cost
+        # is on**. Measured 2026-09-21 (issue #1514): `list(project="emrg")` on the
+        # evolution host returns 9 rants, 9/9 completed — 100% history with the work at
+        # nil; over one session's whole history the calls averaged 17.4 K characters and
+        # were 19.4% of every tool-result character it ever saw.
+        #
+        # So the scope is the fix, and a scope is not a cap. **The full text is printed for
+        # every rant that is not `completed`, and for every rant a `status=` filter
+        # selected** — a caller naming the slice is the narrowing mechanism this comment
+        # always nominated, while "the rows narrow it" was never true of any caller. Every
+        # row still lists every rant, completed ones included (the row is the queue, and
+        # `cleanup` decides by recency and status, i.e. by the row), and
+        # `status="completed"` returns the withheld history whole — so nothing this action
+        # ever printed becomes unreachable, which is the property the refusal above was
+        # protecting. A withheld body says so and names that call, because an absent block
+        # that looks like an empty message is the silent half of the 2026-09-17 defect.
         #
         # `progress` is bounded in the header too, and for the same reason it is *not*
         # dropped there: it is a one-line field of the row (the prompt curates with it), but
         # printed whole it **was** the row — 1651 of that 1743-character header on the rant
         # in flight. So the row keeps an excerpt, and the whole value follows in a `progress:`
-        # block after the message, exactly as the message does. Nothing is cut: an excerpt in
-        # the scan view plus the full text in a block, never one without the other.
+        # block after the message, on the same rule the message follows — and it is withheld
+        # with the message on a completed row, since a completed rant's progress is the
+        # longer of the two fields (measured: 5008 characters on one of the queue's
+        # completed rants, against a 739-character message).
+        status_selected = status is not None
         lines = []
         for r in rants:
             message = (r.get("message") or "").strip()
@@ -317,6 +369,9 @@ class SubmitRantTool(ToolExecutor):
                 f"status={r.get('status')} | progress={progress_row} | "
                 f"completed={r.get('completed')} | {summary}"
             )
+            if not status_selected and (r.get("status") or "") == _HISTORY_STATUS:
+                lines.append(_WITHHELD_NOTE)
+                continue
             lines.append(
                 _indented(message) if message
                 else "    (this rant has no message)"
