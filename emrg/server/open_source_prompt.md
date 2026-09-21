@@ -125,6 +125,16 @@ cd {{ source_dir }} && git status --short --branch 2>&1
 >   `工作树非干净（dirty working tree）— 本周期只读` in the closing summary and proceed
 >   with the read-only parts of the cycle; finish without any git write operations.
 
+> ⚠️ **Where the contribution happens (rant 2026-09-21T16:12:19):** `{{ source_dir }}` is the
+> HOST's working tree and is a **read-only reference** for this task — read source in it,
+> `git show origin/main:<path>`, `git diff HEAD origin/main`. Every branch, commit and push
+> happens in the **session clone** defined in B.3
+> (`{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev`): it sits under the
+> runtime directory the host tree excludes from `git status` (PR #1505), and inside the
+> workspace the sandbox allows writes to. An earlier version of B.3 told the task to
+> `git checkout -b` in `{{ source_dir }}` itself — the one directory the dirty-tree rule and
+> the sandbox both exist to protect.
+
 - **Uncommitted local changes present** → do NOT stash/reset/restore. Record
   "dirty working tree — read-only cycle" in the closing summary; run the cycle
   **read-only** (scan / review / issue discussion only, no git writes, no PR
@@ -323,18 +333,37 @@ Extract from these files and strictly follow:
 - Unclear intent → read the tests (tests are docs), read Issues/discussion records
 - **Only when you understand the author's design intent should you consider how to contribute** — contributions must follow the existing design, not start from scratch
 
-#### B.3 Fork and branch
+#### B.3 Fork, clone, and branch
+
+**Never branch in `{{ source_dir }}`** (rant 2026-09-21T16:12:19). The contribution lives in a clone
+under this session's own directory; that path is inside the workspace the sandbox allows, and the
+host tree's `.git/info/exclude` keeps it out of `git status` (PR #1505).
 
 ```bash
-cd {{ source_dir }}
-# Contributor: start from your own fork
-gh repo fork {{ owner }}/{{ repo }} --clone=false 2>&1  # ensure the fork exists
-git remote get-url origin 2>&1  # confirm remote
-git checkout -b <branch name per project convention> 2>&1   # default to fix/<description> if unspecified
+DEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"
+
+# 1. The fork exists — Contributor: this is what the branch is pushed to
+gh repo fork {{ owner }}/{{ repo }} --clone=false 2>&1
+# 2. Clone THE FORK into the session directory (first round creates it; later rounds reuse it)
+[ -d "$DEV" ] || gh repo clone "$(gh api user -q .login)/{{ repo }}" "$DEV" 2>&1
+# 3. Keep the upstream beside the fork, as a read-only reference
+cd "$DEV" && git remote add upstream {{ repo_url }} 2>&1 || true
+# 4. Branch inside the clone, per project convention (default fix/<description>)
+cd "$DEV" && git fetch upstream 2>&1
+cd "$DEV" && git checkout -b <branch name per project convention> 2>&1
 ```
+
+**This flow needs the `workspace-write` tier — measured 2026-09-21**, not assumed: `git clone`,
+`git checkout -b`, `git add` and `git commit` are each `BLOCK` under `read-only` and each `ALLOW`
+under `workspace-write`, because `$DEV` lies inside the workspace. A cycle whose tier is
+`read-only` (configured for the project, or forced by the dirty-tree guard above) cannot start
+this flow at all: do **not** improvise another location — record the exact command the sandbox
+refused in the closing summary as a blocker, and finish the read-only parts of the cycle.
 
 #### B.4 Implement
 
+- **Work in the clone from B.3** (`cd "$DEV"`): every edit lands there — `{{ source_dir }}` stays a
+  read-only reference (rant 2026-09-21T16:12:19)
 - **Read the context first**: understand the relevant code's responsibilities and conventions
 - **Small changes**: focus on a single problem; don't refactor opportunistically
 - **Follow project conventions**: strictly comply with CONTRIBUTING.md and the PR template read in B.3
@@ -342,7 +371,7 @@ git checkout -b <branch name per project convention> 2>&1   # default to fix/<de
 #### B.5 Test (must pass before submitting)
 
 ```bash
-cd {{ source_dir }}
+cd "$DEV"    # the clone from B.3 — never {{ source_dir }}
 # 1. Run the existing test suite (make sure nothing breaks)
 #    Choose the command based on project type:
 #    - Python: uv run pytest tests/ -v 2>&1 || echo "⚠️ test failures"
@@ -364,16 +393,16 @@ python -c "<verification code snippet>" 2>&1 || echo "⚠️ verification failed
 - Commit: `<scope>: <description>`
 
 ```bash
-cd {{ source_dir }}
+cd "$DEV"    # the clone from B.3 — never {{ source_dir }}
 git add -A
 git commit -m "<commit message per project convention>"   # e.g. conventional commits: fix: xxx or feat: xxx
-git push origin <branch name> 2>&1
+git push origin <branch name> 2>&1   # origin = the fork `gh repo clone` set up in B.3
 ```
 
 **PR description must follow the project template.** If the project has `.github/pull_request_template.md`, fill in every field strictly. If no template, use this default format:
 
 ```bash
-gh pr create -R {{ owner }}/{{ repo }} \
+cd "$DEV" && gh pr create -R {{ owner }}/{{ repo }} \
   --title "<scope>: <description>" \
   --body "## Summary
 <description>
@@ -424,6 +453,10 @@ For each open PR:
 | **Merged** | ✅ Remove from active PR list, record in memory file |
 | **Closed (unmerged)** | Understand why → record in memory file → remove from active PR list |
 | **No feedback for 7+ days** | May politely ask on the PR "any updates or feedback?" |
+
+> Every code change this phase makes — the review-feedback fix and the conflict rebase alike —
+> happens in the clone B.3 created (`cd "$DEV"`); `{{ source_dir }}` stays a read-only reference
+> (rant 2026-09-21T16:12:19).
 
 #### C.1.5 Parallel Recon (healthy-PR rule, PR #954, rant 2026-08-24T14:05:06)
 

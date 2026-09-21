@@ -606,3 +606,151 @@ def test_the_write_zone_scan_answers_both_ways() -> None:
     assert not _out_of_zone_refs(
         "Do not modify files under `{{ evolution_cwd }}` outside `{{ source_dir }}/`"
     ), "the bare root names the directory in a prohibition; it is not a write path"
+
+
+# `open_source_prompt.md` is the one built-in template whose `{{ source_dir }}` is the HOST's own
+# working tree — the directory the dirty-tree rule (§0.3) and the sandbox exist to protect. It
+# used to send Phase B.3 there to `git checkout -b`, which is unreachable in the `read-only` tier
+# those same rules force (rant 2026-09-21T16:12: measured 12:22:01Z `git add` refused at 12:22:10Z
+# in the sibling task, while its own hand-rolled clone pushed fine). The fix is a clone under the
+# session directory; this guard keeps the flow from drifting back into the host tree.
+#
+# The other templates are deliberately out of scope: `evolution_prompt.md` works in its own
+# repository by design ("not pushing = not done" — the branch, commit and push there ARE the
+# cycle's output), and the journal/paper tasks commit manuscripts into their own task clone.
+# A guard over all of them would be a different claim, not a stricter version of this one.
+_GIT_MUTATOR = re.compile(
+    r"\bgit\s+(clone|checkout|switch|add|commit|push|pull|rebase|merge|reset|clean|stash"
+    r"|restore|cherry-pick|revert)\b"
+)
+_CD_TARGET = re.compile(r"\bcd\s+(?P<rest>[^&;|#]+)")
+
+
+def _fenced_blocks(text: str) -> list[list[str]]:
+    """The text's fenced code blocks, as lists of lines (fence lines dropped)."""
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            if in_fence:
+                blocks.append(current)
+                current = []
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            current.append(line)
+    return blocks
+
+
+def _host_tree_git_writes(text: str) -> list[str]:
+    """Git writes a template issues with the HOST tree as the current directory.
+
+    The reader's directory is the last `cd <target>` in the block the command sits in —
+    alone on its line or joined with `&&`, which is why the retired B.3 shape
+    (`cd {{ source_dir }}` … `git checkout -b`) is caught. The target runs to the first
+    `&`/`;`/`|`/`#` but *not* to a space, because `{{ source_dir }}` contains one; a trailing
+    comment that merely *names* `{{ source_dir }}` (the new instruction says
+    "never {{ source_dir }}") therefore stops at the `#` and is not read as the directory.
+    Two exclusions, both measured against real template text: a read verb
+    (`log`/`show`/`diff`/`status`/`fetch`) is not a mutation, and `--dry-run` writes nothing
+    (the role probe in §0.2 is one).
+    """
+    offenders: list[str] = []
+    for block in _fenced_blocks(text):
+        cwd: str | None = None
+        for line in block:
+            match = _CD_TARGET.search(line)
+            if match:
+                cwd = match.group("rest").strip()
+            if (
+                cwd is not None
+                and "source_dir" in cwd
+                and _GIT_MUTATOR.search(line)
+                and "--dry-run" not in line
+            ):
+                offenders.append(line.strip())
+    return offenders
+
+
+def test_the_open_source_flow_writes_only_in_the_session_clone() -> None:
+    """`{{ source_dir }}` is the host's tree: no branch, commit or push inside it.
+
+    Rant 2026-09-21T16:12. Three facts are asserted together because each can go missing on
+    its own: the flow's git writes all run in the clone, the clone is *named* and sits under
+    the session directory the sandbox allows, and the tier that flow needs is stated with it —
+    a location without its tier sends the next reader to the same dead end one layer down.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    offenders = _host_tree_git_writes(text)
+    assert not offenders, (
+        "the open-source template issues these git writes in the HOST's tree "
+        f"(`{{{{ source_dir }}}}`): {offenders} — Phase B.3's clone exists so that "
+        "`{{ source_dir }}` stays a read-only reference"
+    )
+
+    # The scan must be looking at a non-empty surface: the flow's writes are still there,
+    # in the clone. Otherwise deleting the whole phase would read as a pass.
+    clone_writes = [
+        line
+        for block in _fenced_blocks(text)
+        for line in block
+        if _GIT_MUTATOR.search(line) and "--dry-run" not in line
+    ]
+    assert len(clone_writes) >= 3, (
+        f"only {len(clone_writes)} mutating git command(s) left in the contribution flow — "
+        "the scan above would pass on a template that no longer contributes"
+    )
+
+    assert re.search(
+        r'DEV="\{\{ source_dir \}\}/\.emrg/sessions/\{\{ session_id \}\}/tmp/', text
+    ), "B.3 must name the clone under the session directory, not merely say 'a clone'"
+
+    # The tier half is bound to B.3 rather than asserted anywhere in the file: a location
+    # without the tier that unlocks it sends the next reader to the same dead end one layer
+    # down, which is what the rant measured (both the configured and the dirty-tree-forced
+    # `read-only` refuse every step of this flow).
+    parts = text.split('DEV="{{ source_dir }}', 1)
+    assert len(parts) == 2, "B.3 must define the clone as a shell variable the flow can reuse"
+    section = parts[1].split("#### B.4", 1)[0]
+    assert "workspace-write" in section and "read-only" in section, (
+        "B.3 must state the tier this flow needs and the tier that refuses it — measured: "
+        "`git clone`, `git checkout -b`, `git add` and `git commit` are all BLOCK under "
+        "`read-only` and all ALLOW under `workspace-write`"
+    )
+
+
+def test_the_host_tree_write_scan_answers_both_ways() -> None:
+    """The instrument's controls, on the shapes this repository has actually carried.
+
+    Without the refusing half it would pass on a scan that finds nothing; without the
+    accepting half it would flag the read-only probes that legitimately run in the host tree —
+    including the new instruction's own comment, which names `{{ source_dir }}` in order to
+    forbid it.
+    """
+    retired = """```bash
+cd {{ source_dir }}
+gh repo fork {{ owner }}/{{ repo }} --clone=false 2>&1
+git checkout -b <branch name per project convention> 2>&1
+```"""
+    assert _host_tree_git_writes(retired) == [
+        "git checkout -b <branch name per project convention> 2>&1"
+    ], "the retired B.3 shape is exactly what this guard exists for"
+
+    shipped = """```bash
+DEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"
+cd "$DEV"    # the clone from B.3 — never {{ source_dir }}
+git add -A
+git push origin <branch> 2>&1
+```"""
+    assert not _host_tree_git_writes(shipped), (
+        "the clone's own instructions name `{{ source_dir }}` in a comment; that is not a cwd"
+    )
+
+    assert not _host_tree_git_writes(
+        "```bash\ncd {{ source_dir }} && git status --short --branch 2>&1\n```"
+    ), "reading the host tree is what it is a reference for"
+    assert not _host_tree_git_writes(
+        "```bash\ncd {{ source_dir }} && git push origin HEAD --dry-run 2>&1\n```"
+    ), "a dry run writes nothing, and §0.2's role probe is one"
