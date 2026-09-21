@@ -38,6 +38,7 @@ import importlib.util
 import io
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,41 @@ HEAD = "a" * 40
 CYCLE = "cyc20260916-020149"
 OTHER_CYCLE = "cyc20260915-235900"
 ID_REVIEW = "emrg: a flag with an attached value is the same flag (#1256)"
+
+#: The cycle the abstention clause is measured against — one minute before `CYCLE`, the
+#: same shape `tests/test_review_queue.py` uses for the same clause, so the two files pin
+#: the same two ends. In UTC (`cycle_start` converts; a cycle id is local time): `CYCLE`
+#: starts at 18:01:49Z and this one at 17:59:06Z.
+PREV_CYCLE = "cyc20260916-015906"
+
+#: Where every head in this file was pushed unless the test moves it: **before both ends
+#: of the window**, so the clause lets the vote through and the tests that measure
+#: attribution and counting keep measuring exactly that. A test about the clause sits its
+#: push on one side or the other of 01:59:06 local, or of 02:01:49 local for the
+#: narrowed window.
+LOCAL = datetime.now().astimezone().tzinfo
+
+
+def _push(year, month, day, hour, minute, second=0):
+    """A push instant named in the host's own zone, as GitHub would report it.
+
+    Push times arrive as UTC while a cycle id is *local* time, so a bare `...Z` literal
+    is a measurement of the **runner's** timezone: a push two seconds after
+    01:59:06 local is inside the window on a +08 host, a +04 one and a UTC one alike,
+    and the same literal is a different question on each. The conversion happens here
+    rather than in the assertion, the way the sibling `tests/test_review_queue.py`
+    builds the same two ends of the same window — the two files must not disagree
+    about which push is inside it.
+    """
+    return (
+        datetime(year, month, day, hour, minute, second, tzinfo=LOCAL)
+        .astimezone(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+PUSHED_BEFORE_THE_WINDOW = _push(2026, 9, 16, 1, 0, 0)
 
 
 def _load(path: Path, name: str):
@@ -94,15 +130,36 @@ class Verdict:
     needed: int = 3
     votes: list[Vote] = field(default_factory=list)
     counted: list[bool] = field(default_factory=list)
+    #: The counter's two push-time fields, which the abstention clause decides from.
+    #: Modelled rather than omitted: without them the clause could not be driven through
+    #: `main` at all, and a fake that cannot receive a field is a fake that hides a call
+    #: site reading it (`push_time_exact` is the counter's own "no CI run exists for this
+    #: head" — the case the clause refuses to judge).
+    push_time: str = PUSHED_BEFORE_THE_WINDOW
+    push_time_exact: bool = True
 
 
 def vote(cycle=CYCLE, *, kind="approve", counted=True, why="", at="2026-09-15T18:19:36Z"):
     return Vote(at=at, kind=kind, cycle=cycle, valid=counted, why=why)
 
 
-def verdict_with(votes=(), counted=None, valid_count=0, pr=1):
+def verdict_with(
+    votes=(),
+    counted=None,
+    valid_count=0,
+    pr=1,
+    push_time=PUSHED_BEFORE_THE_WINDOW,
+    push_time_exact=True,
+):
     counted = [v.valid for v in votes] if counted is None else list(counted)
-    return Verdict(pr=pr, votes=list(votes), counted=counted, valid_count=valid_count)
+    return Verdict(
+        pr=pr,
+        votes=list(votes),
+        counted=counted,
+        valid_count=valid_count,
+        push_time=push_time,
+        push_time_exact=push_time_exact,
+    )
 
 
 class FakeCounter:
@@ -164,8 +221,18 @@ def body_file(tmp_path):
 
 
 def _run(mod, monkeypatch, counter: FakeCounter, gh: FakeGh, argv: list[str]):
+    """`main` with the counter, `gh` and the window's far end all pinned.
+
+    `--prev-cycle` is supplied unless the caller pins the window itself (with
+    `--prev-cycle` or `--cycles-log`). The tool's default is the cycle records beside the
+    checkout, so a test that let the default decide would be measuring this host's memory
+    directory rather than the clause — and would answer differently on CI, where those
+    records do not exist.
+    """
     monkeypatch.setattr(mod, "votes_counter", lambda: counter)
     monkeypatch.setattr(mod, "_gh", gh)
+    if "--prev-cycle" not in argv and "--cycles-log" not in argv:
+        argv = [*argv, "--prev-cycle", PREV_CYCLE]
     return mod.main(argv)
 
 
@@ -934,3 +1001,252 @@ def test_zero_is_a_supported_budget_and_asks_once(mod, monkeypatch, capsys, body
     )
     assert rc == 0
     assert counter.kwargs == [{"mergeability_wait": 0.0}, {"mergeability_wait": 0.0}]
+
+
+# ── the abstention clause: whose head is this? (issue #1408) ───────────────
+#
+# The clause is *a cycle does not vote on a head it pushed*, and the cycle immediately
+# before this one counts as one's own. `review-queue.py` owns that reading and reports
+# such a head as `abstain`; these tests pin that the same reading is **enforced where the
+# vote is spent**, because the counter — the only authority on whether a vote counted —
+# never asks who pushed the head, and un-spending one afterwards is a hand edit of the
+# review body. Measured 2026-09-21 (`cyc20260921-114528`): a vote went out on a head
+# pushed inside the previous cycle's window, and the sibling reported `abstain` for that
+# same head minutes later.
+#
+# Every push below is named in the host's zone through `_push`, so the two ends of the
+# window are the same two ends on a +08 host, a +04 one and a UTC one. A bare `...Z`
+# literal here would be a measurement of the runner's timezone instead.
+#
+# Every refusal's **direction** is asserted, not just its occurrence: nothing was posted.
+# Mutation arm, run 2026-09-21 and reported in the cycle record `cyc20260921-114528`:
+# reversing the comparison in `own_head_window` (`pushed >= window.start` -> `<`) turns
+# the three refusals that decide from the push time red (the previous cycle's head, the
+# boundary, the narrowed window) and leaves the negative control green — which is what
+# says the control is a real one.
+
+
+def test_a_head_the_previous_cycle_pushed_is_refused_before_anything_is_posted(
+    mod, monkeypatch, capsys, body_file
+):
+    """The measured violation: a vote went out, and the sibling said `abstain` for it.
+
+    The head below is pushed a minute inside the window the cycle before `CYCLE` opened
+    (01:59:06 local), and before `CYCLE` itself began. `check-vote-count.py` counts a
+    vote here — it reads *when* a vote was cast, never *who pushed the head* — so nothing
+    else in this toolchain objects, which is exactly why the check has to be here.
+    """
+    pushed = _push(2026, 9, 16, 2, 0, 0)
+    counter = FakeCounter(verdict_with(push_time=pushed))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM")],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2, "nothing was posted, so nothing has to be rolled back"
+    assert gh.calls == [], "the clause exists to prevent the post, not to report it"
+    assert counter.calls == [(1255, 3)], (
+        "one read, and it is the one whose verdict carries the push time the clause "
+        "decides from"
+    )
+    assert "inside the window this cycle treats as its own" in err
+    assert PREV_CYCLE in err, "the window's source is named, not implied"
+    assert pushed in err, "the push time that decided it is quoted back"
+    assert "abstain" in err, "the reader must learn where the same head is reported"
+    assert "later cycle" in err, "and what the remedy is: another cycle's vote"
+
+
+def test_the_window_is_closed_at_its_start(mod, monkeypatch, capsys, body_file):
+    """A push *at* the previous cycle's start is inside it — the boundary `review-queue`
+    pins for the same clause, from the same `abstain_window`.
+
+    An exclusive start would be a one-second hole in a rule that has no other edge, and
+    it is the edge a refresh lands on: a cycle merges master and the merge commit's time
+    is the instant its window begins.
+    """
+    pushed = _push(2026, 9, 16, 1, 59, 6)
+    counter = FakeCounter(verdict_with(push_time=pushed))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM")],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert gh.calls == []
+    assert "inside the window" in err and pushed in err
+
+
+def test_the_negative_control_a_push_before_the_window_is_still_posted(
+    mod, monkeypatch, capsys, body_file
+):
+    """Without this, a tool that refused every vote would pass every test above.
+
+    The push is one second before the window opens and the vote goes out — so the
+    refusals above are about *where the head came from*, not about the clause being
+    unable to let anything through.
+    """
+    counter = FakeCounter(
+        verdict_with(push_time=_push(2026, 9, 16, 1, 59, 5)),
+        verdict_with([vote()], counted=[True], valid_count=1),
+    )
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM")],
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert len(gh.calls) == 1 and gh.calls[0][:3] == ["pr", "review", "1255"]
+    assert "counted" in out
+
+
+def test_a_head_with_no_ci_run_cannot_be_judged_so_nothing_is_posted(
+    mod, monkeypatch, capsys, body_file
+):
+    """An undecidable window is a refusal, not a pass.
+
+    With no CI run for the head the counter's push time is the *commit date* — its own
+    `push_time_exact` says so — which is a lower bound and cannot tell whether the push
+    fell inside the window. The head below is pushed an hour before it opens, so a tool
+    that applied the clause anyway would post; refusing is the direction that costs a
+    delay instead of a vote nobody can recount. The remedy is the one the same missing
+    run already has elsewhere — and the refusal names that row rather than leaving the
+    reader to find it, because "no CI run" is not a reason to invent a second remedy.
+    """
+    counter = FakeCounter(
+        verdict_with(push_time=_push(2026, 9, 16, 1, 0, 0), push_time_exact=False)
+    )
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM")],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert gh.calls == []
+    assert "no CI run" in err and "lower bound" in err
+    assert "unblock" in err, "the queue's own remedy for this head, not a new one"
+    assert "re-trigger" in err, "the refusal names the command, not just the state"
+
+
+def test_the_previous_cycle_is_read_from_the_cycle_records(
+    mod, monkeypatch, capsys, body_file, tmp_path
+):
+    """`--cycles-log`: the newest record that sorts *before* this cycle's id.
+
+    Pinned through the real reader rather than a stubbed window, because the wiring is
+    the part that can silently point at the wrong record: the directory here also holds
+    a record from *after* `CYCLE`, and a tool that took the newest record would widen the
+    window to a cycle that has not run yet.
+    """
+    (tmp_path / "cycle-20260916-015906.md").write_text(
+        "---\nid: cyc20260916-015906\n---\n", encoding="utf-8"
+    )
+    (tmp_path / "cycle-20260916-030000.md").write_text(
+        "---\nid: cyc20260916-030000\n---\n", encoding="utf-8"
+    )
+    counter = FakeCounter(verdict_with(push_time=_push(2026, 9, 16, 2, 0, 0)))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        [
+            "1255",
+            "--body-file",
+            body_file(f"{CYCLE} — ✅ LGTM"),
+            "--cycles-log",
+            str(tmp_path),
+        ],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert gh.calls == []
+    assert f"previous cycle {PREV_CYCLE}" in err, (
+        "the window's source must name the record that was read, so a reader can tell "
+        "which cycle the head was attributed to"
+    )
+    assert "20260916-030000" not in err, "the later record must not widen the window"
+
+
+def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
+    mod, monkeypatch, capsys, body_file, tmp_path
+):
+    """A narrowed window is a strictly weaker reading, and it says so.
+
+    With no records at all the clause still catches what it can always decide — a push
+    inside *this* cycle's own window — and the note reports the narrowing **even though
+    the run ends in a refusal**, because that is the outcome a reader most needs to know
+    the reading was weaker than the rule for. A note printed only on the way to a posted
+    vote would be silent exactly when it matters.
+    """
+    counter = FakeCounter(verdict_with(push_time=_push(2026, 9, 16, 2, 5, 0)))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        [
+            "1255",
+            "--body-file",
+            body_file(f"{CYCLE} — ✅ LGTM"),
+            "--cycles-log",
+            str(tmp_path),
+        ],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert gh.calls == []
+    assert "note:" in err and "could not be widened" in err
+    assert "only pushes at or after" in err
+    assert "this cycle only" in err, "the note names the window it actually applied"
+
+
+def test_an_unresolvable_previous_cycle_cannot_widen_a_vote_into_a_pass(
+    mod, monkeypatch, capsys, body_file, tmp_path
+):
+    """The narrowed window still lets through what it never claimed — the control for
+    the note above, which would otherwise be satisfied by a tool that refused always.
+
+    The push here sits before *this* cycle began, so the reading that was applied has no
+    opinion about it; the vote goes out and the note rides along with it.
+    """
+    counter = FakeCounter(
+        verdict_with(push_time=_push(2026, 9, 16, 1, 0, 0)),
+        verdict_with([vote()], counted=[True], valid_count=1),
+    )
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        [
+            "1255",
+            "--body-file",
+            body_file(f"{CYCLE} — ✅ LGTM"),
+            "--cycles-log",
+            str(tmp_path),
+        ],
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert len(gh.calls) == 1
+    assert "counted" in captured.out
+    assert "could not be widened" in captured.err
