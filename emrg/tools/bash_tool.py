@@ -6609,6 +6609,23 @@ def _unresolved_wrapper_payloads(tokens: list[str]) -> list[str]:
     aborts the whole compound command the reads sharing the call are lost with
     it. The wrapper class itself is unchanged: every spelling in the corpus stands
     where a command can begin.
+
+    **And which of the wrapper's own arguments are code at all** (issue #1492).
+    `_runs_as_a_command` answers the position question for the wrapper *word*;
+    the same question is owed to the words behind it. A word that follows a flag
+    is that flag's value, and a flag's value is text the program reads — so
+    `-c 'git checkout .'` is a command string, while `"patch rc=$?"` in
+    `$SHELL "patch rc=$?"` is one argument, the script name. Handing that
+    argument back as command text re-tokenizes one word into the words `patch`
+    and `rc=$?`, and `patch` is a write verb: measured on master `c1a70c94`,
+    `$SHELL "patch rc=$?"` and `$SHELL -c 'ls' "patch rc=$?"` both answered
+    **BLOCK** at read-only naming `rc=$?`, while `$SHELL -c 'ls'` stayed allowed
+    — one word that arrives after a flag is code, the same word one position over
+    is data. Matching the *flag* rather than `-c` avoids the enumeration this
+    file refuses everywhere else (`_nested_command_texts` records the measurement
+    that killed the walk-to-`-c` version: 9 of 14 named-wrapper shapes went
+    ALLOW), and the rule stays an over-approximation in the safe direction —
+    every value of every flag is still read as code.
     """
     out: list[str] = []
     for i, tok in enumerate(tokens):
@@ -6623,8 +6640,29 @@ def _unresolved_wrapper_payloads(tokens: list[str]) -> list[str]:
             _UNRESOLVED_VAR_RE.fullmatch(tok)
             or _UNRESOLVED_VAR_RE.fullmatch(_basename(tok))
         ) and _runs_as_a_command(tokens, i):
-            out.extend(tokens[i + 1:])
+            out.extend(_payload_code_words(tokens, i))
     return out
+
+
+def _payload_code_words(tokens: list[str], i: int) -> list[str]:
+    """The arguments of wrapper ``tokens[i]`` the shell hands back as text.
+
+    One position carries text rather than an operand: the value of a flag. The
+    wrapper is unresolved, so *which* flag — `-c`, `--command`, `-e` — is a fact
+    about a program the guard cannot name, and enumerating them is the #461 class
+    `_nested_command_texts` refuses (its docstring carries the measurement). The
+    flag itself is therefore what is matched, and every value of every flag is
+    read as code: an over-approximation, in the direction that keeps blocking.
+
+    Every other argument is one word the wrapper consumes — a script name, a
+    positional parameter, the word a stream filter eats — and re-reading one as a
+    command line is what named `rc=$?` in `$SHELL "patch rc=$?"` (issue #1492).
+    """
+    return [
+        tokens[j]
+        for j in range(i + 1, len(tokens))
+        if tokens[j - 1].startswith("-")
+    ]
 
 
 def _unresolved_wrapper_targets(cmd: str, _depth: int = 0) -> list[str]:

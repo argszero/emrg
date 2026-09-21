@@ -224,6 +224,49 @@ def test_a_wrapper_beside_an_operand_position_variable_is_still_read(cmd: str) -
     assert not allowed, (cmd, reason)
 
 
+# Issue #1492: the wrapper's own **arguments**. `_runs_as_a_command` answers the
+# position question for the wrapper *word*; the same question is owed to the words
+# behind it. A word that follows a flag is that flag's value — text the program
+# reads — and a word anywhere else is one argument the wrapper consumes. Measured
+# on master `a38fd0d`, through `_check_sandbox` at the read-only tier, every row
+# below answered BLOCK while writing nothing, naming `rc=$?`: the argument token
+# `patch rc=$?` was re-tokenized into the words `patch` and `rc=$?`, and `patch`
+# is a write verb.
+WRAPPER_ARGUMENTS_ARE_DATA = [
+    '$SHELL "patch rc=$?"',
+    "$SHELL -c 'ls' \"patch rc=$?\"",
+    '${SHELL} "patch rc=$?"',
+    '$SHELL x "echo hi > OUT.txt"',
+    "$SHELL -c 'ls' \"rm -rf /tmp/x\"",
+]
+
+# The rule matches the *flag*, not `-c`: naming the flag that takes code is the
+# #461 enumeration `_nested_command_texts` refuses (its docstring carries the
+# measurement — a long option or an option value ended the walk before `-c` was
+# reached, and 9 of 14 named-wrapper shapes went ALLOW). These are the shapes that
+# killed that version, driven with an un-resolvable wrapper.
+STILL_CODE_AFTER_A_LONG_OPTION = [
+    "$SHELL --command 'git checkout .'",
+    "$SHELL --login -c 'git checkout .'",
+    "$SHELL -o pipefail -c 'git checkout .'",
+]
+
+
+@pytest.mark.parametrize("cmd", WRAPPER_ARGUMENTS_ARE_DATA)
+def test_an_argument_of_an_unresolved_wrapper_is_data(cmd: str) -> None:
+    """Both tiers: a refusal here aborts the reads sharing the compound command."""
+    for tier in (READ_ONLY, WW):
+        allowed, reason, _enforcement = _check_sandbox(cmd, tier, WORKDIR)
+        assert allowed, (cmd, tier, reason)
+
+
+@pytest.mark.parametrize("cmd", STILL_CODE_AFTER_A_LONG_OPTION)
+def test_the_flag_rule_does_not_lose_the_shapes_the_walk_to_c_lost(cmd: str) -> None:
+    allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
+    assert not allowed, (cmd, reason)
+    assert "git" in (reason or ""), (cmd, reason)
+
+
 def test_the_named_wrapper_is_the_control() -> None:
     """The hole was the spelling, so the named twin must reach the same verdict."""
     named, _r1, _e1 = _check_sandbox("sh -c 'git checkout .'", READ_ONLY, WORKDIR)
