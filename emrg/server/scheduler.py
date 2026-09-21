@@ -32,6 +32,7 @@ from emrg.server.atomic import atomic_write_yaml
 from emrg.server.git_utils import (
     _detect_git_remote,
     ensure_local_exclude,
+    repo_scope,
     resolve_git_gh,
 )
 
@@ -416,26 +417,29 @@ class TaskHandler:
         return "workspace-write"
 
     def _exclude_own_runtime_dir(self) -> None:
-        """Let the repository ignore this instance's own runtime directory.
+        """Let the repository this task works in ignore this instance's own runtime data.
 
         EMRG writes ``.emrg/`` (sessions, memory, the client log) into the
-        directories it works in. Where that directory is a git repository —
+        directories it works in. Where that directory is *in* a git repository —
         an open-source task's clone is the case that cost 38 consecutive
-        read-only cycles (rant 2026-09-21T10:12:01) — the dirt is EMRG's own
-        and must not be read as the host's uncommitted work.
+        read-only cycles (rant 2026-09-21T10:12:01) — the dirt is EMRG's own and
+        must not be read as the host's uncommitted work.
 
-        The entry goes in the repository's *local* ``.git/info/exclude``:
-        per-clone, never committed, and never the upstream ``.gitignore``,
-        which belongs to the project's maintainers. Idempotent and silent by
-        design — a failure here (no git, a read-only git dir) must never stop
-        a cycle, and the probe below still answers for itself.
+        The entry goes in the repository's *local* ``.git/info/exclude``: per-clone,
+        never committed, and never the upstream ``.gitignore``, which belongs to the
+        project's maintainers. Both halves are asked of git rather than derived from
+        the path (``repo_scope`` / ``ensure_local_exclude``), because "is this
+        directory the root of a checkout?" is not the question: a task directory one
+        level down has no ``<dir>/.git`` and still writes its runtime data *inside* a
+        repository (community issue #1507). Idempotent and silent by design — a
+        failure here (no git, a read-only git dir) must never stop a cycle, and the
+        probe below still answers for itself.
         """
         source_dir = str(self._source_dir)
-        marker = os.path.join(source_dir, ".git")
-        # The dirty-tree probe itself fails open without this marker, so there
-        # is nothing to protect when it is absent (and no git call is worth
-        # making on a directory that is not a repository).
-        if not os.path.isdir(marker) and not os.path.isfile(marker):
+        # The dirty-tree probe below reads the same scope and fails open on it, so
+        # there is no tree to protect when the directory is in no repository — and
+        # no git call is worth making for it beyond the one that answered that.
+        if repo_scope(source_dir) is None:
             return
         status = ensure_local_exclude(source_dir)
         if status == "added":
@@ -462,22 +466,33 @@ class TaskHandler:
         self-heal git machinery was deleted). Run via ``asyncio.to_thread``
         so the event loop is never blocked by the git call.
 
-        Fail-open by design: a non-git source dir, or a failing git call,
-        returns False — there is no uncommitted state to protect, and the
-        guard itself must never block a cycle.
+        Fail-open by design: a directory in no repository, or a failing git call,
+        returns False — there is no uncommitted state to protect, and the guard
+        itself must never block a cycle.
+
+        **The directory is judged where the task may write, not where the repository
+        ends.** Asking git for the root (`repo_scope`) answers "is this directory in a
+        tree?" — the question a `.git` marker test cannot answer, since the marker is
+        absent for every directory that is not a root, and returned False for a task
+        directory whose own `git status` listed the work it was about to be allowed to
+        remove (community issue #1507). The reading is then limited to that directory
+        (`-- <prefix>`), because dirt elsewhere in the repository is work this task
+        cannot reach: its writes are confined to its workspace by the sandbox, so a
+        verdict over the parent's tree would hold a cycle read-only — and hand the
+        recovery below a repo-wide stash — for somebody else's work. A task directory
+        *at* the root passes no pathspec at all, so its reading is byte-identical to
+        what it was.
         """
         import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
 
-        # .git may be a directory (regular repo) or a file (linked worktree —
-        # "gitdir: ..." pointer). Treat both as git repos; only a bare/non-git
-        # dir fails open (cycle 20260825-194513: isdir-only check silently
-        # bypassed the guard in linked-worktree setups).
-        git_marker = os.path.join(source_dir, ".git")
-        if not os.path.isdir(git_marker) and not os.path.isfile(git_marker):
+        scope = repo_scope(source_dir)
+        if scope is None:
             return False
+        root, prefix = scope
+        spec = [] if not prefix else ["--", prefix]
         try:
             out = _sp.run(
-                ["git", "-C", source_dir, "status", "--porcelain"],
+                ["git", "-C", root, "status", "--porcelain", *spec],
                 capture_output=True, text=True, timeout=10,
                 # Paths, not console output: `git status` emits UTF-8 filenames.
                 # Default `core.quotePath=true` escapes non-ASCII to ASCII octal
@@ -564,9 +579,21 @@ class TaskHandler:
         """
         import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
 
+        # The same scope the probe reads, for the same reason (issue #1507): paths are
+        # resolved *from the repository root* (`hash-object -- <path>`, `HEAD:<path>`,
+        # `ls-files -s -- <path>`) so the reading is taken from the root, and limited to
+        # the directory the guard was pointed at — the only place the task can write, and
+        # therefore the only place whose loss is this guard's business. At the root the
+        # pathspec is absent and every call is what it was.
+        scope = repo_scope(source_dir)
+        if scope is None:
+            return False, "not in a git repository, so there is no tree to lose"
+        root, prefix = scope
+        spec = [] if not prefix else ["--", prefix]
+
         def git(*args: str, stdin: str | None = None):
             return _sp.run(
-                ["git", "-C", source_dir, *args],
+                ["git", "-C", root, *args],
                 # `None` is the inherited stdin every other call here has always had;
                 # only the one batched read below passes a spec list (`cat-file
                 # --batch-check` takes its questions on stdin, which is what makes one
@@ -587,7 +614,7 @@ class TaskHandler:
         # whose bytes are the upstream tip's — the 33-cycle deadlock shape — answered
         # *unique* for a path with a space or a non-ASCII name, i.e. the guard refused a
         # tree it has no reason to refuse, on a host whose filenames are not all ASCII.
-        status = git("status", "--porcelain", "-z", "--untracked-files=normal")
+        status = git("status", "--porcelain", "-z", "--untracked-files=normal", *spec)
         if status.returncode != 0:
             return True, "the working tree state could not be read"
         if not status.stdout.strip():
@@ -952,9 +979,21 @@ class TaskHandler:
         """
         import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
 
+        # The scope the probe and the criterion read, and load-bearing here for a second
+        # reason: `git stash push` is **repository-wide** — measured for issue #1507, a
+        # stash run in a task directory one level down moved the parent repository's
+        # untracked file as well — so the pathspec is what keeps a convergence from
+        # touching work this task does not own, and the post-check below is asked in the
+        # same scope so the parent's surviving dirt is not read as a failed convergence.
+        scope = repo_scope(source_dir)
+        if scope is None:
+            return "error", "the recovery could not run: not a git repository"
+        root, prefix = scope
+        spec = [] if not prefix else ["--", prefix]
+
         def git(*args: str):
             return _sp.run(
-                ["git", "-C", source_dir, *args],
+                ["git", "-C", root, *args],
                 capture_output=True, text=True, timeout=30,
                 encoding="utf-8", errors="replace",
             )
@@ -966,7 +1005,7 @@ class TaskHandler:
         if head.returncode != 0 or not head.stdout.strip():
             return "error", "the recovery could not run: not a git repository with a commit"
 
-        porcelain = git("status", "--porcelain", "--untracked-files=normal")
+        porcelain = git("status", "--porcelain", "--untracked-files=normal", *spec)
         if porcelain.returncode != 0:
             return "error", "the recovery could not run: `git status` failed"
         before = [line for line in porcelain.stdout.splitlines() if line.strip()]
@@ -978,20 +1017,32 @@ class TaskHandler:
             return "refused", f"this tree holds work that exists nowhere else ({reason})"
 
         message = "emrg-recovery-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        stash = git("stash", "push", "--include-untracked", "-m", message)
+        stash = git("stash", "push", "--include-untracked", "-m", message, *spec)
+        # `stash push -- <pathspec>` exits 1 with "No valid patches in input" when the
+        # *tracked* diff under the pathspec is empty — measured for issue #1507: a staged
+        # deletion under a task directory one level down is that shape, and the scope was
+        # converged anyway. So the exit code is not the verdict here and the state below
+        # is (#464's lesson — test the output, not the exit code — arriving inside the
+        # guard rather than in a shell check), while any *other* failure keeps the
+        # fail-closed path it has always had.
+        empty_patch = ""
         if stash.returncode != 0:
-            detail = (stash.stderr or stash.stdout).strip()
-            return "error", f"the recovery could not run: `git stash push` failed: {detail}"
+            complaint = (stash.stderr or stash.stdout).strip()
+            if "No valid patches" not in complaint:
+                return "error", f"the recovery could not run: `git stash push` failed: {complaint}"
+            empty_patch = complaint
 
-        after = git("status", "--porcelain", "--untracked-files=normal")
+        after = git("status", "--porcelain", "--untracked-files=normal", *spec)
         if after.returncode != 0 or after.stdout.strip():
             return "error", (
-                "the tree is still not clean after stashing; recover the stash with "
+                "the tree is still not clean after stashing"
+                + (f" ({empty_patch})" if empty_patch else "")
+                + "; recover the stash with "
                 f"`git stash list` -> {message} and investigate"
             )
 
         head_after = git("rev-parse", "HEAD").stdout.strip()
-        receipt = TaskHandler._write_recovery_receipt(source_dir, {
+        payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "repo": source_dir,
             "reason": reason,
@@ -1005,7 +1056,12 @@ class TaskHandler:
             # the manual tool's fallback cannot disagree about the inverse — the two
             # copies were the defect, not the wording (see the template).
             "reversible_with": recovery_recipe(message),
-        })
+        }
+        if empty_patch:
+            # Recorded rather than swallowed: the convergence is claimed on the state
+            # below, so the receipt says what git reported alongside that claim.
+            payload["stash_note"] = empty_patch
+        receipt = TaskHandler._write_recovery_receipt(source_dir, payload)
         if head_after != head.stdout.strip():
             # Not expected - a stash does not move HEAD - so this is asserted rather
             # than assumed, and the receipt above is the evidence either way.

@@ -211,14 +211,20 @@ to that tree, and leaves it in place - the line it prints names the path, the tr
 answers for, and how to remove it. The run itself is unchanged, so a kept worktree
 answers for the same tree the default run would have deleted.
 
-That line also names the two things true of every fresh worktree, because both have
-already been reported as defects (one measured in a hand-built landing-tree worktree,
-and both re-measured on a real landing tree the next cycle): it has **no `.venv`**, so
-`uv run pytest` there reports that no suite ran, and it has **no `node_modules`**, so the
-GUI Node suite fails two files - the spawn-args test (`python=python3 (expected
-.venv/bin/python)`) and `test/integration.test.js` (`Cannot find module 'ws'`), because
-the GUI's dependencies (`ws` among them) live in `emrg/gui/node_modules`, not in the
-repository root's. The node link therefore names the **GUI's own** directory: it was
+That line also names what is true of every fresh worktree, because each has already
+been reported as a defect (one measured in a hand-built landing-tree worktree, and
+both re-measured on a real landing tree the next cycle): it has **no `.venv`**, so
+`uv run pytest` there reports that no suite ran, and it has **no `node_modules`**, so
+the GUI Node suite reds `test/integration.test.js` (`Cannot find module 'ws'`),
+because the GUI's dependencies (`ws` among them) live in `emrg/gui/node_modules`, not
+in the repository root's. A second file used to red with it - `daemon_client`'s
+spawn-args test, which expected `.venv/bin/python` and so asserted whatever
+interpreter the *tree* happened to carry rather than the code's contract. That was
+fixed in #1501, and the note names the boundary rather than dropping the subject,
+because a reader on a tree from before it still sees two failing files and has no way
+to tell a fixed defect from a regression: measured 2026-09-21 in a fresh worktree of
+each - two failing files on `05df2638`, one on `14f6aacb`. The node link therefore
+names the **GUI's own** directory: it was
 first written as the repository root's, which is empty, so the line that was supposed to
 fix the suite fixed nothing (measured 2026-09-19, `cyc20260919-060712`: on landing tree
 `f96d6515c734`, 125 passed / 2 failed with no link, 126 / 1 with the python link alone,
@@ -1075,11 +1081,15 @@ def _kept_note(path: Path, tree_sha: str | None = None) -> None:
     print(f"  git worktree remove --force {path}")
     print(
         "  It has no .venv and no node_modules, like any fresh worktree: `uv run pytest`\n"
-        "  there reports that no suite ran, and the GUI Node suite fails two files - the\n"
-        "  spawn-args test (python=python3, expected .venv/bin/python) and\n"
+        "  there reports that no suite ran, and the GUI Node suite reds\n"
         "  test/integration.test.js (Cannot find module 'ws'). Measured on a real landing\n"
-        "  tree (2026-09-19, f96d6515c734): the GUI suite is 125 passed / 2 failed with\n"
+        "  tree (2026-09-19, f96d6515c734): that suite was 125 passed / 2 failed with\n"
         "  neither link, 126 / 1 with the python link alone, 126 / 0 / 8 skipped with both.\n"
+        "  The spawn-args half of those two failures was daemon_client's test expecting\n"
+        "  .venv/bin/python, i.e. asserting the machine rather than the code; it was fixed\n"
+        "  in #1501, so a tree from before it shows two failing files and a later one shows\n"
+        "  only the `ws` one (measured 2026-09-21: 2 on 05df2638, 1 on 14f6aacb). Neither\n"
+        "  is a verdict on the tree.\n"
         "  The node link must point at the GUI's OWN node_modules: the repository root has\n"
         "  none at all (there is no root package.json either), so `ln -sfn` from it leaves a\n"
         "  dangling symlink - as indistinguishable from linking nothing as an empty directory\n"

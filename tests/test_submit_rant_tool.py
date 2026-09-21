@@ -470,6 +470,97 @@ def test_the_list_header_is_bounded_and_the_full_progress_follows_it(tmp_path, m
     assert "message-tail-" + "m" * 300 in out, "the message still arrives whole"
 
 
+def test_a_completed_body_is_withheld_and_one_call_returns_it(tmp_path, monkeypatch):
+    """The default read costs what the work costs; history stays reachable.
+
+    Issue #1514, measured on the host that filed it: `list` returned the whole message and the
+    whole `progress` of every rant on the queue, **51,482 characters for 13 rants** — eleven of
+    them `completed`, five of those carrying 3.5-5 K-character bodies — while the actionable
+    part (pending + one `in_progress`) was a small fraction. Every task template routes its
+    review through this call, so the same ~52 K (~13 K tokens) was re-paid two or three times a
+    cycle for text whose only role was provenance. The comment above the rendering argued that
+    a *cap* "would be the same defect with a larger number in it"; this pins the distinction
+    the issue drew instead — a **scope** that is still complete, because the withheld text is
+    one documented call away (`status="completed"`, the narrowing mechanism the same comment
+    already endorsed and no filter on the cost's own axis).
+
+    Three things are asserted together, and each fails alone in a way the others do not catch:
+    the body is absent (the cost), the absence is *stated* (the silent half of the 2026-09-17
+    defect — an empty block is indistinguishable from an empty message), and the filtered call
+    returns it line for line (the guarantee the original refusal was protecting). The rows are
+    asserted present for the withheld rant as well: `cleanup` decides by recency and status,
+    i.e. by the row, so dropping completed rows would break curation instead of saving tokens.
+    """
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    body = (
+        "a completed rant's body, written when it was filed\n\n"
+        "  an interior line a reader would have seen\n\n"
+        "and a tail that says nothing about the work left to do."
+        + " history-tail-" + "h" * 300
+    )
+    progress = ("Stage 1 landed; Stage 2 is the remaining half."
+                + " progress-tail-" + "p" * 300)
+    _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-09-20T09:00:00+08:00", "project": "emrg",
+         "status": "completed", "progress": progress,
+         "completed": "2026-09-20T18:00:00+08:00", "message": body},
+        {"timestamp": "2026-09-21T09:00:00+08:00", "project": "emrg",
+         "status": "pending", "progress": None, "completed": None,
+         "message": "the work actually in flight"},
+    ])
+    tool = SubmitRantTool()
+    out = __import__("asyncio").run(tool.execute({"action": "list"})).content
+    lines = out.splitlines()
+
+    # (a) the cost: the completed rant contributes **two lines** — its row and the note — so
+    #     neither its body nor its full `progress` block is paid for again. The row keeps the
+    #     100-character excerpts of both fields (the scan view, and the reason the tail run is
+    #     the thing to assert absent: a bounded excerpt may well contain the head of it).
+    header = next(l for l in lines if l.startswith("2026-09-20T09:00:00"))
+    assert header.startswith(
+        "2026-09-20T09:00:00+08:00 | emrg | status=completed | progress=")
+    assert " | completed=2026-09-20T18:00:00+08:00 | a completed rant's body" in header, header
+    assert len(header) < 400, f"the row is a bounded scan view: {len(header)} chars"
+    assert "history-tail-" + "h" * 300 not in out, "a completed body is history, not work"
+    assert "progress-tail-" + "p" * 300 not in out, "a completed progress is withheld too"
+    header_at = lines.index(header)
+    next_row = next(i for i in range(header_at + 1, len(lines))
+                    if lines[i] and not lines[i].startswith(" "))
+    assert next_row - header_at == 2, (
+        "a completed row is its row plus one note, never a text block: "
+        f"{lines[header_at:next_row]!r}"
+    )
+
+    # (b) the disclosure: the withheld row says so and names the call that returns it. This is
+    #     the arm that keeps the next reader from concluding "this rant has no message".
+    withheld = [l for l in lines if "withheld" in l]
+    assert len(withheld) == 1, f"exactly the completed row is marked: {withheld!r}"
+    assert 'status="completed"' in withheld[0], (
+        f"the note has to name the one call that returns the text: {withheld[0]!r}"
+    )
+
+    # (c) the queue is whole, and the actionable text is untouched: the pending rant's body
+    #     arrives even though it sits after the withheld one (the `continue` must not eat it).
+    assert any(l.startswith("2026-09-21T09:00:00+08:00") for l in lines)
+    assert "the work actually in flight" in out
+
+    # (d) reachability, line for line off the output (the block is indented, so the value is
+    #     never one literal run of characters) — the property the scope had to preserve.
+    filtered = __import__("asyncio").run(
+        tool.execute({"action": "list", "status": "completed"})).content
+    flines = filtered.splitlines()
+    start = next(i for i, l in enumerate(flines) if l.startswith("2026-09-20T09:00:00"))
+    block: list[str] = []
+    for line in flines[start + 1:]:
+        if line == "    progress:":
+            break
+        block.append(line[4:] if line.startswith("    ") else line)
+    assert "\n".join(block) == body, (
+        "a status-filtered call is the documented way back to the withheld text"
+    )
+    assert "progress-tail-" + "p" * 300 in filtered, "the progress block comes back too"
+
+
 def test_tool_list_action(tmp_path, monkeypatch):
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     tool = SubmitRantTool()
