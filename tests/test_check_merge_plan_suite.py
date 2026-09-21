@@ -515,17 +515,31 @@ def test_a_kept_worktree_is_the_tree_the_run_measured(
 
     # The note names the path, the tree, and the two traps every fresh worktree has -
     # no `.venv` (so `uv run pytest` there reports that no suite ran) and no
-    # `node_modules` (so the GUI suite reds the spawn-args test and
-    # `test/integration.test.js`, which cannot resolve `ws`). Both were reported
-    # as defects before, which is why the tool says them out loud - and it prints the
-    # remedy for each, because a warning without one costs the next reader the same
-    # discovery. Shape-matched, not path-matched: the note prints git's spelling of the
-    # main checkout, which is a forward-slash path on Windows too.
+    # `node_modules` (so the GUI suite reds `test/integration.test.js`, which cannot
+    # resolve `ws`). Both were reported as defects before, which is why the tool says them
+    # out loud - and it prints the remedy for each, because a warning without one costs
+    # the next reader the same discovery. Shape-matched, not path-matched: the note prints
+    # git's spelling of the main checkout, which is a forward-slash path on Windows too.
     assert "kept " in kept.stdout and kept_dir.name in kept.stdout
     assert ".venv" in kept.stdout and "node_modules" in kept.stdout
     assert f"PYTHONPATH={kept_dir}" in kept.stdout
     assert "-m pytest tests/ -q" in kept.stdout
     assert _node_remedy_links_the_guis_own_deps(kept.stdout), kept.stdout
+
+    # The file list the note blames is a fact about the *node tests' content*, not about
+    # the worktree, so it goes stale the moment one of those tests is fixed - and it did:
+    # the note said the suite "fails two files" (the spawn-args test and
+    # `test/integration.test.js`) long after #1501 made the first of those pass in a
+    # worktree with no `.venv`, and a reader who saw one failure instead of two had no way
+    # to tell a fixed defect from a regression. Pinned in both directions, because the
+    # counts the note also prints stay true either way: the `ws` failure must be named,
+    # and the retired claim must not come back. Measured 2026-09-21, one fresh worktree
+    # per side, each node suite run in full: **two** failing files on `05df2638`, **one**
+    # on `14f6aacb`.
+    assert "test/integration.test.js" in kept.stdout
+    assert "fails two files" not in kept.stdout, (
+        "the note blames a file that no longer fails in a fresh worktree"
+    )
 
     # The removal line it prints is the one that works.
     _git(repo, "worktree", "remove", "--force", str(kept_dir))
