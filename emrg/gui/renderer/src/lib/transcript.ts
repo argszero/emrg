@@ -71,10 +71,6 @@ export interface SystemEntry {
   kind: "system";
   text: string;
 }
-export interface HistoryEntry {
-  kind: "history";
-  text: string;
-}
 export interface ToolRowEntry {
   kind: "tool-row";
   row: ToolRow;
@@ -88,7 +84,6 @@ export interface ToolGroupEntry {
 export type TranscriptEntry =
   | UserEntry
   | SystemEntry
-  | HistoryEntry
   | AssistantEntry
   | ToolRowEntry
   | ToolGroupEntry;
@@ -156,17 +151,6 @@ export interface TranscriptStore {
   clear(sid?: string | null): void;
   addUserMessage(text: string, sid?: string | null): void;
   addSystemMessage(text: string, sid?: string | null): void;
-  /**
-   * 历史消息（rant 2026-09-02T10:03:29：role="assistant" → 助手气泡，否则 user 样式 history 气泡）。
-   *
-   * ⚠️ 自 rant 2026-09-20T18:58:44 起**已无调用方**：历史加载改由 `replayHistoryRecords`
-   * 走实时那一套 handler，`addHistoryMessage` / `prependHistoryMessage` 这条「另写一套映射」
-   * 的老路不再被使用。它们连同 `kind: "history"` 渲染分支与样式一起，删除是另一件改动
-   * （会动 TranscriptView 与 CSS），故先留在这里并标明状态。
-   */
-  addHistoryMessage(text: string, sid?: string | null, role?: string): void;
-  /** 更早一页历史 prepend 到顶部（vanilla addHistoryMessage prepend 语义；loadBar 独立字段渲染在上方）——⚠️ 同上，已无调用方 */
-  prependHistoryMessage(text: string, sid?: string | null, role?: string): void;
   /**
    * 把一段回放出来的条目整块插到最前（rant 2026-09-20T18:58:44：更早一页由实时 handler
    * 回放成条目，落点在这里）。record→entry 的映射不在本方法里 —— 它只负责落点。
@@ -497,39 +481,6 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     addSystemMessage: (text, sid) => {
       mutate(() => {
         st(sid).entries.push({ kind: "system", text });
-      });
-    },
-    addHistoryMessage: (text, sid, role) => {
-      mutate(() => {
-        const s = st(sid);
-        if (role === "assistant") {
-          // 历史助手消息：封存段（无 typing），✦ 标记由渲染层统一加
-          s.entries.push({
-            kind: "assistant",
-            rid: `hist-${s.entries.length}`,
-            isOwn: false,
-            segments: [{ text, hasText: !!text, sealed: true, typing: false }],
-          });
-        } else {
-          s.entries.push({ kind: "history", text });
-        }
-      });
-    },
-    prependHistoryMessage: (text, sid, role) => {
-      mutate(() => {
-        const s = st(sid);
-        shiftIndexes(s, 1);
-        if (role === "assistant") {
-          // 历史助手消息：封存段（无 typing），✦ 标记由渲染层统一加
-          s.entries.unshift({
-            kind: "assistant",
-            rid: `hist-${s.entries.length}`,
-            isOwn: false,
-            segments: [{ text, hasText: !!text, sealed: true, typing: false }],
-          });
-        } else {
-          s.entries.unshift({ kind: "history", text });
-        }
       });
     },
     prependEntries: (entries, sid) => {
