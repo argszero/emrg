@@ -875,3 +875,115 @@ def test_the_clone_definition_scan_answers_both_ways() -> None:
     assert not _clone_blocks_without_a_definition(self_contained), (
         "the shipped shape names the clone in its own block and must not be flagged"
     )
+
+
+# B.3 leaves the branch tracking `upstream` and keeps that remote beside the fork, which is exactly the
+# layout in which `gh pr create` cannot infer the head: its `@{push}` lookup errors (`push.default` is
+# unset and the local and upstream branch names differ) and its ref-probe fallback stops at the first
+# missing ref. Measured 2026-09-21 on a clone of a real fork: `--dry-run` printed `head: master` — the
+# base repository's own branch — where the reviewer's clone aborted outright, and gh's abort message
+# asks for the flag by name. `--head` skips the inference, so the create call must carry it.
+_CREATE_HEAD = re.compile(r"--head\s")
+# The head must be spelled by resolving the login: this template serves every contributor, so a
+# literal name is wrong even when it happens to be right for the cycle that wrote it.
+_CREATE_RESOLVED_HEAD = re.compile(r"--head\s+\"\$\(gh api user -q \.login\):")
+
+
+def _create_calls(text: str) -> list[str]:
+    """Every `gh pr create` command in a fenced block, its continuations joined.
+
+    Only fenced blocks are read: the template also *talks* about `gh pr create` in prose and in
+    capability tables, and a rule about the command must not be satisfiable by the sentence.
+    """
+    calls: list[str] = []
+    for block in _fenced_blocks(text):
+        for i, line in enumerate(block):
+            if "gh pr create" not in line:
+                continue
+            call = [line]
+            j = i
+            while block[j].rstrip().endswith("\\") and j + 1 < len(block):
+                j += 1
+                call.append(block[j])
+            calls.append(" ".join(part.strip() for part in call))
+    return calls
+
+
+def _create_calls_without_a_head(text: str) -> list[str]:
+    """Create calls that do not name the head at all."""
+    return [call for call in _create_calls(text) if not _CREATE_HEAD.search(call)]
+
+
+def _create_calls_naming_a_head_literally(text: str) -> list[str]:
+    """Create calls that name the head without resolving whose fork it is."""
+    return [
+        call
+        for call in _create_calls(text)
+        if _CREATE_HEAD.search(call) and not _CREATE_RESOLVED_HEAD.search(call)
+    ]
+
+
+def test_every_create_call_names_the_head() -> None:
+    """`gh pr create` is always told which repository the head lives in.
+
+    Rant 2026-09-21T16:12:19, fourth round (PR #1524 review). B.3 makes the new branch track `upstream`
+    and keeps `upstream` beside the fork, so gh's head inference lands on the base repository — and what
+    it does next depends on which refs happen to exist locally: measured, a wrong head (`master`) in one
+    clone where another aborted. Naming the head removes the guess in both directions, and the silent
+    variant is the one a guard has to catch because a TTY merely prompts.
+
+    The second clause is why this reads the *call* rather than the file: the first version asserted that
+    `gh api user -q .login` appeared somewhere in the template, and a mutation arm replacing the head
+    with a literal login stayed green on the strength of the sentence explaining the rule. A guard whose
+    power rests on prose is the defect class it was written against.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    missing = _create_calls_without_a_head(text)
+    assert not missing, (
+        f"these `gh pr create` calls do not name their head: {missing} — without `--head "
+        '"$(gh api user -q .login):<branch>"` gh infers it, and B.3\'s `upstream` remote makes that '
+        "inference land on the base repository rather than the fork"
+    )
+
+    literal = _create_calls_naming_a_head_literally(text)
+    assert not literal, (
+        f"these create calls name a head without resolving the login: {literal} — the contributor is "
+        "whoever runs this, so the login comes from `gh api user -q .login`, never a literal"
+    )
+
+    # Non-empty surface: the scans are not passing because no create call exists to check.
+    assert _create_calls(text), (
+        "the template no longer opens a PR anywhere — the checks above would pass vacuously"
+    )
+
+
+def test_the_create_head_scan_answers_both_ways() -> None:
+    """The instrument's controls, on the shipped shape and on the flagged ones."""
+    shipped = (
+        '```bash\ncd "$DEV" && gh pr create -R o/r \\\n'
+        '  --head "$(gh api user -q .login):<branch name>" \\\n'
+        '  --title "x"\n```'
+    )
+    assert not _create_calls_without_a_head(shipped), "the shipped shape names the head"
+    assert not _create_calls_naming_a_head_literally(shipped), "and resolves the login"
+
+    assert _create_calls_without_a_head(
+        '```bash\ncd "$DEV" && gh pr create -R o/r \\\n  --title "x" \\\n  --body "y"\n```'
+    ), "a create call with no `--head` is exactly what the first scan is for"
+
+    assert _create_calls_without_a_head(
+        '```bash\ngh pr create -R {{ owner }}/{{ repo }} \\\n  --title "<scope>: <description>"\n```'
+    ) == ['gh pr create -R {{ owner }}/{{ repo }} \\ --title "<scope>: <description>"'], (
+        "a continuation line carries no head, so the call must be read as a whole"
+    )
+
+    assert _create_calls_naming_a_head_literally(
+        '```bash\ngh pr create -R o/r \\\n  --head "someuser:<branch name>" \\\n  --title "x"\n```'
+    ), "a literal login is wrong for every contributor but the one who wrote it"
+
+    assert not _create_calls_without_a_head(
+        "| `gh pr create` | ✅ | ✅ |\n\nTry `gh pr create` when the branch is ready.\n"
+    ) and not _create_calls("| `gh pr create` | ✅ | ✅ |\n"), (
+        "a capability table and a sentence are not the command — the scan reads fenced blocks only"
+    )

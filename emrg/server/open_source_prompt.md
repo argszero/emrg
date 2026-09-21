@@ -424,6 +424,7 @@ git push origin <branch name> 2>&1   # origin = the fork `gh repo clone` set up 
 ```bash
 DEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"   # re-declared: a block is copied on its own
 cd "$DEV" && gh pr create -R {{ owner }}/{{ repo }} \
+  --head "$(gh api user -q .login):<branch name>" \
   --title "<scope>: <description>" \
   --body "## Summary
 <description>
@@ -435,6 +436,22 @@ Closes #<N>
 - [ ] Existing tests pass
 - [ ] New tests added"
 ```
+
+**Name the head, always** (measured 2026-09-21, PR #1524 review). Without `--head`, `gh pr create` has to infer
+which repo the branch was pushed to, and B.3 is exactly the layout that makes that inference ambiguous: the
+`upstream` remote is present, and `git checkout -b <branch> "upstream/$DEFAULT"` makes the new branch *track*
+it (`branch.<name>.remote` → `upstream`) — so gh's first two attempts both land on the base repository rather
+than the fork. Measured in a clone of a real fork: `git rev-parse --symbolic-full-name <branch>@{push}` →
+`fatal: cannot resolve 'simple' push to a single destination` (the local and upstream branch names differ and
+`push.default` is unset), and the fallback's ref probe `git show-ref --verify -- HEAD
+refs/remotes/upstream/<branch> refs/remotes/origin/<branch>` stops at the first missing ref (prints `HEAD`
+alone, exits 128). What gh does then depends on which refs happen to exist — measured here, `--dry-run` printed
+`head: master` (the *base* repository's branch, a head that was never pushed) where the reviewer's own clone
+aborted with `you must first push the current branch to a remote, or use the --head flag`. Neither is the
+branch the flow just pushed, and the silent variant is the more dangerous one: with a TTY gh prompts instead
+of aborting, so it is easy to miss. `--head "<login>:<branch>"` skips the inference entirely — gh's own abort
+message asks for it, and the same `--dry-run` then prints `head: <login>:<branch>`. The login comes from
+`gh api user -q .login`, never a literal: this template serves every contributor.
 
 > ⚠️ **PR submission rules (PR #902, rant 2026-08-20T21:53:36 — supersedes earlier PR-issue linking notes)**:
 > 1. **Base the PR on the DEFAULT branch.** Before opening a PR, check the target repo's default branch (`gh repo view --json defaultBranchRef`) and open the PR against it. GitHub only resolves closing keywords in the body/commit message into the linked-issue field when the PR base is the default branch; for any other base the linked field stays empty and bot checks like `needs:issue` never pass. If the repo explicitly requires a non-default base (e.g. per CONTRIBUTING), record in the closing summary that the check fails by design and is ignorable — do not keep retrying.
