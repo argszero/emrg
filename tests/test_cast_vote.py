@@ -16,9 +16,9 @@ vote nobody cast. Both halves of that loss are pinned here, because they are the
 two properties that are invisible at the moment of posting:
 
 * **attribution** - the body must carry exactly one cycle id. None is void; two
-  is worse (the counter takes the first match, so the owner becomes an accident
-  of prose order). `--cycle` may check that reading but cannot replace it, since
-  the counter never sees the flag.
+  is worse (the counter reads every id the body names and gives such a body no
+  owner, so the vote counts for none of them). `--cycle` may check that reading
+  but cannot replace it, since the counter never sees the flag.
 * **counting** - a posted review can still fail to count (a second vote from a
   cycle already in the run contributes nothing), and only the counter knows.
 
@@ -267,12 +267,15 @@ def test_a_malformed_cycle_flag_is_refused(mod, monkeypatch, capsys, body_file):
 
 
 def test_two_cycle_ids_in_one_body_are_refused(mod, monkeypatch, capsys, body_file):
-    """Two ids make the vote's owner an accident of prose order.
+    """A body naming several cycles has no derivable author, so the vote counts for none.
 
     A body that quotes another cycle (as a review does when it explains whose
-    earlier vote it is superseding) reads as that cycle's vote if the id is
-    quoted first. Better to refuse than to cast a vote under a cycle that did not
-    write it.
+    earlier vote it is superseding) cannot be attributed to either of them: the
+    counter reads *every* id the body names and gives it no owner at all. It is
+    not credited to whichever id comes first - that was the counter's old
+    behaviour, and it mis-filed a veto under a cycle that never wrote one
+    (`cyc20260917-014155`). Better to refuse here than to spend a vote that
+    counts for nothing.
     """
     gh = FakeGh()
     body = f"{OTHER_CYCLE} voted earlier; {CYCLE} — ✅ LGTM"
@@ -282,6 +285,16 @@ def test_two_cycle_ids_in_one_body_are_refused(mod, monkeypatch, capsys, body_fi
     assert gh.calls == []
     assert "more than one cycle id" in err
     assert OTHER_CYCLE in err and CYCLE in err
+    # The *reason* must be the counter's, not a rule it has since dropped: the
+    # two assertions above stay true under either reading, so the rationale could
+    # rot unnoticed (it did - this refusal claimed the counter "takes the first
+    # match" long after the counter stopped doing that). Pinned on the
+    # consequence the counter implements, and on the absence of the retired
+    # claim; `check-vote-count.py` states both halves itself, at its own
+    # `len(ids) > 1` branch (`cycle = ids[0] if len(ids) == 1 else None`, then
+    # "which cycle wrote it cannot be measured, so it counts for none of them").
+    assert "count for none of them" in err, "the refusal must state the counter's consequence"
+    assert "first match" not in err, "the counter no longer takes the first match"
 
 
 # ── counting: posted is not the same as counted ────────────────────────────

@@ -163,12 +163,53 @@ test("ensureConnected: token 文件缺失 → 拉起 daemon（spawn 参数正确
   };
   await connectClient(client);
   assert.ok(spawnCalls, "startDaemon should be called");
-  // 平台自适应：POSIX = .venv/bin/python，Windows = .venv\Scripts\python.exe
-  const pyPath = process.platform === "win32"
-    ? path.join(".venv", "Scripts", "python.exe")
-    : path.join(".venv", "bin", "python");
-  assert.ok(spawnCalls.python.endsWith(pyPath), `python=${spawnCalls.python} (expected ${pyPath})`);
+  // ⚡ 这里不能断言「必须落在 .venv/bin/python」——那断言的是**本机恰好有没有 venv**，
+  // 不是被测代码：`_findPython` 的契约是「可执行的 .venv 优先，其次 PATH 兜底」，
+  // 在一棵没有 venv 的树里（干净 worktree、未 `uv sync` 的克隆）回退到 python3 正是
+  // 正确行为，写成绝对路径断言却会报 red，把环境差异误报成代码缺陷（实测于 2026-09-21
+  // 测量 #1495 落地树时命中：npm test 报 1 failed，实为 worktree 无 .venv）。
+  // 契约本身由下面两条「自己建 root」的用例逐分支钉住。
+  assert.ok(
+    path.isAbsolute(spawnCalls.python)
+      ? fs.existsSync(spawnCalls.python)
+      : spawnCalls.python === "python3",
+    `python=${spawnCalls.python}（应为存在的绝对路径，或 PATH 兜底的 python3）`,
+  );
   assert.strictEqual(spawnCalls.cwd, os.homedir());
+});
+
+/** `.venv` 里解释器的平台路径（POSIX = bin/python，Windows = Scripts\python.exe）。 */
+function venvPythonIn(root) {
+  return process.platform === "win32"
+    ? path.join(root, ".venv", "Scripts", "python.exe")
+    : path.join(root, ".venv", "bin", "python");
+}
+
+/** 测试自建的假解释器：POSIX 上必须真的可执行（X_OK 是判据的一环）。 */
+function writeExecutable(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "#!/bin/sh\n");
+  if (process.platform !== "win32") fs.chmodSync(file, 0o755);
+}
+
+test("_findPython: 树里有可执行的 .venv 解释器就用它（G59/G61/G126）", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "emrg-venv-"));
+  try {
+    const expected = venvPythonIn(root);
+    writeExecutable(expected);
+    assert.strictEqual(new DaemonClient()._findPython(root), expected);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("_findPython: 树里没有 .venv 就回退 PATH 的 python3，不算失败", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "emrg-venv-"));
+  try {
+    assert.strictEqual(new DaemonClient()._findPython(root), "python3");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("P2 deltaBatchMs: 批量合并 message_delta，终态前冲刷保序（rant 14:11）", async () => {
