@@ -236,13 +236,18 @@ to compare worktree runs with worktree runs.
 
 What the run leaves behind
 --------------------------
-Nothing. A PR head has to be fetched into a ref before it can be folded, so each
+Nothing. The plan's own tip is not a ref and never needs to be one: `build_plan_tip`
+returns a commit this process made, and the worktree is added from that SHA (until
+2026-09-21 it was parked in one fixed `refs/emrg-plan-suite/tip`, which two
+overlapping runs swapped - see the note above the ref prefixes for the measurement).
+A PR head does have to be fetched into a ref before it can be folded, so each
 planned PR parks one under `refs/emrg-plan-suite/` - and a ref is state: it keeps
 the commit reachable, so `git gc` can never prune it. Those refs are therefore
-removed when the run ends, on every path (`_drop_fetched_refs`), the same way a
-worktree is: measured 2026-09-17 (`cyc20260917-142057`), leaving them in place had
-grown the family to 88 refs pinning 283 commits unreachable from master, plus 29
-more from three earlier tools with the same habit. A run that ends with a verdict
+released by the very call that made them, immediately after the commit has been
+read (`_fetch_head`), the same way a worktree is: measured 2026-09-17
+(`cyc20260917-142057`), leaving them in place had grown the family to 88 refs
+pinning 283 commits unreachable from master, plus 29 more from three earlier tools
+with the same habit. A run that ends with a verdict
 nobody can act on is a bad run; a run that ends having quietly moved the object
 database is a worse one, because nothing about the verdict tells you it happened.
 """
@@ -267,10 +272,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import merge_tree  # noqa: E402  (needs the path above)
 
-TIP_REF = "refs/emrg-plan-suite/tip"
-# Where a fetched PR head is parked while the plan is built. Temp by intent: the
-# plan needs the *commit* `_fetch_head` resolves, never the ref, so the ref is
-# removed when the run ends (`_drop_fetched_refs`). Nothing else may depend on it.
+# There is deliberately **no** plan-tip ref. The tip `build_plan_tip` returns is a
+# commit this process just made, and a commit is an immutable name already: the
+# worktree is added from that SHA. A fixed `refs/emrg-plan-suite/tip` used to hold
+# it, which made the *tree under test* state shared between runs of this same
+# tool - and two runs that overlap swap it. Measured 2026-09-21 (`cyc20260921-172459`):
+# three plans measured concurrently in one repository (`for n in 1512 1515 1517; do
+# ... & done; wait`), each parking its tip in that one name, so the run for #1512
+# printed its own tree `6b7bfaf6a3f9` with `suite OK: 4731 passed` - a count that
+# belongs to the tree carrying `tests/test_exec_prefix_wrappers.py` (4753 collected
+# items), while the tree it named collects 4729 (4707 passed). The tree hash is
+# computed from this process's own `tip`, so the report was self-consistent and the
+# number was about another plan: exactly the defect this family exists to remove,
+# one level down. The per-PR head refs below stay, because a fetched head has to be
+# named to be fetched and the name is the same for every run fetching that PR.
+# Where a fetched PR head is parked while it is read. Temp by intent: the plan needs
+# the *commit* `_fetch_head` resolves, never the ref, so the fetch that parks it
+# releases it in the same call. Nothing else may depend on it.
 PLAN_REF_PREFIX = "refs/emrg-plan-suite/pr"
 SUITE = ["-m", "pytest", "tests/", "-q", "--no-header"]
 
@@ -431,60 +449,56 @@ def _open_pr_numbers(repo: str) -> list[int]:
 
 
 def _fetch_head(number: int) -> str:
-    """Fetch a PR's real head into a temp ref and return the commit it resolves to.
+    """Fetch a PR's real head into a temp ref, drop it, and return the commit.
 
     The refspec is forced (`+`): PR heads here are routinely re-pushed to a commit
     that is not a descendant of the previous one (every conflict resolution does),
     and a rejected fetch would leave the *stale* ref in place, so the plan would
     silently be built from a tree that is no longer the PR.
 
-    The ref is a temp ref, and the caller must dispose of it: the plan needs the
-    commit, not the name, so `_drop_fetched_refs` removes it when the run is over.
+    The ref lives only across the read that needs it - the plan is built from the
+    *commit*, so a name is not needed once `_rev_parse` has answered. Dropping it
+    here rather than in a `finally` at the end of `main()` is `merge_tree.drop_ref`'s
+    doctrine and its own history: measured on the main tree 2026-09-17, the four
+    sibling gates had left 105 / 83 / 40 / 25 resident refs, one per PR per run,
+    each pinning that head's commits and trees for the life of the clone, and this
+    gate's own share of the same defect was **88** refs / **283 commits** /
+    **1405 objects** unreachable from master - unreachable, so `git gc` could never
+    prune them. A ref nobody reads is state, and a guard's state leak is the same
+    defect class as a guard's wrong tree: the artifact outlives the reason it was
+    made.
+
+    Until 2026-09-21 the drop was a separate pass (`_drop_fetched_refs`, called from
+    `main`'s `finally` over a list of fetched PR numbers). It covered every return
+    path, and it was still the weaker shape: what it left behind was a second place
+    that knows which refs exist, and `tests/test_pr_head_refs_are_released.py` reads
+    the module structurally and asks of *each* parking site whether it releases what
+    it parked. A release in another function is indistinguishable there from no
+    release at all - correctly, because "somewhere in the file something deletes
+    something" is not a property, while "the call that made the ref deletes it" is.
     """
     ref = f"{PLAN_REF_PREFIX}{number}"
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise MeasurementError(f"could not fetch PR #{number}: {detail}")
-    return _rev_parse(ref)
+    commit = _rev_parse(ref)
+    # Best-effort and never raised on: the ref is a by-product of a measurement, so a
+    # tool that cannot delete it still has to report the measurement, and the next
+    # run's forced fetch overwrites the same name anyway.
+    merge_tree.drop_ref(ref, run=_run)
+    return commit
 
 
-def _fetch_heads(numbers: list[int], fetched: list[int]) -> list[tuple[int, str]]:
-    """Fetch every planned PR's head, recording which temp refs now need removing.
+def _fetch_heads(numbers: list[int]) -> list[tuple[int, str]]:
+    """Fetch every planned PR's head. Each ref is released by the fetch that made it.
 
-    `fetched` is appended to in fetch order rather than being derived from
-    `numbers`: a run that dies on PR 3 of 5 has created two refs, and those two are
-    exactly the ones that need clearing.
+    That is what makes the release unconditional: this list can raise on the third
+    of five PRs with two already fetched, and every path out of it - an early
+    `return`, a raise, a killed process - leaves nothing resident, because nothing
+    was ever resident beyond the `rev-parse` that read it.
     """
-    heads: list[tuple[int, str]] = []
-    for number in numbers:
-        heads.append((number, _fetch_head(number)))
-        fetched.append(number)
-    return heads
-
-
-def _drop_fetched_refs(fetched: list[int]) -> None:
-    """Delete the per-PR temp refs this run fetched - on every return path.
-
-    Measured 2026-09-17 (`cyc20260917-142057`): `_fetch_head` left its ref behind, so
-    `refs/emrg-plan-suite/` had grown to **88** refs - one per planned PR per run -
-    pinning **283 commits / 1405 objects** unreachable from master, which therefore
-    can never be pruned by `git gc`. Three older families (`refs/cdrain/`,
-    `refs/drain/`, `refs/tmp/`; 29 refs between them) are still sitting in this
-    clone from tools that no longer exist in the tree, which is what "nothing ever
-    cleans this" looks like. A ref nobody reads is state, and a guard's state leak
-    is the same defect class as a guard's wrong tree: the artifact outlives the
-    reason it was made.
-
-    The ref is keyed by PR number, so two runs planning the same PR share one ref.
-    Removing it is safe for the other run: it has already resolved the commit it
-    needs (that is what `_fetch_head` returns), and the ref is temp for it too - the
-    worst case is that it deletes an already-absent ref, which is why deleting is
-    best-effort rather than a `MeasurementError`. A failure to delete says nothing
-    about the measurement, so it is never allowed to become one.
-    """
-    for number in fetched:
-        _run(["git", "update-ref", "-d", f"{PLAN_REF_PREFIX}{number}"])
+    return [(number, _fetch_head(number)) for number in numbers]
 
 
 def _merge_tree(ours: str, theirs: str) -> tuple[str | None, list[str]]:
@@ -861,16 +875,16 @@ def _suite_verdict(
     """
     tree_sha = _tree_of(tip, "the planned tree")
 
-    updated = _run(["git", "update-ref", TIP_REF, tip])
-    if updated.returncode != 0:
-        raise MeasurementError(f"could not mark the plan tip: {updated.stderr.strip()}")
+    # `tip` is this process's own commit: the worktree is added from that SHA, so no
+    # name another run of this tool can also be writing is consulted (see the note
+    # above the ref prefixes - a fixed tip ref is what this replaced).
     worktree = keep if keep is not None else scratch / "tree"
     # Beside the worktree, never inside it: the report is the harness's, and a file this
     # tool writes into the tree it measures is a file the suite could see (`untracked`
     # checks, `git status` assertions) and would have to be removed again.
     junit = scratch / "plan-junit.xml"
     try:
-        added = _run(["git", "worktree", "add", "--detach", str(worktree), TIP_REF])
+        added = _run(["git", "worktree", "add", "--detach", str(worktree), tip])
         if added.returncode != 0:
             raise MeasurementError(
                 "could not materialise the planned tree: " + added.stderr.strip()
@@ -918,7 +932,6 @@ def _suite_verdict(
     finally:
         if keep is None:
             _run(["git", "worktree", "remove", "--force", str(worktree)])
-        _run(["git", "update-ref", "-d", TIP_REF])
 
 
 def _pytest_rows(worktree: Path, rows: list[str], junit: Path) -> tuple[int, str]:
@@ -1243,20 +1256,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    fetched: list[int] = []
-    # Everything from the first fetch on runs with temp refs in the object database,
-    # so it is all wrapped: a plan that conflicts (rc 3), a step that cannot be built,
-    # or an unanswerable suite (rc 2) fetched its heads just the same, and a cleanup
-    # that only ran on the path that reached the suite would leak on exactly the runs
-    # that fail - the ones a reader is most likely to repeat.
-    #
-    # The fetch itself belongs *inside* this try, not before it. It is the first thing
-    # that parks a ref, so a run that fetches PR 1 and then dies on PR 2 has already
-    # created PR 1's ref - the case `_fetch_heads`' own docstring names ("those two are
-    # exactly the ones that need clearing"). Measured 2026-09-17 by @how2how2how2-arch
-    # on the previous revision of this fix: `check-merge-plan-suite.py 1323 999999`
-    # reported rc 2 and left `refs/emrg-plan-suite/pr1323` behind, because the fetch sat
-    # in a `try` whose `except` returned before the cleanup's `finally` was entered.
+    # Nothing here has to clean up after a fetch: `_fetch_head` releases its own ref
+    # before it returns (see its docstring), so a plan that conflicts (rc 3), a step
+    # that cannot be built, or an unanswerable suite (rc 2) has nothing resident to
+    # leak on the paths a reader is most likely to repeat. Measured 2026-09-17 by
+    # @how2how2how2-arch on an earlier revision of that cleanup, when the refs *were*
+    # left for the end of the run: `check-merge-plan-suite.py 1323 999999` reported
+    # rc 2 and left `refs/emrg-plan-suite/pr1323` behind, because the fetch sat in a
+    # `try` whose `except` returned before the cleanup's `finally` was entered.
     try:
         # The base, in the two dimensions it can be wrong by: *when* it was read
         # and *which* ref the name denotes. Both are owned by the sibling, so both
@@ -1266,7 +1273,7 @@ def main(argv: list[str] | None = None) -> int:
         base_ref = seq._qualify_ref(args.base)
         base = _rev_parse(base_ref)
         numbers = args.prs or _open_pr_numbers(args.repo)
-        heads = _fetch_heads(numbers, fetched)
+        heads = _fetch_heads(numbers)
 
         # The ref measured, not the spelling typed: they differ whenever a short name
         # is ambiguous, and a header that reports `origin/master` for a commit that is
@@ -1341,14 +1348,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except MeasurementError as exc:
         # Reached by everything that can fail before the suite does - the base, the
-        # open-PR listing, and any fetch (the head fetched first is the ref the
-        # `finally` below exists for). The inner `except` clauses keep their own
+        # open-PR listing, and any fetch. The inner `except` clauses keep their own
         # messages and run first; this is the same discipline one level out: an
         # unanswerable question is rc 2, never a verdict.
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
-    finally:
-        _drop_fetched_refs(fetched)
 
 
 if __name__ == "__main__":
