@@ -1130,7 +1130,30 @@ _GIT_SUBCOMMAND_WITH_VALUE = frozenset({
     "--grep", "--author", "--committer", "--since", "--until",
 })
 # Shell operators that separate one command from the next in a chain.
-_SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
+#
+# `|&` is bash's "pipe stdout *and* stderr" — one character wider than `|`, and
+# the tokenizer emits it as **one** token (measured:
+# `_split_command_tokens('echo x |& sh -c "patch /etc/hosts"')` →
+# `['echo', 'x', '|&', 'sh', '-c', 'patch /etc/hosts']`). It is a command border
+# exactly as `|` is, and leaving it out of this set cost a fail-open in the walk
+# below: the walk stepped through the operator, reached the `echo` head of the
+# chain, found a member of `_DATA_ONLY_COMMANDS`, and answered "data" — so the
+# payload behind `|&` never reached a reader. Measured 2026-09-22 on the head
+# that introduced the walk (PR #1515, `d140e25f`) against master `1f2feefa`:
+#
+#   echo x |& sh -c "patch /etc/hosts"   master BLOCK/BLOCK -> head ALLOW/ALLOW
+#   echo x |& sh -c "git checkout ."     master BLOCK/ALLOW -> head ALLOW/ALLOW
+#   echo x |& eval "patch /etc/hosts"    master BLOCK/BLOCK -> head ALLOW/ALLOW
+#
+#   controls, unchanged on that head: `|`, `&&`, `;`, `&` all BLOCK/BLOCK.
+#
+# Whether the payload *can* run is host-dependent, and that is why the deny is
+# the right reading rather than the local one: bash ≥ 4 runs it (the review
+# measured with Git-for-Windows bash 5), while this host's `/bin/bash` is 3.2.57
+# and rejects it as `syntax error near unexpected token '&'`. A border set
+# calibrated to whichever shell happens to be in front of it fails open one host
+# over; the price of the other direction is a false block on bash 3.2 alone.
+_SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "|&", "&", "\n"})
 # Tokens that put what follows them in command position without being commands
 # themselves: grouping (`( … )`, `{ … }`) and shell negation (`! cmd`).
 _COMMAND_POSITION_OPERATORS = frozenset({"(", "{", "!", "`", ">(", "<(", ")"})

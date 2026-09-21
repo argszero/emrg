@@ -59,10 +59,12 @@ from pathlib import Path
 import pytest
 
 from emrg.tools.bash_tool import (
+    _SHELL_SEPARATORS,
     _check_sandbox,
     _extract_write_targets,
     _nested_command_texts,
     _split_command_tokens,
+    _tokenize_command,
 )
 
 READ_ONLY = "read-only"
@@ -143,7 +145,7 @@ UNRECOGNISED_PREFIX_SHAPES = [
 @pytest.mark.parametrize("cmd", DATA_SHAPES)
 def test_a_wrapper_word_in_data_is_not_a_wrapper(cmd: str, tmp_path: Path) -> None:
     """The line is data, so neither reader may recurse into it."""
-    assert _nested_command_texts(_split_command_tokens(cmd)) == [], (
+    assert _nested_command_texts(_tokenize_command(cmd)) == [], (
         f"the wrapper word in {cmd!r} was believed, so the rest of the line is read "
         "as a command"
     )
@@ -156,7 +158,7 @@ def test_a_wrapper_word_in_data_is_not_a_wrapper(cmd: str, tmp_path: Path) -> No
 @pytest.mark.parametrize("cmd", INVOCATION_SHAPES)
 def test_a_wrapper_in_command_position_is_still_believed(cmd: str, tmp_path: Path) -> None:
     """The payload is a command the shell will run, and read-only must refuse it."""
-    nested = _nested_command_texts(_split_command_tokens(cmd))
+    nested = _nested_command_texts(_tokenize_command(cmd))
     assert nested, f"{cmd!r} runs a command through a wrapper, and no text was read"
     allowed, reason, _ = _check_sandbox(cmd, READ_ONLY, str(tmp_path))
     assert not allowed, f"{cmd!r} was allowed at {READ_ONLY} (nested={nested!r})"
@@ -173,7 +175,7 @@ def test_an_unrecognised_prefix_keeps_the_over_approximation(cmd: str, tmp_path:
     became a silent allow for 13 measured prefixes. The payload is now skipped only on a
     positive proof (`_DATA_ONLY_COMMANDS`), so these rows come back.
     """
-    nested = _nested_command_texts(_split_command_tokens(cmd))
+    nested = _nested_command_texts(_tokenize_command(cmd))
     assert nested, f"{cmd!r} runs a payload behind an unrecognised prefix, and none was read"
     allowed, reason, _ = _check_sandbox(cmd, READ_ONLY, str(tmp_path))
     assert not allowed, f"{cmd!r} was allowed at {READ_ONLY} (nested={nested!r})"
@@ -221,3 +223,112 @@ def test_the_docstring_names_the_gate_the_code_calls() -> None:
     assert "_runs_as_a_command" not in gate, (
         "the gate paragraph names the verb walk's position test, which is the vetoed reading"
     )
+
+
+# The operators a command can follow *directly*, one row each. The whole proof this gate rests on
+# is a positive one — "this word heads a shell whose only job is to print" (`_DATA_ONLY_COMMANDS`) —
+# so an operator the walk does not recognise as a border is a hole in that proof, not a nuisance:
+# the walk steps through it, reaches the data-only head, and answers "data".
+#
+# `|&` was the missing one (PR #1515 review). It is bash's pipe-stdout-and-stderr, one character
+# wider than `|`, and the tokenizer emits it as a **single** token — measured, as every row here is:
+#
+#   echo x |& sh -c "patch /etc/hosts"   master BLOCK/BLOCK -> first head ALLOW/ALLOW
+#   echo x |& sh -c "git checkout ."     master BLOCK/ALLOW -> first head ALLOW/ALLOW
+#   echo x |& eval "patch /etc/hosts"    master BLOCK/BLOCK -> first head ALLOW/ALLOW
+#
+# Whether the payload *can* run is host-dependent, and the corpus is written to the host where it
+# can: bash ≥ 4 runs `|&` (the review measured it with Git-for-Windows bash 5, where a marker file
+# was really written), while this host's `/bin/bash` is 3.2.57 and rejects the row as
+# `syntax error near unexpected token '&'` — so a corpus calibrated to the shell in front of it
+# would have called this row inert. The deny is the safe direction either way: the cost is a false
+# block on bash 3.2 alone, and the alternative is a silent allow one host over.
+BORDER_OPERATOR_SHAPES = [
+    'echo x && sh -c "patch /etc/hosts"',
+    'echo x || sh -c "patch /etc/hosts"',
+    'echo x ; sh -c "patch /etc/hosts"',
+    'echo x | sh -c "patch /etc/hosts"',
+    'echo x |& sh -c "patch /etc/hosts"',
+    'echo x & sh -c "patch /etc/hosts"',
+    # A newline, spelled with `chr(10)` so the row cannot be read as two lines of this file.
+    # It is the row that forces the corpus to tokenize the way the product does: the walk's own
+    # tokenizer emits `\n` as a token, while `_split_command_tokens` drops it, so a corpus that
+    # read with the latter saw an empty `nested` for this row and would have called a live hole
+    # into the 2026-08-20 data-loss class a pass.
+    'echo done' + chr(10) + 'sh -c "patch /etc/hosts"',
+]
+
+# The operators the tokenizer *also* emits as single tokens, which are deliberately **not** borders.
+# Listed with the shape that shows why, so "put every operator token in the set" is not the rule
+# either — that would be an over-approximation bought with no measurement:
+#   `;;` / `;&` / `;;&` — legal only inside a `case` body, where what follows is the next *pattern*.
+#                        The command position after them is the pattern's `)`, already in
+#                        `_COMMAND_POSITION_OPERATORS`; measured, the row below is BLOCK/BLOCK.
+#   `<<<` / `>>` / `<<`  — the word after them is the here-string fed to stdin, or a filename to
+#                        write: data, not a command. Measured ALLOW/ALLOW and BLOCK for the
+#                        redirect target that really is one.
+NOT_A_BORDER_SHAPES = [
+    'case a in a) echo ;; b) sh -c "patch /etc/hosts" ;; esac',
+    'echo x <<< sh -c "patch /etc/hosts"',
+    # ...and an operator row whose right-hand command writes nothing: the tier is not the question
+    # here, the reading is — `grep -f` names a pattern file to read.
+    'echo x |& grep -f /etc/passwd',
+]
+
+
+@pytest.mark.parametrize("cmd", BORDER_OPERATOR_SHAPES)
+def test_every_command_border_is_a_border(cmd: str, tmp_path: Path) -> None:
+    """A wrapper word after any command border is believed, whatever the operator's spelling."""
+    nested = _nested_command_texts(_tokenize_command(cmd))
+    assert nested, f"{cmd!r} runs a payload behind a border, and no text was read"
+    allowed, reason, _ = _check_sandbox(cmd, READ_ONLY, str(tmp_path))
+    assert not allowed, f"{cmd!r} was allowed at {READ_ONLY} (nested={nested!r})"
+    assert reason
+
+
+def test_the_border_set_matches_the_operators_the_tokenizer_splits_out() -> None:
+    """Every operator that can be followed directly by a command is in `_SHELL_SEPARATORS`.
+
+    Written as a rule over the set rather than as six more rows because the failure is a *set*
+    drifting away from the tokenizer, and the two must be read together: `|&` was emitted as one
+    token and sat in none of the three sets the walk consults, so a single operator defeated a proof
+    whose strength is a positive one. The control half is what keeps this from being satisfied by
+    putting every punctuation token in the set.
+    """
+    for op in ("&&", "||", ";", "|", "|&", "&", "\n"):
+        tokens = _tokenize_command(f'echo x {op} sh -c "patch"')
+        assert op in tokens, f"the tokenizer does not emit {op!r} as a token: {tokens!r}"
+        assert op in _SHELL_SEPARATORS, (
+            f"{op!r} separates one command from the next, and the walk in `_runs_as_a_command` "
+            "reads only the sets — a border outside them is stepped through, and the head it "
+            "reaches can be a data-only command whose whole job is printing"
+        )
+
+    for op in (";;", ";&", ";;&"):
+        tokens = _tokenize_command(f"echo x {op} sh")
+        assert op in tokens, f"precondition: the tokenizer emits {op!r} as one token: {tokens!r}"
+        assert op not in _SHELL_SEPARATORS, (
+            f"{op!r} is not a command border — it is legal only inside a `case` body, where the "
+            "next word is a pattern and the `)` after it is the command position"
+        )
+
+
+@pytest.mark.parametrize("cmd", NOT_A_BORDER_SHAPES)
+def test_the_operators_that_are_not_borders_are_covered_by_their_own_reader(
+    cmd: str, tmp_path: Path
+) -> None:
+    """The control side: each non-border operator's shape is handled, by the reader that can see it.
+
+    A `case` body's command position is its pattern's `)`, a here-string operand is data, and a
+    pattern file is read rather than written — so none of these needs the operator itself to be a
+    border, and each answer is measured rather than assumed.
+    """
+    if cmd.startswith("case "):
+        allowed, reason, _ = _check_sandbox(cmd, READ_ONLY, str(tmp_path))
+        assert not allowed, "a `case` body reaches its command through the pattern's `)`"
+        assert reason
+    else:
+        for tier in (READ_ONLY, WW):
+            allowed, reason, _ = _check_sandbox(cmd, tier, str(tmp_path))
+            assert allowed, f"{cmd!r} names no write and no invocation at {tier}: {reason}"
+            assert _extract_write_targets(cmd) == [], f"{cmd!r} names a write it does not make"
