@@ -1180,6 +1180,28 @@ _SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
 # a real invocation and are already handled, because the invocation is still in
 # the token stream.
 _SHELL_EVALUATORS = frozenset({"eval"})
+# Command words that **write their arguments and run none of them**, so a shell-wrapper
+# word standing among those arguments is data rather than an invocation (issue #1513).
+#
+# This list exists to make the wrapper branches' *skipping* condition a **positive** one,
+# and it is deliberately not the mirror of `_COMMAND_WRAPPERS`. Measured 2026-09-21
+# (cyc20260921-193118), one process, both tiers, nothing executed — the first version of
+# the #1513 fix asked the verb walk's position test instead, and the position test's answer
+# for "a word after a command word it does not recognise" is *data*:
+#
+#   fakeroot sh -c "patch /etc/hosts"   master BLOCK/BLOCK -> position test ALLOW/ALLOW
+#   taskset  sh -c "patch /etc/hosts"   master BLOCK/BLOCK -> position test ALLOW/ALLOW
+#   ltrace   sh -c "git checkout ."     master BLOCK/ALLOW -> position test ALLOW/ALLOW
+#
+# i.e. it turned a *true* block into a silent allow for every prefix that execs the next
+# word without being listed — the one direction this guard must never move in (the same
+# finding `pm25coder` measured on #1515 as its veto, 13 of 13 unlisted prefixes flipping).
+# The list is closed and small, and incompleteness costs a **false block** rather than a
+# silent allow: an unlisted command word in front of a wrapper keeps the over-approximation
+# that master has always had. `echo` and `printf` are the two the issue measured; a third
+# would have to be measured the same way (a command that really cannot run its arguments)
+# before it could be added.
+_DATA_ONLY_COMMANDS = frozenset({"echo", "printf"})
 # A program word that is a *variable reference* is one the guard cannot resolve:
 # `$SHELL` is `sh`, `bash` or `zsh` depending on the host, and `$HOME` is a
 # different absolute path on every one. A guard cannot enumerate how a shell
@@ -4808,6 +4830,65 @@ def _basename(tok: str) -> str:
     return base
 
 
+def _is_data_argument(tokens: list[str], i: int) -> bool:
+    """Whether ``tokens[i]`` is **provably** an argument rather than an invocation.
+
+    The question the wrapper branches of `_nested_command_texts` ask before they
+    recurse, and it is asked in this direction on purpose: the *only* reason to stop
+    reading the payload is a positive fact about the command that owns the word, so a
+    word this guard does not recognise in front of a wrapper keeps master's
+    over-approximation (a loud false block) instead of silently allowing the payload.
+
+    The positive fact is `_DATA_ONLY_COMMANDS`: the word that opens the simple command
+    is one that writes its arguments and runs none of them, so a wrapper word among
+    those arguments is data. Everything else — an unrecognised prefix (`fakeroot`,
+    `strace`, `ssh`, `taskset`, any of them), a listed wrapper (`env`, `sudo`, `xargs`),
+    a separator, an assignment — answers `False`, i.e. "believe it and recurse".
+
+    Asking the verb walk's `_runs_as_a_command` here instead is what the first version of
+    this gate did, and it cost true blocks (measured `cyc20260921-193118`, both tiers,
+    nothing executed):
+
+        fakeroot sh -c "patch /etc/hosts"   master BLOCK/BLOCK   _runs_as_a_command ALLOW/ALLOW
+        taskset  sh -c "patch /etc/hosts"   master BLOCK/BLOCK   _runs_as_a_command ALLOW/ALLOW
+        ltrace   sh -c "git checkout ."     master BLOCK/ALLOW   _runs_as_a_command ALLOW/ALLOW
+
+    `_runs_as_a_command` is the right test for a *verb* one site over (#1469): there, "the
+    shell would not run this word" means "the mutator is not invoked", which is the safe
+    answer. At this site the same answer means "the payload behind this word is not read",
+    which is the unsafe one — the two sites need opposite defaults, and the veto on #1515
+    measured the difference on 13 prefixes.
+    """
+    start = i
+    while start > 0 and not _heads_a_command(tokens, start):
+        start -= 1
+    if start == i:
+        # The word heads its own command: the shell runs it, whatever it is.
+        return False
+    return _basename(tokens[start]) in _DATA_ONLY_COMMANDS
+
+
+def _heads_a_command(tokens: list[str], i: int) -> bool:
+    """Whether ``tokens[i]`` heads the simple command it sits in.
+
+    One line of the walk's vocabulary, used to find the word that *owns* a slot
+    (`_is_data_argument`): a slot is owned by the head of its simple command, so the
+    scan backwards stops at the first word nothing stands in front of but a separator,
+    an operator or a shell keyword. An assignment deliberately does **not** stop it —
+    `FOO=1 echo sh "…"` is still `echo`'s argument list — while it keeps the head from
+    being a *data-only* word, so the proof fails and the payload is read: a false block,
+    which is the direction the rest of this guard errs in.
+    """
+    if i == 0:
+        return True
+    prev = tokens[i - 1]
+    return (
+        prev in _SHELL_SEPARATORS
+        or prev in _COMMAND_POSITION_OPERATORS
+        or prev in _SHELL_KEYWORD_POSITION
+    )
+
+
 def _nested_command_texts(tokens: list[str]) -> list[str]:
     """The command strings a shell will itself re-parse out of ``tokens``.
 
@@ -4885,20 +4966,22 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
             # recursive parse decide what is a command. Do NOT locate `-c`:
             # every way of spelling an option before it is a hole.
             #
-            # ...but the *word* is believed only where the shell would run it
-            # (issue #1513): `echo sh "patch /etc/hosts"` prints a string, and
-            # recursing into the line after that `sh` refused it at both tiers.
-            # The position test is the one the verb walk already uses, so the two
-            # readers of "is this word an invocation?" stay one rule.
-            if not _runs_as_a_command(tokens, i):
+            # ...but the *word* is skipped where it is provably data (issue
+            # #1513): `echo sh "patch /etc/hosts"` prints a string, and recursing
+            # into the line after that `sh` refused it at both tiers. The proof is
+            # a positive one and is asked through `_is_data_argument`, never
+            # through the verb walk's position test — see that helper for the
+            # regression the position test cost here:
+            #
+            #   fakeroot sh -c "patch /etc/hosts"   master BLOCK/BLOCK
+            #                                       position test ALLOW/ALLOW
+            if _is_data_argument(tokens, i):
                 continue
             out.extend(tokens[i + 1:])
         elif base in _SHELL_EVALUATORS:
             # `eval <text...>`: every remaining token is re-parsed as a command.
-            # Same position gate, same reason — and the direction #1391 recorded
-            # for this payload ("reading it as a command is the security-critical
-            # direction", so narrowing it belongs in its own issue) is this one.
-            if not _runs_as_a_command(tokens, i):
+            # Same proof, same reason.
+            if _is_data_argument(tokens, i):
                 continue
             out.extend(tokens[i + 1:])
     out.extend(_unresolved_wrapper_payloads(tokens))

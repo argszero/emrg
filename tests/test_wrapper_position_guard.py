@@ -31,6 +31,25 @@ against, and the invocations are the reason the gate is a **position** test rath
 `xargs -I{} sh -c …`, `find . -exec sh -c …`, `timeout 5 sh -c …` and
 `bash --login -c …` are all reachable today, and a first-token-only gate would under-block
 every one of them — the direction this guard must never move in.
+
+**The gate was rebuilt once, and the reason is the third corpus below** (veto by
+`pm25coder`, cycle `cyc20260921-190928`, on this PR's first head `4bce5f44`; reproduced and
+fixed by `cyc20260921-193118`). The first version skipped the payload whenever the verb
+walk's `_runs_as_a_command` said the wrapper word was not in command position — and for a
+word after a command it does not *recognise*, that function's answer is "data", because its
+job one site over is to decide whether a **verb** is invoked. At this site the same answer
+means "the payload is not read", so a true block became a silent allow for every prefix that
+execs the next word without being listed:
+
+    fakeroot sh -c "patch /etc/hosts"   master BLOCK/BLOCK   first version ALLOW/ALLOW
+    taskset  sh -c "patch /etc/hosts"   master BLOCK/BLOCK   first version ALLOW/ALLOW
+    ltrace   sh -c "git checkout ."     master BLOCK/ALLOW   first version ALLOW/ALLOW
+
+13 of the 13 unlisted exec prefixes the veto measured flipped that way. The fix inverts the
+default at this one site: the payload is skipped only on a **positive** proof that its
+command word does not run its arguments (`_DATA_ONLY_COMMANDS`), so an unrecognised prefix
+keeps master's over-approximation — a loud false block, never a silent allow. The two sites
+genuinely need opposite defaults, and `UNRECOGNISED_PREFIX_SHAPES` is the fence.
 """
 
 from __future__ import annotations
@@ -100,6 +119,27 @@ INVOCATION_SHAPES = [
 ]
 
 
+# The same wrapper word behind a prefix the guard does **not** know execs the next word.
+# Master over-approximates here (it reads the payload after any wrapper word, whatever
+# stands in front of it), and that over-approximation is the whole value of the branch:
+# the prefix list cannot be completed (#1420's shape), so the safe answer for an
+# unrecognised one is the loud false block. Every row below must stay refused at
+# `read-only` — this is the corpus the veto on the first head measured as flipping.
+UNRECOGNISED_PREFIX_SHAPES = [
+    'fakeroot sh -c "patch /etc/hosts"',
+    'taskset sh -c "patch /etc/hosts"',
+    'ltrace sh -c "git checkout ."',
+    'strace sh -c "patch /etc/hosts"',
+    'ssh host sh -c "patch /etc/hosts"',
+    'flock /tmp/l sh -c "patch /etc/hosts"',
+    'setpriv --reuid 1 sh -c "git checkout ."',
+    'bwrap --dev-bind / / sh -c "patch /etc/hosts"',
+    # ...and the same shape one word further out, where the *unknown* word is not the
+    # head: `fakeroot env sh -c …` still runs the payload, so it is still refused.
+    'fakeroot env FOO=1 sh -c "patch /etc/hosts"',
+]
+
+
 @pytest.mark.parametrize("cmd", DATA_SHAPES)
 def test_a_wrapper_word_in_data_is_not_a_wrapper(cmd: str, tmp_path: Path) -> None:
     """The line is data, so neither reader may recurse into it."""
@@ -118,6 +158,23 @@ def test_a_wrapper_in_command_position_is_still_believed(cmd: str, tmp_path: Pat
     """The payload is a command the shell will run, and read-only must refuse it."""
     nested = _nested_command_texts(_split_command_tokens(cmd))
     assert nested, f"{cmd!r} runs a command through a wrapper, and no text was read"
+    allowed, reason, _ = _check_sandbox(cmd, READ_ONLY, str(tmp_path))
+    assert not allowed, f"{cmd!r} was allowed at {READ_ONLY} (nested={nested!r})"
+    assert reason
+
+
+@pytest.mark.parametrize("cmd", UNRECOGNISED_PREFIX_SHAPES)
+def test_an_unrecognised_prefix_keeps_the_over_approximation(cmd: str, tmp_path: Path) -> None:
+    """The prefix is not in any list, so the payload is read and `read-only` refuses it.
+
+    This is the veto's fence: the first head of this gate skipped the payload when the
+    verb walk's position test said the wrapper word was "data", which is exactly what
+    that test answers for a word after a command it does not recognise — so a true block
+    became a silent allow for 13 measured prefixes. The payload is now skipped only on a
+    positive proof (`_DATA_ONLY_COMMANDS`), so these rows come back.
+    """
+    nested = _nested_command_texts(_split_command_tokens(cmd))
+    assert nested, f"{cmd!r} runs a payload behind an unrecognised prefix, and none was read"
     allowed, reason, _ = _check_sandbox(cmd, READ_ONLY, str(tmp_path))
     assert not allowed, f"{cmd!r} was allowed at {READ_ONLY} (nested={nested!r})"
     assert reason
