@@ -6754,7 +6754,9 @@ def _unresolved_wrapper_payloads(tokens: list[str]) -> list[str]:
     file refuses everywhere else (`_nested_command_texts` records the measurement
     that killed the walk-to-`-c` version: 9 of 14 named-wrapper shapes went
     ALLOW), and the rule stays an over-approximation in the safe direction —
-    every value of every flag is still read as code.
+    every value of every flag is still read as code. `_payload_code_words` is the
+    function that owns that test, and it carries the second half beside the flag:
+    an input redirection hands a shell its program too (issue #1523).
     """
     out: list[str] = []
     for i, tok in enumerate(tokens):
