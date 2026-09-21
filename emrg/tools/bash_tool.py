@@ -3220,7 +3220,11 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     # `_find_git_mutator` uses, capped at the same depth, so the two rules
     # cannot drift apart again.
     if _depth < 3:
-        for nested in _nested_command_texts(tokens):
+        # `_quoted_substitution_bodies` is the *text* half of the same walk: shlex
+        # dequotes, so a substitution inside double quotes (which the shell runs) and
+        # its single-quoted twin (which it does not) are one token, and only the raw
+        # text can tell them apart (issue #1516).
+        for nested in _nested_command_texts(tokens) + _quoted_substitution_bodies(masked):
             for t in _extract_write_targets(nested, _depth + 1):
                 if t not in targets:
                     targets.append(t)
@@ -5283,6 +5287,126 @@ def _mask_fd_redirect_prefixes(cmd: str) -> str:
     return "".join(out)
 
 
+def _substitution_body_at(text: str, i: int) -> tuple[str, int] | None:
+    """The body of the command substitution starting at ``i``, and the index after it.
+
+    Both spellings the shell substitutes: ``$( … )`` (nesting-aware — a ``)` inside a
+    nested substitution, a single-quoted span, or an escaped character does not close
+    it) and the backtick pair. ``None`` when no substitution starts at ``i``, and
+    ``None`` as well for one that never closes: an unterminated substitution is text
+    the shell would reject, so there is no body to read.
+
+    ``$(( … ))`` arrives here as a ``$(`` and its body is read as the parenthesis
+    expression it is, which is what the walk would make of the tokens anyway — the
+    reading is left alone rather than special-cased, because an arithmetic expansion
+    runs no command and names no target either way.
+    """
+    if text.startswith("$(", i):
+        depth = 1
+        j = i + 2
+        start = j
+        while j < len(text):
+            ch = text[j]
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == "'":
+                # A single-quoted span inside the substitution is literal, the same
+                # rule the outer scan applies — it just has to be *skipped* here so a
+                # `)` written in it does not close the substitution early.
+                end = text.find("'", j + 1)
+                j = len(text) if end == -1 else end + 1
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return text[start:j], j + 1
+            j += 1
+        return None
+    if text[i] == "`":
+        end = text.find("`", i + 1)
+        if end == -1:
+            return None
+        return text[i + 1:end], end + 1
+    return None
+
+
+def _quoted_substitution_bodies(text: str) -> list[str]:
+    """The command substitutions in ``text`` that the shell really runs, as bodies.
+
+    Issue #1516. A substitution inside **double** quotes reaches the walk as a single
+    token — quote semantics are deliberate there (issue #1162: a ``>`` inside a quoted
+    argument must stay inside the token), and what keeps that ``>`` in also keeps the
+    ``$( … )`` in. So neither reader saw a command word: measured on master `8861f1c3`
+    through `_check_sandbox` at ``read-only``, nothing executed,
+
+        ALLOW  tokens ['echo', '$(git checkout .)']           targets []
+        ALLOW  tokens ['echo', '$(touch /outside/probe)']     targets []
+        ALLOW  tokens ['echo', '$(rm -rf /etc/hosts)']        targets []
+        BLOCK  tokens ['touch', '/outside/probe']             targets ['/outside/probe']
+
+    — the bare spelling of the third row is refused with its target named, while the
+    quoted substitution of the same write is refused at neither tier. "The destination
+    was never extracted" is why this reaches ``workspace-write`` too, where the question
+    is not a mutator the tier deliberately allows but a write to a path the tier exists
+    to keep out of reach.
+
+    The direction is the one the ramp of issue #1516 asks for and the only safe one:
+    this **adds** bodies to the readers, never removes text from them, so it cannot
+    unblock anything the walk already refuses.
+
+    A **single**-quoted span is skipped entirely, because it is literal: `echo
+    '$(git checkout .)'` runs nothing, and reading its body would be a false block of a
+    pure read — the direction this guard must not drift in either.
+
+    Token-stream insufficiency is why this reads the *text* and not the tokens: shlex
+    dequotes, so `echo "$(git checkout .)"` and `echo '$(git checkout .)'` produce the
+    **same** token, and no reader looking only at tokens can tell the two apart. Only
+    the raw text still carries which of them the shell substitutes (the same reason
+    `_fully_quoted_token_indexes` exists for issue #1268's operators).
+
+    Residual, deliberately not read: an escaped ``\\$(`` inside double quotes is
+    literal text and is skipped, as is a substitution in a span that is itself inside a
+    heredoc body already masked by `_mask_data_heredoc_bodies` — the callers pass the
+    masked text, so the masking wins, exactly as it does for every other reader.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "'":
+            end = text.find("'", i + 1)
+            i = n if end == -1 else end + 1
+            continue
+        if ch == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                found = _substitution_body_at(text, i)
+                if found is None:
+                    i += 1
+                    continue
+                body, i = found
+                out.append(body)
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        found = _substitution_body_at(text, i)
+        if found is None:
+            i += 1
+            continue
+        body, i = found
+        out.append(body)
+    return out
+
+
 def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     """The first mutating git verb in ``cmd``, or None when there is none.
 
@@ -5299,13 +5423,17 @@ def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     as in `_extract_write_targets`: `cat <<EOF` + `git checkout .` + `EOF` is a
     document that mentions the command, not an invocation of it.
     """
-    tokens = _tokenize_command(_mask_data_heredoc_bodies(cmd))
+    masked = _mask_data_heredoc_bodies(cmd)
+    tokens = _tokenize_command(masked)
     for verb, rest in _git_verbs(tokens):
         hit = _git_invocation_is_mutator(verb, rest)
         if hit:
             return f"git {hit}"
     if _depth < 3:
-        for nested in _nested_command_texts(tokens):
+        # A substitution inside double quotes is one token here, so the mutator it runs
+        # is reached through the text rather than through the token stream (issue
+        # #1516) — the same pairing `_extract_write_targets` uses.
+        for nested in _nested_command_texts(tokens) + _quoted_substitution_bodies(masked):
             hit = _find_git_mutator(nested, _depth + 1)
             if hit:
                 return hit
@@ -5482,7 +5610,8 @@ def _cwd_left_workspace(
             expanded = os.path.join(cwd, expanded)
         return os.path.realpath(expanded)
 
-    tokens = _split_command_tokens(_mask_data_heredoc_bodies(cmd))
+    masked = _mask_data_heredoc_bodies(cmd)
+    tokens = _split_command_tokens(masked)
     for i, tok in enumerate(tokens):
         word = _command_word(tok)
         if word not in ("cd", "pushd", "popd", "env") or not _runs_as_a_command(
@@ -5574,7 +5703,7 @@ def _cwd_left_workspace(
             if leaves_workspace(cwd):
                 return cwd
     if _depth < 3:
-        for nested in _nested_command_texts(tokens):
+        for nested in _nested_command_texts(tokens) + _quoted_substitution_bodies(masked):
             hit = _cwd_left_workspace(nested, workspace, _depth + 1, cwd)
             if hit is not None:
                 return hit
