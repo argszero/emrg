@@ -254,8 +254,10 @@ def preflight(body: str, cycle: str | None) -> tuple[str | None, str]:
         return None, (
             "the body names more than one cycle id ("
             + ", ".join(found)
-            + ") - the counter takes the first match, which makes the vote's owner an "
-            "accident of prose order; leave exactly one"
+            + ") - the counter reads *every* id the body names and gives a body with "
+            "several no owner at all, so the vote would count for none of them "
+            "rather than for whichever id came first; a vote body must name exactly "
+            "one, so leave exactly one"
         )
     return found[0], ""
 
