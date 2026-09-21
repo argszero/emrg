@@ -3230,6 +3230,12 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # `--file <p>` / `-f <p>` operand and the global/system config behind
             # `--global` / `--system`. See `_git_config_write_targets`.
             targets.extend(_git_config_write_targets(tokens, i))
+        elif word == "gh":
+            # `gh repo clone <repo> <directory>` writes the directory operand,
+            # the same path `git clone <url> <directory>` names (issue #1533).
+            # No other gh form names a path — `gh pr checkout 5`'s operand is a
+            # pull-request number, not a file.
+            targets.extend(_gh_write_targets(tokens, i))
         elif word in _DESTINATION_LAST_VERBS:
             args = _positional_args(tokens, i, _VERB_OPTIONS_WITH_VALUE[word])
             t_dir = _target_directory_values(tokens, i, word)
@@ -5628,6 +5634,206 @@ def _quoted_substitution_bodies(text: str) -> list[str]:
     return out
 
 
+# ── gh runs git (issue #1533) ───────────────────────────────────────────────
+#
+# Both readers above answer about the **`git` command word**, and `gh` is not a
+# name in any of their tables, so every gh spelling fell through to ALLOW —
+# including the ones that write the local tree. Measured by the reporter of
+# issue #1533 through `BashTool.execute` at `read-only`, with the git twin
+# beside it: `gh repo clone <fork> /private/tmp/... -- --depth 1` wrote 16 MB
+# and a `.git` there (no block) while `git clone … <the same target>` was
+# refused and created nothing; `gh pr checkout 1524 --force` switched branches
+# and discarded an uncommitted edit that `git checkout` was refused for.
+#
+# The classification is a map from the gh spelling to the **git operation it
+# really performs**, not a list of gh words to refuse: `gh repo clone` is a
+# clone (and its *destination* is a path, which is what the workspace-write
+# tier has to be able to name), `gh pr checkout` is a branch switch, and
+# `gh repo sync` with no repository argument is a fetch + reset **of the local
+# repository** — its own `--help` says so in as many words ("Without an
+# argument, the local repository is selected as the destination repository"),
+# while `gh repo sync owner/repo` updates the *remote* and is a GitHub-side
+# verb like `gh pr create`.
+#
+# Not classified, and deliberately so: the gh verbs that write locally without
+# being a git operation — `gh release download` / `gh run download` (assets
+# into `--dir` or the cwd), `gh gist clone`, `gh extension install` — and the
+# GitHub-side family (`gh pr create`, `gh issue create`, `gh api -X POST`),
+# which a read-only Contributor cycle must keep, since opening a PR is exactly
+# what that role is for.
+_GH_LOCAL_GIT_FORMS: dict[tuple[str, str], str] = {
+    ("repo", "clone"): "git clone",
+    ("repo", "sync"): "git fetch + reset",
+    ("pr", "checkout"): "git checkout",
+}
+#: gh's inherited global options that take a **separate** value, so the walk
+#: below does not read `-R owner/repo`'s value as the subcommand.
+_GH_GLOBAL_WITH_VALUE = frozenset({"-R", "--repo", "--hostname"})
+#: The value-taking flags of each resolved form, read off `gh <form> --help` on
+#: this host rather than guessed. Only the forms whose *operands* are read need
+#: one: an option missing from here makes its value look like an operand, which
+#: for `repo clone` would name the wrong directory.
+_GH_OPTIONS_WITH_VALUE: dict[tuple[str, str], frozenset[str]] = {
+    ("repo", "clone"): frozenset({"-u", "--upstream-remote-name"}),
+    ("repo", "sync"): frozenset({"-b", "--branch", "-s", "--source"}),
+    ("repo", "fork"): frozenset({"--fork-name", "--org", "--remote-name"}),
+}
+
+
+def _gh_invocation_at(tokens: list[str], i: int) -> tuple[int, tuple[str, str] | None, list[str]] | None:
+    """Resolve the ``gh`` command at ``tokens[i]`` into its ``(word, sub)`` form.
+
+    Returns ``(index of the first argument, form, rest)`` — or ``None`` when
+    there is no subcommand to resolve (a bare ``gh``). ``rest`` is bounded by the
+    next command separator, for the reason `_git_verbs` records: an unbounded
+    rest hands the *next* command's words to a walk that decides by operands.
+    """
+    j = i + 1
+    while j < len(tokens):
+        tok = tokens[j]
+        if tok in _GH_GLOBAL_WITH_VALUE:
+            j += 2
+            continue
+        if tok.startswith("-"):
+            j += 1
+            continue
+        break
+    if j >= len(tokens):
+        return None
+    end = j
+    while end < len(tokens) and tokens[end] not in _COMMAND_SEPARATORS:
+        end += 1
+    rest = tokens[j:end]
+    form = (rest[0], rest[1]) if len(rest) >= 2 else None
+    return j, form, rest
+
+
+def _gh_verbs(tokens: list[str]) -> list[tuple[tuple[str, str] | None, list[str]]]:
+    """Every ``gh`` invocation in ``tokens``, resolved one by one.
+
+    Only a ``gh`` token in **command position** is an invocation
+    (`_runs_as_a_command`), the same rule `_git_verbs` applies and for the same
+    measured reason: a command that merely *names* gh as an argument
+    (`grep -rn gh .`, `echo gh repo clone x`) is not running it.
+    """
+    out: list[tuple[tuple[str, str] | None, list[str]]] = []
+    i = 0
+    while i < len(tokens):
+        if _basename(tokens[i]) != "gh" or not _runs_as_a_command(tokens, i):
+            i += 1
+            continue
+        inv = _gh_invocation_at(tokens, i)
+        if inv is None:
+            i += 1
+            continue
+        _j, form, rest = inv
+        out.append((form, rest))
+        i += 1
+    return out
+
+
+def _gh_flag_is_on(rest: list[str], flag: str) -> bool:
+    """Is ``flag`` set in this argument list? A boolean gh flag, either spelling.
+
+    ``--clone`` and ``--clone=true`` are the same request, and ``--clone=false``
+    is not one — `gh repo fork` without cloning forks on GitHub and writes
+    nothing locally, which is why this reads the value rather than the name.
+    """
+    for tok in rest:
+        if tok == flag:
+            return True
+        if tok.startswith(flag + "="):
+            return tok.split("=", 1)[1].strip().lower() not in ("false", "0", "no")
+    return False
+
+
+def _gh_local_write_kind(form: tuple[str, str] | None, rest: list[str]) -> str | None:
+    """The git operation this gh form performs **on the local tree**, or ``None``.
+
+    `gh repo sync <destination-repository>` is excluded on the strength of the
+    command's own help text, quoted beside `_GH_LOCAL_GIT_FORMS`: the local
+    repository is selected only when *no* argument is given, so the spelling
+    that names one updates the remote and touches nothing here.
+    """
+    if form == ("repo", "sync"):
+        return None if _gh_positionals(form, rest) else _GH_LOCAL_GIT_FORMS[form]
+    if form == ("repo", "fork"):
+        return _GH_LOCAL_GIT_FORMS[("repo", "clone")] if _gh_flag_is_on(rest, "--clone") else None
+    if form is None:
+        return None
+    return _GH_LOCAL_GIT_FORMS.get(form)
+
+
+def _gh_args(form: tuple[str, str] | None, rest: list[str]) -> list[str]:
+    """``rest`` with the resolved form's words removed — gh's own arguments.
+
+    Everything after a ``--`` is handed to git (`gh repo clone <repo> <dir> --
+    --depth 1`), so it is cut before the operands are read: those words would
+    otherwise be read as operands, and `--depth` and `1` would be named as
+    directories.
+    """
+    args = rest[2:] if form is not None else list(rest)
+    if "--" in args:
+        args = args[: args.index("--")]
+    return args
+
+
+def _gh_positionals(form: tuple[str, str] | None, rest: list[str]) -> list[str]:
+    """The non-option arguments of a resolved gh form, option values excluded.
+
+    The sliced arguments are handed over with ``gh`` in front of them because
+    `_positional_args` reads "the operands of the command at index ``i``" — it
+    starts *after* that word (`_args_after_command`), so a bare slice would drop
+    the form's own first argument. That is exactly the bug this line fixes:
+    without the placeholder, `gh repo clone <repo> <dir>` returned
+    ``['<dir>']`` and the destination read as the repository, so nothing was
+    named — measured before the fix.
+    """
+    table = _GH_OPTIONS_WITH_VALUE.get(form, frozenset()) | _GH_GLOBAL_WITH_VALUE
+    args = _gh_args(form, rest)
+    return _positional_args(["gh", *args], 0, table) if args else []
+
+
+def _gh_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The local paths a ``gh`` run writes — ``gh repo clone``'s directory operand.
+
+    The same question the git twin answers: `git clone <url> <dir>` writes
+    ``<dir>``, and `gh repo clone <repo> [<directory>]` writes the *second*
+    operand, or the directory it derives from the repository name when that
+    operand is omitted — inside the cwd, which no operand spells and which is
+    therefore not named here (the same reading `split` gets for its default
+    prefix).
+    """
+    inv = _gh_invocation_at(tokens, i)
+    if inv is None:
+        return []
+    _j, form, rest = inv
+    if form != ("repo", "clone"):
+        return []
+    return _gh_positionals(form, rest)[1:2]
+
+
+def _find_gh_local_write(cmd: str, _depth: int = 0) -> tuple[str, str] | None:
+    """The first gh spelling in ``cmd`` that writes the local tree, and its git twin.
+
+    Recurses into the texts a shell re-parses, exactly as `_find_git_mutator`
+    does (a `sh -c 'gh pr checkout 5'` is the same act as the bare spelling), and
+    caps depth rather than trusting it.
+    """
+    masked = _mask_data_heredoc_bodies(cmd)
+    tokens = _tokenize_command(masked)
+    for form, rest in _gh_verbs(tokens):
+        kind = _gh_local_write_kind(form, rest)
+        if kind is not None:
+            return (f"gh {' '.join(form)}" if form else "gh", kind)
+    if _depth < 3:
+        for nested in _nested_command_texts(tokens) + _quoted_substitution_bodies(masked):
+            hit = _find_gh_local_write(nested, _depth + 1)
+            if hit is not None:
+                return hit
+    return None
+
+
 def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     """The first mutating git verb in ``cmd``, or None when there is none.
 
@@ -6539,6 +6745,19 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
             return False, (
                 f"read-only sandbox: blocked git mutating command {hit!r} "
                 "(dirty-tree guard, community issue #979)"
+            ), "partial"
+        # …and the same operations spelled through `gh`, which is not a name in
+        # any of the git tables above (issue #1533): `gh pr checkout 1524
+        # --force` discarded an uncommitted edit that `git checkout` was
+        # refused for, and `gh repo clone <fork> <outside>` wrote a 16 MB tree
+        # where `git clone` wrote nothing. The refusal names both spellings, so
+        # the reader can see which reader fired.
+        gh_hit = _find_gh_local_write(cmd)
+        if gh_hit is not None:
+            spelling, kind = gh_hit
+            return False, (
+                f"read-only sandbox: blocked {spelling!r}, which runs {kind!r} "
+                "locally (dirty-tree guard one spelling over, issue #1533)"
             ), "partial"
         return True, None, "partial"
 
