@@ -4213,6 +4213,36 @@ def _zip_out_values(words: list[str]) -> list[str]:
     return out
 
 
+# `-@` is a *name source* rather than an option: it hands the run the member names on
+# stdin, where no walk can see them. It is carried as one letter of a short option
+# word, so the letter is what is matched — zip's short options combine, and `-@`, `-q@`
+# and `-@q` are the same request to it. The two spellings zip *refuses* are left out
+# because a refused run writes nothing: `--@` is not a supported long option and `-@-`
+# negates a flag that cannot be negated (both rc=16, no file created — measured by the
+# reporter of issue #1529, whose own two rows this scan exists for).
+_ZIP_STDIN_NAME_LETTER = "@"
+
+
+def _zip_takes_names_from_stdin(words: list[str]) -> bool:
+    """True when this ``zip`` run reads its member names from stdin (``-@``).
+
+    The question the lone-operand exemption cannot answer by itself (issue #1529):
+    `zip a.zip` alone is rc=12, "Nothing to do!", and creates nothing — but
+    `printf 'f\\n' | zip -@ a` is rc=0 and creates `a.zip` from the same single
+    operand, because `-@` gives it the name source the command line did not. Measured
+    by the issue's reporter on Info-ZIP 3.0, and read here rather than assumed: the
+    verdict on the archive must not depend on names arriving on a stream the walk is
+    not shown.
+    """
+    for tok in words:
+        if not tok.startswith("-") or tok.startswith("--") or tok == "-":
+            continue
+        letters = tok[1:]
+        if _ZIP_STDIN_NAME_LETTER in letters and not letters.endswith("-"):
+            return True
+    return False
+
+
 def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     """The paths a ``zip`` run writes: its **first** operand, and what it moves.
 
@@ -4224,7 +4254,9 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
       written in every shape (see `_zip_logfile_targets`);
     * with no second operand the run writes nothing at all (exit 12, "Nothing to
       do!"), which is what keeps `zip a.zip` and `zip -d a.zip` allowed — the same
-      logfile exception applies there too;
+      logfile exception applies there too — **unless the run reads its names from
+      stdin** (``-@``), a name source the operand count cannot see: see the `-@`
+      paragraph below and `_zip_takes_names_from_stdin`;
     * otherwise the archive — the *first* operand — is the path that is created
       or rewritten, and under ``-m``/``--move`` every listed operand after it is
       removed as well;
@@ -4238,8 +4270,22 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     named here. Measured, `zip -m a.zip f -x f` writes nothing, so the over-block
     lands on a run that does nothing anyway; the alternative is a per-name match
     in the walk, the grammar this family of rules refuses to grow (see
-    `_rsync_run_is_a_read` for the same trade taken the other way). `-@` reads its
-    names from stdin, which the walk cannot see: that spelling stays unnamed.
+    `_rsync_run_is_a_read` for the same trade taken the other way).
+
+    ``-@`` is the exception to the operand count above rather than a limit of it
+    (issue #1529). It makes the run read its member names from **stdin**, which no
+    walk can see, so a lone operand stops meaning "nothing to do": measured by that
+    issue's reporter on Info-ZIP 3.0, ``printf 'f\n' | zip -@ a`` is rc=0 and creates
+    ``a.zip``, while ``zip a`` alone is rc=12 ("Nothing to do!") and creates nothing —
+    the same operand, two verdicts, decided by where the names come from. The two
+    spellings zip itself *rejects* keep the exemption, because they write nothing:
+    ``--@`` ("long option '@' not supported") and ``-@-`` ("option '@' ... not
+    negatable") are both rc=16 with no file created, and a scan that matched them
+    would refuse a run that cannot write. Named limit, in the other direction: this
+    reads the option words **as written**, so a ``-@`` that is really another option's
+    value (``zip -P -@ a.zip``, a password spelled like the flag) is read as the name
+    source and the archive is named — an over-block, and one that lands on a run with
+    no list, which writes nothing.
 
     ``-b <dir>`` (the temporary directory, a spaced value this rule drops) is
     deliberately not named, and that is a measurement rather than an omission:
@@ -4302,9 +4348,11 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     )
     if destination and operands:
         return destination + logfile
-    if len(operands) < 2:
+    if len(operands) < 2 and not _zip_takes_names_from_stdin(words):
         # Archive and no list: zip exits 12 having written nothing — the logfile
-        # excepted, which it really does create (measured).
+        # excepted, which it really does create (measured). Under `-@` the same lone
+        # operand is the archive zip *does* write, so the count alone is not the
+        # question (issue #1529).
         return logfile
     if any(tok in _ZIP_MOVE_FLAGS for tok in words):
         return operands + logfile
