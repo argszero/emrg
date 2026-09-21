@@ -315,10 +315,65 @@ def git_cmd(*args: str, cwd: str | None = None, timeout: int = 10) -> subprocess
 # never committed, and never touches the upstream `.gitignore` — which is
 # the file a project's maintainers own.
 
-# Anchored to the repository root on purpose: a nested `.emrg/` inside a
-# subdirectory is some other tool's directory, and ignoring it here would be
-# a claim this repository cannot make.
+# An anchored entry, and *relative to the repository root*: a task directory one
+# level down writes its runtime data into `<root>/work/clone/.emrg`, which the
+# root's own `/.emrg/` does not cover (community issue #1507 — the same marker-vs-git
+# confusion as `repo_scope` below, one gate over). Anchoring is what keeps a nested
+# `.emrg/` belonging to some other tool untouched: a bare `.emrg/` would be a claim
+# this repository cannot make about somebody else's directory.
 EXCLUDE_ENTRY = "/.emrg/"
+
+
+def runtime_exclude_entry(prefix: str = "") -> str:
+    """The local ignore entry covering the runtime dir of a directory ``prefix`` deep.
+
+    ``""`` — the directory *is* the repository root — gives ``EXCLUDE_ENTRY``
+    (``/.emrg/``). A directory one level down gives ``/work/clone/.emrg/``: the
+    runtime data is EMRG's own in either shape, and the entry is where git reads
+    it for the tree the directory actually lives in.
+    """
+    return EXCLUDE_ENTRY if not prefix else f"/{prefix}/.emrg/"
+
+
+def repo_scope(directory: str) -> tuple[str, str] | None:
+    """The repository ``directory`` is *in*, and its path inside it.
+
+    Answers ``(root, prefix)``, where ``prefix`` is ``""`` when the directory is
+    itself the repository root — or ``None`` when it is in no repository at all.
+
+    Asked of git, because that is whose question it is. The structural guards used
+    to test ``os.path.isdir(<dir>/.git)``, which answers *"is this the root of a
+    checkout?"* while the guard needs *"is this directory in a tree?"* — and the
+    two differ for every directory that is not a root: a package inside a
+    monorepo, a docs or `work/` tree, a checkout nested in a larger repository
+    (community issue #1507, measured here: `_is_dirty_tree_sync` answered False
+    for a directory whose own `git status` listed the work the task was about to
+    be allowed to remove).
+
+    Resolving the root also decides the *scope* of every reader that uses it: the
+    two realpaths make the prefix comparable when one of them arrived through a
+    symlink (`/tmp` on macOS is the case measured here). A directory that resolves
+    outside the root it reported — which git's own answer should prevent, so this
+    is a guard rather than a case — keeps the wider reading, ``("", )``, because a
+    narrower one derived from an inconsistent pair is the unsafe direction.
+    """
+    try:
+        cp = git_cmd("rev-parse", "--show-toplevel", cwd=directory)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if cp.returncode != 0:
+        return None
+    root = (cp.stdout or "").strip()
+    if not root:
+        return None
+    root = os.path.realpath(root)
+    here = os.path.realpath(directory)
+    if here == root:
+        return root, ""
+    rel = os.path.relpath(here, root)
+    if rel == os.curdir or rel.startswith(os.pardir):
+        return root, ""
+    return root, rel.replace(os.sep, "/")
 
 _EXCLUDE_NOTE = (
     "# EMRG's own runtime directory (sessions, memory, logs). It is not part\n"
@@ -353,24 +408,33 @@ def _exclude_path_of(repo_dir: str) -> Path | None:
     return candidate if candidate.is_absolute() else (Path(repo_dir) / candidate)
 
 
-def _already_excludes_runtime_dir(text: str) -> bool:
-    """Whether an ignore file already ignores the root ``.emrg/``.
+def _already_excludes_runtime_dir(text: str, entry: str = EXCLUDE_ENTRY) -> bool:
+    """Whether an ignore file already ignores the runtime directory ``entry`` names.
 
-    Accepts the spellings that mean it (anchored or not, trailing slash or
-    not) so the check does not rewrite a file that already says the same
-    thing in another hand's style.
+    Accepts the spellings that mean it (anchored or not, trailing slash or not)
+    so the check does not rewrite a file that already says the same thing in
+    another hand's style — and a bare ``.emrg`` counts for a prefixed entry too,
+    because git reads an unanchored pattern at *any* depth, which is exactly the
+    directory ``/work/clone/.emrg/`` names (issue #1507).
     """
+    core = entry.strip("/")
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if line.strip("/") == ".emrg":
+        if line.strip("/") in (core, ".emrg"):
             return True
     return False
 
 
 def ensure_local_exclude(repo_dir: str) -> str:
-    """Make ``repo_dir``'s own git dir ignore EMRG's runtime directory.
+    """Make the git dir ``repo_dir`` lives in ignore EMRG's runtime directory.
+
+    ``repo_dir`` is the directory this instance *works in*, not necessarily a
+    repository root: the entry is written for its runtime data's path relative to
+    the root git reports (``repo_scope``), into the git dir git reports
+    (``_exclude_path_of``). Naming either of them from the path instead of asking
+    git is what community issue #1507 measured going wrong one level down.
 
     Idempotent, and never raises — this runs while a session or a cycle is
     being set up, and no repository state is worth failing that for:
@@ -387,7 +451,11 @@ def ensure_local_exclude(repo_dir: str) -> str:
     repo = Path(repo_dir)
     if not repo.is_dir():
         return "not-a-repo"
-    exclude = _exclude_path_of(str(repo))
+    scope = repo_scope(str(repo))
+    if scope is None:
+        return "not-a-repo"
+    root, prefix = scope
+    exclude = _exclude_path_of(root)
     if exclude is None:
         return "not-a-repo"
     try:
@@ -398,12 +466,12 @@ def ensure_local_exclude(repo_dir: str) -> str:
         )
     except OSError as exc:
         return f"error: {exc}"
-    if _already_excludes_runtime_dir(existing):
+    if _already_excludes_runtime_dir(existing, runtime_exclude_entry(prefix)):
         return "present"
     body = existing
     if body and not body.endswith("\n"):
         body += "\n"
-    body += _EXCLUDE_NOTE + EXCLUDE_ENTRY + "\n"
+    body += _EXCLUDE_NOTE + runtime_exclude_entry(prefix) + "\n"
     try:
         mode = os.stat(exclude).st_mode & 0o777 if exclude.exists() else 0o644
         atomic_write_bytes(body, exclude, mode=mode)
