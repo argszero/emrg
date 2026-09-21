@@ -61,6 +61,7 @@ from emrg.server.llm import (
 )
 from emrg.server.git_utils import (
     _detect_git_remote,
+    ensure_local_exclude,
     no_prompt_env,
     parse_gh_auth_user,
     resolve_git_gh,
@@ -1211,6 +1212,20 @@ class EmrgServer:
         home = os.path.expanduser("~")
         if cwd == home:
             return
+        # Registration is where this instance takes a directory on as a
+        # project, so it is where the directory learns to ignore the `.emrg/`
+        # runtime data EMRG will write into it (rant 2026-09-21T10:12:01).
+        # Idempotent: an explicit call, not a guess — `git status` is what the
+        # task-level dirty-tree guard reads, and this keeps this instance's own
+        # bookkeeping out of that verdict.
+        marker = os.path.join(cwd, ".git")
+        if os.path.isdir(marker) or os.path.isfile(marker):
+            exclude_status = ensure_local_exclude(cwd)
+            if exclude_status == "added":
+                logger.info(
+                    "_touch_project: %s now ignores .emrg/ locally "
+                    "(its own .git/info/exclude)", cwd,
+                )
         self._projects_log.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now().isoformat()
 
