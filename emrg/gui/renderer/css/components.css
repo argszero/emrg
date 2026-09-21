@@ -95,11 +95,6 @@
   padding: var(--sp-1) 0;
   user-select: none;
 }
-/* 历史消息（rant 14:15:12：只读展示，视觉弱化区分于实时消息） */
-.msg.user.history {
-  opacity: 0.72;
-  animation: none;
-}
 .history-load-bar {
   text-align: center;
   font-size: var(--fs-secondary);
