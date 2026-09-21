@@ -1440,6 +1440,165 @@ def _check_containment_escape(cmd: str) -> str | None:
     return None
 
 
+# ── The daemon's own life (host red line, issue #1324) ──────────────────────
+#
+# Never stopping or restarting the emrg server is the project's highest-priority
+# rule (`MANIFESTO.md` 第四条附则二, host 2026-08-18T22:58), and until this rule it
+# was enforced in one place (the test harness) and stated in two (the manifesto
+# and a host-configured session prompt) — but classified **nowhere a shell
+# command passes through**. Measured by the predicate alone on `1f2feefa`, the
+# workspace-write tier: `emrg server stop`, `emrg server restart`,
+# `pkill -f emrg.server`, `killall emrgd` and `kill $(pgrep -f "python -m emrg")`
+# were all ordinary allowed commands. That is the shape the host actually hit —
+# on 2026-08-21T09:41 a session in another project ran a "measurement" whose
+# subprocess signalled the daemon, the TUI answered `server connection lost`, and
+# the host asked *"你怎么验证的，怎么把 emrg server重启了？"*.
+#
+# The act, not the mention, is what is classified: the emrg program carrying a
+# lifecycle verb, or a process signaller whose operand names emrg. A name that
+# merely *appears* stays allowed — `git log --grep emrg`, `ls emrg`, `echo
+# 'emrg server stop'` are all read commands, and a rule that refused them would
+# teach the next reader to distrust it (the #1513 lesson: `echo sh "patch …"` was
+# a bug, not a safe over-block).
+_EMRG_PROGRAM_WORDS = frozenset({"emrg", "emrgd"})
+#: The verbs that end a running daemon's life: `emrg server stop`,
+#: `emrg server restart`, and `emrg stop` (which stops daemon + TUI + GUI).
+_DAEMON_LIFECYCLE_VERBS = frozenset({"stop", "restart"})
+#: Programs whose whole purpose is to signal another process by name.
+_PROCESS_SIGNALLER_WORDS = frozenset({"pkill", "killall", "kill"})
+#: The sub-command word between the program and the verb (`emrg server stop`).
+_DAEMON_SUBCOMMAND_WORDS = frozenset({"server"})
+#: Substitution and grouping scaffolding — tokens that occupy no slot of their
+#: own, so the verb walk steps over them. `$(which emrg) server stop` tokenizes
+#: as `$ ( which emrg ) server stop`, and without this the `)` between the
+#: program and the verb ended the walk (measured: the shape was allowed).
+_DAEMON_GROUPING_TOKENS = frozenset({"(", ")", "{", "}", "$", "`"})
+
+
+def _is_a_command_border(tok: str) -> bool:
+    """Does this token separate one command from the next?
+
+    The tokenizer fuses adjacent punctuation, so `;;`, `&&` and `|&` arrive as
+    single tokens: the test is "every character is a separator character", which
+    covers the fused spellings without enumerating them. Grouping operators are
+    deliberately **not** borders — `kill $(pgrep -f emrg)` names its target
+    inside a substitution, and stopping at `$` or `(` would lose it.
+    """
+    return bool(tok) and all(c in ";&|\n" for c in tok)
+
+
+def _daemon_lifecycle_verb_after(tokens: list[str], start: int) -> tuple[str, int] | None:
+    """The lifecycle verb this statement carries after the emrg program, and where.
+
+    Only the words a real invocation may put between the program and its verb
+    are stepped over — flags (`emrg --verbose server stop`) and the `server`
+    sub-command — and the walk stops at the first other word. Stopping there is
+    what keeps `git -C <a path ending in emrg> log --grep restart` allowed: the
+    `emrg` there is a directory *name*, and `log` is not a verb of the daemon.
+    """
+    j = start
+    while j < len(tokens):
+        tok = tokens[j]
+        if _is_a_command_border(tok):
+            return None
+        word = _basename(tok).lower()
+        if word in _DAEMON_LIFECYCLE_VERBS:
+            return word, j
+        if (
+            tok.startswith("-")
+            or word in _DAEMON_SUBCOMMAND_WORDS
+            or tok in _DAEMON_GROUPING_TOKENS
+        ):
+            j += 1
+            continue
+        return None
+    return None
+
+
+def _operand_naming_emrg(tokens: list[str], start: int) -> str | None:
+    """The operand a signaller's target is spelled in, if it names emrg.
+
+    Read from the text of the operands rather than from a process table: the
+    guard is a static scan, so what it can see is the name the command spells —
+    `pkill -f emrg.server`, `killall emrgd`, `kill $(pgrep -f "python -m emrg")`
+    (the substitution's tokens include the pattern as one word). A signaller
+    whose target is spelled some other way is a stated limit, not a hole this
+    rule claims to cover; see `_stops_or_restarts_the_daemon`'s docstring.
+    """
+    for tok in tokens[start:]:
+        if _is_a_command_border(tok):
+            return None
+        if "emrg" in tok.lower():
+            return tok
+    return None
+
+
+def _stops_or_restarts_the_daemon(cmd: str, _depth: int = 0) -> str | None:
+    """The spelling of the act, if ``cmd`` stops or restarts the emrg daemon.
+
+    Returns a short name of the spelling (for the refusal message) or ``None``.
+    Consulted by `_check_sandbox` on both checked tiers, because the act is not
+    a write and the write-target scans cannot see it: `emrg server stop` names no
+    file and no git verb, and `pkill -f emrg.server` writes nothing at all.
+
+    What is read is the *act*: an emrg program word (`emrg`, `emrgd`, a path to
+    one, or `python -m emrg`) followed by `stop`/`restart`, optionally through
+    the `server` sub-command and flags; or a signaller (`pkill`, `killall`,
+    `kill`) one of whose operands names emrg. `_nested_command_texts` is asked
+    for the texts a shell re-parses, so `sh -c 'emrg server stop'` and
+    `eval 'emrg server restart'` are classified as the same act rather than as a
+    string literal — the same walk the write-target rule already recurses
+    through.
+
+    **Stated limits** (refused-direction bias does not apply here: each of these
+    is *allowed*, and none is an ordinary route to the daemon):
+
+    * a signaller whose operand does not name emrg — `killall python`,
+      `pkill -f 'python -m emrg'` without the name in the text, `kill 12345`.
+      A process table is not a static reading, and widening the signaller to
+      every interpreter name would refuse ordinary `pkill node` work;
+    * a single string handed over by a *non-shell* program —
+      `env -S "emrg server stop"`. Reading every quoted argument as a command is
+      the over-block #1513 removed from this file (`echo sh "patch /etc/hosts"`
+      was a false refusal), so the payload of a shell (`sh -c`, `eval`) is read
+      and the payload of everything else is data. The argv-side reader of the
+      same act (`tests/conftest.py::_spawns_a_daemon_stop_or_restart`) does
+      cover this spelling, and that is the route a *test* goes through;
+    * a name built at runtime (`$EMRG server stop`, `emrg${X} server stop`).
+    """
+    if _depth >= 3:
+        return None
+    tokens = _tokenize_command(cmd)
+    for i, tok in enumerate(tokens):
+        base = _basename(tok).lower()
+        if base in _EMRG_PROGRAM_WORDS:
+            entry = i
+        elif tok == "-m" and tokens[i + 1 : i + 2] in (["emrg"], ["emrg.server"]):
+            # The interpreter spelling — `python -m emrg server stop` — is how
+            # this repo runs its own CLI, so it is a route to the live daemon
+            # rather than a curiosity.
+            entry = i + 1
+        elif base in _PROCESS_SIGNALLER_WORDS:
+            named = _operand_naming_emrg(tokens, i + 1)
+            if named is not None:
+                return f"{tok} {named}"
+            continue
+        else:
+            continue
+        verb = _daemon_lifecycle_verb_after(tokens, entry + 1)
+        if verb is not None:
+            return " ".join(
+                t
+                for t in tokens[entry : verb[1] + 1]
+                if t not in _DAEMON_GROUPING_TOKENS
+            )
+    for nested in _nested_command_texts(tokens):
+        hit = _stops_or_restarts_the_daemon(nested, _depth + 1)
+        if hit is not None:
+            return hit
+    return None
+
+
 # ── Windows path spellings (issue #1261) ────────────────────────────────────
 #
 # The guard tokenises with `shlex` in POSIX mode, where a backslash is an
@@ -6515,6 +6674,23 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
     escape = _check_containment_escape(cmd)
     if escape:
         return False, escape, "partial"
+
+    # The daemon's life is the one act neither target scan can see (issue
+    # #1324): it names no file and no git verb, so `emrg server stop`,
+    # `pkill -f emrg.server` and `killall emrgd` reached this point as ordinary
+    # commands at *both* checked tiers. The server is EMRG's body rather than a
+    # resource a tool call may dispose of — stopping it drops the host's
+    # connection and rebuilds every scheduled handler — so a shell command under
+    # a checked tier never ends it. `danger-full-access` returns above: there
+    # the host's own instruction is the only rule, and it always was.
+    stops = _stops_or_restarts_the_daemon(cmd)
+    if stops:
+        return False, (
+            f"sandbox: blocked {stops!r} — it stops or restarts the emrg daemon, "
+            "which is EMRG's life core (host red line, issue #1324). Restart it "
+            "from the host's own terminal; `emrg pause` / `emrg resume` pause the "
+            "evolution instead of the server."
+        ), "partial"
 
     targets = _extract_write_targets(cmd) + _unresolved_wrapper_targets(cmd)
     if mode == "read-only":
