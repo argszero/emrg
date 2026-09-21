@@ -372,6 +372,12 @@ under `workspace-write`, because `$DEV` lies inside the workspace. A cycle whose
 this flow at all: do **not** improvise another location — record the exact command the sandbox
 refused in the closing summary as a blocker, and finish the read-only parts of the cycle.
 
+**Every block below re-declares `DEV`** — the blocks are copied one at a time, and a `cd "$DEV"`
+with `DEV` unset is a **silent no-op**: measured on this host (2026-09-21) in bash, sh, dash and
+zsh, `cd ""` leaves the shell where it was and returns 0, so B.5's suite would quietly run in the
+reader's own directory — for this task the host tree B.3 exists to keep out of the way. One line
+per block removes the silent path; `tests/test_prompt_templates.py` pins it.
+
 #### B.4 Implement
 
 - **Work in the clone from B.3** (`cd "$DEV"`): every edit lands there — `{{ source_dir }}` stays a
@@ -383,6 +389,7 @@ refused in the closing summary as a blocker, and finish the read-only parts of t
 #### B.5 Test (must pass before submitting)
 
 ```bash
+DEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"   # re-declared: a block is copied on its own
 cd "$DEV"    # the clone from B.3 — never {{ source_dir }}
 # 1. Run the existing test suite (make sure nothing breaks)
 #    Choose the command based on project type:
@@ -405,6 +412,7 @@ python -c "<verification code snippet>" 2>&1 || echo "⚠️ verification failed
 - Commit: `<scope>: <description>`
 
 ```bash
+DEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"   # re-declared: a block is copied on its own
 cd "$DEV"    # the clone from B.3 — never {{ source_dir }}
 git add -A
 git commit -m "<commit message per project convention>"   # e.g. conventional commits: fix: xxx or feat: xxx
@@ -414,6 +422,7 @@ git push origin <branch name> 2>&1   # origin = the fork `gh repo clone` set up 
 **PR description must follow the project template.** If the project has `.github/pull_request_template.md`, fill in every field strictly. If no template, use this default format:
 
 ```bash
+DEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"   # re-declared: a block is copied on its own
 cd "$DEV" && gh pr create -R {{ owner }}/{{ repo }} \
   --title "<scope>: <description>" \
   --body "## Summary

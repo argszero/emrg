@@ -816,3 +816,62 @@ def test_the_default_branch_scan_answers_both_ways() -> None:
     assert not _LITERAL_DEFAULT_BRANCH.findall('git diff HEAD "origin/$DEFAULT"\n'), (
         "the resolved form is what the rule asks for and must not be flagged"
     )
+
+
+# The clone's blocks are copied one at a time — they are separate fenced snippets and the reader
+# reaches B.6 hours after B.3. A block that says `cd "$DEV"` without defining it depends on a
+# variable from another block, and an unset one is not an error: measured on this host
+# (2026-09-21) in bash, sh, dash and zsh, `cd ""` leaves the shell where it was and returns 0.
+# B.5 would then run the suite in the reader's own directory, which for this task is the host
+# tree the whole phase exists to keep out of the way — silently, which is the worse direction.
+_CLONE_CD = re.compile(r'\bcd\s+"\$DEV"|\bcd\s+\$DEV\b')
+_CLONE_DEFINE = re.compile(r"^\s*DEV=")
+
+
+def _clone_blocks_without_a_definition(text: str) -> list[str]:
+    """Blocks that enter the clone but never name it, one entry per offending `cd` line."""
+    offenders: list[str] = []
+    for block in _fenced_blocks(text):
+        enters = [line for line in block if _CLONE_CD.search(line)]
+        if enters and not any(_CLONE_DEFINE.search(line) for line in block):
+            offenders.extend(line.strip() for line in enters)
+    return offenders
+
+
+def test_every_clone_block_defines_the_directory_it_enters() -> None:
+    """Every block that `cd "$DEV"` defines `DEV` in that same block.
+
+    Rant 2026-09-21T16:12:19, second round — the first version of this flow defined `DEV` in B.3
+    alone, so the three later blocks were only correct when read together. The measurement that
+    makes this worth a guard rather than a note: `cd ""` is not an error in any shell tried, so
+    the failure is a suite run in the wrong tree, reported as a pass.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    offenders = _clone_blocks_without_a_definition(text)
+    assert not offenders, (
+        f"these commands enter the clone without defining it in their own block: {offenders} — "
+        "a copied block must not depend on a variable set in another block"
+    )
+
+    # Non-empty surface: the flow still enters the clone, so the scan is not passing by default.
+    assert sum(
+        len([line for line in block if _CLONE_CD.search(line)])
+        for block in _fenced_blocks(text)
+    ) >= 3, "the flow no longer enters the clone anywhere — the scan above would pass vacuously"
+
+
+def test_the_clone_definition_scan_answers_both_ways() -> None:
+    """The instrument's controls: the dependent shape is flagged, the self-contained one is not."""
+    dependent = '```bash\ncd "$DEV"\ngit push origin <branch> 2>&1\n```'
+    assert _clone_blocks_without_a_definition(dependent) == ['cd "$DEV"'], (
+        "a block that enters a variable it never sets is exactly what this guard is for"
+    )
+
+    self_contained = (
+        '```bash\nDEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"\n'
+        'cd "$DEV"\ngit push origin <branch> 2>&1\n```'
+    )
+    assert not _clone_blocks_without_a_definition(self_contained), (
+        "the shipped shape names the clone in its own block and must not be flagged"
+    )
