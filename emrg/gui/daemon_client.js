@@ -575,9 +575,10 @@ class DaemonClient {
     return [path.join(prefix, "source"), path.join(prefix, "lib")].join(path.delimiter);
   }
 
-  _findPython() {
+  // `root` 可传：默认仍是项目根（G59/G61/G126 的行为不变），测试用自己建的目录驱动
+  // 两条分支——「树里有可执行的 .venv」与「树里没有」——而不是断言本机恰好有没有 venv。
+  _findPython(root = path.resolve(__dirname, "..", "..")) {
     // G59/G61/G126：优先项目 .venv，其次 PATH python3/python
-    const root = path.resolve(__dirname, "..", "..");
     const candidates = [
       path.join(root, ".venv", "bin", "python"),
       path.join(root, ".venv", "Scripts", "python.exe"),
