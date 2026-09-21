@@ -1160,6 +1160,25 @@ _COMMAND_WRAPPERS = frozenset({
     # <dir>` reads `cd` as an invocation too (measured — a false block, in the
     # loud direction, of the class `echo command cd <dir>` already had).
     "builtin",
+    # Four prefixes that exec the word after them, so the walk has to read that
+    # word as a command. Measured on master `9a7bfe65` through `_check_sandbox`
+    # at `read-only`, one `workdir`, nothing executed: ten rows answered ALLOW
+    # with an empty target list — `unshare -r git checkout .`, `nsenter -t 1 git
+    # checkout .`, `chroot / git checkout .`, `busybox git stash drop`, and each
+    # prefix with `rm -rf /tmp/x` (`touch`, `patch` too) — because the word after
+    # the prefix was read as an argument, so neither reader saw a mutator at all.
+    # It is the `builtin` entry above one prefix further out (#1362).
+    # These names also fence issue #1513: the named-wrapper branch of
+    # `_nested_command_texts` takes `tokens[i + 1:]` with no position test, which
+    # is the only reason `unshare -r sh -c …` is read today. A position test
+    # landing there would stop reading every payload behind a prefix that is not
+    # in this set — these four among them (`tests/test_exec_prefix_wrappers.py`
+    # asserts that half, in both directions).
+    # `busybox <applet>` names the program the same way (`busybox sh -c …`,
+    # `busybox rm -rf …`). The cost is the over-approximation every entry here
+    # carries — `busybox git checkout .` is refused although busybox has no git
+    # applet — which is the loud direction this guard always errs in.
+    "unshare", "nsenter", "chroot", "busybox",
     "env", "sudo", "doas", "xargs", "nohup", "time", "timeout", "nice",
     "setsid", "stdbuf", "command", "exec", "ionice", "chrt", "watch",
 })
