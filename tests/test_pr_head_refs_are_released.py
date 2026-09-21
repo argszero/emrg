@@ -29,13 +29,23 @@ nothing dropped — there is no ref to drop and the caller must still get its er
 The structural half is keyed on the **ref**, not on a function's name (issue #1330,
 2026-09-17). The property is "nothing parks `refs/<gate>/…` without releasing it",
 and `_fetch_head` is only what four of the five gates happen to call their parking
-site: `check-merge-plan-suite.py` parks `refs/emrg-plan-suite/tip` inside
-`_suite_verdict`. A name-keyed guard cannot see that shape at all — measured on the
-tree that introduced this file, adding a second, unreleased `_park_head_for_forecast`
-to `scripts/check-merge-order.py` left the guard green (11 passed) while the run
-counted one more resident ref (105 → 106). So the walker below finds *every* site
-that writes into the gate's own namespace and asks each one whether it releases;
-the walker's two directions are themselves fixture-tested.
+site: `check-merge-plan-suite.py` parked `refs/emrg-plan-suite/tip` inside
+`_suite_verdict` at the time. A name-keyed guard cannot see that shape at all —
+measured on the tree that introduced this file, adding a second, unreleased
+`_park_head_for_forecast` to `scripts/check-merge-order.py` left the guard green
+(11 passed) while the run counted one more resident ref (105 → 106). So the walker
+below finds *every* site that writes into the gate's own namespace and asks each
+one whether it releases; the walker's two directions are themselves fixture-tested.
+
+That fifth shape has since moved twice, and both moves are why the walker resolves
+*names* rather than literals. The tip ref was removed on 2026-09-21 (it was one
+fixed name two overlapping runs of the same tool could swap, so each reported a
+tree the other was measuring — `cyc20260921-172459`), and the gate's remaining ref
+is written as `f"{PLAN_REF_PREFIX}{number}"`, a module constant interpolated into
+the ref's text. A walker that reads only string *literals* sees neither the
+constant nor the site, which is the blind spot its own "no parking site found"
+assertion exists to announce — so it resolves module-level constants, whole
+(`TIP_REF = "…"`) and interpolated (`f"{PLAN_REF_PREFIX}{number}"`).
 """
 
 from __future__ import annotations
@@ -237,11 +247,21 @@ def _static_text(node: ast.AST, constants: dict[str, str]) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
-        parts = [
-            value.value
-            for value in node.values
-            if isinstance(value, ast.Constant) and isinstance(value.value, str)
-        ]
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+                continue
+            if isinstance(value, ast.FormattedValue) and isinstance(value.value, ast.Name):
+                # A module-level constant interpolated into the ref's text - the shape
+                # `check-merge-plan-suite.py::_fetch_head` uses, `f"{PLAN_REF_PREFIX}{number}"`.
+                # The interpolated number contributes nothing, so what comes back is a
+                # *prefix* of the real ref, which is all the caller asks of it (it matches
+                # by `startswith`). Without this the walker saw no site at all in that
+                # gate once the plan tip stopped being a ref, and said so through the
+                # "the walker is blind" assertion rather than passing quietly - the reason
+                # that assertion exists (measured 2026-09-21, `cyc20260921-172459`).
+                parts.append(constants.get(value.value.id, ""))
         return "".join(parts) or None
     if isinstance(node, ast.Name):
         return constants.get(node.id)
@@ -402,7 +422,12 @@ def test_the_walker_credits_a_release_and_only_for_that_ref() -> None:
 
 
 def test_the_walker_reads_a_ref_that_lives_in_a_module_constant() -> None:
-    """`check-merge-plan-suite.py` parks `TIP_REF`, a module-level constant."""
+    """A bare module constant as the whole ref — `check-merge-plan-suite.py`'s tip shape.
+
+    The tip is gone (2026-09-21), but the resolution it needed is not: a gate may name
+    the ref through a constant, and a walker that reads only literals would report the
+    module as having no parking site at all.
+    """
     source = (
         'TIP_REF = "refs/emrg-plan-suite/tip"\n'
         "\n"
@@ -418,3 +443,37 @@ def test_the_walker_reads_a_ref_that_lives_in_a_module_constant() -> None:
     # …and the same site with the `-d` taken away: it parks and never releases.
     leaking = source.replace('["git", "update-ref", "-d", TIP_REF]', '["git", "update-ref", TIP_REF]')
     assert _parking_sites(leaking, "refs/emrg-plan-suite") == [("_suite_verdict", 5, False)]
+
+
+def test_the_walker_reads_a_prefix_that_lives_in_a_module_constant() -> None:
+    """The shape plan-suite uses now: `f"{PLAN_REF_PREFIX}{number}"`.
+
+    Built from a constant plus a *loop variable*, so neither half is a literal of the
+    ref: the constant contributes `refs/emrg-plan-suite/pr` and the number contributes
+    nothing, which is enough because the caller only asks whether the text starts with
+    the namespace. Without this the walker found no site in that gate at all and failed
+    through its "the walker is blind" assertion — measured 2026-09-21
+    (`cyc20260921-172459`), on the revision that removed the tip ref.
+    """
+    source = (
+        'PLAN_REF_PREFIX = "refs/emrg-plan-suite/pr"\n'
+        "\n"
+        "\n"
+        "def _fetch_head(number):\n"
+        "    ref = f'{PLAN_REF_PREFIX}{number}'\n"
+        '    proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])\n'
+        "    commit = _rev_parse(ref)\n"
+        "    merge_tree.drop_ref(ref, run=_run)\n"
+        "    return commit\n"
+    )
+    assert _parking_sites(source, "refs/emrg-plan-suite") == [("_fetch_head", 6, True)]
+    # The other direction, and the one that matters: take the release away and the site
+    # must be reported as a leak rather than silently resolved to something else.
+    leaking = source.replace("    merge_tree.drop_ref(ref, run=_run)\n", "")
+    assert _parking_sites(leaking, "refs/emrg-plan-suite") == [("_fetch_head", 6, False)]
+    # …and a constant that does *not* name this namespace is not a site in it, so the
+    # resolution above cannot manufacture one.
+    elsewhere = source.replace(
+        '"refs/emrg-plan-suite/pr"', '"refs/emrg-merge-seq/pr"'
+    )
+    assert _parking_sites(elsewhere, "refs/emrg-plan-suite") == []
