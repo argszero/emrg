@@ -207,6 +207,28 @@ def test_an_unanchored_entry_already_covers_a_nested_runtime_dir(tmp_path):
     assert _status(repo, "work/clone").strip() == "", "and git really does cover it"
 
 
+def test_an_anchored_root_entry_does_not_cover_a_nested_runtime_dir(tmp_path):
+    """The other half of the same reading (issue #1527), measured with git: a pattern
+    containing a `/` is relative to the repository root, so `/.emrg/` does **not** reach
+    `work/clone/.emrg/` — only a pattern with no separator (`.emrg`) matches at any
+    depth. Reading the anchored root form as if it were the unanchored one kept the
+    scoped entry from being written, and every already-registered repository carries
+    that root form, so the nested runtime data stayed unignored."""
+    repo, task = _parent_and_task(tmp_path)
+    exclude = _exclude_file(repo)
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("/.emrg/\n", encoding="utf-8")
+
+    assert ensure_local_exclude(str(task)) == "added", (
+        "the root's anchored entry is not this directory's entry"
+    )
+    assert runtime_exclude_entry("work/clone") in exclude.read_text(encoding="utf-8")
+
+    (task / ".emrg").mkdir()
+    (task / ".emrg" / "history.jsonl").write_text("{}\n", encoding="utf-8")
+    assert _status(repo, "work/clone").strip() == "", "and git really does cover it now"
+
+
 def test_a_prefixed_entry_is_written_once(tmp_path):
     """Idempotent in the new shape too: a second call recognises the entry it wrote."""
     repo, task = _parent_and_task(tmp_path)

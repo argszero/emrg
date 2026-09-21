@@ -1218,14 +1218,25 @@ class EmrgServer:
         # Idempotent: an explicit call, not a guess — `git status` is what the
         # task-level dirty-tree guard reads, and this keeps this instance's own
         # bookkeeping out of that verdict.
-        marker = os.path.join(cwd, ".git")
-        if os.path.isdir(marker) or os.path.isfile(marker):
-            exclude_status = ensure_local_exclude(cwd)
-            if exclude_status == "added":
-                logger.info(
-                    "_touch_project: %s now ignores .emrg/ locally "
-                    "(its own .git/info/exclude)", cwd,
-                )
+        #
+        # Unconditional, because the callee answers the question this site used
+        # to guess at (issue #1527): testing `<cwd>/.git` reads "is this the root
+        # of a checkout?", while the question is "is this directory in a tree?"
+        # — and the two differ for every directory that is not a root (a package
+        # in a monorepo, a `work/` tree, a clone nested in a larger repository),
+        # which is exactly where EMRG's runtime data stayed unignored. The entry
+        # is scoped by the enclosing repository's own answer, so a nested
+        # directory gets `/<prefix>/.emrg/` and the root's `/.emrg/` is not a
+        # substitute for it. `ensure_local_exclude` refuses by itself where there
+        # is nothing to write — a directory in no repository or one that does not
+        # exist answers `"not-a-repo"`, writing nothing and logging nothing — so
+        # the marker test added suppression and nothing else.
+        exclude_status = ensure_local_exclude(cwd)
+        if exclude_status == "added":
+            logger.info(
+                "_touch_project: %s now ignores .emrg/ locally "
+                "(its own .git/info/exclude)", cwd,
+            )
         self._projects_log.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now().isoformat()
 
