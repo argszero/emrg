@@ -541,6 +541,21 @@ def test_a_kept_worktree_is_the_tree_the_run_measured(
         "the note blames a file that no longer fails in a fresh worktree"
     )
 
+    # ...and the note was only one of that sentence's two carriers: the module docstring
+    # carried it too, and nothing in this file reads the script's own text, so correcting
+    # the printed line alone left the docstring free to drift back — the same defect class
+    # this PR repairs, one carrier over. Asserted over the file rather than the printed
+    # line, so both carriers are one row (read without a checkout: 2 occurrences at
+    # `05df2638`, 0 at this head).
+    #
+    # Pinned on the *retired form*, not on its subject. The corrected sentence legitimately
+    # reads "a tree from before it shows two failing files", so an assertion on that
+    # near-synonym would red a true statement about the boundary; the phrasing that must
+    # not come back is the one blaming two files in the present tense.
+    assert "fails two files" not in SCRIPT.read_text(encoding="utf-8"), (
+        "the docstring carried the same retired claim as the note, and no assertion reads it"
+    )
+
     # The removal line it prints is the one that works.
     _git(repo, "worktree", "remove", "--force", str(kept_dir))
     assert not kept_dir.exists()
