@@ -473,6 +473,108 @@ _PZSTD_VALUE_TAKING_SHORT = frozenset(
     if opt.startswith("-") and not opt.startswith("--")
 )
 
+# `brotli` is the member issue #1420 names as the last one of its class that is
+# actually **installed** on a host, and its shape is measured here rather than read
+# off the family's name — because it is not the family's. `gzip f` rewrites `f` in
+# place; `brotli f` writes `f.br` **beside** the operand and keeps it, which is
+# `lz4`'s and `pzstd`'s shape and the reason a name in `_COMPRESSOR_VERBS` would be a
+# wrong reading rather than a thin one: measured, `brotli -o out.br f` leaves `f`
+# untouched, so the family's operand rule would name a file the run only *reads*.
+#
+# Measured 2026-09-21 on this host's own binary (`brotli 1.1.0`, the copy that ships
+# with the git installation on PATH), one **fresh** directory per row, only the input
+# present, the listing read back off disk afterwards:
+#
+#   brotli f                          rc=0  writes  f  f.br      a sibling is derived; `f` STAYS
+#   brotli -k f / -f f / -s f         rc=0  writes  f  f.br
+#   brotli -q 11 f / -w 24 f          rc=0  writes  f  f.br      a spaced number, still a sibling
+#   brotli -S .zz f                   rc=0  writes  f  f.zz      the suffix is `-S`'s value
+#   brotli f g                        rc=0  writes  f.br  g.br   EVERY operand derives its own
+#   brotli -S .zz f g                 rc=0  writes  f.zz  g.zz
+#   brotli -d f.br                    rc=0  writes  f           decompression writes too
+#   brotli -j f / -j f g              rc=0  writes  f.br … and REMOVES the operand
+#   brotli -o out.br f                rc=0  writes  out.br      `f` untouched — the operand is a READ
+#   brotli --output=out.br f          rc=0  writes  out.br
+#   brotli f -o out.br                rc=0  writes  out.br      the destination wins wherever it stands
+#   brotli -o - f                     rc=0  writes  a file literally named `-`
+#   brotli --output out.br f          rc=1  nothing   "must pass the parameter as --output=value"
+#   brotli -oout.br f                 rc=1  nothing   "expected parameter for argument -o"
+#   brotli -qo out.br f               rc=1  nothing   "expected parameter for argument -q"
+#   brotli -c f / --stdout f          rc=0  read      `f`           [stdout], nothing on disk
+#   brotli -t f.br / --test f.br      rc=0  read      `f.br`        [test]
+#   brotli -c f g                     rc=1  nothing   stdout with two inputs is refused
+#   brotli -l f                       rc=1  nothing   "invalid argument -l" — no such option
+#   brotli - / brotli - f             rc=0  nothing / writes `f.br`   the stream alone writes
+#                                                                     nothing; `- f` still derives
+#   brotli -D dict.bin f              rc=1  nothing   the dictionary is a READ input
+#   brotli -- f                       rc=0  writes  f  f.br        the terminator ends options
+#   brotli --lgwin=24 f               rc=0  writes  f  f.br        the long value is attached
+#   brotli --quality=11 f             rc=0  writes  f  f.br
+#   brotli --lgwin 24 f               rc=1  nothing   "must pass the parameter as --lgwin=value"
+#   brotli --quality 11 f             rc=1  nothing   the same, and the program's own help lists
+#                                                       every long value in the `=` form
+#                                                       (`-q NUM, --quality=NUM`, `-w NUM,
+#                                                       --lgwin=NUM`, `-D FILE, --dictionary=FILE`,
+#                                                       `-S SUF, --suffix=SUF`, `-o FILE,
+#                                                       --output=FILE`)
+#
+# Four consequences, and each is why this verb gets a branch of its own:
+#
+# 1. The default form **keeps** the operand and derives a sibling beside it, inside
+#    the operand's own directory — so naming the operand decides both tiers exactly
+#    (the sibling leaves that directory with it), and naming it is the repair.
+# 2. `-o` names the write in **option position**, where no operand rule reaches it,
+#    and while it is spelled the operands are reads — so naming them as well would
+#    refuse `brotli -o out.br <outside>/in`, a run that writes only inside.
+# 3. There is **no cluster spelling** of the destination to reconcile: every cluster
+#    carrying a value-taking letter is refused by the program itself (`-qo out.br f`
+#    → "expected parameter for argument -q"), so the clustered case `pzstd` needed
+#    cannot arise here. The letters are still handed to the extractor, so the two
+#    readers agree about which token carries a value.
+# 4. `-l` is **not an option** at all here (rc=1), so reading the family's third read
+#    letter is harmless in the same way `compress -t` and `pzstd -l` are: the program
+#    writes nothing under a letter it rejects. It is listed with that reason rather
+#    than left out, so a later reader does not re-derive it.
+_BROTLI_VERBS = frozenset({"brotli"})
+_BROTLI_READ_LETTERS = frozenset({"c", "t", "l"})
+_BROTLI_READ_LONG = frozenset({"--stdout", "--test"})
+# The destination option in the two names this binary has — `-o`, whose value is the
+# **next word** (`-o FILE`, while the attached `-oFILE` is rc=1 "expected parameter for
+# argument -o"), and `--output`, whose own help spells the value attached
+# (`--output=FILE`, the spaced `--output FILE` rc=1 "must pass the parameter as
+# --output=value"). Both names are listed because both spellings are read by the shared
+# extractor, which reads a long option *and* its `=` form — and the spaced long form is
+# read with them for the reason that extractor states for the same shape: reading a
+# spelling the program rejects refuses a run that was going to fail anyway, while not
+# reading it would miss the real write of the `=` form, which this binary does accept.
+_BROTLI_DESTINATION_OPTIONS = frozenset({"-o", "--output"})
+# The options this walk treats as eating the **next word**: the destination, the quality
+# and window numbers, the dictionary `-D` (a read) and the suffix. Naming any of those
+# values as an operand would point the guard at a token that is not a path (`-q 11`)
+# or at a read (`-D <dict>`). The short letters are here because they really do eat the
+# word; `--output` and `--suffix` are here because the run that spells *those* spaced is
+# refused by the program (rc=1, nothing written), so skipping a value word costs a
+# command that was going to fail either way.
+#
+# Named limit, measured, and the same one `_option_destination_values` records for the
+# long option that eats a word: a **long** value-taking name spelled spaced is not
+# stepped over, because the letters a cluster is split by are short ones and `--lgwin`/
+# `--quality`/`--dictionary`/`--large_window` are not in the set above — so
+# `brotli --lgwin 24 <path>` names `24` as well (rc=1, nothing written; an over-name,
+# the direction this walk prefers). The attached spellings, which are the ones the
+# program accepts, are single tokens and are skipped by their `--` prefix.
+_BROTLI_OPTIONS_WITH_VALUE = frozenset({
+    "-o", "--output", "-q", "-w", "-D", "-S", "--suffix",
+})
+# …and the letters that decide where a *cluster's* value is, derived from the table
+# above rather than written out, so a letter added there cannot be read in the spaced
+# spelling and silently not in the clustered one.
+_BROTLI_VALUE_TAKING_SHORT = frozenset(
+    opt[1:]
+    for opt in _BROTLI_OPTIONS_WITH_VALUE
+    if opt.startswith("-") and not opt.startswith("--")
+)
+
 # `zip` writes the archive, and the archive is the **first** operand — the
 # opposite end of the operand list from `cp`/`mv`/`rsync`, whose destination is
 # the last one. Every operand rule the walk already has reads the last operand or
@@ -3328,6 +3430,12 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # cannot reach and the attached `-o<file>` spells a read letter inside
             # the path. Measured table in `_PZSTD_VERBS`' comment.
             targets.extend(_pzstd_write_targets(tokens, i))
+        elif word in _BROTLI_VERBS:
+            # `brotli f` writes `f.br` beside the operand and keeps it — `lz4`'s and
+            # `pzstd`'s shape, not the in-place family's — while `brotli -o <file> f`
+            # writes the destination and leaves `f` a read (issue #1420's last
+            # installed member). Measured table in `_BROTLI_VERBS`' comment.
+            targets.extend(_brotli_write_targets(tokens, i))
         elif word == "zip":
             # `zip A.zip f` creates or rewrites `A.zip`, and the archive is the
             # *first* operand — the end no other operand rule reads, so the run
@@ -3893,6 +4001,110 @@ def _pzstd_write_targets(tokens: list[str], i: int) -> list[str]:
         return []
     return _without_the_stream_operand(
         _positional_args(tokens, i, _PZSTD_OPTIONS_WITH_VALUE)
+    )
+
+
+def _brotli_read_form(args: list[str]) -> bool:
+    """True when a ``brotli`` run sends its bytes to stdout or only tests them.
+
+    Read cluster by cluster, like the family's gate, and — as for ``pzstd`` — the
+    scan **stops at a value-taking letter**, so the letters inside a value are not
+    read as flags. The stop costs nothing here that it does not cost for the family:
+    ``-l`` is in the read letters although this binary rejects it (rc=1, "invalid
+    argument -l"), because a letter the program refuses cannot hide a write, while
+    *not* reading it would refuse a run that was going to fail anyway.
+
+    The long forms are matched exactly rather than by prefix, and a token that is not
+    a short-option cluster (an operand, a long option, the value of one) is skipped.
+
+    Asked only once no destination has been spelled — for the reason
+    ``_pzstd_read_form`` gives, and with the same caveat that the two readings are not
+    alternatives: the destination question comes first in ``_brotli_write_targets``.
+    """
+    for tok in args:
+        if tok in _BROTLI_READ_LONG:
+            return True
+        if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+            continue
+        for ch in tok[1:]:
+            if ch in _BROTLI_READ_LETTERS:
+                return True
+            if ch in _BROTLI_VALUE_TAKING_SHORT:
+                break
+    return False
+
+
+def _brotli_names_a_destination(args: list[str]) -> bool:
+    """True when the run spells the destination option, whatever its value.
+
+    The distinction this draws is ``brotli -o - f`` from ``brotli f``. Both leave the
+    destination option's value unnamed by ``_option_destination_values`` — it drops a
+    value of exactly ``-`` — but they differ in what the run then writes: measured on
+    this host, `brotli -o - f` creates a file literally named ``-`` and **not** the
+    sibling ``f.br`` (brotli has no stdout convention for ``-o``'s value, unlike
+    ``pzstd``/``sort``), while a bare `brotli f` derives ``f.br`` beside the operand.
+    Naming the operand in the first case would refuse a run that only reads it.
+
+    The option is found by the reader the value extractor uses — the shared cluster
+    scan over this verb's value-taking letters — so the two cannot disagree about
+    which run has a destination.
+
+    Named residual, measured, and pinned in ``tests/test_bash_tool_brotli_targets.py``:
+    a destination whose value is exactly ``-`` is dropped by the extractor (its
+    documented reading is *stdout* for the verbs it was written for) and this reader
+    then answers "a destination is spelled", so ``brotli -o - f`` names nothing while
+    the run really creates a file literally named ``-``. It cannot leave the workspace
+    by that spelling — the name is relative and resolves in the run's own directory —
+    so the residual is a write inside the cwd going unnamed, not a way out of the
+    sandbox. Naming it would need this verb to hold its own ``-`` policy against the
+    shared extractor, which is the per-verb grammar this walk keeps refusing.
+    """
+    for j, tok in enumerate(args):
+        if tok == "--":
+            break
+        cluster = _short_cluster_option(tok, args, j, _BROTLI_VALUE_TAKING_SHORT)
+        if cluster is not None and cluster[0] == "o":
+            return True
+    return False
+
+
+def _brotli_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The path a ``brotli`` run writes — its ``-o`` destination, or a sibling.
+
+    `brotli` keeps the operand and derives a sibling beside it (`f` → `f.br`), so this
+    is `lz4`'s and `pzstd`'s shape rather than the in-place family's; the measured
+    table behind every claim here is above `_BROTLI_VERBS`. Three questions settle it,
+    in this order:
+
+    * does it spell `-o`/`--output`? then that option holds the destination and the
+      operands are only read — so the destination is named and they are not, which is
+      what keeps `brotli -o out.br <outside>/in` allowed instead of refused;
+    * is it a read form (`-c`/`--stdout`, `-t`/`--test`, the letters read inside a
+      short cluster too) when no destination is spelled? then it writes nothing on
+      disk, and naming the operand would refuse a pure read;
+    * otherwise **every** operand derives its own sibling (`brotli f g` writes `f.br`
+      and `g.br`, measured), so all of them are named, minus the bare ``-``, which is
+      the stream in this family's own reading (`brotli -` creates nothing, while
+      `brotli - f` still derives `f.br` — hence per operand, as in the family).
+
+    Naming the operand is sound for the reason `lz4`'s claim is: the derived sibling
+    lands in the operand's **own** directory and in no other, so the operand names the
+    directory the write happens in — and the decompressing form (`brotli -d f.br`
+    writes `f`) is the same claim read the other way. The two tiers therefore decide
+    both the default and the decompressing spelling exactly.
+    """
+    args = _args_after_command(tokens, i)
+    destinations = _option_destination_values(
+        tokens, i, "brotli", _BROTLI_DESTINATION_OPTIONS, _BROTLI_VALUE_TAKING_SHORT
+    )
+    if destinations:
+        return destinations
+    if _brotli_names_a_destination(args):
+        return []
+    if _brotli_read_form(args):
+        return []
+    return _without_the_stream_operand(
+        _positional_args(tokens, i, _BROTLI_OPTIONS_WITH_VALUE)
     )
 
 

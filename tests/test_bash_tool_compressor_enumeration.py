@@ -168,6 +168,13 @@ READ_FORMS = (
 # so they are names in the family now, with rows in
 # `test_bash_tool_compressor_operands.py` — the same departure `compress` made, and
 # the reason this list is a list of measured holes rather than of guesses.
+#
+# `brotli` left the same way and for the same reason (2026-09-21): it is the last name
+# here that is **installed** on a host, so its ground truth could be measured, and the
+# measurement says its shape is `lz4`'s rather than the family's — `brotli f` writes
+# `f.br` beside the operand and keeps it. It therefore left for a branch of its own
+# (`_BROTLI_VERBS`) with rows in both directions in
+# `test_bash_tool_brotli_targets.py`, not for a name in `_COMPRESSOR_VERBS`.
 UNLISTED_TWINS = (
     ("pbzip2", f"pbzip2 {OUTSIDE}/f"),
     ("lbzip2", f"lbzip2 {OUTSIDE}/f"),
@@ -175,7 +182,6 @@ UNLISTED_TWINS = (
     ("plzip", f"plzip {OUTSIDE}/f"),
     ("lzip", f"lzip {OUTSIDE}/f"),
     ("lzop", f"lzop {OUTSIDE}/f"),
-    ("brotli", f"brotli {OUTSIDE}/f"),
 )
 
 
