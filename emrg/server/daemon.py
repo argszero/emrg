@@ -1000,7 +1000,13 @@ class EmrgServer:
                     if event:
                         event.set()
                     cancel_task = self._session_turn_task.get(cancel_sid) or _tool_task
-                    if cancel_task and not cancel_task.done():
+                    # "Is there a turn here to stop?" is read off the task, not off
+                    # `event`: the connection's locals outlive their turn — a finished
+                    # turn leaves `_cancel_event` set and `_tool_task` assigned until
+                    # the next turn replaces it — so a guard written on `event` reports
+                    # an interruption that stopped nothing (issue #1470).
+                    stopped = bool(cancel_task and not cancel_task.done())
+                    if stopped:
                         cancel_task.cancel()
                         # Only await a task this coroutine owns: awaiting a peer's turn
                         # would park this connection's read loop until that turn unwinds.
@@ -1012,10 +1018,16 @@ class EmrgServer:
                     # The receipt is a statement about the *session*, so every client
                     # watching it gets the same one. A connection-local ack let a peer
                     # read "cancelled" while the turn it never reached kept running.
-                    await self._broadcast(cancel_sid, {
-                        "type": "cancelled",
-                        "session_id": cancel_sid,
-                    })
+                    # It is also a statement that something *stopped*: a turn that had
+                    # already finished is not one, and a client that narrates every
+                    # receipt (GUI) would print "interrupted" under a completed answer,
+                    # reachable whenever Esc lands after the last chunk (issue #1470).
+                    # A cancel that reached no live turn has nothing to report.
+                    if stopped:
+                        await self._broadcast(cancel_sid, {
+                            "type": "cancelled",
+                            "session_id": cancel_sid,
+                        })
                     if cancel_task is _tool_task:
                         _tool_task = None
                         _cancel_event = None
