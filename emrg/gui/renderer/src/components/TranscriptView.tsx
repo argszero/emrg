@@ -145,13 +145,6 @@ function EntryView({ entry, index, t, md, store, sid }: EntryViewProps): ReactNo
           <MarkdownText text={entry.text} md={md} stripMark={false} />
         </div>
       );
-    case "history":
-      // 历史消息同 markdown 渲染（旧纯文本是合法 markdown，回显不损坏）
-      return (
-        <div className="msg user history">
-          <MarkdownText text={entry.text} md={md} stripMark={false} />
-        </div>
-      );
     case "system":
       return <div className="msg system">{entry.text}</div>;
     case "assistant":
