@@ -1,4 +1,5 @@
-"""`curl --output-dir` relocates what `-o` and `-O` write (issue #1504).
+"""`curl`'s destination options: `--output-dir` relocates what `-o` and `-O` write, and
+the program's other file-writing options are named (issue #1504).
 
 A destination option's value is not always the path the run writes. `curl --output-dir
 <dir> -o f <url>` creates `<dir>/f` and **nothing** at `f`, so a reader that names the value
@@ -23,14 +24,17 @@ Measured 2026-09-21 on this host (curl 8.9.0, win64), one scratch directory per 
                                                       read anyway (see the table's note)
     curl --output-dir D -o /rooted/f URL       rc=23  nothing created — pinned below
 
-What this file does **not** claim is the family the same reader still cannot name:
-`--dump-header`/`-D`, `--cookie-jar`/`-c`, `--trace`, `--trace-ascii`, `--etag-save`,
-`--stderr` and `--libcurl` are destinations the walk enumerates nowhere, so it names `()`
-for them and both tiers allow a command that really creates the file (measured through
-`curl`, `-D f` leaving a 91-byte file and `-c f` a 131-byte jar). Those rows are pinned here
-as a measured hole rather than left silent, which is the shape the maintainer's reply asks
-for; `-D` and `--trace` are also the spellings whose *long* form eats the word in issue
-#1461, so a fix there must not read one as the other.
+The second half of the same issue lives here too, because it is the same reader and the
+same table: `curl` writes a file with more than its destination option, and the walk
+enumerated none of the others. `--dump-header`/`-D`, `--cookie-jar`/`-c`, `--etag-save`,
+`--hsts`, `--alt-svc`, `--trace`, `--trace-ascii`, `--stderr` and `--libcurl` each name a
+file the run creates (measured through `curl`, `-D f` leaving a 91-byte header file and
+`-c f` a 131-byte jar), yet the target list came back `()` — and an empty list is allowed
+by construction, so both tiers allowed the write. Those spellings are rows of the named
+block below now, with the two shapes that must *stay* unnamed (a `-` value, which is
+stdout, and a path an option only ever reads) pinned beside them so a later widening of
+the table cannot pass by naming everything. `-D` and `--trace` are also the spellings whose
+*long* form eats the word in issue #1461, so a fix there must not read one as the other.
 
 Separate from `test_bash_tool_option_destinations.py` for the reason that file gives for
 itself: one family per file, so two fixtures need not agree about a table neither owns.
@@ -187,42 +191,112 @@ def test_the_rooted_value_and_the_workdir_row_are_pinned(row, cmd, named, allowe
     assert got is allowed, f"{cmd!r} answered {got} ({reason})"
 
 
-# ── the hole this file does *not* close, pinned as a hole ──────────────────────
+# ── the rest of what curl writes: every file-writing option it has ──────────────
 #
-# Every row below is a real write the walk cannot see: the options are enumerated nowhere,
-# so the target list is empty and an empty list is allowed by construction. Measured
-# through `curl` on this host in a scratch directory (issue #1504's table), each of
-# `--dump-header`, `-D`, `--cookie-jar`, `-c`, `--etag-save`, `--trace` really creates the
-# file it names. They are pinned here so a later reader finds them named as a hole instead
-# of finding an empty list and assuming coverage — and so that a fix has a row to turn.
-UNLISTED_WRITER_ROWS = (
-    ("--dump-header", f"curl --dump-header {OUTSIDE}/h {URL}"),
-    ("-D", f"curl -D {OUTSIDE}/h {URL}"),
-    ("--cookie-jar", f"curl --cookie-jar {OUTSIDE}/c {URL}"),
-    ("-c", f"curl -c {OUTSIDE}/c {URL}"),
-    ("--etag-save", f"curl --etag-save {OUTSIDE}/e {URL}"),
-    ("--trace", f"curl --trace {OUTSIDE}/t {URL}"),
-    ("--trace-ascii", f"curl --trace-ascii {OUTSIDE}/t {URL}"),
-    ("--stderr", f"curl --stderr {OUTSIDE}/s {URL}"),
-    ("--libcurl", f"curl --libcurl {OUTSIDE}/l.c {URL}"),
-    ("--output-dir only, no -o/-O to relocate", f"curl --output-dir {OUTSIDE} -o f {URL}".replace(" -o f", "")),
+# Each row is a real write, measured on this host (curl 8.9.0, win64) in a scratch
+# directory and read back off disk: `-D f` leaves a header file, `-c f` a cookie jar, and
+# `--hsts f`, `--alt-svc f`, `--libcurl f`, `--stderr f`, `--trace f` each create their
+# file. Before the table carried these spellings the walk named nothing for them, which is
+# the hole issue #1504 reports — an empty target list is allowed at both tiers.
+NAMED_WRITER_ROWS = (
+    ("--dump-header", f"curl --dump-header {OUTSIDE}/h {URL}", (f"{OUTSIDE}/h",)),
+    ("-D", f"curl -D {OUTSIDE}/h {URL}", (f"{OUTSIDE}/h",)),
+    ("-D inside a cluster", f"curl -sD {OUTSIDE}/h {URL}", (f"{OUTSIDE}/h",)),
+    ("--cookie-jar", f"curl --cookie-jar {OUTSIDE}/c {URL}", (f"{OUTSIDE}/c",)),
+    ("-c", f"curl -c {OUTSIDE}/c {URL}", (f"{OUTSIDE}/c",)),
+    ("-c inside a cluster", f"curl -sc {OUTSIDE}/c {URL}", (f"{OUTSIDE}/c",)),
+    ("--etag-save", f"curl --etag-save {OUTSIDE}/e {URL}", (f"{OUTSIDE}/e",)),
+    ("--hsts", f"curl --hsts {OUTSIDE}/hs {URL}", (f"{OUTSIDE}/hs",)),
+    ("--alt-svc", f"curl --alt-svc {OUTSIDE}/as {URL}", (f"{OUTSIDE}/as",)),
+    ("--trace", f"curl --trace {OUTSIDE}/t {URL}", (f"{OUTSIDE}/t",)),
+    ("--trace-ascii", f"curl --trace-ascii {OUTSIDE}/t {URL}", (f"{OUTSIDE}/t",)),
+    ("--stderr", f"curl --stderr {OUTSIDE}/s {URL}", (f"{OUTSIDE}/s",)),
+    ("--libcurl", f"curl --libcurl {OUTSIDE}/l.c {URL}", (f"{OUTSIDE}/l.c",)),
+    # The `=` spelling is read although this host's curl rejects it, for the reason the
+    # relocation rows give for `--output-dir=`: `--opt=value` is what a GNU getopt-style
+    # parser accepts, so a build that takes it really creates the file.
+    ("--dump-header=, the form this curl rejects",
+     f"curl --dump-header={OUTSIDE}/h {URL}", (f"{OUTSIDE}/h",)),
 )
 
 
 @pytest.mark.parametrize(
-    "row,cmd", UNLISTED_WRITER_ROWS, ids=[r for r, _ in UNLISTED_WRITER_ROWS],
+    "row,cmd,named", NAMED_WRITER_ROWS, ids=[r for r, *_ in NAMED_WRITER_ROWS],
 )
-def test_the_unlisted_writers_are_pinned_as_a_measured_hole(row, cmd):
-    """A hole, named: the walk names nothing and both tiers allow the write.
+def test_the_other_writers_name_the_file_they_create(row, cmd, named):
+    """The option's value is the write, so it is named and refused outside the workspace."""
+    assert tuple(_extract_write_targets(cmd)) == named, row
+    for tier in ("read-only", "workspace-write"):
+        allowed, reason, _ = _check_sandbox(cmd, tier, workdir="/workspace")
+        assert allowed is False, f"{tier} allowed {cmd!r}"
+        assert named[0] in reason, f"{tier}: {reason!r} does not name {named[0]!r}"
 
-    Pinned in the shape `test_bash_tool_option_destinations.py` uses for its own limits —
-    asserting today's answer so it cannot be read as coverage, and failing loudly when a
-    fix lands, at which point this row moves up into the block that asserts the named path.
-    """
+
+INSIDE_WRITER_ROWS = tuple(
+    (label, f"curl {opt} {INSIDE}/w {URL}", (f"{INSIDE}/w",))
+    for label, opt in (
+        ("-D", "-D"), ("-c", "-c"), ("--dump-header", "--dump-header"),
+        ("--cookie-jar", "--cookie-jar"), ("--trace", "--trace"),
+        ("--hsts", "--hsts"), ("--libcurl", "--libcurl"),
+    )
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd,named", INSIDE_WRITER_ROWS, ids=[r for r, *_ in INSIDE_WRITER_ROWS],
+)
+def test_the_other_writers_stay_allowed_inside_the_workspace(row, cmd, named):
+    """The same rows inside the workspace are allowed, so naming them over-refuses nothing."""
+    assert tuple(_extract_write_targets(cmd)) == named, row
+    allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+    assert allowed is True, f"workspace-write refused {cmd!r}: {reason}"
+
+
+# ── the same options in the spelling that names no file ─────────────────────────
+#
+# `-` is the stdout spelling for these two, measured on this host (`curl -D - URL` and
+# `curl -c - URL` are rc=0 with the directory empty afterwards, as is `--trace -`), and the
+# reader drops a `-` value for **every** option it reads. Naming one would refuse a run that
+# changes no byte, which is the direction this walk treats as the worse error.
+STDOUT_WRITER_ROWS = (
+    ("-D -", f"curl -D - {URL}"),
+    ("--cookie-jar -", f"curl --cookie-jar - {URL}"),
+    ("--trace -", f"curl --trace - {URL}"),
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd", STDOUT_WRITER_ROWS, ids=[r for r, _ in STDOUT_WRITER_ROWS],
+)
+def test_a_dash_value_is_stdout_and_names_no_file(row, cmd):
+    """The run writes nothing, so no path is judged and both tiers allow it."""
     assert tuple(_extract_write_targets(cmd)) == (), row
     for tier in ("read-only", "workspace-write"):
-        allowed, _reason, _ = _check_sandbox(cmd, tier, workdir="/workspace")
-        assert allowed is True, f"{tier} now refuses {cmd!r} — move this row out of the hole"
+        allowed, reason, _ = _check_sandbox(cmd, tier, workdir="/workspace")
+        assert allowed is True, f"{tier} refused {cmd!r} — a false block: {reason}"
+
+
+# ── the other direction: an option that only ever *reads* its value ─────────────
+#
+# The table names writers, so the value of a read-only option must stay unnamed — the shape
+# a later widening of that table would break first. These rows are statements about the
+# walk (it names nothing), not ground truth about curl: each option below is the program's
+# documented way of *reading* the path it is given.
+READER_OPTION_ROWS = (
+    ("--netrc-file", f"curl --netrc-file {OUTSIDE}/n {URL}"),
+    ("--cacert", f"curl --cacert {OUTSIDE}/ca.pem {URL}"),
+    ("-b", f"curl -b {OUTSIDE}/c {URL}"),
+    ("-T", f"curl -T {OUTSIDE}/up {URL}"),
+    ("--data-binary @", f"curl --data-binary @{OUTSIDE}/d {URL}"),
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd", READER_OPTION_ROWS, ids=[r for r, _ in READER_OPTION_ROWS],
+)
+def test_an_option_that_reads_its_value_names_no_write(row, cmd):
+    """A read is not a write: widening the table past the writers reds this row."""
+    assert tuple(_extract_write_targets(cmd)) == (), row
 
 
 # ── ground truth: the relocation is a fact about the tool, not about the reader ──
@@ -288,3 +362,56 @@ def test_the_relocation_really_moves_the_file(monkeypatch, tmp_path, row, args, 
         assert cwd_leftover == [], (
             f"{command!r} also wrote {cwd_leftover!r} in the workdir — not relocated"
         )
+
+
+# ── ground truth for the writers above, not only for the relocation ─────────────
+#
+# `NAMED_WRITER_ROWS` says what the walk answers; this says why the answer is right — the
+# file really appears where the option named it. Without it the rows above would pin a
+# spelling rather than a behaviour: "this option writes a file" would be a claim about curl
+# that nothing here had run. Posix-only for the reason the relocation arm above gives.
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX shell ground truth: the daemon's shell on Windows is cmd.exe",
+)
+@pytest.mark.parametrize(
+    "row,args,expected_name",
+    (
+        ("-D", ["-s", "-D", "{d}/h.txt", "{u}"], "h.txt"),
+        ("-c", ["-s", "-c", "{d}/c.txt", "{u}"], "c.txt"),
+        ("--trace", ["-s", "--trace", "{d}/t.txt", "{u}"], "t.txt"),
+        ("--etag-save", ["-s", "--etag-save", "{d}/e.txt", "{u}"], "e.txt"),
+    ),
+    ids=["-D", "-c", "--trace", "--etag-save"],
+)
+def test_the_other_writers_really_create_the_file_they_name(
+    monkeypatch, tmp_path, row, args, expected_name
+):
+    """Run it: the option's value is the path that appears on disk afterwards."""
+    if shutil.which("curl") is None:
+        pytest.skip("`curl` is not on PATH here, so this ground truth is unmeasurable")
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: "/fake-os-temp")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = workspace / "source.txt"
+    source.write_text("hello\n", encoding="utf-8")
+    directory = workspace / "out"
+    directory.mkdir()
+
+    command = "curl " + " ".join(
+        a.format(d=directory.as_posix(), u="file://" + source.as_posix()) for a in args
+    )
+    tool = BashTool()
+    result = _run(tool.execute({
+        "command": command, "sandbox": "workspace-write", "workdir": str(workspace),
+    }))
+
+    assert "not executed" not in result.content, (
+        f"{command!r} was refused at the sandbox: {result.content}"
+    )
+    assert sorted(p.name for p in directory.iterdir()) == [expected_name], (
+        f"{command!r} did not create {expected_name!r} under the directory — the option is "
+        "not a write here, so naming it would be an over-approximation; re-measure before "
+        "changing the reader"
+    )

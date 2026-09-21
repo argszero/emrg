@@ -2148,8 +2148,43 @@ _CSPLIT_OPTIONS_WITH_VALUE: frozenset[str] = _CSPLIT_PREFIX_OPTIONS | frozenset(
     "-n", "--digits",          # the suffix's digit count
     "-b", "--suffix-format",   # GNU only
 })
+# `curl` writes a file with more than its destination option (issue #1504): the rows below
+# are every writing option of the program measured on this host (curl 8.9.0, win64,
+# 2026-09-21), one scratch directory per row, a `file:///` source, the tree read back off
+# disk after each run:
+#
+#   curl --dump-header h URL   rc=0  `h` created         · `-D` too; `-D -` creates nothing
+#   curl --cookie-jar c URL    rc=0  `c` created         · `-c` too; `-c -` creates nothing
+#   curl --etag-save e URL     rc=0  `e` created
+#   curl --trace t URL         rc=0  `t` created         · `--trace-ascii` too; `-` is stdout
+#   curl --hsts hs URL         rc=0  `hs` created
+#   curl --alt-svc as URL      rc=0  `as` created
+#   curl --libcurl l.c URL     rc=0  `l.c` created
+#   curl --stderr s URL        rc=0  `s` created
+#   curl -sD cd.txt URL        rc=0  `cd.txt` created — the letter read inside a cluster
+#
+# `--output-dir` relocates none of them, which is why they are destinations of this verb
+# rather than a second entry in the relocation family below: measured, `curl --output-dir D
+# -D dh.txt -o f.txt URL` creates `D/f.txt` **and `dh.txt` in the cwd**, and the same row
+# with `--trace` leaves `tr.txt` there. Only `-o`/`-O` follow the directory.
+#
+# Every row above is a command that really creates the file it names, so naming it is the
+# repair rather than an over-approximation: before this entry each of them left the target
+# list empty, and an empty list is allowed by construction — the loop that judges targets
+# never ran, so both tiers allowed the write.
+_CURL_WRITING_OPTIONS: frozenset[str] = frozenset({
+    "-o", "--output",
+    "-D", "--dump-header",
+    "-c", "--cookie-jar",
+    "--etag-save",
+    "--trace", "--trace-ascii",
+    "--hsts",
+    "--alt-svc",
+    "--libcurl",
+    "--stderr",
+})
 _OPTION_DESTINATION_VERBS: dict[str, frozenset[str]] = {
-    "curl": frozenset({"-o", "--output"}),
+    "curl": _CURL_WRITING_OPTIONS,
     "wget": frozenset({"-O", "--output-document"}),
     "sort": frozenset({"-o", "--output"}),
     "unzip": frozenset({"-d", "--directory"}),
