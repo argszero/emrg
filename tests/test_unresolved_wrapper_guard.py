@@ -47,6 +47,7 @@ import tempfile
 
 import pytest
 
+from emrg.tools import bash_tool
 from emrg.tools.bash_tool import (
     _basename,
     _check_sandbox,
@@ -403,6 +404,101 @@ def test_a_substituted_here_string_can_carry_the_write_too(cmd: str) -> None:
 def test_a_redirection_whose_operand_substitutes_a_read_is_allowed(cmd: str) -> None:
     allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
     assert allowed, (cmd, reason)
+
+
+# The same position, the other spelling of a substitution (reported by a Contributor
+# against this branch's head `f247459b`). A backtick carries no parenthesis, and the
+# tokenizer makes a backtick punctuation: written against its operator it is glued to
+# it, written apart it is a token of its own. The opener therefore stands inside the
+# *operator's* token in one spelling and one token later in the other, and in both the
+# word the operator hands over is the operand. Measured on master `1f2feef` vs head
+# `f247459b`, both tiers, through `_check_sandbox`: every mutator row below answered
+# **BLOCK** on master and **ALLOW** at the head — the same fail-open direction as the
+# rows above, one spelling over, so these rows exist for the same reason: the payload
+# of an un-resolvable wrapper is read as a command wherever the shell would run it.
+BACKTICK_FEEDING_MUTATORS = [
+    "$SHELL <<< `echo 'git checkout .'`",
+    "$SHELL <<<`echo 'git checkout .'`",
+    "$SHELL < `echo 'git checkout .'`",
+    "$SHELL <<< `printf %s 'git checkout .'`",
+    "$SHELL <<< `echo 'git stash drop'`",
+]
+
+# The write, through the same position and the same destination as the rows above:
+# named by the target rule, refused at both tiers because ``OUTSIDE`` is outside every
+# allowed root (the premise above pins that for these rows too).
+BACKTICK_FEEDING_A_WRITE = [
+    f"$SHELL <<< `echo 'rm -rf {OUTSIDE}'`",
+]
+
+# The control the hand-over is admitted against: the same position, substitutions that
+# read. A rule that blocked these would be refusing the read to reach the write.
+BACKTICK_CARRYING_A_READ = [
+    "$SHELL <<< `echo 'git status'`",
+    "$SHELL <<<`echo hi`",
+]
+
+
+@pytest.mark.parametrize("cmd", BACKTICK_FEEDING_MUTATORS)
+def test_a_redirection_whose_operand_is_a_backtick_substitution_is_read(cmd: str) -> None:
+    allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
+    assert not allowed, (cmd, reason)
+    assert "git" in (reason or ""), (cmd, reason)
+
+
+@pytest.mark.parametrize("cmd", BACKTICK_FEEDING_A_WRITE)
+def test_a_backtick_substituted_here_string_can_carry_the_write_too(cmd: str) -> None:
+    for tier in (READ_ONLY, WW):
+        allowed, reason, _enforcement = _check_sandbox(cmd, tier, WORKDIR)
+        assert not allowed, (cmd, tier, reason)
+        assert "emrg-1523" in (reason or ""), (cmd, tier, reason)
+
+
+@pytest.mark.parametrize("cmd", BACKTICK_CARRYING_A_READ)
+def test_a_redirection_whose_operand_substitutes_a_backtick_read_is_allowed(cmd: str) -> None:
+    allowed, reason, _enforcement = _check_sandbox(cmd, READ_ONLY, WORKDIR)
+    assert allowed, (cmd, reason)
+
+
+def test_the_backtick_body_is_what_the_reader_hands_over() -> None:
+    """The mechanism, in both spellings: the words handed over, not just the verdict.
+
+    A verdict test cannot tell "the body was read" from "the block landed for some
+    other reason", and the two spellings reach the reader through two call sites —
+    `_payload_code_words` sees the opener inside the fused operator token,
+    `_text_position_words` sees it in the operand — so what they hand over is pinned
+    rather than left to the verdict above.
+    """
+    for cmd in (
+        "$SHELL <<< `echo 'git checkout .'`",
+        "$SHELL <<<`echo 'git checkout .'`",
+    ):
+        words = _unresolved_wrapper_payloads(_tokenize_command(cmd))
+        assert "git checkout ." in words, (cmd, words)
+
+
+def test_the_backtick_reader_is_what_names_the_operand() -> None:
+    """Blind the reader and the hole the report measured comes back, both tiers.
+
+    With `_has_open_backtick` answering False the operand is read as the single word
+    it is again — the pre-repair reading — so the row above is a claim about this
+    predicate rather than an observation about one command.
+    """
+    cmd = "$SHELL <<< `echo 'git checkout .'`"
+    assert not _check_sandbox(cmd, READ_ONLY, WORKDIR)[0], "the control: unblinded, refused"
+
+    original = bash_tool._has_open_backtick
+    try:
+        bash_tool._has_open_backtick = lambda tok: False
+        assert _check_sandbox(cmd, READ_ONLY, WORKDIR)[0], (
+            "the row must hang on the backtick reader, not on the operator"
+        )
+        assert _check_sandbox(cmd, WW, WORKDIR)[0]
+    finally:
+        bash_tool._has_open_backtick = original
+        assert not _check_sandbox(cmd, READ_ONLY, WORKDIR)[0], (
+            "the reader must be restored byte-for-byte"
+        )
 
 
 def test_the_hand_over_is_the_substitution_not_the_token_at_the_operator() -> None:
