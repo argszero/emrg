@@ -208,6 +208,86 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.getByText("结论：一切正常。")).toBeInTheDocument();
   });
 
+  /**
+   * 两页记录（更新的一页 + 更早的一页），桥的替身照 `before_index` 回答：带游标 = 更早那一页，
+   * 不带 = 又一份最新页。于是「游标丢了」这个真实退化在断言里可辨，而不只是断言一个参数名。
+   */
+  function mockTwoHistoryPages(m: ReturnType<typeof mockEmrg>) {
+    const newest = [
+      { record_index: 4, kind: "message", role: "user", content: "newest-1" },
+      { record_index: 5, kind: "message", role: "assistant", content: "newest-2" },
+      { record_index: 6, kind: "message", role: "user", content: "newest-3" },
+    ];
+    const older = [
+      { record_index: 1, kind: "message", role: "user", content: "older-1" },
+      { record_index: 2, kind: "message", role: "assistant", content: "older-2" },
+      { record_index: 3, kind: "message", role: "user", content: "older-3" },
+    ];
+    m.listHistory.mockImplementation((p: { beforeIndex?: number } = {}) =>
+      Promise.resolve(
+        p.beforeIndex != null
+          ? { messages: older, hasMore: false }
+          : { messages: newest, hasMore: true },
+      ),
+    );
+    return { newest, older };
+  }
+
+  /** 打开一个会话，等第一页落定，再把滚动位置带到顶部（TranscriptView 的 capture 监听在 scrollTop<=2 时上翻）。 */
+  async function openSessionAndScrollToTop(
+    m: ReturnType<typeof mockEmrg>,
+    container: HTMLElement,
+    firstPageText: string,
+  ) {
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(1));
+    // 第一页真的渲染出来（此时 hasMore 已落定 → canLoadOlder 为真），再模拟上翻。
+    await waitFor(() => expect(screen.getByText(firstPageText)).toBeInTheDocument());
+    const viewport = container.querySelector<HTMLElement>('[data-testid="transcript-view"]');
+    expect(viewport).not.toBeNull();
+    Object.defineProperty(viewport, "scrollTop", { value: 0, configurable: true, writable: true });
+    Object.defineProperty(viewport, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
+    act(() => {
+      viewport!.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+  }
+
+  it("asks for the records BEFORE the oldest loaded one when scrolled to the top (rant 2026-09-20T18:58:44)", async () => {
+    // 该 rant 的第三条缺陷是「分页会重复、会漏、会让更早内容不可达」，修法是游标改成
+    // 最早已加载记录的绝对 record_index。游标一旦丢失，页 2 会再取一次最新页，而
+    // `loaded` 会把整页滤空 —— 视图永不前进，且套件全绿（issue #1493 的变异臂实测）。
+    const m = mockEmrg();
+    const { older } = mockTwoHistoryPages(m);
+    const { container } = render(wrapper(<Shell />));
+    await openSessionAndScrollToTop(m, container, "newest-1");
+
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(2));
+    expect(m.listHistory).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ sessionId: "s1", includeRecords: true, beforeIndex: 4 }),
+    );
+    // 更早一页确实进了视图，而不是被 `loaded` 去重滤空。
+    await waitFor(() => expect(screen.getByText(older[0].content)).toBeInTheDocument());
+  });
+
+  it("prepends an older page as one block, keeping record order (rant 2026-09-20T18:58:44)", async () => {
+    const m = mockEmrg();
+    const { newest, older } = mockTwoHistoryPages(m);
+    const { container } = render(wrapper(<Shell />));
+    await openSessionAndScrollToTop(m, container, "newest-1");
+    await waitFor(() => expect(screen.getByText(older[2].content)).toBeInTheDocument());
+
+    // 文本在容器里的先后 = DOM 顺序：更早一页整块在当前页之前，且页内仍是记录顺序
+    // （倒序 unshift 会让页内反而颠倒，这一条同时钉住「前插」和「不翻转」）。
+    const text = container.querySelector('[data-testid="transcript-view"]')?.textContent ?? "";
+    const at = (s: string) => text.indexOf(s);
+    expect(at(older[0].content)).toBeGreaterThanOrEqual(0);
+    expect(at(older[2].content)).toBeLessThan(at(newest[0].content));
+    expect(at(older[0].content)).toBeLessThan(at(older[2].content));
+  });
+
   it("shows the connection status + model from the status broadcast", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));
