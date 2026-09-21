@@ -25,9 +25,12 @@ The rule, made structural
 Two properties are needed for a posted review to be a vote, and neither is
 visible at the moment of posting:
 
-* **it carries a cycle id** — the counter's only handle on who voted. A body with
-  none is void; a body with *two* is worse, because the counter silently takes the
-  first and the vote's owner becomes an accident of prose order.
+* **it carries exactly one cycle id** — the counter's only handle on who voted. A
+  body with none is void, and a body with *two* is void for the same reason: with
+  more than one the counter cannot measure which cycle wrote it, so it counts for
+  none of them. Credit by text order — a vote filed under whichever id the body
+  named first — is the old reading, and what removed it is the counter's own
+  `cycle = ids[0] if len(ids) == 1 else None`.
 * **the counter counts it** — a valid vote can still fail to count (a second vote
   from a cycle already in the run contributes nothing).
 
@@ -73,9 +76,16 @@ window is the previous cycle's start when it can be found (`--prev-cycle`, else 
 newest cycle record that sorts before this cycle's id in `--cycles-log`, default
 `$EMRG_CYCLES_LOG`, else the records beside the checkout) and this cycle's own start
 when it cannot — narrowed and said so, never abandoned and never widened by a guess.
-A head whose push time fell back to the commit date is left alone rather than judged:
-the counter already calls such a head blocking for that reason, and a lower bound
-cannot decide a window.
+A head whose push time fell back to the commit date is **refused rather than judged**:
+a lower bound cannot decide a window, so nothing is posted and the refusal names the
+remedy that same missing run already has — get a run for the head, then ask again. The
+counter calls such a head blocking for that same missing run, so the cost is a delay
+rather than a vote nobody can recount. The other uncertain input — no previous cycle to
+widen the window from — is *narrowed* rather than refused: the head is judged over this
+cycle's own start and the narrowing is reported, because a clause applied over a smaller
+window is a weaker reading than the rule states and must not pass as the stronger one.
+Only a cycle id that names no instant at all leaves the clause inapplicable, and that is
+a refusal.
 
 Why `-` exists (issue #1462)
 ----------------------------
@@ -115,8 +125,11 @@ Exit codes
        counts here rather than crashing; `cycle-id`: the body has no cycle id, or more than one,
        or `--cycle` disagrees with it; `count-unreadable`: the vote count could
        not be read; `already-voted`: this cycle already has a counted vote or a
-       veto here; `own-head-window`: the head was pushed by this cycle or by the one
-       immediately before it, so the abstention clause is why nothing was posted;
+       veto here; `own-head-window`: the abstention clause is why nothing was
+       posted — either the head was pushed by this cycle or by the one immediately
+       before it, or the head itself could not be judged because the window cannot
+       be decided from it (no CI run for the head, so its push time is the commit
+       date, a lower bound), or there was no window to apply at all;
        `gh-failed`: `gh` failed). Fail loud, and never report a posted
        vote for a review that was never sent
 
