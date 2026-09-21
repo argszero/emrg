@@ -2148,8 +2148,43 @@ _CSPLIT_OPTIONS_WITH_VALUE: frozenset[str] = _CSPLIT_PREFIX_OPTIONS | frozenset(
     "-n", "--digits",          # the suffix's digit count
     "-b", "--suffix-format",   # GNU only
 })
+# `curl` writes a file with more than its destination option (issue #1504): the rows below
+# are every writing option of the program measured on this host (curl 8.9.0, win64,
+# 2026-09-21), one scratch directory per row, a `file:///` source, the tree read back off
+# disk after each run:
+#
+#   curl --dump-header h URL   rc=0  `h` created         · `-D` too; `-D -` creates nothing
+#   curl --cookie-jar c URL    rc=0  `c` created         · `-c` too; `-c -` creates nothing
+#   curl --etag-save e URL     rc=0  `e` created
+#   curl --trace t URL         rc=0  `t` created         · `--trace-ascii` too; `-` is stdout
+#   curl --hsts hs URL         rc=0  `hs` created
+#   curl --alt-svc as URL      rc=0  `as` created
+#   curl --libcurl l.c URL     rc=0  `l.c` created
+#   curl --stderr s URL        rc=0  `s` created
+#   curl -sD cd.txt URL        rc=0  `cd.txt` created — the letter read inside a cluster
+#
+# `--output-dir` relocates none of them, which is why they are destinations of this verb
+# rather than a second entry in the relocation family below: measured, `curl --output-dir D
+# -D dh.txt -o f.txt URL` creates `D/f.txt` **and `dh.txt` in the cwd**, and the same row
+# with `--trace` leaves `tr.txt` there. Only `-o`/`-O` follow the directory.
+#
+# Every row above is a command that really creates the file it names, so naming it is the
+# repair rather than an over-approximation: before this entry each of them left the target
+# list empty, and an empty list is allowed by construction — the loop that judges targets
+# never ran, so both tiers allowed the write.
+_CURL_WRITING_OPTIONS: frozenset[str] = frozenset({
+    "-o", "--output",
+    "-D", "--dump-header",
+    "-c", "--cookie-jar",
+    "--etag-save",
+    "--trace", "--trace-ascii",
+    "--hsts",
+    "--alt-svc",
+    "--libcurl",
+    "--stderr",
+})
 _OPTION_DESTINATION_VERBS: dict[str, frozenset[str]] = {
-    "curl": frozenset({"-o", "--output"}),
+    "curl": _CURL_WRITING_OPTIONS,
     "wget": frozenset({"-O", "--output-document"}),
     "sort": frozenset({"-o", "--output"}),
     "unzip": frozenset({"-d", "--directory"}),
@@ -2218,6 +2253,129 @@ _OPTION_DESTINATION_VALUE_TAKING: dict[str, frozenset[str]] = {
     # a path it never touches.
     "csplit": frozenset(_short_option_letters(_CSPLIT_OPTIONS_WITH_VALUE)),
 }
+
+# A destination option's value can be **relocated** by a modifier option, and `curl`'s
+# `--output-dir` is the first of those this walk meets. It names no destination of its own
+# and alone writes nothing at all (measured below), so it does not belong in
+# `_OPTION_DESTINATION_VERBS`: naming it as one would be the false block `tar -C` is kept
+# out of this walk for. It is read as a modifier of the destination's value instead.
+#
+# Measured 2026-09-21 on this host (curl 8.9.0, win64), one scratch directory per row, a
+# `file:///` source, the tree read back off disk after each run:
+#
+#   curl --output-dir D -o f URL              rc=0  D/f created, nothing at `f`
+#   curl -o f --output-dir D URL              rc=0  D/f created — an `-o` **before** the
+#                                                    directory is relocated too, so the
+#                                                    reading is of the whole line
+#   curl --output-dir D1 --output-dir D2 -o f rc=0  D2/f created — the **last** one wins
+#   curl --output-dir D -O URL                rc=0  D/<basename of URL> created
+#   curl --output-dir D -o sub/in.txt URL     rc=0  D/sub/in.txt created
+#   curl --output-dir D -o ../esc.txt URL     rc=0  D/../esc.txt created, one level above
+#                                                    D — the join is literal, not resolved
+#   curl --output-dir D URL                   rc=0  nothing created (body to stdout)
+#   curl --output-dir D -o - URL              rc=0  nothing created (body to stdout)
+#   curl --output-dir=D -o f URL              rc=2  ``--output=…: is unknown`` on this curl,
+#                                                    nothing created; read anyway (below)
+#   curl --output-dir D -o /rooted/f URL      rc=23 nothing created — pinned as a limit
+#
+# The `=` spelling is read although this host's curl rejects it, for the reason the
+# destination reader already gives for that same form: ``--opt=value`` is what a GNU
+# getopt-style parser accepts, so a build that takes it really relocates, and the two ways
+# of being wrong are not equally costly. The **rooted** row is left un-relocated: real curl
+# writes nothing there (rc=23), so joining would name a path neither the tool nor the
+# reader agrees exists; leaving the value as it stands keeps today's reading, and
+# ``tests/test_bash_tool_curl_output_dir.py`` pins it with that measurement.
+_OPTION_RELOCATES_DESTINATION: dict[str, str] = {"curl": "--output-dir"}
+
+# **Which** of a verb's destinations that option relocates (issue #1504). The directory is a
+# property of two options, not of the verb: measured, `curl --output-dir D -o f.txt URL`
+# creates `D/f.txt`, while `curl --output-dir D -D dh.txt -o f.txt URL` creates `D/f.txt`
+# **and `dh.txt` in the cwd** — `--dump-header` and the rest of `_CURL_WRITING_OPTIONS`
+# ignore it, and `man curl` says the same ("the directory in which files should be stored,
+# when -O, --remote-name or -o, --output are used"). So a reader that collects the values
+# into a bag and relocates every one of them names a path the run does not write as soon as
+# a *sibling* writer meets a directory outside the workspace — a false block, the direction
+# this walk's own record treats as the costly one.
+#
+# `-O`/`--remote-name` carry no value for this list to act on (they are read by
+# `_OPTION_NAMES_AFTER_URL`, which names the *directory* itself); they are listed because
+# this table answers "which options does the directory move", and those two are among them.
+#
+# A verb absent from this table keeps the historical reading — every value it names is
+# relocated — because the default must not be "relocate nothing": that would turn the hole
+# #1504 reports (a relocated write named by its un-relocated value) back on.
+_RELOCATION_APPLIES_TO: dict[str, frozenset[str]] = {
+    "curl": frozenset({"-o", "--output", "-O", "--remote-name"}),
+}
+
+# The option that names each file after its URL: `curl -O <url>` writes the URL's last
+# segment into the cwd, and `--output-dir` relocates *that* too (measured above). The
+# basename is the operand's last segment, which this reader does not parse, so the
+# **directory** is named — the same over-approximation, in the same direction, that
+# `_target_directory_values` gives `-t <dir>`. Naming the directory decides both tiers
+# exactly: the write lands inside it or outside it, and nowhere else.
+_OPTION_NAMES_AFTER_URL: dict[str, frozenset[str]] = {
+    "curl": frozenset({"-O", "--remote-name"}),
+}
+
+
+def _output_directory_in_force(args: list[str], verb: str) -> str | None:
+    """The directory ``verb``'s relocation option puts in force on this line, or ``None``.
+
+    Read off the whole line rather than off what follows the option, because that is what
+    the measurement says: `curl -o f --output-dir D URL` creates ``D/f``, so an ``-o``
+    *before* the directory is relocated too. The last one wins, and a ``--`` that no option
+    consumed ends the search — the same terminator reading the destination walk gives it.
+    """
+    option = _OPTION_RELOCATES_DESTINATION.get(verb)
+    if option is None:
+        return None
+    found: str | None = None
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        if tok == "--" and (idx == 0 or args[idx - 1] != option):
+            break
+        if tok == option:
+            if idx + 1 < len(args):
+                found = args[idx + 1]
+            idx += 2
+            continue
+        if tok.startswith(option + "="):
+            found = tok.split("=", 1)[1]
+        idx += 1
+    return found
+
+
+def _names_a_file_after_the_url(args: list[str], verb: str) -> bool:
+    """Whether ``verb`` is asked to name a file after its URL (``curl -O``/``--remote-name``).
+
+    Presence only: the name it would take is the URL's last segment, and the directory is
+    what this walk can name (see `_OPTION_NAMES_AFTER_URL`).
+    """
+    options = _OPTION_NAMES_AFTER_URL.get(verb, frozenset())
+    if not options:
+        return False
+    for tok in args:
+        if tok == "--":
+            break
+        if tok in options:
+            return True
+    return False
+
+
+def _relocated_under(value: str, directory: str) -> str:
+    """``value`` as it lands when ``directory`` relocates it — or ``value`` unchanged.
+
+    A **rooted** value is returned unchanged rather than joined, with the measurement in
+    `_OPTION_RELOCATES_DESTINATION`: real curl exits 23 there and writes nothing, so a join
+    would name a path nothing agrees exists.
+    """
+    if _is_absolute_path(value):
+        return value
+    if directory.endswith(("/", "\\")):
+        return directory + value
+    return directory + "/" + value
 
 
 def _leading_short_option_value(tok: str, letters: set[str]) -> str | None:
@@ -2459,11 +2617,35 @@ def _option_destination_values(
     prints the file to stdout and creates nothing, while the walk still names ``out`` —
     a false block of a run that writes nothing. The row is pinned, with that reason, in
     ``tests/test_bash_tool_option_destinations.py``.
+
+    A verb can also let another option **relocate** the value this reader names, and then
+    the value alone is the wrong path rather than an unnamed one: ``curl --output-dir
+    <dir> -o f`` writes ``<dir>/f``, so naming ``f`` describes a write that does not
+    happen — allowed at workspace-write (a relative ``f`` resolves inside the workdir)
+    and refused at read-only for a word the run never touches. That pair is read here
+    through ``_OPTION_RELOCATES_DESTINATION`` and applied to the values this reader
+    returns, so the named path is the one that is written; the option itself is *not* a
+    destination (alone it writes nothing), which is why it is not in
+    ``_OPTION_DESTINATION_VERBS``. The measurements, the `=` spelling that is read anyway,
+    and the rooted value that is deliberately left alone are all recorded above that table.
+
+    The relocation is scoped to the **option** that named each value, not to the verb
+    (`_RELOCATION_APPLIES_TO`): a verb's other writers are not moved by the same directory,
+    so relocating their values names a path nothing writes. Measured on this host, `curl
+    --output-dir <outside> -D dh.txt <url>` writes ``dh.txt`` in the workdir while the
+    widened table names ``<outside>/dh.txt`` and refuses the command at workspace-write —
+    a false block, and one the reader's own note about those rows already stated. Each
+    value therefore travels with its option, and only ``-o``/``--output`` are relocated.
     """
     options = _OPTION_DESTINATION_VERBS[verb] if options is None else options
     longs = {opt for opt in options if opt.startswith("--")}
     letters = {opt[1:] for opt in options if not opt.startswith("--")}
-    out: list[str] = []
+    # Each value keeps the option that named it, because relocation belongs to the option
+    # and not to the verb: `curl --output-dir D -o f` moves `f`, while `curl --output-dir D
+    # -D h` still writes `h` in the cwd (measured, issue #1504). A bag of bare values cannot
+    # tell those apart, which is how the widened curl set below put a false block on every
+    # sibling writer.
+    pairs: list[tuple[str, str]] = []
     args = _args_after_command(tokens, i)
     idx = 0
     while idx < len(args):
@@ -2475,12 +2657,12 @@ def _option_destination_values(
         eaten = 1
         if tok in options:
             if idx + 1 < len(args):
-                out.append(args[idx + 1])
+                pairs.append((tok, args[idx + 1]))
             eaten = 2
         elif tok.startswith("--"):
             for long_opt in longs:
                 if tok.startswith(long_opt + "="):
-                    out.append(tok.split("=", 1)[1])
+                    pairs.append((long_opt, tok.split("=", 1)[1]))
                     break
         elif cluster_letters:
             # The destination letter sits **inside the cluster** rather than at its
@@ -2497,13 +2679,33 @@ def _option_destination_values(
                 letter, value, attached = cluster
                 eaten = _words_eaten(attached)
                 if letter in letters and value:
-                    out.append(value)
+                    pairs.append(("-" + letter, value))
         else:
             attached = _leading_short_option_value(tok, letters)
             if attached is not None:
-                out.append(attached)
+                pairs.append((tok[:2], attached))
         idx += eaten
-    return [value for value in out if value != "-"]
+    pairs = [(opt, value) for opt, value in pairs if value != "-"]
+    directory = _output_directory_in_force(args, verb)
+    if directory is None:
+        return [value for _, value in pairs]
+    # The value is relocated, not replaced: `curl --output-dir <dir> -o f` writes
+    # `<dir>/f`, and the walk must name that path rather than `f` — the row that made this
+    # visible was `curl --output-dir <outside> -o f <url>`, where the old reading allowed
+    # the command at workspace-write (a relative `f` resolves inside the workdir) while
+    # read-only refused it for a word the command never writes (issue #1504).
+    #
+    # Only the options the directory really moves are relocated (`_RELOCATION_APPLIES_TO`):
+    # the other writers of the same verb keep writing where they name, so relocating them
+    # would refuse a run that lands inside the workspace.
+    applicable = _RELOCATION_APPLIES_TO.get(verb, options)
+    relocated = [
+        _relocated_under(value, directory) if opt in applicable else value
+        for opt, value in pairs
+    ]
+    if _names_a_file_after_the_url(args, verb):
+        relocated.append(directory)
+    return relocated
 
 
 # `patch` **rewrites the files it is pointed at**, and it was invisible to this walk
