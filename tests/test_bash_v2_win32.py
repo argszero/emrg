@@ -19,7 +19,6 @@ import ctypes
 import gc
 import json
 import os
-import pathlib
 import re
 import subprocess
 import sys
@@ -597,6 +596,137 @@ needs_windows = pytest.mark.skipif(
 )
 
 
+#: ``TOKEN_INFORMATION_CLASS`` value for ``TokenUser``.  The boundary's own ABI
+#: table is the blueprint's list, which has no name for it; this read is the only
+#: place the test harness needs the value.
+_TOKEN_USER = 1
+
+
+def _grant_caller(api, path) -> None:
+    """Give the running user's own SID write access to one boundary directory.
+
+    Windows checks a ``WRITE_RESTRICTED`` child's access twice: once against the
+    SIDs the token itself carries, and once against the restricting list.  A
+    capability ACE can only answer the second, so a directory must already be
+    reachable through the caller's own SID for the first — the blueprint's "the
+    granted directories belong to the caller" precondition, and the ordinary
+    state of every workspace a deployer hands the sandbox.  Without it the
+    restricted child is denied before the capability is ever consulted, which
+    would make these tests measure the filesystem they run on rather than the
+    boundary.
+
+    ``tmp_path`` on CI is the one place the precondition does not hold, and that
+    is a property of the harness rather than of the boundary: the ambient temp
+    root above it grants the running user, while the pytest base directory is
+    owned by ``BUILTIN\\Administrators`` and inherits only ``SYSTEM`` /
+    ``Administrators`` ACEs, which a filtered token reaches through no SID it
+    holds.  Granting the caller's SID restores what the tests assume; it does not
+    soften what they measure, because that SID appears in no restricting list, so
+    a capability ACE remains the only ACE a ``read-only`` child could use — and
+    ``test_a_read_only_run_is_refused_inside_the_workspace_too`` is the proof
+    that it still does not.
+
+    :param api: the binding table.
+    :param path: the directory that gains the ambient ACE.
+    """
+    from emrg.sandbox.win32.acl import grant_write
+    from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_ptr, decode_uint32, is_null_ptr
+    from emrg.sandbox.win32.token import open_current_process_token
+
+    token = open_current_process_token(api)
+    try:
+        needed_slot = alloc_uint32()
+        api.advapi32.GetTokenInformation(
+            ctypes.c_void_p(token), _TOKEN_USER, None, 0, ctypes.byref(needed_slot)
+        )  # expected to fail with ERROR_INSUFFICIENT_BUFFER
+        needed = decode_uint32(needed_slot)
+        assert needed > 0, "the token's user SID could not be sized"
+        # One buffer owns both the TOKEN_USER record and the SID it points at, so
+        # it must outlive the grant — the same lifetime rule the sandbox itself
+        # learned the hard way (``NativeBuffer`` in ``ffi``).
+        block = alloc_bytes(needed)
+        read = int(api.advapi32.GetTokenInformation(
+            ctypes.c_void_p(token), _TOKEN_USER, ctypes.byref(block), needed, ctypes.byref(needed_slot)
+        ))
+        assert read != 0, "the token's user SID could not be read"
+        sid = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(block)))
+        assert not is_null_ptr(sid), "the token carries no user SID"
+        grant_write(api, str(path), sid)
+    finally:
+        api.kernel32.CloseHandle(ctypes.c_void_p(token))
+
+
+#: The size of the ``TOKEN_USER`` record this fake hands back (one pointer) plus
+#: its SID — the allocation class ``_grant_caller`` reads its SID out of.
+_FAKE_TOKEN_USER_SIZE = ctypes.sizeof(ctypes.c_void_p) + 8
+
+
+class _FakeUserSidApi:
+    """``_grant_caller``'s token read, over a fake that owns the SID it points at.
+
+    The fake keeps only the *address* of its SID block, exactly as the boundary
+    sees it, so a helper that hands the grant a bare pointer cannot be rescued by
+    the fake holding the memory alive.
+    """
+
+    def __init__(self, blob: bytes = b"USERSID!") -> None:
+        self.blob = blob
+        self.sid_address: int | None = None
+        self.advapi32 = self
+        self.kernel32 = _FakeKernel32()
+
+    def OpenProcessToken(self, process, access, token_ref):
+        token_ref._obj.value = 0x7000  # a non-null handle is all the read needs
+        return 1
+
+    def GetTokenInformation(self, token, info_class, buffer, size, needed_ref):
+        """Answer the size probe and then the read, with one user SID."""
+        assert info_class == 1, "``_grant_caller`` asks for the token's user SID"
+        needed_ref._obj.value = _FAKE_TOKEN_USER_SIZE
+        if not buffer:
+            return 0  # expected to fail with ERROR_INSUFFICIENT_BUFFER
+        block = buffer._obj
+        ctypes.memset(ctypes.addressof(block), 0, _FAKE_TOKEN_USER_SIZE)
+        self.sid_address = ctypes.addressof(block) + ctypes.sizeof(ctypes.c_void_p)
+        ctypes.c_void_p.from_address(ctypes.addressof(block)).value = self.sid_address
+        ctypes.memmove(self.sid_address, self.blob, len(self.blob))
+        return 1
+
+
+def test_grant_caller_grants_a_sid_that_its_own_buffer_still_owns(tmp_path, monkeypatch):
+    """The harness's one SID must outlive the grant call, exactly like the sandbox's.
+
+    ``_grant_caller`` reads a SID out of a ``TOKEN_USER`` block and passes the
+    *pointer* on, so the block has to be alive for as long as the grant call
+    needs it.  A helper that sized the block, read the SID and let it die would
+    hand ``grant_write`` an address the interpreter has already given to the next
+    allocation — the defect the sandbox itself carried (``NativeBuffer``),
+    reproduced in the test harness, where it would surface as the boundary test
+    being refused for a reason that has nothing to do with the boundary.
+
+    The churn inside the granted call is that next allocation.  Nothing is
+    asserted about the memory after the call returns: the SID is consumed by
+    ``SetEntriesInAclW`` while the grant runs, which is the whole window the
+    buffer has to survive.
+    """
+    api = _FakeUserSidApi()
+    granted: list[tuple[str, int, bytes]] = []
+
+    def fake_grant_write(bindings, path, sid_ptr):
+        for _ in range(256):
+            ctypes.create_string_buffer(_FAKE_TOKEN_USER_SIZE)  # this block's own class
+            ctypes.create_string_buffer(68)  # SECURITY_MAX_SID_SIZE
+        gc.collect()
+        granted.append((path, sid_ptr, ctypes.string_at(sid_ptr, 8)))
+
+    monkeypatch.setattr("emrg.sandbox.win32.acl.grant_write", fake_grant_write)
+    _grant_caller(api, tmp_path)
+
+    assert api.sid_address is not None, "the fake never handed out a SID"
+    assert granted == [(str(tmp_path), api.sid_address, api.blob)]
+    assert api.kernel32.closed == [0x7000], "the token it opened is closed again"
+
+
 def _confined(argv: list[str], workspace, temp_root, mode: str) -> subprocess.CompletedProcess:
     """Spawn the runner the way the seam does, and let the child report for itself."""
     return subprocess.run(
@@ -690,6 +820,10 @@ def test_a_workspace_write_run_inherits_the_capability_and_nothing_outside_it(tm
     outside.mkdir()
     inside_file = workspace / "inside.txt"
     escaped = outside / "escaped.txt"
+    # The ambient ACE every ordinary workspace already has (``_grant_caller``).
+    api = ffi.win32()
+    _grant_caller(api, workspace)
+    _grant_caller(api, tmp_path)
 
     inherited = _confined(
         [sys.executable, "-c", _write_script([inside_file])], workspace, tmp_path, "workspace-write"
@@ -711,62 +845,16 @@ def test_a_read_only_run_is_refused_inside_the_workspace_too(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
     target = workspace / "forbidden.txt"
+    # The ambient ACE is granted on purpose here: the refusal below must be the
+    # restricting check's, not a directory the token could not reach anyway.
+    _grant_caller(ffi.win32(), workspace)
+    _grant_caller(ffi.win32(), tmp_path)
 
     completed = _confined([sys.executable, "-c", _write_script([target])], workspace, tmp_path, "read-only")
 
     assert not target.exists(), f"read-only wrote into the workspace ({_evidence(completed)})"
     assert completed.returncode != 0, f"the refusing child claimed success ({_evidence(completed)})"
     assert "denied" in completed.stderr.lower(), _evidence(completed)
-
-
-# ── TEMPORARY PROBE (round 3): which children survive the restricted token ──
-# Delete this once the answer is in hand.  It asserts nothing by design; it
-# reports a table, and the table is the reason the round exists.
-
-
-@needs_windows
-def test_probe_which_children_survive_the_restricted_token(tmp_path):
-    """The exit code 0xC0000142 says "DLL initialization failed" and nothing more."""
-    import shutil
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
-    cmd = os.path.join(system_root, "System32", "cmd.exe")
-    where = shutil.which("where")
-    interpreter = sys.executable
-
-    rows = []
-    candidates = {
-        "venv-python-pass": [interpreter, "-c", "pass"],
-        "venv-python-print": [interpreter, "-c", "print('py-stdout')"],
-        "cmd-exit7": [cmd, "/c", "exit 7"],
-        "cmd-echo": [cmd, "/c", "echo cmd-stdout"],
-        "where": [where, "cmd"] if where else None,
-    }
-    for label, argv in candidates.items():
-        if argv is None:
-            rows.append(f"{label:20s} SKIPPED (not found)")
-            continue
-        confined = _confined(argv, workspace, tmp_path, "read-only")
-        rows.append(
-            f"{label:20s} exit={confined.returncode!r} out={confined.stdout.strip()[:40]!r} "
-            f"err={confined.stderr.strip()[:60]!r}"
-        )
-    # The same children, unconfined: separates "this environment cannot run them"
-    # from "the restricted token cannot".
-    for label, argv in (("cmd-exit7-bare", [cmd, "/c", "exit 7"]), ("cmd-echo-bare", [cmd, "/c", "echo cmd-stdout"])):
-        bare = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
-        rows.append(f"{label:20s} exit={bare.returncode!r} out={bare.stdout.strip()[:40]!r} err={bare.stderr.strip()[:60]!r}")
-
-    env = {
-        "SESSIONNAME": os.environ.get("SESSIONNAME"),
-        "USERNAME": os.environ.get("USERNAME"),
-        "cwd": os.getcwd(),
-        "interpreter": interpreter,
-        "temp": tempfile.gettempdir(),
-    }
-    pytest.fail("PROBE TABLE (" + json.dumps(env) + ")\n" + "\n".join(rows))
 
 
 # ── the SIDs a restricted token is built from ─────────────────────────────
@@ -942,203 +1030,3 @@ def test_init_owns_every_sid_the_restricted_token_is_pointed_at(tmp_path, monkey
     assert len(api.kernel32.closed) == 2, "both the current and the restricted token are closed"
 
 
-# ── TEMPORARY PROBE (round 5): which of the two access checks fails? ─────
-# Delete this together with round 3's probe.  It asserts nothing by design.
-#
-# Round 4 showed the capability ACE landing correctly on the workspace (mask
-# 0x110156, OI|CI) yet every write denied, including one to an existing file,
-# so the restricting check is not the only gate: under WRITE_RESTRICTED Windows
-# checks the token's own SIDs first, and a filtered (LUA) token on an elevated
-# runner may hold none of the SIDs that own the directory.
-
-
-_OWNER_SECURITY_INFORMATION = 0x00000001
-
-
-def _owner_bytes(api, path):
-    """The owner SID's raw bytes for one path."""
-    from emrg.sandbox.win32 import abi
-    from emrg.sandbox.win32.ffi import alloc_ptr_slot, decode_ptr, read_sid_bytes
-
-    owner = alloc_ptr_slot()
-    descriptor = alloc_ptr_slot()
-    result = int(api.advapi32.GetNamedSecurityInfoW(
-        path, abi.SE_FILE_OBJECT, _OWNER_SECURITY_INFORMATION,
-        ctypes.byref(owner), None, None, None, ctypes.byref(descriptor),
-    ))
-    if result != abi.ERROR_SUCCESS:
-        return f"GetNamedSecurityInfoW failed ({result})"
-    pointer = decode_ptr(owner)
-    return read_sid_bytes(api, pointer).hex() if pointer else "none"
-
-
-def _user_sid_bytes(api, token):
-    """The token's user SID bytes (TokenUser = 1)."""
-    from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_ptr, decode_uint32, read_sid_bytes
-
-    needed_slot = alloc_uint32()
-    api.advapi32.GetTokenInformation(ctypes.c_void_p(token), 1, None, 0, ctypes.byref(needed_slot))
-    needed = decode_uint32(needed_slot)
-    block = alloc_bytes(needed)
-    api.advapi32.GetTokenInformation(
-        ctypes.c_void_p(token), 1, ctypes.byref(block), needed, ctypes.byref(needed_slot)
-    )
-    sid = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(block)))
-    return read_sid_bytes(api, sid)
-
-
-def _spawn_write(api, token, path):
-    """Spawn a child that creates one file, and report whether it exists."""
-    from emrg.sandbox.win32.spawn import spawn_restricted
-
-    target = pathlib.Path(path)
-    if target.exists():
-        target.unlink()
-    child = spawn_restricted(api, token, [sys.executable, "-c", f"open(r'{path}', 'w').write('x')"])
-    try:
-        code = child.wait()
-    finally:
-        child.close()
-    return code, target.exists()
-
-
-@needs_windows
-def test_probe_which_access_check_fails(tmp_path):
-    """The normal-SID check against the restricting check, one child each."""
-    from emrg.sandbox.win32 import abi
-    from emrg.sandbox.win32 import ffi as ffi_module
-    from emrg.sandbox.win32.acl import grant_write
-    from emrg.sandbox.win32.ffi import alloc_ptr_slot, decode_ptr, win32
-    from emrg.sandbox.win32.sandbox import AclSandbox
-    from emrg.sandbox.win32.sid import temp_write_sid, workspace_write_sid
-    from emrg.sandbox.win32.token import find_logon_sid, make_well_known_sid, open_current_process_token
-
-    workspace = tmp_path / "ws"
-    temp_root = tmp_path / "temp"
-    workspace.mkdir()
-    temp_root.mkdir()
-    private_temp = temp_root / "private"
-    private_temp.mkdir()
-    write_sid = workspace_write_sid(str(workspace))
-    temp_sid = temp_write_sid(str(private_temp))
-
-    api = win32()
-    rows = []
-    current = open_current_process_token(api)
-    try:
-        rows.append(f"workspace owner {_owner_bytes(api, str(workspace))}")
-        rows.append(f"tmp_path owner  {_owner_bytes(api, str(tmp_path))}")
-        rows.append(f"ambient owner   {_owner_bytes(api, tempfile.gettempdir())}")
-        rows.append(f"process user    {_user_sid_bytes(api, current).hex()}")
-        logon = find_logon_sid(api, current)
-        world = make_well_known_sid(api, abi.WIN_WORLD_SID)
-        # The restricting list the mechanism builds.
-        write_pointer = None
-        sandbox = AclSandbox(
-            writable_dirs=[str(workspace)],
-            temp_dir=str(private_temp),
-            mode="workspace-write",
-            write_sid=write_sid,
-            temp_write_sid=temp_sid,
-        )
-        sandbox.init(api)
-        from emrg.sandbox.win32.sandbox import _parse_sid
-
-        write_pointer = _parse_sid(api, write_sid)
-
-        def mint(flags, sids):
-            entries = (ffi_module.SIDAndAttributes * len(sids))() if sids else None
-            for index, sid in enumerate(sids):
-                entries[index].Sid = ctypes.c_void_p(sid)
-                entries[index].Attributes = 0
-            slot = alloc_ptr_slot()
-            made = int(api.advapi32.CreateRestrictedToken(
-                ctypes.c_void_p(current),
-                flags,
-                0, None, 0, None,
-                len(sids), ctypes.byref(entries) if entries is not None else None,
-                ctypes.byref(slot),
-            ))
-            if made == 0:
-                return None, f"CreateRestrictedToken failed ({api.get_last_error()})"
-            return decode_ptr(slot), "OK"
-
-        lua_only = abi.DISABLE_MAX_PRIVILEGE | abi.LUA_TOKEN
-        write_restricted = lua_only | abi.WRITE_RESTRICTED
-
-        def dacl_rows(path, label):
-            from emrg.sandbox.win32.acl import read_current_dacl
-            from emrg.sandbox.win32.ffi import ACLStructure
-
-            current_dacl = read_current_dacl(api, path)
-            if current_dacl.old_acl is None:
-                return [f"{label}: none"]
-            header = ACLStructure.from_address(current_dacl.old_acl)
-            out = [f"{label}: size={int(header.AclSize)} count={int(header.AceCount)}"]
-            offset = 8
-            for _ in range(int(header.AceCount)):
-                ace_size = int(ctypes.c_uint16.from_address(current_dacl.old_acl + offset + 2).value)
-                if ace_size < 8:
-                    break
-                raw = ctypes.string_at(current_dacl.old_acl + offset, ace_size)
-                out.append(
-                    f"{label}: type={raw[0]} flags={raw[1]:#04x} "
-                    f"mask={int.from_bytes(raw[4:8], 'little'):#010x} sid={raw[8:].hex()}"
-                )
-                offset += ace_size
-            current_dacl.release("probe")
-            return out
-
-        rows.extend(dacl_rows(tempfile.gettempdir(), "ambient-temp-DACL"))
-        rows.extend(dacl_rows(str(tmp_path), "tmp_path-DACL"))
-
-        # The caller's own SID, granted on a directory the caller owns: the
-        # ambient reachability every ordinary workspace already has.
-        from emrg.sandbox.win32.acl import grant_write
-        from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_uint32
-
-        needed_slot = alloc_uint32()
-        api.advapi32.GetTokenInformation(ctypes.c_void_p(current), 1, None, 0, ctypes.byref(needed_slot))
-        token_user = alloc_bytes(decode_uint32(needed_slot))
-        api.advapi32.GetTokenInformation(
-            ctypes.c_void_p(current), 1, ctypes.byref(token_user),
-            decode_uint32(needed_slot), ctypes.byref(needed_slot),
-        )
-        user_sid = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(token_user)))
-
-        def mint_and_write(label, flags, sids, target):
-            token, note = mint(flags, sids)
-            if token is None:
-                rows.append(f"{label}: {note}")
-                return
-            try:
-                code, created = _spawn_write(api, token, str(target))
-                rows.append(f"{label}: exit={code} created={created}")
-            finally:
-                api.kernel32.CloseHandle(ctypes.c_void_p(token))
-
-        grant_write(api, str(workspace), user_sid)
-        mint_and_write("lua-only / workspace+caller-ACE", lua_only, [], workspace / "lua2.txt")
-        mint_and_write(
-            "restricted / workspace+caller-ACE",
-            write_restricted,
-            [logon.address, world.address, write_pointer],
-            workspace / "restricted2.txt",
-        )
-
-        # The same, on a fresh directory that carries ONLY the caller's ACE:
-        # the capability ACE must be what lets the restricted child through.
-        plain = tmp_path / "plain"
-        plain.mkdir()
-        grant_write(api, str(plain), user_sid)
-        mint_and_write("lua-only / plain+caller-ACE", lua_only, [], plain / "plain1.txt")
-        mint_and_write(
-            "restricted(read-only list) / plain+caller-ACE",
-            write_restricted,
-            [logon.address, world.address],
-            plain / "plain2.txt",
-        )
-        sandbox.dispose()
-    finally:
-        api.kernel32.CloseHandle(ctypes.c_void_p(current))
-    pytest.fail("PROBE TABLE (round 5)\n" + "\n".join(rows))
