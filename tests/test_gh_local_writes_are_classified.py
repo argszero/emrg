@@ -235,9 +235,19 @@ STILL_ALLOWED = (
     # a fork that is not cloned locally
     "gh repo fork",
     "gh repo fork --clone=false",
-    # a mention is not an invocation
+    # a mention is not an invocation. The rows carry a **destination operand** on
+    # purpose: the gh rule names the *second* positional, so `echo gh repo clone x`
+    # with one operand names nothing even while the walk is wrong — measured on the
+    # head before this line existed, `echo gh repo clone x y` and
+    # `grep -rn gh repo clone a b` named the operand and were refused at both tiers
+    # for a line that writes nothing. A one-operand mention cannot fail, so it cannot
+    # guard.
     "grep -rn gh .",
     "echo gh repo clone x",
+    "echo gh repo clone x y",
+    "echo gh repo clone x /outside/emrg/d",
+    "grep -rn gh repo clone a b",
+    "printf %s gh repo clone a b",
 )
 
 
@@ -262,6 +272,43 @@ def test_a_data_only_heredoc_is_not_read():
     assert bash_tool._find_gh_local_write(doc) is None
     assert bash_tool._find_gh_local_write("sh -c 'gh repo sync'") == (
         "gh repo sync", "git fetch + reset"
+    )
+
+
+# ── the mention rows must be able to fail ───────────────────────────────────────
+#
+# The review that blocked this PR measured that the one-operand mention row
+# (`"echo gh repo clone x"`) cannot catch the defect it was written for: the gh rule
+# names the *second* positional, so a row with one operand names nothing even while the
+# guard is missing. Measured on the head before this fix, with `gh` absent from
+# `_WRITE_VERB_WORDS`: the four operand-carrying rows below named `['y']`, `['b']` or
+# `['/outside/emrg/d']` and were refused at both tiers, while `"echo gh repo clone x"`
+# stayed `[]` — a green row in a suite that was blind to the defect.
+#
+# So the rows and the guard are asserted **together**: blinding the guard must make the
+# rows name a target. Without this, a mention row can be added (or trimmed) that can
+# never fail, and the file stays green through exactly the class of defect it exists for.
+OPERAND_CARRYING_MENTIONS = (
+    "echo gh repo clone x y",
+    "echo gh repo clone x /outside/emrg/d",
+    "grep -rn gh repo clone a b",
+    "printf %s gh repo clone a b",
+)
+
+
+def test_the_mention_rows_are_load_bearing_for_the_guard(monkeypatch):
+    """Blind the guard and every mention row names the operand it must not name."""
+    for cmd in OPERAND_CARRYING_MENTIONS:
+        assert cmd in STILL_ALLOWED, f"{cmd!r} left the table the assertions above read"
+        assert _extract_write_targets(cmd) == [], f"{cmd!r}: clean while the guard is live"
+
+    # `_runs_as_a_command` is the rule the walk asks before believing a verb spelling;
+    # answering True everywhere is the missing-guard state this PR fixed.
+    monkeypatch.setattr(bash_tool, "_runs_as_a_command", lambda tokens, i: True)
+    blind = {cmd: _extract_write_targets(cmd) for cmd in OPERAND_CARRYING_MENTIONS}
+    assert all(blind.values()), (
+        "every mention row must name a target once the guard is blinded, or the row "
+        f"cannot fail and guards nothing: {blind}"
     )
 
 

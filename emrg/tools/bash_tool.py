@@ -3129,7 +3129,8 @@ _WRITE_VERB_WORDS: frozenset[str] = frozenset().union(
     _LZ4_VERBS,
     _PZSTD_VERBS,
     _OPTION_DESTINATION_VERBS,
-    {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip"},
+    {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip",
+     "gh"},
 )
 
 
