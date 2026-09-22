@@ -1064,56 +1064,80 @@ def test_probe_which_access_check_fails(tmp_path):
             return decode_ptr(slot), "OK"
 
         lua_only = abi.DISABLE_MAX_PRIVILEGE | abi.LUA_TOKEN
-        variants = {
-            "lua-only / workspace": (lua_only, [], workspace / "lua-ws.txt"),
-            "lua-only / ambient-temp": (lua_only, [], pathlib.Path(tempfile.gettempdir()) / "lua-temp.txt"),
-            "lua-only / private-temp": (lua_only, [], private_temp / "lua-private.txt"),
-            "restricted / workspace": (
-                lua_only | abi.WRITE_RESTRICTED,
-                [logon.address, world.address, write_pointer],
-                workspace / "restricted-ws.txt",
-            ),
-            "restricted / private-temp": (
-                lua_only | abi.WRITE_RESTRICTED,
-                [logon.address, world.address, write_pointer],
-                private_temp / "restricted-private.txt",
-            ),
-        }
-        for label, (flags, sids, target) in variants.items():
+        write_restricted = lua_only | abi.WRITE_RESTRICTED
+
+        def dacl_rows(path, label):
+            from emrg.sandbox.win32.acl import read_current_dacl
+            from emrg.sandbox.win32.ffi import ACLStructure
+
+            current_dacl = read_current_dacl(api, path)
+            if current_dacl.old_acl is None:
+                return [f"{label}: none"]
+            header = ACLStructure.from_address(current_dacl.old_acl)
+            out = [f"{label}: size={int(header.AclSize)} count={int(header.AceCount)}"]
+            offset = 8
+            for _ in range(int(header.AceCount)):
+                ace_size = int(ctypes.c_uint16.from_address(current_dacl.old_acl + offset + 2).value)
+                if ace_size < 8:
+                    break
+                raw = ctypes.string_at(current_dacl.old_acl + offset, ace_size)
+                out.append(
+                    f"{label}: type={raw[0]} flags={raw[1]:#04x} "
+                    f"mask={int.from_bytes(raw[4:8], 'little'):#010x} sid={raw[8:].hex()}"
+                )
+                offset += ace_size
+            current_dacl.release("probe")
+            return out
+
+        rows.extend(dacl_rows(tempfile.gettempdir(), "ambient-temp-DACL"))
+        rows.extend(dacl_rows(str(tmp_path), "tmp_path-DACL"))
+
+        # The caller's own SID, granted on a directory the caller owns: the
+        # ambient reachability every ordinary workspace already has.
+        from emrg.sandbox.win32.acl import grant_write
+        from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_uint32
+
+        needed_slot = alloc_uint32()
+        api.advapi32.GetTokenInformation(ctypes.c_void_p(current), 1, None, 0, ctypes.byref(needed_slot))
+        token_user = alloc_bytes(decode_uint32(needed_slot))
+        api.advapi32.GetTokenInformation(
+            ctypes.c_void_p(current), 1, ctypes.byref(token_user),
+            decode_uint32(needed_slot), ctypes.byref(needed_slot),
+        )
+        user_sid = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(token_user)))
+
+        def mint_and_write(label, flags, sids, target):
             token, note = mint(flags, sids)
             if token is None:
                 rows.append(f"{label}: {note}")
-                continue
+                return
             try:
                 code, created = _spawn_write(api, token, str(target))
                 rows.append(f"{label}: exit={code} created={created}")
             finally:
                 api.kernel32.CloseHandle(ctypes.c_void_p(token))
 
-        # Same restricted token, but the directory also grants the caller's own SID.
-        user_sid_pointer = None
-        needed_slot_needed = None
-        token_user_block = None
-        from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_uint32
+        grant_write(api, str(workspace), user_sid)
+        mint_and_write("lua-only / workspace+caller-ACE", lua_only, [], workspace / "lua2.txt")
+        mint_and_write(
+            "restricted / workspace+caller-ACE",
+            write_restricted,
+            [logon.address, world.address, write_pointer],
+            workspace / "restricted2.txt",
+        )
 
-        needed_slot_needed = alloc_uint32()
-        api.advapi32.GetTokenInformation(ctypes.c_void_p(current), 1, None, 0, ctypes.byref(needed_slot_needed))
-        token_user_block = alloc_bytes(decode_uint32(needed_slot_needed))
-        api.advapi32.GetTokenInformation(
-            ctypes.c_void_p(current), 1, ctypes.byref(token_user_block),
-            decode_uint32(needed_slot_needed), ctypes.byref(needed_slot_needed),
+        # The same, on a fresh directory that carries ONLY the caller's ACE:
+        # the capability ACE must be what lets the restricted child through.
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        grant_write(api, str(plain), user_sid)
+        mint_and_write("lua-only / plain+caller-ACE", lua_only, [], plain / "plain1.txt")
+        mint_and_write(
+            "restricted(read-only list) / plain+caller-ACE",
+            write_restricted,
+            [logon.address, world.address],
+            plain / "plain2.txt",
         )
-        user_sid_pointer = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(token_user_block)))
-        grant_write(api, str(workspace), user_sid_pointer)
-        token, note = mint(
-            lua_only | abi.WRITE_RESTRICTED, [logon.address, world.address, write_pointer]
-        )
-        if token is not None:
-            try:
-                code, created = _spawn_write(api, token, str(workspace / "user-granted.txt"))
-                rows.append(f"restricted / workspace+user-ACE: exit={code} created={created}")
-            finally:
-                api.kernel32.CloseHandle(ctypes.c_void_p(token))
         sandbox.dispose()
     finally:
         api.kernel32.CloseHandle(ctypes.c_void_p(current))
