@@ -131,10 +131,20 @@ def test_the_command_does_not_run_when_no_backend_can_confine_it(tmp_path):
 
 
 def test_the_tool_reports_the_refusal_instead_of_running_bare(tmp_path, monkeypatch):
-    """Through the tool, the model sees a refusal rather than an unconfined result."""
+    """Through the tool, the model sees a refusal rather than an unconfined result.
+
+    Two patches, and the second is not decoration: emptying the chain is not
+    enough on Linux, which short-circuits to an unconfined run **before** any
+    provider is consulted (deviation D4).  This test is about the tool's handling
+    of the seam's refusal, so it isolates exactly that — a chain-less platform
+    with no deviation — instead of quietly exercising D4 on one runner and the
+    refusal on another (the first CI run did the former, and failed).
+    """
     import emrg.sandbox.providers as providers
+    import emrg.tools.bash_tool_v2 as v2
 
     monkeypatch.setattr(providers, "PLATFORM_CHAINS", {})
+    monkeypatch.setattr(v2, "unconfined_mode", lambda mode, platform_name=None: None)
     sentinel = tmp_path / "must-not-exist"
     result = asyncio.run(
         BashToolV2().execute(
@@ -407,6 +417,31 @@ def test_the_decoder_survives_a_host_that_reports_no_usable_codec(monkeypatch):
 
     monkeypatch.setattr(v2.locale, "getpreferredencoding", lambda *_: "definitely-not-a-codec")
     assert v2._decode_output(b"hello", os_name="nt") == "hello"
+
+
+@needs_seatbelt
+def test_a_missing_workdir_is_not_reported_as_a_sandbox_problem(tmp_path):
+    """A bad cwd is the caller's error, and the classification must not launder it.
+
+    The runner is present and the profile is fine; what cannot be entered is the
+    cwd the caller asked for, and POSIX reports the failure with the *cwd* as its
+    filename (measured: ``FileNotFoundError: ... '/…/gone'``).  Reporting this as
+    "no sandbox backend is usable" would send the operator to the sandbox for a
+    typing error, so the original error must survive — which is what
+    ``is_runner_spawn_failure``'s independently-usable-workdir clause buys.
+    """
+    missing = tmp_path / "no-such-dir"
+    with pytest.raises(OSError) as excinfo:
+        asyncio.run(
+            run_command(
+                "echo hi",
+                policy=SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path)),
+                workdir=str(missing),
+                timeout=30.0,
+            )
+        )
+    assert not isinstance(excinfo.value, SandboxUnavailableError)
+    assert "sandbox mode" not in str(excinfo.value)
 
 
 def _shell_quote(text: str) -> str:

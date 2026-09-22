@@ -8,6 +8,7 @@ then exercise for real.
 """
 
 import os
+import re
 import sys
 import tempfile
 
@@ -33,6 +34,28 @@ from emrg.sandbox.providers.darwin import SEATBELT_EXEC, seatbelt_profile_args
 from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.tools import bash_tool
 
+#: An absolute path on **every** platform.  ``"/tmp"`` is not one: the policy
+#: layer asserts absoluteness, and ``os.path.isabs("/tmp")`` is False on Windows
+#: (measured by this file's own first Windows CI run), so a test that spells it
+#: would pass on macOS and fail on a Windows runner.  ``os.sep`` is the root this
+#: host actually has.
+ABSOLUTE_ROOT = os.path.abspath(os.sep)
+
+
+def _grants(profile_args: list[str]) -> list[str]:
+    """The path grants one Seatbelt profile makes, read back out of the profile.
+
+    A round trip rather than a substring match, and the difference matters: a
+    profile is a *parsed* language, so the honest assertion is "this path is
+    granted, once the quoting is undone".  A substring test has to re-spell the
+    escaping, and would therefore also pass an arm that stopped escaping a path
+    containing a quote (measured on the Windows runner, where a ``\\`` path
+    turned the re-spelled expectation into a false red).
+    """
+    profile = " ".join(profile_args)
+    raw_grants = re.findall(r'\((?:subpath|literal) ("(?:[^"\\]|\\.)*")\)', profile)
+    return [raw[1:-1].replace('\\"', '"').replace("\\\\", "\\") for raw in raw_grants]
+
 
 # ── vocabulary ────────────────────────────────────────────────────────────
 
@@ -57,7 +80,7 @@ def test_bare_call_keeps_the_mode_a_host_session_already_had():
     would confiscate a session nobody asked to confine (design §1.3).
     """
     assert DEFAULT_MODE == DANGER_FULL_ACCESS
-    assert resolve_policy(workspace_root="/tmp").mode == DANGER_FULL_ACCESS
+    assert resolve_policy(workspace_root=ABSOLUTE_ROOT).mode == DANGER_FULL_ACCESS
 
 
 def test_denial_marker_vocabulary_is_one_line_for_both_enforcing_families():
@@ -82,7 +105,7 @@ def test_host_platform_speaks_the_chain_table_vocabulary():
 
 def test_policy_rejects_an_unknown_mode():
     with pytest.raises(ValueError, match="unknown mode"):
-        SandboxPolicy(mode="mostly-safe", workspace_root="/tmp")
+        SandboxPolicy(mode="mostly-safe", workspace_root=ABSOLUTE_ROOT)
 
 
 def test_policy_rejects_a_relative_workspace_root():
@@ -93,8 +116,8 @@ def test_policy_rejects_a_relative_workspace_root():
 
 def test_policy_keeps_the_workspace_root_under_modes_that_do_not_use_it():
     """The caller can resolve one policy before choosing the enforcement path."""
-    policy = SandboxPolicy(mode="read-only", workspace_root="/tmp")
-    assert policy.workspace_root == "/tmp"
+    policy = SandboxPolicy(mode="read-only", workspace_root=ABSOLUTE_ROOT)
+    assert policy.workspace_root == ABSOLUTE_ROOT
     assert policy.session_id is None
 
 
@@ -102,8 +125,8 @@ def test_policy_keeps_the_workspace_root_under_modes_that_do_not_use_it():
 
 
 def test_read_only_grants_no_writable_root():
-    assert writable_roots(SandboxPolicy(mode="read-only", workspace_root="/tmp")) == []
-    assert writable_roots(SandboxPolicy(mode=DANGER_FULL_ACCESS, workspace_root="/tmp")) == []
+    assert writable_roots(SandboxPolicy(mode="read-only", workspace_root=ABSOLUTE_ROOT)) == []
+    assert writable_roots(SandboxPolicy(mode=DANGER_FULL_ACCESS, workspace_root=ABSOLUTE_ROOT)) == []
 
 
 def test_workspace_write_grants_the_workspace_and_the_temp_areas(tmp_path):
@@ -118,7 +141,10 @@ def test_canonical_path_resolves_symlinks(tmp_path):
     target = tmp_path / "real"
     target.mkdir()
     link = tmp_path / "link"
-    link.symlink_to(target, target_is_directory=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without the symlink privilege
+        pytest.skip(f"this host cannot create a directory symlink ({exc}), so the property is unmeasurable")
     assert canonical_path(str(link)) == os.path.realpath(str(target))
 
 
@@ -133,8 +159,8 @@ def test_canonical_path_never_invents_a_path_for_a_missing_root():
     """
     missing = os.path.join(tempfile.gettempdir(), "emrg-v2-does-not-exist-9f2c")
     canonical = canonical_path(missing)
-    assert canonical.endswith("/emrg-v2-does-not-exist-9f2c")
-    assert canonical == canonical_path(tempfile.gettempdir()) + "/emrg-v2-does-not-exist-9f2c"
+    assert os.path.basename(canonical) == "emrg-v2-does-not-exist-9f2c"
+    assert canonical == os.path.join(canonical_path(tempfile.gettempdir()), "emrg-v2-does-not-exist-9f2c")
     assert canonical_path("\0not a path") == "\0not a path"
 
 
@@ -159,7 +185,11 @@ def test_confine_wraps_the_exact_argv_and_never_re_parses_the_command():
     shell string that is re-parsed is a shell string that can be re-interpreted.
     """
     command = "printf '%s\\n' \"a b\" 'c\"d' e\\ f"
-    confined = confine(["bash", "-c", command], SandboxPolicy(mode="workspace-write", workspace_root="/tmp"))
+    confined = confine(
+        ["bash", "-c", command],
+        SandboxPolicy(mode="workspace-write", workspace_root=ABSOLUTE_ROOT),
+        platform_name="darwin",
+    )
     assert confined.argv[-3:] == ["bash", "-c", command]
     assert confined.argv[-4] == "--", "the caller argv must follow the runner's own separator"
 
@@ -167,7 +197,7 @@ def test_confine_wraps_the_exact_argv_and_never_re_parses_the_command():
 def test_confine_fails_closed_when_this_platform_has_no_backend():
     """A request for confinement that cannot be honoured must not run unconfined."""
     with pytest.raises(SandboxUnavailableError) as excinfo:
-        confine(["bash", "-c", "echo hi"], SandboxPolicy(mode="workspace-write", workspace_root="/tmp"),
+        confine(["bash", "-c", "echo hi"], SandboxPolicy(mode="workspace-write", workspace_root=ABSOLUTE_ROOT),
                 platform_name="win32")
     assert excinfo.value.code == SANDBOX_UNAVAILABLE
     assert excinfo.value.mode == "workspace-write"
@@ -177,7 +207,7 @@ def test_confine_fails_closed_when_this_platform_has_no_backend():
 def test_confine_selects_the_platform_it_is_told_and_not_the_host():
     """Injectable selection is what makes a chain testable anywhere."""
     assert "win32" not in PLATFORM_CHAINS
-    confined = confine(["bash", "-c", "echo hi"], SandboxPolicy(mode="read-only", workspace_root="/tmp"),
+    confined = confine(["bash", "-c", "echo hi"], SandboxPolicy(mode="read-only", workspace_root=ABSOLUTE_ROOT),
                        platform_name="darwin")
     assert confined.argv[0] == SEATBELT_EXEC
 
@@ -229,8 +259,9 @@ def test_seatbelt_grants_only_the_derived_roots(tmp_path):
     policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
     profile = " ".join(seatbelt_profile_args(policy))
     assert "(deny file-write*)" in profile
-    assert f'(subpath "{canonical_path(str(tmp_path))}")' in profile
-    assert f'(literal "{"/dev/null"}")' in profile
+    grants = _grants(seatbelt_profile_args(policy))
+    assert canonical_path(str(tmp_path)) in grants
+    assert "/dev/null" in grants
 
 
 def test_seatbelt_denies_every_write_under_read_only(tmp_path):
@@ -243,8 +274,11 @@ def test_seatbelt_denies_every_write_under_read_only(tmp_path):
 
 
 def test_seatbelt_quotes_a_path_containing_a_quote(tmp_path):
-    """A profile is a parsed language: an unescaped quote in a path breaks it."""
+    """A profile is a parsed language: an unescaped quote in a path breaks it.
+
+    Read back through :func:`_grants`, so the assertion is "the path survives the
+    round trip" rather than "the escaping was spelled the way this test expects".
+    """
     hostile = str(tmp_path / 'we"ird')
-    profile = " ".join(seatbelt_profile_args(SandboxPolicy(mode="workspace-write", workspace_root=hostile)))
-    assert '\\"' in profile
-    assert '(subpath "' + hostile.replace('"', '\\"') + '")' in profile
+    args = seatbelt_profile_args(SandboxPolicy(mode="workspace-write", workspace_root=hostile))
+    assert hostile in _grants(args)

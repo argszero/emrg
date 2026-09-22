@@ -166,10 +166,10 @@ def test_the_session_cwd_cannot_be_named_by_the_model(injected):
     sandbox that takes its authorization root from the agent is not a sandbox,
     which is why the injection is unconditional rather than a default.
     """
-    args = injected(
-        "bash", {"command": "ls", "workdir": "/Users/somebody"}, cwd=Path("/the/session/cwd")
-    )
-    assert args["workdir"] == "/the/session/cwd"
+    session_cwd = Path("/the/session/cwd")
+    args = injected("bash", {"command": "ls", "workdir": "/Users/somebody"}, cwd=session_cwd)
+    assert args["workdir"] == str(session_cwd)
+    assert args["workdir"] != "/Users/somebody"
 
 
 def test_the_cwd_is_injected_even_when_the_model_supplied_none(injected, tmp_path):
