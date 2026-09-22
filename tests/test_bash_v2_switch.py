@@ -5,8 +5,7 @@ Rant ``2026-09-21T18:50:03`` ("bash tool v2").
 Two subjects, both of which are about *who decides*:
 
 * which executor the daemon builds — one switch, read once at startup, defaulting
-  to the frozen tool so the parallel period's other half keeps receiving its own
-  fixes;
+  to v2 and keeping the frozen tool reachable as the rollback;
 * which parts of a tool call the model may choose — the D1 root fix.  Before it,
   ``workdir`` was injected only when the model had not supplied one, so the model
   could name the very root it was trusted in (``workdir=/Users/<host>``), and the
@@ -44,43 +43,60 @@ def _instantiate() -> EmrgServer:
     return server
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_switch(monkeypatch):
+    """The shell must not decide what a test here measures.
+
+    ``EMRG_BASH_TOOL_V2`` is the documented one-launch rollback, so a host
+    starting pytest with it set is doing the normal thing and would otherwise see
+    every default-reading test below fail while the product is correct.  The tests
+    that are *about* the variable set it themselves, after this fixture runs.
+    """
+    monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
+
+
 # ── the config seam ───────────────────────────────────────────────────────
 
 
-def test_the_switch_defaults_to_the_frozen_tool():
-    """Moving to v2 must be a deliberate act, not a side effect of an upgrade."""
-    assert SandboxConfig().bash_tool_v2 is False
-    assert EmrgConfig().sandbox.bash_tool_v2 is False
+def test_the_switch_defaults_to_v2():
+    """The boundary is the default now: a boundary switched off is not the one measured.
+
+    P6 of the programme (design §D7).  The frozen tool stays reachable — that is
+    the rollback asserted at the bottom of this file — but an instance that has
+    said nothing gets the OS boundary, on every platform whose chain has a rung.
+    """
+    assert SandboxConfig().bash_tool_v2 is True
+    assert EmrgConfig().sandbox.bash_tool_v2 is True
 
 
 def test_a_missing_config_file_keeps_the_default(tmp_path):
-    assert load_sandbox_config().bash_tool_v2 is False
+    assert load_sandbox_config().bash_tool_v2 is True
 
 
 def test_the_section_is_read_from_the_file(tmp_path):
-    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = true\n")
-    assert load_sandbox_config().bash_tool_v2 is True
+    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = false\n")
+    assert load_sandbox_config().bash_tool_v2 is False
 
 
 def test_a_malformed_sandbox_section_falls_back_to_the_default(tmp_path):
     """A config file the daemon cannot parse must not decide which tool runs."""
     _write_config(tmp_path, 'sandbox = "not a table"\n')
-    assert load_sandbox_config().bash_tool_v2 is False
+    assert load_sandbox_config().bash_tool_v2 is True
 
 
 def test_the_environment_overrides_the_file_in_both_directions(tmp_path, monkeypatch):
-    """The host can try v2 in a session without editing ``config.toml``."""
-    monkeypatch.setenv(ENV_BASH_TOOL_V2, "1")
-    assert load_sandbox_config().bash_tool_v2 is True
-    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = true\n")
+    """The host can overrule ``config.toml`` in a session without editing it."""
     monkeypatch.setenv(ENV_BASH_TOOL_V2, "0")
     assert load_sandbox_config().bash_tool_v2 is False
+    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = false\n")
+    monkeypatch.setenv(ENV_BASH_TOOL_V2, "1")
+    assert load_sandbox_config().bash_tool_v2 is True
 
 
 def test_an_unparseable_environment_value_keeps_the_files_answer(tmp_path, monkeypatch):
-    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = true\n")
+    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = false\n")
     monkeypatch.setenv(ENV_BASH_TOOL_V2, "maybe")
-    assert load_sandbox_config().bash_tool_v2 is True
+    assert load_sandbox_config().bash_tool_v2 is False
 
 
 def test_the_rest_of_the_config_is_unaffected_by_the_new_section(tmp_path):
@@ -110,18 +126,30 @@ def test_both_executors_answer_to_the_same_tool_name():
     assert isinstance(registry.get("bash"), BashToolV2)
 
 
-def test_the_daemon_builds_the_frozen_tool_by_default(monkeypatch, tmp_path):
+def test_the_daemon_builds_v2_by_default(monkeypatch, tmp_path):
     monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
+    server = _instantiate()
+    assert isinstance(server.tools.get("bash"), BashToolV2)
+    assert not isinstance(server.tools.get("bash"), BashTool)
+
+
+def test_the_file_switch_rolls_back_to_the_frozen_tool(tmp_path, monkeypatch):
+    """The rollback is a supported path, not an accident: one line, no code change.
+
+    A boundary that cannot be turned off in the field is not deployable, so this
+    pins the way back as firmly as the way forward.
+    """
+    monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
+    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = false\n")
     server = _instantiate()
     assert isinstance(server.tools.get("bash"), BashTool)
     assert not isinstance(server.tools.get("bash"), BashToolV2)
 
 
-def test_the_file_switch_builds_v2(tmp_path, monkeypatch):
-    monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
-    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = true\n")
+def test_the_environment_rolls_back_without_a_config_edit(monkeypatch):
+    monkeypatch.setenv(ENV_BASH_TOOL_V2, "0")
     server = _instantiate()
-    assert isinstance(server.tools.get("bash"), BashToolV2)
+    assert isinstance(server.tools.get("bash"), BashTool)
 
 
 def test_the_environment_switch_builds_v2_without_a_config_edit(monkeypatch):

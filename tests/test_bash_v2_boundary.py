@@ -259,6 +259,123 @@ def test_the_package_does_not_import_the_frozen_tool():
     assert offenders == []
 
 
+# ── what the confined child's environment gets ────────────────────────────
+#
+# The policies below take their workspace root from ``tmp_path`` rather than a
+# literal ``/tmp``: ``SandboxPolicy`` asserts the root is absolute, and ``/tmp``
+# is not an absolute path on Windows — the first version of these tests was green
+# on the dev host and red on the Windows leg for exactly that reason.  A
+# workspace root is a directory that exists, so the test supplies one.
+#
+# The mode's other half: granting a boundary that a package manager cannot work
+# inside is not usable, and the fix must not be a wider boundary.  These tests
+# pin the two properties that keep it honest — the relocated directory lies
+# inside what the policy already grants, and a deployer's own declaration wins.
+
+
+def test_the_caches_of_a_confined_run_are_relocated_into_a_granted_root(tmp_path, monkeypatch):
+    """The relocation widens nothing: it points caches at a root the policy grants.
+
+    Both the measured breaks (``uv`` fails, ``npm``'s default is unwritable) and
+    the quiet one (``pip`` disables its cache) come from the tool's default cache
+    living under ``$HOME``, which a confined run cannot write.  The answer is to
+    move the cache, never the boundary — so this asserts containment against
+    ``writable_roots``, the same derivation the Seatbelt profile is built from.
+
+    The variables are cleared first, because the subject is the relocation and not
+    the ambient environment: ``confined_env`` deliberately leaves alone a variable
+    the deployer already set, and CI's own environment sets ``UV_CACHE_DIR``.  The
+    equality below is with the module's list *as relocated*, never with the list as
+    an environment-independent expectation — asserted the other way, this test
+    measured GitHub's environment and failed on both CI legs.
+    """
+    from emrg.sandbox.roots import writable_roots
+    from emrg.tools.bash_tool_v2 import _CACHE_ENV, confined_env
+
+    for name in _CACHE_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
+    granted = writable_roots(policy)
+    env = confined_env(policy)
+
+    assert set(env) == set(_CACHE_ENV), "every cache variable the module names, and only those"
+    for name, value in env.items():
+        assert any(Path(value).is_relative_to(root) for root in granted), (
+            f"{name}={value} is outside every root the policy grants ({granted})"
+        )
+
+
+def test_a_read_only_run_relocates_nothing(tmp_path):
+    """No writable root, no cache to point anywhere: the mode is the whole answer."""
+    from emrg.tools.bash_tool_v2 import confined_env
+
+    assert confined_env(SandboxPolicy(mode="read-only", workspace_root=str(tmp_path))) == {}
+
+
+def test_the_deployer_declared_cache_wins(tmp_path, monkeypatch):
+    """A warm cache the deployer put somewhere stays reachable.
+
+    The variable is set in the child's environment only when the environment does
+    not already name one, so this is "the deployer's declaration wins", not "the
+    sandbox knows better".  Both variables are cleared first, so the one it sets is
+    the only declaration this measures.
+    """
+    from emrg.tools.bash_tool_v2 import _CACHE_ENV, confined_env
+
+    for name in _CACHE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("UV_CACHE_DIR", "/the/deployers/cache")
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
+    env = confined_env(policy)
+    assert "UV_CACHE_DIR" not in env
+    assert "PIP_CACHE_DIR" in env, "the others are still relocated"
+
+
+def test_the_unconfined_path_relocates_nothing(tmp_path, monkeypatch):
+    """``danger-full-access`` runs bare, so its caches belong where they always were."""
+    import emrg.tools.bash_tool_v2 as v2
+
+    seen: dict = {}
+
+    async def fake_spawn(*argv, **kwargs):
+        seen.update(kwargs)
+        raise AssertionError("stop here: the environment is the subject")
+
+    monkeypatch.setattr(v2.asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    policy = SandboxPolicy(mode="danger-full-access", workspace_root=str(tmp_path))
+    try:
+        asyncio.run(v2.run_command("echo hi", policy=policy, workdir=str(tmp_path), timeout=5.0))
+    except AssertionError:
+        pass
+    assert "UV_CACHE_DIR" not in seen["env"], "nothing was confined, so nothing was relocated"
+
+
+@needs_seatbelt
+def test_a_confined_command_really_sees_the_relocated_cache(boundary, monkeypatch):
+    """The end-to-end half: the variable is in the child's environment, not just planned.
+
+    Without it the measured ``uv`` failure stands — ``uv run`` exits with
+    "Failed to initialize cache" — so this is the difference between a boundary
+    that is correct and one that is usable.
+
+    The deployer's own ``UV_CACHE_DIR`` is cleared first, because a declared cache
+    is deliberately left alone and would be the variable this test then reads: with
+    one exported from the shell it asserted about a path outside every grant and
+    failed for a reason that is not a defect.  The relocation is the subject, so the
+    environment must not be able to decide it.
+    """
+    from emrg.sandbox.roots import writable_roots
+
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    result = boundary.run('echo "$UV_CACHE_DIR" && mkdir -p "$UV_CACHE_DIR" && echo cache-writable')
+    assert result.exit_code == 0, result.stderr
+    relocated = result.stdout.splitlines()[0]
+    assert any(Path(relocated).is_relative_to(root) for root in writable_roots(boundary.policy("workspace-write")))
+    assert "cache-writable" in result.stdout
+
+
 # ── the boundary itself (darwin only) ─────────────────────────────────────
 
 
