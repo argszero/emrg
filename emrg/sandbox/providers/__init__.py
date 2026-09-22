@@ -14,19 +14,24 @@ from __future__ import annotations
 
 from emrg.sandbox.contract import Runner, SandboxUnavailableError, host_platform
 from emrg.sandbox.policy import DANGER_FULL_ACCESS
-from emrg.sandbox.providers import darwin, win32
+from emrg.sandbox.providers import darwin, linux, win32
 
 #: The runner chain per platform, in preference order.
 #:
-#: ``darwin`` is the blueprint's row for this host; ``win32`` is its Windows
-#: rung, the ACL restricted-token backend (P4).  Linux is absent because its
-#: *product* is: its first rung is ``bwrap`` and its second is the
-#: ``landlock-run`` launcher (a native artifact this pure-Python package does
-#: not have yet, blueprint §1.5 B1) — that rung lands in P3.  A missing product
-#: is a pending artifact, not a licence to pretend (design §1.4) — so
-#: ``select_runner`` fails closed there rather than silently running bare.
+#: ``darwin`` and ``win32`` are the blueprint's rows for those hosts (Seatbelt,
+#: and the ACL restricted-token backend); ``linux`` carries its **first** rung
+#: only (``bwrap``), not its second — the ``landlock-run`` launcher, a native
+#: artifact this pure-Python package does not have yet (blueprint §1.5 B1).
+#: A missing product is a pending artifact, not a licence to pretend (design
+#: §1.4) — so ``select_runner`` fails closed where a chain is absent or empty
+#: rather than silently running the command bare.
+#:
+#: A chain of one is selected **without** a probe, which is why the linux row
+#: needs none: the blueprint probes only to arbitrate between candidates, and
+#: when landlock arrives it becomes the second rung and the probe comes with it.
 PLATFORM_CHAINS: dict[str, tuple[Runner, ...]] = {
     "darwin": (darwin.SEATBELT,),
+    "linux": (linux.BWRAP,),
     "win32": (win32.WINDOWS_ACL,),
 }
 
@@ -64,28 +69,21 @@ def select_runner(mode: str, *, platform_name: str | None = None) -> Runner:
 def unconfined_mode(mode: str, *, platform_name: str | None = None) -> str | None:
     """The mode this call runs WITHOUT confinement under, or ``None`` when it is confined.
 
-    Two reasons a run is unconfined, and neither is silent:
+    One reason a run is unconfined, and it is not silent: ``danger-full-access``
+    — the mode's own meaning.  The blueprint short-circuits it in the consumer,
+    before any provider is consulted (``shell/bash-sandbox/src/index.ts:92-95``),
+    and the result surface then carries no ``enforcement`` field at all.
 
-    * ``danger-full-access`` — the mode's own meaning.  The blueprint
-      short-circuits it in the consumer, before any provider is consulted
-      (``shell/bash-sandbox/src/index.ts:92-95``), and the result surface then
-      carries no ``enforcement`` field at all.
-    * **Linux, until P3** — host-authorised deviation D4 (2026-09-21 18:29).
-      The blueprint's Linux chain is ``bwrap`` then ``landlock-run``; neither
-      exists here yet, so the honest report is that Linux has no boundary at
-      all rather than a boundary that cannot be honoured.  The mode returned is
-      ``danger-full-access`` even when the task asked for another tier, so the
-      result surface cannot claim a confinement that is not there — a falsified
-      field is worse than an absent one.  Exit condition: P3 lands, this arm is
-      deleted, and Linux fails closed exactly like the blueprint.
+    Linux's host-authorised deviation D4 (2026-09-21 18:29, "run unconfined and
+    report ``danger-full-access`` until P3 lands") lived here and is **deleted by
+    P3**, which is that deviation's own stated exit condition: the chain now has
+    a real rung, so a Linux host without ``bwrap`` fails closed exactly like the
+    blueprint instead of running bare.
 
     :param mode: the requested tier.
     :param platform_name: the platform to decide for; defaults to the host's.
     :returns: the mode to run under unconfined, or ``None`` to confine.
     """
     if mode == DANGER_FULL_ACCESS:
-        return DANGER_FULL_ACCESS
-    platform = platform_name or host_platform()
-    if platform == "linux":
         return DANGER_FULL_ACCESS
     return None
