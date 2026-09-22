@@ -3119,7 +3119,16 @@ def _patch_write_targets(tokens: list[str], i: int) -> list[str]:
 # shell's own question can be asked *once*, before a verb spelling is believed: a
 # word that is a verb only in spelling, standing where the shell passes it as data,
 # is not an invocation and names no target (`_runs_as_a_command`).
+#: The word the write-target walk dispatches `gh` on. Its own set, like
+#: `_BROTLI_VERBS`: membership of the union below is what asks the guard question
+#: about a word, and adding a word to the shared literal list instead puts two
+#: branches on one line — measured, this branch and the tar rule's conflict in
+#: both merge orders when `gh` goes there.
+_GH_VERB_WORDS = frozenset({"gh"})
+
+
 _WRITE_VERB_WORDS: frozenset[str] = frozenset().union(
+    _GH_VERB_WORDS,
     _REMOVER_VERBS,
     _CREATING_VERBS,
     _DESTINATION_LAST_VERBS,
@@ -3129,8 +3138,7 @@ _WRITE_VERB_WORDS: frozenset[str] = frozenset().union(
     _LZ4_VERBS,
     _PZSTD_VERBS,
     _OPTION_DESTINATION_VERBS,
-    {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip",
-     "gh"},
+    {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip"},
 )
 
 
