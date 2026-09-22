@@ -122,7 +122,12 @@ def boundary():
 
 
 def test_the_command_does_not_run_when_no_backend_can_confine_it(tmp_path):
-    """The whole point of the contract: no silent fallback to a bare run."""
+    """The whole point of the contract: no silent fallback to a bare run.
+
+    The platform is a synthetic one with no rung: this test is about the seam's
+    refusal, and it must keep asking that question as the chain table fills up
+    (``win32`` was the example until the Windows rung landed in P4).
+    """
     sentinel = tmp_path / "must-not-exist"
     with pytest.raises(SandboxUnavailableError) as excinfo:
         asyncio.run(
@@ -131,7 +136,7 @@ def test_the_command_does_not_run_when_no_backend_can_confine_it(tmp_path):
                 policy=SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path)),
                 workdir=str(tmp_path),
                 timeout=30.0,
-                platform_name="win32",
+                platform_name="freebsd",
             )
         )
     assert excinfo.value.code == "SANDBOX_UNAVAILABLE"

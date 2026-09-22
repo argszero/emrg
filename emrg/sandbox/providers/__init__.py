@@ -14,24 +14,25 @@ from __future__ import annotations
 
 from emrg.sandbox.contract import Runner, SandboxUnavailableError, host_platform
 from emrg.sandbox.policy import DANGER_FULL_ACCESS
-from emrg.sandbox.providers import darwin, linux
+from emrg.sandbox.providers import darwin, linux, win32
 
 #: The runner chain per platform, in preference order.
 #:
-#: ``darwin`` carries the blueprint's one rung; ``linux`` carries its **first**
-#: rung (``bwrap``) and not its second (the ``landlock-run`` launcher, a native
-#: artifact this pure-Python package does not have yet — blueprint §1.5 B1).
-#: ``win32`` is absent because its sole rung, the ACL restricted-token backend,
-#: is P4.  A missing product is a pending artifact, not a licence to pretend
-#: (design §1.4) — so ``select_runner`` fails closed there rather than silently
-#: running bare.
+#: ``darwin`` and ``win32`` are the blueprint's rows for those hosts (Seatbelt,
+#: and the ACL restricted-token backend); ``linux`` carries its **first** rung
+#: only (``bwrap``), not its second — the ``landlock-run`` launcher, a native
+#: artifact this pure-Python package does not have yet (blueprint §1.5 B1).
+#: A missing product is a pending artifact, not a licence to pretend (design
+#: §1.4) — so ``select_runner`` fails closed where a chain is absent or empty
+#: rather than silently running the command bare.
 #:
-#: A chain of one is selected **without** a probe, which is why linux no longer
-#: needs one: the blueprint probes only to arbitrate between candidates, and
+#: A chain of one is selected **without** a probe, which is why the linux row
+#: needs none: the blueprint probes only to arbitrate between candidates, and
 #: when landlock arrives it becomes the second rung and the probe comes with it.
 PLATFORM_CHAINS: dict[str, tuple[Runner, ...]] = {
     "darwin": (darwin.SEATBELT,),
     "linux": (linux.BWRAP,),
+    "win32": (win32.WINDOWS_ACL,),
 }
 
 # A backend's confinement covers whatever the wrapped argv goes on to execute.

@@ -47,6 +47,11 @@ from emrg.tools import bash_tool
 #: host actually has.
 ABSOLUTE_ROOT = os.path.abspath(os.sep)
 
+#: How the Windows rung's runner is invoked.  Spelled out here rather than read
+#: back from the provider: a test that asks the code under test what it does can
+#: only ever agree with it.
+WINDOWS_ACL_INVOCATION = [sys.executable, "-m", "emrg.sandbox.win32.runner"]
+
 
 def _grants(profile_args: list[str]) -> list[str]:
     """The path grants one Seatbelt profile makes, read back out of the profile.
@@ -218,21 +223,32 @@ def test_confine_wraps_the_exact_argv_and_never_re_parses_the_command():
 
 
 def test_confine_fails_closed_when_this_platform_has_no_backend():
-    """A request for confinement that cannot be honoured must not run unconfined."""
+    """A request for confinement that cannot be honoured must not run unconfined.
+
+    The platform is a synthetic one, deliberately: as the chain table fills up, a
+    real platform's name stops meaning "no rung" and this test would silently
+    start measuring something else (``win32`` was that name until P4).
+    """
     with pytest.raises(SandboxUnavailableError) as excinfo:
         confine(["bash", "-c", "echo hi"], SandboxPolicy(mode="workspace-write", workspace_root=ABSOLUTE_ROOT),
-                platform_name="win32")
+                platform_name="freebsd")
     assert excinfo.value.code == SANDBOX_UNAVAILABLE
     assert excinfo.value.mode == "workspace-write"
     assert "workspace-write" in str(excinfo.value)
 
 
 def test_confine_selects_the_platform_it_is_told_and_not_the_host():
-    """Injectable selection is what makes a chain testable anywhere."""
-    assert "win32" not in PLATFORM_CHAINS
+    """Injectable selection is what makes a chain testable anywhere.
+
+    The name used is the table's entry that is *not* this host's: naming the
+    host's own platform would pass even if the parameter were ignored, which is
+    the very property under test.
+    """
+    other = "darwin" if host_platform() == "win32" else "win32"
     confined = confine(["bash", "-c", "echo hi"], SandboxPolicy(mode="read-only", workspace_root=ABSOLUTE_ROOT),
-                       platform_name="darwin")
-    assert confined.argv[0] == SEATBELT_EXEC
+                       platform_name=other)
+    expected = [SEATBELT_EXEC] if other == "darwin" else WINDOWS_ACL_INVOCATION
+    assert confined.argv[: len(expected)] == expected
 
 
 def test_the_refusal_names_what_the_operator_can_do_about_it():
@@ -360,6 +376,57 @@ def test_the_linux_runner_argv_prepends_the_program(tmp_path):
     argv = linux.runner_argv(policy)
     assert argv[0] == linux.BWRAP_BIN
     assert argv[1:] == bwrap_profile_args(policy)
+
+
+# ── win32 rung ────────────────────────────────────────────────────────────
+
+
+def test_the_windows_chain_is_the_acl_restricted_token_backend():
+    """One candidate, selected without a probe — and it is the ACL backend.
+
+    The name matters, not the count: Windows has exactly one way to confine a
+    process from Python here (an ACL-restricted token), and a second candidate
+    would have to be arbitrated by a probe that does not exist yet.
+    """
+    assert len(PLATFORM_CHAINS["win32"]) == 1
+    assert select_runner("read-only", platform_name="win32").name == "windows-acl"
+
+
+def test_the_windows_rung_claims_partial_enforcement_because_that_is_what_it_has():
+    """``WRITE_RESTRICTED`` cannot be the absolute promise, so it must not be spelled as one.
+
+    Everyone has to sit in both restricting lists for the restricted child to
+    initialize at all, so an object granting Everyone write access stays writable,
+    and an NTFS hard link can alias a granted file to a path outside the
+    workspace.  The blueprint's own row is ``partial``
+    (``sandbox-local/src/index.ts:177-187``); a ``full`` here would be a claim the
+    result surface then repeats to the model.
+    """
+    window = select_runner("read-only", platform_name="win32")
+    assert window.enforcement == "partial"
+    assert window.enforcement != select_runner("read-only", platform_name="darwin").enforcement
+
+
+def test_a_confined_windows_run_still_carries_the_exact_argv_behind_the_separator():
+    """The seam's one job, through the other rung: no second parse, no re-quoting.
+
+    ``read-only`` is the mode this test can use on any host: it renders no
+    capability SIDs, so no Win32 call is made and no grant is materialized.
+    """
+    command = "printf '%s\\n' \"a b\" 'c\"d'"
+    confined = confine(
+        ["bash", "-c", command],
+        SandboxPolicy(mode="read-only", workspace_root=ABSOLUTE_ROOT),
+        platform_name="win32",
+    )
+    assert confined.argv[-4:] == ["--", "bash", "-c", command]
+    assert "--write-sid" not in confined.argv and "--temp-write-sid" not in confined.argv
+    assert confined.enforcement == "partial"
+
+
+def test_the_windows_refusal_names_the_runner_the_operator_can_fix():
+    """The fail-closed message is the same one, and it names this platform's rung."""
+    assert "restricted-token runner" in sandbox_unavailable_message("workspace-write")
 
 
 # ── darwin profile ────────────────────────────────────────────────────────
