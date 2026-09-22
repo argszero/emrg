@@ -610,6 +610,8 @@ def _confined(argv: list[str], workspace, temp_root, mode: str) -> subprocess.Co
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
         check=False,
     )
