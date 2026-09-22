@@ -14,19 +14,20 @@ from __future__ import annotations
 
 from emrg.sandbox.contract import Runner, SandboxUnavailableError, host_platform
 from emrg.sandbox.policy import DANGER_FULL_ACCESS
-from emrg.sandbox.providers import darwin
+from emrg.sandbox.providers import darwin, win32
 
 #: The runner chain per platform, in preference order.
 #:
-#: ``darwin`` is the blueprint's row for this host.  The other two are absent
-#: because the *product* is: Linux's first rung is ``bwrap`` and its second is
-#: the ``landlock-run`` launcher (a native artifact this pure-Python package does
-#: not have yet, blueprint §1.5 B1), and Windows' sole rung is the ACL
-#: restricted-token backend (P4).  A missing product is a pending artifact, not
-#: a licence to pretend (design §1.4) — so until they land, ``select_runner``
-#: fails closed there rather than silently running bare.
+#: ``darwin`` is the blueprint's row for this host; ``win32`` is its Windows
+#: rung, the ACL restricted-token backend (P4).  Linux is absent because its
+#: *product* is: its first rung is ``bwrap`` and its second is the
+#: ``landlock-run`` launcher (a native artifact this pure-Python package does
+#: not have yet, blueprint §1.5 B1) — that rung lands in P3.  A missing product
+#: is a pending artifact, not a licence to pretend (design §1.4) — so
+#: ``select_runner`` fails closed there rather than silently running bare.
 PLATFORM_CHAINS: dict[str, tuple[Runner, ...]] = {
     "darwin": (darwin.SEATBELT,),
+    "win32": (win32.WINDOWS_ACL,),
 }
 
 # A backend's confinement covers whatever the wrapped argv goes on to execute.
