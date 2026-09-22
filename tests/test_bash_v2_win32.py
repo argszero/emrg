@@ -925,8 +925,13 @@ def test_init_owns_every_sid_the_restricted_token_is_pointed_at(tmp_path, monkey
     sandbox = AclSandbox(writable_dirs=[str(workspace)], temp_dir=None, mode="read-only")
     sandbox.init(api=api)
 
-    owners = [ctypes.addressof(buffer) for buffer in sandbox._owned_sids]
-    assert api.restricting_sids == owners, "the restricting list must point inside buffers init kept"
+    owners = [*sandbox._owned_sids]
+    assert all(isinstance(owner, ctypes.Array) for owner in owners), (
+        "an address is not an owner: keeping the pointer is what let the memory be reused"
+    )
+    assert [ctypes.addressof(owner) for owner in owners] == api.restricting_sids, (
+        "the restricting list must point inside buffers init kept"
+    )
     assert [ctypes.string_at(address, 8) for address in owners] == [b"SIDBLOB!"] * len(owners)
     assert granted_to == [api.restricting_sids[1]], "the default DACL takes the Everyone SID"
     assert api.restricted_flags & 0x8, "WRITE_RESTRICTED is what makes the list mean anything"
@@ -934,3 +939,155 @@ def test_init_owns_every_sid_the_restricted_token_is_pointed_at(tmp_path, monkey
     sandbox.dispose()
     assert api.kernel32.freed == [], "ctypes memory is released by dropping it, never by LocalFree"
     assert len(api.kernel32.closed) == 2, "both the current and the restricted token are closed"
+
+
+# ── TEMPORARY PROBE (round 4): why is a workspace write denied? ──────────
+# Delete this together with round 3's probe.  It asserts nothing by design: it
+# reports whether the capability ACE lands on the workspace, what the token's
+# default DACL carries for new objects, and what the child's own error is.
+
+
+def _dacl_rows(api, acl_address, label):
+    """Every ACE in one ACL as (type, flags, mask, sid bytes)."""
+    from emrg.sandbox.win32.ffi import ACLStructure
+
+    header = ACLStructure.from_address(acl_address)
+    size = int(header.AclSize)
+    count = int(header.AceCount)
+    rows = [f"{label}: size={size} count={count}"]
+    offset = 8
+    for _ in range(count):
+        ace_size = int(ctypes.c_uint16.from_address(acl_address + offset + 2).value)
+        if ace_size < 8 or offset + ace_size > size:
+            rows.append(f"{label}: malformed ACE at {offset} (size {ace_size})")
+            break
+        raw = ctypes.string_at(acl_address + offset, ace_size)
+        rows.append(
+            f"{label}: type={raw[0]} flags={raw[1]:#04x} size={ace_size} "
+            f"mask={int.from_bytes(raw[4:8], 'little'):#010x} sid={raw[8:].hex()}"
+        )
+        offset += ace_size
+    return rows
+
+
+@needs_windows
+def test_probe_the_workspace_ace_and_the_new_object_default_dacl(tmp_path):
+    """The ACE that should allow the write, and the child's own error code."""
+    import tempfile
+
+    from emrg.sandbox.win32 import ffi as ffi_module
+    from emrg.sandbox.win32.acl import read_current_dacl
+    from emrg.sandbox.win32.sandbox import _parse_sid
+
+    workspace = tmp_path / "ws"
+    temp_root = tmp_path / "temp"
+    workspace.mkdir()
+    temp_root.mkdir()
+    private_temp = tempfile.mkdtemp(prefix="emrg-", dir=str(temp_root))
+    write_sid = workspace_write_sid(str(workspace))
+    temp_sid = temp_write_sid(private_temp)
+
+    api = ffi_module.win32()
+    sandbox = AclSandbox(
+        writable_dirs=[str(workspace)],
+        temp_dir=private_temp,
+        mode="workspace-write",
+        write_sid=write_sid,
+        temp_write_sid=temp_sid,
+    )
+    rows = [f"workspace={workspace}", f"private_temp={private_temp}", f"write_sid={write_sid}", f"temp_sid={temp_sid}"]
+    try:
+        sandbox.init(api)
+        rows.append(f"init OK token={sandbox._token!r}")
+
+        current = read_current_dacl(api, str(workspace))
+        if current.old_acl is None:
+            rows.append("workspace DACL: none")
+        else:
+            rows.extend(_dacl_rows(api, current.old_acl, "workspace-DACL"))
+        current.release("probe")
+
+        current_temp = read_current_dacl(api, private_temp)
+        if current_temp.old_acl is None:
+            rows.append("temp DACL: none")
+        else:
+            rows.extend(_dacl_rows(api, current_temp.old_acl, "temp-DACL"))
+        current_temp.release("probe")
+
+        rows.append(f"write-sid bytes {ffi_module.read_sid_bytes(api, _parse_sid(api, write_sid)).hex()}")
+        rows.append(f"temp-sid bytes  {ffi_module.read_sid_bytes(api, _parse_sid(api, temp_sid)).hex()}")
+
+        # The token's default DACL: what every NEW object the child creates takes.
+        from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_ptr, decode_uint32
+
+        needed_slot = alloc_uint32()
+        api.advapi32.GetTokenInformation(
+            ctypes.c_void_p(sandbox._token), 6, None, 0, ctypes.byref(needed_slot)
+        )
+        needed = decode_uint32(needed_slot)
+        rows.append(f"default-DACL needed={needed}")
+        if needed:
+            block = alloc_bytes(needed)
+            api.advapi32.GetTokenInformation(
+                ctypes.c_void_p(sandbox._token), 6, ctypes.byref(block), needed, ctypes.byref(needed_slot)
+            )
+            default_acl = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(block)))
+            if default_acl:
+                rows.extend(_dacl_rows(api, default_acl, "default-DACL"))
+            else:
+                rows.append("default-DACL: null")
+
+        # The children, through the runner (whose stdio is captured here).
+        cmd = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
+        (workspace / "existing.txt").write_text("seed")
+        scripts = {
+            "new-file": (
+                "try:\n"
+                f"    open(r'{workspace}\\new-file.txt', 'w').write('x')\n"
+                "    print('OK')\n"
+                "except OSError as exc:\n"
+                "    print('DENIED', getattr(exc, 'winerror', None), exc)\n"
+            ),
+            "existing-file": (
+                f"p = r'{workspace}\\existing.txt'\n"
+                "try:\n"
+                "    open(p, 'a').write('x')\n"
+                "    print('OK')\n"
+                "except OSError as exc:\n"
+                "    print('DENIED', getattr(exc, 'winerror', None), exc)\n"
+            ),
+            "new-dir": (
+                f"p = r'{workspace}\\new-dir'\n"
+                "import os\n"
+                "try:\n"
+                "    os.mkdir(p)\n"
+                "    print('OK')\n"
+                "except OSError as exc:\n"
+                "    print('DENIED', getattr(exc, 'winerror', None), exc)\n"
+            ),
+        }
+        for label, body in scripts.items():
+            completed = _confined(
+                [sys.executable, "-c", body], workspace, temp_root, "workspace-write"
+            )
+            rows.append(
+                f"child {label}: exit={completed.returncode} out={completed.stdout.strip()!r} "
+                f"err={completed.stderr.strip()[-200:]!r}"
+            )
+        completed = _confined(
+            [cmd, "/c", f"echo x > {workspace}\\cmd-file.txt"], workspace, temp_root, "workspace-write"
+        )
+        rows.append(
+            f"child cmd-echo: exit={completed.returncode} out={completed.stdout.strip()!r} "
+            f"err={completed.stderr.strip()[-200:]!r} exists={(workspace / 'cmd-file.txt').exists()}"
+        )
+        completed = _confined(
+            [sys.executable, "-c", "import os; print('TEMP', os.environ['TEMP'])"],
+            workspace,
+            temp_root,
+            "workspace-write",
+        )
+        rows.append(f"child temp-env: exit={completed.returncode} out={completed.stdout.strip()!r}")
+    finally:
+        sandbox.dispose()
+    pytest.fail("PROBE TABLE (round 4)\n" + "\n".join(rows))
