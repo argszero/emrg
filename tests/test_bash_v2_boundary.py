@@ -261,13 +261,19 @@ def test_the_package_does_not_import_the_frozen_tool():
 
 # ── what the confined child's environment gets ────────────────────────────
 #
+# The policies below take their workspace root from ``tmp_path`` rather than a
+# literal ``/tmp``: ``SandboxPolicy`` asserts the root is absolute, and ``/tmp``
+# is not an absolute path on Windows — the first version of these tests was green
+# on the dev host and red on the Windows leg for exactly that reason.  A
+# workspace root is a directory that exists, so the test supplies one.
+#
 # The mode's other half: granting a boundary that a package manager cannot work
 # inside is not usable, and the fix must not be a wider boundary.  These tests
 # pin the two properties that keep it honest — the relocated directory lies
 # inside what the policy already grants, and a deployer's own declaration wins.
 
 
-def test_the_caches_of_a_confined_run_are_relocated_into_a_granted_root():
+def test_the_caches_of_a_confined_run_are_relocated_into_a_granted_root(tmp_path):
     """The relocation widens nothing: it points caches at a root the policy grants.
 
     Both the measured breaks (``uv`` fails, ``npm``'s default is unwritable) and
@@ -279,7 +285,7 @@ def test_the_caches_of_a_confined_run_are_relocated_into_a_granted_root():
     from emrg.sandbox.roots import writable_roots
     from emrg.tools.bash_tool_v2 import _CACHE_ENV, confined_env
 
-    policy = SandboxPolicy(mode="workspace-write", workspace_root="/tmp")
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
     granted = writable_roots(policy)
     env = confined_env(policy)
 
@@ -290,14 +296,14 @@ def test_the_caches_of_a_confined_run_are_relocated_into_a_granted_root():
         )
 
 
-def test_a_read_only_run_relocates_nothing():
+def test_a_read_only_run_relocates_nothing(tmp_path):
     """No writable root, no cache to point anywhere: the mode is the whole answer."""
     from emrg.tools.bash_tool_v2 import confined_env
 
-    assert confined_env(SandboxPolicy(mode="read-only", workspace_root="/tmp")) == {}
+    assert confined_env(SandboxPolicy(mode="read-only", workspace_root=str(tmp_path))) == {}
 
 
-def test_the_deployer_declared_cache_wins(monkeypatch):
+def test_the_deployer_declared_cache_wins(tmp_path, monkeypatch):
     """A warm cache the deployer put somewhere stays reachable.
 
     The variable is set in the child's environment only when the environment does
@@ -307,13 +313,13 @@ def test_the_deployer_declared_cache_wins(monkeypatch):
     from emrg.tools.bash_tool_v2 import confined_env
 
     monkeypatch.setenv("UV_CACHE_DIR", "/the/deployers/cache")
-    policy = SandboxPolicy(mode="workspace-write", workspace_root="/tmp")
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
     env = confined_env(policy)
     assert "UV_CACHE_DIR" not in env
     assert "PIP_CACHE_DIR" in env, "the others are still relocated"
 
 
-def test_the_unconfined_path_relocates_nothing(monkeypatch):
+def test_the_unconfined_path_relocates_nothing(tmp_path, monkeypatch):
     """``danger-full-access`` runs bare, so its caches belong where they always were."""
     import emrg.tools.bash_tool_v2 as v2
 
@@ -325,9 +331,9 @@ def test_the_unconfined_path_relocates_nothing(monkeypatch):
 
     monkeypatch.setattr(v2.asyncio, "create_subprocess_exec", fake_spawn)
     monkeypatch.delenv("UV_CACHE_DIR", raising=False)
-    policy = SandboxPolicy(mode="danger-full-access", workspace_root="/tmp")
+    policy = SandboxPolicy(mode="danger-full-access", workspace_root=str(tmp_path))
     try:
-        asyncio.run(v2.run_command("echo hi", policy=policy, workdir="/tmp", timeout=5.0))
+        asyncio.run(v2.run_command("echo hi", policy=policy, workdir=str(tmp_path), timeout=5.0))
     except AssertionError:
         pass
     assert "UV_CACHE_DIR" not in seen["env"], "nothing was confined, so nothing was relocated"
