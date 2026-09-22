@@ -606,3 +606,384 @@ def test_the_write_zone_scan_answers_both_ways() -> None:
     assert not _out_of_zone_refs(
         "Do not modify files under `{{ evolution_cwd }}` outside `{{ source_dir }}/`"
     ), "the bare root names the directory in a prohibition; it is not a write path"
+
+
+# `open_source_prompt.md` is the one built-in template whose `{{ source_dir }}` is the HOST's own
+# working tree — the directory the dirty-tree rule (§0.3) and the sandbox exist to protect. It
+# used to send Phase B.3 there to `git checkout -b`, which is unreachable in the `read-only` tier
+# those same rules force (rant 2026-09-21T16:12: measured 12:22:01Z `git add` refused at 12:22:10Z
+# in the sibling task, while its own hand-rolled clone pushed fine). The fix is a clone under the
+# session directory; this guard keeps the flow from drifting back into the host tree.
+#
+# The other templates are deliberately out of scope: `evolution_prompt.md` works in its own
+# repository by design ("not pushing = not done" — the branch, commit and push there ARE the
+# cycle's output), and the journal/paper tasks commit manuscripts into their own task clone.
+# A guard over all of them would be a different claim, not a stricter version of this one.
+_GIT_MUTATOR = re.compile(
+    r"\bgit\s+(clone|checkout|switch|add|commit|push|pull|rebase|merge|reset|clean|stash"
+    r"|restore|cherry-pick|revert)\b"
+)
+_CD_TARGET = re.compile(r"\bcd\s+(?P<rest>[^&;|#]+)")
+
+
+def _fenced_blocks(text: str) -> list[list[str]]:
+    """The text's fenced code blocks, as lists of lines (fence lines dropped)."""
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            if in_fence:
+                blocks.append(current)
+                current = []
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            current.append(line)
+    return blocks
+
+
+def _host_tree_git_writes(text: str) -> list[str]:
+    """Git writes a template issues with the HOST tree as the current directory.
+
+    The reader's directory is the last `cd <target>` in the block the command sits in —
+    alone on its line or joined with `&&`, which is why the retired B.3 shape
+    (`cd {{ source_dir }}` … `git checkout -b`) is caught. The target runs to the first
+    `&`/`;`/`|`/`#` but *not* to a space, because `{{ source_dir }}` contains one; a trailing
+    comment that merely *names* `{{ source_dir }}` (the new instruction says
+    "never {{ source_dir }}") therefore stops at the `#` and is not read as the directory.
+    Two exclusions, both measured against real template text: a read verb
+    (`log`/`show`/`diff`/`status`/`fetch`) is not a mutation, and `--dry-run` writes nothing
+    (the role probe in §0.2 is one).
+    """
+    offenders: list[str] = []
+    for block in _fenced_blocks(text):
+        cwd: str | None = None
+        for line in block:
+            match = _CD_TARGET.search(line)
+            if match:
+                cwd = match.group("rest").strip()
+            if (
+                cwd is not None
+                and "source_dir" in cwd
+                and _GIT_MUTATOR.search(line)
+                and "--dry-run" not in line
+            ):
+                offenders.append(line.strip())
+    return offenders
+
+
+def test_the_open_source_flow_writes_only_in_the_session_clone() -> None:
+    """`{{ source_dir }}` is the host's tree: no branch, commit or push inside it.
+
+    Rant 2026-09-21T16:12. Three facts are asserted together because each can go missing on
+    its own: the flow's git writes all run in the clone, the clone is *named* and sits under
+    the session directory the sandbox allows, and the tier that flow needs is stated with it —
+    a location without its tier sends the next reader to the same dead end one layer down.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    offenders = _host_tree_git_writes(text)
+    assert not offenders, (
+        "the open-source template issues these git writes in the HOST's tree "
+        f"(`{{{{ source_dir }}}}`): {offenders} — Phase B.3's clone exists so that "
+        "`{{ source_dir }}` stays a read-only reference"
+    )
+
+    # The scan must be looking at a non-empty surface: the flow's writes are still there,
+    # in the clone. Otherwise deleting the whole phase would read as a pass.
+    clone_writes = [
+        line
+        for block in _fenced_blocks(text)
+        for line in block
+        if _GIT_MUTATOR.search(line) and "--dry-run" not in line
+    ]
+    assert len(clone_writes) >= 3, (
+        f"only {len(clone_writes)} mutating git command(s) left in the contribution flow — "
+        "the scan above would pass on a template that no longer contributes"
+    )
+
+    assert re.search(
+        r'DEV="\{\{ source_dir \}\}/\.emrg/sessions/\{\{ session_id \}\}/tmp/', text
+    ), "B.3 must name the clone under the session directory, not merely say 'a clone'"
+
+    # The tier half is bound to B.3 rather than asserted anywhere in the file: a location
+    # without the tier that unlocks it sends the next reader to the same dead end one layer
+    # down, which is what the rant measured (both the configured and the dirty-tree-forced
+    # `read-only` refuse every step of this flow).
+    parts = text.split('DEV="{{ source_dir }}', 1)
+    assert len(parts) == 2, "B.3 must define the clone as a shell variable the flow can reuse"
+    section = parts[1].split("#### B.4", 1)[0]
+    assert "workspace-write" in section and "read-only" in section, (
+        "B.3 must state the tier this flow needs and the tier that refuses it — measured: "
+        "`git clone`, `git checkout -b`, `git add` and `git commit` are all BLOCK under "
+        "`read-only` and all ALLOW under `workspace-write`"
+    )
+
+
+def test_the_host_tree_write_scan_answers_both_ways() -> None:
+    """The instrument's controls, on the shapes this repository has actually carried.
+
+    Without the refusing half it would pass on a scan that finds nothing; without the
+    accepting half it would flag the read-only probes that legitimately run in the host tree —
+    including the new instruction's own comment, which names `{{ source_dir }}` in order to
+    forbid it.
+    """
+    retired = """```bash
+cd {{ source_dir }}
+gh repo fork {{ owner }}/{{ repo }} --clone=false 2>&1
+git checkout -b <branch name per project convention> 2>&1
+```"""
+    assert _host_tree_git_writes(retired) == [
+        "git checkout -b <branch name per project convention> 2>&1"
+    ], "the retired B.3 shape is exactly what this guard exists for"
+
+    shipped = """```bash
+DEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"
+cd "$DEV"    # the clone from B.3 — never {{ source_dir }}
+git add -A
+git push origin <branch> 2>&1
+```"""
+    assert not _host_tree_git_writes(shipped), (
+        "the clone's own instructions name `{{ source_dir }}` in a comment; that is not a cwd"
+    )
+
+    assert not _host_tree_git_writes(
+        "```bash\ncd {{ source_dir }} && git status --short --branch 2>&1\n```"
+    ), "reading the host tree is what it is a reference for"
+    assert not _host_tree_git_writes(
+        "```bash\ncd {{ source_dir }} && git push origin HEAD --dry-run 2>&1\n```"
+    ), "a dry run writes nothing, and §0.2's role probe is one"
+
+
+# A default branch named literally. `main` and `master` are two spellings of one thing and a
+# repository's own default is whichever it happens to use — this one is `master`, so the
+# `origin/main` the first version of §0.3 told the reader to run fails with
+# `fatal: Needed a single revision` (measured 2026-09-21, PR #1524 review).
+_LITERAL_DEFAULT_BRANCH = re.compile(r"\b(?:origin|upstream)/(?:main|master)\b")
+
+
+def test_the_default_branch_is_resolved_rather_than_spelled() -> None:
+    """The template resolves the default branch and starts the branch at it.
+
+    Two claims, both from the external review of PR #1524 (measured, not argued):
+
+    1. A literal `<remote>/main` does not resolve in a repository whose default is `master`, and
+       enumerating spellings is the #461 class this repo keeps refusing to open — so the template
+       must not name one, and must keep the mechanism that resolves it (`gh repo view --json
+       defaultBranchRef`, already used for the PR base).
+    2. B.3's `git checkout -b` had no start point, so it branched off the clone's own HEAD — and a
+       fork is only as fresh as its last sync. The reviewer's fork stood **396 commits** behind
+       upstream, so B.5's suite would have measured a tree twelve days old while the PR's diff
+       stays clean (the merge base is still an ancestor). The start point is the fix.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    literals = _LITERAL_DEFAULT_BRANCH.findall(text)
+    assert not literals, (
+        f"the template names a default branch literally: {literals} — resolve it instead "
+        "(`gh repo view {{ owner }}/{{ repo }} --json defaultBranchRef`); `main` and `master` "
+        "are two spellings of one class and this repository's default is the second one"
+    )
+    assert "defaultBranchRef" in text, (
+        "the template must keep the resolution mechanism it replaced the literal with"
+    )
+
+    clone_block = text.split('DEV="{{ source_dir }}', 1)[1].split("#### B.4", 1)[0]
+    checkout = [
+        line
+        for block in _fenced_blocks("```bash\n" + clone_block)
+        for line in block
+        if "git checkout -b" in line
+    ]
+    assert checkout, "B.3 must still create the branch"
+    for line in checkout:
+        assert "upstream/$DEFAULT" in line or "$DEFAULT" in line, (
+            f"`{line.strip()}` branches off the clone's own HEAD — a fork can be hundreds of "
+            "commits behind, so the branch (and B.5's suite) must start at the upstream default"
+        )
+
+
+def test_the_default_branch_scan_answers_both_ways() -> None:
+    """The scanner's controls, on the two spellings and the resolved form."""
+    assert _LITERAL_DEFAULT_BRANCH.findall("git diff HEAD origin/main\n"), (
+        "the spelling the first version carried must be flagged — in this repository it does "
+        "not resolve"
+    )
+    assert _LITERAL_DEFAULT_BRANCH.findall("git show upstream/master:<path>\n"), (
+        "the other spelling of the same class must be flagged too"
+    )
+    assert not _LITERAL_DEFAULT_BRANCH.findall('git diff HEAD "origin/$DEFAULT"\n'), (
+        "the resolved form is what the rule asks for and must not be flagged"
+    )
+
+
+# The clone's blocks are copied one at a time — they are separate fenced snippets and the reader
+# reaches B.6 hours after B.3. A block that says `cd "$DEV"` without defining it depends on a
+# variable from another block, and an unset one is not an error: measured on this host
+# (2026-09-21) in bash, sh, dash and zsh, `cd ""` leaves the shell where it was and returns 0.
+# B.5 would then run the suite in the reader's own directory, which for this task is the host
+# tree the whole phase exists to keep out of the way — silently, which is the worse direction.
+_CLONE_CD = re.compile(r'\bcd\s+"\$DEV"|\bcd\s+\$DEV\b')
+_CLONE_DEFINE = re.compile(r"^\s*DEV=")
+
+
+def _clone_blocks_without_a_definition(text: str) -> list[str]:
+    """Blocks that enter the clone but never name it, one entry per offending `cd` line."""
+    offenders: list[str] = []
+    for block in _fenced_blocks(text):
+        enters = [line for line in block if _CLONE_CD.search(line)]
+        if enters and not any(_CLONE_DEFINE.search(line) for line in block):
+            offenders.extend(line.strip() for line in enters)
+    return offenders
+
+
+def test_every_clone_block_defines_the_directory_it_enters() -> None:
+    """Every block that `cd "$DEV"` defines `DEV` in that same block.
+
+    Rant 2026-09-21T16:12:19, second round — the first version of this flow defined `DEV` in B.3
+    alone, so the three later blocks were only correct when read together. The measurement that
+    makes this worth a guard rather than a note: `cd ""` is not an error in any shell tried, so
+    the failure is a suite run in the wrong tree, reported as a pass.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    offenders = _clone_blocks_without_a_definition(text)
+    assert not offenders, (
+        f"these commands enter the clone without defining it in their own block: {offenders} — "
+        "a copied block must not depend on a variable set in another block"
+    )
+
+    # Non-empty surface: the flow still enters the clone, so the scan is not passing by default.
+    assert sum(
+        len([line for line in block if _CLONE_CD.search(line)])
+        for block in _fenced_blocks(text)
+    ) >= 3, "the flow no longer enters the clone anywhere — the scan above would pass vacuously"
+
+
+def test_the_clone_definition_scan_answers_both_ways() -> None:
+    """The instrument's controls: the dependent shape is flagged, the self-contained one is not."""
+    dependent = '```bash\ncd "$DEV"\ngit push origin <branch> 2>&1\n```'
+    assert _clone_blocks_without_a_definition(dependent) == ['cd "$DEV"'], (
+        "a block that enters a variable it never sets is exactly what this guard is for"
+    )
+
+    self_contained = (
+        '```bash\nDEV="{{ source_dir }}/.emrg/sessions/{{ session_id }}/tmp/{{ repo }}-dev"\n'
+        'cd "$DEV"\ngit push origin <branch> 2>&1\n```'
+    )
+    assert not _clone_blocks_without_a_definition(self_contained), (
+        "the shipped shape names the clone in its own block and must not be flagged"
+    )
+
+
+# B.3 leaves the branch tracking `upstream` and keeps that remote beside the fork, which is exactly the
+# layout in which `gh pr create` cannot infer the head: its `@{push}` lookup errors (`push.default` is
+# unset and the local and upstream branch names differ) and its ref-probe fallback stops at the first
+# missing ref. Measured 2026-09-21 on a clone of a real fork: `--dry-run` printed `head: master` — the
+# base repository's own branch — where the reviewer's clone aborted outright, and gh's abort message
+# asks for the flag by name. `--head` skips the inference, so the create call must carry it.
+_CREATE_HEAD = re.compile(r"--head\s")
+# The head must be spelled by resolving the login: this template serves every contributor, so a
+# literal name is wrong even when it happens to be right for the cycle that wrote it.
+_CREATE_RESOLVED_HEAD = re.compile(r"--head\s+\"\$\(gh api user -q \.login\):")
+
+
+def _create_calls(text: str) -> list[str]:
+    """Every `gh pr create` command in a fenced block, its continuations joined.
+
+    Only fenced blocks are read: the template also *talks* about `gh pr create` in prose and in
+    capability tables, and a rule about the command must not be satisfiable by the sentence.
+    """
+    calls: list[str] = []
+    for block in _fenced_blocks(text):
+        for i, line in enumerate(block):
+            if "gh pr create" not in line:
+                continue
+            call = [line]
+            j = i
+            while block[j].rstrip().endswith("\\") and j + 1 < len(block):
+                j += 1
+                call.append(block[j])
+            calls.append(" ".join(part.strip() for part in call))
+    return calls
+
+
+def _create_calls_without_a_head(text: str) -> list[str]:
+    """Create calls that do not name the head at all."""
+    return [call for call in _create_calls(text) if not _CREATE_HEAD.search(call)]
+
+
+def _create_calls_naming_a_head_literally(text: str) -> list[str]:
+    """Create calls that name the head without resolving whose fork it is."""
+    return [
+        call
+        for call in _create_calls(text)
+        if _CREATE_HEAD.search(call) and not _CREATE_RESOLVED_HEAD.search(call)
+    ]
+
+
+def test_every_create_call_names_the_head() -> None:
+    """`gh pr create` is always told which repository the head lives in.
+
+    Rant 2026-09-21T16:12:19, fourth round (PR #1524 review). B.3 makes the new branch track `upstream`
+    and keeps `upstream` beside the fork, so gh's head inference lands on the base repository — and what
+    it does next depends on which refs happen to exist locally: measured, a wrong head (`master`) in one
+    clone where another aborted. Naming the head removes the guess in both directions, and the silent
+    variant is the one a guard has to catch because a TTY merely prompts.
+
+    The second clause is why this reads the *call* rather than the file: the first version asserted that
+    `gh api user -q .login` appeared somewhere in the template, and a mutation arm replacing the head
+    with a literal login stayed green on the strength of the sentence explaining the rule. A guard whose
+    power rests on prose is the defect class it was written against.
+    """
+    text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+
+    missing = _create_calls_without_a_head(text)
+    assert not missing, (
+        f"these `gh pr create` calls do not name their head: {missing} — without `--head "
+        '"$(gh api user -q .login):<branch>"` gh infers it, and B.3\'s `upstream` remote makes that '
+        "inference land on the base repository rather than the fork"
+    )
+
+    literal = _create_calls_naming_a_head_literally(text)
+    assert not literal, (
+        f"these create calls name a head without resolving the login: {literal} — the contributor is "
+        "whoever runs this, so the login comes from `gh api user -q .login`, never a literal"
+    )
+
+    # Non-empty surface: the scans are not passing because no create call exists to check.
+    assert _create_calls(text), (
+        "the template no longer opens a PR anywhere — the checks above would pass vacuously"
+    )
+
+
+def test_the_create_head_scan_answers_both_ways() -> None:
+    """The instrument's controls, on the shipped shape and on the flagged ones."""
+    shipped = (
+        '```bash\ncd "$DEV" && gh pr create -R o/r \\\n'
+        '  --head "$(gh api user -q .login):<branch name>" \\\n'
+        '  --title "x"\n```'
+    )
+    assert not _create_calls_without_a_head(shipped), "the shipped shape names the head"
+    assert not _create_calls_naming_a_head_literally(shipped), "and resolves the login"
+
+    assert _create_calls_without_a_head(
+        '```bash\ncd "$DEV" && gh pr create -R o/r \\\n  --title "x" \\\n  --body "y"\n```'
+    ), "a create call with no `--head` is exactly what the first scan is for"
+
+    assert _create_calls_without_a_head(
+        '```bash\ngh pr create -R {{ owner }}/{{ repo }} \\\n  --title "<scope>: <description>"\n```'
+    ) == ['gh pr create -R {{ owner }}/{{ repo }} \\ --title "<scope>: <description>"'], (
+        "a continuation line carries no head, so the call must be read as a whole"
+    )
+
+    assert _create_calls_naming_a_head_literally(
+        '```bash\ngh pr create -R o/r \\\n  --head "someuser:<branch name>" \\\n  --title "x"\n```'
+    ), "a literal login is wrong for every contributor but the one who wrote it"
+
+    assert not _create_calls_without_a_head(
+        "| `gh pr create` | ✅ | ✅ |\n\nTry `gh pr create` when the branch is ready.\n"
+    ) and not _create_calls("| `gh pr create` | ✅ | ✅ |\n"), (
+        "a capability table and a sentence are not the command — the scan reads fenced blocks only"
+    )
