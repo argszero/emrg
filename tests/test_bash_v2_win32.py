@@ -952,6 +952,9 @@ def test_init_owns_every_sid_the_restricted_token_is_pointed_at(tmp_path, monkey
 # runner may hold none of the SIDs that own the directory.
 
 
+_OWNER_SECURITY_INFORMATION = 0x00000001
+
+
 def _owner_bytes(api, path):
     """The owner SID's raw bytes for one path."""
     from emrg.sandbox.win32 import abi
@@ -960,7 +963,7 @@ def _owner_bytes(api, path):
     owner = alloc_ptr_slot()
     descriptor = alloc_ptr_slot()
     result = int(api.advapi32.GetNamedSecurityInfoW(
-        path, abi.SE_FILE_OBJECT, abi.OWNER_SECURITY_INFORMATION,
+        path, abi.SE_FILE_OBJECT, _OWNER_SECURITY_INFORMATION,
         ctypes.byref(owner), None, None, None, ctypes.byref(descriptor),
     ))
     if result != abi.ERROR_SUCCESS:
