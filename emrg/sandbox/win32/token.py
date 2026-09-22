@@ -25,6 +25,7 @@ from ctypes import wintypes
 from emrg.sandbox.win32 import abi
 from emrg.sandbox.win32.acl import build_explicit_access
 from emrg.sandbox.win32.ffi import (
+    NativeBuffer,
     SIDAndAttributes,
     Win32Bindings,
     alloc_bytes,
@@ -79,7 +80,7 @@ def open_current_process_token(api: Win32Bindings) -> int:
     return token
 
 
-def find_logon_sid(api: Win32Bindings, token: int) -> int:
+def find_logon_sid(api: Win32Bindings, token: int) -> NativeBuffer:
     """Find and copy the token's logon session SID (``S-1-5-5-x-y``).
 
     The restricted token needs it for ``WinSta0``/desktop and other per-logon
@@ -87,7 +88,8 @@ def find_logon_sid(api: Win32Bindings, token: int) -> int:
 
     :param api: the binding table.
     :param token: the token whose groups are scanned.
-    :returns: a copied logon SID.
+    :returns: the copied logon SID and the buffer that owns it.  The caller keeps
+        the buffer: the address alone would outlive the memory it points at.
     :raises Win32Error: when the token information could not be read.
     :raises RuntimeError: when the token carries no logon SID.
     """
@@ -132,18 +134,19 @@ def find_logon_sid(api: Win32Bindings, token: int) -> int:
         ))
         if copied == 0:
             throw_last_error(api, "CopySid", f"logon SID group {index}")
-        return ctypes.addressof(copy)
+        return NativeBuffer(ctypes.addressof(copy), copy)
     raise RuntimeError(
         f"CreateRestrictedToken prerequisite failed: no logon SID found among {group_count} token groups"
     )
 
 
-def make_well_known_sid(api: Win32Bindings, sid_type: int) -> int:
+def make_well_known_sid(api: Win32Bindings, sid_type: int) -> NativeBuffer:
     """Create one well-known SID and assert its validity.
 
     :param api: the binding table.
     :param sid_type: the ``WELL_KNOWN_SID_TYPE`` value to create.
-    :returns: the created SID pointer.
+    :returns: the created SID and the buffer that owns it — kept by the caller for
+        the same reason as :func:`find_logon_sid`'s.
     :raises Win32Error: when the SID could not be created.
     """
     sid = alloc_bytes(abi.SECURITY_MAX_SID_SIZE)
@@ -155,7 +158,7 @@ def make_well_known_sid(api: Win32Bindings, sid_type: int) -> int:
         throw_last_error(api, "CreateWellKnownSid", f"type {sid_type}")
     if int(api.advapi32.IsValidSid(ctypes.byref(sid))) == 0:
         throw_last_error(api, "IsValidSid", f"CreateWellKnownSid type {sid_type}")
-    return ctypes.addressof(sid)
+    return NativeBuffer(ctypes.addressof(sid), sid)
 
 
 def set_token_default_dacl_grant(api: Win32Bindings, token: int, sid_ptr: int) -> None:

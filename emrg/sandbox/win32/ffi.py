@@ -21,6 +21,14 @@ they occur:
   by the C ABI rules for this interpreter instead of being asserted by hand.
   The port therefore ASSUMES A 64-BIT INTERPRETER, the same assumption the
   blueprint's hard-coded offsets encode.
+
+A third is not deliberate but has to be obeyed: ``ctypes`` memory belongs to a
+Python object, where ``koffi``'s belongs to the caller.  Every pointer this
+module hands upward therefore travels with its owner (:class:`NativeBuffer`),
+because a bare address is one the interpreter may reuse — the Windows CI
+mechanism test failed exactly that way, with every confined child dying
+``STATUS_DLL_INIT_FAILED`` (``0xC0000142``) once the restricting SIDs had been
+reused by the ``SID_AND_ATTRIBUTES`` array built from them.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from __future__ import annotations
 import ctypes
 import sys
 from ctypes import wintypes
+from dataclasses import dataclass
 
 from emrg.sandbox.win32 import abi
 
@@ -453,10 +462,36 @@ def alloc_uint32(value: int = 0) -> wintypes.DWORD:
 def alloc_bytes(size: int) -> ctypes.Array:
     """Allocate a zeroed byte buffer.
 
+    The memory belongs to the interpreter, not to Win32: it must never be passed
+    to ``LocalFree``, and a pointer to it is only valid while something still
+    references the buffer (see :class:`NativeBuffer`).
+
     :param size: the buffer size in bytes.
     :returns: the buffer.
     """
     return (ctypes.c_ubyte * size)()
+
+
+@dataclass(frozen=True)
+class NativeBuffer:
+    """A pointer into memory this process owns, together with the owner.
+
+    The blueprint's ``allocBytes`` is a *native* allocation (a koffi block), so
+    its pointer is stable for as long as the caller holds it.  ``ctypes`` memory
+    is a Python object's: a function that returns only ``addressof(buffer)``
+    leaves nothing referencing the bytes, and the interpreter is free to hand
+    that memory to the next allocation of a similar size — which for a SID is
+    precisely what happens, because ``SID_AND_ATTRIBUTES`` entries are allocated
+    between the call that makes a SID and the call that reads it.
+
+    So the address and its owner travel together, and the owner is what a caller
+    keeps.  Releasing it is dropping the reference, never ``LocalFree``: the two
+    allocators are different, and freeing memory this process does not own is
+    heap corruption rather than a leak.
+    """
+
+    address: int
+    buffer: ctypes.Array
 
 
 def decode_ptr(slot: ctypes.c_void_p) -> int:

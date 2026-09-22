@@ -15,6 +15,8 @@ The DACL application itself is the blueprint's own code path, ported rather than
 re-invented.
 """
 
+import ctypes
+import gc
 import json
 import os
 import re
@@ -27,6 +29,7 @@ import pytest
 from emrg.sandbox.policy import SandboxPolicy
 from emrg.sandbox.providers import win32 as provider
 from emrg.sandbox.win32 import ffi
+from emrg.sandbox.win32.ffi import SIDAndAttributes
 from emrg.sandbox.win32.runner import (
     RUNNER_SIGNATURE,
     RunnerFailure,
@@ -36,6 +39,7 @@ from emrg.sandbox.win32.runner import (
     run,
 )
 from emrg.sandbox.win32.sandbox import AclSandbox
+from emrg.sandbox.win32.token import TokenGroups, find_logon_sid, make_well_known_sid
 from emrg.sandbox.win32.sid import (
     assert_private_temp_disjoint,
     assert_temp_root_outside_workspace,
@@ -762,3 +766,171 @@ def test_probe_which_children_survive_the_restricted_token(tmp_path):
         "temp": tempfile.gettempdir(),
     }
     pytest.fail("PROBE TABLE (" + json.dumps(env) + ")\n" + "\n".join(rows))
+
+
+# ── the SIDs a restricted token is built from ─────────────────────────────
+#
+# These two are the ones the Windows CI mechanism test found: a port that returns
+# ``addressof(buffer)`` and lets the buffer die hands ``CreateRestrictedToken`` a
+# pointer into memory the interpreter has already given to the next allocation,
+# and every child then dies with STATUS_DLL_INIT_FAILED (0xC0000142) — which is
+# exactly what the blueprint documents for a restricting list that carries no
+# usable keep-alive group.  No macOS test can run the mechanism, so what is pinned
+# here is the property that failure came from.
+
+
+class _FakeSidApi:
+    """The two Advapi32 calls ``make_well_known_sid`` makes, and a SID blob."""
+
+    def __init__(self, blob: bytes = b"SIDBLOB!") -> None:
+        self.blob = blob
+        self.advapi32 = self
+
+    def CreateWellKnownSid(self, sid_type, domain, sid_ref, size_ref):
+        sid_ref._obj[0 : len(self.blob)] = self.blob
+        return 1
+
+    def IsValidSid(self, sid_ref):
+        sid_ref._obj[0 : len(self.blob)] = self.blob
+        return 1
+
+
+def test_a_well_known_sid_hands_back_the_buffer_that_owns_its_memory():
+    """The address and its owner travel together; a bare address is the defect.
+
+    ``ctypes`` memory belongs to the interpreter, so an address that nothing
+    references is memory the collector may reuse — and the allocation that reuses
+    it is the ``SID_AND_ATTRIBUTES`` array built a few lines later from these very
+    addresses.
+    """
+    handle = make_well_known_sid(_FakeSidApi(), 1)
+    assert ctypes.addressof(handle.buffer) == handle.address
+    assert ctypes.string_at(handle.address, 8) == b"SIDBLOB!"
+
+
+def test_the_sid_memory_survives_the_allocations_that_used_to_land_on_it():
+    """Kept alive by the handle, not by luck: the same bytes after a churn of peers."""
+    handle = make_well_known_sid(_FakeSidApi(), 1)
+    before = ctypes.string_at(handle.address, 8)
+    for _ in range(256):
+        ctypes.create_string_buffer(16)  # the size class of a SID_AND_ATTRIBUTES array
+        ctypes.create_string_buffer(68)  # SECURITY_MAX_SID_SIZE, the well-known SID's own
+    gc.collect()
+    assert ctypes.string_at(handle.address, 8) == before
+
+
+class _FakeTokenApi:
+    """``GetTokenInformation``/``GetLengthSid``/``CopySid`` over one fake logon group."""
+
+    def __init__(self, blob: bytes = b"LOGONSID") -> None:
+        self.blob = blob
+        self.sid_block = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
+        self.advapi32 = self
+
+    def GetTokenInformation(self, token, info_class, buffer, size, needed_ref):
+        """Answer the size probe and then the read, with one logon-SID group."""
+        groups_offset = TokenGroups.Groups.offset
+        needed = groups_offset + ctypes.sizeof(SIDAndAttributes)
+        needed_ref._obj.value = needed
+        if not buffer:
+            return 0  # the probe is *expected* to fail with ERROR_INSUFFICIENT_BUFFER
+        target = buffer._obj
+        ctypes.memset(ctypes.addressof(target), 0, needed)
+        ctypes.c_uint32.from_address(ctypes.addressof(target)).value = 1
+        entry = ctypes.addressof(target) + groups_offset
+        ctypes.c_void_p.from_address(entry).value = ctypes.addressof(self.sid_block)
+        ctypes.c_uint32.from_address(entry + SIDAndAttributes.Attributes.offset).value = 0xC0000000
+        return 1
+
+    def GetLengthSid(self, sid_ptr):
+        return len(self.blob)
+
+    def CopySid(self, length, destination_ref, sid_ptr):
+        destination_ref._obj[0:length] = ctypes.string_at(sid_ptr, length)
+        return 1
+
+
+def test_a_logon_sid_hands_back_the_buffer_that_owns_its_memory():
+    """The same defect, on the other SID — the one the blueprint calls the keep-alive group."""
+    handle = find_logon_sid(_FakeTokenApi(), 0)
+    assert ctypes.addressof(handle.buffer) == handle.address
+    assert ctypes.string_at(handle.address, 8) == b"LOGONSID"
+
+
+class _FakeAclApi(_FakeTokenApi, _FakeSidApi):
+    """One read-only ``init`` end to end: the two SID fakes above plus kernel32.
+
+    Both fakes install themselves as ``advapi32``, so their methods compose here —
+    and both read the same ``blob``, which is what lets this test recognize the
+    bytes the token was built from after the fact.
+    """
+
+    def __init__(self, blob: bytes = b"SIDBLOB!") -> None:
+        _FakeTokenApi.__init__(self, blob)
+        self.blob = blob
+        self.restricting_sids: list[int] = []
+        self.restricted_flags = 0
+        self.kernel32 = _FakeKernel32()
+
+    def OpenProcessToken(self, process, access, token_ref):
+        token_ref._obj.value = 0x7000  # a non-null handle is all the port reads
+        return 1
+
+    def CreateRestrictedToken(
+        self, token, flags, disabled_count, disabled, deleted_count, deleted, count, list_ref, out_ref
+    ):
+        """Record the restricting list, which is what the SID owners must outlive."""
+        self.restricted_flags = flags
+        entries = list_ref._obj
+        self.restricting_sids = [int(entries[index].Sid or 0) for index in range(count)]
+        out_ref._obj.value = 0xB0B
+        return 1
+
+
+class _FakeKernel32:
+    """The three kernel32 calls ``init``/``dispose`` make, and what they were handed."""
+
+    def __init__(self) -> None:
+        self.closed: list[int] = []
+        self.freed: list[int] = []
+
+    def GetCurrentProcess(self):
+        return 0x1
+
+    def CloseHandle(self, handle):
+        self.closed.append(int(getattr(handle, "value", handle) or 0))
+        return 1
+
+    def LocalFree(self, pointer):
+        self.freed.append(int(getattr(pointer, "value", pointer) or 0))
+        return 0
+
+
+def test_init_owns_every_sid_the_restricted_token_is_pointed_at(tmp_path, monkeypatch):
+    """The whole defect, at the site that had it: the sandbox keeps the buffers.
+
+    The helper tests above pin one function's return shape.  This one pins the
+    property the crash depends on — that after ``init`` every address in the
+    token's restricting list is inside memory this sandbox still references, so
+    ``CreateRestrictedToken`` cannot read a byte the interpreter has reused.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    api = _FakeAclApi()
+    granted_to: list[int] = []
+    monkeypatch.setattr(
+        "emrg.sandbox.win32.sandbox.set_token_default_dacl_grant",
+        lambda bindings, token, sid_ptr: granted_to.append(sid_ptr),
+    )
+    sandbox = AclSandbox(writable_dirs=[str(workspace)], temp_dir=None, mode="read-only")
+    sandbox.init(api=api)
+
+    owners = [ctypes.addressof(buffer) for buffer in sandbox._owned_sids]
+    assert api.restricting_sids == owners, "the restricting list must point inside buffers init kept"
+    assert [ctypes.string_at(address, 8) for address in owners] == [b"SIDBLOB!"] * len(owners)
+    assert granted_to == [api.restricting_sids[1]], "the default DACL takes the Everyone SID"
+    assert api.restricted_flags & 0x8, "WRITE_RESTRICTED is what makes the list mean anything"
+
+    sandbox.dispose()
+    assert api.kernel32.freed == [], "ctypes memory is released by dropping it, never by LocalFree"
+    assert len(api.kernel32.closed) == 2, "both the current and the restricted token are closed"

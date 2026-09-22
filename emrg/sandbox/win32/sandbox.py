@@ -149,7 +149,15 @@ class AclSandbox:
         self._write_sid_ptr: int | None = None
         self._temp_write_sid_ptr: int | None = None
         self._temp_dir: str | None = temp_dir if mode == "workspace-write" else None
-        self._sid_allocations: list[int] = []
+        #: Buffers this process owns, held for as long as the sandbox lives.
+        #:
+        #: The logon SID and the Everyone SID are ``ctypes`` buffers, so their
+        #: memory belongs to the interpreter and the *owner* is what has to be
+        #: kept: an address alone would be used by ``CreateRestrictedToken`` after
+        #: the collector had already handed those bytes to the next allocation.
+        #: They are released by dropping the reference — never by ``LocalFree``,
+        #: which is for the SIDs the OS allocated (``ConvertStringSidToSidW``).
+        self._owned_sids: list[ctypes.Array] = []
         self._granted: list[tuple[str, int]] = []
 
     @property
@@ -202,14 +210,14 @@ class AclSandbox:
                     grant_write(bindings, self._temp_dir, self._temp_write_sid_ptr)
 
             logon_sid = find_logon_sid(bindings, current_token)
-            self._sid_allocations.append(logon_sid)
+            self._owned_sids.append(logon_sid.buffer)
             world_sid = make_well_known_sid(bindings, abi.WIN_WORLD_SID)
-            self._sid_allocations.append(world_sid)
+            self._owned_sids.append(world_sid.buffer)
             write_sids = [
                 sid for sid in (self._write_sid_ptr, self._temp_write_sid_ptr) if sid is not None
             ]
             restricted_token = create_restricted_token(
-                bindings, current_token, logon_sid, write_sids, world_sid, self.mode
+                bindings, current_token, logon_sid.address, write_sids, world_sid.address, self.mode
             )
             self._token = restricted_token
             # The restricted token's default DACL still names only the user's
@@ -222,7 +230,7 @@ class AclSandbox:
             set_token_default_dacl_grant(
                 bindings,
                 restricted_token,
-                self._temp_write_sid_ptr or self._write_sid_ptr or world_sid,
+                self._temp_write_sid_ptr or self._write_sid_ptr or world_sid.address,
             )
             if int(bindings.kernel32.CloseHandle(ctypes.c_void_p(current_token))) == 0:
                 throw_last_error(bindings, "CloseHandle", "current process token")
@@ -249,12 +257,10 @@ class AclSandbox:
                     failures.append(exc)
             _free_sid_best_effort(bindings, self._write_sid_ptr, "workspace write SID", failures)
             _free_sid_best_effort(bindings, self._temp_write_sid_ptr, "temp write SID", failures)
-            for sid_ptr in self._sid_allocations:
-                _free_sid_best_effort(bindings, sid_ptr, "init SID allocation", failures)
+            self._owned_sids = []
             self._token = None
             self._write_sid_ptr = None
             self._temp_write_sid_ptr = None
-            self._sid_allocations = []
             self._granted = []
             if failures:
                 aggregate = RuntimeError(
@@ -293,9 +299,7 @@ class AclSandbox:
             except BaseException as exc:  # noqa: BLE001 - collected
                 failures.append(exc)
         self._granted = []
-        for sid_ptr in self._sid_allocations:
-            _free_sid_best_effort(api, sid_ptr, "init SID allocation", failures)
-        self._sid_allocations = []
+        self._owned_sids = []
         _free_sid_best_effort(api, self._write_sid_ptr, "workspace write SID", failures)
         _free_sid_best_effort(api, self._temp_write_sid_ptr, "temp write SID", failures)
         self._write_sid_ptr = None
