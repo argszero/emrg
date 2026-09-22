@@ -203,6 +203,14 @@ def test_guard_refuses_spawning_the_stop_or_restart_cli(tmp_path):
         [str(stubs / "nohup"), str(stubs / "emrg"), "server", "restart"],
         [str(stubs / "timeout"), "5", str(stubs / "emrg"), "server", "stop"],
         [str(stubs / "nice"), "-n", "5", str(stubs / "pkill"), "-f", "emrg.server"],
+        # `env -S <string>` splits its value into an argv and execs it: the act is
+        # *in the string*. The shell spelling of this row is below; this is the
+        # list-argv one, which the guard missed until cycle `cyc20260922-032844`
+        # (both readers read it now). Every program is still a stub — the string
+        # names the stub `emrg` by absolute path, so a regression spawns that stub
+        # and not the host's CLI.
+        [str(stubs / "env"), "-S", f"{stubs / 'emrg'} server stop"],
+        [str(stubs / "env"), "--split-string", "emrg server restart"],
     ):
         with pytest.raises(AssertionError, match="red-line violation"):
             subprocess.Popen(argv)
