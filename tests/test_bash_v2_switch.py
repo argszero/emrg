@@ -43,6 +43,18 @@ def _instantiate() -> EmrgServer:
     return server
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_switch(monkeypatch):
+    """The shell must not decide what a test here measures.
+
+    ``EMRG_BASH_TOOL_V2`` is the documented one-launch rollback, so a host
+    starting pytest with it set is doing the normal thing and would otherwise see
+    every default-reading test below fail while the product is correct.  The tests
+    that are *about* the variable set it themselves, after this fixture runs.
+    """
+    monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
+
+
 # ── the config seam ───────────────────────────────────────────────────────
 
 
