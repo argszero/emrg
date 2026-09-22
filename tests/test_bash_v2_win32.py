@@ -621,8 +621,57 @@ def _write_script(paths: list) -> str:
     return ";".join(f"open({str(path)!r}, 'w').write('x')" for path in paths)
 
 
+def _evidence(completed: subprocess.CompletedProcess) -> str:
+    """The facts a failure message needs when the child's streams may be dead.
+
+    A confined child that dies before it can print (a DLL-init failure, a refused
+    exec) reports nothing on either stream, so an assertion that quotes only
+    ``stderr`` says "the workspace grant did not hold" for a child that never ran.
+    The exit code survives that, and it is the first thing to read.
+    """
+    return (
+        f"exit={completed.returncode} stdout={completed.stdout!r} stderr={completed.stderr!r}"
+    )
+
+
 @needs_windows
-def test_a_workspace_write_run_writes_inside_and_is_refused_outside(tmp_path):
+def test_a_confined_child_runs_and_reports_its_own_exit_code(tmp_path):
+    """The spawn contract before the boundary: a child that cannot start proves nothing.
+
+    Exit codes travel without stdio, so this is the one fact the seam has even when
+    the child's streams are dead — and the reason this test exists separately from
+    the two below, whose assertions are about file effects.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    completed = _confined([sys.executable, "-c", "pass"], workspace, tmp_path, "read-only")
+    assert completed.returncode == 0, (
+        f"a confined child did not run to completion ({_evidence(completed)})"
+    )
+
+
+@needs_windows
+def test_a_confined_childs_stdio_reaches_the_seam(tmp_path):
+    """The runner's stdio is the child's stdio, byte for byte, on both streams.
+
+    Without this the two boundary tests below can only report "no output", which is
+    the same reading for a refused write and for a child that never started.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    completed = _confined(
+        [sys.executable, "-c", "import sys; print('out-marker'); sys.stderr.write('err-marker')"],
+        workspace,
+        tmp_path,
+        "read-only",
+    )
+    assert completed.returncode == 0, _evidence(completed)
+    assert completed.stdout.strip() == "out-marker", f"stdout did not reach the seam ({_evidence(completed)})"
+    assert completed.stderr.strip() == "err-marker", f"stderr did not reach the seam ({_evidence(completed)})"
+
+
+@needs_windows
+def test_a_workspace_write_run_inherits_the_capability_and_nothing_outside_it(tmp_path):
     """The capability, measured where it exists: the workspace ACE and nothing else.
 
     The outside directory is a sibling of the workspace under the pytest temp root,
@@ -637,14 +686,18 @@ def test_a_workspace_write_run_writes_inside_and_is_refused_outside(tmp_path):
     inside_file = workspace / "inside.txt"
     escaped = outside / "escaped.txt"
 
-    completed = _confined(
-        [sys.executable, "-c", _write_script([inside_file, escaped])], workspace, tmp_path, "workspace-write"
+    inherited = _confined(
+        [sys.executable, "-c", _write_script([inside_file])], workspace, tmp_path, "workspace-write"
     )
+    assert inherited.returncode == 0, f"the workspace grant did not hold ({_evidence(inherited)})"
+    assert inside_file.exists(), f"the workspace grant did not hold ({_evidence(inherited)})"
 
-    assert inside_file.exists(), f"the workspace grant did not hold:\n{completed.stderr}"
-    assert not escaped.exists(), f"the sandbox did not hold outside the workspace:\n{completed.stderr}"
-    assert completed.returncode != 0, "the refused write must not report success"
-    assert "denied" in completed.stderr.lower(), completed.stderr
+    refused = _confined(
+        [sys.executable, "-c", _write_script([escaped])], workspace, tmp_path, "workspace-write"
+    )
+    assert not escaped.exists(), f"the sandbox did not hold outside the workspace ({_evidence(refused)})"
+    assert refused.returncode != 0, f"the refusing child claimed success ({_evidence(refused)})"
+    assert "denied" in refused.stderr.lower(), refused.stderr
 
 
 @needs_windows
@@ -656,6 +709,6 @@ def test_a_read_only_run_is_refused_inside_the_workspace_too(tmp_path):
 
     completed = _confined([sys.executable, "-c", _write_script([target])], workspace, tmp_path, "read-only")
 
-    assert not target.exists(), f"read-only wrote into the workspace:\n{completed.stderr}"
-    assert completed.returncode != 0
-    assert "denied" in completed.stderr.lower(), completed.stderr
+    assert not target.exists(), f"read-only wrote into the workspace ({_evidence(completed)})"
+    assert completed.returncode != 0, f"the refusing child claimed success ({_evidence(completed)})"
+    assert "denied" in completed.stderr.lower(), _evidence(completed)
