@@ -19,6 +19,7 @@ import ctypes
 import gc
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -941,153 +942,176 @@ def test_init_owns_every_sid_the_restricted_token_is_pointed_at(tmp_path, monkey
     assert len(api.kernel32.closed) == 2, "both the current and the restricted token are closed"
 
 
-# ── TEMPORARY PROBE (round 4): why is a workspace write denied? ──────────
-# Delete this together with round 3's probe.  It asserts nothing by design: it
-# reports whether the capability ACE lands on the workspace, what the token's
-# default DACL carries for new objects, and what the child's own error is.
+# ── TEMPORARY PROBE (round 5): which of the two access checks fails? ─────
+# Delete this together with round 3's probe.  It asserts nothing by design.
+#
+# Round 4 showed the capability ACE landing correctly on the workspace (mask
+# 0x110156, OI|CI) yet every write denied, including one to an existing file,
+# so the restricting check is not the only gate: under WRITE_RESTRICTED Windows
+# checks the token's own SIDs first, and a filtered (LUA) token on an elevated
+# runner may hold none of the SIDs that own the directory.
 
 
-def _dacl_rows(api, acl_address, label):
-    """Every ACE in one ACL as (type, flags, mask, sid bytes)."""
-    from emrg.sandbox.win32.ffi import ACLStructure
+def _owner_bytes(api, path):
+    """The owner SID's raw bytes for one path."""
+    from emrg.sandbox.win32 import abi
+    from emrg.sandbox.win32.ffi import alloc_ptr_slot, decode_ptr, read_sid_bytes
 
-    header = ACLStructure.from_address(acl_address)
-    size = int(header.AclSize)
-    count = int(header.AceCount)
-    rows = [f"{label}: size={size} count={count}"]
-    offset = 8
-    for _ in range(count):
-        ace_size = int(ctypes.c_uint16.from_address(acl_address + offset + 2).value)
-        if ace_size < 8 or offset + ace_size > size:
-            rows.append(f"{label}: malformed ACE at {offset} (size {ace_size})")
-            break
-        raw = ctypes.string_at(acl_address + offset, ace_size)
-        rows.append(
-            f"{label}: type={raw[0]} flags={raw[1]:#04x} size={ace_size} "
-            f"mask={int.from_bytes(raw[4:8], 'little'):#010x} sid={raw[8:].hex()}"
-        )
-        offset += ace_size
-    return rows
+    owner = alloc_ptr_slot()
+    descriptor = alloc_ptr_slot()
+    result = int(api.advapi32.GetNamedSecurityInfoW(
+        path, abi.SE_FILE_OBJECT, abi.OWNER_SECURITY_INFORMATION,
+        ctypes.byref(owner), None, None, None, ctypes.byref(descriptor),
+    ))
+    if result != abi.ERROR_SUCCESS:
+        return f"GetNamedSecurityInfoW failed ({result})"
+    pointer = decode_ptr(owner)
+    return read_sid_bytes(api, pointer).hex() if pointer else "none"
+
+
+def _user_sid_bytes(api, token):
+    """The token's user SID bytes (TokenUser = 1)."""
+    from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_ptr, decode_uint32, read_sid_bytes
+
+    needed_slot = alloc_uint32()
+    api.advapi32.GetTokenInformation(ctypes.c_void_p(token), 1, None, 0, ctypes.byref(needed_slot))
+    needed = decode_uint32(needed_slot)
+    block = alloc_bytes(needed)
+    api.advapi32.GetTokenInformation(
+        ctypes.c_void_p(token), 1, ctypes.byref(block), needed, ctypes.byref(needed_slot)
+    )
+    sid = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(block)))
+    return read_sid_bytes(api, sid)
+
+
+def _spawn_write(api, token, path):
+    """Spawn a child that creates one file, and report whether it exists."""
+    from emrg.sandbox.win32.spawn import spawn_restricted
+
+    target = pathlib.Path(path)
+    if target.exists():
+        target.unlink()
+    child = spawn_restricted(api, token, [sys.executable, "-c", f"open(r'{path}', 'w').write('x')"])
+    try:
+        code = child.wait()
+    finally:
+        child.close()
+    return code, target.exists()
 
 
 @needs_windows
-def test_probe_the_workspace_ace_and_the_new_object_default_dacl(tmp_path):
-    """The ACE that should allow the write, and the child's own error code."""
-    import tempfile
-
+def test_probe_which_access_check_fails(tmp_path):
+    """The normal-SID check against the restricting check, one child each."""
+    from emrg.sandbox.win32 import abi
     from emrg.sandbox.win32 import ffi as ffi_module
-    from emrg.sandbox.win32.acl import read_current_dacl
-    from emrg.sandbox.win32.sandbox import _parse_sid
+    from emrg.sandbox.win32.acl import grant_write
+    from emrg.sandbox.win32.ffi import alloc_ptr_slot, decode_ptr, win32
+    from emrg.sandbox.win32.sandbox import AclSandbox
+    from emrg.sandbox.win32.sid import temp_write_sid, workspace_write_sid
+    from emrg.sandbox.win32.token import find_logon_sid, make_well_known_sid, open_current_process_token
 
     workspace = tmp_path / "ws"
     temp_root = tmp_path / "temp"
     workspace.mkdir()
     temp_root.mkdir()
-    private_temp = tempfile.mkdtemp(prefix="emrg-", dir=str(temp_root))
+    private_temp = temp_root / "private"
+    private_temp.mkdir()
     write_sid = workspace_write_sid(str(workspace))
-    temp_sid = temp_write_sid(private_temp)
+    temp_sid = temp_write_sid(str(private_temp))
 
-    api = ffi_module.win32()
-    sandbox = AclSandbox(
-        writable_dirs=[str(workspace)],
-        temp_dir=private_temp,
-        mode="workspace-write",
-        write_sid=write_sid,
-        temp_write_sid=temp_sid,
-    )
-    rows = [f"workspace={workspace}", f"private_temp={private_temp}", f"write_sid={write_sid}", f"temp_sid={temp_sid}"]
+    api = win32()
+    rows = []
+    current = open_current_process_token(api)
     try:
-        sandbox.init(api)
-        rows.append(f"init OK token={sandbox._token!r}")
-
-        current = read_current_dacl(api, str(workspace))
-        if current.old_acl is None:
-            rows.append("workspace DACL: none")
-        else:
-            rows.extend(_dacl_rows(api, current.old_acl, "workspace-DACL"))
-        current.release("probe")
-
-        current_temp = read_current_dacl(api, private_temp)
-        if current_temp.old_acl is None:
-            rows.append("temp DACL: none")
-        else:
-            rows.extend(_dacl_rows(api, current_temp.old_acl, "temp-DACL"))
-        current_temp.release("probe")
-
-        rows.append(f"write-sid bytes {ffi_module.read_sid_bytes(api, _parse_sid(api, write_sid)).hex()}")
-        rows.append(f"temp-sid bytes  {ffi_module.read_sid_bytes(api, _parse_sid(api, temp_sid)).hex()}")
-
-        # The token's default DACL: what every NEW object the child creates takes.
-        from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_ptr, decode_uint32
-
-        needed_slot = alloc_uint32()
-        api.advapi32.GetTokenInformation(
-            ctypes.c_void_p(sandbox._token), 6, None, 0, ctypes.byref(needed_slot)
+        rows.append(f"workspace owner {_owner_bytes(api, str(workspace))}")
+        rows.append(f"tmp_path owner  {_owner_bytes(api, str(tmp_path))}")
+        rows.append(f"ambient owner   {_owner_bytes(api, tempfile.gettempdir())}")
+        rows.append(f"process user    {_user_sid_bytes(api, current).hex()}")
+        logon = find_logon_sid(api, current)
+        world = make_well_known_sid(api, abi.WIN_WORLD_SID)
+        # The restricting list the mechanism builds.
+        write_pointer = None
+        sandbox = AclSandbox(
+            writable_dirs=[str(workspace)],
+            temp_dir=str(private_temp),
+            mode="workspace-write",
+            write_sid=write_sid,
+            temp_write_sid=temp_sid,
         )
-        needed = decode_uint32(needed_slot)
-        rows.append(f"default-DACL needed={needed}")
-        if needed:
-            block = alloc_bytes(needed)
-            api.advapi32.GetTokenInformation(
-                ctypes.c_void_p(sandbox._token), 6, ctypes.byref(block), needed, ctypes.byref(needed_slot)
-            )
-            default_acl = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(block)))
-            if default_acl:
-                rows.extend(_dacl_rows(api, default_acl, "default-DACL"))
-            else:
-                rows.append("default-DACL: null")
+        sandbox.init(api)
+        from emrg.sandbox.win32.sandbox import _parse_sid
 
-        # The children, through the runner (whose stdio is captured here).
-        cmd = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
-        (workspace / "existing.txt").write_text("seed")
-        scripts = {
-            "new-file": (
-                "try:\n"
-                f"    open(r'{workspace}\\new-file.txt', 'w').write('x')\n"
-                "    print('OK')\n"
-                "except OSError as exc:\n"
-                "    print('DENIED', getattr(exc, 'winerror', None), exc)\n"
+        write_pointer = _parse_sid(api, write_sid)
+
+        def mint(flags, sids):
+            entries = (ffi_module.SIDAndAttributes * len(sids))() if sids else None
+            for index, sid in enumerate(sids):
+                entries[index].Sid = ctypes.c_void_p(sid)
+                entries[index].Attributes = 0
+            slot = alloc_ptr_slot()
+            made = int(api.advapi32.CreateRestrictedToken(
+                ctypes.c_void_p(current),
+                flags,
+                0, None, 0, None,
+                len(sids), ctypes.byref(entries) if entries is not None else None,
+                ctypes.byref(slot),
+            ))
+            if made == 0:
+                return None, f"CreateRestrictedToken failed ({api.get_last_error()})"
+            return decode_ptr(slot), "OK"
+
+        lua_only = abi.DISABLE_MAX_PRIVILEGE | abi.LUA_TOKEN
+        variants = {
+            "lua-only / workspace": (lua_only, [], workspace / "lua-ws.txt"),
+            "lua-only / ambient-temp": (lua_only, [], pathlib.Path(tempfile.gettempdir()) / "lua-temp.txt"),
+            "lua-only / private-temp": (lua_only, [], private_temp / "lua-private.txt"),
+            "restricted / workspace": (
+                lua_only | abi.WRITE_RESTRICTED,
+                [logon.address, world.address, write_pointer],
+                workspace / "restricted-ws.txt",
             ),
-            "existing-file": (
-                f"p = r'{workspace}\\existing.txt'\n"
-                "try:\n"
-                "    open(p, 'a').write('x')\n"
-                "    print('OK')\n"
-                "except OSError as exc:\n"
-                "    print('DENIED', getattr(exc, 'winerror', None), exc)\n"
-            ),
-            "new-dir": (
-                f"p = r'{workspace}\\new-dir'\n"
-                "import os\n"
-                "try:\n"
-                "    os.mkdir(p)\n"
-                "    print('OK')\n"
-                "except OSError as exc:\n"
-                "    print('DENIED', getattr(exc, 'winerror', None), exc)\n"
+            "restricted / private-temp": (
+                lua_only | abi.WRITE_RESTRICTED,
+                [logon.address, world.address, write_pointer],
+                private_temp / "restricted-private.txt",
             ),
         }
-        for label, body in scripts.items():
-            completed = _confined(
-                [sys.executable, "-c", body], workspace, temp_root, "workspace-write"
-            )
-            rows.append(
-                f"child {label}: exit={completed.returncode} out={completed.stdout.strip()!r} "
-                f"err={completed.stderr.strip()[-200:]!r}"
-            )
-        completed = _confined(
-            [cmd, "/c", f"echo x > {workspace}\\cmd-file.txt"], workspace, temp_root, "workspace-write"
+        for label, (flags, sids, target) in variants.items():
+            token, note = mint(flags, sids)
+            if token is None:
+                rows.append(f"{label}: {note}")
+                continue
+            try:
+                code, created = _spawn_write(api, token, str(target))
+                rows.append(f"{label}: exit={code} created={created}")
+            finally:
+                api.kernel32.CloseHandle(ctypes.c_void_p(token))
+
+        # Same restricted token, but the directory also grants the caller's own SID.
+        user_sid_pointer = None
+        needed_slot_needed = None
+        token_user_block = None
+        from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_uint32
+
+        needed_slot_needed = alloc_uint32()
+        api.advapi32.GetTokenInformation(ctypes.c_void_p(current), 1, None, 0, ctypes.byref(needed_slot_needed))
+        token_user_block = alloc_bytes(decode_uint32(needed_slot_needed))
+        api.advapi32.GetTokenInformation(
+            ctypes.c_void_p(current), 1, ctypes.byref(token_user_block),
+            decode_uint32(needed_slot_needed), ctypes.byref(needed_slot_needed),
         )
-        rows.append(
-            f"child cmd-echo: exit={completed.returncode} out={completed.stdout.strip()!r} "
-            f"err={completed.stderr.strip()[-200:]!r} exists={(workspace / 'cmd-file.txt').exists()}"
+        user_sid_pointer = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(token_user_block)))
+        grant_write(api, str(workspace), user_sid_pointer)
+        token, note = mint(
+            lua_only | abi.WRITE_RESTRICTED, [logon.address, world.address, write_pointer]
         )
-        completed = _confined(
-            [sys.executable, "-c", "import os; print('TEMP', os.environ['TEMP'])"],
-            workspace,
-            temp_root,
-            "workspace-write",
-        )
-        rows.append(f"child temp-env: exit={completed.returncode} out={completed.stdout.strip()!r}")
-    finally:
+        if token is not None:
+            try:
+                code, created = _spawn_write(api, token, str(workspace / "user-granted.txt"))
+                rows.append(f"restricted / workspace+user-ACE: exit={code} created={created}")
+            finally:
+                api.kernel32.CloseHandle(ctypes.c_void_p(token))
         sandbox.dispose()
-    pytest.fail("PROBE TABLE (round 4)\n" + "\n".join(rows))
+    finally:
+        api.kernel32.CloseHandle(ctypes.c_void_p(current))
+    pytest.fail("PROBE TABLE (round 5)\n" + "\n".join(rows))
