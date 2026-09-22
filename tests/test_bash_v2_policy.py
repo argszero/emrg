@@ -161,7 +161,24 @@ def test_canonical_path_never_invents_a_path_for_a_missing_root():
     canonical = canonical_path(missing)
     assert os.path.basename(canonical) == "emrg-v2-does-not-exist-9f2c"
     assert canonical == os.path.join(canonical_path(tempfile.gettempdir()), "emrg-v2-does-not-exist-9f2c")
-    assert canonical_path("\0not a path") == "\0not a path"
+
+
+def test_canonical_path_returns_the_spelling_when_resolution_fails(monkeypatch):
+    """The documented fallback, tested where it is the *only* thing that happens.
+
+    ``realpath`` is tolerant by construction, so the refusal is rare and
+    platform-shaped — which is why this drives it directly instead of hunting for
+    a spelling that makes the host give up.  (A spelling that makes *POSIX* raise
+    is a NUL byte, but Windows merely prefixes the cwd for it, so a test built on
+    one would measure `ntpath.abspath` rather than this function's contract.)
+    """
+    spelling = "unresolvable\\path"
+
+    def _refuse(path):  # pragma: no cover - the raise IS the subject
+        raise OSError("cannot resolve")
+
+    monkeypatch.setattr(os.path, "realpath", _refuse)
+    assert canonical_path(spelling) == spelling
 
 
 def test_the_deleted_trusted_write_zone_is_not_carried_over_under_another_name():
