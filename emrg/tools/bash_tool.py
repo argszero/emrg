@@ -3330,6 +3330,25 @@ def _patch_write_targets(tokens: list[str], i: int) -> list[str]:
 # shell's own question can be asked *once*, before a verb spelling is believed: a
 # word that is a verb only in spelling, standing where the shell passes it as data,
 # is not an invocation and names no target (`_runs_as_a_command`).
+#
+# ⚠️ **Membership here is the price of *every* branch below, so a word the chain reads
+# must be added to it in the same change.** A branch is reached by the bare word
+# (`elif word == "zip":`, `elif word in _BROTLI_VERBS:`), and this set is the only thing
+# that asks whether that word really stands where a command begins — so a word in the
+# chain and not in this set is read as an invocation *wherever it stands*, including
+# where the shell passes it as data. Measured on master `398e2319`: `echo brotli -o
+# <outside>/f x`, `grep -rn brotli -o <outside>/f x` and `printf %s brotli -o
+# <outside>/f` each named `<outside>/f` and were **refused at both tiers** for a line
+# that writes nothing, while the same rows for `zip`/`pzstd` — which are here — were
+# allowed. The word was missed because the branches and this set are edited by hand and
+# separately: this set's last edit (`fcbe224c`, #1479, which introduced the guard) came
+# *before* the branch that reads `brotli` (#1528), and `zip` reached the literal set
+# below in the same change that added its branch while `brotli` did not.
+#
+# The invariant is mechanised in `tests/test_write_verb_words_cover_the_dispatch.py`:
+# every condition the chain tests `word` against must be a subset of this set, and every
+# word in the set must name nothing where the shell passes it as data — so a branch added
+# without its word fails there rather than on the host's later command.
 _WRITE_VERB_WORDS: frozenset[str] = frozenset().union(
     _REMOVER_VERBS,
     _CREATING_VERBS,
@@ -3339,6 +3358,7 @@ _WRITE_VERB_WORDS: frozenset[str] = frozenset().union(
     _COMPRESSOR_VERBS,
     _LZ4_VERBS,
     _PZSTD_VERBS,
+    _BROTLI_VERBS,
     _OPTION_DESTINATION_VERBS,
     {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip"},
 )

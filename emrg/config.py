@@ -127,9 +127,50 @@ class UpdateConfig:
 
 
 @dataclass
+class SandboxConfig:
+    """The ``[sandbox]`` section — which bash tool this instance runs.
+
+    ``bash_tool_v2`` is the parallel-period switch (design
+    ``bash-tool-v2-design.md`` D10).  Its default is the **old** tool on purpose:
+    while v2 is built beside the frozen file, the old tool keeps serving and keeps
+    receiving the parallel bash-word fixes, so moving to v2 must be a deliberate
+    act rather than a side effect.
+
+    Read **once at startup** by the daemon — unlike ``[llm]`` and ``[update]``
+    this key is not hot-reloaded, because it decides which executor is *built*
+    into the tool registry, and the registry is constructed once and read-only
+    after that (``emrg/tools/registry.py``).  The environment variable
+    ``EMRG_BASH_TOOL_V2`` overrides the file, so the host can try v2 in a session
+    without editing ``config.toml``.
+    """
+
+    bash_tool_v2: bool = False
+
+
+@dataclass
 class EmrgConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+
+
+#: Environment override for :attr:`SandboxConfig.bash_tool_v2`.
+ENV_BASH_TOOL_V2 = "EMRG_BASH_TOOL_V2"
+
+
+def _as_bool(raw: str, default: bool) -> bool:
+    """Read a truthy/falsy environment spelling, or fall back.
+
+    :param raw: the variable's text.
+    :param default: the value to keep when the text is neither.
+    :returns: the parsed flag.
+    """
+    lowered = raw.strip().lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    return default
 
 
 def config_dir() -> Path:
@@ -203,7 +244,42 @@ def load_config(path: Optional[Path] = None) -> EmrgConfig:
         delay_minutes=update_data.get("delay_minutes", 1440),
     )
 
-    return EmrgConfig(llm=llm, update=update)
+    return EmrgConfig(llm=llm, update=update, sandbox=_sandbox_from(data))
+
+
+def _sandbox_from(data: dict) -> SandboxConfig:
+    """Read the ``[sandbox]`` section out of a parsed config file.
+
+    :param data: the parsed TOML document.
+    :returns: the section's value, defaulting to the old bash tool.
+    """
+    section = data.get("sandbox", {})
+    if not isinstance(section, dict):
+        return SandboxConfig()
+    return SandboxConfig(bash_tool_v2=bool(section.get("bash_tool_v2", False)))
+
+
+def load_sandbox_config() -> SandboxConfig:
+    """Load only the ``[sandbox]`` section (design D10).
+
+    The daemon constructs its tool registry from this. Missing config file or
+    missing section → the default (the old bash tool), exactly as
+    :func:`load_update_config` tolerates both. The environment override is
+    applied **last**, so it wins over the file in both directions — including
+    turning v2 back off without editing ``config.toml``.
+    """
+    cfg = SandboxConfig()
+    cfg_path = config_path()
+    if cfg_path.exists():
+        try:
+            data = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            data = {}
+        cfg = _sandbox_from(data)
+    raw = os.environ.get(ENV_BASH_TOOL_V2)
+    if raw is not None:
+        cfg = SandboxConfig(bash_tool_v2=_as_bool(raw, cfg.bash_tool_v2))
+    return cfg
 
 
 def load_update_config() -> UpdateConfig:
