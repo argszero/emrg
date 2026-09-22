@@ -29,8 +29,14 @@ from emrg.sandbox.policy import (
     SandboxPolicy,
     resolve_policy,
 )
-from emrg.sandbox.providers import PLATFORM_CHAINS, select_runner, unconfined_mode
+from emrg.sandbox.providers import (
+    PLATFORM_CHAINS,
+    linux,
+    select_runner,
+    unconfined_mode,
+)
 from emrg.sandbox.providers.darwin import SEATBELT_EXEC, seatbelt_profile_args
+from emrg.sandbox.providers.linux import bwrap_profile_args
 from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.tools import bash_tool
 
@@ -258,15 +264,102 @@ def test_danger_full_access_is_short_circuited_before_any_provider():
     assert unconfined_mode("read-only", platform_name="darwin") is None
 
 
-def test_linux_reports_no_boundary_rather_than_one_it_cannot_honour():
-    """Host-authorised deviation D4 (2026-09-21 18:29): the Linux chain has no artifact yet.
+def test_linux_selects_its_sole_rung_without_a_probe():
+    """P3: the linux chain is ``bwrap`` alone, and the deviation D4 is gone.
 
-    The honest report is that Linux has no boundary at all — a falsified
-    ``enforcement`` field is worse than an absent one.  Exit condition: P3 lands
-    and this test is deleted with the arm it pins.
+    The blueprint's linux chain is ``['bwrap', 'landlock']`` and probes exist
+    only to arbitrate between candidates; the landlock launcher is still a
+    missing artifact (blueprint §1.5 B1), so this chain has one rung and is
+    selected the way darwin's is.  Two halves, because either can go wrong
+    alone: the chain must carry the rung, and the rung must be *usable* as a
+    runner — a chain that named a backend which cannot confine anything would
+    read as coverage while failing closed on every real command.
+
+    D4 ("run unconfined and report ``danger-full-access`` on linux") is deleted
+    by its own exit condition, and this asserts its absence: a linux host
+    without ``bwrap`` must fail closed rather than run bare.
     """
-    assert unconfined_mode("workspace-write", platform_name="linux") == DANGER_FULL_ACCESS
-    assert "linux" not in PLATFORM_CHAINS
+    assert [runner.name for runner in PLATFORM_CHAINS["linux"]] == ["bwrap"]
+    assert select_runner("read-only", platform_name="linux") is linux.BWRAP
+    assert unconfined_mode("workspace-write", platform_name="linux") is None
+    assert unconfined_mode("read-only", platform_name="linux") is None
+    # The blueprint's own short-circuit still stands on every platform.
+    assert unconfined_mode(DANGER_FULL_ACCESS, platform_name="linux") == DANGER_FULL_ACCESS
+
+
+def test_linux_reaches_the_seam_instead_of_being_answered_first():
+    """The half D4 used to answer: this platform is now confined like any other.
+
+    Under D4 the consumer returned before ``confine()`` was called, so the seam
+    never saw a linux policy.  Now it does, and the wrapping is the same shape
+    darwin gets: the runner, its profile, the trailing ``--`` and the caller's
+    exact argv.  The *fail-closed* half of "a host without bwrap" cannot be
+    asserted here — ``confine`` builds an argv and spawns nothing — so it lives
+    one layer out, in ``test_bash_v2_boundary.py``, where a real spawn is refused.
+    """
+    confined = confine(
+        ["bash", "-c", "true"],
+        SandboxPolicy(mode="read-only", workspace_root=ABSOLUTE_ROOT),
+        platform_name="linux",
+    )
+    assert confined.argv[0] == linux.BWRAP_BIN
+    assert "bwrap" in confined.argv[0]
+    assert confined.argv[-4:] == ["--", "bash", "-c", "true"]
+    assert confined.enforcement == "full"
+    assert confined.denial_signatures == linux.DENIAL_SIGNATURES
+
+
+def test_linux_profile_is_the_blueprint_mount_table(tmp_path):
+    """The mount profile, argument for argument, from ``profiles.ts::bwrapProfileArgs``.
+
+    Pinned as a *sequence* rather than a set: the order carries meaning here —
+    ``--tmpfs /tmp`` before ``--bind <workspace>`` is what keeps a workspace
+    living under ``/tmp`` writable (measured in the container, 2026-09-22: the
+    mount added last wins).
+    """
+    workspace = str(tmp_path)
+    read_only = bwrap_profile_args(SandboxPolicy(mode="read-only", workspace_root=workspace))
+    assert read_only == [
+        "--ro-bind", "/", "/",
+        "--dev", "/dev",
+        "--unshare-pid",
+        "--proc", "/proc",
+        "--die-with-parent",
+    ], "read-only is the bare profile: no writable mount at all"
+
+    writable = bwrap_profile_args(SandboxPolicy(mode="workspace-write", workspace_root=workspace))
+    assert writable == read_only + ["--tmpfs", "/tmp", "--bind", workspace, workspace]
+
+    # Not the Seatbelt grant list: a mount namespace can give the sandbox its
+    # own /tmp, and the blueprint does.  A drift to "grant the host's /tmp"
+    # would be invisible in the profile above without this assertion.
+    assert "--tmpfs" in writable and writable.count("/tmp") == 1
+
+
+def test_the_linux_tables_are_the_blueprints_rows():
+    """Enforcement, denial dialect and runner-failure rule for this rung.
+
+    Each row is the one ``sandbox-local/src/index.ts`` carries for ``bwrap``:
+    ``full`` (the profile is the mount table, so the claim is a profile fact),
+    the EROFS string the kernel raises against the read-only mount, and a
+    signature-only failure rule — ``bwrap`` exits 1 on its own fatal paths, but
+    so does any command that fails, so an exit status here would misread a
+    confined command's own failure as "the command never ran".
+    """
+    assert linux.ENFORCEMENT == "full"
+    assert linux.DENIAL_SIGNATURES == ("read-only file system",)
+    assert len(linux.RUNNER_FAILURE_RULES) == 1
+    rule = linux.RUNNER_FAILURE_RULES[0]
+    assert rule.fatal_signatures == ("bwrap: ",)
+    assert rule.allowed_exit_codes is None, "an exit status is not evidence here (see docstring)"
+    assert linux.BWRAP.runner_argv is linux.runner_argv
+
+
+def test_the_linux_runner_argv_prepends_the_program(tmp_path):
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
+    argv = linux.runner_argv(policy)
+    assert argv[0] == linux.BWRAP_BIN
+    assert argv[1:] == bwrap_profile_args(policy)
 
 
 # ── darwin profile ────────────────────────────────────────────────────────

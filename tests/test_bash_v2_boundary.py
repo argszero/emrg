@@ -18,16 +18,24 @@ temp root* — outside ``/tmp`` and outside ``tempfile.gettempdir()``, so it lie
 outside every root a ``workspace-write`` policy grants.  That is what stops a
 test from passing on the temp grant while believing it proved the workspace
 grant.
+
+The boundary half is per-backend and skips where its backend is absent: the
+darwin tests need ``sandbox-exec``, and the linux tests (P3) need a ``bwrap``
+that can really create a namespace — the container recipe beside them is the
+environment this repository measured them in.
 """
 
 import asyncio
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+import emrg.sandbox.providers.linux as linux_provider
 
 from emrg.sandbox.contract import SandboxUnavailableError, sandbox_denial_marker
 from emrg.sandbox.policy import SandboxPolicy
@@ -369,19 +377,142 @@ def test_a_bare_command_with_no_tier_is_not_confined():
 
 
 @needs_a_shell
-def test_linux_reports_an_unconfined_run_rather_than_a_boundary_it_lacks():
-    """Host-authorised deviation D4: the Linux chain has no artifact yet."""
-    result = asyncio.run(
-        run_command(
-            "echo linux",
-            policy=SandboxPolicy(mode="workspace-write", workspace_root=os.getcwd()),
-            workdir=os.getcwd(),
-            timeout=30.0,
-            platform_name="linux",
+def test_linux_refuses_instead_of_running_bare_when_its_runner_is_missing(tmp_path, monkeypatch):
+    """P3's end-to-end half, and the assertion that D4 is really gone.
+
+    Deviation D4 used to answer this platform *before* any provider was
+    consulted: ``unconfined_mode("workspace-write", platform_name="linux")``
+    returned ``danger-full-access`` and the command ran bare.  Now the platform
+    has a rung, so the seam is consulted, the spawn fails on a runner that is
+    not there, and the run is refused — the same refusal darwin gives.
+
+    It runs on every platform (that is the point): the runner is removed from
+    ``PATH`` by patching the program name, so nothing here needs Linux or
+    bubblewrap to be installed.
+    """
+    import emrg.sandbox.providers.linux as linux_provider
+
+    monkeypatch.setattr(linux_provider, "BWRAP_BIN", "emrg-no-such-runner-anywhere")
+    sentinel = tmp_path / "must-not-exist"
+    with pytest.raises(SandboxUnavailableError) as excinfo:
+        asyncio.run(
+            run_command(
+                f"touch {sentinel}",
+                policy=SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path)),
+                workdir=str(tmp_path),
+                timeout=30.0,
+                platform_name="linux",
+            )
         )
-    )
-    assert result.exit_code == 0
-    assert "enforcement" not in result.sandbox
+    assert excinfo.value.code == "SANDBOX_UNAVAILABLE"
+    assert not sentinel.exists(), "a linux host with no runner must fail closed, never run bare"
+
+
+# ── the boundary itself (linux only) ──────────────────────────────────────
+#
+# Measured in this repository's own container recipe (2026-09-22), which is the
+# only environment available here that can create a user namespace:
+#
+#   docker run --rm -v "$PWD:/src:ro" \
+#     --security-opt seccomp=unconfined --security-opt apparmor=unconfined --cap-add SYS_ADMIN \
+#     debian:bookworm-slim bash -c 'apt-get update -qq && apt-get install -y -qq python3 python3-pip git bubblewrap
+#       cp -a /src /work && cd /work && pip install --break-system-packages -e . pytest
+#       python3 -m pytest tests/test_bash_v2_boundary.py -q'
+#
+# All three security options are needed: with only ``seccomp=unconfined`` the
+# AppArmor profile refuses ``mount --make-rslave /`` and ``bwrap`` dies with
+# ``Failed to make / slave: Permission denied`` **before** it reaches the profile
+# — a red suite that says nothing about this code (measured).
+
+
+def _bwrap_problem() -> str | None:
+    """Why this host cannot run the linux boundary tests, or ``None`` if it can.
+
+    Presence is not usability: ``bwrap`` that exists but cannot create a
+    namespace (a locked-down container) would make these tests fail for a reason
+    that is not a defect, so usability is *measured* with the same profile shape
+    the provider builds.
+    """
+    program = shutil.which(linux_provider.BWRAP_BIN)
+    if program is None:
+        return "bubblewrap (bwrap) is not installed"
+    try:
+        probe = subprocess.run(
+            [program, "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc", "--", "true"],
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"bwrap could not be probed: {exc}"
+    if probe.returncode != 0:
+        detail = probe.stderr.decode("utf-8", "replace").strip().splitlines()
+        return f"bwrap cannot create a namespace here: {detail[0] if detail else 'no stderr'}"
+    return None
+
+
+_BWRAP_PROBLEM = _bwrap_problem()
+
+needs_bwrap = pytest.mark.skipif(
+    _BWRAP_PROBLEM is not None,
+    reason=(
+        f"the real linux boundary needs a usable bwrap: {_BWRAP_PROBLEM} "
+        "(the container recipe in this section's comment is the measured environment)"
+    ),
+)
+
+
+@needs_bwrap
+def test_bwrap_lets_a_command_write_inside_the_workspace(boundary):
+    """The ``--bind`` mount, proven where the temp grant cannot reach."""
+    result = boundary.run("echo hi > inside.txt && cat inside.txt")
+    assert (result.exit_code, result.stderr) == (0, "")
+    assert result.stdout == "hi"
+    assert (boundary.workspace / "inside.txt").read_text().strip() == "hi"
+    assert result.sandbox == {"mode": "workspace-write", "denied": False, "enforcement": "full"}
+
+
+@needs_bwrap
+def test_bwrap_refuses_an_interpreter_write_outside_the_workspace(boundary):
+    """The same interpreter hole the old scan could not close, refused by the kernel."""
+    target = boundary.outside / "escaped.txt"
+    script = f"open({str(target)!r}, 'w').write('escaped')"
+    result = boundary.run(f"{sys.executable} -c {_shell_quote(script)}")
+    assert result.exit_code not in (0, None), "an escaping write must not report success"
+    assert not target.exists(), "the sandbox did not hold"
+    assert result.sandbox["denied"] is True
+    assert "read-only file system" in result.stderr.lower()
+    assert sandbox_denial_marker("workspace-write") in render_result(result)
+
+
+@needs_bwrap
+def test_bwrap_reads_outside_the_workspace_and_refuses_a_write_inside_it_read_only(boundary):
+    """``--ro-bind / /`` is the whole read-only tier: readable everywhere, writable nowhere."""
+    read = boundary.run("cat /etc/hosts")
+    assert (read.exit_code, read.stderr) == (0, "")
+
+    target = boundary.workspace / "forbidden.txt"
+    refused = boundary.run(f"echo nope > {target}", mode="read-only")
+    assert refused.exit_code not in (0, None)
+    assert not target.exists()
+    assert refused.sandbox == {"mode": "read-only", "denied": True, "enforcement": "full"}
+
+
+@needs_bwrap
+def test_bwrap_gives_the_sandbox_a_private_tmp(boundary):
+    """The linux profile's difference from Seatbelt, measured: ``/tmp`` is a fresh tmpfs.
+
+    A profile can only allow or deny, so the darwin backend grants the host's
+    ``/tmp``; a mount namespace can do better, and the blueprint's bwrap profile
+    does.  What makes this assertion worth having is the *outside* half: the file
+    the confined command writes to ``/tmp`` must not exist on the host
+    afterwards — a grant would leave it there.
+    """
+    probe = Path(tempfile.gettempdir()) / f"emrg-v2-bwrap-tmp-{os.getpid()}"
+    assert not probe.exists()
+    result = boundary.run(f"echo private > {probe} && cat {probe}")
+    assert (result.exit_code, result.stderr) == (0, "")
+    assert result.stdout == "private"
+    assert not probe.exists(), "the sandbox's /tmp leaked into the host's"
 
 
 def test_the_decoder_never_raises_on_bytes_it_cannot_decode():
