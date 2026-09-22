@@ -712,3 +712,53 @@ def test_a_read_only_run_is_refused_inside_the_workspace_too(tmp_path):
     assert not target.exists(), f"read-only wrote into the workspace ({_evidence(completed)})"
     assert completed.returncode != 0, f"the refusing child claimed success ({_evidence(completed)})"
     assert "denied" in completed.stderr.lower(), _evidence(completed)
+
+
+# ── TEMPORARY PROBE (round 3): which children survive the restricted token ──
+# Delete this once the answer is in hand.  It asserts nothing by design; it
+# reports a table, and the table is the reason the round exists.
+
+
+@needs_windows
+def test_probe_which_children_survive_the_restricted_token(tmp_path):
+    """The exit code 0xC0000142 says "DLL initialization failed" and nothing more."""
+    import shutil
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    cmd = os.path.join(system_root, "System32", "cmd.exe")
+    where = shutil.which("where")
+    interpreter = sys.executable
+
+    rows = []
+    candidates = {
+        "venv-python-pass": [interpreter, "-c", "pass"],
+        "venv-python-print": [interpreter, "-c", "print('py-stdout')"],
+        "cmd-exit7": [cmd, "/c", "exit 7"],
+        "cmd-echo": [cmd, "/c", "echo cmd-stdout"],
+        "where": [where, "cmd"] if where else None,
+    }
+    for label, argv in candidates.items():
+        if argv is None:
+            rows.append(f"{label:20s} SKIPPED (not found)")
+            continue
+        confined = _confined(argv, workspace, tmp_path, "read-only")
+        rows.append(
+            f"{label:20s} exit={confined.returncode!r} out={confined.stdout.strip()[:40]!r} "
+            f"err={confined.stderr.strip()[:60]!r}"
+        )
+    # The same children, unconfined: separates "this environment cannot run them"
+    # from "the restricted token cannot".
+    for label, argv in (("cmd-exit7-bare", [cmd, "/c", "exit 7"]), ("cmd-echo-bare", [cmd, "/c", "echo cmd-stdout"])):
+        bare = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        rows.append(f"{label:20s} exit={bare.returncode!r} out={bare.stdout.strip()[:40]!r} err={bare.stderr.strip()[:60]!r}")
+
+    env = {
+        "SESSIONNAME": os.environ.get("SESSIONNAME"),
+        "USERNAME": os.environ.get("USERNAME"),
+        "cwd": os.getcwd(),
+        "interpreter": interpreter,
+        "temp": tempfile.gettempdir(),
+    }
+    pytest.fail("PROBE TABLE (" + json.dumps(env) + ")\n" + "\n".join(rows))
