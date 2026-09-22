@@ -158,6 +158,15 @@ _CONSOLE_DECODE_ALLOWED = {
         "exemption is live through the locale-codec rule, not the text-mode rule; "
         "covered by tests/test_bash_tool.py"
     ),
+    "emrg/tools/bash_tool_v2.py": (
+        "The parallel successor, with the same subject and therefore the same "
+        "reason: it runs commands the user asks for, and a Windows console program "
+        "among them speaks the console code page while git/gh speak UTF-8 (rant "
+        "2026-08-08T09:35:30). This entry exists only for the parallel period - at "
+        "P7 the old file is deleted and this one inherits the exemption above it "
+        "rather than adding a second one. Its own tests pin the decoder both ways: "
+        "tests/test_bash_v2_boundary.py, tests/test_bash_v2_policy.py"
+    ),
 }
 
 # Child programs whose stdout really is the Windows console code page, so a
@@ -521,9 +530,11 @@ def test_no_locale_codec_is_used_to_decode_subprocess_output() -> None:
     Rule one catches the *implicit* form (`subprocess.run(..., text=True)` with no
     `encoding=`). This catches the explicit one: a name like
     `locale.getpreferredencoding()` in a file that runs subprocesses is the same
-    policy written out loud. Only `emrg/tools/bash_tool.py` is allowed it, because
-    its subject really is the Windows console code page; the exemption is tied to
-    the file by `_CONSOLE_DECODE_ALLOWED`, and the dead-entry test fails if the
+    policy written out loud. Only the two `bash` executors are allowed it, because
+    their subject really is the Windows console code page - they run whatever the
+    user asked for, and `cmd.exe`/`dir` answer in the console code page; the
+    exemption is tied to the file by `_CONSOLE_DECODE_ALLOWED`, and the dead-entry
+    test fails if the
     usage disappears.
     """
     violations: list[str] = []
