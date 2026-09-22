@@ -130,21 +130,23 @@ class UpdateConfig:
 class SandboxConfig:
     """The ``[sandbox]`` section — which bash tool this instance runs.
 
-    ``bash_tool_v2`` is the parallel-period switch (design
-    ``bash-tool-v2-design.md`` D10).  Its default is the **old** tool on purpose:
-    while v2 is built beside the frozen file, the old tool keeps serving and keeps
-    receiving the parallel bash-word fixes, so moving to v2 must be a deliberate
-    act rather than a side effect.
+    ``bash_tool_v2`` chooses between the two executors that answer to the tool
+    name ``bash`` (design ``bash-tool-v2-design.md`` D10).  Its default is now
+    **the new one**: the boundary it enforces is the OS process boundary rather
+    than a static scan of the command text, which is the whole point of the
+    programme, and a boundary that is off by default is not the one being
+    measured in production.  ``False`` keeps the frozen tool and remains the
+    rollback: one line here, or ``EMRG_BASH_TOOL_V2=0`` for a single launch.
 
     Read **once at startup** by the daemon — unlike ``[llm]`` and ``[update]``
     this key is not hot-reloaded, because it decides which executor is *built*
     into the tool registry, and the registry is constructed once and read-only
     after that (``emrg/tools/registry.py``).  The environment variable
-    ``EMRG_BASH_TOOL_V2`` overrides the file, so the host can try v2 in a session
-    without editing ``config.toml``.
+    ``EMRG_BASH_TOOL_V2`` overrides the file in both directions, so the host can
+    try either executor in a session without editing ``config.toml``.
     """
 
-    bash_tool_v2: bool = False
+    bash_tool_v2: bool = True
 
 
 @dataclass
@@ -251,22 +253,22 @@ def _sandbox_from(data: dict) -> SandboxConfig:
     """Read the ``[sandbox]`` section out of a parsed config file.
 
     :param data: the parsed TOML document.
-    :returns: the section's value, defaulting to the old bash tool.
+    :returns: the section's value, defaulting to the new bash tool.
     """
     section = data.get("sandbox", {})
     if not isinstance(section, dict):
         return SandboxConfig()
-    return SandboxConfig(bash_tool_v2=bool(section.get("bash_tool_v2", False)))
+    return SandboxConfig(bash_tool_v2=bool(section.get("bash_tool_v2", True)))
 
 
 def load_sandbox_config() -> SandboxConfig:
     """Load only the ``[sandbox]`` section (design D10).
 
     The daemon constructs its tool registry from this. Missing config file or
-    missing section → the default (the old bash tool), exactly as
+    missing section → the default (the new bash tool), exactly as
     :func:`load_update_config` tolerates both. The environment override is
     applied **last**, so it wins over the file in both directions — including
-    turning v2 back off without editing ``config.toml``.
+    the rollback to the frozen tool without editing ``config.toml``.
     """
     cfg = SandboxConfig()
     cfg_path = config_path()

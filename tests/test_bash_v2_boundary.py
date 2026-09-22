@@ -259,6 +259,97 @@ def test_the_package_does_not_import_the_frozen_tool():
     assert offenders == []
 
 
+# ── what the confined child's environment gets ────────────────────────────
+#
+# The mode's other half: granting a boundary that a package manager cannot work
+# inside is not usable, and the fix must not be a wider boundary.  These tests
+# pin the two properties that keep it honest — the relocated directory lies
+# inside what the policy already grants, and a deployer's own declaration wins.
+
+
+def test_the_caches_of_a_confined_run_are_relocated_into_a_granted_root():
+    """The relocation widens nothing: it points caches at a root the policy grants.
+
+    Both the measured breaks (``uv`` fails, ``npm``'s default is unwritable) and
+    the quiet one (``pip`` disables its cache) come from the tool's default cache
+    living under ``$HOME``, which a confined run cannot write.  The answer is to
+    move the cache, never the boundary — so this asserts containment against
+    ``writable_roots``, the same derivation the Seatbelt profile is built from.
+    """
+    from emrg.sandbox.roots import writable_roots
+    from emrg.tools.bash_tool_v2 import _CACHE_ENV, confined_env
+
+    policy = SandboxPolicy(mode="workspace-write", workspace_root="/tmp")
+    granted = writable_roots(policy)
+    env = confined_env(policy)
+
+    assert set(env) == set(_CACHE_ENV), "every cache variable the module names, and only those"
+    for name, value in env.items():
+        assert any(Path(value).is_relative_to(root) for root in granted), (
+            f"{name}={value} is outside every root the policy grants ({granted})"
+        )
+
+
+def test_a_read_only_run_relocates_nothing():
+    """No writable root, no cache to point anywhere: the mode is the whole answer."""
+    from emrg.tools.bash_tool_v2 import confined_env
+
+    assert confined_env(SandboxPolicy(mode="read-only", workspace_root="/tmp")) == {}
+
+
+def test_the_deployer_declared_cache_wins(monkeypatch):
+    """A warm cache the deployer put somewhere stays reachable.
+
+    The variable is set in the child's environment only when the environment does
+    not already name one, so this is "the deployer's declaration wins", not "the
+    sandbox knows better".
+    """
+    from emrg.tools.bash_tool_v2 import confined_env
+
+    monkeypatch.setenv("UV_CACHE_DIR", "/the/deployers/cache")
+    policy = SandboxPolicy(mode="workspace-write", workspace_root="/tmp")
+    env = confined_env(policy)
+    assert "UV_CACHE_DIR" not in env
+    assert "PIP_CACHE_DIR" in env, "the others are still relocated"
+
+
+def test_the_unconfined_path_relocates_nothing(monkeypatch):
+    """``danger-full-access`` runs bare, so its caches belong where they always were."""
+    import emrg.tools.bash_tool_v2 as v2
+
+    seen: dict = {}
+
+    async def fake_spawn(*argv, **kwargs):
+        seen.update(kwargs)
+        raise AssertionError("stop here: the environment is the subject")
+
+    monkeypatch.setattr(v2.asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    policy = SandboxPolicy(mode="danger-full-access", workspace_root="/tmp")
+    try:
+        asyncio.run(v2.run_command("echo hi", policy=policy, workdir="/tmp", timeout=5.0))
+    except AssertionError:
+        pass
+    assert "UV_CACHE_DIR" not in seen["env"], "nothing was confined, so nothing was relocated"
+
+
+@needs_seatbelt
+def test_a_confined_command_really_sees_the_relocated_cache(boundary):
+    """The end-to-end half: the variable is in the child's environment, not just planned.
+
+    Without it the measured ``uv`` failure stands — ``uv run`` exits with
+    "Failed to initialize cache" — so this is the difference between a boundary
+    that is correct and one that is usable.
+    """
+    from emrg.sandbox.roots import writable_roots
+
+    result = boundary.run('echo "$UV_CACHE_DIR" && mkdir -p "$UV_CACHE_DIR" && echo cache-writable')
+    assert result.exit_code == 0, result.stderr
+    relocated = result.stdout.splitlines()[0]
+    assert any(Path(relocated).is_relative_to(root) for root in writable_roots(boundary.policy("workspace-write")))
+    assert "cache-writable" in result.stdout
+
+
 # ── the boundary itself (darwin only) ─────────────────────────────────────
 
 
