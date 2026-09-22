@@ -490,3 +490,84 @@ def test_a_backticked_writer_is_seen_by_the_write_target_walk():
     assert _reads("echo `date`") is True
 
 
+
+
+# ── a runner's `run` sub-command ──────────────────────────────────────────
+#
+# `uv run <cmd>` is how this repo runs its own tools (`uv run pytest tests/ -v`
+# is in Agent.md), and the `run` word stands exactly where a flag's *value*
+# stands — so the value-skip above never looked past it, and the command after
+# it read as an argument. Measured on master `6126273d`, one workdir, nothing
+# executed: `uv run git checkout .`, `uv run --no-sync git checkout .`, `uv run
+# -q git reset --hard` and `poetry run git checkout .` all answered ALLOW at
+# read-only and named **no** mutator, while `git checkout .` beside them was
+# refused. The whole git rule was one prefix away, and the prefix is the one the
+# tree's own instructions use.
+#
+# Both halves are asserted, as everywhere in this file: a mention of the shape —
+# `echo uv run git checkout .`, a runner name inside a grep pattern — is data and
+# stays allowed.
+RUNNERS = ["uv", "poetry", "pdm", "hatch", "pipenv", "rye"]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+@pytest.mark.parametrize("mutator", MUTATORS)
+def test_a_runner_prefix_hides_a_mutator(runner, mutator):
+    assert _reads(f"{runner} run {mutator}") is False, f"{runner} run {mutator}"
+    assert _reads(f"{runner} run --no-sync {mutator}") is False
+
+
+def test_a_runners_own_flags_do_not_hide_the_mutator():
+    """`uv --quiet run …` and `uv run -q …`: the flags are the runner's, not walls."""
+    assert _reads("uv --quiet run git checkout .") is False
+    assert _reads("uv run -q git reset --hard") is False
+    assert _reads("timeout 60 uv run git checkout .") is False
+    assert _reads("cd /tmp && uv run git checkout .") is False
+    assert _reads("if uv run git stash drop; then :; fi") is False
+
+
+def test_a_runner_name_used_as_data_stays_allowed():
+    """Where the runner is not itself in command position, the shape is a string.
+
+    The runner rule asks `_runs_as_a_command` about the *runner*, rather than
+    treating the pair as always-an-invocation: `echo uv run git checkout .`
+    prints its arguments, and `grep -rn 'uv run git checkout' .` searches for the
+    text. Widening this to every mention would be the #1513 over-block one level
+    out (`echo sh "patch /etc/hosts"` was a bug, not a safe refusal).
+    """
+    for cmd in (
+        "echo uv run git checkout .",
+        "printf %s uv run git checkout .",
+        "grep -rn 'uv run git checkout' .",
+        "git log --grep run uv",
+    ):
+        assert _reads(cmd) is True, cmd
+        assert _extract_write_targets(cmd) == [], cmd
+
+
+def test_a_script_runner_is_not_a_runner():
+    """`npm run`/`yarn run`/`pnpm run` take a *script name*, not an argv.
+
+    `yarn run git checkout .` asks yarn for a script called `git`, so reading it
+    as an invocation of git would refuse ordinary JS tooling — the over-block this
+    file keeps out. The measured cost of the opposite choice is stated here rather
+    than left to be rediscovered.
+    """
+    for cmd in (
+        "yarn run git checkout .",
+        "npm run git checkout .",
+        "pnpm run git checkout .",
+    ):
+        assert _reads(cmd) is True, cmd
+
+
+def test_a_runner_does_not_hide_a_read():
+    """The complement at the same site: a runner around a read stays allowed."""
+    for cmd in (
+        "uv run pytest tests/ -q",
+        "uv run --no-sync python3 scripts/check-doc-count.py --measure",
+        "uv run git status",
+        "uv run git log --oneline -3",
+        "uv run grep git .",
+    ):
+        assert _reads(cmd) is True, cmd

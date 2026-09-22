@@ -1284,6 +1284,28 @@ _COMMAND_WRAPPERS = frozenset({
     "env", "sudo", "doas", "xargs", "nohup", "time", "timeout", "nice",
     "setsid", "stdbuf", "command", "exec", "ionice", "chrt", "watch",
 })
+# Runners that exec the word after their `run` sub-command: `uv run <cmd>` (how
+# this repo runs its own tools), `poetry run`, `pdm run`, `hatch run`,
+# `pipenv run`, `rye run`. They are **not** in `_COMMAND_WRAPPERS`, because the
+# command is not the first word after the runner — `run` stands where a flag's
+# *value* stands, so the generic value-skip above stops on it and the command
+# after it read as an argument. Measured on master `6126273d` through
+# `_check_sandbox` at read-only, one workdir, nothing executed: `uv run git
+# checkout .` (and `poetry run git checkout .`, `uv run git clean -fd`, `uv run
+# git reset --hard`, `uv run git push origin master`) all answered ALLOW and
+# named no mutator, while `git checkout .` beside them was refused — the whole
+# git rule, one prefix away. `uv run` is the spelling in this repo's own
+# instructions (`uv run pytest tests/ -v`), which is what makes it a route
+# rather than a curiosity.
+#
+# `npm run`, `yarn run` and `pnpm run` are deliberately NOT here: their argument
+# is a *script name* in `package.json`, so `yarn run git checkout .` asks yarn
+# for a script called `git`, and reading it as an invocation would refuse
+# ordinary JS tooling — the over-block direction this file keeps out.
+_RUNNER_WORDS = frozenset({"uv", "poetry", "pdm", "hatch", "pipenv", "rye"})
+#: The sub-command word between a runner and the command it runs.
+_RUNNER_SUBCOMMAND_WORDS = frozenset({"run"})
+
 # `FOO=1 git checkout .` — the shell strips leading assignments and runs the
 # rest, so an assignment is a prefix, not a command.
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -4988,6 +5010,22 @@ def _runs_as_a_command(tokens: list[str], i: int) -> bool:
         if _basename(tok) in _COMMAND_WRAPPERS:
             # The candidate is this wrapper's command argument.
             return True
+        if _basename(tok) in _RUNNER_SUBCOMMAND_WORDS:
+            # `<runner> run <candidate …>`: the runner execs a command word after
+            # its `run` sub-command, so the candidate is that word. The runner
+            # itself has to be in command position for this to be an invocation
+            # — `echo uv run git checkout .` prints a string, and asking the same
+            # walk about the `uv` keeps that allowed rather than widening the
+            # rule to every mention of a runner name.
+            k = j - 1
+            while k >= 0 and tokens[k].startswith("-"):
+                k -= 1
+            if (
+                k >= 0
+                and _basename(tokens[k]) in _RUNNER_WORDS
+                and _runs_as_a_command(tokens, k)
+            ):
+                return True
         if tok.startswith("-"):
             j -= 1
             continue
