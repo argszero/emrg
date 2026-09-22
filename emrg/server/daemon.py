@@ -40,6 +40,7 @@ from emrg.config import (
     LlmConfig,
     config_dir,
     find_model_entry,
+    load_sandbox_config,
     load_update_config,
     resolve_model_vision,
 )
@@ -141,6 +142,7 @@ def _redact(value):
 
 from emrg.tools import ToolRegistry
 from emrg.tools.bash_tool import BashTool
+from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools.read_tool import ReadTool
 from emrg.tools.write_tool import WriteTool
 from emrg.tools.edit_tool import EditTool
@@ -287,6 +289,12 @@ class EmrgServer:
         # `[update]` section and falls back to defaults, so a server built
         # without the file (every unit test) is unaffected.
         self._update_config = load_update_config()
+        # Which bash tool this instance runs (design D10). Read once here: the
+        # registry below is built once and read-only afterwards, so the switch is
+        # a startup value rather than a hot-reloaded one — its default is the old
+        # tool, which keeps receiving the parallel bash-word fixes while v2 is
+        # built beside it.
+        self._sandbox_config = load_sandbox_config()
         # Hot-reload state + policy (rant 2026-09-17T16:52:57). Constructed
         # here so `_reload_config_once()` has its decision object even in a
         # server that never entered `_run()` (tests drive single revisions);
@@ -361,7 +369,11 @@ class EmrgServer:
 
         # Build tool registry
         self.tools = ToolRegistry()
-        self.tools.register(BashTool())
+        # Both executors answer to the name `bash` (the model-visible contract is
+        # the dialect, so they cannot coexist under two names), and the registry
+        # indexes by name — which is why exactly one is built, chosen by the
+        # `[sandbox] bash_tool_v2` switch (design D10).
+        self.tools.register(BashToolV2() if self._sandbox_config.bash_tool_v2 else BashTool())
         self.tools.register(ReadTool())
         self.tools.register(WriteTool())
         self.tools.register(EditTool())
@@ -2755,6 +2767,49 @@ class EmrgServer:
                         "session_id": session_id,
                     })
 
+    @staticmethod
+    def _inject_tool_arguments(tc_name: str, args: dict, session, req: TaskRequest) -> None:
+        """Inject the parts of a tool call the model must not choose.
+
+        Two rules, and both exist because the value decides a boundary rather
+        than a preference:
+
+        * **the session's cwd is where a filesystem tool works.** Injected
+          unconditionally, exactly as ``write``/``edit`` receive ``workspace``,
+          so the value a command runs in and the value it may write under are one
+          identity rather than two (host ruling 2026-09-21 16:46). It used to be
+          injected only when the model had not supplied ``workdir`` — and with
+          that ``and "workdir" not in args`` the model could name the root it was
+          trusted in: measured, ``workdir=/Users/<host>`` plus a write to
+          ``.zshrc`` was allowed, because the whole home directory became "the
+          workspace" (design §2.4). A sandbox that takes its authorization root
+          from the agent is not a sandbox, so this is one ``and`` fixing the root
+          cause rather than a new concept.
+        * **the sandbox tier is the task's, not the agent's** (rant
+          2026-08-20T15:46:50). ``write``/``edit`` also receive it, together with
+          the workspace boundary, so that under read-only they cannot clobber the
+          host's uncommitted tree (community issue #979).
+
+        ``workspace`` is a new key for ``bash`` and the old executor ignores it
+        (it reads ``command``/``timeout``/``workdir``/``sandbox`` only), so the
+        injection reaches v2 without moving the old tool's behaviour (design
+        D10). Both bash keys are supplied when a tier is configured, and the
+        session cwd is supplied regardless.
+
+        :param tc_name: the tool the model called.
+        :param args: the call's arguments, updated in place.
+        :param session: the session the call belongs to (its ``cwd`` is the value).
+        :param req: the request carrying the task's configured tier.
+        """
+        cwd = str(session.cwd)
+        if tc_name in ("bash", "glob"):
+            args["workdir"] = cwd
+        elif tc_name == "grep" and "path" not in args:
+            args["path"] = cwd
+        if tc_name in ("bash", "write", "edit") and req.sandbox:
+            args["sandbox"] = req.sandbox
+            args["workspace"] = cwd
+
     async def _run_tool_loop(
         self, req: TaskRequest, ws, session: Session,
         cancel_event: asyncio.Event | None = None,
@@ -3195,23 +3250,8 @@ class EmrgServer:
                         "intent": args.get("intent") or "",
                     })
 
-                    # Inject session cwd as default for filesystem tools
-                    if tc_name in ("bash", "glob") and "workdir" not in args:
-                        args["workdir"] = str(session.cwd)
-                    elif tc_name == "grep" and "path" not in args:
-                        args["path"] = str(session.cwd)
-
-                    # Sandbox tier (rant 2026-08-20T15:46:50): the task's
-                    # configured sandbox is injected into the bash tool — the
-                    # agent cannot choose it per call.
-                    if tc_name == "bash" and req.sandbox:
-                        args["sandbox"] = req.sandbox
-                    # write/edit get the tier + workspace boundary too
-                    # (community issue #979): under read-only the tools must
-                    # not clobber the host's tree — workspace = session cwd.
-                    elif tc_name in ("write", "edit") and req.sandbox:
-                        args["sandbox"] = req.sandbox
-                        args["workspace"] = str(session.cwd)
+                    # The pieces of a call the model must not choose (D1).
+                    self._inject_tool_arguments(tc_name, args, session, req)
 
                     # Execute
                     tool = self.tools.get(tc_name)
