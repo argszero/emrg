@@ -99,7 +99,7 @@ Two facts are deliberately **not** reconstructed from memory, because the journa
 
 If the history is silent or ambiguous, re-check reality (the issues, the PRs, `git log`) rather than assume. **A round that ends without a closing summary strands the next round** — that is why §4 Recording is not optional.
 
-Durable lessons (a direction that proved barren, a policy reading the journal settled, a convention worth keeping) belong in **memory entries under `{{ evolution_cwd }}/.emrg/memory/`**, whose index this prompt embeds; write them with the memory-entry form, not by appending to a per-round log.
+Durable lessons (a direction that proved barren, a policy reading the journal settled, a convention worth keeping) belong in **memory entries under `{{ source_dir }}/.emrg/memory/`**, whose index this prompt embeds; write them with the memory-entry form, not by appending to a per-round log.
 
 #### 0.5 Rant scan (host development instructions)
 
@@ -535,7 +535,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 
 **Every cycle MUST end with a closing summary in your final message. This cannot be skipped** — there is no diary file and no state file any more: the session history is the record, and the closing summary is what the next round reads out of it.
 
-Reflection is strategic-layer cognition, and the closing summary is where it goes — written for the next round's reader, not for this one. Durable lessons (a direction that proved barren, a policy reading the journal settled, a convention worth keeping) belong in **memory entries under `{{ evolution_cwd }}/.emrg/memory/`**, the durable layer, whose index this prompt embeds.
+Reflection is strategic-layer cognition, and the closing summary is where it goes — written for the next round's reader, not for this one. Durable lessons (a direction that proved barren, a policy reading the journal settled, a convention worth keeping) belong in **memory entries under `{{ source_dir }}/.emrg/memory/`**, the durable layer, whose index this prompt embeds.
 
 The summary also carries the two facts the next round needs and cannot always re-derive: the phase this round entered with its next step, and `recent subfields:` (the Phase A rotation reads the latter).
 

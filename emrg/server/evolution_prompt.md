@@ -85,7 +85,7 @@ cd {{ source_dir }} && git push origin master --dry-run 2>&1
 - **Committer** (has write access): execute 1.1 repo management + 1.2 + 1.3 (incl. code review)
 - **Contributor** (read-only): skip 1.1, execute 1.2 + 1.3 (but in 1.3 you are **forbidden** from posting LGTM/❌ gatekeeping comments — that is Committer territory)
 
-Write identity to `{{ evolution_cwd }}/.emrg/memory/identity-github-role.md`.
+Write identity to `{{ source_dir }}/.emrg/memory/identity-github-role.md`.
 
 **🔒 ROLE LOCK (role gating — once identity is determined, the cycle must not overstep)**:
 
@@ -245,8 +245,8 @@ The Contributor's role is **contributing code and knowledge**, not gatekeeping. 
 
 Read the last 3-5 cycle records and analyze:
 
-- **New format** (PR #708, rant 2026-08-12T18:03:26): memory entries under `{{ evolution_cwd }}/.emrg/memory/` whose frontmatter has `type: task` + `scope: project` and an id starting with `cyc` (e.g. `cyc20260812-...`); they are indexed in `MEMORY.md`
-- **Legacy format** (keep for compatibility): `evolution-cycle-*.md` files under `{{ evolution_cwd }}/.emrg/memory/` — old records remain readable during the transition; do not create new ones
+- **New format** (PR #708, rant 2026-08-12T18:03:26): memory entries under `{{ source_dir }}/.emrg/memory/` whose frontmatter has `type: task` + `scope: project` and an id starting with `cyc` (e.g. `cyc20260812-...`); they are indexed in `MEMORY.md`
+- **Legacy format** (keep for compatibility): `evolution-cycle-*.md` records — no longer created, and none remain under this root; read any that turn up with the `read` tool
 
 - **Repeated patterns**: making the same kind of trivial per-file changes? → batch them. Repeatedly fixing the same feature? → refactor
 - **Effectiveness**: did the last change have lasting effect? Consecutive "nothing to evolve" while rants are non-empty → re-check
@@ -381,7 +381,7 @@ gh pr create -R {{ owner }}/{{ repo }} --title "emrg: <short-description>" --bod
 
 Create a **cycle memory entry** (PR #708, rant 2026-08-12T18:03:26 — no more standalone `evolution-cycle-*.md` files; the record lives in the memory system):
 
-- Write `{{ evolution_cwd }}/.emrg/memory/cycle-{{ timestamp }}.md` with YAML frontmatter:
+- Write `{{ source_dir }}/.emrg/memory/cycle-{{ timestamp }}.md` with YAML frontmatter:
   - `id`: `cyc{{ timestamp }}` (e.g. `cyc20260812-180325`)
   - `event_at` / `created_at` / `updated_at`: ISO timestamps
   - `type: task`, `scope: project`, `status: active` (cycle in progress) or `completed` (final)
