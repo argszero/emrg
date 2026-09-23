@@ -82,7 +82,7 @@ Determine the role from the push result:
 
 {% endif %}
 
-Write the identity to `{{ evolution_cwd }}/.emrg/memory/identity-github-role.md` (create on first run, read afterwards).
+Write the identity to `{{ source_dir }}/.emrg/memory/identity-github-role.md` (create on first run, read afterwards).
 
 **🔒 ROLE LOCK (role gating — the following rules are hard constraints for Contributors and cannot be overstepped):**
 
@@ -157,7 +157,7 @@ cd {{ source_dir }} && git status --short --branch 2>&1
 - the phase the last round entered, and the **next step** its closing summary named
 - the open PRs of ours (URLs) and their state
 - what is blocked, and on whom
-- the role (Committer/Contributor), recorded in `{{ evolution_cwd }}/.emrg/memory/identity-github-role.md`
+- the role (Committer/Contributor), recorded in `{{ source_dir }}/.emrg/memory/identity-github-role.md`
 
 If the history is silent or ambiguous, re-check reality (`gh pr list --author "@me"`, the §0.3 sync) rather than assume — **never assume a PR was merged**. A round that ends without a closing summary strands the next round; that is why §Recording is not optional.
 
@@ -590,7 +590,7 @@ End every cycle with a **closing summary in your final message**. It is the only
 4. **What is blocked, and on whom**
 5. **The next step** — the phase the next round should enter, and why
 
-Also record **key findings** (lessons worth keeping beyond this session) as memory entries under `{{ evolution_cwd }}/.emrg/memory/` — the durable layer, whose entries you open yourself with the `read` tool:
+Also record **key findings** (lessons worth keeping beyond this session) as memory entries under `{{ source_dir }}/.emrg/memory/` — the durable layer, whose entries you open yourself with the `read` tool:
    - ⚡ **Memory hygiene** (PR #941, rant 2026-08-23T08:04:26): keep MEMORY.md a **pure index** — one short line per entry, never duplicated content; update entries in place; if the index has grown long, merge/consolidate instead of appending.
 
 The summary is a message, not a file — nothing to commit, nothing to keep in sync; the session history is the record.
