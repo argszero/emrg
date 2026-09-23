@@ -143,6 +143,12 @@ def _redact(value):
 from emrg.tools import ToolRegistry
 from emrg.tools.bash_tool import BashTool
 from emrg.tools.bash_tool_v2 import BashToolV2
+from emrg.tools.pwsh_tool_v2 import PwshToolV2
+from emrg.tools.shell_dialects import (
+    SHELL_TOOL_NAME_WINDOWS,
+    SHELL_TOOL_NAMES,
+    shell_tool_name,
+)
 from emrg.tools.read_tool import ReadTool
 from emrg.tools.write_tool import WriteTool
 from emrg.tools.edit_tool import EditTool
@@ -252,6 +258,47 @@ def _create_fixed_port_socket(port: int) -> _socket.socket:
         except OSError:
             pass
         raise
+
+
+def build_shell_tool(
+    sandbox_config: Optional[SandboxConfig] = None,
+    platform_name: str | None = None,
+):
+    """Build the one shell tool this platform mounts (design §14.5 item 4).
+
+    The composition step itself: the roster (which names exist, and which one a
+    platform gets) is :mod:`emrg.tools.shell_dialects` so that every reader —
+    the argument injection below, the TUI, the guards — reads one definition;
+    *which class to build* is this daemon's decision, and it stays where the
+    registry is built.
+
+    Three cases, and the third is the rollback the documentation promises:
+
+    * **Windows, v2 family on** (the default) → :class:`PwshToolV2`, the
+      PowerShell dialect with its own executable-resolution chain.
+    * **POSIX, v2 on** → :class:`BashToolV2`, the bash dialect at the same
+      boundary.
+    * **v2 off** → :class:`BashTool`, the frozen tool, on every platform.  On
+      Windows it runs ``cmd.exe`` via ``COMSPEC`` (``bash_tool.py:33``), which
+      is why it still works there and why ``bash_tool_v2 = false`` remains a
+      working rollback until P7 deletes it.  After P7 the Windows roster is the
+      blueprint's: ``pwsh`` and nothing else.
+
+    Only one is ever built: the registry indexes by name, so two shell tools
+    would be two behaviours for one intent — the drift the parallel period
+    exists to prevent.
+
+    :param sandbox_config: the ``[sandbox]`` section; a missing one means the
+        defaults (v2 on, no configured PowerShell path).
+    :param platform_name: the platform to decide for; defaults to the host's.
+    :returns: the tool executor to register.
+    """
+    config = sandbox_config or SandboxConfig()
+    if not config.bash_tool_v2:
+        return BashTool()
+    if shell_tool_name(platform_name) == SHELL_TOOL_NAME_WINDOWS:
+        return PwshToolV2(pwsh_path=config.pwsh_path or None)
+    return BashToolV2()
 
 
 class EmrgServer:
@@ -369,11 +416,12 @@ class EmrgServer:
 
         # Build tool registry
         self.tools = ToolRegistry()
-        # Both executors answer to the name `bash` (the model-visible contract is
-        # the dialect, so they cannot coexist under two names), and the registry
-        # indexes by name — which is why exactly one is built, chosen by the
-        # `[sandbox] bash_tool_v2` switch (design D10).
-        self.tools.register(BashToolV2() if self._sandbox_config.bash_tool_v2 else BashTool())
+        # Which shell this platform mounts — and, on POSIX, which of the two
+        # executors answers to the name `bash`.  The gate is composition data
+        # rather than a runtime branch (design §14.2 layer 6): Windows has no
+        # `bash` tool row at all, so "bash is not found" is not representable
+        # there.  See `build_shell_tool` for the three cases.
+        self.tools.register(build_shell_tool(self._sandbox_config))
         self.tools.register(ReadTool())
         self.tools.register(WriteTool())
         self.tools.register(EditTool())
@@ -1621,6 +1669,20 @@ class EmrgServer:
             "slowdown_reason": str(data.get("slowdown_reason", ""))[:300],
         }
 
+    def _mounted_shell_tool_name(self) -> str:
+        """The name of the shell tool this daemon registered.
+
+        Exactly one dialect is ever mounted (the registry indexes by name, so a
+        second would silently overwrite the first), which makes this a lookup of
+        one and not a choice. The platform gate is the fallback for the window
+        before the registry exists — and it is only a fallback: what the prompt
+        must name is the tool the model will actually call.
+        """
+        for name in sorted(SHELL_TOOL_NAMES):
+            if self.tools.get(name) is not None:
+                return name
+        return shell_tool_name()
+
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt via Jinja2 template.
 
@@ -1636,6 +1698,16 @@ class EmrgServer:
         # byte-stable within a session (system prompt = static sections only).
         ctx["os_name"] = platform.system()
         ctx["platform_detail"] = platform.platform()
+        # The shell dialect this daemon actually mounted. Rendered into the
+        # prompt so it cannot advertise a tool the platform does not have —
+        # which is what happened on Windows: the prompt said "use the bash
+        # tool" while the tool it meant spawned an executable that is not
+        # there (design §14.5 item 6, the accident itself). Read from the
+        # registry rather than re-derived from the platform, because the two
+        # can legitimately differ: `[sandbox] bash_tool_v2 = false` on Windows
+        # mounts the old cmd.exe tool, whose name is `bash`, and the prompt
+        # must say what is mounted, not what the gate would have chosen.
+        ctx["shell_tool"] = self._mounted_shell_tool_name()
         # Global config dir (~/.emrg) — injected so system.j2 can reference the
         # cross-project sessions index and other global data files by path.
         ctx["config_dir"] = str(config_dir())
@@ -2790,11 +2862,18 @@ class EmrgServer:
           the workspace boundary, so that under read-only they cannot clobber the
           host's uncommitted tree (community issue #979).
 
-        ``workspace`` is a new key for ``bash`` and the old executor ignores it
-        (it reads ``command``/``timeout``/``workdir``/``sandbox`` only), so the
-        injection reaches v2 without moving the old tool's behaviour (design
-        D10). Both bash keys are supplied when a tier is configured, and the
-        session cwd is supplied regardless.
+        ``workspace`` is a new key for the shell tools and the old executor
+        ignores it (it reads ``command``/``timeout``/``workdir``/``sandbox``
+        only), so the injection reaches v2 without moving the old tool's
+        behaviour (design D10). Both shell keys are supplied when a tier is
+        configured, and the session cwd is supplied regardless.
+
+        Both dialects are named here because there is one fact, not two: the
+        session cwd is the run's cwd and its boundary on Windows exactly as on
+        POSIX (design §14.5 item 5; the blueprint resolves the same value from
+        ``session.header.cwd``). The list is built from the same constants the
+        platform gate reads, so a dialect that gets mounted cannot be missed
+        here — the shape that produced this phase's accident.
 
         :param tc_name: the tool the model called.
         :param args: the call's arguments, updated in place.
@@ -2802,11 +2881,11 @@ class EmrgServer:
         :param req: the request carrying the task's configured tier.
         """
         cwd = str(session.cwd)
-        if tc_name in ("bash", "glob"):
+        if tc_name in SHELL_TOOL_NAMES or tc_name == "glob":
             args["workdir"] = cwd
         elif tc_name == "grep" and "path" not in args:
             args["path"] = cwd
-        if tc_name in ("bash", "write", "edit") and req.sandbox:
+        if tc_name in SHELL_TOOL_NAMES | {"write", "edit"} and req.sandbox:
             args["sandbox"] = req.sandbox
             args["workspace"] = cwd
 

@@ -20,6 +20,21 @@ export const MAX_WIDTH_RATIO = 0.45;
 export const LS_WIDTH = "emrg.resultPanel.panelWidth";
 export const LS_COLLAPSED = "emrg.resultPanel.collapsed";
 
+/**
+ * 两种 shell 方言的工具名（EMRG 的 shell 名册，Python 侧唯一定义在
+ * `emrg/tools/shell_dialects.py::SHELL_TOOL_NAMES`，本文件是跨语言边界的另一端）。
+ *
+ * 渲染器是 TypeScript，无法 import 那个 Python 常量，所以这里是一份**声明式副本**：
+ * 门控在装配期决定平台挂哪一个（Windows 只有 `pwsh`，POSIX 只有 `bash`），
+ * 但两者的**渲染必须同款**——方言是工具的身份，不是版式差异。
+ *
+ * 为什么不能写死 `"bash"`：Windows 上 `bash` 这一行根本不存在，
+ * 写死则 `pwsh` 的输出路径提取与文案都落空（事故根因见设计 §14）。
+ * 本文件与 `copywriting`/`i18n-dicts` 的对应关系由
+ * `resultPanel.test.ts` 的守卫钉住：名册里每个名字都必须有词条。
+ */
+export const SHELL_TOOL_NAMES: readonly string[] = ["bash", "pwsh"];
+
 // ── 类型 ──
 export type TabId = "files" | "artifacts" | `file:${string}`;
 
@@ -101,7 +116,7 @@ export function extractFilePath(toolName: string, content: string): string {
     if (km) return cleanPath(km[1]);
     return "";
   }
-  if (toolName === "bash") {
+  if (SHELL_TOOL_NAMES.includes(toolName)) {
     const m = content.match(/(?:Created|created|Generated|generated)[^\n:：]*[:：]\s*([^\s\n]+)/);
     if (m) return cleanPath(m[1]);
   }

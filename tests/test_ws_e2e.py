@@ -23,6 +23,15 @@ from emrg.config import LlmConfig, load_config
 from emrg.connect import connect_to_server
 from emrg.server.config_reload import ConfigReloader
 from emrg.server.tool_types import ToolResult
+from emrg.tools.shell_dialects import shell_tool_name
+
+#: The shell tool this host's daemon mounts. A fake model that wants to run a
+#: command must name the dialect that is actually registered — Windows mounts
+#: ``pwsh`` and has no ``bash`` tool row at all (``emrg/tools/shell_dialects.py``).
+#: Spelling ``"bash"`` in a fake tool call meant that, on Windows, the call named
+#: a tool that does not exist and the test silently measured "unknown tool"
+#: instead of the dispatch it was written to measure.
+_SHELL = shell_tool_name()
 
 
 def _make_config() -> LlmConfig:
@@ -56,7 +65,7 @@ def _make_fake_chat_stream():
                 "content": None,
                 "tool_calls": [{
                     "index": 0, "id": "call_1",
-                    "function": {"name": "bash", "arguments": '{"command":"echo hi"}'},
+                    "function": {"name": _SHELL, "arguments": '{"command":"echo hi"}'},
                 }],
                 "finish_reason": "tool_calls", "usage": None,
             }
@@ -676,7 +685,7 @@ class TestWSProtocol:
                                 "content": None,
                                 "tool_calls": [{
                                     "index": 0, "id": "call_i1",
-                                    "function": {"name": "bash",
+                                    "function": {"name": _SHELL,
                                                  "arguments": '{"command": "echo intent-ok", "intent": "验证 intent 日志"}',
                                                  },
                                 }],
@@ -687,14 +696,21 @@ class TestWSProtocol:
                                    "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 
                     server.llm.chat_stream = fake_chat_stream
-                    # Capture what the real BashTool executor receives.
-                    orig_bash_execute = server.tools.get("bash").execute
+                    # Capture what the real shell executor receives. The tool is
+                    # named by asking the daemon which dialect it mounted — the
+                    # dialect is a platform decision (Windows mounts `pwsh`;
+                    # `emrg/tools/shell_dialects.py`), and this test is about the
+                    # `intent` argument surviving to the executor, which is the
+                    # same fact in either dialect. Spelling `"bash"` here made the
+                    # test assert the platform and return None on Windows.
+                    shell_tool_name = server._mounted_shell_tool_name()
+                    orig_bash_execute = server.tools.get(shell_tool_name).execute
 
                     async def spy_execute(arguments):
                         seen_args["executed"] = dict(arguments)
                         return await orig_bash_execute(arguments)
 
-                    server.tools.get("bash").execute = spy_execute
+                    server.tools.get(shell_tool_name).execute = spy_execute
 
                     ws = await connect_to_server()
                     try:
@@ -1670,19 +1686,24 @@ class TestWSQueueInjection:
                     seen = {"round2_user_texts": None, "round2_tools": None,
                             "t_inject_seen": None, "t_tool_end": None}
 
-                    class _SlowBash:
+                    # Keyed on the mounted dialect, not on "bash": the stub must
+                    # answer for the tool the fake model actually called. Naming
+                    # bash here left the real (fast) tool in place on Windows, so
+                    # the test would have measured a turn that was already over —
+                    # the defect its own docstring warns about.
+                    class _SlowShell:
                         async def execute(self, args):
                             await asyncio.sleep(0.6)
                             seen["t_tool_end"] = loop.time()
-                            return ToolResult(tool_call_id="call_1", name="bash",
+                            return ToolResult(tool_call_id="call_1", name=_SHELL,
                                               content="hi", error=False)
 
                         def definition(self):
                             from emrg.server.tool_types import ToolDefinition
-                            return ToolDefinition(name="bash")
+                            return ToolDefinition(name=_SHELL)
 
                     orig_get = server.tools.get
-                    server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)
+                    server.tools.get = lambda name: _SlowShell() if name == _SHELL else orig_get(name)
 
                     async def chat_stream(messages, tools=None):
                         user_texts = [m.get("content") for m in messages
@@ -1698,7 +1719,7 @@ class TestWSQueueInjection:
                                "finish_reason": None, "usage": None}
                         yield {"content": None, "tool_calls": [{
                             "index": 0, "id": "call_1",
-                            "function": {"name": "bash",
+                            "function": {"name": _SHELL,
                                          "arguments": '{"command":"echo hi"}'},
                         }], "finish_reason": "tool_calls", "usage": None}
                     server.llm.chat_stream = chat_stream
@@ -1759,18 +1780,20 @@ class TestWSQueueInjection:
                     loop = asyncio.get_running_loop()
                     seen = {"tools": "unset"}
 
-                    class _SlowBash:
+                    # Same reason as the mid-turn stub above: _SHELL is the tool
+                    # the fake model calls, so it is the one to slow down.
+                    class _SlowShell:
                         async def execute(self, args):
                             await asyncio.sleep(0.5)
-                            return ToolResult(tool_call_id="call_1", name="bash",
+                            return ToolResult(tool_call_id="call_1", name=_SHELL,
                                               content="hi", error=False)
 
                         def definition(self):
                             from emrg.server.tool_types import ToolDefinition
-                            return ToolDefinition(name="bash")
+                            return ToolDefinition(name=_SHELL)
 
                     orig_get = server.tools.get
-                    server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)
+                    server.tools.get = lambda name: _SlowShell() if name == _SHELL else orig_get(name)
 
                     async def chat_stream(messages, tools=None):
                         user_texts = [m.get("content") for m in messages
@@ -1782,7 +1805,7 @@ class TestWSQueueInjection:
                             return
                         yield {"content": None, "tool_calls": [{
                             "index": 0, "id": "call_1",
-                            "function": {"name": "bash",
+                            "function": {"name": _SHELL,
                                          "arguments": '{"command":"echo hi"}'},
                         }], "finish_reason": "tool_calls", "usage": None}
                     server.llm.chat_stream = chat_stream

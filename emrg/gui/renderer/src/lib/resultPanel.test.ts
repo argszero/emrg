@@ -18,6 +18,7 @@ import {
   openFileTab,
   persistCollapsed,
   persistWidth,
+  SHELL_TOOL_NAMES,
   storedCollapsed,
   storedWidth,
   tabIdFor,
@@ -120,6 +121,16 @@ describe("extractFilePath", () => {
 
   it("bash 带 Created 关键词", () => {
     expect(extractFilePath("bash", "Created: /tmp/out.txt\n")).toBe("/tmp/out.txt");
+  });
+
+  // Windows 上挂载的是 pwsh 方言（Python 侧唯一定义：emrg/tools/shell_dialects.py），
+  // 它的输出与 bash 同款，所以路径提取必须同款——写死 "bash" 会让 Windows 会话
+  // 一个产物路径都登记不出来（事故根因见设计 §14）。
+  it("pwsh 方言与 bash 同款提取（Windows 挂载的是它）", () => {
+    expect(extractFilePath("pwsh", "Created: C:\\tmp\\out.txt\n")).toBe("C:\\tmp\\out.txt");
+    expect(extractFilePath("pwsh", "ok")).toBe("");
+    expect(SHELL_TOOL_NAMES).toContain("pwsh");
+    expect(SHELL_TOOL_NAMES).toContain("bash");
   });
 
   it("空 content 返回空", () => {

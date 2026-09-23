@@ -144,9 +144,17 @@ class SandboxConfig:
     after that (``emrg/tools/registry.py``).  The environment variable
     ``EMRG_BASH_TOOL_V2`` overrides the file in both directions, so the host can
     try either executor in a session without editing ``config.toml``.
+
+    ``pwsh_path`` names the PowerShell executable the Windows roster mounts
+    (design §14.5 item 3).  Empty means the resolution chain decides
+    (``emrg/tools/pwsh_tool_v2.py``: PowerShell 7's install directory, then
+    ``PATH``, then Windows PowerShell 5.1 — which every Windows host has, so
+    "the executable is missing" is not a reachable state there).  A value set
+    here is trusted as-is, exactly as the blueprint trusts its own ``pwshPath``.
     """
 
     bash_tool_v2: bool = True
+    pwsh_path: str = ""
 
 
 @dataclass
@@ -258,7 +266,11 @@ def _sandbox_from(data: dict) -> SandboxConfig:
     section = data.get("sandbox", {})
     if not isinstance(section, dict):
         return SandboxConfig()
-    return SandboxConfig(bash_tool_v2=bool(section.get("bash_tool_v2", True)))
+    pwsh_path = section.get("pwsh_path", "")
+    return SandboxConfig(
+        bash_tool_v2=bool(section.get("bash_tool_v2", True)),
+        pwsh_path=pwsh_path if isinstance(pwsh_path, str) else "",
+    )
 
 
 def load_sandbox_config() -> SandboxConfig:
@@ -280,7 +292,13 @@ def load_sandbox_config() -> SandboxConfig:
         cfg = _sandbox_from(data)
     raw = os.environ.get(ENV_BASH_TOOL_V2)
     if raw is not None:
-        cfg = SandboxConfig(bash_tool_v2=_as_bool(raw, cfg.bash_tool_v2))
+        # Rebuild rather than mutate: the dataclass is frozen by convention, and
+        # every other field has to survive the override (a `SandboxConfig(...)`
+        # that named only this one silently dropped `pwsh_path`).
+        cfg = SandboxConfig(
+            bash_tool_v2=_as_bool(raw, cfg.bash_tool_v2),
+            pwsh_path=cfg.pwsh_path,
+        )
     return cfg
 
 
