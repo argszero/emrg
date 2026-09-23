@@ -24,6 +24,7 @@ from websockets.exceptions import ConnectionClosed
 from emrg.protocol import TaskResponse, ToolEnd, ToolStart
 from emrg.session import generate_session_id
 from emrg.skills.loader import load_skills
+from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -2717,7 +2718,12 @@ def _format_args(args: dict, tool_name: str = "") -> str:
         return ""
 
     # Tool-specific human-readable formats
-    if tool_name == "bash":
+    # Both shell dialects share one layout, because they share one argument name
+    # (`command`) and one meaning — the dialect is the tool's identity, not a
+    # difference the header should show (design §14.5 item 7). The set comes from
+    # the roster's one definition rather than repeating "bash" here, where a
+    # second dialect would have been silently mis-formatted.
+    if tool_name in SHELL_TOOL_NAMES:
         cmd = args.get("command", "")
         workdir = args.get("workdir")
         if cmd:

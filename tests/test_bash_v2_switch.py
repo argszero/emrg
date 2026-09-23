@@ -25,6 +25,7 @@ from emrg.server.daemon import EmrgServer
 from emrg.tools import ToolRegistry
 from emrg.tools.bash_tool import BashTool
 from emrg.tools.bash_tool_v2 import BashToolV2
+from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
 
 
 def _write_config(tmp_path: Path, body: str) -> None:
@@ -113,11 +114,27 @@ def test_the_rest_of_the_config_is_unaffected_by_the_new_section(tmp_path):
 # ── the daemon's choice ───────────────────────────────────────────────────
 
 
+def _mounted_shell(server):
+    """The shell tool the daemon registered, by the name the daemon itself reports.
+
+    Read rather than assumed to be ``bash``: since P8 the roster is a platform
+    gate (``emrg/tools/shell_dialects.py``), so on Windows the mounted tool is
+    ``pwsh`` and ``get("bash")`` is ``None`` — a test that hardcoded the name
+    would pass on the dev host and fail on Windows CI while the product was
+    correct.  ``_mounted_shell_tool_name`` is the same function the prompt builder
+    reads, so this asserts about the tool the model is actually offered.
+    """
+    name = server._mounted_shell_tool_name()
+    return name, server.tools.get(name)
+
+
 def test_both_executors_answer_to_the_same_tool_name():
     """The model-visible contract is the dialect, so the registry can hold only one.
 
     Two names would be two behaviours for one tool call — the drift the parallel
-    period exists to prevent — so this pins the collision deliberately.
+    period exists to prevent — so this pins the collision deliberately. The two
+    frozen/parallel executors are what share the name ``bash``; ``pwsh`` is a peer
+    dialect, not a second name for the same one (``tests/test_pwsh_tool_v2.py``).
     """
     assert BashTool().definition().name == "bash"
     assert BashToolV2().definition().name == "bash"
@@ -129,33 +146,42 @@ def test_both_executors_answer_to_the_same_tool_name():
 def test_the_daemon_builds_v2_by_default(monkeypatch, tmp_path):
     monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
     server = _instantiate()
-    assert isinstance(server.tools.get("bash"), BashToolV2)
-    assert not isinstance(server.tools.get("bash"), BashTool)
+    name, tool = _mounted_shell(server)
+    assert name in SHELL_TOOL_NAMES
+    assert isinstance(tool, BashToolV2)
+    assert not isinstance(tool, BashTool)
 
 
 def test_the_file_switch_rolls_back_to_the_frozen_tool(tmp_path, monkeypatch):
     """The rollback is a supported path, not an accident: one line, no code change.
 
     A boundary that cannot be turned off in the field is not deployable, so this
-    pins the way back as firmly as the way forward.
+    pins the way back as firmly as the way forward. The frozen tool is mounted
+    under its own name on every platform — including Windows, where it runs
+    ``cmd.exe`` — which is why this is the rollback P8 had to preserve rather than
+    replace.
     """
     monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
     _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = false\n")
     server = _instantiate()
-    assert isinstance(server.tools.get("bash"), BashTool)
-    assert not isinstance(server.tools.get("bash"), BashToolV2)
+    name, tool = _mounted_shell(server)
+    assert isinstance(tool, BashTool)
+    assert not isinstance(tool, BashToolV2)
+    assert name == "bash"
 
 
 def test_the_environment_rolls_back_without_a_config_edit(monkeypatch):
     monkeypatch.setenv(ENV_BASH_TOOL_V2, "0")
     server = _instantiate()
-    assert isinstance(server.tools.get("bash"), BashTool)
+    _, tool = _mounted_shell(server)
+    assert isinstance(tool, BashTool)
 
 
 def test_the_environment_switch_builds_v2_without_a_config_edit(monkeypatch):
     monkeypatch.setenv(ENV_BASH_TOOL_V2, "1")
     server = _instantiate()
-    assert isinstance(server.tools.get("bash"), BashToolV2)
+    _, tool = _mounted_shell(server)
+    assert isinstance(tool, BashToolV2)
 
 
 def test_a_populated_registry_still_answers_every_other_tool(monkeypatch):
