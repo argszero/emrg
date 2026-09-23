@@ -25,6 +25,7 @@ from emrg.server.daemon import EmrgServer
 from emrg.tools import ToolRegistry
 from emrg.tools.bash_tool import BashTool
 from emrg.tools.bash_tool_v2 import BashToolV2
+from emrg.tools.pwsh_tool_v2 import PwshToolV2
 from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
 
 
@@ -144,11 +145,19 @@ def test_both_executors_answer_to_the_same_tool_name():
 
 
 def test_the_daemon_builds_v2_by_default(monkeypatch, tmp_path):
+    """The switch is on by default, and "on" means *some* v2 dialect.
+
+    ``BashToolV2`` specifically would be an assertion about the platform, not
+    about the switch: Windows mounts ``PwshToolV2`` (P8), so a test that named the
+    bash class passed here and failed there while the product was correct. What
+    the switch decides is the *family* — a process-boundary executor rather than
+    the frozen scan — and that is what this asserts.
+    """
     monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
     server = _instantiate()
     name, tool = _mounted_shell(server)
     assert name in SHELL_TOOL_NAMES
-    assert isinstance(tool, BashToolV2)
+    assert isinstance(tool, (BashToolV2, PwshToolV2))
     assert not isinstance(tool, BashTool)
 
 
@@ -181,7 +190,8 @@ def test_the_environment_switch_builds_v2_without_a_config_edit(monkeypatch):
     monkeypatch.setenv(ENV_BASH_TOOL_V2, "1")
     server = _instantiate()
     _, tool = _mounted_shell(server)
-    assert isinstance(tool, BashToolV2)
+    assert isinstance(tool, (BashToolV2, PwshToolV2))
+    assert not isinstance(tool, BashTool)
 
 
 def test_a_populated_registry_still_answers_every_other_tool(monkeypatch):
