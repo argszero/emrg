@@ -1,9 +1,11 @@
 """The reconstructible-dirt criterion and `scripts/recover-worktree.py` (#1237).
 
 The guard's contract is "a cycle must not destroy work that exists nowhere else".
-These pin the two halves: dirt that IS unique is refused (nothing touched), and
-dirt that is NOT unique is converged **reversibly** — the scenario the measured
-33-cycle deadlock was made of, built here as a real repository.
+These pin the two halves: dirt that IS unique is **pinned** (`refs/emrg/rescue/`) and
+converged — the exit from the absorbing state of #1465, which the older contract bought by
+refusing to touch the tree at all — and dirt that is NOT unique is converged
+**reversibly**, the scenario the measured 33-cycle deadlock was made of, built here as a
+real repository.
 """
 
 from __future__ import annotations
@@ -95,6 +97,64 @@ def _git(repo: Path, *args: str):
 
 def _status(repo: Path) -> str:
     return _git(repo, "status", "--porcelain").stdout
+
+
+def _rescue_ref(repo: Path) -> str:
+    """The pin that holds the worktree's bytes — the plain ref, not the `-head` one."""
+    out = _git(repo, "for-each-ref", "--format=%(refname)", "refs/emrg/rescue/")
+    refs = [r for r in out.stdout.split() if r and not r.endswith("-head")]
+    assert len(refs) == 1, f"expected exactly one rescue pin, found {refs}"
+    return refs[0]
+
+
+def _assert_unique_dirt_is_pinned_not_refused(repo: Path) -> str:
+    """The contract for work found nowhere else, since the exit from issue #1465.
+
+    This replaces the assertion `status == "refused"` at every site that used it, and the
+    reason it is a *replacement* rather than a deletion is the whole point of the change.
+    What those assertions were protecting — "the bytes must survive" — is still asserted
+    here, and asserted harder: the dirt must round-trip. What they also asserted, and what
+    must not survive, is that the daemon declines to touch the tree at all — because the
+    refusal arrived with `read-only`, and that tier refuses the git verbs that would
+    converge the tree, so the cycle could neither clean it nor leave (measured on this
+    host: 10/10 mutators blocked, `pytest` unable to start). Host directive 2026-09-23:
+    a dirty tree must clean itself up, it must not get stuck.
+
+    So three things, where the old test asserted one:
+      1. the action converges the tree (`"recovered"`, promoted to a PIN — not "refused");
+      2. the tree is left genuinely clean;
+      3. the pin restores the *exact* original dirt, index side included, so nothing that
+         was in the tree is missing from anywhere git can reach.
+    """
+    before = _status(repo)
+    assert before.strip(), "precondition: this test is about a dirty tree"
+
+    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
+    assert status == "recovered", f"{status}: {detail}"
+    assert "PINNED" in detail, f"the promoted outcome must name the pin: {detail}"
+    assert _status(repo) == "", f"the convergence must leave a clean tree: {_status(repo)!r}"
+
+    ref = _rescue_ref(repo)
+    assert _git(repo, "rev-parse", "--verify", "--quiet", ref).stdout.strip() == (
+        _git(repo, "rev-parse", ref).stdout.strip()
+    ), ref
+
+    applied = _git(repo, "stash", "apply", "--index", ref)
+    # The exit code is not the verdict — the state is, and this is measured rather than
+    # assumed. On the `D ??` geometry (a staged deletion *and* an untracked file at the
+    # same path, which is one of this file's most-regressed shapes) git restores the dirt
+    # **exactly** and still exits 1 with "f.txt already exists, no checkout / error: could
+    # not restore untracked files from stash", because the untracked side was already
+    # provided by the other tree. Asserting rc == 0 there would fail a correct restore;
+    # asserting the bytes cannot. #464's lesson ("test the output, not the exit code")
+    # arriving in a third place — and the direction stays fail-closed, since a wrong state
+    # fails whatever the exit code said.
+    assert _status(repo) == before, (
+        f"the pin must restore the exact dirt (git returned rc={applied.returncode}: "
+        f"{(applied.stderr or applied.stdout).strip()!r}); "
+        f"got {_status(repo)!r} != {before!r}"
+    )
+    return ref
 
 
 def _new_repo(path: Path, content: str = "v1", name: str = "f.txt") -> None:
@@ -405,7 +465,9 @@ def test_an_untracked_copy_of_head_with_other_bytes_is_unique(tmp_path):
     """The control for the clause above: the measurement is of the bytes, not the gesture.
 
     The same `git rm --cached` shape with edited content — the host's newer draft — exists
-    in no commit, so the tier must stay refused and the draft must survive the attempt.
+    in no commit, so the criterion must call it unique and the draft must survive the
+    action. Since #1465's exit "survive" means the pin round-trips it, not that the tree
+    is left alone (see `_assert_unique_dirt_is_pinned_not_refused`).
     """
     repo = tmp_path / "repo"
     _new_repo(repo, "unchanged")
@@ -417,8 +479,7 @@ def test_an_untracked_copy_of_head_with_other_bytes_is_unique(tmp_path):
     assert loses is True, why
     assert "f.txt" in why
 
-    status, _detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
-    assert status == "refused", status
+    _assert_unique_dirt_is_pinned_not_refused(repo)
     assert (repo / "f.txt").read_text(encoding="utf-8") == "the host's newer draft"
 
 
@@ -499,12 +560,14 @@ def test_staged_content_the_worktree_cannot_evidence_is_unique(tmp_path):
     assert loses is True, why
     assert "staged" in why, why
 
-    # And the action obeys that verdict: nothing may be moved aside.
-    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
-    assert status == "refused", f"{status}: {detail}"
-    assert _git(repo, "stash", "list").stdout.strip() == ""
+    # And the action obeys that verdict: the worktree side must not be the thing the
+    # convergence relies on — the index side is pinned with it (the pin is a stash, whose
+    # `--index` half exists for exactly this shape; the round-trip is asserted by the
+    # helper below, and the staged blob is re-read here to name the half that was at risk).
+    ref = _assert_unique_dirt_is_pinned_not_refused(repo)
     assert _git(repo, "rev-parse", ":f.txt").stdout.strip() == staged, \
-        "the staged blob must still be in the index"
+        "the pin must restore the staged blob into the index"
+    assert _git(repo, "rev-parse", ref).stdout.strip() != "", ref
 
 
 def test_staged_content_with_no_worktree_copy_is_unique(tmp_path):
@@ -612,8 +675,12 @@ def test_a_modification_at_a_quoted_path_holding_unique_work_is_unique(tmp_path)
     assert loses is True, why
     assert name in why
 
-    status, _detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
-    assert status == "refused", status
+    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
+    assert status == "recovered" and "PINNED" in detail, detail
+    # The dirt is in the pin now, so the file reads as `HEAD` again until it is replayed —
+    # asserted in that order because "the file still has the host's bytes in the worktree"
+    # would be the *stale* claim: the point is that the bytes survive, not where they sit.
+    _git(repo, "stash", "apply", "--index", _rescue_ref(repo))
     assert (repo / name).read_text(encoding="utf-8") == "the host's unreleased work"
 
 
@@ -677,7 +744,7 @@ def test_every_entry_is_walked_when_one_of_them_is_quoted(tmp_path):
     loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(work))
     assert loses is True, why
     assert "host notes.md" in why, why
-    assert _load().TaskHandler._recover_dirty_tree_sync(str(work))[0] == "refused"
+    _assert_unique_dirt_is_pinned_not_refused(work)
 
 
 def test_a_commit_only_on_this_branch_is_unique(tmp_path):
@@ -763,19 +830,39 @@ def test_a_clean_tree_is_not_dirt(tmp_path):
 # ── the tool: refuse, converge, stay reversible ──────────────────────────────
 
 
-def test_the_tool_refuses_unique_work_and_touches_nothing(tmp_path, capsys):
-    """The refusal is the guard working: the file must survive the attempt."""
+def test_the_tool_pins_unique_work_and_a_dry_run_still_refuses(tmp_path, capsys):
+    """The file must survive either path, and `--apply` must not need a human first.
+
+    The old shape of this test asserted that the *action* refused, because a refusal was
+    the only way to be sure the work survived. It is not: the survival claim is now made
+    by the pin, which is asserted here, and the refusal that remains is the one that costs
+    nothing — a **dry run** still exits 1 and writes nothing, so a human asking "what is
+    in this tree?" is not answered with a convergence they did not request.
+    """
     repo = tmp_path / "repo"
     _new_repo(repo)
     (repo / "notes.md").write_text("only here", encoding="utf-8")
 
-    assert _load().recover(repo, apply=True) == 1
+    # Dry run: diagnoses, touches nothing, and says what --apply would do.
+    assert _load().recover(repo, apply=False) == 1
     out = capsys.readouterr().out
-    assert "refused" in out
+    assert "unique" in out and "PINNED" in out
     assert (repo / "notes.md").read_text(encoding="utf-8") == "only here"
-    assert _git(repo, "stash", "list").stdout.strip() == ""
+    assert _git(repo, "stash", "list").stdout.strip() == "", "a dry run writes nothing"
     assert not (Path(_git(repo, "rev-parse", "--absolute-git-dir").stdout.strip())
                 / "emrg-recovery-receipt.json").exists()
+
+    # --apply: converges and pins, so the tree is clean *and* the bytes are reachable.
+    assert _load().recover(repo, apply=True) == 0
+    out = capsys.readouterr().out
+    assert "recovered" in out
+    assert _status(repo).strip() == "", "the tool's whole job is a clean tree"
+    ref = _rescue_ref(repo)
+    assert _git(repo, "rev-parse", "--verify", "--quiet", ref).stdout.strip()
+    applied = _git(repo, "stash", "apply", "--index", ref)
+    assert applied.returncode == 0, applied.stderr or applied.stdout
+    assert (repo / "notes.md").read_text(encoding="utf-8") == "only here"
+    assert _status(repo).strip() == "?? notes.md", _status(repo)
 
 
 def test_the_tool_converges_reconstructible_dirt_reversibly(tmp_path, capsys):
@@ -1006,10 +1093,7 @@ def test_the_action_asks_the_criterion_itself_and_cannot_be_told_the_answer(tmp_
     _new_repo(repo)
     (repo / "notes.md").write_text("only here", encoding="utf-8")
 
-    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
-    assert status == "refused" and "notes.md" in detail, detail
-    assert (repo / "notes.md").read_text(encoding="utf-8") == "only here"
-    assert _git(repo, "stash", "list").stdout.strip() == "", "nothing may be moved aside"
+    _assert_unique_dirt_is_pinned_not_refused(repo)
 
     # The reviewed exploit, verbatim: `_recover_dirty_tree_sync(repo, <verdict>)`.
     # It must not be expressible rather than merely discouraged.
@@ -1024,13 +1108,15 @@ def test_the_action_asks_the_criterion_itself_and_cannot_be_told_the_answer(tmp_
     assert _git(work, "rev-parse", "HEAD").stdout.strip() == head, "HEAD must not move"
 
 
-def test_the_four_outcomes_are_not_two(tmp_path):
+def test_the_three_outcomes_are_not_two(tmp_path):
     """`(bool, detail)` collapsed three different answers into `False`; #1274 split them.
 
     A caller reading any non-recovered answer as "nothing happened" would report a
-    tree it just *refused* to touch as though the question had been settled, and one
-    reading `clean` as `recovered` would claim a convergence that never ran. So the
-    states are pinned apart, including the one that means "I could not answer".
+    convergence as though the question had been settled, and one reading `clean` as
+    `recovered` would claim a convergence that never ran. So the states are pinned apart,
+    including the one that means "I could not answer". Since #1465's exit there are
+    **three**, not four: the `refused` state is gone with the rule that produced it (it is
+    now `recovered` + a pin, which `test_the_action_asks_the_criterion_itself...` pins).
     """
     seen = {}
 
@@ -1042,14 +1128,19 @@ def test_the_four_outcomes_are_not_two(tmp_path):
     unique = tmp_path / "unique"
     _new_repo(unique)
     (unique / "notes.md").write_text("only here", encoding="utf-8")
-    seen["refused"], _ = _load().TaskHandler._recover_dirty_tree_sync(str(unique))
+    seen["recovered"], detail = _load().TaskHandler._recover_dirty_tree_sync(str(unique))
+    assert "PINNED" in detail, detail
+    assert _status(unique).strip() == "", "a recovery leaves a clean tree"
 
     plain = tmp_path / "plain"
     plain.mkdir()
     seen["error"], detail = _load().TaskHandler._recover_dirty_tree_sync(str(plain))
     assert "could not run" in detail, detail
 
-    assert sorted(seen.values()) == ["clean", "error", "refused"], seen
+    assert sorted(seen.values()) == ["clean", "error", "recovered"], seen
+    # And the removed state is not merely unused — it is not producible. A tree whose
+    # every byte exists nowhere else is the sharpest case, and it answers `recovered`.
+    assert "refused" not in seen.values()
 
 
 def test_a_clean_tree_is_a_no_op(tmp_path, capsys):

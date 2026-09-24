@@ -27,10 +27,14 @@ daemon also uses (this script owns no policy; if it disagreed with the guard abo
 what "reconstructible" means, the deadlock would come back through the script):
 
 * the tree is already clean -> nothing to do;
-* the dirt holds work that exists nowhere else -> **refuse**, name the paths, and
-  touch nothing. Committing, stashing or copying that work out is a decision for
-  whoever wrote it, and an agent that discards it is doing the thing the guard
-  exists to prevent;
+* the dirt holds work that exists nowhere else -> **pin it, then converge**. `HEAD` and
+  the stash commit are recorded under `refs/emrg/rescue/`, which is what "exists nowhere
+  else" was about, so the claim stops being true and the tree can be converged without
+  discarding anything. Nothing is destroyed by this and nothing is left for a human to
+  unblock: the state this rule used to produce — a `read-only` tier that refuses the git
+  verbs needed to converge the tree — is the absorbing state of issue #1465, and pinning
+  is its exit. Undone with `git stash apply --index refs/emrg/rescue/<stamp>`, which
+  survives `git stash clear`;
 * the dirt is reconstructible -> `git stash push -u` it, which leaves the worktree
   clean *and* keeps every byte in the stash, so the action is undoable — with
   `git stash apply --index stash@{N}`, the spelling the receipt names, `N` being the
@@ -52,9 +56,11 @@ written rather than naming a path for a file that does not exist (issue #1284).
 Exit codes
 ----------
 ``0``  nothing to do, or the tree was converged and verified (also: a dry run of a
-       tree that *would* converge). ``1``  refused: the tree holds work found
-       nowhere else, nothing was written. ``2``  the question could not be
-       answered (not a git repo, an unreadable state) — never reported as a pass.
+       tree that *would* converge). ``1``  diagnosed but not acted on: the tree holds
+       work found nowhere else and `--apply` was **not** given, so nothing was
+       written — `--apply` would pin it and converge, discarding nothing. ``2``  the
+       question could not be answered (not a git repo, an unreadable state) — never
+       reported as a pass.
 
 Usage
 -----
@@ -150,10 +156,15 @@ def recover(repo: Path, apply: bool) -> int:
     # One owner for the criterion: the same question the guard asks, so the tool
     # and the tier decision can never disagree about what "reconstructible" means.
     loses, why = TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
-    if loses:
-        print(f"refused: {repo} holds work that exists nowhere else: {why}")
-        print("nothing was changed. Commit, stash or copy that work out first;")
-        print("this tool will not discard it.")
+    if loses and not apply:
+        # A dry run does not act anywhere, so this is a report rather than a refusal to
+        # rescue. Since the fix for #1465 the daemon pins work found nowhere else under
+        # `refs/emrg/rescue/` and converges, and `--apply` here runs that exact function —
+        # so exit 1 now means "diagnosed, and nothing was done about it", which is one
+        # flag away from being resolved rather than the terminal state it used to be.
+        print(f"unique: {repo} holds work that exists nowhere else: {why}")
+        print(f"{len(entries)} entr(y|ies) would be PINNED under refs/emrg/rescue/ and "
+              "stashed; nothing is discarded; re-run with --apply")
         return 1
 
     if not apply:
@@ -167,11 +178,6 @@ def recover(repo: Path, apply: bool) -> int:
     # that changed between the diagnosis above and this line is judged on its current
     # state rather than on the earlier answer.
     status, detail = TaskHandler._recover_dirty_tree_sync(str(repo))
-    if status == "refused":
-        print(f"refused: {repo} holds work that exists nowhere else: {detail}")
-        print("nothing was changed. Commit, stash or copy that work out first;")
-        print("this tool will not discard it.")
-        return 1
     if status == "error":
         print(f"could not measure: {detail}")
         return 2

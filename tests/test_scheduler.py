@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -2647,13 +2648,25 @@ def test_sandbox_resolution_unified_default_rule():
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# The four verdicts that hold only while `EMRG_TASK_DIRTY_OVERRIDE` is *absent*
+# The verdicts that hold only while `EMRG_TASK_DIRTY_OVERRIDE` is *absent*
 # (issue #1326); the subprocess test below runs them with it exported.
+#
+# What the override replaces changed with the pinning contract (2026-09-23). It used
+# to decide the *tier*: unique dirt forced `read-only`, the override handed the
+# configured tier back, and every read-only verdict was override-sensitive. A pinned
+# tree keeps its tier either way, so the tier is no longer a discriminator — what the
+# early return skips is the **convergence** itself. These are the tests that assert
+# the tree was converged and pinned, which is exactly what an exported override stops
+# happening: with it, `_effective_sandbox` returns before the recovery is reached.
+#
+# Two, not three: `test_the_pinned_ref_alone_restores_the_work` drives
+# `_recover_dirty_tree_sync` directly, so it never reads the variable. Measured by
+# neutering the fixture below — it passed while the other two failed. A guard whose
+# expected count names a test that cannot fail is the same defect as a guard that
+# cannot fail.
 OVERRIDE_SENSITIVE_TESTS = (
-    "tests/test_scheduler.py::test_dirty_tree_forces_read_only_structural_guard",
     "tests/test_scheduler.py::test_reconstructible_dirt_is_recovered_by_the_daemon_itself",
-    "tests/test_scheduler.py::test_unique_dirt_still_forces_read_only",
-    "tests/test_scheduler.py::test_a_stale_verdict_cannot_unlock_a_tree_holding_unique_work",
+    "tests/test_scheduler.py::test_a_unique_tree_is_pinned_and_the_cycle_keeps_its_tier",
 )
 
 
@@ -2663,33 +2676,35 @@ def _no_ambient_dirty_override(monkeypatch):
 
     `_effective_sandbox` reads `EMRG_TASK_DIRTY_OVERRIDE` from the process
     environment and hands back the *configured* tier when the task is named, so
-    an exported variable replaces the read-only verdict the four tests below
-    assert. That variable is precisely how an evolution cycle keeps working on a
-    dirty tree, which is why the standard verification command reported
-    `4 failed` on a tree where the same four pass with it unset (measured
+    an exported variable replaces the verdict the tests below assert. That
+    variable is precisely how an evolution cycle keeps working on a dirty tree,
+    which is why the standard verification command reported
+    `4 failed` on a tree where the same tests pass with it unset (measured
     2026-09-17 on a dirty main tree): the variable decided, not the dirt.
 
     A test's premise is its own: this module builds the trees it measures, so
     the ambient variable is removed here rather than inherited. The one test
     that *means* to exercise the override
     (`test_dirty_tree_override_env_audited_receipt`) sets it itself, which is
-    why this is an autouse clear rather than four separate requests.
+    why this is an autouse clear rather than three separate requests.
     """
     monkeypatch.delenv("EMRG_TASK_DIRTY_OVERRIDE", raising=False)
 
 
 def test_the_dirty_tree_verdicts_survive_an_exported_override():
-    """The CI-visible half: the four verdicts hold in a subprocess that exports
-    `EMRG_TASK_DIRTY_OVERRIDE`, so the fixture above is the reason they hold.
+    """The CI-visible half: the convergence verdicts hold in a subprocess that
+    exports `EMRG_TASK_DIRTY_OVERRIDE`, so the fixture above is the reason they hold.
 
-    In CI the variable is never exported, so the four tests pass with or without
-    the fixture — the run below is what keeps the insulation from being deleted
-    silently. Its failure mode without the fixture is the measured one from
-    issue #1326: `4 failed` for a caller's convenience variable.
+    In CI the variable is never exported, so the tests pass with or without the
+    fixture — the run below is what keeps the insulation from being deleted
+    silently. Its failure mode without the fixture is the class measured for
+    issue #1326, a caller's convenience variable deciding a cycle's verdict; the
+    count is the one this set has now (measured 2026-09-23 by neutering the
+    fixture: `2 failed, 1 passed`).
 
     The export is this guard's whole power, so it is pinned rather than assumed.
     Dropping it — `env = dict(os.environ)` — leaves the child reporting
-    `4 passed` whatever the module does, and then the guard passes in *both*
+    `2 passed` whatever the module does, and then the guard passes in *both*
     states, insulation present or deleted (measured 2026-09-17 on the merged
     tree: `1 passed` either way). A guard that cannot fail reads like a guard
     that passes, which is the one failure this file exists to prevent in the
@@ -2714,7 +2729,7 @@ def test_the_dirty_tree_verdicts_survive_an_exported_override():
         errors="replace", env=env,
     )
     assert out.returncode == 0, out.stdout + out.stderr
-    assert "4 passed" in out.stdout, out.stdout + out.stderr
+    assert f"{len(OVERRIDE_SENSITIVE_TESTS)} passed" in out.stdout, out.stdout + out.stderr
 
 
 def test_is_dirty_tree_detects_uncommitted_changes():
@@ -2755,28 +2770,76 @@ def test_is_dirty_tree_linked_worktree():
         assert TaskHandler._is_dirty_tree_sync(str(wt)) is True  # untracked → dirty
 
 
-def test_dirty_tree_forces_read_only_structural_guard():
-    """Community issue #979 + #1237: a dirty tree holding work that exists nowhere
-    else forces the cycle's effective sandbox to read-only regardless of
-    configuration — topology over rules. `loses_unique` is injected here so the
-    test states the *reason* rather than depending on what the tree under test
-    happens to contain; the end-to-end probes are the two tests below."""
-    handler = TaskHandler(
-        name="emrg-task", config={"project": "emrg"}, interval=60,
-        identity=InstanceIdentity(),
-    )
+def test_a_unique_tree_is_pinned_and_the_cycle_keeps_its_tier(tmp_path):
+    """Host directive 2026-09-23 (#1465): a dirty tree cleans itself up.
+
+    This test used to be `test_dirty_tree_forces_read_only_structural_guard`, and it
+    stated the *reason* by injecting `loses_unique=True` into a handler pointing at
+    the repository under test. Both halves of that shape were wrong:
+
+    * the verdict is now measured, never supplied (see
+      `test_no_caller_can_supply_a_verdict`), so the tree is built here instead —
+      an untracked file, which is the one shape that exists nowhere else;
+    * the outcome inverted. Unique dirt no longer costs the cycle its tier: the
+      criterion's claim is a claim about *reachability*, a ref is reachability, so the
+      daemon pins the work under `refs/emrg/rescue/` and the claim stops being true.
+      Forcing `read-only` is what made the state absorbing — read-only refuses the very
+      git verbs that would have converged the tree, so 10/10 mutators were blocked and
+      the state could only be left by a human.
+    """
+    repo = _repo_with_dirt(tmp_path, "untracked")
+    handler = TaskHandler(name="emrg-task", config={"path": repo}, interval=60,
+                          identity=InstanceIdentity())
     assert handler._sandbox == "workspace-write"  # configured default
-    assert asyncio.run(
-        handler._effective_sandbox(dirty=True, loses_unique=True)
-    ) == "read-only"
-    # configured read-only stays read-only (no weakening)
-    handler2 = TaskHandler(
-        name="ro-task", config={}, interval=60, identity=InstanceIdentity(),
-        sandbox="read-only",
-    )
-    assert asyncio.run(
-        handler2._effective_sandbox(dirty=True, loses_unique=True)
-    ) == "read-only"
+
+    assert asyncio.run(handler._effective_sandbox()) == "workspace-write", \
+        "a pinned tree is not a tree the cycle has to be locked out of"
+    assert _status(repo).strip() == "", "the daemon converges a unique tree itself too"
+    assert _git_out(repo, "stash", "list") != "", "and it does so without discarding a byte"
+
+    # Two refs, and they are the whole difference between "pinned" and "refused":
+    # the stash commit carrying the worktree's bytes, and HEAD, which a stash cannot
+    # move (the criterion's other clause is about a commit reachable from this
+    # checkout alone).
+    pins = sorted(r for r in _git_out(repo, "for-each-ref", "--format=%(refname)",
+                                      "refs/emrg/rescue/").splitlines())
+    assert len(pins) == 2, pins
+    assert pins[1].endswith("-head"), pins
+
+    git_dir = Path(_git_out(repo, "rev-parse", "--absolute-git-dir"))
+    receipt = json.loads((git_dir / "emrg-recovery-receipt.json").read_text(encoding="utf-8"))
+    assert receipt["rescued_unique"] is True
+    assert receipt["rescue_ref"] in pins, receipt
+    assert receipt["reversible_with"].startswith("`git stash apply --index "), receipt
+
+    # configured read-only stays read-only (no weakening) — on a tree the same shape,
+    # so the tier is the only difference between the two runs.
+    other = tmp_path / "configured-read-only"
+    other.mkdir()
+    ro_repo = _repo_with_dirt(other, "untracked")
+    ro_handler = TaskHandler(name="ro-task", config={"path": ro_repo}, interval=60,
+                             identity=InstanceIdentity(), sandbox="read-only")
+    assert asyncio.run(ro_handler._effective_sandbox()) == "read-only"
+
+
+def test_no_caller_can_supply_a_verdict():
+    """#1274's lesson, promoted from a comment to the signature.
+
+    `_recover_dirty_tree_sync` stopped taking a caller's verdict because a guarantee
+    that holds only while every caller passes the truth is not a guarantee. Its caller
+    kept two such parameters (`dirty`, `loses_unique`) and paid the same price one
+    level up, both directions measured on 2026-09-23:
+
+    * `dirty=False` on a tree that is dirty **bypasses the guard** — the probe is
+      skipped and the cycle gets its configured tier over an unconverged tree;
+    * `dirty=True` is *destructive*: it drives a real `git stash push -u` against
+      whatever repository the handler points at. Pointed at this repository, from a
+      test, it moved an uncommitted fix out of the working tree.
+
+    The probe and the criterion are cheap and the only production caller passed
+    neither, so there is no verdict to supply any more.
+    """
+    assert list(inspect.signature(TaskHandler._effective_sandbox).parameters) == ["self"]
 
 
 def _status(repo: str) -> str:
@@ -2913,74 +2976,80 @@ def test_a_receipt_that_cannot_be_written_is_reported_not_silent(tmp_path, caplo
             / "emrg-recovery-receipt.json").is_file()
 
 
-def test_unique_dirt_still_forces_read_only(tmp_path):
-    """The protection, unchanged: an untracked file exists nowhere else."""
-    repo = _repo_with_dirt(tmp_path, "untracked")
+def test_the_pinned_ref_alone_restores_the_work(tmp_path):
+    """The claim "exists nowhere else" is answered by making it false (#1465).
 
-    handler = TaskHandler(name="emrg-task", config={"path": repo}, interval=60,
-                          identity=InstanceIdentity())
-    assert asyncio.run(handler._effective_sandbox()) == "read-only"
-    # The work the guard protects is still there after the decision -- and the
-    # daemon's self-recovery must not have run at all: a stash here would be the
-    # guard moving a host's unsaved work out from under it.
-    assert (tmp_path / "repo-untracked" / "notes.md").read_text(encoding="utf-8") == "only here"
-    assert _git_out(repo, "stash", "list") == "", "unique work must not be stashed"
-    assert not (Path(_git_out(repo, "rev-parse", "--absolute-git-dir"))
-                / "emrg-recovery-receipt.json").exists(), \
-        "no recovery ran, so there is no recovery to receipt"
+    This test used to be `test_unique_dirt_still_forces_read_only`, asserting the
+    protection *unchanged*: unique dirt bought `read-only` and the recovery never ran,
+    so the host's unsaved work stayed put. What that bought in safety it paid for in
+    reachability — the tier blocked the repair of the thing it blocked — and the work
+    was no less alone for having been left there.
 
-
-def test_a_stale_verdict_cannot_unlock_a_tree_holding_unique_work(tmp_path):
-    """Found in review of #1274: the action's own measurement governs the tier.
-
-    `loses_unique` is a test seam and an optimisation for the log line, so a caller
-    can fill it in -- and the earlier shape *believed* it: passing `loses_unique=False`
-    on a tree that does hold unique work bought the cycle `workspace-write` **and**
-    stashed the work, with the receipt calling it a recovery. The net held only while
-    every caller passed the truth, which is the same as not holding.
-
-    Now the action re-measures the criterion itself and its refusal governs, so a
-    wrong or stale verdict is contradicted instead of honoured.
+    So the assertion moved to the half the guard actually cares about: nothing is
+    discarded *and* the bytes are reachable from a ref. The strong form is below —
+    `refs/stash` is cleared entirely, so the stash-shaped objects are unreachable
+    through every ordinary route, and the pin alone brings back the modification, the
+    staged side and the untracked file.
     """
     repo = _repo_with_dirt(tmp_path, "untracked")
+    head = _git_out(repo, "rev-parse", "HEAD")
+    status, detail = TaskHandler._recover_dirty_tree_sync(repo)
+    assert status == "recovered", detail
 
-    handler = TaskHandler(name="emrg-task", config={"path": repo}, interval=60,
-                          identity=InstanceIdentity())
-    assert asyncio.run(
-        handler._effective_sandbox(dirty=True, loses_unique=False)
-    ) == "read-only", "a verdict supplied by the caller must not decide this"
+    rescue = _git_out(repo, "for-each-ref", "--format=%(refname)",
+                      "refs/emrg/rescue/").splitlines()
+    rescue = [r for r in rescue if not r.endswith("-head")]
+    assert len(rescue) == 1, rescue
 
-    assert (tmp_path / "repo-untracked" / "notes.md").read_text(encoding="utf-8") == "only here"
-    assert _git_out(repo, "stash", "list") == "", "a refused action moves nothing"
-    assert not (Path(_git_out(repo, "rev-parse", "--absolute-git-dir"))
-                / "emrg-recovery-receipt.json").exists()
+    # The pin is compared against the stash it names rather than trusted: a pin that
+    # silently did not resolve is indistinguishable from no pin at all.
+    assert _git_out(repo, "rev-parse", rescue[0]) == _git_out(repo, "rev-parse", "refs/stash")
+    assert _git_out(repo, "rev-parse", rescue[0] + "-head") == head
+
+    # Drop every ordinary route to the bytes.
+    subprocess.run(["git", "-C", repo, "stash", "clear"], capture_output=True, timeout=30)
+    assert _git_out(repo, "stash", "list") == "", "precondition: refs/stash is gone"
+
+    apply = subprocess.run(
+        ["git", "-C", repo, "stash", "apply", "--index", rescue[0]],
+        capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace",
+    )
+    # The verdict is the state, not the exit code: git restores some geometries exactly
+    # and still exits 1 (`tests/test_recover_worktree.py` measures the `D ??` one).
+    assert (tmp_path / "repo-untracked" / "notes.md").read_text(encoding="utf-8") == "only here", apply.stderr
+    assert "?? notes.md" in _status(repo)
 
 
-def test_dirty_tree_override_env_audited_receipt():
+def test_dirty_tree_override_env_audited_receipt(tmp_path, caplog):
     """Community issue #979: EMRG_TASK_DIRTY_OVERRIDE (comma-separated task
     names, or *) lets a human lift the guard — every exception is logged as a
-    receipt. The override must name THIS task (or *) to apply."""
-    handler = TaskHandler(
-        name="emrg-task", config={"project": "emrg"}, interval=60,
-        identity=InstanceIdentity(),
-    )
+    receipt. The override must name THIS task (or *) to apply.
+
+    Built on a repository this test owns, because what the override buys is now
+    visible in the tree rather than in the tier: a pinned tree keeps its tier either
+    way, so the *effect* of the override is that the recovery did not run — the host's
+    unsaved work is still exactly where the host left it.
+    """
+    repo = _repo_with_dirt(tmp_path, "untracked")
+    handler = TaskHandler(name="emrg-task", config={"path": repo}, interval=60,
+                          identity=InstanceIdentity())
     old = os.environ.get("EMRG_TASK_DIRTY_OVERRIDE")
     try:
-        # task named in the override → configured tier restored
+        # task named in the override → the guard stands down, tree untouched
         os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = "other-task,emrg-task"
-        assert asyncio.run(
-            handler._effective_sandbox(dirty=True, loses_unique=True)
-        ) == "workspace-write"
-        # wildcard → configured tier restored
+        with caplog.at_level(logging.WARNING, logger="emrg.server.scheduler"):
+            assert asyncio.run(handler._effective_sandbox()) == "workspace-write"
+        assert _status(repo) == "?? notes.md\n", "an override moves nothing"
+        assert _git_out(repo, "stash", "list") == ""
+        assert any("read-only guard overridden" in r.getMessage()
+                   for r in caplog.records), [r.getMessage() for r in caplog.records]
+        # wildcard → same
         os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = "*"
-        assert asyncio.run(
-            handler._effective_sandbox(dirty=True, loses_unique=True)
-        ) == "workspace-write"
-        # override for a different task → guard still applies
+        assert asyncio.run(handler._effective_sandbox()) == "workspace-write"
+        # override for a different task → the guard still applies, and converges
         os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = "other-task"
-        assert asyncio.run(
-            handler._effective_sandbox(dirty=True, loses_unique=True)
-        ) == "read-only"
+        assert asyncio.run(handler._effective_sandbox()) == "workspace-write"
+        assert _status(repo).strip() == "", "a guard that applies converges the tree"
     finally:
         if old is None:
             os.environ.pop("EMRG_TASK_DIRTY_OVERRIDE", None)
@@ -2988,13 +3057,15 @@ def test_dirty_tree_override_env_audited_receipt():
             os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = old
 
 
-def test_clean_tree_keeps_configured_sandbox():
+def test_clean_tree_keeps_configured_sandbox(tmp_path):
     """Community issue #979: a clean tree leaves the configured tier intact —
-    no behavior change for the normal case."""
-    handler = TaskHandler(
-        name="emrg-task", config={"project": "emrg"}, interval=60,
-        identity=InstanceIdentity(),
-    )
-    assert asyncio.run(
-        handler._effective_sandbox(dirty=False, loses_unique=True)
-    ) == "workspace-write", "a clean tree is never asked about loss"
+    no behavior change for the normal case, and nothing is stashed."""
+    repo = _repo_with_dirt(tmp_path, "deleted")
+    subprocess.run(["git", "-C", repo, "checkout", "--", "f.txt"],
+                   capture_output=True, timeout=30)
+    assert _status(repo).strip() == "", "precondition: a clean tree"
+
+    handler = TaskHandler(name="emrg-task", config={"path": repo}, interval=60,
+                          identity=InstanceIdentity())
+    assert asyncio.run(handler._effective_sandbox()) == "workspace-write"
+    assert _git_out(repo, "stash", "list") == "", "a clean tree is never asked about loss"

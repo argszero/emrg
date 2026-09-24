@@ -222,10 +222,17 @@ def test_the_task_handler_excludes_before_it_judges(tmp_path):
     assert EXCLUDE_ENTRY in _exclude_file(repo).read_text(encoding="utf-8")
 
 
-def test_real_dirt_still_forces_read_only(tmp_path):
+def test_real_dirt_still_triggers_the_guard(tmp_path):
     """The safety counterpart of the test above: the hook removes EMRG's own
-    directory from the verdict, not the verdict — a cycle in that same tree
-    still loses its tier when the tree holds someone else's unsaved work."""
+    directory from the verdict, not the verdict — a cycle in that same tree still
+    answers for someone else's unsaved work.
+
+    What "answers for" means changed on 2026-09-23 (host directive: a dirty tree
+    cleans itself up, it must not get stuck). The verdict is no longer *read-only*
+    — that tier refused the git verbs that converge a tree, so it was the state that
+    kept the cycle in it — but the guard still fires, and the host's bytes are still
+    there afterwards, now reachable from a pinned ref as well.
+    """
     repo = _repo(tmp_path / "clone")
     _runtime_dir(repo)
     (repo / "notes.txt").write_text("work that exists nowhere else", encoding="utf-8")
@@ -235,11 +242,32 @@ def test_real_dirt_still_forces_read_only(tmp_path):
         identity=InstanceIdentity(),
     )
 
-    assert asyncio.run(handler._effective_sandbox()) == "read-only"
-    assert (repo / "notes.txt").is_file(), "the guard leaves that work untouched"
-    assert (repo / "notes.txt").read_text(encoding="utf-8") == (
-        "work that exists nowhere else"
+    assert asyncio.run(handler._effective_sandbox()) == "workspace-write"
+    # The guard fired, and this is the discriminating half: the tier is the same as the
+    # test above, so what tells the two apart is the action the run left behind.
+    listed = subprocess.run(
+        ["git", "-C", str(repo), "stash", "list"],
+        capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
+    ).stdout.strip()
+    assert listed != "", "someone else's dirt must not be passed over"
+    # …and the host's bytes are not gone, they are *reachable* — the pin is the whole
+    # claim. Read them back out of the pinned ref rather than out of the worktree, since
+    # converging the tree is what the guard now does; the third parent of a
+    # `stash push --include-untracked` commit is the untracked-files commit.
+    rescue = [r for r in subprocess.run(
+        ["git", "-C", str(repo), "for-each-ref", "--format=%(refname)",
+         "refs/emrg/rescue/"],
+        capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
+    ).stdout.split() if not r.endswith("-head")]
+    assert len(rescue) == 1, rescue
+    kept = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{rescue[0]}^3:notes.txt"],
+        capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace",
     )
+    assert kept.returncode == 0, kept.stderr
+    assert kept.stdout == "work that exists nowhere else"
 
 
 def test_registering_a_project_writes_the_exclude_too(tmp_path):
