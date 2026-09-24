@@ -360,14 +360,25 @@ def _fit_streams(stdout: str, stderr: str) -> tuple[str, str]:
 
 
 def _truncate_stderr(stderr: str) -> str:
-    """Cut stderr to its own cap, keeping the head.
+    """Cut stderr to its own cap, keeping both ends.
+
+    The policy is the bash twin's, and it is pinned as one rather than asserted
+    in prose (``test_the_two_twins_agree_on_the_framing_contract`` feeds both
+    helpers the same text): a failing command's error is at the *end* of its
+    stderr, so a head-only cut hides the line the reading exists for, and the
+    notice has to say which end survived or a cut stream reads as a short one.
 
     :param stderr: the raw stderr text.
     :returns: the text, unchanged when it fits.
     """
     if len(stderr) <= _ERR_MAX:
         return stderr
-    return stderr[:_ERR_MAX] + f"\n... [stderr truncated, {len(stderr)} chars total]"
+    half = _ERR_MAX // 2
+    return (
+        f"{stderr[:half]}\n\n"
+        f"... [stderr truncated: {len(stderr)} → {_ERR_MAX} chars, head+tail kept]"
+        f"\n\n{stderr[-half:]}"
+    )
 
 
 def _truncate_stdout(stdout: str, remaining: int) -> str:
