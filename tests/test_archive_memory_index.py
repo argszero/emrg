@@ -87,6 +87,17 @@ def _write_index(path: Path, rows: list[str], heading: str = "# Index\n") -> str
     return text
 
 
+def _over_cap_row(stamp: str, mod) -> str:
+    """A valid row whose line is one char over the per-row cap, newline included.
+
+    Built from ``_row`` so the padding cannot accidentally become a second line (or
+    swallow the next row) if the row shape changes: the padding goes on the row's own
+    line, before its newline.
+    """
+    line = _row(stamp).rstrip("\n")
+    return line + "y" * (mod.ROW_MAX_CHARS + 1 - len(line)) + "\n"
+
+
 def _rows_in(path: Path) -> list[str]:
     return [line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("- [")]
 
@@ -252,6 +263,100 @@ def test_check_mode_flags_a_long_row_and_a_duplicate(tmp_path, mod, capsys):
     assert "duplicate" in capsys.readouterr().out
 
 
+def test_the_move_reports_the_row_length_rule_it_does_not_enforce(tmp_path, mod, capsys):
+    """The one rule with a checker and no runner (#1551), read where it can be acted on.
+
+    Both directions on the same fixture, and the last block is the sharper one: the
+    reading is of the **post-move** index, so a row that was over the cap and just
+    moved out is not reported as still sitting there. A report taken of the index as
+    it was *before* the move would name a violation the run it is reporting on has
+    already removed.
+    """
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+
+    # A compliant index: the move says nothing about a rule that is not broken.
+    _write_index(index, [_row(NEWEST), _row(NEW)])
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 0
+    out = capsys.readouterr()
+    assert "over the per-row cap" not in out.err, "no violation, no note"
+
+    # The over-cap row stays behind: the note names it, and the exit code does not move.
+    _write_index(index, [_over_cap_row(NEW, mod), _row(MID)])
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 0, (
+        "the length rule is a report, not a refusal: refusing would strand the row cap"
+    )
+    out = capsys.readouterr()
+    assert "1 row(s) of the index are over the per-row cap" in out.err
+    assert str(mod.ROW_MAX_CHARS) in out.err
+    assert "moved 1 row(s)" in out.out, "the move still happened"
+    assert _targets(index) == [f"cycle-{NEW}.md"], "the oldest row (MID) moved out"
+
+    # The over-cap row is the one that moves out: nothing is left to report.
+    _write_index(index, [_over_cap_row(OLD, mod), _row(NEWEST)])
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 0
+    out = capsys.readouterr()
+    assert "over the per-row cap" not in out.err, (
+        "the reading is of the text the move left behind — the plan's post-move "
+        "index, which is what `apply_plan` wrote and `measure_on_disk` verified — "
+        "so the row that was over the cap has already left: a reading taken of the "
+        "index as it stood *before* the move would name a violation this very run "
+        "has removed"
+    )
+    assert "moved 1 row(s)" in out.out
+
+
+def test_nothing_to_move_still_reports_the_row_length_rule(tmp_path, mod, capsys):
+    """The other exit a cycle can reach: no move, but the drift is still there."""
+    index = tmp_path / "MEMORY.md"
+    _write_index(index, [_over_cap_row(NEW, mod)])
+
+    assert mod.main([str(index), "--cap", "50"]) == 0
+    assert "over the per-row cap" in capsys.readouterr().err
+
+def test_check_mode_answers_from_one_snapshot(tmp_path, mod, monkeypatch, capsys):
+    """The count and the rule list must describe the same file.
+
+    The index has other writers — every task's cycles append to the same one — which is
+    why the move is a compare-and-swap and why `changed_since_planned` exists. `--check`
+    read the file **twice**: the printed count came from the first read and the rules
+    from the second, so a row appended in between put two snapshots in one answer, and
+    the two lines of that answer contradicted each other (`3 cycle row(s) …` beside
+    `VIOLATION: 4 cycle rows, over the cap 2`).
+
+    The file here is never written between the reads: the second read is made to return
+    a different text, which is what a parallel writer's append looks like from inside a
+    process whose other read already happened.
+    """
+    index = tmp_path / "MEMORY.md"
+    before = _write_index(index, [_row(NEW), _row(MID), _row(OLD)])
+    after = _write_index(index, [_row(NEW), _row(MID), _row(OLD), _row(NEWEST)])
+
+    real_read = Path.read_text
+    seen: list[str] = []
+
+    def racing_read(self, *args, **kwargs):
+        text = real_read(self, *args, **kwargs)
+        if self != index:
+            return text
+        seen.append(text)
+        return before if len(seen) == 1 else after
+
+    monkeypatch.setattr(Path, "read_text", racing_read)
+    assert mod.main([str(index), "--cap", "2", "--check"]) == 1
+    out = capsys.readouterr().out
+
+    counted = int(re.search(r"^(\d+) cycle row\(s\)", out, re.M).group(1))
+    violated = int(re.search(r"^VIOLATION: (\d+) cycle rows", out, re.M).group(1))
+    assert counted == violated, (
+        f"the answer describes two snapshots: it counts {counted} cycle row(s) and then "
+        f"reports {violated} over the cap\n{out}"
+    )
+    assert len(seen) == 1, (
+        f"the index was read {len(seen)} times; one answer must come from one snapshot"
+    )
+
+
 def _topic_row(i: int) -> str:
     """A readable row that is not a cycle row - bulk for an over-cap index."""
     return f"- [topic {i}](topic-{i}.md) - {'x' * 90}\n"
@@ -367,6 +472,94 @@ def test_the_reading_is_printed_under_a_violation_too(tmp_path, mod, capsys):
 
     assert "VIOLATION" in out
     assert "embed cap:" in out, "the reading must not be hidden by the violation"
+
+
+def test_the_embed_reading_keeps_describing_the_rows_the_count_used(
+    tmp_path, mod, monkeypatch, capsys
+):
+    """The reading is one answer with the count, even though the cap reads the file.
+
+    Over the cap the kept prefix comes from the cap's own read - it takes a path, which
+    is what "asked, not copied" costs - so the two reads are one writer apart in the
+    ordinary case: a cycle appending to the same index. The size it prints must be the
+    size of the text the count above came from, not of a second snapshot, and an append
+    cannot move the head (both reads cover the same first `INDEX_SIZE_WARN` characters),
+    so the printed "N of M row(s) are past the cut" must still describe the rows that
+    count used. Both reads are made to return different texts here, which is what a
+    parallel writer's append looks like from inside the process.
+    """
+    index = tmp_path / "MEMORY.md"
+    before = _write_index(index, [_topic_row(i) for i in range(600)] + [_row(NEWEST)])
+    after = before + _topic_row(999)  # append to the text: a writer that appends
+    index.write_text(after, encoding="utf-8")
+    assert len(after) > len(before), "the appended row must change the size"
+
+    real_read = Path.read_text
+    seen: list[int] = []
+
+    def racing_read(self, *args, **kwargs):
+        text = real_read(self, *args, **kwargs)
+        if self != index:
+            return text
+        seen.append(1)
+        return before if len(seen) == 1 else after
+
+    monkeypatch.setattr(Path, "read_text", racing_read)
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    out = capsys.readouterr().out
+
+    assert len(seen) > 1, "the fixture must exercise the cap's own read, or this is vacuous"
+    assert f"embed cap: {len(before)} char(s)" in out, (
+        "the reading reported a size from a snapshot the count above did not use - a "
+        f"second read of the file rather than the one `--check` already made\n{out}"
+    )
+    counted_rows = int(re.search(r"cycle row\(s\) of (\d+) row\(s\)", out).group(1))
+    reading = re.search(r"(\d+) of (\d+) row\(s\) are past the cut", out)
+    assert reading, out
+    dropped, described_rows = (int(reading.group(1)), int(reading.group(2)))
+    assert dropped > 0, "the fixture must drop rows, or the numbers are both 0"
+    assert described_rows == counted_rows, (
+        f"the reading describes {described_rows} row(s) while the count above used "
+        f"{counted_rows}: one answer, two snapshots\n{out}"
+    )
+
+
+def test_the_reading_names_a_snapshot_that_moved_under_it(tmp_path, mod, monkeypatch, capsys):
+    """The one racing case that changes the answer, said rather than number-printed.
+
+    An append leaves the head intact, so the reading still describes the rows the count
+    used (the test above). A writer that removes rows from the **head** does not: the
+    cut moves relative to those rows, and the kept prefix no longer lines up with them.
+    The reading compares the two and refuses to state a number that describes neither
+    file - which is the shape a move (this tool's own writer) leaves behind.
+    """
+    index = tmp_path / "MEMORY.md"
+    before = _write_index(index, [_topic_row(i) for i in range(600)] + [_row(NEWEST)])
+    # A move removes *old* rows: the same file, its head shortened.
+    after = _write_index(index, [_topic_row(i) for i in range(200, 600)] + [_row(NEWEST)])
+
+    real_read = Path.read_text
+    seen: list[int] = []
+
+    def racing_read(self, *args, **kwargs):
+        text = real_read(self, *args, **kwargs)
+        if self != index:
+            return text
+        seen.append(1)
+        return before if len(seen) == 1 else after
+
+    monkeypatch.setattr(Path, "read_text", racing_read)
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    out = capsys.readouterr().out
+
+    assert len(seen) > 1, "the fixture must exercise the cap's own read, or this is vacuous"
+    assert "changed between the two reads" in out, (
+        f"the reading stated a cut for a snapshot its own count did not use\n{out}"
+    )
+    assert "row(s) are past the cut" not in out, (
+        f"the reading printed a drop count that describes neither snapshot\n{out}"
+    )
+    assert "embed cap:" in out, "the reading is still a reading: it must appear"
 
 
 def test_the_verifiers_rules_fire_on_a_bad_plan(tmp_path, mod):
