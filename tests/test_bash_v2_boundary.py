@@ -231,11 +231,56 @@ def test_a_runner_failure_is_never_reported_as_a_denial():
     from emrg.tools.bash_tool_v2 import classify_runner_failure
     from emrg.sandbox.providers.darwin import RUNNER_FAILURE_RULES
 
-    fatal = classify_runner_failure(65, "sandbox-exec: syntax error\n", RUNNER_FAILURE_RULES)
-    assert fatal == "sandbox-exec: syntax error"
+    fatal = classify_runner_failure(
+        65, "sandbox-exec: syntax error: expecting ')'\n", RUNNER_FAILURE_RULES
+    )
+    assert fatal == "sandbox-exec: syntax error: expecting ')'"
     assert classify_runner_failure(65, "Operation not permitted\n", RUNNER_FAILURE_RULES) is None
     assert classify_runner_failure(0, "sandbox-exec: nope\n", RUNNER_FAILURE_RULES) is None
     assert classify_runner_failure(None, "sandbox-exec: nope\n", RUNNER_FAILURE_RULES) is None
+
+
+def test_the_darwin_rule_classifies_the_lines_sandbox_exec_really_prints():
+    """The darwin rung's rule, pinned by recorded output rather than a plausible one.
+
+    The sibling ``linux`` rung received this treatment in #1587, for issue #1543's
+    reason: a rule that has only ever been fed a line it will obviously match is not
+    measured. Here the line was ``"sandbox-exec: syntax error"`` — no line
+    ``sandbox-exec`` prints (the real one continues ``: expecting ')'``), so the pin
+    could pass while the rule stopped matching the runner's own output, which is the
+    whole of what the rule is for.
+
+    Recorded, not invented: ``/usr/bin/sandbox-exec`` on macOS 26.6.2 (build 25G83),
+    ``-p <profile> /bin/echo hi``, each of the five profiles in the rule's own
+    comment exiting 65 with the prefix on stderr. Pure predicates over strings, so
+    this runs on every leg — nothing below needs macOS.
+    """
+    from emrg.tools.bash_tool_v2 import classify_runner_failure
+    from emrg.sandbox.providers.darwin import RUNNER_FAILURE_RULES
+
+    for line in (
+        "sandbox-exec: unbound variable: bogus-op at <input string>, line 1, column 28",
+        "sandbox-exec: Error reading string",
+        "sandbox-exec: no version specified",
+    ):
+        assert classify_runner_failure(65, line + "\n", RUNNER_FAILURE_RULES) == line, line
+
+    # The detail without the prefix is **not** a line this runner prints (all five
+    # measured fatals carry it), and it is not classified — this is what makes the
+    # prefix the load-bearing half of the rule rather than decoration.
+    assert (
+        classify_runner_failure(65, "syntax error: expecting ')'\n", RUNNER_FAILURE_RULES) is None
+    )
+
+    # And the row stays signature-only, exactly as the blueprint has it. The tempting
+    # "tightening" is to gate on 65, because all five measured cases exit with it —
+    # but that is one macOS version's behaviour, while the prefix is the launcher's own
+    # contract; a gate would silently stop classifying a runner failure on a version
+    # that exits differently, reporting it as the denial this rule exists to outrank.
+    assert len(RUNNER_FAILURE_RULES) == 1
+    rule = RUNNER_FAILURE_RULES[0]
+    assert rule.fatal_signatures == ("sandbox-exec: ",)
+    assert rule.allowed_exit_codes is None, "an exit status is not evidence here (see darwin.py)"
 
 
 def test_the_package_does_not_import_the_frozen_tool():
