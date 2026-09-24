@@ -466,14 +466,21 @@ def test_a_missing_run_is_told_to_re_trigger_rather_than_refresh(mod, monkeypatc
     assert "Re-merge master into the branch" not in err
 
 
-def test_a_run_still_going_is_told_to_wait(mod, monkeypatch, capsys):
+def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
+    """The message is an instruction to a cycle, so it must not say "wait".
+
+    A run that has not concluded cannot be voted on by anyone, so blocking on it buys
+    nothing this cycle can use; the reader is told to defer the row instead (host rant
+    2026-09-24T14:46:10).
+    """
     fake = FakeGh(_view(), _compare("ahead", 1, 0), [_run_(conclusion="pending")])
     asked = _votes(mod, monkeypatch, 3)
     rc = _run(mod, monkeypatch, fake)
     err = capsys.readouterr().err
     assert rc == 1
     assert asked == []
-    assert "wait for the run" in err
+    assert "park it" in err
+    assert "next cycle" in err, "the deferral has to name when the row comes back"
 
 
 def test_a_failing_run_is_told_to_fix_the_failure_not_to_refresh(mod, monkeypatch, capsys):
