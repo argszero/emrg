@@ -479,6 +479,19 @@ class MemoryIndex:
     entries are appended under their ``## type`` heading. Loading an untouched
     index and saving it back returns the same text (normalised to one trailing
     newline) — no row, note or heading is lost.
+
+    One input that promise does not cover, which ``to_markdown`` states at the
+    line and which is worth knowing before anyone reaches for a save: a row
+    longer than ``INDEX_TITLE_MAX_CHARS`` is **re-rendered from the parsed
+    fields** rather than truncated, so whatever the row carried beyond its
+    title, link, status and dates is dropped — per-row prose, and any identifier
+    that lived only in the row. Measured 2026-09-24 on this host's evolution
+    index (172 rows, 31 over the cap): a load → save took it from 108,491 to
+    68,421 chars and brought it within the cap (0 rows over), while dropping
+    text from 31 rows — and for 27 of them an identifier the row names is in no
+    detail file. So a save is the wrong way to trim a drifted index (#1551) even
+    though it satisfies the cap: the text has to be checked against the detail
+    file first, row by row.
     """
 
     def __init__(self, entries: list[_IndexEntry] | None = None):
