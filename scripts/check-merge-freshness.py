@@ -52,6 +52,23 @@ out of either. It is also pinned to the workflow whose verdict is being claimed 
 `test.yml` - because "some passing run" is only the test verdict while nothing
 else happens to run on a PR head.
 
+That query is asked **twice** before an empty answer is taken as the answer, and
+the re-ask that finds a run is printed on stderr. Not a precaution: measured
+2026-09-24 (`cyc20260924-213009`), the identical query answered empty for head
+`fb672634` (#1582), which has a run - the lazy answer was visible in
+`review-queue.py`'s own line as the commit-date fallback (`pushed
+2026-09-24T12:45:21Z`) against the run GitHub holds (`12:45:38Z`) - and the same
+query was correct on the next invocation and on all eight asks made in the minute
+after. Nothing in the response says which of the two it is, and **here an empty
+answer is used**: it sets `_KIND_NO_RUN` and refuses FRESH with "there is NO Test
+run for head ...", a verdict-shaped sentence about a head that has one. A head
+that really ran nothing stays empty through both asks and is still reported
+`no_run`, so the retry cannot invent a verdict. Filed as issue #1585, whose
+sibling half is `check-vote-count.py`'s `_earliest_run_created_at`; the two are
+deliberately separate implementations because each suite stubs its **own**
+`_gh_json`, so a shared lookup would put a live `gh` request behind the other
+suite's tests.
+
 The run is also required to have *passed* - a failing or cancelled run is not a
 stale verdict, it is a verdict the committer has to deal with on its own terms,
 and this tool says so rather than calling it fresh.
@@ -168,6 +185,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -219,6 +237,17 @@ _KIND_ANCESTRY = "ancestry"  # the #1137 case: green, but about an older master
 _KIND_NO_RUN = "no_run"  # master is an ancestor but nothing ever judged the head
 _KIND_RUNNING = "running"  # a run exists and has not concluded
 _KIND_FAILING = "failing"  # a run concluded non-success
+
+# How many times the run lookup is asked before an empty answer is taken as *the*
+# answer, and the gap between the asks. The reason is in the module docstring and
+# in `_latest_run_for_head`: an empty answer here is not a missing measurement, it
+# is a *verdict* (`_KIND_NO_RUN`, FRESH refused), and the query was measured
+# serving one stale for a head that has a run. Bounded at two because the state it
+# guards still exists - a dropped push event or a fork PR really has no run - and
+# such a head stays empty through both asks. `review-queue.py` reads this for every
+# open PR, so the run-less head pays the gap once per reader and no more.
+_RUN_LOOKUP_ATTEMPTS = 2
+_RUN_LOOKUP_DELAY_SECONDS = 2.0
 
 
 def _gh_json(args: list[str]) -> object:
@@ -274,6 +303,40 @@ def _latest_run_for_head(head: str) -> dict | None:
 
     Filtering to `_VERDICT_WORKFLOW` is the second half of the same point: a
     passing run from *any* workflow is not a test verdict.
+
+    An empty answer is re-asked (bounded, `_RUN_LOOKUP_ATTEMPTS`) before it is
+    returned as `None`, because `None` is not how this tool says "unknown" - it is
+    `_KIND_NO_RUN` and a refused FRESH, i.e. a sentence claiming the head has no
+    run at all. That sentence was measured being said about head `fb672634`
+    (#1582) by the identical query while GitHub held its run; see the module
+    docstring. The re-ask that *finds* the run is reported on stderr, so a repair
+    of a stale answer is never silent and a later reader can tell flakiness from a
+    one-off. A head that really ran nothing returns `None` from both asks, so the
+    retry cannot manufacture a run.
+    """
+    for attempt in range(_RUN_LOOKUP_ATTEMPTS):
+        run = _ask_latest_run_for_head(head)
+        if run is not None:
+            if attempt:
+                print(
+                    f"note: the runs API listed no {_VERDICT_WORKFLOW} run for head "
+                    f"{head[:8]} and then returned one created "
+                    f"{run.get('createdAt')} - the empty answer was served stale, so "
+                    "the verdict it was about to be denied is this run's",
+                    file=sys.stderr,
+                )
+            return run
+        if attempt + 1 < _RUN_LOOKUP_ATTEMPTS:
+            time.sleep(_RUN_LOOKUP_DELAY_SECONDS)
+    return None
+
+
+def _ask_latest_run_for_head(head: str) -> dict | None:
+    """One ask of the run lookup: the newest verdict run for the SHA, or `None`.
+
+    Split out so the bounded re-ask in `_latest_run_for_head` cannot accidentally
+    re-ask a *broken* call: a call that raises is not an empty answer, and must
+    stay a failure rather than being retried into looking like a measurement.
     """
     payload = _gh_json(
         [
