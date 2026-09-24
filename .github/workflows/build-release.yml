@@ -511,8 +511,9 @@ jobs:
           # Latest 只在本 tag 是版本序最高的那个已发布 release 时才断言：重跑（或重打）
           # 一个旧 tag 是允许的，那时 `releases/latest` 指向更新的版本并不代表这次失败。
           # `--paginate`（外审提出的那一半，2026-09-23 采纳）：这个端点按**创建时间**倒序
-          # 返回，而下面按**版本序**取最大——两者在 100 个 release 的跨度内一致纯属巧合。
-          # 分页消除这个巧合要求：漏页时丢的是最旧的几页，版本序也仍在全量上取。
+          # 返回，而下面按**版本序**取最大——不分页时只读最新的一页（100 个），两者一致
+          # 就成了「创建序与版本序在这 100 个之内不得相反」这一未被写下的前提。分页后读的
+          # 是全量，这个前提消失。
           newest="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
             --paginate \
             --jq '.[]|select(.draft==false and .prerelease==false)|.tag_name' | sort -V | tail -1)"
