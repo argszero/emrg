@@ -48,6 +48,7 @@ from emrg.sandbox.policy import (
     SANDBOX_MODES,
     resolve_policy,
 )
+from emrg.sandbox.providers import unconfined_mode
 from emrg.sandbox.roots import writable_roots
 from emrg.tools.bash_tool import check_workspace_write
 from emrg.tools.edit_tool import EditTool
@@ -238,6 +239,28 @@ def test_resolve_policy_without_a_mode_is_the_documented_default() -> None:
     policy = resolve_policy(mode=None, workspace_root=str(Path.cwd()))
     assert policy.mode == DEFAULT_MODE
     assert DEFAULT_MODE == DANGER_FULL_ACCESS
+
+
+def test_no_declaration_leaves_the_command_runner_unconfined() -> None:
+    """The enforcement layer, not just the predicates: nothing confines the call.
+
+    The three writes the upgrade needs go through bash, so the in-process
+    predicates are only half the story — the OS-level backend is the other half.
+    ``unconfined_mode`` is the consumer's short-circuit *before* any provider is
+    consulted, and it is the same decision on every platform, so this is a pure
+    function on the resolved mode rather than a platform-specific probe.
+
+    Together with the predicate tests above, this is what "the upgrade can write
+    its own three targets again" decomposes into. It is deliberately *not*
+    demonstrated by writing to those targets: they live under ``$HOME``, and a
+    test that performed the write would be a real modification of the host's
+    installation.
+    """
+    resolved = resolve_policy(mode=None, workspace_root=str(Path.cwd()))
+    assert unconfined_mode(resolved.mode) == DANGER_FULL_ACCESS, (
+        "a call with no declared tier must run unconfined — otherwise the "
+        "upgrade session is confined again and the deadlock returns"
+    )
 
 
 def test_no_declaration_means_the_write_tool_does_not_fence(tmp_path: Path) -> None:
