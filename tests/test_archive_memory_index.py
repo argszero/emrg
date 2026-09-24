@@ -478,6 +478,105 @@ def test_a_plain_index_is_still_clean_in_both_modes(tmp_path, mod, capsys):
     assert len(_targets(index)) == 2 and _targets(archive) == [f"cycle-{OLD}.md"]
 
 
+# --- a file whose rows are all in another shape is not a clean file ---------------
+#
+# The counted shape of the same false verdict: an index written as
+# `| id | title | type | status | updated |`, which names no cycle and so is
+# invisible to the cycle-id scan above. Measured 2026-09-24 on the `mem` project's
+# index (161 row-like lines, the longest 3,141 chars, per-row cap 512):
+#
+#     --check  ->  "0 cycle row(s) of 0 row(s)"  "OK: the index respects the row rules"  rc 0
+#     trim     ->  "nothing to move: the index is within its 50-row cap"                 rc 0
+#
+# Both are verdicts about rows that were never read, which is what exit 2 is for. The
+# boundary is "no row parses at all", not "some line is not a row": the third test
+# below pins the other direction, because the two indexes this host embeds both carry
+# a line of another shape beside readable rows and must keep their verdicts.
+
+
+def _table_index(path: Path) -> str:
+    """A `mem`-shaped index: table rows, none of which names a cycle."""
+    text = (
+        "# Memory Index\n"
+        "\n"
+        "| ID | Title | Type | Status | Updated |\n"
+        "|----|-------|------|--------|---------|\n"
+        "| shenbi-workspace-001 | one | reference | active | 2026-07-22 |\n"
+        "| e3a1b7c2 | two | reference | active | 2026-07-22 |\n"
+        "| b4f2c8a1 | " + "x" * 600 + " | project | active | 2026-07-22 |\n"
+    )
+    path.write_text(text, encoding="utf-8")
+    return text
+
+
+def test_an_index_whose_rows_are_all_another_shape_is_not_called_clean(tmp_path, mod, capsys):
+    """`0 cycle row(s) of 0 row(s)` plus `OK` is a healthy verdict on no question."""
+    index = tmp_path / "MEMORY.md"
+    _table_index(index)
+
+    assert mod.main([str(index), "--check"]) == 2, (
+        "the row rules were applied to no row, so nothing may be reported about them"
+    )
+    captured = capsys.readouterr()
+    assert "not one row of the shape this tool reads" in captured.err, captured.err
+    assert "MEMORY.md:3" in captured.err, "the first row-like line must be named"
+    for wrong in ("OK: the index respects the row rules", "cycle row(s)", "VIOLATION"):
+        assert wrong not in captured.out, f"nothing may be claimed: {captured.out}"
+
+
+def test_the_trim_refuses_a_foreign_format_index_rather_than_moving_nothing(
+    tmp_path, mod, capsys
+):
+    """`nothing to move` is the same claim from the other side: the cap was not read."""
+    index = tmp_path / "MEMORY.md"
+    before = _table_index(index)
+    archive = tmp_path / "cycle-archive-X.md"
+
+    assert mod.main([str(index), "--cap", "2", "--archive", str(archive)]) == 2
+
+    assert index.read_text(encoding="utf-8") == before, "refusing means writing nothing"
+    assert not archive.exists()
+    captured = capsys.readouterr()
+    assert "nothing to move" not in captured.out
+    assert "not one row of the shape this tool reads" in captured.err, captured.err
+
+
+def test_rows_of_another_shape_beside_readable_rows_keep_their_verdict(tmp_path, mod, capsys):
+    """The boundary: the refusal is "no row parses", not "some line is not a row".
+
+    Both indexes this host embeds carry such lines (a table row in one, a prose bullet
+    in the other), and a rule that fired on them would refuse the files it exists to
+    maintain. So a mixed index answers from what it can read - here the readable rows
+    are over a cap of two, which is the verdict that must survive.
+    """
+    index = tmp_path / "MEMORY.md"
+    text = _write_index(
+        index,
+        [
+            "| not-a-row | of this tool |\n",
+            _row(NEW),
+            _row(MID),
+            _row(OLD),
+        ],
+    )
+    assert mod.parse_rows(text), "the readable rows are the ones that count"
+
+    assert mod.main([str(index), "--cap", "2", "--check"]) == 1, (
+        "three readable rows over a cap of two is a violation, not an unmeasurable file"
+    )
+    out = capsys.readouterr().out
+    assert "3 cycle row(s) of 3 row(s)" in out, out
+
+
+def test_an_index_with_no_rows_at_all_is_still_clean(tmp_path, mod, capsys):
+    """The other control: having no rows is not the same as having unreadable ones."""
+    index = tmp_path / "MEMORY.md"
+    index.write_text("# Index\n\n> notes only, no rows yet\n", encoding="utf-8")
+
+    assert mod.main([str(index), "--check"]) == 0
+    assert "OK: the index respects the row rules" in capsys.readouterr().out
+
+
 # --- the index is shared: a move must survive another writer ----------------
 #
 # `/Users/argszero/.emrg/evolution/.emrg/memory/MEMORY.md` is written by *every*

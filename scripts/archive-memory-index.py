@@ -78,6 +78,23 @@ row(s)` with `OK`, and the trim answered `nothing to move` for a 52-row index).
 Both modes now exit 2 and name the lines. Prose that merely mentions a cycle id is
 not a row and is left alone.
 
+The same false healthy verdict has a second shape, and it is the counted one: an
+index whose rows are **all** in a shape this parser does not read *and* which names
+no cycle, so nothing above can see it - a project index written as
+`| id | title | type | status | updated |`. There the tool used to answer
+`0 cycle row(s) of 0 row(s)` plus `OK` while the rows ran to six times the per-row
+cap (measured 2026-09-24: 161 row-like lines, the longest 3,141 chars, no cycle
+ids), and the trim answered `nothing to move` for the same file. A count over the
+empty set is not a clean index, so a file with row-like lines and **no** row of the
+shape this tool reads is refused by both modes as well (`report_foreign_format`).
+
+The boundary is deliberate: the refusal fires only when *no* row parses. A mixed
+index - readable rows beside rows of another shape that name no cycle - still
+answers from what it can read, which is why the two indexes embedded on the host
+that carry such lines (a table row here, a prose bullet there) keep their verdicts.
+That residual gap is a count taken over a subset, and it is the honest cost of not
+refusing files whose readable rows are perfectly manageable.
+
 Exit codes
 ----------
 ``0``  the index is within its cap (nothing to move), or the move was made and
@@ -85,9 +102,11 @@ Exit codes
        read (too many cycle rows, a row over the per-row cap, a duplicate target).
        ``2``  the question could not be answered - no index at that path, an index
        that could not be read, an index holding lines that name a cycle but are not
-       rows this tool can read (so which rows are cycle rows is unknowable), or a
-       move that did not verify. A measurement error is never reported as a healthy
-       index, and never as a rule violation.
+       rows this tool can read (so which rows are cycle rows is unknowable), an index
+       whose row-like lines contain no row this tool can read at all (so the row rules
+       have nothing to be asserted about), or a move that did not verify. A
+       measurement error is never reported as a healthy index, and never as a rule
+       violation.
 
 Usage
 -----
@@ -220,6 +239,21 @@ def unreadable_rows(text: str) -> list[tuple[int, str]]:
         if lineno - 1 not in readable
         and ROW_LIKE.match(line)
         and CYCLE_ID_IN_LINE.search(line)
+    ]
+
+
+def row_like_lines(text: str) -> list[tuple[int, str]]:
+    """Every row-like line in `text`, numbered as an editor counts.
+
+    `ROW_LIKE` is a *shape* test, not a parse: it answers whether the file contains
+    rows at all, which is the one question `parse_rows` returning nothing leaves
+    open. A file with row-like lines and none of them readable is a file the row
+    rules cannot be asserted about - see `report_foreign_format`.
+    """
+    return [
+        (lineno, line)
+        for lineno, line in enumerate(text.splitlines(), start=1)
+        if ROW_LIKE.match(line)
     ]
 
 
@@ -497,6 +531,26 @@ def report_unreadable(index_path: Path, unreadable: list[tuple[int, str]]) -> No
         print(f"  ... and {len(unreadable) - 20} more", file=sys.stderr)
 
 
+def report_foreign_format(index_path: Path, row_like: list[tuple[int, str]]) -> None:
+    """Name the rows in a shape this parser does not read, when there are no others.
+
+    The verdict is deliberately about what the tool *did* with this file, not about
+    the file being wrong: an index in another format may be perfectly good, and this
+    tool has no opinion on it. What it may not do is call it clean, because the row
+    rules were applied to nothing.
+    """
+    print(
+        f"error: {index_path} has {len(row_like)} row-like line(s) and not one row of "
+        "the shape this tool reads (`- [title](target)`), so the row rules have "
+        "nothing to be asserted about:",
+        file=sys.stderr,
+    )
+    for lineno, line in row_like[:20]:
+        print(f"  {index_path}:{lineno}: {line.strip()[:120]}", file=sys.stderr)
+    if len(row_like) > 20:
+        print(f"  ... and {len(row_like) - 20} more", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -552,13 +606,26 @@ def main(argv: list[str] | None = None) -> int:
         report_unreadable(index_path, unreadable)
         return 2
 
+    # The counted shape of the same defect, which `unreadable_rows` cannot see
+    # because such a file names no cycle: rows in a shape this parser does not read,
+    # and no readable row to apply the rules to. `0 cycle row(s) of 0 row(s)` plus
+    # `OK` is a healthy verdict on a question that was never answered (measured
+    # 2026-09-24 on a table-format project index: 161 row-like lines, the longest
+    # 3,141 chars, `--check` rc 0), and the trim's `nothing to move` is the same
+    # claim from the other side. Refused here, before either mode answers.
+    rows = parse_rows(index_text)
+    if not rows:
+        row_like = row_like_lines(index_text)
+        if row_like:
+            report_foreign_format(index_path, row_like)
+            return 2
+
     archive_path: Path = args.archive or index_path.with_name(
         f"cycle-archive-{date.today():%Y%m%d}.md"
     )
 
     if args.check:
         problems = check_rules(index_path, args.cap)
-        rows = parse_rows(index_text)
         cycle_rows = [row for row in rows if row.is_cycle]
         print(f"index: {index_path}")
         print(f"{len(cycle_rows)} cycle row(s) of {len(rows)} row(s), cap {args.cap}")
