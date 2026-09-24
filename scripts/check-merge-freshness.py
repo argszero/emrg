@@ -556,8 +556,9 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
         )
     if kind == _KIND_RUNNING:
         return (
-            f"#{pr}: wait for the run - neither a refresh nor a re-trigger answers a run "
-            "that has not concluded"
+            f"#{pr}: park it, the run has not concluded - a vote here is not votable by "
+            "anyone and neither a refresh nor a re-trigger answers it, so do not block on "
+            "this PR: read it again next cycle (host rant 2026-09-24T14:46:10)"
         )
     return (
         f"#{pr}: fix the failure - a refresh costs every vote the branch has, and does not "
