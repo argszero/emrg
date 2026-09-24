@@ -487,7 +487,8 @@ def test_the_embed_reading_keeps_describing_the_rows_the_count_used(
     """
     index = tmp_path / "MEMORY.md"
     before = _write_index(index, [_topic_row(i) for i in range(600)] + [_row(NEWEST)])
-    after = _write_index(index, before + _topic_row(999))
+    after = before + _topic_row(999)  # append to the text: a writer that appends
+    index.write_text(after, encoding="utf-8")
     assert len(after) > len(before), "the appended row must change the size"
 
     real_read = Path.read_text
@@ -518,6 +519,44 @@ def test_the_embed_reading_keeps_describing_the_rows_the_count_used(
         f"the reading describes {described_rows} row(s) while the count above used "
         f"{counted_rows}: one answer, two snapshots\n{out}"
     )
+
+
+def test_the_reading_names_a_snapshot_that_moved_under_it(tmp_path, mod, monkeypatch, capsys):
+    """The one racing case that changes the answer, said rather than number-printed.
+
+    An append leaves the head intact, so the reading still describes the rows the count
+    used (the test above). A writer that removes rows from the **head** does not: the
+    cut moves relative to those rows, and the kept prefix no longer lines up with them.
+    The reading compares the two and refuses to state a number that describes neither
+    file - which is the shape a move (this tool's own writer) leaves behind.
+    """
+    index = tmp_path / "MEMORY.md"
+    before = _write_index(index, [_topic_row(i) for i in range(600)] + [_row(NEWEST)])
+    # A move removes *old* rows: the same file, its head shortened.
+    after = _write_index(index, [_topic_row(i) for i in range(200, 600)] + [_row(NEWEST)])
+
+    real_read = Path.read_text
+    seen: list[int] = []
+
+    def racing_read(self, *args, **kwargs):
+        text = real_read(self, *args, **kwargs)
+        if self != index:
+            return text
+        seen.append(1)
+        return before if len(seen) == 1 else after
+
+    monkeypatch.setattr(Path, "read_text", racing_read)
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    out = capsys.readouterr().out
+
+    assert len(seen) > 1, "the fixture must exercise the cap's own read, or this is vacuous"
+    assert "changed between the two reads" in out, (
+        f"the reading stated a cut for a snapshot its own count did not use\n{out}"
+    )
+    assert "row(s) are past the cut" not in out, (
+        f"the reading printed a drop count that describes neither snapshot\n{out}"
+    )
+    assert "embed cap:" in out, "the reading is still a reading: it must appear"
 
 
 def test_the_verifiers_rules_fire_on_a_bad_plan(tmp_path, mod):

@@ -530,6 +530,13 @@ def embed_cap_reading(index_path: Path, rows: list[Row], text: str) -> list[str]
     append at the end cannot change). `--check` reads the index once for everything it
     prints about the file.
 
+    One racing case *does* change the answer, and it is named rather than left to be
+    rediscovered: a writer that removes rows from the **head** (this tool's own move
+    does exactly that) moves the cut relative to the rows the count used, and the two
+    reads are one writer apart. The kept prefix is compared against those rows, and when
+    they disagree the reading says the snapshot moved instead of printing a number that
+    describes neither file.
+
     :param index_path: the index, named so the cap can be asked about it.
     :param rows: the rows of ``text``, parsed by the caller.
     :param text: the index's text as the caller read it (the same read the count uses).
@@ -545,6 +552,18 @@ def embed_cap_reading(index_path: Path, rows: list[Row], text: str) -> list[str]
     from emrg.server.daemon import EmrgServer  # lazy: only this reading needs it
 
     kept_rows = parse_rows(EmrgServer._cap_memory_index(None, index_path))
+    if kept_rows != rows[: len(kept_rows)]:
+        # Compared by identity of the rows themselves (`lineno`, text, target, stamp),
+        # so an append - the ordinary case - matches and answers, while a head removal
+        # does not. Nothing is inferred from sizes or counts here: if they disagree the
+        # question "which rows are past the cut" has two answers and this prints none.
+        return [
+            f"embed cap: {size} char(s), over the {limit}-char cap - the head is kept, "
+            "but the index changed between the two reads this reading needs (rows were "
+            "removed at the head, which is what a move does), so which rows are past "
+            "the cut cannot be said about the count above; re-run `--check` once the "
+            "other writer has finished"
+        ]
     dropped = rows[len(kept_rows) :]
 
     out = [
