@@ -48,6 +48,12 @@ def _load_module():
     # resolves through sys.modules[cls.__module__] at class-creation time.
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
+    # Zeroed here rather than in each test: the *gap* between the two run-lookup asks
+    # is not what anything below decides, the number of asks is, and four existing
+    # tests drive the empty answer - left at the production value each would sleep
+    # 2s, on both CI legs, for nothing measured. The production value stays visible
+    # in `_RUN_LOOKUP_DELAY_SECONDS`, which is where a reader looks for it.
+    mod._RUN_LOOKUP_DELAY_SECONDS = 0.0
     return mod
 
 
@@ -1074,6 +1080,65 @@ def test_the_no_ci_block_names_the_missing_run(mod, monkeypatch, capsys):
     _run(mod, monkeypatch, fake)
     err = capsys.readouterr().err
     assert "no CI run" in err
+
+
+def test_an_empty_run_answer_is_re_asked_before_it_is_reported_as_no_run(mod, monkeypatch, capsys):
+    """A stale empty answer must not be reported as a measured "no CI run".
+
+    Measured 2026-09-24 (`cyc20260924-213009`): `review-queue.py` reported #1582 this
+    way - its own line carried the commit-date fallback (`pushed 2026-09-24T12:45:21Z`)
+    against the run GitHub holds (`12:45:38Z`) - and the identical query answered
+    correctly on the next invocation and on eight attempts in the minute after. The
+    empty answer is *used* here (it sets `BLOCKED`), so one ask is not enough evidence
+    for it.
+
+    Both halves of the same input are asserted: with the re-ask the PR is READY, and
+    the note says the empty answer was stale - without it the identical input reaches
+    the fallback, which the tests above already pin as blocked.
+    """
+    votes = [_approve(f"cyc2026091{i}-010000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)]
+    base = FakeGh(votes, exact=True)
+    asked: list[str] = []
+
+    def flaky(args: list[str]) -> object:
+        if args[0] == "api" and "actions/runs" in " ".join(args):
+            asked.append("runs")
+            if len(asked) == 1:
+                base.calls.append(list(args))
+                return {"t": ""}  # the stale answer, verbatim shape
+        return base(args)
+
+    monkeypatch.setattr(mod, "_gh_json", flaky)
+    monkeypatch.setattr(mod, "_gh_json_paginated", base.paginated)
+    rc = mod.main(["1"])
+
+    captured = capsys.readouterr()
+    assert asked == ["runs", "runs"], f"the lookup must be re-asked exactly once: {asked}"
+    assert rc == 0, captured.out + captured.err
+    assert "READY 3/3" in captured.out, captured.out
+    assert "BLOCKED" not in captured.out, captured.out
+    assert "approximated" not in captured.out, captured.out
+    assert "served stale" in captured.err, captured.err
+
+
+def test_a_head_that_really_ran_nothing_is_asked_the_bounded_number_of_times(mod, monkeypatch, capsys):
+    """The other direction: the re-ask cannot turn a run-less head into a verdict.
+
+    A dropped push event and a fork PR both produce a head GitHub lists no run for,
+    and those must still fall back to the commit date and still block. The ask count
+    is pinned to the constant rather than to "at least one", so the loop is a bound
+    and not a wait: `review-queue.py` reads this for every open PR, and a head with no
+    run at all is exactly the case that pays the asking without a run to find.
+    """
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")], exact=False)
+    rc = _run(mod, monkeypatch, fake)
+
+    asked = [c for c in fake.calls if "actions/runs" in " ".join(c)]
+    assert len(asked) == mod._RUN_LOOKUP_ATTEMPTS, fake.calls
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "push time approximated by commit date" in out, out
+    assert "BLOCKED" in out, out
 
 
 def test_a_head_with_a_ci_run_is_not_blocked_for_that_reason(mod, monkeypatch, capsys):

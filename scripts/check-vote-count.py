@@ -112,6 +112,18 @@ precede the push, so the fallback is the optimistic direction and must not be
 silently trusted. The fallback is also the case where the PR has no CI at all - and
 that is the third conjunct failing, so it **blocks** rather than just being disclosed.
 
+The run lookup is asked **twice** before an empty answer is taken as the answer, and
+the re-ask that finds the run is printed. Not a precaution: measured 2026-09-24, this
+exact query answered empty for a head that has a run (issue #1582 was reported as "no
+CI run exists for the head commit", the fallback visible as `12:45:21Z` against the
+run's `12:45:38Z`), answered correctly on the next run of the tool, and was correct on
+all eight asks made in the minute after - so the empty answer had been served stale
+and nothing in the response says which of the two it is. Because an empty answer here
+is *used* (it sets `BLOCKED` with that sentence), it is a verdict-shaped reading and
+gets the sibling treatment: re-ask, bounded. A head that really ran nothing stays
+empty through both asks and still falls back, still flagged - the retry cannot invent
+a run.
+
 An earlier version of this note claimed such a PR "is not mergeable anyway" and used
 the fallback for the count alone. Measured 2026-09-12: the claim is false.
 `MergeStateStatus` is computed from *required* checks, and this repo has no branch
@@ -186,6 +198,29 @@ _UNKNOWN_MERGEABILITY = "UNKNOWN"
 # right budget differs between a gate a reader is watching and a script that
 # scans a queue.
 _MERGEABILITY_POLL_SECONDS = 5.0
+
+# How many times the run lookup is asked before an empty answer is taken as *the*
+# answer, and the gap between the asks. The second question this tool puts to GitHub
+# has the same shape as the first one: a lazy answer that must not be reported as a
+# verdict. Measured 2026-09-24 (cycle cyc20260924-213009): `review-queue.py` reported
+# #1582 as "no CI run exists for the head commit" - with the commit-date fallback
+# visible in its own line as `pushed 2026-09-24T12:45:21Z`, where the run GitHub
+# holds was created `12:45:38Z` - and the identical query answered correctly on the
+# next run of the tool and on all eight asks made in the minute after that. So the
+# empty answer was served stale, not true, and nothing in the response distinguishes
+# the two.
+#
+# That asymmetry is why an empty answer is re-asked rather than reported: unlike a
+# missing mergeability (which is safety-neutral and simply fails loud), "no runs" is
+# *used* - it is reported as the measured fact "no CI run exists for the head commit"
+# and it sets `BLOCKED`, so a stale empty answer does not read as a doubt, it reads
+# as a verdict. The retry is bounded at one re-ask because the fallback path is not
+# going away: a head that really ran nothing (a dropped push, a fork PR) stays empty
+# through both asks and still falls back to the commit date, flagged inexact. A
+# genuinely run-less head therefore pays the gap once per reader, which matters
+# because a cycle's queue scan reads this for every open PR.
+_RUN_LOOKUP_ATTEMPTS = 2
+_RUN_LOOKUP_DELAY_SECONDS = 2.0
 
 # The merge gate is spelled **`MERGEABLE`/`CLEAN`** - two fields - and an earlier
 # version of this tool read only the first, on the theory that `mergeStateStatus` is
@@ -794,6 +829,44 @@ class Verdict:
         return "READY"
 
 
+def _earliest_run_created_at(head: str) -> str:
+    """The earliest CI run creation time GitHub lists for this SHA, or `""`.
+
+    Re-asked when the answer is empty, because an empty answer is used as a fact
+    (`block_reason` reads it as "no CI run exists", and `blocked` turns on it) - see
+    `_RUN_LOOKUP_ATTEMPTS` for the measurement that made a single ask untenable. A
+    head that really ran nothing stays empty and returns `""`; the caller then falls
+    back, still flagged inexact, so the retry cannot manufacture a run.
+
+    The re-ask that *finds* the run is reported on stderr: a tool that silently
+    repairs a stale answer hides the thing it repairs, and how often this happens is
+    the only way a later reader can tell flakiness from a one-off.
+    """
+    for attempt in range(_RUN_LOOKUP_ATTEMPTS):
+        runs = _gh_json(
+            [
+                "api",
+                f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
+                "--jq",
+                '{t: ([.workflow_runs[].created_at] | sort | .[0] // "")}',
+            ]
+        )
+        assert isinstance(runs, dict)
+        created = runs.get("t")
+        if isinstance(created, str) and created:
+            if attempt:
+                print(
+                    f"note: the runs API listed no run for head {head[:8]} and then "
+                    f"returned {created} - the empty answer was served stale, so the "
+                    "push time is exact after all",
+                    file=sys.stderr,
+                )
+            return created
+        if attempt + 1 < _RUN_LOOKUP_ATTEMPTS:
+            time.sleep(_RUN_LOOKUP_DELAY_SECONDS)
+    return ""
+
+
 def _head_push_time(head: str) -> tuple[str, bool]:
     """Earliest CI run creation time for this SHA, else the commit date.
 
@@ -801,17 +874,8 @@ def _head_push_time(head: str) -> tuple[str, bool]:
     a commit date can precede the push, so the fallback is flagged rather than
     silently used.
     """
-    runs = _gh_json(
-        [
-            "api",
-            f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
-            "--jq",
-            '{t: ([.workflow_runs[].created_at] | sort | .[0] // "")}',
-        ]
-    )
-    assert isinstance(runs, dict)
-    created = runs.get("t")
-    if isinstance(created, str) and created:
+    created = _earliest_run_created_at(head)
+    if created:
         return created, True
 
     commit = _gh_json(["api", f"repos/{REPO}/commits/{head}", "--jq", "{t: .commit.committer.date}"])
