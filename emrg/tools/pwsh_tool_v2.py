@@ -62,7 +62,7 @@ from emrg.sandbox.providers import unconfined_mode
 from emrg.server.git_utils import no_prompt_env
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
-from emrg.tools.shell_env import confined_env
+from emrg.tools.shell_env import confined_env, runner_import_env
 
 logger = logging.getLogger(__name__)
 
@@ -467,16 +467,17 @@ async def run_command(
     )
     # The child's environment: the caller's with interactive git prompts off,
     # the dialect's own colour/pager overrides (no `TERM` — see ENV_OVERRIDES),
-    # and — when this run really is confined and the mode grants somewhere to
-    # write — the package caches relocated into the granted temp area.  The
-    # relocation is EMRG's own measure (the blueprint's deployer sets caches
-    # from their own shell); it is shared with the bash twin through
-    # `confined_env`, so the two dialects cannot disagree about where a cache
-    # may live.
+    # and — when this run really is confined — the two things the boundary itself
+    # needs from it: the package caches relocated into the granted temp area, and
+    # the runner's own import root.  The relocation is EMRG's own measure (the
+    # blueprint's deployer sets caches from their own shell) and the import root
+    # is what the runner's `-P` argv leaves room for; both are shared with the
+    # bash twin through `shell_env`, so the two dialects cannot disagree.
     child_env = no_prompt_env()
     child_env.update(ENV_OVERRIDES)
     if confined is not None:
         child_env.update(confined_env(policy))
+        child_env.update(runner_import_env())
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
