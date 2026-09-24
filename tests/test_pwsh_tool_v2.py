@@ -532,7 +532,9 @@ def test_the_two_twins_agree_on_the_framing_contract():
     importing them (the dialects are peers — design §14.5 item 1), so the shared
     values are pinned here instead of trusted to stay faithful.  The model-facing
     contract must be identical across dialects: the same budget, the same
-    separator, the same truncation policy — only the shell differs.
+    separator, the same truncation policy — only the shell differs.  The policy
+    half is not a constant, so it is measured rather than compared by name:
+    :func:`test_the_two_twins_cut_a_long_stderr_the_same_way`.
     """
     from emrg.tools import bash_tool_v2 as bash
 
@@ -541,6 +543,29 @@ def test_the_two_twins_agree_on_the_framing_contract():
     assert pwsh._HEAD_TAIL_RATIO == bash._HEAD_TAIL_RATIO
     assert pwsh._STDERR_SEPARATOR == bash._STDERR_SEPARATOR
     assert pwsh._STREAM_GRACE_SECONDS == bash._STREAM_GRACE_SECONDS
+
+
+def test_the_two_twins_cut_a_long_stderr_the_same_way():
+    """The shared stderr policy, measured on the same text through both helpers.
+
+    This was the half of the pair above that no assertion reached, and the two
+    helpers had in fact drifted: bash kept both ends and said so, while pwsh kept
+    the head only and reported the total it had thrown away — so on Windows the
+    end of a failing command's stderr, which is where its error is, was the end
+    that went missing.  Feeding one text through both helpers is the reading that
+    would have caught it, and it is the reading that keeps them in step.
+    """
+    from emrg.tools import bash_tool_v2 as bash
+
+    # Long enough for both modules' own cap (they are equal, asserted above).
+    stderr = "".join(f"{i:06d} line of a failing command's stderr\n" for i in range(1200))
+    assert len(stderr) > pwsh._ERR_MAX
+
+    theirs, ours = bash._truncate_stderr(stderr), pwsh._truncate_stderr(stderr)
+    assert ours == theirs
+    assert ours.startswith(stderr[:500]), "the head is kept: it names what ran"
+    assert ours.endswith(stderr[-500:]), "the tail is kept: it carries the error"
+    assert "head+tail kept" in ours, "and the notice says which end the reader got"
 
 
 def test_the_pwsh_module_does_not_import_the_bash_executor():
