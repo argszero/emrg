@@ -5305,11 +5305,15 @@ def check_read_only_file_write(file_path: str, workspace: str | None = None) -> 
     space. Mirrors the bash tool's read-only semantics for file tools.
 
     A relative target is joined onto ``workspace`` first (issue #1558): this used
-    to realpath the spelling as given, i.e. against the **daemon's cwd**, while
-    the write that followed resolved it somewhere else — so a relative path could
-    land inside the workspace without this function ever having looked there. The
-    judgement and the write now name the same file, which is what makes the
-    containment answer mean anything. See :func:`resolve_file_target`.
+    to realpath the spelling as given, i.e. against the **daemon's cwd** — a base
+    the caller never designated — so the containment answer was about a path
+    outside the workspace the caller declared, and one file's two spellings split
+    their verdict (the relative spelling allowed at a tier where the absolute
+    spelling of that same file was blocked). The write followed the same base, so
+    it landed outside the declared workspace rather than inside it: what was wrong
+    is *which* file was judged, not a write this function never saw. The judgement
+    and the write now name the file the caller named.
+    See :func:`resolve_file_target`.
     """
     path = os.path.realpath(resolve_file_target(file_path, workspace))
     if workspace:

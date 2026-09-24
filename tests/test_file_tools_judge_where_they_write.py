@@ -204,9 +204,13 @@ def test_a_relative_path_is_not_a_way_past_the_read_only_fence(tmp_path, monkeyp
     """The read-only half: relative no longer means "somewhere I did not look".
 
     Before the fix this row was *allowed* — the predicate realpath'd the spelling
-    against the process cwd, which is outside the workspace — and the write then
-    landed inside the workspace, i.e. the dirty-tree guard was bypassed by a
-    relative path rather than by a defect in the fence.
+    against the process cwd, a base outside the workspace the caller declared — so
+    its containment answer was about a path the caller never named, while the
+    absolute spelling of that same file was blocked at this tier. The write used
+    the same base, so it landed outside the declared workspace rather than inside
+    it: the hole is *which* file the predicate was asked about, not one it never
+    saw. Re-measured on both trees: pre-fix the relative spelling was allowed here
+    while the absolute spelling of that same file was blocked.
     """
     monkeypatch.chdir(tmp_path)
     ws = _workspace(tmp_path)
