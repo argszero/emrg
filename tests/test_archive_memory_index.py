@@ -86,6 +86,17 @@ def _write_index(path: Path, rows: list[str], heading: str = "# Index\n") -> str
     return text
 
 
+def _over_cap_row(stamp: str, mod) -> str:
+    """A valid row whose line is one char over the per-row cap, newline included.
+
+    Built from ``_row`` so the padding cannot accidentally become a second line (or
+    swallow the next row) if the row shape changes: the padding goes on the row's own
+    line, before its newline.
+    """
+    line = _row(stamp).rstrip("\n")
+    return line + "y" * (mod.ROW_MAX_CHARS + 1 - len(line)) + "\n"
+
+
 def _rows_in(path: Path) -> list[str]:
     return [line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("- [")]
 
@@ -249,6 +260,55 @@ def test_check_mode_flags_a_long_row_and_a_duplicate(tmp_path, mod, capsys):
     _write_index(index, [_row(NEW), _row(NEW)])
     assert mod.main([str(index), "--cap", "50", "--check"]) == 1
     assert "duplicate" in capsys.readouterr().out
+
+
+def test_the_move_reports_the_row_length_rule_it_does_not_enforce(tmp_path, mod, capsys):
+    """The one rule with a checker and no runner (#1551), read where it can be acted on.
+
+    Both directions on the same fixture, and the last block is the sharper one: the
+    reading is of the **post-move** index, so a row that was over the cap and just
+    moved out is not reported as still sitting there. A report taken of the index as
+    it was *before* the move would name a violation the run it is reporting on has
+    already removed.
+    """
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+
+    # A compliant index: the move says nothing about a rule that is not broken.
+    _write_index(index, [_row(NEWEST), _row(NEW)])
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 0
+    out = capsys.readouterr()
+    assert "over the per-row cap" not in out.err, "no violation, no note"
+
+    # The over-cap row stays behind: the note names it, and the exit code does not move.
+    _write_index(index, [_over_cap_row(NEW, mod), _row(MID)])
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 0, (
+        "the length rule is a report, not a refusal: refusing would strand the row cap"
+    )
+    out = capsys.readouterr()
+    assert "1 row(s) of the index are over the per-row cap" in out.err
+    assert str(mod.ROW_MAX_CHARS) in out.err
+    assert "moved 1 row(s)" in out.out, "the move still happened"
+    assert _targets(index) == [f"cycle-{NEW}.md"], "the oldest row (MID) moved out"
+
+    # The over-cap row is the one that moves out: nothing is left to report.
+    _write_index(index, [_over_cap_row(OLD, mod), _row(NEWEST)])
+    assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 0
+    out = capsys.readouterr()
+    assert "over the per-row cap" not in out.err, (
+        "the reading must come from the index on disk, not from the plan: the "
+        "violating row is the one that left"
+    )
+    assert "moved 1 row(s)" in out.out
+
+
+def test_nothing_to_move_still_reports_the_row_length_rule(tmp_path, mod, capsys):
+    """The other exit a cycle can reach: no move, but the drift is still there."""
+    index = tmp_path / "MEMORY.md"
+    _write_index(index, [_over_cap_row(NEW, mod)])
+
+    assert mod.main([str(index), "--cap", "50"]) == 0
+    assert "over the per-row cap" in capsys.readouterr().err
 
 
 def test_the_verifiers_rules_fire_on_a_bad_plan(tmp_path, mod):

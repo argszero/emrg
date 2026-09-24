@@ -95,10 +95,28 @@ that carry such lines (a table row here, a prose bullet there) keep their verdic
 That residual gap is a count taken over a subset, and it is the honest cost of not
 refusing files whose readable rows are perfectly manageable.
 
+The row-length rule rides on the move
+-------------------------------------
+`--check` reads two rules: the row cap, and a per-row length cap. The move is what
+keeps the first, and **nothing ran the second** - every cycle rewrites this index
+through the move, and the move verified conservation and the cap while rows sat well
+over the length cap and were never mentioned (measured 2026-09-24 on the evolution
+index: 31 rows over 512 chars, longest 4,280, and `moved N row(s); verified conserved
+and append-only` reading as a clean verdict - issue #1551). The move now reports the
+length rule it does not enforce, on stderr, and its exit code is unchanged.
+
+A report rather than a refusal, because the two rules interact: this move is the only
+thing that brings the index under the *row* cap, so refusing to run while some row is
+over the *length* cap would leave the index over the row cap for good. The row cap is
+the one whose violation displaces the embedded budget; the length rule is a reading
+for whoever writes the rows.
+
 Exit codes
 ----------
 ``0``  the index is within its cap (nothing to move), or the move was made and
-       verified. ``1``  ``--check`` found a row-rule violation in an index it could
+       verified. A per-row length violation the move cannot fix is reported on
+       stderr and does not change this code. ``1``  ``--check`` found a row-rule
+       violation in an index it could
        read (too many cycle rows, a row over the per-row cap, a duplicate target).
        ``2``  the question could not be answered - no index at that path, an index
        that could not be read, an index holding lines that name a cycle but are not
@@ -270,6 +288,51 @@ def non_row_lines(text: str) -> list[str]:
     ]
 
 
+def long_rows(text: str) -> list[Row]:
+    """The rows of `text` over the per-row cap, in file order.
+
+    One owner for the predicate: `check_rules` asserts it and the move reports it,
+    so the two readings cannot drift apart into two slightly different rules.
+    """
+    return [row for row in parse_rows(text) if len(row.text) > ROW_MAX_CHARS]
+
+
+def report_row_lengths(text: str, stream: object = None) -> None:
+    """Report the row-length rule on the **write** path, where nothing else runs it.
+
+    The row cap and the row-length rule are read by `--check`, which nothing runs:
+    cycles rewrite this index through the move, and the move verified conservation
+    and the cap while 31 rows sat over the per-row cap (measured 2026-09-24 on
+    `~/.emrg/evolution/.emrg/memory/MEMORY.md`, issue #1551). So the move says what
+    it did *and* what it did not look at, rather than letting "verified conserved and
+    append-only" read as "the index respects the row rules".
+
+    A report, not a refusal, and the interaction between the two rules is why: this
+    move is the only thing that brings the index under the *row cap*, so refusing to
+    run while any row is over the *length* cap would leave the index over the row cap
+    for good - the violation the cap exists to prevent, enforced by the rule that was
+    supposed to be the cheap one.
+
+    The stream is resolved at call time, never bound as a default: a
+    `stream=sys.stderr` default is evaluated once, when this module is imported, so
+    the note would go to whatever object `sys.stderr` was at import - a capture from
+    an earlier test, in a suite that replaces it per test - and a reader (or a
+    `capsys` assertion) would see nothing.
+    """
+    if stream is None:
+        stream = sys.stderr
+    rows = long_rows(text)
+    if not rows:
+        return
+    print(
+        f"note: {len(rows)} row(s) of the index are over the per-row cap "
+        f"{ROW_MAX_CHARS} chars (longest {max(len(row.text) for row in rows)}); the "
+        "move does not enforce that rule - `--check` lists it, and a row's summary "
+        "belongs in its detail file",
+        file=stream,
+    )
+
+
 def archive_header(index: Path, cap: int, today: str) -> str:
     """The heading a freshly created archive starts with.
 
@@ -389,11 +452,11 @@ def check_rules(index_path: Path, cap: int) -> list[str]:
             "to archive the oldest ones"
         )
 
-    long_rows = [row for row in rows if len(row.text) > ROW_MAX_CHARS]
-    if long_rows:
+    long = long_rows(text)
+    if long:
         problems.append(
-            f"{len(long_rows)} row(s) over {ROW_MAX_CHARS} chars, longest "
-            f"{max(len(row.text) for row in long_rows)}"
+            f"{len(long)} row(s) over {ROW_MAX_CHARS} chars, longest "
+            f"{max(len(row.text) for row in long)}"
         )
 
     targets = Counter(row.target for row in rows)
@@ -648,11 +711,13 @@ def main(argv: list[str] | None = None) -> int:
         if not plan.moved:
             print(f"index: {index_path}")
             print(f"nothing to move: the index is within its {args.cap}-row cap")
+            report_row_lengths(index_text)
             return 0
 
         if args.dry_run:
             announce(index_path, archive_path, plan)
             print(f"dry run: {len(plan.moved)} row(s) would move, nothing written")
+            report_row_lengths(plan.index_after)
             return 0
 
         # The compare half of the compare-and-swap: another task's cycle appends
@@ -694,6 +759,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"moved {len(plan.moved)} row(s); verified conserved and append-only")
+    # The *post-move* text, from the plan: this is the text `apply_plan` wrote and
+    # `measure_on_disk` verified, so a row that was over the cap and moved out is not
+    # reported as still sitting in the index.
+    report_row_lengths(plan.index_after)
     return 0
 
 
