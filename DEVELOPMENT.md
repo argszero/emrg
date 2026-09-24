@@ -230,6 +230,15 @@ bash packaging/gen-assets.sh   # icon.svg → png/icns/ico (idempotent)
 
 Renderer priority: `rsvg-convert` → Chrome/Chromium headless → `sips` (last resort, glow may be lost). Requires macOS `iconutil` for `.icns` (skipped with a notice on Linux/Windows).
 
+**The host-side counterpart of the installer's compiled-extension guard** (#1544). The macOS build signs the app with `com.apple.security.cs.disable-library-validation` so a pip-installed C extension can load; the installer asserts that entitlement's **shape**, and this command asserts its **effect** — a wheel's `.so` really imports under the bundled interpreter. Run it before reporting "packaging is broken", or after an install, to tell the two apart:
+
+```bash
+python3 scripts/check-extension-load.py                 # default: ~/.emrg/install/bin/python
+python3 scripts/check-extension-load.py --python <path> --keep
+```
+
+Exit `0` = a wheel's compiled module loaded; `1` = it did **not** (the load decides, not the codesign reading — an interpreter without the entitlement can still load, and vice versa); `2` = could not measure (no such interpreter, it cannot run, or no wheel for this platform) — never a pass. CI runs the same check as step 15 of `packaging/smoke-test.sh`, so host and CI ask one question in one place.
+
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 > **Self-evolution from source**: the evolution workspace expects the repo at `~/.emrg/evolution/emrg`. Packaged installs self-heal (clone on demand + auto-bootstrap projects/tasks); source installs should clone there explicitly if you want the evolution daemon to work on this repo.

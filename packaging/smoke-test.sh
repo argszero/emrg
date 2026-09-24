@@ -268,6 +268,24 @@ else
 fi
 rm -rf "$venv_dir"
 
+# 15. 编译扩展的真实加载（issue #1544：整套守卫断言的是 entitlement 的「形状」，
+#     没有一条断言它存在的原因 —— 装在 wheel 里的 .so 能否被 bundled python 加载）。
+#     与 14 的区别就是这一条：14 只证明 venv 能建、pip 能跑，两者都不加载 .so。
+#     主机侧同款命令：`python3 scripts/check-extension-load.py`（rc: 0 实测通过 /
+#     1 实测失败 / 2 无法测量），所以 CI 与宿主两侧在这里是对称的。
+#     退出码按家族契约处理：2 是「无法测量」（无 wheel、无网络），记 audit-degraded
+#     并显式打印，绝不当成通过；1 是实测失败，即 fail。
+say "15. compiled-extension wheel loads (the entitlement's referent, issue #1544)"
+ext_rc=0
+python3 "$ROOT/scripts/check-extension-load.py" --python "$PY_BIN" --quiet || ext_rc=$?
+if [ "$ext_rc" -eq 0 ]; then
+  ok "15. wheel .so loads under the bundled python"
+elif [ "$ext_rc" -eq 2 ]; then
+  ok "15. audit-degraded — could not measure (no wheel for this platform, or no network)"
+else
+  fail "15. wheel .so does NOT load under the bundled python (rc=$ext_rc)"
+fi
+
 # 清理：红线禁止 stop/restart daemon —— CI 临时 daemon 随虚拟机销毁；本机由上方
 # 端口守卫兜底（56031 忙 → 降级跳过），绝不以任何形式终止 daemon 进程。
 
