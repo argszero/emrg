@@ -911,9 +911,22 @@ class EmrgServer:
             cwd=cwd,
             prompt=prompt,
             timestamp="",
-            # Upgrade writes install/ and source/ inside its own work dir —
-            # workspace-write tier (rant 2026-08-20T15:46:50).
-            sandbox="workspace-write",
+            # NO tier is declared here, deliberately (rant 2026-09-23T21:46:12).
+            #
+            # The comment that used to stand here ("Upgrade writes install/ and
+            # source/ inside its own work dir") was false: the install tree, the
+            # upgrade backup and the ~/Applications copy are *siblings* of the
+            # work dir, not children of it. `workspace-write` therefore granted
+            # none of the three, and the upgrade session spun with zero output —
+            # 23 attempts, 132 minutes, byte-identical failures (see
+            # emrg/sandbox/roots.py::writable_roots for the granted set).
+            #
+            # A tier is a deployment choice its consumer declares; this is the
+            # one session that must write outside its own cwd, so it declares
+            # none — the documented state that resolves to
+            # `policy.DEFAULT_MODE`. Writing a mode name here instead would let
+            # a Python literal stand in for a deployment decision, which is the
+            # defect. `tests/test_upgrade_session_tier.py` pins both halves.
         )
         if self._session_busy.get(session_id):
             # Queue per existing semantics (host decision A: busy → pending,
