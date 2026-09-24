@@ -45,6 +45,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -249,6 +250,123 @@ def test_check_mode_flags_a_long_row_and_a_duplicate(tmp_path, mod, capsys):
     _write_index(index, [_row(NEW), _row(NEW)])
     assert mod.main([str(index), "--cap", "50", "--check"]) == 1
     assert "duplicate" in capsys.readouterr().out
+
+
+def _topic_row(i: int) -> str:
+    """A readable row that is not a cycle row - bulk for an over-cap index."""
+    return f"- [topic {i}](topic-{i}.md) - {'x' * 90}\n"
+
+
+def _capped(index: Path) -> list[str]:
+    """The rows the daemon's embed cap would keep - the oracle, not a re-derivation.
+
+    Asked of the production function, because the reading's whole claim is that it
+    reports *that* cut: a test that re-implemented the cap would agree with a second
+    implementation while both drifted from the daemon.
+    """
+    from emrg.server.daemon import EmrgServer
+
+    capped = EmrgServer._cap_memory_index(None, index)
+    return [line for line in capped.splitlines() if line.startswith("- [")]
+
+
+def test_the_reading_names_the_rows_the_cap_does_not_embed(tmp_path, mod, capsys):
+    """An index past the embed cap: the rows of its tail are not what a reader sees."""
+    index = tmp_path / "MEMORY.md"
+    rows = [_row(OLD)] + [_topic_row(i) for i in range(600)] + [_row(NEWEST)]
+    _write_index(index, rows)
+    assert len(index.read_text(encoding="utf-8")) > mod.INDEX_SIZE_WARN, (
+        "the fixture must be past the cap, or this test measures nothing"
+    )
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0, (
+        "an index past the embed cap is not a row-rule violation"
+    )
+    out = capsys.readouterr().out
+
+    capped = _capped(index)
+    dropped = len(rows) - len(capped)
+    assert dropped > 0, "the oracle must find rows the cap drops"
+    assert f"{dropped} of {len(rows)} row(s) are past the cut" in out
+    assert f"last row embedded: {capped[-1][:120]}" in out
+    assert f"newest cycle row {NEWEST}: not embedded" in out
+    assert "(a reading, not a rule" in out
+
+
+def test_the_reading_reports_an_embedded_newest_row_when_it_is_one(tmp_path, mod, capsys):
+    """The other direction: a reading that always says 'not embedded' proves nothing."""
+    index = tmp_path / "MEMORY.md"
+    rows = [_row(NEWEST)] + [_topic_row(i) for i in range(600)] + [_row(OLD)]
+    _write_index(index, rows)
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    out = capsys.readouterr().out
+
+    capped = _capped(index)
+    assert len(capped) < len(rows), "the fixture must still drop rows"
+    assert _row(NEWEST).strip()[:120] in capped, "the oracle must keep the newest row"
+    assert f"newest cycle row {NEWEST}: embedded" in out
+
+
+def test_an_index_within_the_cap_says_so(tmp_path, mod, capsys):
+    index = tmp_path / "MEMORY.md"
+    _write_index(index, [_row(NEWEST), _row(OLD)])
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    out = capsys.readouterr().out
+
+    assert "the whole index is embedded" in out
+    assert "past the cut" not in out
+
+
+def test_the_reading_asks_the_cap_rather_than_cutting_the_text_itself(
+    tmp_path, mod, capsys, monkeypatch
+):
+    """The reading's claim is that it reports *that* cut, so it has to ask it.
+
+    A local copy of the three-line rule would pass every assertion above - the two
+    agree until the cap's line-boundary handling changes - and then diverge in
+    silence, with the copy being what `--check` reports. Spying on the production
+    method is what separates "asked" from "agrees today".
+    """
+    from emrg.server import daemon
+
+    index = tmp_path / "MEMORY.md"
+    _write_index(index, [_topic_row(i) for i in range(600)] + [_row(NEWEST)])
+
+    asked: list[Path] = []
+    real = daemon.EmrgServer._cap_memory_index
+
+    def spy(self, path):  # noqa: ANN001 - mirrors the method it wraps
+        asked.append(path)
+        return real(self, path)
+
+    monkeypatch.setattr(daemon.EmrgServer, "_cap_memory_index", spy)
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    capsys.readouterr()
+    assert asked == [index], (
+        "the reading must ask the cap what it keeps, not cut the text itself"
+    )
+
+
+def test_the_reading_is_printed_under_a_violation_too(tmp_path, mod, capsys):
+    """`--check` reports both questions in one run, whichever way each of them goes."""
+    index = tmp_path / "MEMORY.md"
+    stamps = [
+        (datetime(2026, 9, 1) + timedelta(hours=i)).strftime("%Y%m%d-%H%M%S")
+        for i in range(60)
+    ]
+    rows = [_row(stamp) for stamp in stamps] + [_topic_row(i) for i in range(600)]
+    _write_index(index, rows)
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 1, (
+        "60 cycle rows are over the 50-row cap"
+    )
+    out = capsys.readouterr().out
+
+    assert "VIOLATION" in out
+    assert "embed cap:" in out, "the reading must not be hidden by the violation"
 
 
 def test_the_verifiers_rules_fire_on_a_bad_plan(tmp_path, mod):
