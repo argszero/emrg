@@ -297,8 +297,11 @@ def test_the_move_reports_the_row_length_rule_it_does_not_enforce(tmp_path, mod,
     assert mod.main([str(index), "--cap", "1", "--archive", str(archive)]) == 0
     out = capsys.readouterr()
     assert "over the per-row cap" not in out.err, (
-        "the reading must come from the index on disk, not from the plan: the "
-        "violating row is the one that left"
+        "the reading is of the text the move left behind — the plan's post-move "
+        "index, which is what `apply_plan` wrote and `measure_on_disk` verified — "
+        "so the row that was over the cap has already left: a reading taken of the "
+        "index as it stood *before* the move would name a violation this very run "
+        "has removed"
     )
     assert "moved 1 row(s)" in out.out
 
