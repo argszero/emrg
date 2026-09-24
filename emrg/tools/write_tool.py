@@ -7,7 +7,11 @@ from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
-from emrg.tools.bash_tool import check_read_only_file_write, check_workspace_write
+from emrg.tools.bash_tool import (
+    check_read_only_file_write,
+    check_workspace_write,
+    resolve_file_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,26 +65,31 @@ class WriteTool(ToolExecutor):
                 error=True,
             )
 
-        path = Path(file_path).expanduser().resolve()
+        # Where the bytes actually go, decided in one place (issue #1558). A
+        # relative `file_path` is joined onto the injected workspace — the
+        # session cwd — instead of being resolved against the daemon's own cwd,
+        # which is the tree the predicates do not judge.
+        target = resolve_file_target(file_path, arguments.get("workspace"))
+        path = Path(target).resolve()
 
         # Read-only sandbox (community issue #979): the write tool must not
         # clobber the host's uncommitted work in the task source tree when the
         # dirty-tree guard forced read-only. Workspace boundary injected by the
         # daemon (session cwd); None in non-daemon use → fail-open.
+        # The joined `target` is what both gates are handed, so the file they
+        # judge is the file written below (before #1558 the spelling was passed
+        # on and resolved elsewhere).
         if arguments.get("sandbox") == "read-only":
-            reason = check_read_only_file_write(file_path, arguments.get("workspace"))
+            reason = check_read_only_file_write(target, arguments.get("workspace"))
             if reason:
                 return ToolResult(name="write", content=reason, error=True)
 
         # workspace-write sandbox (rant 2026-09-01T15:10:23): mirror the bash
         # tool's boundary so write/edit are symmetric with bash — a
         # workspace-write session must not write outside the session cwd (or
-        # OS temp / protected daemon state). Pass the ORIGINAL file_path (not
-        # the resolved one) so relative paths keep the "assumed in-workspace"
-        # semantics — resolving a relative path against the daemon cwd would
-        # wrongly classify it as absolute-outside-workspace.
+        # OS temp / protected daemon state).
         if arguments.get("sandbox") == "workspace-write":
-            reason = check_workspace_write(file_path, arguments.get("workspace"))
+            reason = check_workspace_write(target, arguments.get("workspace"))
             if reason:
                 return ToolResult(name="write", content=reason, error=True)
 
