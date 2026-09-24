@@ -597,3 +597,72 @@ class TestMemoryIndexRoundTripFidelity:
         assert "2026-07-20" in out, "the rewritten row kept its stale dates"
         # The untouched row is still its original line, verbatim.
         assert "- [Other](task-other.md) — rec: 2026-07-14, evt: 2026-07-10" in out
+
+
+# The pair the class below needs: the same row shape either side of the line cap,
+# so the length is the only variable. The long one carries a tail that appears in
+# the row and nowhere else, which makes "is it still there" a measurement.
+EXCESS_TAIL = "超出上限的行内容"
+WITHIN_CAP_ROW = "- [Small](small.md) — 更新于 2026-09-24：短行"
+OVER_CAP_ROW = f"- [Big](big.md) — 更新于 2026-09-24：{EXCESS_TAIL * 60}"
+
+
+class TestMemoryIndexRowOverTheCap:
+    """A row over ``INDEX_TITLE_MAX_CHARS`` is rewritten, and what it carried is dropped.
+
+    This is the one input the round-trip promise above does not cover, and the loss
+    is silent where it happens: ``_render_entry`` logs a warning and the daemon
+    discards its stderr, so nothing reaches the agent that wrote the row.
+
+    It is pinned here because the reading of memory issue **#1551** that says "let the
+    store save the index" is wrong in a way only a measurement shows. An over-cap row
+    is not *truncated* — it is re-rendered from the parsed fields (title, link,
+    status, dates), so per-row prose and any identifier that lived only in the row
+    are gone. Measured 2026-09-24 on this host's evolution index (172 rows, 31 over
+    the cap): a load → save took it 108,491 → 68,421 chars and left **0** rows over
+    the cap, while dropping text from 31 rows — and for 27 of those, an identifier the
+    row names is in no detail file. The safe trim therefore stays the one #1551
+    describes (per row, checked against its detail file), and this class is what keeps
+    a later cycle from replacing it with a save.
+
+    The lossless alternative — move the excess into the detail file, which is where
+    the protocol says a row's summary belongs — changes where memory text lives, so it
+    is a product decision rather than a repair. Named here, not taken.
+
+    Not a duplicate of ``TestMemoryIndex::test_to_markdown_truncates_legacy_long_line``,
+    which measures a 700-char **title** inside an otherwise well-formed row and only at
+    the model level. Here the row's *body* is what overflows (the shape the 31 rows of
+    the real index are in), the write goes through the store, and the in-cap sibling is
+    what makes the length the only variable between the two halves.
+    """
+
+    def test_the_pair_differs_only_in_length(self):
+        """Guard the fixture: two rows over the cap would make the pair prove nothing."""
+        assert len(WITHIN_CAP_ROW) <= INDEX_TITLE_MAX_CHARS < len(OVER_CAP_ROW)
+
+    def test_a_row_within_the_cap_is_untouched_by_the_same_write(self, session_store):
+        session_store.index_path.write_text(
+            f"# Memory Index\n\n{WITHIN_CAP_ROW}\n{OVER_CAP_ROW}\n", encoding="utf-8"
+        )
+
+        session_store.create("task", "A new memory", "body text")
+
+        after = session_store.index_path.read_text(encoding="utf-8")
+        assert WITHIN_CAP_ROW in after, (
+            "a write that only added one entry rewrote an in-cap row"
+        )
+
+    def test_a_row_over_the_cap_is_rewritten_and_its_excess_is_gone(self, session_store):
+        session_store.index_path.write_text(
+            f"# Memory Index\n\n{WITHIN_CAP_ROW}\n{OVER_CAP_ROW}\n", encoding="utf-8"
+        )
+
+        session_store.create("task", "A new memory", "body text")
+
+        after = session_store.index_path.read_text(encoding="utf-8")
+        assert EXCESS_TAIL not in after, "the over-cap row's excess is expected to be dropped"
+        row = [ln for ln in after.split("\n") if "big.md" in ln]
+        assert len(row) == 1, "the rewritten row is not in the index exactly once"
+        assert len(row[0]) <= INDEX_TITLE_MAX_CHARS, "the rewritten row still exceeds the cap"
+        assert "big.md" in row[0], "the rewritten row lost the link to its detail file"
+        assert "Small" in after, "the in-cap sibling row was dropped as well"
