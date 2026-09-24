@@ -414,6 +414,36 @@ def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
 # --- branch states, and the one a committer resolves directly --------------
 
 
+def test_a_run_in_flight_on_a_behind_master_head_is_parked_not_sent_to_the_branch(
+    mod, monkeypatch, capsys
+):
+    """#1573's measured shape: `behind_by=4`, `MERGEABLE/UNSTABLE`, both legs in flight.
+
+    The row is built from the kind the freshness tool now reports for that state
+    (`running`) — before that fix it reported `ancestry`, which matched no CI branch
+    here and fell through to the merge-state branch, answering `unblock`: "the branch
+    has to remove it". That is the one instruction that voids the votes such a head
+    may be carrying, and it is the opposite of what the freshness tool says about the
+    same head, which is why the state is pinned here as well as at its source.
+    """
+    votes = FakeVotes(
+        reviews=[_review(cycle="cyc1"), _review(at="2026-09-17T10:15:00Z", cycle="cyc2")],
+        state="UNSTABLE",
+    )
+    fresh = FakeFresh(
+        stale=True, kind="running", behind=4,
+        reason="CI is still pending on head aaaa (and the head does not contain master)",
+    )
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2/3 votes" in out, "the votes this row is protecting are on it"
+    assert "park" in out
+    assert "unblock" not in out, "an unfinished run is not a branch defect"
+    assert "stale:running" in out
+    assert "cast-vote.py" not in out
+
+
 def test_a_conflict_names_the_merge_and_the_classifier(mod, monkeypatch, capsys):
     votes = FakeVotes(reviews=[], mergeable="CONFLICTING", state="DIRTY")
     fresh = FakeFresh()

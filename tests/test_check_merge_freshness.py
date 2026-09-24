@@ -277,6 +277,68 @@ def test_a_failing_verdict_is_reported_as_failing_not_as_stale(mod, monkeypatch,
     assert "failing verdict, not a stale one" in out
 
 
+# --- the run's state outranks the tree question (#1573) ---------------------
+#
+# The kinds are exclusive, so their order decides what the reader is told. Measured
+# on #1569: a head behind master with both legs `pending` was reported as
+# `ancestry`, so the row a cycle consults first said "the branch has to remove it"
+# - the one instruction that voids the votes the head was carrying - while this
+# tool's own remedy for the same state sends the reader to measure the landing tree
+# and vote on a run that has not concluded. The tree fact is not dropped; it moves
+# into the reason, which is what the first three rows assert beside the kind.
+
+
+def test_a_run_in_flight_on_a_behind_master_head_is_parked_not_called_a_tree(
+    mod, monkeypatch, capsys
+):
+    """#1569's shape: behind master *and* unfinished. The run is the state to name."""
+    fake = FakeGh(
+        _view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_(conclusion="pending")]
+    )
+    asked = _votes(mod, monkeypatch, 3)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "still pending" in cap.out
+    assert "no longer be merged" in cap.out, "the tree fact must survive the reorder"
+    assert "park it" in cap.err
+    assert "Re-merge master into the branch" not in cap.err, (
+        "a run that has not concluded is not cured by a push, and the refresh is the "
+        "one remedy that voids the votes this head may carry"
+    )
+    assert asked == [], "the run kinds are not priced - their action does not depend on it"
+
+
+def test_no_run_on_a_behind_master_head_is_retriggered_not_refreshed(mod, monkeypatch, capsys):
+    """A dropped push event on a behind-master head: the missing run is the state."""
+    fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [])
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "NO Test run" in cap.out
+    assert "no longer be merged" in cap.out
+    assert "re-trigger CI on the same head" in cap.err
+    assert "Re-merge master into the branch" not in cap.err
+
+
+def test_a_failing_run_on_a_behind_master_head_is_read_not_called_stale(
+    mod, monkeypatch, capsys
+):
+    """A red run is a verdict to read, and it is not evidence for the landing-tree vote."""
+    fake = FakeGh(
+        _view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_(conclusion="failure")]
+    )
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "failing verdict, not a stale one" in cap.out
+    assert "no longer be merged" in cap.out
+    assert "fix the failure" in cap.err
+    assert "cast the vote on it" not in cap.err, (
+        "no one is told to vote on a tree whose run ran red"
+    )
+
+
 def test_the_newest_run_for_the_head_wins(mod, monkeypatch, capsys):
     """Two runs on one SHA: the freshest conclusion decides, not the first seen."""
     fake = FakeGh(

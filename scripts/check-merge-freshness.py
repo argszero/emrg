@@ -56,6 +56,23 @@ The run is also required to have *passed* - a failing or cancelled run is not a
 stale verdict, it is a verdict the committer has to deal with on its own terms,
 and this tool says so rather than calling it fresh.
 
+Which state is reported when more than one holds
+------------------------------------------------
+The kinds are exclusive, so the order they are tested in is a decision, and the
+run's state is reported before ancestry. Ancestry asks "would this verdict
+transfer", which has no answer while there is no verdict; reporting it first made
+a head that is behind master answer `ancestry` whatever its run was doing, so a
+run still in flight was answered as a problem of the tree (issue #1573, measured
+on `#1569`: `MERGEABLE/UNSTABLE` with both legs `pending`, reported as "the branch
+has to remove it" - the one instruction that voids the votes the head carries, and
+the opposite of what this tool said about the same head). Reporting the run's
+state first also keeps one owner for the kind: `review-queue.py` reads the kind
+rather than re-deriving it, so `park` becomes reachable for a behind-master head
+exactly because the kind is right here. Ancestry still decides the case it exists
+for - a *passing* run about a tree that can no longer be merged - and:
+`_tree_note` carries the tree fact into the run states' reasons, so nothing
+measured is dropped by the order.
+
 Why the obvious shortcut is wrong
 ---------------------------------
 `gh pr view --json mergeable` returns `CLEAN` here and is actively misleading:
@@ -282,6 +299,23 @@ def _latest_run_for_head(head: str) -> dict | None:
     return max(matching, key=lambda r: str(r.get("createdAt") or ""))
 
 
+def _tree_note(stale_tree: bool, status: str, behind_by: int, merge_base: str) -> str:
+    """The tree fact, appended to a run-state reason.
+
+    Kept rather than dropped when the run is reported first: a reader told to park, or to
+    read a failure, is a reader who will also need to know that a green verdict here would
+    not transfer, and the fact is already measured. On an ancestor head the same slot
+    states the half that *is* answered, so both shapes of reason read alike.
+    """
+    if stale_tree:
+        return (
+            f" (and the head does not contain master: status={status}, behind_by={behind_by}, "
+            f"merge base {merge_base[:8]} - so a green run here would still be about a tree "
+            "that can no longer be merged)"
+        )
+    return f" (master is an ancestor, status={status})"
+
+
 def check_pr(number: int) -> Verdict:
     view = _gh_json(
         [
@@ -331,29 +365,25 @@ def check_pr(number: int) -> Verdict:
             f"unrecognised compare status {status!r} for #{number}; refusing to call it fresh"
         )
 
-    if status in _STALE_STATUSES:
-        return Verdict(
-            **common,
-            stale=True,
-            stale_kind=_KIND_ANCESTRY,
-            reason=(
-                f"head does not contain master (status={status}, behind_by={behind_by}) "
-                f"- CI's merge base was {merge_base[:8]}, so the verdict is about a tree "
-                "that can no longer be merged"
-            ),
-        )
-
-    # Master is an ancestor. That answers "would a verdict transfer"; now answer
-    # "is there one".
+    # The run's state first, then ancestry — because ancestry is a question *about a
+    # verdict*, and this tool's subject is a **green** CI. Asked the other way round, a
+    # head that is behind master reported `ancestry` whatever its run was doing, so a run
+    # still in flight was answered as a problem of the tree (#1573). That cost twice: the
+    # reader was told the branch had to change for a state no push clears — the one
+    # instruction that voids the votes the head may be carrying — and this tool's own
+    # remedy sent them to measure the landing tree and vote on a run that had not
+    # concluded. Reported in this order, the kind names what is here now (no run, a run
+    # unfinished, a run failed), and only a *passing* run raises the ancestry question.
+    stale_tree = status in _STALE_STATUSES
     if run is None:
         return Verdict(
             **common,
             stale=True,
             stale_kind=_KIND_NO_RUN,
             reason=(
-                f"master is an ancestor (status={status}) but there is NO {_VERDICT_WORKFLOW} "
-                f"run for head {head_sha[:8]} - an unjudged head, which `gh pr checks` reports "
-                "as 'no checks reported'"
+                f"there is NO {_VERDICT_WORKFLOW} run for head {head_sha[:8]}"
+                f"{_tree_note(stale_tree, status, behind_by, merge_base)} - an unjudged head, "
+                "which `gh pr checks` reports as 'no checks reported'"
             ),
         )
     if conclusion in _UNFINISHED:
@@ -361,7 +391,10 @@ def check_pr(number: int) -> Verdict:
             **common,
             stale=True,
             stale_kind=_KIND_RUNNING,
-            reason=f"CI is still {conclusion or 'pending'} on head {head_sha[:8]} - no verdict yet",
+            reason=(
+                f"CI is still {conclusion or 'pending'} on head {head_sha[:8]} - no verdict yet"
+                f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
+            ),
         )
     if conclusion != "success":
         return Verdict(
@@ -371,6 +404,18 @@ def check_pr(number: int) -> Verdict:
             reason=(
                 f"CI concluded {conclusion!r} on head {head_sha[:8]} - a failing verdict, "
                 "not a stale one; re-running will not make it fresh"
+                f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
+            ),
+        )
+    if stale_tree:
+        return Verdict(
+            **common,
+            stale=True,
+            stale_kind=_KIND_ANCESTRY,
+            reason=(
+                f"head does not contain master (status={status}, behind_by={behind_by}) "
+                f"- CI's merge base was {merge_base[:8]}, so the verdict is about a tree "
+                "that can no longer be merged"
             ),
         )
     return Verdict(
