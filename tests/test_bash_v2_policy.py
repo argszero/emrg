@@ -35,7 +35,7 @@ from emrg.sandbox.providers import (
     select_runner,
     unconfined_mode,
 )
-from emrg.sandbox.providers.darwin import SEATBELT_EXEC, seatbelt_profile_args
+from emrg.sandbox.providers.darwin import SEATBELT_EXEC, sbpl_string, seatbelt_profile_args
 from emrg.sandbox.providers.linux import bwrap_profile_args
 from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.tools import bash_tool
@@ -145,6 +145,100 @@ def test_workspace_write_grants_the_workspace_and_the_temp_areas(tmp_path):
     assert canonical_path(str(tmp_path)) in roots
     assert canonical_path(tempfile.gettempdir()) in roots
     assert len(roots) == len(set(roots)), "roots must be deduplicated"
+
+
+def test_a_host_with_no_usable_temp_area_grants_what_it_can_compute(monkeypatch, tmp_path):
+    """The derivation is total: an unreportable temp source is absent, not fatal (#1561).
+
+    ``tempfile.gettempdir()`` is a *probe* — CPython creates a file to find a writable
+    candidate and raises ``FileNotFoundError`` when none of them is. Before this,
+    the raise escaped ``writable_roots`` (``emrg/sandbox/roots.py``) and reached the
+    caller as a bare ``FileNotFoundError``: not the ``SandboxUnavailableError``
+    ``confine`` documents, and not anything the tools' ``except OSError`` around the
+    *spawn* can see, because ``confine`` is called outside it. The blueprint
+    (``roots.ts:52-55``) calls Node's ``os.tmpdir()``, which is total, so the port has
+    to be total as well — and the only non-inventing way is to grant the sources that
+    resolve.
+
+    Measured (2026-09-24, this host): a host really can be in this state — inside a
+    ``read-only`` seatbelt child a bare ``gettempdir()`` raises — which is why this is
+    a guard rather than a curiosity.
+    """
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
+
+    def _no_temp_area():  # pragma: no cover - the raise IS the subject
+        raise FileNotFoundError(2, "No usable temporary directory found in [...]")
+
+    monkeypatch.setattr(tempfile, "gettempdir", _no_temp_area)
+
+    roots = writable_roots(policy)
+    assert canonical_path(str(tmp_path)) in roots, (
+        "a host with no temp area must still be granted its workspace root — the grant "
+        "is narrower, never absent"
+    )
+    assert len(roots) == len(set(roots)), roots
+    # No spelling is conjured to replace the probe: the process cwd is Node's own
+    # last-resort fallback and is deliberately *not* ported, because it would grant a
+    # root the caller never named (``canonical_path``'s stated rule).
+    assert canonical_path(os.getcwd()) not in roots, roots
+
+    # The seam the issue reproduced on: ``confine`` must not raise for a cause that is
+    # not "no backend can enforce the mode". The darwin provider is pure argv building
+    # (no host probe), so this asserts the same thing on every platform.
+    #
+    # The expected spelling comes from the provider's own ``sbpl_string``, never from a
+    # local re-derivation: the profile escapes backslashes, so on a Windows host the
+    # grant appears as ``"C:\\Users\\..."`` and a test comparing the raw path against
+    # the joined argv is red there while the grant is in fact present (measured on
+    # ``test-windows``, PR #1568 first push: `1 failed, 5008 passed, 247 skipped`).
+    confined = confine(["echo", "ok"], policy, platform_name="darwin")
+    assert sbpl_string(canonical_path(str(tmp_path))) in " ".join(confined.argv), (
+        "the workspace-root grant must survive into the profile the seam builds"
+    )
+
+
+def test_the_profile_carries_the_grant_under_the_providers_escaping(tmp_path):
+    """A root the profile must escape is still found — asserted on every platform (#1568).
+
+    The previous test's last assertion looked for the raw path in the joined argv. That
+    happens to hold on macOS (no backslashes in a path) and is *false* on Windows, where
+    ``sbpl_string`` doubles every backslash: the CI leg reported
+    `1 failed, 5008 passed, 247 skipped` with the grant visibly present in the profile.
+    The defect was in the reading, not the grant — so the reading gets its own guard.
+
+    The shape is reproduced platform-independently by a workspace root that contains a
+    backslash: a legal directory name on POSIX, and on Windows the separator itself. The
+    second assertion is what makes this non-vacuous — it fails on *any* host if the
+    assertion is written against the raw spelling, so the escape cannot be forgotten again.
+    """
+    workspace = tmp_path / "work\\space"
+    workspace.mkdir(parents=True, exist_ok=True)
+    assert "\\" in str(workspace), "the fixture must carry a backslash for this to measure"
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(workspace))
+
+    joined = " ".join(confine(["echo", "ok"], policy, platform_name="darwin").argv)
+    canonical = canonical_path(str(workspace))
+    assert sbpl_string(canonical) in joined, "the grant must be present under the provider's escaping"
+    assert canonical not in joined, (
+        "the raw spelling is not what the profile carries — an assertion written against "
+        "it measures macOS only"
+    )
+
+
+def test_the_modes_that_never_probe_are_unaffected_by_a_missing_temp_area(monkeypatch):
+    """The negative control: the probe is only reached under ``workspace-write``.
+
+    ``read-only`` and ``danger-full-access`` return before it, so injecting the failure
+    globally must leave them returning ``[]`` rather than raising — otherwise the guard
+    above would be measuring the injection rather than the fix.
+    """
+
+    def _no_temp_area():  # pragma: no cover - the raise IS the subject
+        raise FileNotFoundError(2, "No usable temporary directory found in [...]")
+
+    monkeypatch.setattr(tempfile, "gettempdir", _no_temp_area)
+    assert writable_roots(SandboxPolicy(mode="read-only", workspace_root=ABSOLUTE_ROOT)) == []
+    assert writable_roots(SandboxPolicy(mode=DANGER_FULL_ACCESS, workspace_root=ABSOLUTE_ROOT)) == []
 
 
 def test_canonical_path_resolves_symlinks(tmp_path):
