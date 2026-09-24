@@ -11,10 +11,12 @@ was nevertheless unsafe, and the way it was unsafe is reproducible:
     master  64bab52    : Agent.md count line 1397   own collection 1397  (+4 other tests)
 
 Both sides set the count line to the same number, so git merged it without a
-conflict, kept 1397, and the merged tree collected 1401. Two guards
-(`test_doc_counts.py::test_python_count_matches_docs` and
-`test_check_doc_count.py::test_real_tree_is_consistent`) went red - *after* the
-merge, on master, where nobody was looking.
+conflict, kept 1397, and the merged tree collected 1401. Two guards went red on
+that merged tree, *after* the merge, on master, where nobody was looking:
+`tests/test_check_node_test_count.py::test_real_tree_is_consistent`, and the
+Python doc-count rule - `tests/test_doc_counts.py::test_python_count_matches_docs`
+then, `tests/test_check_doc_count.py::test_the_real_tree_states_no_count` since
+#1181 made the count measured rather than stored.
 
 The CI verdict was not wrong. It was about a different tree. On `pull_request`
 GitHub builds `Merge <head> into <merge-base>` - the head merged onto the branch

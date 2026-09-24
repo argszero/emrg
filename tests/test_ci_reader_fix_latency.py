@@ -1,4 +1,4 @@
-"""Unit tests for scripts/reader-fix-latency.py — the reader-feedback ->
+"""Unit tests for scripts/reader_fix_latency.py — the reader-feedback ->
 merged-fix latency metric (issue #1027 secondary suggestion, Dev.to 3dicj:
 "the 50-min loop claim becomes a measured number").
 
