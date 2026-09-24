@@ -189,23 +189,46 @@ def test_no_prompt_names_a_placeholder_the_builder_does_not_provide(
             ) from exc
 
 
-# `{{ source_dir }}` followed by the rest of the path it names. After D9 (design §6 D9,
-# host decision 2026-09-21 16:25) every memory path in every template is written against
-# this root — the session workspace — because it is both the directory the sandbox
+# The memory roots a template may name, in the spelling a template writes them: the
+# session's *project* memory (`<session.cwd>/.emrg/memory/`) and its *session* memory
+# (`<session.cwd>/.emrg/sessions/<id>/memory/`). After D9 (design §6 D9, host decision
+# 2026-09-21 16:25) every memory path in every template is written against one root —
+# `{{ source_dir }}`, the session workspace — because it is both the directory the sandbox
 # confines writes to and the directory whose `.emrg/memory/MEMORY.md` the daemon embeds.
-SOURCE_DIR_REF = re.compile(r"\{\{\s*source_dir\s*\}\}([^\s`)\"'|,;]*)")
+# Spaces are stripped from a ref's suffix before comparison — the session root is spelled
+# `{{ source_dir }}/.emrg/sessions/{{ session_id }}/memory/`, so the two spellings are the
+# same path only once the placeholder's interior spaces are gone.
+LEGAL_MEMORY_ROOTS = ("/.emrg/memory", "/.emrg/sessions/{{session_id}}/memory")
 
-# A path suffix that routes through a `memory/` directory.
-_MEMORY_SEGMENT = re.compile(r"(?:^|/)memory/")
+# `{{ <name> }}` plus the path it is followed by, up to a `memory/` segment. Deliberately
+# *any* placeholder-rooted path rather than `{{ source_dir }}` one: a scan for the root it
+# wants cannot see the root it forbids, so a path re-based onto another root yields an
+# empty list — and "nothing found" then reads exactly like "nothing wrong". Multi-part
+# because the session root goes through two placeholders, so a single-placeholder pattern
+# would be blind to `promote_prompt.md`, the template that names *both* roots (#1557).
+PLACEHOLDER_MEMORY_REF = re.compile(
+    r"\{\{\s*(?P<var>[\w.]+)\s*\}\}(?P<rest>(?:/[\w.{}\s-]+?)*/memory(?![-\w]))"
+)
 
 
-def _source_dir_memory_refs(text: str) -> list[str]:
-    """Path suffixes of ``{{ source_dir }}`` references that name a memory dir."""
+def _placeholder_memory_refs(text: str) -> list[tuple[str, str]]:
+    """Every placeholder-rooted memory path, as ``(root variable, path suffix)``."""
     return [
-        suffix
-        for suffix in SOURCE_DIR_REF.findall(text)
-        if _MEMORY_SEGMENT.search(suffix)
+        (match.group("var"), match.group("rest").replace(" ", ""))
+        for match in PLACEHOLDER_MEMORY_REF.finditer(text)
     ]
+
+
+def _is_legal_memory_root(var: str, suffix: str) -> bool:
+    """Is this memory path rooted at the workspace root the daemon loads?
+
+    The single reading of that rule. Two guards apply it — the memory-root scan (a write
+    target must be one of `LEGAL_MEMORY_ROOTS`) and the embed-claim scan (a root may only
+    be *called* embedded if it is) — and a second copy of it would be free to drift.
+    """
+    return var == "source_dir" and any(
+        suffix == root or suffix.startswith(root + "/") for root in LEGAL_MEMORY_ROOTS
+    )
 
 
 def _sandbox_defines(name_fragment: str) -> list[str]:
@@ -243,9 +266,10 @@ def test_prompt_memory_writes_land_where_the_daemon_loads_them(tmp_path, monkeyp
     daemon's own loader a session whose `cwd` is the `{{ source_dir }}` the template
     renders: if the write root and the loaded root ever split apart again, this fails.
 
-    Named limit: only *memory* paths are checked, and only where a template spells one
-    as a literal `{{ source_dir }}` path. A path assembled at runtime, or one written
-    into a shell heredoc, is outside what any static scan can see.
+    Named limit: this measures the *placeholder*, not the prose. A memory path a template
+    assembles at runtime, or writes into a shell heredoc, is outside what a render can
+    show; and a path that is wrong in a way the render still resolves (a legal root in the
+    wrong session) is not a shape this test can tell apart.
     """
     handler = _make_handler(
         tmp_path, monkeypatch, "evolution_prompt.md", {"project": "demoproj"}
@@ -254,21 +278,15 @@ def test_prompt_memory_writes_land_where_the_daemon_loads_them(tmp_path, monkeyp
     source_dir_str = str(handler._source_dir)
     memory_root = source_dir / ".emrg" / "memory"
 
-    # (1) Every memory path a template names is expressed against the workspace root.
-    checked = 0
-    for task_type, filename in _builtin_templates():
-        text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
-        for suffix in _source_dir_memory_refs(text):
-            assert suffix.startswith("/.emrg/memory/"), (
-                f"{task_type}/{filename}: a memory path is `{{{{ source_dir }}}}"
-                f"{suffix}` — memory belongs under `{{{{ source_dir }}}}/.emrg/memory/`, "
-                f"which is the root the daemon loads"
-            )
-            checked += 1
-    assert checked >= 8, (
-        f"only {checked} memory path(s) found across the templates — the scan is "
-        f"not looking at what it thinks it is"
-    )
+    # (1) "Every memory path is rooted at the workspace the daemon loads" used to be
+    # asserted here too, by a scan that looked for the `{{ source_dir }}` member of the
+    # category — the wrong shape twice over: a scan for the root it wants cannot see the
+    # root it forbids, and this copy of the rule could drift from
+    # `test_no_template_names_a_memory_root_other_than_the_two`, which reads the whole
+    # category (and absolute paths) through the same `_is_legal_memory_root`. Removed
+    # 2026-09-24 (#1557): one rule, one home. What this test is *for* is the other half —
+    # that the root the templates write to is the root the daemon actually loads — which
+    # the static scan cannot answer and (2)–(4) below measure.
 
     # (2) The placeholder resolves to that workspace, through the real builder.
     rendered = handler._build_evolution_prompt()
@@ -307,16 +325,11 @@ def test_prompt_memory_writes_land_where_the_daemon_loads_them(tmp_path, monkeyp
     )
 
 
-# The two roots `EmrgServer._collect_memory_data` embeds an index from, in the spelling a
-# template names them: the session's *project* memory (`<session.cwd>/.emrg/memory/`) and
-# its *session* memory (`<session.cwd>/.emrg/sessions/<id>/memory/`). After D9 these are
-# also the only two memory roots any template names — the guard above proves the first is
-# the one the loader reads, and `{{ source_dir }}` IS `session.cwd` (`scheduler.py:1666`
-# builds the session with `cwd=self._source_dir`) — so "this prompt embeds that index" is
-# now true wherever it appears. The guard's job narrowed accordingly: it *keeps* it true,
-# by refusing the claim wherever it is paired with any other root — including a root that
-# is merely writable, which is the shape D9 removed.
-LEGAL_EMBEDDED_MEMORY_ROOTS = ("/.emrg/memory", "/.emrg/sessions/{{ session_id }}/memory")
+# The claim guard's reader of the rule is `_is_legal_memory_root` (defined with the
+# memory-root scan above): the same legal roots, so "where memory may be written" and
+# "which index may be called loaded" cannot drift apart. What is specific to this guard is
+# only the *claim* pattern below.
+#
 # Every spelling the templates use, both directions of the sentence: "the memory index is
 # part of this prompt", "the memory index embedded in this prompt", and "memory entries
 # under …, whose index this prompt embeds". The first version of this pattern knew only the
@@ -327,13 +340,6 @@ LEGAL_EMBEDDED_MEMORY_ROOTS = ("/.emrg/memory", "/.emrg/sessions/{{ session_id }
 # looks for reports success by not looking.
 _INDEX_IN_PROMPT = re.compile(
     r"(?:part of|embedded in)\s+this prompt\b|this prompt\s+embeds?\b", re.IGNORECASE
-)
-
-# `{{ <name> }}` plus the path it is followed by, up to a `memory/` segment. Multi-part:
-# the session root goes through two placeholders, so a single-placeholder pattern would
-# be blind to `promote_prompt.md` — the template that writes memory entries to *both* roots.
-_ROOTED_MEMORY_REF = re.compile(
-    r"\{\{\s*(?P<var>[\w.]+)\s*\}\}(?P<rest>(?:/[\w.{}\s-]+?)*/memory(?![-\w]))"
 )
 
 
@@ -347,15 +353,9 @@ def _embedded_index_claims(text: str) -> list[str]:
     for paragraph in text.split("\n\n"):
         if not _INDEX_IN_PROMPT.search(paragraph):
             continue
-        for match in _ROOTED_MEMORY_REF.finditer(paragraph):
-            rest = match.group("rest").replace(" ", "")
-            legal = [
-                root.replace(" ", "") for root in LEGAL_EMBEDDED_MEMORY_ROOTS
-            ]
-            if match.group("var") != "source_dir" or not any(
-                rest == candidate or rest.startswith(candidate + "/")
-                for candidate in legal
-            ):
+        for match in PLACEHOLDER_MEMORY_REF.finditer(paragraph):
+            suffix = match.group("rest").replace(" ", "")
+            if not _is_legal_memory_root(match.group("var"), suffix):
                 offenders.append(paragraph.strip()[:140])
                 break
     return offenders
@@ -373,7 +373,7 @@ def _embedded_index_claim_counts(text: str) -> tuple[int, int]:
         if not _INDEX_IN_PROMPT.search(paragraph):
             continue
         claims += 1
-        if _ROOTED_MEMORY_REF.search(paragraph):
+        if PLACEHOLDER_MEMORY_REF.search(paragraph):
             paired += 1
     return claims, paired
 
@@ -682,12 +682,15 @@ def test_widened_fingerprint_is_measured_on_the_real_templates() -> None:
 # Acceptance item 3 of rant 2026-09-14T14:35:47 ("提示词内不存在指向工作区之外的写路径") is
 # still the claim, and this is still its guard — the retired-mechanism pattern above
 # cannot see it, because a *different* out-of-zone path is not the retired mechanism.
-_MEMORY_DIR_REF = re.compile(
-    r"\{\{\s*(?P<var>[\w.]+)\s*\}\}(?P<rest>(?:/[\w.{}\s-]+?)*/memory(?![-\w]))"
-)
-# A memory directory spelled as an absolute (or `~`-rooted) path: whatever a template
-# hardcodes is outside the placeholder mechanism, so it cannot be re-based by a change to
-# the render context, and it is right only on the machine it was written on.
+# The category scan below reads `PLACEHOLDER_MEMORY_REF` and `_is_legal_memory_root`,
+# defined with the memory-root scan near the top of this file: one pattern and one reading
+# of the rule, so the write-root rule and the claim rule cannot drift apart. What is
+# specific to this scan is the second half — a memory directory spelled as an absolute (or
+# `~`-rooted) path, below.
+#
+# `_ABSOLUTE_MEMORY_DIR`: whatever a template hardcodes is outside the placeholder
+# mechanism, so it cannot be re-based by a change to the render context, and it is right
+# only on the machine it was written on.
 _ABSOLUTE_MEMORY_DIR = re.compile(r"(?:^|[\s`'\"(])(?P<path>[/~][\w./~-]*/memory(?![-\w]))")
 
 
@@ -743,16 +746,12 @@ def test_every_memory_root_a_template_names_is_writable() -> None:
 
 def _memory_root_offenders(text: str) -> tuple[int, list[str]]:
     """Memory references in ``text``, and those of them rooted at the wrong place."""
-    legal = [root.replace(" ", "") for root in LEGAL_EMBEDDED_MEMORY_ROOTS]
     checked = 0
     offenders: list[str] = []
-    for match in _MEMORY_DIR_REF.finditer(text):
+    for var, suffix in _placeholder_memory_refs(text):
         checked += 1
-        rest = match.group("rest").replace(" ", "")
-        if match.group("var") != "source_dir" or not any(
-            rest == candidate or rest.startswith(candidate + "/") for candidate in legal
-        ):
-            offenders.append(match.group(0))
+        if not _is_legal_memory_root(var, suffix):
+            offenders.append(f"{{{{ {var} }}}}{suffix}")
     for match in _ABSOLUTE_MEMORY_DIR.finditer(text):
         offenders.append(match.group("path"))
     return checked, offenders
@@ -762,24 +761,59 @@ def test_no_template_names_a_memory_root_other_than_the_two() -> None:
     """Every memory path in every template is rooted at the session workspace.
 
     After D9 exactly two roots are legal, and both are the session workspace's own
-    (`LEGAL_EMBEDDED_MEMORY_ROOTS` — the project and session memory the daemon embeds,
-    which are the same two directories the sandbox allows because ``{{ source_dir }}`` IS
+    (`LEGAL_MEMORY_ROOTS` — the project and session memory the daemon embeds, which are
+    the same two directories the sandbox allows because ``{{ source_dir }}`` IS
     ``session.cwd``). Everything else is a defect of one of two kinds: rooted at another
     variable (the D9 shape), or hardcoded as an absolute path (which no render-context
     change can re-base, and which is correct only on the machine that wrote it).
+
+    Two halves, and the second was added because the first alone has slack (#1557): the
+    scan refuses a mis-rooted path, and the per-file floor refuses a *silent* one. Measured
+    2026-09-24 while reviewing that issue — its headline ("a one-line revert of
+    `paper_prompt.md` passes every arm") is true of the two arms *inside*
+    `test_prompt_memory_writes_land_where_the_daemon_loads_them`, and false of this file:
+    reverting that line turns **this test** red, and this test alone is the failure set
+    (an earlier reading that showed a second failure had `HOME` pinned inside the
+    repository, which makes `test_every_memory_root_a_template_names_is_writable` red on
+    its own — a false red, measured and discarded).
+
+    What was genuinely missing was the floor's *shape*. A floor summed over the set is
+    masked by any gain elsewhere: at 13 references against a floor of 13 a deletion is
+    still caught, but the first time one template gains a reference, another's loss is
+    offset and the aggregate reads healthy while a whole file's memory paths are gone — and
+    in neither case can it name the file that is short, which is the edit a reader needs.
     """
-    checked = 0
     offenders: list[str] = []
+    per_file: dict[str, int] = {}
     for _task_type, filename in _builtin_templates():
         text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
         found, bad = _memory_root_offenders(text)
-        checked += found
+        per_file[filename] = found
         offenders += [f"{filename}: {ref}" for ref in bad]
-    # A floor, not a target: 13 references stood across the templates when D9 landed
-    # (10 project + 3 session). It may grow; shrinking means the scan stopped looking.
-    assert checked >= 13, (
-        f"only {checked} `{{{{ <var> }}}}/…/memory/` reference(s) found across the "
-        f"templates — the scan is not looking where it thinks it is"
+
+    # A floor **per file**, not over the set (#1557): a floor summed over the six templates
+    # is masked by any gain elsewhere, and cannot name the file that is short. These are
+    # minimums, measured when the floor was made per-file (1, 3, 2, 3, 1, 3 — 13 across the
+    # six templates: 10 project-memory + 3 session-memory); a removal is allowed, but it has
+    # to be deliberate and it has to be this line that is edited. A template absent from the
+    # map is still covered by the scan; a *renamed* one lands here as 0 and cannot shed its
+    # floor silently.
+    floor = {
+        "competition_prompt.md": 1,
+        "evolution_prompt.md": 3,
+        "journal_prompt.md": 2,
+        "open_source_prompt.md": 3,
+        "paper_prompt.md": 1,
+        "promote_prompt.md": 3,
+    }
+    thin = [
+        f"{name}: {per_file.get(name, 0)} < {needed}"
+        for name, needed in floor.items()
+        if per_file.get(name, 0) < needed
+    ]
+    assert not thin, (
+        "these templates name fewer placeholder-rooted memory paths than they did when "
+        "this floor was made per-file: " + ", ".join(thin)
     )
     assert not offenders, (
         f"these templates name a memory root that is neither the session workspace's "
