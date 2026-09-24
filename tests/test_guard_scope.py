@@ -103,16 +103,32 @@ def test_the_probe_fires_for_a_directory_inside_a_repository(tmp_path):
     assert TaskHandler._is_dirty_tree_sync(str(task)) is True
 
 
-def test_the_sandbox_holds_that_directory_read_only(tmp_path):
-    """The consequence the issue names: with the probe blind, the tier was never held and
-    `rm -f unsaved.txt` was permitted in the directory holding the host's work."""
+def test_the_sandbox_pins_that_directory_instead_of_holding_it_read_only(tmp_path):
+    """The consequence the issue names, answered a different way since #1465's exit.
+
+    With the probe blind, the tier was never held and `rm -f unsaved.txt` was permitted in
+    the directory holding the host's work. The first fix held every such cycle
+    ``read-only`` — safe for the bytes, but terminal for the tree: the tier refuses the git
+    verbs that would converge it, so nothing could leave the state. Host directive
+    2026-09-23 makes the tree clean itself up instead, and the survival claim moves from
+    "the tier forbids writing" to "the bytes are reachable from a ref". Both halves are
+    asserted here, because the second is what has to hold now.
+    """
     repo, task = _parent_and_task(tmp_path)
     (task / "notes.txt").write_text("work that exists nowhere else", encoding="utf-8")
 
-    assert asyncio.run(_handler(task)._effective_sandbox()) == "read-only"
-    assert (task / "notes.txt").read_text(encoding="utf-8") == (
-        "work that exists nowhere else"
+    assert asyncio.run(_handler(task)._effective_sandbox()) == "workspace-write"
+
+    # The convergence happened, and the work is in the pin rather than merely in place.
+    assert _status(repo, "work/clone").strip() == "", "the task's dirt is converged"
+    refs = _git(repo, "for-each-ref", "--format=%(refname)", "refs/emrg/rescue/").split()
+    pins = [r for r in refs if not r.endswith("-head")]
+    assert len(pins) == 1, refs
+    subprocess.run(
+        ["git", "-C", str(repo), "stash", "apply", "--index", pins[0]],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
     )
+    assert (task / "notes.txt").read_text(encoding="utf-8") == "work that exists nowhere else"
 
 
 def test_a_parent_repositorys_own_dirt_is_not_the_tasks_dirt(tmp_path):
@@ -285,16 +301,41 @@ def test_the_recovery_moves_only_the_tasks_own_dirt(tmp_path):
     assert _git(repo, "stash", "list").strip(), "the convergence is reversible"
 
 
-def test_the_recovery_refuses_a_subtree_that_holds_unique_work(tmp_path):
-    """The safety counterpart: scoping the judgment must not make unique work in the
-    task's own directory recoverable — nothing is touched there."""
+def test_the_recovery_pins_a_subtree_that_holds_unique_work(tmp_path):
+    """The safety counterpart, restated: the *scope* guarantee is what this test owns.
+
+    What it must keep proving is that scoping the judgment did not make the task's unique
+    work unreachable-or-lost, and that the parent's work is not swept up by a recovery run
+    one level down (the repository-wide-stash hazard of #1507, asserted next door too).
+    Since #1465's exit the way that is shown is the pin plus the round-trip rather than a
+    refusal — and the parent still has to be untouched, which is asserted here directly.
+    """
     repo, task = _parent_and_task(tmp_path)
     (task / "unsaved.txt").write_text("work that exists nowhere else", encoding="utf-8")
+    (repo / "parent-unsaved.txt").write_text("the host's work", encoding="utf-8")
 
     status, detail = TaskHandler._recover_dirty_tree_sync(str(task))
 
-    assert status == "refused", detail
+    assert status == "recovered", detail
+    assert "PINNED" in detail, detail
+    assert _status(repo, "work/clone").strip() == "", "the task's dirt is converged"
+    # The parent's untracked file is work this task does not own, and a repository-wide
+    # stash would have moved it — the measured defect (#1507) this scope exists to prevent.
+    assert _status(repo) == "?? parent-unsaved.txt\n", "the parent's work must not move"
+
+    refs = _git(repo, "for-each-ref", "--format=%(refname)", "refs/emrg/rescue/").split()
+    pins = [r for r in refs if not r.endswith("-head")]
+    assert len(pins) == 1, refs
+    subprocess.run(
+        ["git", "-C", str(repo), "stash", "apply", "--index", pins[0]],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+    )
+    # The verdict is the state, not the exit code: git restores some geometries exactly and
+    # still exits 1 (`test_recover_worktree.py` measures the `D ??` one).
     assert (task / "unsaved.txt").read_text(encoding="utf-8") == (
         "work that exists nowhere else"
     )
-    assert not _git(repo, "stash", "list").strip(), "a refusal touches nothing"
+    assert "?? parent-unsaved.txt" in _status(repo), (
+        "the parent's work is still the parent's"
+    )
+    assert "?? work/clone/unsaved.txt" in _status(repo), "and the task's dirt is back"
