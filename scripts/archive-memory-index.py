@@ -95,6 +95,21 @@ that carry such lines (a table row here, a prose bullet there) keep their verdic
 That residual gap is a count taken over a subset, and it is the honest cost of not
 refusing files whose readable rows are perfectly manageable.
 
+The row-length rule rides on the move
+-------------------------------------
+`--check` reads two rules: the row cap, and a per-row length cap. The move is what
+keeps the first, and **nothing ran the second** - every cycle rewrites this index
+through the move, and the move verified conservation and the cap while rows sat well
+over the length cap and were never mentioned (measured 2026-09-24 on the evolution
+index: 31 rows over 512 chars, longest 4,280, and `moved N row(s); verified conserved
+and append-only` reading as a clean verdict - issue #1551). The move now reports the
+length rule it does not enforce, on stderr, and its exit code is unchanged.
+
+A report rather than a refusal, because the two rules interact: this move is the only
+thing that brings the index under the *row* cap, so refusing to run while some row is
+over the *length* cap would leave the index over the row cap for good. The row cap is
+the one whose violation displaces the embedded budget; the length rule is a reading
+for whoever writes the rows.
 The other half of the file: what the prompt would not carry
 ----------------------------------------------------------
 `--check` also reports the **embed cap's** reading, because the row rules bound the
@@ -116,7 +131,9 @@ re-implemented here, so the two cannot disagree about what is embedded.
 Exit codes
 ----------
 ``0``  the index is within its cap (nothing to move), or the move was made and
-       verified. ``1``  ``--check`` found a row-rule violation in an index it could
+       verified. A per-row length violation the move cannot fix is reported on
+       stderr and does not change this code. ``1``  ``--check`` found a row-rule
+       violation in an index it could
        read (too many cycle rows, a row over the per-row cap, a duplicate target).
        ``2``  the question could not be answered - no index at that path, an index
        that could not be read, an index holding lines that name a cycle but are not
@@ -291,6 +308,51 @@ def non_row_lines(text: str) -> list[str]:
     ]
 
 
+def long_rows(text: str) -> list[Row]:
+    """The rows of `text` over the per-row cap, in file order.
+
+    One owner for the predicate: `check_rules` asserts it and the move reports it,
+    so the two readings cannot drift apart into two slightly different rules.
+    """
+    return [row for row in parse_rows(text) if len(row.text) > ROW_MAX_CHARS]
+
+
+def report_row_lengths(text: str, stream: object = None) -> None:
+    """Report the row-length rule on the **write** path, where nothing else runs it.
+
+    The row cap and the row-length rule are read by `--check`, which nothing runs:
+    cycles rewrite this index through the move, and the move verified conservation
+    and the cap while 31 rows sat over the per-row cap (measured 2026-09-24 on
+    `~/.emrg/evolution/.emrg/memory/MEMORY.md`, issue #1551). So the move says what
+    it did *and* what it did not look at, rather than letting "verified conserved and
+    append-only" read as "the index respects the row rules".
+
+    A report, not a refusal, and the interaction between the two rules is why: this
+    move is the only thing that brings the index under the *row cap*, so refusing to
+    run while any row is over the *length* cap would leave the index over the row cap
+    for good - the violation the cap exists to prevent, enforced by the rule that was
+    supposed to be the cheap one.
+
+    The stream is resolved at call time, never bound as a default: a
+    `stream=sys.stderr` default is evaluated once, when this module is imported, so
+    the note would go to whatever object `sys.stderr` was at import - a capture from
+    an earlier test, in a suite that replaces it per test - and a reader (or a
+    `capsys` assertion) would see nothing.
+    """
+    if stream is None:
+        stream = sys.stderr
+    rows = long_rows(text)
+    if not rows:
+        return
+    print(
+        f"note: {len(rows)} row(s) of the index are over the per-row cap "
+        f"{ROW_MAX_CHARS} chars (longest {max(len(row.text) for row in rows)}); the "
+        "move does not enforce that rule - `--check` lists it, and a row's summary "
+        "belongs in its detail file",
+        file=stream,
+    )
+
+
 def archive_header(index: Path, cap: int, today: str) -> str:
     """The heading a freshly created archive starts with.
 
@@ -391,15 +453,22 @@ def verify_plan(plan: Plan, cap: int) -> list[str]:
     return problems
 
 
-def check_rules(index_path: Path, cap: int) -> list[str]:
-    """The row rules `--check` enforces (read-only).
+def check_rules(text: str, cap: int) -> list[str]:
+    """The row rules `--check` enforces, against the text it was handed (read-only).
 
     Rows this parser cannot read are not a rule `--check` can test - `main` refuses
     before either mode runs, because a rule list printed beside a count taken over
     the rows it *could* see is the false OK this tool exists to prevent. What is
     left here is what the protocol states about rows that are readable.
+
+    The **text**, not the path, and that is the point of the signature: `main` has
+    already read the index to answer the count it prints beside these rules, and
+    this function used to read the file a second time. The index has other writers
+    (every task's cycle appends to the same one - the reason `changed_since_planned`
+    exists), so an append between the two reads put two snapshots in one answer, and
+    the answer contradicted itself: `3 cycle row(s) of 3 row(s)` printed above
+    `VIOLATION: 4 cycle rows, over the cap 2`. One read, one snapshot, one verdict.
     """
-    text = index_path.read_text(encoding="utf-8")
     rows = parse_rows(text)
     problems: list[str] = []
 
@@ -410,11 +479,11 @@ def check_rules(index_path: Path, cap: int) -> list[str]:
             "to archive the oldest ones"
         )
 
-    long_rows = [row for row in rows if len(row.text) > ROW_MAX_CHARS]
-    if long_rows:
+    long = long_rows(text)
+    if long:
         problems.append(
-            f"{len(long_rows)} row(s) over {ROW_MAX_CHARS} chars, longest "
-            f"{max(len(row.text) for row in long_rows)}"
+            f"{len(long)} row(s) over {ROW_MAX_CHARS} chars, longest "
+            f"{max(len(row.text) for row in long)}"
         )
 
     targets = Counter(row.target for row in rows)
@@ -425,7 +494,7 @@ def check_rules(index_path: Path, cap: int) -> list[str]:
     return problems
 
 
-def embed_cap_reading(index_path: Path, rows: list[Row]) -> list[str]:
+def embed_cap_reading(index_path: Path, rows: list[Row], text: str) -> list[str]:
     """The rows this index would not reach the prompt with - the embed cap's cut.
 
     The two rules above are about the *file*; this is about the half of it a reader
@@ -451,8 +520,27 @@ def embed_cap_reading(index_path: Path, rows: list[Row]) -> list[str]:
     rows it keeps are the index's first rows in file order - which is what makes
     `rows[len(kept_rows):]` the dropped set. The tests pin that against the capped
     text itself rather than against this reasoning.
+
+    The size and the rows are the caller's **one** read, not a second one taken here:
+    this index has other writers (every task's cycles append to it), and a reading that
+    re-read the file could print a size from a snapshot its own count did not come from.
+    The kept prefix is still the cap's own read, because it takes a path - and an append
+    between the two cannot move the head, so the drop count stays a statement about the
+    rows counted above (both read the same first `INDEX_SIZE_WARN` characters, which an
+    append at the end cannot change). `--check` reads the index once for everything it
+    prints about the file.
+
+    One racing case *does* change the answer, and it is named rather than left to be
+    rediscovered: a writer that removes rows from the **head** (this tool's own move
+    does exactly that) moves the cut relative to the rows the count used, and the two
+    reads are one writer apart. The kept prefix is compared against those rows, and when
+    they disagree the reading says the snapshot moved instead of printing a number that
+    describes neither file.
+
+    :param index_path: the index, named so the cap can be asked about it.
+    :param rows: the rows of ``text``, parsed by the caller.
+    :param text: the index's text as the caller read it (the same read the count uses).
     """
-    text = index_path.read_text(encoding="utf-8")
     size = len(text)
     limit = INDEX_SIZE_WARN
     if size <= limit:
@@ -464,6 +552,18 @@ def embed_cap_reading(index_path: Path, rows: list[Row]) -> list[str]:
     from emrg.server.daemon import EmrgServer  # lazy: only this reading needs it
 
     kept_rows = parse_rows(EmrgServer._cap_memory_index(None, index_path))
+    if kept_rows != rows[: len(kept_rows)]:
+        # Compared by identity of the rows themselves (`lineno`, text, target, stamp),
+        # so an append - the ordinary case - matches and answers, while a head removal
+        # does not. Nothing is inferred from sizes or counts here: if they disagree the
+        # question "which rows are past the cut" has two answers and this prints none.
+        return [
+            f"embed cap: {size} char(s), over the {limit}-char cap - the head is kept, "
+            "but the index changed between the two reads this reading needs (rows were "
+            "removed at the head, which is what a move does), so which rows are past "
+            "the cut cannot be said about the count above; re-run `--check` once the "
+            "other writer has finished"
+        ]
     dropped = rows[len(kept_rows) :]
 
     out = [
@@ -708,7 +808,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.check:
-        problems = check_rules(index_path, args.cap)
+        # The same text the count above is taken from - one read, so the count and the
+        # rules cannot be about two different files (see `check_rules`).
+        problems = check_rules(index_text, args.cap)
         cycle_rows = [row for row in rows if row.is_cycle]
         print(f"index: {index_path}")
         print(f"{len(cycle_rows)} cycle row(s) of {len(rows)} row(s), cap {args.cap}")
@@ -716,7 +818,7 @@ def main(argv: list[str] | None = None) -> int:
         # pass as the rules - and printed in both outcomes, because an index past
         # the cap with sound rows is the ordinary case, not a fault. It returns no
         # verdict: the exit code below is the two row rules and nothing else.
-        for line in embed_cap_reading(index_path, rows):
+        for line in embed_cap_reading(index_path, rows, index_text):
             print(line)
         if problems:
             for problem in problems:
@@ -737,11 +839,13 @@ def main(argv: list[str] | None = None) -> int:
         if not plan.moved:
             print(f"index: {index_path}")
             print(f"nothing to move: the index is within its {args.cap}-row cap")
+            report_row_lengths(index_text)
             return 0
 
         if args.dry_run:
             announce(index_path, archive_path, plan)
             print(f"dry run: {len(plan.moved)} row(s) would move, nothing written")
+            report_row_lengths(plan.index_after)
             return 0
 
         # The compare half of the compare-and-swap: another task's cycle appends
@@ -783,6 +887,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"moved {len(plan.moved)} row(s); verified conserved and append-only")
+    # The *post-move* text, from the plan: this is the text `apply_plan` wrote and
+    # `measure_on_disk` verified, so a row that was over the cap and moved out is not
+    # reported as still sitting in the index.
+    report_row_lengths(plan.index_after)
     return 0
 
 

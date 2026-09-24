@@ -776,6 +776,33 @@ def test_the_decoder_survives_a_host_that_reports_no_usable_codec(monkeypatch):
     assert v2._decode_output(b"hello", os_name="nt") == "hello"
 
 
+def test_the_streams_cut_for_each_other_say_which_end_they_kept(monkeypatch):
+    """Two cuts share one budget, and each notice must name the end it kept.
+
+    ``_fit_streams`` cannot reach its stderr re-cut at the shipped constants, and
+    that is arithmetic rather than luck: ``_truncate_stderr`` has already bounded
+    stderr at ``_ERR_MAX`` (30 000) while the budget is ``MAX_OUTPUT_CHARS``
+    (200 000), so ``remaining`` never falls below ``200 000 − 30 000 − 6``.  That
+    is why the branch is worth pinning instead of trusting — it is reached only
+    when someone moves one of those two numbers, and the reader it then serves is
+    the one deciding what to do next.  It keeps the head, so it says so; the same
+    input through the tool's own helper is the reading that keeps that true.
+    """
+    import emrg.tools.bash_tool_v2 as v2
+
+    monkeypatch.setattr(v2, "MAX_OUTPUT_CHARS", 10_000)
+    monkeypatch.setattr(v2, "_ERR_MAX", 9_000)
+    stderr = "".join(f"{i:06d} stderr line\n" for i in range(800))
+
+    stdout, fitted = v2._fit_streams("", stderr)
+
+    assert stdout == ""
+    assert "truncated to make room for stdout" in fitted
+    assert "only the head is kept, the tail is dropped" in fitted
+    assert fitted.startswith(stderr[:500]), "the head is what the reader gets"
+    assert not fitted.endswith(stderr[-500:]), "and the tail is what it loses"
+
+
 @needs_seatbelt
 def test_a_missing_workdir_is_not_reported_as_a_sandbox_problem(tmp_path):
     """A bad cwd is the caller's error, and the classification must not launder it.

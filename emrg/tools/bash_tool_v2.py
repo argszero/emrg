@@ -252,7 +252,11 @@ def _fit_streams(stdout: str, stderr: str) -> tuple[str, str]:
     remaining = MAX_OUTPUT_CHARS - len(stderr) - separator
     if remaining < 2000 and stderr:
         remaining = MAX_OUTPUT_CHARS // 2
-        stderr = stderr[:remaining] + "\n\n... [stderr truncated to make room for stdout]"
+        stderr = (
+            stderr[:remaining]
+            + "\n\n... [stderr truncated to make room for stdout: "
+            "only the head is kept, the tail is dropped]"
+        )
     if len(stdout) > remaining:
         stdout = _truncate_stdout(stdout, remaining)
     return stdout, stderr
