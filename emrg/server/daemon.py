@@ -1818,11 +1818,33 @@ class EmrgServer:
         gets embedded; the full index and cycle-archive-*.md stay readable
         on disk via the read tool.
         """
-        # One knob, two readings. This used to spell the cap itself with a
-        # comment promising it matched `memory.INDEX_SIZE_WARN` — a promise nothing
-        # checked, so tuning the threshold the store warns by (the point of a soft
-        # guard) would leave the cap embedding an index the agent is already being
-        # warned about. The number is the store's; this reads it.
+        # One knob, two units. This used to spell the cap itself with a comment
+        # promising it matched `memory.INDEX_SIZE_WARN` — a promise nothing checked,
+        # so tuning the threshold the store warns by (the point of a soft guard)
+        # would leave the cap embedding an index the agent is already being warned
+        # about. The number is the store's; this reads it — but as a *character*
+        # budget, because a prompt is counted in characters, while the advisory
+        # readers compare the same constant against a *byte* file size
+        # (`MemoryStore._warn_index_thresholds`, and the reflection prompt's
+        # hygiene note, which says "N bytes" as it prints it). "One knob, two
+        # readings" read as one unit, and was true only while the index was ASCII:
+        # measured 2026-09-24, a 30,024-char / 61,160-byte CJK index fires the
+        # advisory and leaves this cap silent. So the units stay as they are.
+        #
+        # This method has **two** callers (`_collect_memory_data`: the project index
+        # and the session index) and, since 2026-09-24, an advisory for both: the
+        # check lives on `MemoryStore` — the base of the two stores — and its
+        # `_save_index` calls it, which is what makes the ordering above a property of
+        # *the cap* rather than of one of its two subjects. It was a
+        # `SessionMemoryStore` method until then, and the project half was measurably
+        # unwatched: on one fixture a 56,214-char project index was truncated here with
+        # no advisory having looked at its size, while the same file as a session index
+        # fired it first (issue #1581, remedy: wire the project index to the same
+        # advisory). So this can truncate nothing an advisory left unflagged — for an
+        # index a **store** wrote. One the agent wrote with `write`/`edit` reaches
+        # neither advisory, and the notice below naming the file it cut (#1578) is its
+        # only reader. Both scopes are measured in
+        # `tests/test_memory_index_thresholds.py`.
         limit = INDEX_SIZE_WARN
         text = path.read_text(encoding="utf-8")
         if len(text) <= limit:

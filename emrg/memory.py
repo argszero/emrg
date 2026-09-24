@@ -142,7 +142,36 @@ VALID_STATUSES = {"active", "superseded", "merged"}
 # LLM-driven; these are soft guards (warn/truncate, never auto-delete).
 INDEX_TITLE_MAX_CHARS = 512  # max chars for one index title / line
 INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
-INDEX_SIZE_WARN = 50 * 1024  # >50KB MEMORY.md → consolidation recommended
+# >50KB MEMORY.md → consolidation recommended. One number, two *units*, which is
+# why neither site may assume the other's reading: the two advisory readers compare
+# it against the file's **byte** size (`MemoryStore._warn_index_thresholds` below,
+# and the reflection prompt's hygiene note, which prints the reading as "N bytes"),
+# while `EmrgServer._cap_memory_index` applies it as a **character** budget, because
+# what it bounds is a prompt and prompts are counted in characters (the incident the
+# cap came from is quoted that way: 77% of a 452,972-char prompt). The two disagree
+# about one CJK index — measured 2026-09-24, a 30,024-char / 61,160-byte index fires
+# the advisory while the cap truncates nothing, and the band where that happens is
+# wide, since CJK runs ~3 bytes per character.
+#
+# The direction that matters holds for **both** of the cap's subjects, and it holds
+# because the advisory sits on the base store, not on one of the two that inherit
+# from it: `MemoryStore._save_index` calls `_warn_index_thresholds`, so a project
+# index and a session index are each flagged before the cap can see them. That is
+# structural rather than lucky — the cap can only truncate a file the advisory
+# already flagged, because UTF-8 never encodes a string in fewer bytes than
+# characters, so `chars > T` implies `bytes > T`. Until 2026-09-24 the advisory was a
+# `SessionMemoryStore` method and the project half went unwatched, measured on one
+# fixture: a 56,214-char project index was truncated with no advisory having looked
+# at its size, while the same file as a session index fired the advisory first
+# (issue #1581, whose remedy is this wiring).
+#
+# What the ordering still does not reach, named so it is not overread: the advisory
+# fires on a **store write**. An index the agent edits with `write`/`edit` — which is
+# how the memory instructions tell it to maintain `MEMORY.md` — bypasses this method
+# at either scope, and the cap's own notice naming the file it cut (#1578) is all
+# that file has. Mechanised for both scopes in
+# `tests/test_memory_index_thresholds.py`.
+INDEX_SIZE_WARN = 50 * 1024
 
 # Order of the `## type` sections when the index has to be rendered from
 # entries alone (a rebuild, or entries the document never had). The parser
@@ -743,6 +772,43 @@ class MemoryStore:
         if source:
             logger.debug("memory index write from: %s", source)
         index.save(self.index_path)
+        self._warn_index_thresholds()
+
+    # Rant 2026-08-23T08:04:26 — soft guard only: warn when an index crosses a
+    # threshold. Actual consolidation (merge/trim to ≤50) is LLM-driven via
+    # reflection/consolidation prompts — never auto-delete here.
+    #
+    # On the base class since 2026-09-24, because the embed cap truncates *both*
+    # indexes a store writes and the advisory used to be wired to one of them: as a
+    # `SessionMemoryStore` method it left a project index to cross the cap with no
+    # reader ever having measured its size, falsifying the ordering the cap's own
+    # comment relied on (issue #1581; measured on one fixture — 56,214 chars, the
+    # project store silent, the same file as a session index flagged). Here it covers
+    # whichever index the store owns, since it reads only `self.index_path` and
+    # `self.count`.
+    #
+    # Still out of reach, named so this is not read as a guarantee: an index written
+    # by the agent's `write`/`edit` tools — which is how the memory instructions tell
+    # it to maintain `MEMORY.md` — never reaches this method, at either scope.
+    def _warn_index_thresholds(self) -> None:
+        """Log a warning when this store's index exceeds a soft threshold."""
+        try:
+            if self.count > INDEX_COUNT_WARN:
+                logger.warning(
+                    "memory index ≥ threshold — consolidation recommended: "
+                    "count=%d > %d (%s)",
+                    self.count, INDEX_COUNT_WARN, self.index_path,
+                )
+            if self.index_path.exists():
+                size = self.index_path.stat().st_size
+                if size > INDEX_SIZE_WARN:
+                    logger.warning(
+                        "memory index ≥ threshold — consolidation recommended: "
+                        "size=%d bytes > %d (%s)",
+                        size, INDEX_SIZE_WARN, self.index_path,
+                    )
+        except OSError:
+            logger.debug("memory index threshold check skipped", exc_info=True)
 
     def _rebuild_index(self) -> MemoryIndex:
         """Rebuild the entire index by scanning all .md files."""
@@ -1067,30 +1133,3 @@ class SessionMemoryStore(MemoryStore):
 
     def __init__(self, session_dir: Path):
         super().__init__(session_dir / "memory", scope="session")
-
-    # Rant 2026-08-23T08:04:26 — soft guard only: warn when the session index
-    # crosses thresholds. Actual consolidation (merge/trim to ≤50) is
-    # LLM-driven via reflection/consolidation prompts — never auto-delete here.
-    def _save_index(self, index: MemoryIndex, source: str = "") -> None:
-        super()._save_index(index, source)
-        self._warn_index_thresholds()
-
-    def _warn_index_thresholds(self) -> None:
-        """Log a warning when the session index exceeds soft thresholds."""
-        try:
-            if self.count > INDEX_COUNT_WARN:
-                logger.warning(
-                    "memory index ≥ threshold — consolidation recommended: "
-                    "count=%d > %d (%s)",
-                    self.count, INDEX_COUNT_WARN, self.index_path,
-                )
-            if self.index_path.exists():
-                size = self.index_path.stat().st_size
-                if size > INDEX_SIZE_WARN:
-                    logger.warning(
-                        "memory index ≥ threshold — consolidation recommended: "
-                        "size=%d bytes > %d (%s)",
-                        size, INDEX_SIZE_WARN, self.index_path,
-                    )
-        except OSError:
-            logger.debug("memory index threshold check skipped", exc_info=True)
