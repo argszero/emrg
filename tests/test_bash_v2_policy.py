@@ -147,6 +147,66 @@ def test_workspace_write_grants_the_workspace_and_the_temp_areas(tmp_path):
     assert len(roots) == len(set(roots)), "roots must be deduplicated"
 
 
+def test_a_host_with_no_usable_temp_area_grants_what_it_can_compute(monkeypatch, tmp_path):
+    """The derivation is total: an unreportable temp source is absent, not fatal (#1561).
+
+    ``tempfile.gettempdir()`` is a *probe* — CPython creates a file to find a writable
+    candidate and raises ``FileNotFoundError`` when none of them is. Before this,
+    the raise escaped ``writable_roots`` (``emrg/sandbox/roots.py``) and reached the
+    caller as a bare ``FileNotFoundError``: not the ``SandboxUnavailableError``
+    ``confine`` documents, and not anything the tools' ``except OSError`` around the
+    *spawn* can see, because ``confine`` is called outside it. The blueprint
+    (``roots.ts:52-55``) calls Node's ``os.tmpdir()``, which is total, so the port has
+    to be total as well — and the only non-inventing way is to grant the sources that
+    resolve.
+
+    Measured (2026-09-24, this host): a host really can be in this state — inside a
+    ``read-only`` seatbelt child a bare ``gettempdir()`` raises — which is why this is
+    a guard rather than a curiosity.
+    """
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
+
+    def _no_temp_area():  # pragma: no cover - the raise IS the subject
+        raise FileNotFoundError(2, "No usable temporary directory found in [...]")
+
+    monkeypatch.setattr(tempfile, "gettempdir", _no_temp_area)
+
+    roots = writable_roots(policy)
+    assert canonical_path(str(tmp_path)) in roots, (
+        "a host with no temp area must still be granted its workspace root — the grant "
+        "is narrower, never absent"
+    )
+    assert len(roots) == len(set(roots)), roots
+    # No spelling is conjured to replace the probe: the process cwd is Node's own
+    # last-resort fallback and is deliberately *not* ported, because it would grant a
+    # root the caller never named (``canonical_path``'s stated rule).
+    assert canonical_path(os.getcwd()) not in roots, roots
+
+    # The seam the issue reproduced on: ``confine`` must not raise for a cause that is
+    # not "no backend can enforce the mode". The darwin provider is pure argv building
+    # (no host probe), so this asserts the same thing on every platform.
+    confined = confine(["echo", "ok"], policy, platform_name="darwin")
+    assert canonical_path(str(tmp_path)) in " ".join(confined.argv), (
+        "the workspace-root grant must survive into the profile the seam builds"
+    )
+
+
+def test_the_modes_that_never_probe_are_unaffected_by_a_missing_temp_area(monkeypatch):
+    """The negative control: the probe is only reached under ``workspace-write``.
+
+    ``read-only`` and ``danger-full-access`` return before it, so injecting the failure
+    globally must leave them returning ``[]`` rather than raising — otherwise the guard
+    above would be measuring the injection rather than the fix.
+    """
+
+    def _no_temp_area():  # pragma: no cover - the raise IS the subject
+        raise FileNotFoundError(2, "No usable temporary directory found in [...]")
+
+    monkeypatch.setattr(tempfile, "gettempdir", _no_temp_area)
+    assert writable_roots(SandboxPolicy(mode="read-only", workspace_root=ABSOLUTE_ROOT)) == []
+    assert writable_roots(SandboxPolicy(mode=DANGER_FULL_ACCESS, workspace_root=ABSOLUTE_ROOT)) == []
+
+
 def test_canonical_path_resolves_symlinks(tmp_path):
     """Granting a root *as spelled* matches nothing — measured (design §3.5)."""
     target = tmp_path / "real"

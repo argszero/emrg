@@ -55,6 +55,17 @@ def writable_roots(policy: SandboxPolicy) -> list[str]:
     temp area for the ``mkstemp`` family; omitting it would deny what the mode
     promises).
 
+    The derivation is **total**: a temp source this host cannot report is
+    *absent* from the list, never fatal (issue #1561, ``_platform_temp_sources``).
+    The reading this deliberately does not take: treating a policy that cannot be
+    fully computed as one that cannot be enforced, and failing at the seam. That
+    reading belongs to ``contract.confine``, whose
+    :class:`~emrg.sandbox.contract.SandboxUnavailableError` means "no backend on
+    this platform can enforce the mode" — a missing temp *directory* is not that,
+    and reporting it there would tell the reader to install bubblewrap while
+    turning a host that can still confine to its workspace root into one where no
+    command runs at all.
+
     Two things this list deliberately does NOT contain:
 
     * an extra deployer root.  The blueprint's allow-list is these three
@@ -67,12 +78,14 @@ def writable_roots(policy: SandboxPolicy) -> list[str]:
       one ``gettempdir()`` already returned (issue #1093).
 
     :param policy: the file-effect policy to derive the allow-list from.
-    :returns: the canonical writable roots; empty exactly under ``read-only``.
+    :returns: the canonical writable roots; empty for every mode but
+        ``workspace-write`` (``read-only`` allows nothing by definition, and
+        ``danger-full-access`` never asks).
     """
     if policy.mode != "workspace-write":
         return []
-    spellings = [policy.workspace_root, "/tmp", tempfile.gettempdir()]
-    spellings.extend(_temp_parent_spellings(tempfile.gettempdir()))
+    spellings = [policy.workspace_root, "/tmp"]
+    spellings.extend(_platform_temp_sources())
     out: list[str] = []
     seen: set[str] = set()
     for spelling in spellings:
@@ -81,6 +94,36 @@ def writable_roots(policy: SandboxPolicy) -> list[str]:
             seen.add(canonical)
             out.append(canonical)
     return out
+
+
+def _platform_temp_sources() -> list[str]:
+    """The platform temp areas, or none when this host reports no usable one.
+
+    ``tempfile.gettempdir()`` is a **probe**, not a name: CPython creates a file
+    to find a writable candidate and raises ``FileNotFoundError`` when none of
+    them is (measured 2026-09-24, issue #1561: reachable for real whenever
+    ``TMPDIR``/``TEMP``/``TMP`` name nothing and ``/tmp``, ``/var/tmp``,
+    ``/usr/tmp`` and the process cwd are all unwritable — the state of a process
+    confined at ``read-only``).
+
+    The blueprint this module ports calls Node's ``os.tmpdir()``
+    (``roots.ts:52-55``), which is total — it falls back rather than raising — so
+    the port has to be total too. The only way to be total without inventing a
+    root is to grant the sources that resolve; ``canonical_path``'s own rule
+    ("inventing a fallback would grant a path the caller never named") is why a
+    fallback spelling is not substituted here.
+
+    Both spellings are derived from the *one* probe result, so the parent
+    normalization below cannot re-probe and fail separately.
+
+    :returns: the temp spellings to grant (usually one, none on a host with no
+        usable temp area).
+    """
+    try:
+        temp_dir = tempfile.gettempdir()
+    except OSError:
+        return []
+    return [temp_dir, *_temp_parent_spellings(temp_dir)]
 
 
 def _temp_parent_spellings(temp_dir: str) -> list[str]:
