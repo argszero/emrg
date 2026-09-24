@@ -48,6 +48,14 @@ BACKUP_DIR = Path.home() / ".emrg" / "upgrade-backup"
 GUI_SRC = Path(__file__).parent.parent / "gui"  # evolution repo's emrg/gui
 # Hard-coded 5-minute check interval (host: not configurable).
 TICK_INTERVAL = 300
+# What one *attempt* costs, and therefore how long an attempt that did not install
+# is held back (issue #1598). `_trigger` starts a full LLM session, so a target
+# whose install can never succeed costs one session per tick — 288 a day — and
+# before this the code had no way to tell that attempt from the first one. The
+# base wait is 30 minutes, doubling per consecutive ineffective attempt up to the
+# ceiling; a *different* target is never held back (see `_is_waiting`).
+INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS = 30 * 60
+MAX_INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS = 6 * 60 * 60
 CHECK_TIMEOUT_SECONDS = 10.0
 # Fixed upgrade session id — traceable, one session per upgrade.
 SESSION_ID = "emrg-upgrade"
@@ -238,6 +246,17 @@ def _published_epoch(published_at: str) -> Optional[float]:
         return None
 
 
+def _now() -> float:
+    """The clock the attempt wait is measured against.
+
+    A function rather than an inline `time.monotonic()` for the reason
+    `prune_upgrade_backups` resolves `BACKUP_DIR` at call time: a module global a
+    test can move. `monotonic`, not `time.time` — the quantity is an interval, and a
+    host clock step (NTP, sleep/resume) must not skip or extend the wait.
+    """
+    return time.monotonic()
+
+
 class UpgradeManager:
     """Program-side upgrade trigger (all logic lives here — daemon only
     references it; the daemon must NOT grow upgrade logic, host decision).
@@ -249,6 +268,12 @@ class UpgradeManager:
         self._config = config
         self._run_session_cb = run_session_cb  # daemon-provided session runner
         self._inflight = False  # upgrade session in progress (re-entry guard)
+        # Attempts that did not move version.txt (issue #1598). In-memory by
+        # design: a daemon restart forgets the wait and tries again, which is
+        # the same shape `_trigger`'s docstring gives an interrupted session.
+        self._attempted_tag: Optional[str] = None
+        self._attempted_at: float = 0.0
+        self._ineffective_attempts = 0
 
     # ── Public: called by the daemon every 5 minutes ──────────────────────
     async def tick(self) -> None:
@@ -270,7 +295,72 @@ class UpgradeManager:
         local = self._read_local_version()
         if local == target.lstrip("v"):
             return  # already at target — nothing to do
+        if self._is_waiting(target):
+            return  # an attempt at THIS tag did not move version.txt; still paying it off
         await self._trigger(target)
+        self._record_attempt(target, before=local)
+
+    # ── What an attempt that did not install costs the next one ───────────
+    def _ineffective_backoff(self) -> float:
+        """Seconds to wait before re-attempting a tag that did not install.
+
+        The shape the scheduler's `_connect_backoff` uses — exponential in the
+        consecutive-ineffective count, with a ceiling — because the defect is the
+        same one a level down: a per-tick retry whose cost is not the tick but the
+        work a tick starts. Measured live while writing this (2026-09-25): the
+        upgrade session's own record was rewritten at 06:44:30 local, i.e. a full
+        LLM session every five minutes for a target whose writes are refused, so
+        `version.txt` never moves (issue #1598 holds the probe table and `Tick 221`).
+        """
+        if self._ineffective_attempts <= 0:
+            return 0.0
+        n = min(self._ineffective_attempts, 10)  # cap the exponent growth
+        return min(
+            INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS * (2 ** (n - 1)),
+            MAX_INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS,
+        )
+
+    def _is_waiting(self, target: str) -> bool:
+        """Whether `target` was attempted too recently to be attempted again.
+
+        A different tag is *never* held back, and that clause is the one that keeps
+        this from delaying the repair it is meant to make affordable: a new release
+        may be the one that installs, and for a host whose chain is blocked by the
+        release it keeps re-installing, the next release **is** the fix arriving.
+        """
+        if self._ineffective_attempts <= 0 or self._attempted_tag != target:
+            return False
+        return (_now() - self._attempted_at) < self._ineffective_backoff()
+
+    def _record_attempt(self, target: str, before: str) -> None:
+        """Charge the next attempt for how this one ended.
+
+        `version.txt` moving is the only evidence an upgrade session did its job,
+        and it is read here rather than inside `_trigger`, which keeps its single
+        responsibility. A *whole* upgrade is not waited for: `_trigger` returns when
+        the session ends, so this reads what the session left behind.
+
+        Counted whether the session was refused or crashed — the same slot of the
+        host's budget is spent either way, and the alternative (distinguishing them
+        here) would need `_trigger` to report *why* it ended, which is knowledge the
+        caller cannot use: the wait is bounded, and a new target resets it.
+        """
+        after = self._read_local_version()
+        if after != before:
+            self._ineffective_attempts = 0  # the install moved: this path works
+            self._attempted_tag = None
+            return
+        self._ineffective_attempts += 1
+        self._attempted_tag = target
+        self._attempted_at = _now()
+        logger.info(
+            "upgrade: %s left version.txt at %r (%d ineffective attempt(s)); "
+            "next attempt of that tag in %.0f s",
+            target,
+            after,
+            self._ineffective_attempts,
+            self._ineffective_backoff(),
+        )
 
     # ── Target discovery ──────────────────────────────────────────────────
     async def _find_target_tag(self) -> Optional[str]:
