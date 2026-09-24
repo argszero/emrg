@@ -449,8 +449,10 @@ def test_the_truncation_notice_names_which_end_it_cut(tmp_path):
     the reader actually lost. An implementation flipped to keeping the tail passes
     the naming arm and fails the measurement; one that stopped naming the end fails
     the naming arm alone. The under-cap direction — no notice, so nothing claims an
-    end where nothing was cut — is pinned next door
-    (`test_cap_memory_index_under_cap`, `..._is_the_number_the_store_warns_by`).
+    end where nothing was cut — is pinned next door by
+    `test_cap_memory_index_small_file` (an under-cap index is embedded as-is) and
+    `test_the_embed_cap_is_the_number_the_store_warns_by` (the boundary, from both
+    sides).
     """
     server = _make_server()
     idx = tmp_path / "MEMORY.md"
