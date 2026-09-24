@@ -465,6 +465,117 @@ def test_the_linux_tables_are_the_blueprints_rows():
     assert linux.BWRAP.runner_argv is linux.runner_argv
 
 
+def test_the_linux_rule_classifies_the_lines_bwrap_really_prints():
+    """The linux rung's rule, pinned by evidence instead of by its own tuple.
+
+    Issue #1543: `test_the_linux_tables_are_the_blueprints_rows` above asserts
+    the signature *is* `("bwrap: ",)` and nothing ever fed the rule a line, so
+    whether the rule matches ``bwrap``'s real output was not measured anywhere.
+    The darwin rung has the equivalent pin (`test_a_runner_failure_is_never_
+    reported_as_a_denial`), which is why the linux one read as covered.
+
+    Both lines are recorded, not invented: ``bwrap: Can't find source path …``
+    is what a workspace root that does not exist produces (the header's measured
+    case), and ``bwrap: Failed to make / slave: Permission denied`` is what an
+    AppArmor-refused ``mount --make-rslave /`` produces (the container recipe in
+    `test_bash_v2_boundary.py`).  Pure predicates: no ``bwrap`` is needed, so
+    this runs on every leg.
+    """
+    from emrg.tools.bash_tool_v2 import classify_runner_failure
+
+    rules = linux.RUNNER_FAILURE_RULES
+    for line in (
+        "bwrap: Can't find source path /nope: No such file or directory",
+        "bwrap: Failed to make / slave: Permission denied",
+    ):
+        assert classify_runner_failure(1, line + "\n", rules) == line, line
+
+    # The detail without its prefix is **not** a line `bwrap` prints (both of its
+    # fatal printers write `bwrap: ` first — upstream `utils.c:35-70`), and it is
+    # not classified: this is what makes the prefix the load-bearing half of the
+    # rule rather than decoration. It also records that the two carriers which
+    # used to quote the line this way were paraphrases, not a second dialect.
+    assert classify_runner_failure(1, "Failed to make / slave: Permission denied\n", rules) is None
+
+    # Shape before content: an exit status of 0 or a signal is not a runner
+    # failure whatever stderr says, which is the half the rule *does* gate on.
+    assert classify_runner_failure(0, "bwrap: nope\n", rules) is None
+    assert classify_runner_failure(None, "bwrap: nope\n", rules) is None
+
+
+def test_a_commands_own_bwrap_line_is_still_read_as_a_runner_failure():
+    """The cost of the rung above, named so it is a decision and not a trap.
+
+    Issue #1543 measured this from the classification side and proposed
+    anchoring the signature to the start of a line. Measured against the
+    blueprint (pinned `ddefc45fbc`) that would be a deviation, so the behaviour
+    is pinned here instead of changed:
+
+    * the matcher is the blueprint's own — `lowered.includes(signature)` on one
+      stderr line (`packages/sandbox/sandbox/src/diagnostics.ts:83`);
+    * `bwrap` has **no** exit gate in the blueprint's table either
+      (`sandbox-local/src/index.ts:232`), and its comment says why: bubblewrap's
+      "fatal paths exit 1 but its public contract does not reserve that status",
+      so it "remain[s] signature-only". The gate exists only where a runner
+      reserves its own failure status (landlock 125, windows-acl 127) —
+      "so a confined command that merely PRINTS the signature … is never
+      misclassified as 'the command did not run'".
+
+    So this is the blueprint's accepted cost, inherited deliberately. Anchoring
+    the match would not even remove it (a command's own line can begin with the
+    prefix) while deviating from the contract — the change to make, if a host
+    ever wants it, is a design decision about the rung, not a local tightening.
+    A test that names the cost keeps a later cycle from re-finding it as a
+    defect and "fixing" it in the one direction the blueprint excludes.
+    """
+    from emrg.tools.bash_tool_v2 import classify_runner_failure
+
+    assert classify_runner_failure(1, "bwrap: hello\n", linux.RUNNER_FAILURE_RULES) == "bwrap: hello"
+    assert (
+        classify_runner_failure(2, "line one\nline two\nbwrap: oops\n", linux.RUNNER_FAILURE_RULES)
+        == "bwrap: oops"
+    )
+    # The same line with a zero exit is the command's own output, and it is the
+    # exit-status half of the predicate that separates the two — which is also
+    # why an exit gate on 1 could not help.
+    assert classify_runner_failure(0, "bwrap: hello\n", linux.RUNNER_FAILURE_RULES) is None
+
+
+def test_the_carriers_that_quote_bwraps_refusal_quote_its_prefix():
+    """The other half of #1543: our own record paraphrased the line, and a
+    paraphrase of a *signature-bearing* line is a defect in the record.
+
+    Two carriers described the AppArmor-refused namespace case as ``bwrap``
+    dying with ``Failed to make / slave: Permission denied`` — no prefix. Read
+    against the rule (`fatal_signatures == ("bwrap: ",)`) that sentence says a
+    real bwrap failure goes unclassified, which is the false alarm #1543 spent a
+    half of its body on. The line upstream prints carries the prefix, so the
+    carriers must too, or the next reader re-derives the same alarm.
+
+    Pinned as a positive: both carriers carry the prefixed line. The bare detail
+    is allowed to appear *explaining* the rule (the module docstring does not,
+    the rule's comment does), which is why this asserts presence rather than
+    absence.
+
+    Whitespace is normalised before the search, and that is not tidiness: both
+    carriers wrap their prose, so the quoted line is split across two source
+    lines and a raw substring test fails on the *correct* text. Measured while
+    writing this (the first version of this test failed exactly there), and it
+    is the same trap that has bitten a wrapped-format pin before.
+    """
+    from pathlib import Path
+
+    import emrg.sandbox.providers.linux as linux_module
+
+    def flat(text: str) -> str:
+        return " ".join(text.split())
+
+    prefixed = "bwrap: Failed to make / slave"
+    assert prefixed in flat(linux_module.__doc__ or ""), "the backend header quotes the bare detail"
+    recipe = Path(__file__).with_name("test_bash_v2_boundary.py").read_text(encoding="utf-8")
+    assert prefixed in flat(recipe), "the container recipe quotes the bare detail"
+
+
 def test_the_linux_runner_argv_prepends_the_program(tmp_path):
     policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
     argv = linux.runner_argv(policy)

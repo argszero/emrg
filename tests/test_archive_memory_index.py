@@ -45,6 +45,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -350,6 +351,172 @@ def test_check_mode_answers_from_one_snapshot(tmp_path, mod, monkeypatch, capsys
     )
     assert len(seen) == 1, (
         f"the index was read {len(seen)} times; one answer must come from one snapshot"
+    )
+
+
+def _topic_row(i: int) -> str:
+    """A readable row that is not a cycle row - bulk for an over-cap index."""
+    return f"- [topic {i}](topic-{i}.md) - {'x' * 90}\n"
+
+
+def _capped(index: Path) -> list[str]:
+    """The rows the daemon's embed cap would keep - the oracle, not a re-derivation.
+
+    Asked of the production function, because the reading's whole claim is that it
+    reports *that* cut: a test that re-implemented the cap would agree with a second
+    implementation while both drifted from the daemon.
+    """
+    from emrg.server.daemon import EmrgServer
+
+    capped = EmrgServer._cap_memory_index(None, index)
+    return [line for line in capped.splitlines() if line.startswith("- [")]
+
+
+def test_the_reading_names_the_rows_the_cap_does_not_embed(tmp_path, mod, capsys):
+    """An index past the embed cap: the rows of its tail are not what a reader sees."""
+    index = tmp_path / "MEMORY.md"
+    rows = [_row(OLD)] + [_topic_row(i) for i in range(600)] + [_row(NEWEST)]
+    _write_index(index, rows)
+    assert len(index.read_text(encoding="utf-8")) > mod.INDEX_SIZE_WARN, (
+        "the fixture must be past the cap, or this test measures nothing"
+    )
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0, (
+        "an index past the embed cap is not a row-rule violation"
+    )
+    out = capsys.readouterr().out
+
+    capped = _capped(index)
+    dropped = len(rows) - len(capped)
+    assert dropped > 0, "the oracle must find rows the cap drops"
+    assert f"{dropped} of {len(rows)} row(s) are past the cut" in out
+    assert f"last row embedded: {capped[-1][:120]}" in out
+    assert f"newest cycle row {NEWEST}: not embedded" in out
+    assert "(a reading, not a rule" in out
+
+
+def test_the_reading_reports_an_embedded_newest_row_when_it_is_one(tmp_path, mod, capsys):
+    """The other direction: a reading that always says 'not embedded' proves nothing."""
+    index = tmp_path / "MEMORY.md"
+    rows = [_row(NEWEST)] + [_topic_row(i) for i in range(600)] + [_row(OLD)]
+    _write_index(index, rows)
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    out = capsys.readouterr().out
+
+    capped = _capped(index)
+    assert len(capped) < len(rows), "the fixture must still drop rows"
+    assert _row(NEWEST).strip()[:120] in capped, "the oracle must keep the newest row"
+    assert f"newest cycle row {NEWEST}: embedded" in out
+
+
+def test_an_index_within_the_cap_says_so(tmp_path, mod, capsys):
+    index = tmp_path / "MEMORY.md"
+    _write_index(index, [_row(NEWEST), _row(OLD)])
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    out = capsys.readouterr().out
+
+    assert "the whole index is embedded" in out
+    assert "past the cut" not in out
+
+
+def test_the_reading_asks_the_cap_rather_than_cutting_the_text_itself(
+    tmp_path, mod, capsys, monkeypatch
+):
+    """The reading's claim is that it reports *that* cut, so it has to ask it.
+
+    A local copy of the three-line rule would pass every assertion above - the two
+    agree until the cap's line-boundary handling changes - and then diverge in
+    silence, with the copy being what `--check` reports. Spying on the production
+    method is what separates "asked" from "agrees today".
+    """
+    from emrg.server import daemon
+
+    index = tmp_path / "MEMORY.md"
+    _write_index(index, [_topic_row(i) for i in range(600)] + [_row(NEWEST)])
+
+    asked: list[Path] = []
+    real = daemon.EmrgServer._cap_memory_index
+
+    def spy(self, path):  # noqa: ANN001 - mirrors the method it wraps
+        asked.append(path)
+        return real(self, path)
+
+    monkeypatch.setattr(daemon.EmrgServer, "_cap_memory_index", spy)
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    capsys.readouterr()
+    assert asked == [index], (
+        "the reading must ask the cap what it keeps, not cut the text itself"
+    )
+
+
+def test_the_reading_is_printed_under_a_violation_too(tmp_path, mod, capsys):
+    """`--check` reports both questions in one run, whichever way each of them goes."""
+    index = tmp_path / "MEMORY.md"
+    stamps = [
+        (datetime(2026, 9, 1) + timedelta(hours=i)).strftime("%Y%m%d-%H%M%S")
+        for i in range(60)
+    ]
+    rows = [_row(stamp) for stamp in stamps] + [_topic_row(i) for i in range(600)]
+    _write_index(index, rows)
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 1, (
+        "60 cycle rows are over the 50-row cap"
+    )
+    out = capsys.readouterr().out
+
+    assert "VIOLATION" in out
+    assert "embed cap:" in out, "the reading must not be hidden by the violation"
+
+
+def test_the_embed_reading_keeps_describing_the_rows_the_count_used(
+    tmp_path, mod, monkeypatch, capsys
+):
+    """The reading is one answer with the count, even though the cap reads the file.
+
+    Over the cap the kept prefix comes from the cap's own read - it takes a path, which
+    is what "asked, not copied" costs - so the two reads are one writer apart in the
+    ordinary case: a cycle appending to the same index. The size it prints must be the
+    size of the text the count above came from, not of a second snapshot, and an append
+    cannot move the head (both reads cover the same first `INDEX_SIZE_WARN` characters),
+    so the printed "N of M row(s) are past the cut" must still describe the rows that
+    count used. Both reads are made to return different texts here, which is what a
+    parallel writer's append looks like from inside the process.
+    """
+    index = tmp_path / "MEMORY.md"
+    before = _write_index(index, [_topic_row(i) for i in range(600)] + [_row(NEWEST)])
+    after = _write_index(index, before + _topic_row(999))
+    assert len(after) > len(before), "the appended row must change the size"
+
+    real_read = Path.read_text
+    seen: list[int] = []
+
+    def racing_read(self, *args, **kwargs):
+        text = real_read(self, *args, **kwargs)
+        if self != index:
+            return text
+        seen.append(1)
+        return before if len(seen) == 1 else after
+
+    monkeypatch.setattr(Path, "read_text", racing_read)
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    out = capsys.readouterr().out
+
+    assert len(seen) > 1, "the fixture must exercise the cap's own read, or this is vacuous"
+    assert f"embed cap: {len(before)} char(s)" in out, (
+        "the reading reported a size from a snapshot the count above did not use - a "
+        f"second read of the file rather than the one `--check` already made\n{out}"
+    )
+    counted_rows = int(re.search(r"cycle row\(s\) of (\d+) row\(s\)", out).group(1))
+    reading = re.search(r"(\d+) of (\d+) row\(s\) are past the cut", out)
+    assert reading, out
+    dropped, described_rows = (int(reading.group(1)), int(reading.group(2)))
+    assert dropped > 0, "the fixture must drop rows, or the numbers are both 0"
+    assert described_rows == counted_rows, (
+        f"the reading describes {described_rows} row(s) while the count above used "
+        f"{counted_rows}: one answer, two snapshots\n{out}"
     )
 
 

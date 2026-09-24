@@ -110,6 +110,23 @@ thing that brings the index under the *row* cap, so refusing to run while some r
 over the *length* cap would leave the index over the row cap for good. The row cap is
 the one whose violation displaces the embedded budget; the length rule is a reading
 for whoever writes the rows.
+The other half of the file: what the prompt would not carry
+----------------------------------------------------------
+`--check` also reports the **embed cap's** reading, because the row rules bound the
+file while the cap bounds what a reader of the system prompt sees of it. The daemon
+keeps the index's **head** up to `INDEX_SIZE_WARN` characters (cut at a line
+boundary), and an index that appends newest-last therefore shows its *oldest* rows:
+measured on the host's evolution index, 65 of 166 rows were past the cut, the rows of
+the three preceding days among them (issue #1554). The reading says how many rows are
+past the cut, which row is the last one kept, and whether the **newest** cycle row is
+among the embedded ones - the one line #1554 asks for, and the one a maintainer
+cannot get from a count.
+
+It is a reading and never a verdict: which end an index should keep is a product
+decision (#1554 records four options, none taken), so the exit code stays the two row
+rules, and an index past the cap with sound rows is reported `OK` with the reading
+following it. The cut is asked of `EmrgServer._cap_memory_index` rather than
+re-implemented here, so the two cannot disagree about what is embedded.
 
 Exit codes
 ----------
@@ -151,7 +168,10 @@ from pathlib import Path
 # `python3 scripts/archive-memory-index.py` the root is not `sys.path[0]`, and the
 # test suite loads this file by path (`spec_from_file_location`).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from emrg.memory import INDEX_TITLE_MAX_CHARS  # noqa: E402  (needs the path above)
+from emrg.memory import (  # noqa: E402  (needs the path above)
+    INDEX_SIZE_WARN,
+    INDEX_TITLE_MAX_CHARS,
+)
 
 #: One index row: a markdown link whose text is the title and whose target is a
 #: detail file. Only the target is load-bearing here, so the link text is free.
@@ -474,6 +494,79 @@ def check_rules(text: str, cap: int) -> list[str]:
     return problems
 
 
+def embed_cap_reading(index_path: Path, rows: list[Row], text: str) -> list[str]:
+    """The rows this index would not reach the prompt with - the embed cap's cut.
+
+    The two rules above are about the *file*; this is about the half of it a reader
+    of the system prompt actually sees. The daemon applies `_cap_memory_index` to
+    the two indexes a store embeds (the project's and the session's), and that
+    method keeps the file's **head** up to `INDEX_SIZE_WARN` characters, cutting at
+    a line boundary. An index that appends newest-last therefore shows the *oldest*
+    rows: measured on the host's evolution index (issue #1554), **65 of 166** rows
+    were past the cut - every row of the preceding three days, the cycle's own
+    included - while the head was filled by the oldest topic rows. Which end an
+    index should keep is a product decision (#1554 records four options, none
+    taken), so this is a **reading**: it never fails the run, and `--check`'s exit
+    code stays the two row rules. A reading allowed to fail would take that decision
+    by accident.
+
+    The cut is asked of the production function rather than re-implemented. A second
+    copy of a three-line rule is a second answer to "which rows are embedded", free
+    to drift the moment the cap's line-boundary handling changes - and the copy would
+    be the one `--check` reports. `EmrgServer` is imported lazily (the move never
+    pays for it) and called unbound: that method does not read `self`.
+
+    What is relied on about its shape: the cap keeps a **prefix** of the file, so the
+    rows it keeps are the index's first rows in file order - which is what makes
+    `rows[len(kept_rows):]` the dropped set. The tests pin that against the capped
+    text itself rather than against this reasoning.
+
+    The size and the rows are the caller's **one** read, not a second one taken here:
+    this index has other writers (every task's cycles append to it), and a reading that
+    re-read the file could print a size from a snapshot its own count did not come from.
+    The kept prefix is still the cap's own read, because it takes a path - and an append
+    between the two cannot move the head, so the drop count stays a statement about the
+    rows counted above (both read the same first `INDEX_SIZE_WARN` characters, which an
+    append at the end cannot change). `--check` reads the index once for everything it
+    prints about the file.
+
+    :param index_path: the index, named so the cap can be asked about it.
+    :param rows: the rows of ``text``, parsed by the caller.
+    :param text: the index's text as the caller read it (the same read the count uses).
+    """
+    size = len(text)
+    limit = INDEX_SIZE_WARN
+    if size <= limit:
+        return [
+            f"embed cap: {size} char(s), within the {limit}-char cap - the whole "
+            "index is embedded"
+        ]
+
+    from emrg.server.daemon import EmrgServer  # lazy: only this reading needs it
+
+    kept_rows = parse_rows(EmrgServer._cap_memory_index(None, index_path))
+    dropped = rows[len(kept_rows) :]
+
+    out = [
+        f"embed cap: {size} char(s), over the {limit}-char cap - the head is kept; "
+        f"{len(dropped)} of {len(rows)} row(s) are past the cut"
+    ]
+    if kept_rows:
+        out.append(f"  last row embedded: {kept_rows[-1].text.strip()[:120]}")
+    cycle_rows = [row for row in rows if row.is_cycle]
+    if cycle_rows:
+        # Cycle ids sort as text (`YYYYMMDD-HHMMSS`), so the maximum is the newest.
+        newest = max(cycle_rows, key=lambda row: row.stamp or "")
+        out.append(
+            f"  newest cycle row {newest.stamp}: "
+            f"{'not embedded' if newest in dropped else 'embedded'}"
+        )
+    out.append(
+        "  (a reading, not a rule: `--check` fails only on the row rules above)"
+    )
+    return out
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` so a reader sees the old file or the new one.
 
@@ -643,7 +736,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="read-only: report row-rule violations, exit 1 if there are any",
+        help="read-only: report row-rule violations (exit 1 if there are any) and the "
+        "embed cap's reading (which rows the prompt would not carry; no verdict)",
     )
     parser.add_argument(
         "--dry-run",
@@ -701,6 +795,12 @@ def main(argv: list[str] | None = None) -> int:
         cycle_rows = [row for row in rows if row.is_cycle]
         print(f"index: {index_path}")
         print(f"{len(cycle_rows)} cycle row(s) of {len(rows)} row(s), cap {args.cap}")
+        # The cap's reading, printed before the verdict so it is read in the same
+        # pass as the rules - and printed in both outcomes, because an index past
+        # the cap with sound rows is the ordinary case, not a fault. It returns no
+        # verdict: the exit code below is the two row rules and nothing else.
+        for line in embed_cap_reading(index_path, rows, index_text):
+            print(line)
         if problems:
             for problem in problems:
                 print(f"VIOLATION: {problem}")
