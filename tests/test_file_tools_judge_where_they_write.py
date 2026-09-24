@@ -12,9 +12,13 @@ write is not kernel-confined by the Seatbelt/bwrap profile the way a bash child
 is, and ``emrg/sandbox/fence.py`` does not exist yet).
 
 ``check_read_only_file_write`` had the mirror-image slip: it realpath'd the
-spelling as given — i.e. against the daemon's cwd — so a relative path could land
-*inside* the workspace without that function ever having looked there, which is
-the dirty-tree guard bypassed rather than an unrelated file written.
+spelling as given — i.e. against the daemon's cwd, a base the caller never
+designated — so its containment answer was about a path outside the workspace the
+caller declared, and one file's two spellings split their verdict (the relative
+spelling allowed at a tier where the absolute spelling of that same file was
+blocked). The write followed the same base, so it landed outside the declared
+workspace rather than inside it: the hole is *which* file the predicate was asked
+about, not a write it never saw.
 
 What is asserted here is therefore the **composition**, not either predicate
 alone: for a relative input, the file the tool writes is the file the predicate
