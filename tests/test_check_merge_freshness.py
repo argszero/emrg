@@ -79,6 +79,12 @@ def _load_module():
 
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
+    # Zeroed here rather than in each test: the *gap* between the two run-lookup
+    # asks is not what anything below decides, the number of asks is, and two tests
+    # below drive the empty answer deliberately - left at the production value each
+    # would sleep 2s, on both CI legs, for nothing measured. The production value
+    # stays visible in `_RUN_LOOKUP_DELAY_SECONDS`, which is where a reader looks.
+    mod._RUN_LOOKUP_DELAY_SECONDS = 0.0
     return mod
 
 
@@ -228,6 +234,98 @@ def test_stale_when_there_is_no_ci_run_for_this_head(mod, monkeypatch, capsys):
     assert rc == 1
     assert "NO Test run" in out.out
     assert "no checks reported" in out.out
+
+
+class _StaleRunAnswer(FakeGh):
+    """A `FakeGh` whose first `actions/runs` answer is empty, as GitHub served it.
+
+    Measured 2026-09-24 (`cyc20260924-213009`, issue #1585): the identical query
+    answered empty for head `fb672634` while GitHub held its run, and answered
+    correctly on every later ask. The stale payload is the same shape a truly
+    run-less head returns, which is why nothing downstream can tell them apart -
+    hence the re-ask rather than a smarter parse.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.run_asks = 0
+
+    def __call__(self, args):
+        if any("actions/runs" in a for a in args):
+            self.run_asks += 1
+            if self.run_asks == 1:
+                self.calls.append(list(args))
+                return {"runs": []}
+        return super().__call__(args)
+
+
+def test_an_empty_run_answer_is_re_asked_before_it_is_reported_as_no_run(
+    mod, monkeypatch, capsys
+):
+    """A stale empty answer must not be reported as a measured "NO Test run".
+
+    The empty answer is *used* here - it sets `_KIND_NO_RUN` and refuses FRESH with
+    a sentence claiming the head has no run - so it is a verdict, and a verdict is
+    not read off one lazy reply. Both halves of the same input are asserted: with
+    the re-ask the head is FRESH and the note says the answer was stale; without
+    it the identical input is the `no_run` case the test above pins.
+    """
+    fake = _StaleRunAnswer(
+        _view(), _compare("ahead", 1, 0), [_run_(at="2026-09-24T12:45:38Z")]
+    )
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert fake.run_asks == mod._RUN_LOOKUP_ATTEMPTS, fake.calls
+    assert rc == 0, cap.out + cap.err
+    assert "FRESH" in cap.out, cap.out
+    assert "NO Test run" not in cap.out, cap.out
+    assert "served stale" in cap.err, cap.err
+
+
+def test_a_head_that_really_ran_nothing_is_asked_the_bounded_number_of_times(
+    mod, monkeypatch, capsys
+):
+    """The other direction: the re-ask cannot turn a run-less head into a verdict.
+
+    A dropped push event and a fork PR both produce a head GitHub lists no run for,
+    and those must still report `no_run` and still refuse FRESH. The ask count is
+    pinned to the constant rather than to "at least one", so the loop is a bound
+    and not a wait: `review-queue.py` reads this for every open PR.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [])
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    asked = [c for c in fake.calls if any("actions/runs" in a for a in c)]
+    assert len(asked) == mod._RUN_LOOKUP_ATTEMPTS, fake.calls
+    assert rc == 1, cap.out + cap.err
+    assert "NO Test run" in cap.out
+    assert "served stale" not in cap.err, "no run was found, so nothing was repaired"
+
+
+def test_a_broken_run_lookup_is_not_retried_into_looking_like_a_measurement(
+    mod, monkeypatch, capsys
+):
+    """A call that raises is not an empty answer, and must not be re-asked as one.
+
+    The re-ask exists for a lazy *reply*; a failure is a different fact and the
+    tool's contract is to say it (exit 2) rather than to absorb it. Pinned because
+    the retry would otherwise sit one refactor away from swallowing a real error
+    and reporting the head as run-less - a fail-loud turning into a false verdict.
+    """
+    asked: list[list[str]] = []
+
+    def boom_on_runs(args):
+        if any("actions/runs" in a for a in args):
+            asked.append(list(args))
+            raise RuntimeError("gh failed (rc=1): gh api repos/x/actions/runs\nboom")
+        return FakeGh(_view(), _compare("ahead", 1, 0), [_run_()])(args)
+
+    monkeypatch.setattr(mod, "_gh_json", boom_on_runs)
+    rc = mod.main(["1"])
+    err = capsys.readouterr().err
+    assert len(asked) == 1, asked
+    assert rc == 2, err
+    assert "gh failed" in err
 
 
 def test_stale_when_a_run_exists_only_for_a_different_sha(mod, monkeypatch, capsys):
