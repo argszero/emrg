@@ -1891,10 +1891,22 @@ class EmrgServer:
         # archive files (issue #1551). A notice embedded in the system prompt is
         # read on every request, so it may not point the reader away from the text
         # it just hid.
+        #
+        # It also names which **end** it cut, because the two mechanisms above were
+        # never read against each other: an index appends newest-last while this keeps
+        # the **head**, so the reader holds the oldest part of the file and the rows it
+        # is missing are the newest ones — the rows that exist to stop it re-doing
+        # work. Saying where the text is without saying which end of it is gone leaves
+        # that to be guessed. Measured 2026-09-25 on a project index this cap really
+        # truncates (73,484 chars, 24 of its 163 rows kept out of the prompt — issue
+        # #1554 holds that reading and its numbers). Which end *should* survive is that
+        # issue's open decision (keep the tail / order the index newest-first / split
+        # durable rows from cycle rows); this only makes today's mechanism legible, and
+        # each of those options rewrites one word of the sentence below.
         return head + (
-            f"\n… [truncated {over} chars — this index exceeds the embed cap; the "
-            f"whole file, this text included, is {path} — readable via the read "
-            "tool]"
+            f"\n… [truncated {over} chars — this index exceeds the embed cap; the head "
+            "is kept and the tail dropped, so the newest rows are past this point; the "
+            f"whole file, this text included, is {path} — readable via the read tool]"
         )
 
     def _collect_memory_data(self, session: Session) -> dict[str, Any] | None:
