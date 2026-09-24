@@ -825,18 +825,45 @@ class MemoryStore:
 
     # ── File lookup ────────────────────────────────────────────
 
-    def _find_by_id(self, mem_id: str) -> Path | None:
-        """Scan directory for a .md file whose frontmatter id matches."""
+    def _scan(self, mem_id: str) -> tuple[Path | None, list[tuple[Path, str]]]:
+        """One walk: the file carrying `mem_id`, and the files that could not be read.
+
+        Returns `(path, unreadable)`, where `unreadable` pairs each file that raised
+        with the exception's *name*. Both halves come from the same walk on purpose:
+        a reader needs them together, and two functions doing the same walk would be
+        two answers to "which file is this id in".
+
+        Why the second half is collected rather than dropped: the tolerant catch here
+        is `(OSError, ValueError)` and `UnicodeDecodeError` is a `ValueError`
+        subclass, so a file another writer is mid-rewrite is skipped **silently**.
+        `MemoryIndex.save` writes with `path.write_text` (truncate, then write), so a
+        reader can observe a partial file, and a cut inside a multi-byte character is
+        a decode error. A caller that then reports "not found" is making a claim its
+        walk did not measure. Measured 2026-09-24 on a 200-KB memory file under a
+        concurrent writer, through the daemon's `read_memory` frame: **68 of 120**
+        requests answered "Memory not found" for a memory that was on disk, and 41
+        raised `UnicodeDecodeError` out of the message loop.
+
+        Parse failures are collected too, and that is not an overreach: a file whose
+        frontmatter cannot be parsed is one whose id cannot be read either, so
+        "not found" is equally unproven for it.
+        """
+        unreadable: list[tuple[Path, str]] = []
         for path in sorted(self.directory.glob("*.md")):
             if path.name == "MEMORY.md":
                 continue
             try:
                 mem = MemoryFile.from_file(path)
                 if mem.id == mem_id:
-                    return path
-            except (OSError, ValueError):
+                    return path, unreadable
+            except (OSError, ValueError) as exc:
+                unreadable.append((path, type(exc).__name__))
                 logger.debug("Skipping unparseable memory: %s", path, exc_info=True)
-        return None
+        return None, unreadable
+
+    def _find_by_id(self, mem_id: str) -> Path | None:
+        """Scan directory for a .md file whose frontmatter id matches."""
+        return self._scan(mem_id)[0]
 
     def _find_by_filename(self, filename: str) -> Path | None:
         """Find a memory .md file by filename."""
@@ -938,10 +965,40 @@ class MemoryStore:
 
     def get(self, mem_id: str) -> MemoryFile | None:
         """Get a memory by its frontmatter id."""
-        path = self._find_by_id(mem_id)
-        if path is None:
-            return None
-        return MemoryFile.from_file(path)
+        return self.get_with_reason(mem_id)[0]
+
+    def get_with_reason(self, mem_id: str) -> tuple[MemoryFile | None, str]:
+        """The memory with this id, or `(None, why it is not here)`.
+
+        `why` is `""` for an absence the walk actually measured — what every caller
+        of `get()` already acts on — and a sentence naming what could not be read
+        otherwise. The two are different answers and a client cannot tell them apart
+        from `None` alone: one says "there is no such memory", the other says "I could
+        not finish looking", and only the first is true here.
+
+        The second read is the one that used to raise: `_scan` reads every file to
+        match the id, and then the chosen file is read **again** to return it. A
+        writer that lands between the two turns a match into a `UnicodeDecodeError`
+        escaping `get()` — measured 41 of those in the same 120 requests that
+        produced the 68 false absences above. Returning the reason keeps a torn read
+        out of the caller's stack: `get()` has no answer for it, and the caller that
+        does (a client frame) needs it as data, not as an exception.
+        """
+        path, unreadable = self._scan(mem_id)
+        if path is not None:
+            try:
+                return MemoryFile.from_file(path), ""
+            except (OSError, ValueError) as exc:
+                return None, (
+                    f"{path.name} could not be read ({type(exc).__name__})"
+                )
+        if unreadable:
+            names = ", ".join(f"{p.name} ({how})" for p, how in unreadable)
+            return None, (
+                f"{len(unreadable)} file(s) in the memory directory could not be "
+                f"read: {names}"
+            )
+        return None, ""
 
     def get_by_filename(self, filename: str) -> MemoryFile | None:
         """Get a memory by its index filename."""

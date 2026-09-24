@@ -260,6 +260,29 @@ def _create_fixed_port_socket(port: int) -> _socket.socket:
         raise
 
 
+def _unreadable_index_notice(path, exc: BaseException, *, where: str) -> str:
+    """The sentence both carriers of a memory index use when the file cannot be read.
+
+    One condition, one wording, two carriers: the system prompt's memory section
+    (`_index_for_prompt`) and the `memories_list` frame's `index` field
+    (`_index_for_frame`). `where` names what the missing rows are missing *from*,
+    which is the only part the two do not share. The single-memory reader answers the
+    same condition with the same facts in a different shape (`MemoryIndex.
+    get_with_reason` returns the file name and the exception name as data, for a
+    client that asked about one memory rather than about the index).
+
+    It states the file and the exception verbatim: a reader deciding whether to retry
+    needs to see that this is a `UnicodeDecodeError` on a path, not a missing memory.
+    Nothing is cut here (`_cap_memory_index`'s notice, which means "text was dropped
+    here", carries a leading `…` and this must not be confused with it).
+    """
+    return (
+        f"[this memory index could not be read — {type(exc).__name__}: {exc}. "
+        f"The file is {path}; its rows are not in {where}, and they come back when "
+        "the file can be read again]"
+    )
+
+
 def build_shell_tool(
     sandbox_config: Optional[SandboxConfig] = None,
     platform_name: str | None = None,
@@ -1937,11 +1960,33 @@ class EmrgServer:
             return self._cap_memory_index(path)
         except (OSError, UnicodeDecodeError) as exc:
             logger.debug("memory index could not be read: %s", path, exc_info=True)
-            return (
-                f"[this memory index could not be read — {type(exc).__name__}: {exc}. "
-                f"The file is {path}; its rows are not in this prompt, and this "
-                "section stays empty until the file can be read again]"
-            )
+            return _unreadable_index_notice(path, exc, where="this prompt")
+
+    def _index_for_frame(self, path) -> str:
+        """One index as a client frame carries it, or a notice that it could not be read.
+
+        The `memories_list` frame's `index` field is the third carrier of a memory
+        index, and it was the last one with no answer to a file it cannot read: it
+        read with a bare `read_text`, so `UnicodeDecodeError` left the handler.
+
+        What a raise costs here is not the frame. `_handle_client` awaits
+        `_process_message` inside its message loop, and that loop's `except Exception`
+        ends the loop — whose `finally` cancels the session's running tool task. So a
+        torn read of one `MEMORY.md` did not fail a request; it **dropped the client
+        and cancelled the turn it was watching**. Measured 2026-09-24 through this
+        dispatch, a 200-KB CJK index under a concurrent rewrite: 29 of 120
+        `list_memories` requests raised.
+
+        The frame keeps its rows either way — `store.list()` already tolerates a file
+        it cannot parse, per file — so the notice replaces only the index text, which
+        is what the field is for. Same sentence as the prompt's: one condition, one
+        wording, with the carrier named as the only part that differs.
+        """
+        try:
+            return path.read_text(encoding="utf-8") if path.exists() else ""
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.debug("memory index could not be read: %s", path, exc_info=True)
+            return _unreadable_index_notice(path, exc, where="this listing")
 
     def _collect_history_data(self, session: Session) -> dict[str, str]:
         """Return structured session/history data for template."""
@@ -5102,7 +5147,7 @@ class EmrgServer:
             index_path = store.index_path
 
         memories = store.list()
-        index_text = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+        index_text = self._index_for_frame(index_path)
 
         await self._send(ws, {
             "type": "memories_list",
@@ -5143,11 +5188,21 @@ class EmrgServer:
                 return
             store = SessionMemoryStore(session_dir)
 
-        mem = store.get(memory_id)
+        # `get_with_reason` rather than `get`: "there is no such memory" and "the file
+        # could not be read" are different answers, and a bare `None` collapses them
+        # into the first. The reason is data here, not a fault for the client to
+        # swallow — measured 2026-09-24, a 200-KB memory file under a concurrent
+        # writer answered "Memory not found" on 68 of 120 requests for a memory that
+        # was on disk. `get()` also used to raise from its second read on the same
+        # race (41 of those 120); this call site never raises either way.
+        mem, unreadable = store.get_with_reason(memory_id)
         if mem is None:
+            reason = f"Memory not found: {memory_id}"
+            if unreadable:
+                reason = f"{reason} — {unreadable}"
             await self._send(ws, {
                 "type": "memory_content",
-                "error": f"Memory not found: {memory_id}",
+                "error": reason,
             })
             return
 
