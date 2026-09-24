@@ -157,13 +157,17 @@ def _no_vote_network(mod, monkeypatch):
     monkeypatch.setattr(module, "_gh_json_paginated", boom)
 
 
-def _votes(mod, monkeypatch, count: int | None, note: str = "") -> list[int]:
-    """Fix the count seam `main` uses, and record which PRs it was asked about."""
+def _votes(mod, monkeypatch, count: int | None, note: str = "", vetoes: int = 0) -> list[int]:
+    """Fix the price seam `main` uses, and record which PRs it was asked about.
+
+    `vetoes` is the second half of the price (#1562): the standing vetoes, which the
+    approval count cannot express because a veto contributes `0` to it.
+    """
     asked: list[int] = []
 
-    def fake(pr: int) -> tuple[int | None, str]:
+    def fake(pr: int):
         asked.append(pr)
-        return count, note
+        return mod.Price(count, vetoes, note)
 
     monkeypatch.setattr(mod, "_valid_votes", fake)
     return asked
@@ -363,6 +367,68 @@ def test_a_stale_branch_with_no_votes_is_told_the_refresh_is_free(mod, monkeypat
     assert "review" not in remedy and "comment" not in remedy, remedy
 
 
+def test_a_standing_veto_is_never_priced_as_nothing_to_void(mod, monkeypatch, capsys):
+    """#1562: "nothing to void" must not be reachable while a veto stands on the head.
+
+    The price was read from the approval count alone, and a veto contributes **0** to
+    that count by construction - its entire effect is *resetting* the run it lands in.
+    So a PR whose only vote is a standing veto was handed the sentence reserved for an
+    unvoted branch, and following it voids the veto and the run it reset, after which
+    three fresh approvals satisfy the gate over a defect nobody answered. Measured on
+    #1550, whose only vote is exactly that.
+
+    Two states, because the defect is that one sentence covered both. The unvoted half
+    is deliberately a second run of the *same* fixture with the vetoes dropped: the
+    discrimination is the assertion, and it is two runs of one setup rather than the
+    absence of the other state that a reader would otherwise have to reconstruct.
+    """
+    fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
+    _votes(mod, monkeypatch, 0, vetoes=1)
+    rc = _run(mod, monkeypatch, fake, ["1", "--json"])
+    out = capsys.readouterr()
+    assert rc == 1
+    remedy = next(line for line in out.err.splitlines() if line.startswith("  #1:"))
+    assert "nothing to void" not in remedy, remedy
+    assert "1 standing veto" in remedy, remedy
+    assert "voids the veto" in remedy, remedy
+    assert "voids all 0" not in remedy, remedy
+    # The machine-readable half reads the same way: `valid_votes: 0` alone is the
+    # reading this issue is about, so the veto count is emitted beside it.
+    payload = json.loads(out.out)
+    assert payload[0]["valid_votes"] == 0
+    assert payload[0]["standing_vetoes"] == 1
+
+    fake2 = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
+    _votes(mod, monkeypatch, 0)
+    assert _run(mod, monkeypatch, fake2) == 1
+    err2 = capsys.readouterr().err
+    assert "0 valid votes - nothing to void" in err2
+    assert "standing veto" not in err2
+
+
+def test_the_standing_vetoes_are_the_live_ones_not_the_counted_ones(mod):
+    """`valid` makes this distinction and `counted` does not.
+
+    `check-vote-count.py`'s run walk appends `True` to `counted` for **every** veto,
+    including one the head push has already voided, so a price read off `counted`
+    would report a spent veto as a standing one - and refuse a refresh that is
+    genuinely free. Mutation arm: drop `and vote.valid` from `_standing_vetoes` and
+    this goes red.
+    """
+
+    class _V:
+        def __init__(self, kind: str, valid: bool) -> None:
+            self.kind, self.valid = kind, valid
+
+    class _Verdict:
+        # Two vetoes, both `counted`; only the first is about this head.
+        votes = [_V("veto", True), _V("veto", False), _V("approve", True)]
+        counted = [True, True, True]
+        valid_count = 0
+
+    assert mod._standing_vetoes(_Verdict()) == 1
+
+
 def test_an_unreadable_vote_count_is_said_so_and_never_read_as_zero(mod, monkeypatch, capsys):
     """`0` is an answer, so a failed read must not produce it.
 
@@ -435,6 +501,9 @@ def test_json_carries_the_kind_and_the_count(mod, monkeypatch, capsys):
     assert rc == 1
     assert payload[0]["stale_kind"] == "ancestry"
     assert payload[0]["valid_votes"] == 3
+    # Both halves, because `valid_votes` alone reads as "0 means free" on a head whose
+    # only vote is a veto - which is the reading #1562 is about.
+    assert payload[0]["standing_vetoes"] == 0
 
 
 def test_a_fresh_verdict_carries_neither_a_kind_nor_a_count(mod, monkeypatch, capsys):
@@ -470,12 +539,43 @@ def test_the_count_comes_from_the_sibling_that_owns_it(mod, monkeypatch):
         return _Verdict()
 
     monkeypatch.setattr(mod.votes_counter(), "check_pr", fake_check_pr)
-    assert mod._valid_votes(41) == (2, "")
+    price = mod._valid_votes(41)
+    assert (price.valid_votes, price.vetoes, price.unread) == (2, 0, ""), price
     assert seen == [(41, 3, {"mergeability_wait": mod._MERGEABILITY_WAIT})], seen
     assert mod._MERGEABILITY_WAIT > 0, (
         "a zero budget is ask-once: the price of a refresh would be reported "
         "unavailable for a transient GitHub state right when it decides the action"
     )
+
+
+def test_the_standing_vetoes_come_from_the_sibling_that_owns_them(mod, monkeypatch):
+    """The veto half of the price is read off the sibling's own verdict.
+
+    This test exists because a mutation arm *survived* without it (measured
+    2026-09-24, cycle cyc20260924-115309): replacing the real `_standing_vetoes(verdict)`
+    call with a constant `0` - the whole pre-fix behaviour - left all 31 tests
+    green. Both of the guards that exercise the veto path go through the *price
+    seam* (`_votes` fixes `_valid_votes` itself) or call `_standing_vetoes` directly,
+    so nothing asserted that the two are wired together. A guard that cannot see the
+    wiring cannot see the defect come back.
+
+    The stub carries one live veto and one the head push already voided, so the
+    number is not accidentally right for the wrong reason.
+    """
+
+    class _Vote:
+        def __init__(self, kind: str, valid: bool) -> None:
+            self.kind, self.valid = kind, valid
+
+    class _Verdict:
+        valid_count = 0
+        votes = [_Vote("veto", True), _Vote("veto", False)]
+        counted = [True, True]
+
+    monkeypatch.setattr(mod.votes_counter(), "check_pr", lambda *a, **k: _Verdict())
+    price = mod._valid_votes(41)
+    assert (price.valid_votes, price.vetoes) == (0, 1), price
+    assert price.veto_clause == "1 standing veto", price.veto_clause
 
 
 def test_a_broken_count_read_degrades_to_unavailable(mod, monkeypatch):
@@ -484,9 +584,9 @@ def test_a_broken_count_read_degrades_to_unavailable(mod, monkeypatch):
         raise RuntimeError("gh failed (rc=1): gh api repos/...")
 
     monkeypatch.setattr(mod.votes_counter(), "check_pr", boom)
-    count, note = mod._valid_votes(41)
-    assert count is None
-    assert "gh failed" in note
+    price = mod._valid_votes(41)
+    assert price.valid_votes is None
+    assert "gh failed" in price.unread
 
 
 def test_a_broken_count_read_reaches_main_as_unavailable_not_zero(mod, monkeypatch, capsys):
