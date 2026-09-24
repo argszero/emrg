@@ -434,6 +434,53 @@ def test_the_truncation_notice_names_where_the_cut_text_is(tmp_path):
     )
 
 
+def test_the_truncation_notice_names_which_end_it_cut(tmp_path):
+    """The notice says which end of the index the reader still holds (#1554).
+
+    The two mechanisms had never been read against each other: an index appends
+    newest-last while the cap keeps the **head** — so the rows a reader loses are
+    the newest ones, the rows that exist to stop it re-doing work, and the notice
+    said only how much was cut and where the text is. Measured 2026-09-25 on a
+    project index the cap really truncates: 73,484 chars, 24 of its 163 rows kept
+    out of the prompt (issue #1554 holds that reading and its numbers).
+
+    Both halves come from the fixture rather than from the sentence: the notice
+    must name the end it dropped, **and** the fixture must show that this is the end
+    the reader actually lost. An implementation flipped to keeping the tail passes
+    the naming arm and fails the measurement; one that stopped naming the end fails
+    the naming arm alone. The under-cap direction — no notice, so nothing claims an
+    end where nothing was cut — is pinned next door
+    (`test_cap_memory_index_under_cap`, `..._is_the_number_the_store_warns_by`).
+    """
+    server = _make_server()
+    idx = tmp_path / "MEMORY.md"
+    # Numbered rows, so "which end" is measured rather than described: row0000 is
+    # the head of the index, row0599 the newest row in it.
+    idx.write_text(
+        "".join(
+            f"- [row{i:04d}](cycle-20260823-{i:06d}.md) — " + "x" * 100 + "\n"
+            for i in range(600)
+        ),
+        encoding="utf-8",
+    )
+
+    capped = server._cap_memory_index(idx)
+    notice = capped[capped.rfind("\n… [truncated") :]
+    assert "head is kept" in notice and "tail dropped" in notice, (
+        "the notice must name the end it cut: without that the reader cannot tell "
+        "whether it is holding the oldest rows or the newest (issue #1554)"
+    )
+    assert "newest rows are past this point" in notice, (
+        "naming the end is what makes the loss actionable — the rows the reader "
+        "cannot see are the newest ones"
+    )
+    assert "row0000" in capped, "the head is what survives"
+    assert "row0599" not in capped, (
+        "the fixture must really lose its newest row, or the naming above is asserted "
+        "about a truncation that did not happen"
+    )
+
+
 def test_the_embed_cap_is_the_number_the_store_warns_by(tmp_path):
     """The cap and `INDEX_SIZE_WARN` are one knob, not two numbers that agree.
 
@@ -478,7 +525,16 @@ def test_collect_memory_data_caps_index(tmp_path):
     assert data["has_memories"] is True
     assert data["project_memory_index_path"] == str(idx)
     assert "truncated" in data["project_memory_index"]
-    assert len(data["project_memory_index"]) <= INDEX_SIZE_WARN + 200
+    # The head is what the cap bounds, measured rather than approximated. This read
+    # `len(...) <= INDEX_SIZE_WARN + 200` — a magic allowance standing in for a notice
+    # length the assertion cannot know, so it passed for any notice up to 200 chars
+    # and said nothing about the head. The sibling above (`..._large_file`) was fixed
+    # to this shape first; this one kept the allowance until a longer notice pushed
+    # it past it (2026-09-25, the end-naming sentence). The cap's claim is the head;
+    # the notice's own length is not a number this test should hold.
+    head, sep, _ = data["project_memory_index"].partition("\n… [truncated")
+    assert sep, "an over-cap index must carry a truncation notice"
+    assert len(head) <= INDEX_SIZE_WARN
 
 
 def test_collect_memory_data_no_index(tmp_path):
