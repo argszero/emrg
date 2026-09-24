@@ -1245,3 +1245,61 @@ class TestTheRefusalCarriesWhatGitSaid:
         paths, diagnosis = mod._conflict_paths("a", "b")
         assert paths == []
         assert isinstance(diagnosis, str)
+
+
+class TestThePairwiseRefusalCarriesItToo:
+    """The second call site: `forecast` refuses a pair, not only a PR against the base.
+
+    Every row above drives a **single** PR, so they raise on the PR-vs-base question
+    and the pairwise loop never runs — which is why the site could lose the carried
+    reading unmeasured. Measured 2026-09-24 (`cyc20260924-153521`, filed as #1572):
+    replacing `forecast`'s pairwise `f"…: {diagnosis}"` with a literal left this whole
+    file green, while the site is reachable — the loop is driven here by answering the
+    base questions and refusing only the pair, the way a cascade of PRs that share no
+    ancestor with each other behaves in a shallow clone.
+
+    The file already records this class of gap once ("The pairwise call is a *second*
+    call site, and it was uncovered", from the #1153 review), so the row is written
+    against the operand identity rather than against a call count: a count would pass
+    for the wrong reason if the base loop ever stopped asking.
+    """
+
+    #: The two PR heads, so the pair is identifiable by its operands.
+    _HEAD_A = "a" * 40
+    _HEAD_B = "b" * 40
+
+    def _pairwise_refusal(self, mod, monkeypatch, shallow: bool) -> str:
+        refs = {7: "refs/pr7", 9: "refs/pr9"}
+        monkeypatch.setattr(mod, "_fetch_head", lambda repo, number: refs[number])
+        monkeypatch.setattr(
+            mod,
+            "_rev_parse",
+            lambda ref: {"refs/pr7": self._HEAD_A, "refs/pr9": self._HEAD_B}.get(ref, "0" * 40),
+        )
+
+        def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if argv[1:2] == ["rev-parse"]:
+                return _proc(0, "true\n" if shallow else "false\n")
+            if set(argv[-2:]) == {self._HEAD_A, self._HEAD_B}:
+                return _proc(1, "", "fatal: refusing to merge unrelated histories\n")
+            return _proc(0, _TREE + "\n")
+
+        monkeypatch.setattr(mod, "_run", run)
+        with pytest.raises(RuntimeError) as caught:
+            mod.forecast("origin/master", [7, 9], "argszero/emrg")
+        return str(caught.value)
+
+    def test_the_pairwise_refusal_carries_the_repair(self, mod, monkeypatch) -> None:
+        """Both PR numbers, git's words, and the one command that clears them."""
+        message = self._pairwise_refusal(mod, monkeypatch, shallow=True)
+        assert "#7" in message and "#9" in message, message
+        assert "refusing to merge unrelated histories" in message, message
+        assert "git fetch --unshallow" in message, message
+
+    def test_the_pairwise_control_is_not_accused_of_being_shallow(
+        self, mod, monkeypatch
+    ) -> None:
+        """The control: a complete clone still refuses, and is not blamed for it."""
+        message = self._pairwise_refusal(mod, monkeypatch, shallow=False)
+        assert "refusing to merge unrelated histories" in message, message
+        assert "unshallow" not in message, message
