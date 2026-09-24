@@ -331,8 +331,10 @@ def _fetch_head(number: int) -> str:
     sha = _rev_parse(ref)
     merge_tree.drop_ref(ref, run=_run)
     return sha
-def _merge_tree_paths(a: str, b: str, cwd: str | None = None) -> list[str] | None:
-    """Conflicted paths when `a` and `b` are merged; None if unmeasurable.
+def _merge_tree_paths(
+    a: str, b: str, cwd: str | None = None
+) -> tuple[list[str] | None, str]:
+    """`(conflicted paths, what git said)`; the paths are None if unmeasurable.
 
     An empty list means the merge is clean, which is distinct from None (the
     question was not answered).
@@ -345,13 +347,21 @@ def _merge_tree_paths(a: str, b: str, cwd: str | None = None) -> list[str] | Non
     used to have turned into `[]` - the *clean-merge* answer, over a merge nobody
     made. What stays here is the mapping to this tool's three answers: a conflict
     whose paths the report does not name is `None` ("not answered"), never `[]`.
+
+    The pair exists for the same reason it does in `check-merge-order.py` (issue
+    #1559): `check_pr` raises when the answer is None, and it raised with a literal
+    - "merge-tree failed for PR #N" - so `Fold.diagnosis` was computed for this gate
+    and thrown away. That is the gate whose whole job is to say whether a merge can
+    be judged, and its one failure sentence read as a fact about the *PR*: in a
+    shallow clone the same refusal is a fact about the checkout, with the repair
+    (`git fetch --unshallow`) in git's words.
     """
     answer = merge_tree.fold(a, b, run=_run, cwd=cwd)
     if answer.verdict == "clean":
-        return []
+        return [], answer.diagnosis
     if answer.verdict != "conflict":
-        return None
-    return list(answer.paths) or None
+        return None, answer.diagnosis
+    return list(answer.paths) or None, answer.diagnosis
 
 
 def _merged_tree_sha(a: str, b: str, cwd: str | None = None) -> str:
@@ -466,9 +476,9 @@ def check_pr(
     verdict about a tree that does not exist.
     """
     head = _rev_parse(_fetch_head(number))
-    paths = _merge_tree_paths(base, head, cwd=cwd)
+    paths, diagnosis = _merge_tree_paths(base, head, cwd=cwd)
     if paths is None:
-        raise MeasurementError(f"merge-tree failed for PR #{number}")
+        raise MeasurementError(f"merge-tree failed for PR #{number}: {diagnosis}")
     if paths:
         return "conflict", f"conflicts on {', '.join(sorted(set(paths)))}"
     tree = _merged_tree_sha(base, head, cwd=cwd)

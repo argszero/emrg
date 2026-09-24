@@ -341,7 +341,7 @@ def test_a_clean_merge_that_lands_a_failing_tree_is_unhealthy(
     """
     repo, master, head = _two_pr_repo(tmp_path)
     # Precondition: the merge really is clean, so this is not the conflict case.
-    assert mod._merge_tree_paths(master, head, cwd=str(repo)) == []
+    assert mod._merge_tree_paths(master, head, cwd=str(repo))[0] == []
 
     state, report = _drive(mod, repo, master, head, tmp_path, monkeypatch)
     assert state == "unhealthy", report
@@ -421,7 +421,7 @@ def test_a_blob_input_is_not_the_clean_answer(mod, tmp_path) -> None:
     commit = _git(repo, "rev-parse", "master")
     blob = _git(repo, "rev-parse", f"master:{DOC_PATH}")
 
-    assert mod._merge_tree_paths(commit, blob, cwd=str(repo)) is None
+    assert mod._merge_tree_paths(commit, blob, cwd=str(repo))[0] is None
     with pytest.raises(mod.MeasurementError):
         mod._merged_tree_sha(commit, blob, cwd=str(repo))
 
@@ -436,7 +436,7 @@ def test_the_same_repo_still_answers_a_merge_it_can_make(mod, tmp_path) -> None:
     repo = tmp_path / "blob-ok"
     _seed(repo, 1)
     commit = _git(repo, "rev-parse", "master")
-    assert mod._merge_tree_paths(commit, commit, cwd=str(repo)) == []
+    assert mod._merge_tree_paths(commit, commit, cwd=str(repo))[0] == []
     assert mod._merged_tree_sha(commit, commit, cwd=str(repo)) == _git(
         repo, "rev-parse", f"{commit}^{{tree}}"
     )
@@ -448,7 +448,7 @@ def test_an_exit_code_with_no_tree_behind_it_is_never_an_answer(mod, monkeypatch
         monkeypatch.setattr(
             mod, "_run", lambda *a, **k: _proc(rc, "", "not something we can merge")
         )
-        assert mod._merge_tree_paths("a", "b") is None, rc
+        assert mod._merge_tree_paths("a", "b")[0] is None, rc
         with pytest.raises(mod.MeasurementError):
             mod._merged_tree_sha("a", "b")
 
@@ -465,7 +465,7 @@ def test_a_conflict_whose_paths_are_not_named_is_not_the_clean_answer(mod, monke
         "_run",
         lambda *a, **k: _proc(1, "0" * 40 + "\nCONFLICT (content): no tab line here\n"),
     )
-    assert mod._merge_tree_paths("a", "b") is None
+    assert mod._merge_tree_paths("a", "b")[0] is None
 
 
 def test_an_evidenced_conflict_still_names_its_paths(mod, monkeypatch) -> None:
@@ -481,7 +481,7 @@ def test_an_evidenced_conflict_still_names_its_paths(mod, monkeypatch) -> None:
     monkeypatch.setattr(mod, "_run", lambda *a, **k: _proc(1, report))
     # One entry per stage line, as before: the caller dedupes for display, and
     # this change is about which answers count, not about the parse's shape.
-    assert set(mod._merge_tree_paths("a", "b") or []) == {"Agent.md"}
+    assert set(mod._merge_tree_paths("a", "b")[0] or []) == {"Agent.md"}
 
 
 # --- the refusal names the real files -------------------------------------------
@@ -537,7 +537,7 @@ def test_a_tab_in_the_name_is_not_a_separator(mod, tmp_path, monkeypatch) -> Non
     repo, master, head = _conflict_on(tmp_path, "f\ttab.txt")
     # Precondition: git really did quote this name, so this is the measured case.
     assert '"f\\ttab.txt"' in _raw_report(repo, master, head)
-    paths = mod._merge_tree_paths(master, head, cwd=str(repo))
+    paths = mod._merge_tree_paths(master, head, cwd=str(repo))[0]
     assert set(paths or []) == {"f\ttab.txt"}, paths
 
     state, report = _drive(mod, repo, master, head, tmp_path, monkeypatch)
@@ -553,7 +553,7 @@ def test_a_non_ascii_name_comes_back_as_the_file(mod, tmp_path, monkeypatch) -> 
     # raw is git's choice of spelling; the tool must return the real name either way.
     raw = _raw_report(repo, master, head)
     assert '"\\344\\270\\255\\346\\226\\207.txt"' in raw or "中文.txt" in raw, raw
-    paths = mod._merge_tree_paths(master, head, cwd=str(repo))
+    paths = mod._merge_tree_paths(master, head, cwd=str(repo))[0]
     assert set(paths or []) == {"中文.txt"}, paths
 
     state, report = _drive(mod, repo, master, head, tmp_path, monkeypatch)
@@ -579,7 +579,7 @@ def test_only_the_stage_block_names_the_paths(mod, monkeypatch) -> None:
         ]
     )
     monkeypatch.setattr(mod, "_run", lambda *a, **k: _proc(1, report))
-    assert set(mod._merge_tree_paths("a", "b") or []) == {"f\ttab.txt"}
+    assert set(mod._merge_tree_paths("a", "b")[0] or []) == {"f\ttab.txt"}
 
 
 # `test_the_escapes_are_gits_own` lived here; the escapes are `merge_tree.py`'s now
@@ -809,7 +809,9 @@ def test_main_refreshes_the_base_before_measuring(mod, monkeypatch, capsys) -> N
     monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _Done())
     monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
     monkeypatch.setattr(mod, "_fetch_head", lambda n: "refs/x")
-    monkeypatch.setattr(mod, "_merge_tree_paths", lambda a, b, cwd=None: [])
+    monkeypatch.setattr(
+        mod, "_merge_tree_paths", lambda a, b, cwd=None: ([], "stub: measured elsewhere")
+    )
     monkeypatch.setattr(mod, "_merged_tree_sha", lambda a, b, cwd=None: "0" * 40)
     monkeypatch.setattr(mod, "_guard_verdict", lambda tree, workdir, cwd=None: (True, "guard OK"))
 
@@ -1024,3 +1026,52 @@ def test_a_base_that_cannot_be_refreshed_is_a_measurement_error(mod, monkeypatch
         assert "could not refresh" in str(excinfo.value), (base, excinfo.value)
     assert any("fetch" in c for c in calls), ("the fetch must be attempted", calls)
 
+
+
+# --- the refusal says what git said (#1559) ---------------------------------------
+#
+# `check_pr` raises when the merge is unmeasurable, and it used to raise with a
+# literal - "merge-tree failed for PR #N". The fold had already learned whether the
+# refusal is a shallow-clone artefact (`git fetch --unshallow` being the whole
+# repair), and the literal threw that away. The helper now hands the reading back
+# with the paths, and this arm is why it stays handed back.
+
+
+def _a_refusing_git(shallow: bool):
+    """A git that refuses the merge, and answers the boundary question.
+
+    Exit 1 with **empty** stdout is the measured shape of the refusal: a genuine
+    conflict exits 1 as well but names the merged tree on its first line, so the
+    absence of that line is what makes this "not answered" rather than a conflict
+    (see `merge_tree.shallow_boundary`).
+    """
+
+    def run(argv, cwd=None):
+        if argv[1:2] == ["rev-parse"]:
+            return _proc(0, "true\n" if shallow else "false\n")
+        return _proc(1, "", "fatal: refusing to merge unrelated histories\n")
+
+    return run
+
+
+class TestTheRefusalCarriesWhatGitSaid:
+    """The gate whose whole job is "can this merge be judged" must say why it cannot."""
+
+    def _refusal(self, mod, monkeypatch, shallow: bool) -> str:
+        monkeypatch.setattr(mod, "_fetch_head", lambda number: "refs/x")
+        monkeypatch.setattr(mod, "_rev_parse", lambda ref: "0" * 40)
+        monkeypatch.setattr(mod, "_run", _a_refusing_git(shallow))
+        with pytest.raises(mod.MeasurementError) as caught:
+            mod.check_pr(7, "0" * 40, Path("/nonexistent"), cwd=None)
+        return str(caught.value)
+
+    def test_a_shallow_clone_is_named_with_its_repair(self, mod, monkeypatch) -> None:
+        message = self._refusal(mod, monkeypatch, shallow=True)
+        assert "refusing to merge unrelated histories" in message, message
+        assert "git fetch --unshallow" in message, message
+
+    def test_a_complete_clone_is_not_accused_of_being_shallow(self, mod, monkeypatch) -> None:
+        """The control: the same refusal where the common ancestor really is absent."""
+        message = self._refusal(mod, monkeypatch, shallow=False)
+        assert "refusing to merge unrelated histories" in message, message
+        assert "unshallow" not in message, message
