@@ -508,7 +508,11 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
       replaces the head and voids whatever votes exist;
     * then the three CI states the freshness tool distinguishes — red, absent,
       unfinished. None of them is votable, and their remedies differ, which is why
-      they are not collapsed into "not fresh";
+      they are not collapsed into "not fresh": a red run is read, an absent one is
+      re-triggered, and an unfinished one is **parked** — deferred to a later cycle
+      rather than waited on, because a window spent blocking on a run this cycle
+      cannot vote on is a window not spent on a row it could move (host rant
+      2026-09-24T14:46:10);
     * then a merge state that withholds the merge (draft, blocked, behind) — again
       not a review problem, and not curable by a vote;
     * **then the abstention** (issue #1408): a head pushed by this cycle or by the one
@@ -565,10 +569,17 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             command=f"{RUNNER} scripts/re-trigger-ci.sh <branch-of-{pr}>",
         )
     if reading.stale_read and reading.stale_kind == "running":
+        # The verb is the instruction: "wait" told the reader to block until the run
+        # concluded, which spends the whole window on a PR this cycle cannot vote on
+        # anyway. "park" says the row is skipped this round and read again next one.
         return Action(
-            kind="wait",
-            why=reading.stale_reason + " - neither a refresh nor a re-trigger answers a "
-                                       "run that has not concluded",
+            kind="park",
+            why=reading.stale_reason + " - parked for this cycle: a run that has not "
+                                       "concluded is not votable, so blocking on it "
+                                       "spends the window on a row this cycle cannot "
+                                       "move. Read this PR again next cycle; neither a "
+                                       "refresh nor a re-trigger answers a run that has "
+                                       "not concluded",
             command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.blocked:

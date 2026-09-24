@@ -411,8 +411,61 @@ def votes_counter():
     return _sibling
 
 
-def _valid_votes(pr: int) -> tuple[int | None, str]:
-    """`(valid votes, "")` for this PR, or `(None, why it could not be read)`.
+@dataclass(frozen=True)
+class Price:
+    """What a refresh charges this branch: the approvals it voids, and the veto it resets.
+
+    Two quantities, not one, and #1562 is why. `valid_votes` is the counter's
+    `valid_count` - the approvals in the trailing run, which is what the gate counts
+    toward its threshold. A veto contributes **0** to that number by construction: its
+    entire effect is *resetting* the run it lands in. So the one vote that governs
+    whether a refresh is free is invisible in the count, and a branch whose only vote
+    is a standing veto was handed the sentence "0 valid votes - nothing to void" -
+    false in its case, and false in the direction that spends a review the branch
+    cannot re-earn, because the same push that voids an approval voids the veto and
+    three fresh approvals then satisfy the gate over a defect nobody addressed.
+
+    `vetoes` is that missing quantity: the vetoes *about this head*. Deliberately not
+    the counter's parallel `counted` list - its run walk appends `True` for every veto
+    unconditionally (`check-vote-count.py`), including one the head push has already
+    voided, so `counted` cannot separate a live veto from a spent one. `valid` can: it
+    is precisely "about this head, and attributable to one cycle".
+
+    A veto that stands *beside* a satisfied run is not priced here; that branch is
+    reached at `valid_votes > 0`, where the sentence is already about votes at risk.
+    What this record exists to stop is the one reading that is not merely optimistic
+    but blind: calling a state with a veto in it "nothing to void".
+    """
+
+    valid_votes: int | None
+    vetoes: int = 0
+    unread: str = ""
+
+    @property
+    def veto_clause(self) -> str:
+        """The noun phrase for the standing veto(es), or `""` when none stands."""
+        if not self.vetoes:
+            return ""
+        return f"{self.vetoes} standing veto" + ("" if self.vetoes == 1 else "es")
+
+
+def _standing_vetoes(verdict: object) -> int:
+    """The vetoes in `verdict` that are about its head: `kind == "veto" and valid`.
+
+    `valid` rather than `counted` - see `Price`. Mutation arm for this reading (drop
+    `and vote.valid`): a verdict carrying a veto the head push has already voided is
+    then priced as a standing one, and the price line stops distinguishing a spent
+    veto from a live one.
+    """
+    return sum(
+        1
+        for vote in getattr(verdict, "votes", [])
+        if getattr(vote, "kind", "") == "veto" and getattr(vote, "valid", False)
+    )
+
+
+def _valid_votes(pr: int) -> Price:
+    """What a refresh of this PR would cost, or `Price(None, unread=why it failed)`.
 
     Advisory, so it degrades instead of failing the run: the freshness verdict
     above is answerable without it, and exiting 2 because a *price* could not be
@@ -431,12 +484,12 @@ def _valid_votes(pr: int) -> tuple[int | None, str]:
         verdict = votes_counter().check_pr(
             pr, _VOTES_NEEDED, mergeability_wait=_MERGEABILITY_WAIT
         )
-        return int(verdict.valid_count), ""
+        return Price(int(verdict.valid_count), _standing_vetoes(verdict))
     except Exception as exc:  # advisory by construction - see the docstring above
-        return None, f"{type(exc).__name__}: {exc}".replace("\n", " ")[:200]
+        return Price(None, unread=f"{type(exc).__name__}: {exc}".replace("\n", " ")[:200])
 
 
-def _remedy(pr: int, kind: str, valid_votes: int | None, unread: str) -> str:
+def _remedy(pr: int, kind: str, price: Price) -> str:
     """One line: what to do about this verdict, and what it charges.
 
     The price is attached only where it is actually paid - an ancestry-stale
@@ -445,15 +498,20 @@ def _remedy(pr: int, kind: str, valid_votes: int | None, unread: str) -> str:
     whose CI run is merely missing (a refresh is a remedy there too, but the
     expensive one: re-triggering fires a run on the same head and keeps the
     votes).
+
+    The ancestry-stale branch has **three** states, not two: nothing to void, a
+    price in approvals, and - the one that went missing - no approvals but a
+    standing veto, where the refresh is not free and "nothing to void" is the one
+    claim that is false (#1562).
     """
     if kind == _KIND_ANCESTRY:
-        if valid_votes is None:
+        if price.valid_votes is None:
             return (
-                f"#{pr}: vote count unavailable ({unread or 'not read'}) - read it before "
-                f"refreshing (`scripts/check-vote-count.py {pr}`): a refresh moves the head "
-                "and voids every vote the branch has"
+                f"#{pr}: vote count unavailable ({price.unread or 'not read'}) - read it "
+                f"before refreshing (`scripts/check-vote-count.py {pr}`): a refresh moves "
+                "the head and voids every vote the branch has"
             )
-        if valid_votes == 0:
+        if price.valid_votes == 0 and not price.vetoes:
             return (
                 f"#{pr}: 0 valid votes - nothing to void. Re-merge master into the branch "
                 "and push the merge (`git fetch origin master`, `git merge FETCH_HEAD`, "
@@ -461,9 +519,23 @@ def _remedy(pr: int, kind: str, valid_votes: int | None, unread: str) -> str:
                 "not a rebase: a rebase of a pushed branch is refused as non-fast-forward, "
                 "and publishing one needs the force-push this project forbids"
             )
+        if price.valid_votes == 0:
+            return (
+                f"#{pr}: 0 valid votes, but {price.veto_clause} at this head - the refresh "
+                "is NOT free: it moves the head and voids the veto as surely as it voids an "
+                "approval, and with no approval in the run the gate is then satisfied by "
+                "fresh approvals alone, over the defect the veto named and nothing else "
+                "changed. Answer what the veto names first, and refresh only once it is "
+                "gone (`git fetch origin master`, `git merge FETCH_HEAD`, "
+                "`git push origin <branch>`) - the merge, not a rebase: a rebase of a "
+                "pushed branch is refused as non-fast-forward, and publishing one needs "
+                "the force-push this project forbids"
+            )
+        beside = f" (and the {price.veto_clause} standing there)" if price.vetoes else ""
         return (
-            f"#{pr}: {valid_votes} valid vote(s) at risk - a refresh moves the head, and the "
-            f"vote counter voids all {valid_votes}. Measure the tree this merge would land "
+            f"#{pr}: {price.valid_votes} valid vote(s) at risk - a refresh moves the head, "
+            f"and the vote counter voids all {price.valid_votes}{beside}. Measure the tree "
+            "this merge would land "
             "instead (`git fetch origin master`, then `scripts/check-merge-plan-suite.py "
             f"{pr}`) and cast the vote on it (`scripts/cast-vote.py {pr} --body-file <path>`), "
             "stating the landing tree the review is about: the head does not move, so the "
@@ -484,8 +556,9 @@ def _remedy(pr: int, kind: str, valid_votes: int | None, unread: str) -> str:
         )
     if kind == _KIND_RUNNING:
         return (
-            f"#{pr}: wait for the run - neither a refresh nor a re-trigger answers a run "
-            "that has not concluded"
+            f"#{pr}: park it, the run has not concluded - a vote here is not votable by "
+            "anyone and neither a refresh nor a re-trigger answers it, so do not block on "
+            "this PR: read it again next cycle (host rant 2026-09-24T14:46:10)"
         )
     return (
         f"#{pr}: fix the failure - a refresh costs every vote the branch has, and does not "
@@ -493,7 +566,7 @@ def _remedy(pr: int, kind: str, valid_votes: int | None, unread: str) -> str:
     )
 
 
-def _prices(verdicts: list[Verdict]) -> dict[int, tuple[int | None, str]]:
+def _prices(verdicts: list[Verdict]) -> dict[int, Price]:
     """The vote count for each verdict whose remedy depends on it.
 
     Only the ancestry-stale kind: the other kinds are told an action that does not
@@ -540,7 +613,12 @@ def main(argv: list[str] | None = None) -> int:
                         "stale": v.stale,
                         "reason": v.reason,
                         "stale_kind": v.stale_kind,
-                        "valid_votes": prices[v.pr][0] if v.pr in prices else None,
+                        # Both halves of the price. `valid_votes` alone reads as "0
+                        # means free" for a head whose only vote is a standing veto -
+                        # the reading #1562 is about - so the veto count is emitted
+                        # beside it and a consumer never has to infer it.
+                        "valid_votes": prices[v.pr].valid_votes if v.pr in prices else None,
+                        "standing_vetoes": prices[v.pr].vetoes if v.pr in prices else None,
                     }
                     for v in verdicts
                 ],
@@ -563,8 +641,8 @@ def main(argv: list[str] | None = None) -> int:
         for v in verdicts:
             if not v.stale:
                 continue
-            count, unread = prices.get(v.pr, (None, ""))
-            print("  " + _remedy(v.pr, v.stale_kind, count, unread), file=sys.stderr)
+            price = prices.get(v.pr, Price(None))
+            print("  " + _remedy(v.pr, v.stale_kind, price), file=sys.stderr)
         return 1
     return 0
 

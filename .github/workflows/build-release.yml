@@ -437,3 +437,93 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+
+      # 发布的**终态**是发布的一部分，而它此前只活在 `Agent.md` §Releasing 第 3 步的
+      # 散文里 —— 靠人（或 agent）手工 `gh release view` 核对。
+      # 2026-09-23 的 v0.3.1 实测：softprops 在 9 个产物里传完 8 个之后被对端掐断
+      # （`other side closed`），release 停在 **draft** 且少一个产物；run 是红的，
+      # 但「红」本身没说清「修好」长什么样，恢复只能 `gh run rerun --failed`
+      # （重下约 1GB 再传一遍），而确认恢复成功靠的是手工再跑一次 `gh release view`。
+      # 更该防的是它本可以**绿着留下一个未发布的 release**：`draft`/`prerelease`
+      # 只在**建** release 时套用，对已存在的 release 走 update。draft 的 release 对
+      # `releases/latest` 不可见，自动升级链因此看不到它 —— 而 CI 不会说一个字。
+      # 所以终态由 API 断言，不由步骤自己的退出码断言：未发布 / 少产物 / 不是 Latest
+      # 三者任一成立即红。判别信号刻意各自独立，任一条单独失效不掩盖另外两条。
+      #
+      # ⚠️ `if: !cancelled()` 不是装饰，是这条步骤的**存在前提**：没有显式 `if:` 时
+      # 步骤继承隐式 `success()`，于是在**上一步失败时被跳过**——而「创建 release 失败」
+      # 正是它要报告的那个状态（v0.3.1 的 `other side closed`：release 停在 draft、
+      # 少一个产物，而这条检查从未运行）。立论的一个检查如果只在一切正常时才跑，
+      # 就无法报告它为之而写的失败。
+      # 选 `!cancelled()` 而非 `always()`：后者在**取消**的运行里也执行，那时下载与上传
+      # 都停在中途，这条检查会把「release 不存在」报成红——为一个被取消的构建制造假红。
+      - name: Confirm the release is published, complete, and Latest
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # 期望的产物集合从**本次刚下载的那些文件**推出，不写死数量：构建矩阵增删
+          # 平台时这条断言随之前进，不会腐朽（本仓库的既定约定）。用 glob 而非 `ls`：
+          # 产物名可能含非字母数字（shellcheck SC2012），且 `ls` 在空目录里把失败也
+          # 报成成功，空集合必须在这里被认出来，否则下面每条比较都成了空对空。
+          shopt -s nullglob
+          found=(artifacts/*)
+          shopt -u nullglob
+          if [ "${#found[@]}" -eq 0 ]; then
+            echo "::error::no artifacts were downloaded — every comparison below would be vacuous"
+            exit 1
+          fi
+          expected="$(printf '%s\n' "${found[@]#artifacts/}" | sort)"
+          n="${#found[@]}"
+          api() { gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq "$1"; }
+          exists=""
+          for attempt in 1 2 3 4 5 6; do
+            exists="$(api .tag_name 2>/dev/null || true)"
+            [ -n "$exists" ] && break
+            echo "the release for ${tag} is not readable yet (attempt ${attempt}/6)"
+            sleep 10
+          done
+          if [ -z "$exists" ]; then
+            echo "::error::no release exists for tag ${tag} — the action created nothing"
+            exit 1
+          fi
+          draft="$(api .draft)"
+          if [ "$draft" != "false" ]; then
+            echo "::error::the release for ${tag} is still a DRAFT (draft=${draft}) — it is invisible to releases/latest, so no host can upgrade to it"
+            exit 1
+          fi
+          prerelease="$(api .prerelease)"
+          if [ "$prerelease" != "false" ]; then
+            echo "::error::the release for ${tag} is marked PRERELEASE (prerelease=${prerelease})"
+            exit 1
+          fi
+          got="$(api '.assets[].name' | sort)"
+          if [ "$got" != "$expected" ]; then
+            echo "this run built ${n} artifact(s):"; printf '%s\n' "$expected"
+            echo "the release carries:"; printf '%s\n' "$got"
+            echo "::error::the release for ${tag} does not carry the artifact set this run built"
+            exit 1
+          fi
+          echo "release ${tag}: published, not prerelease, ${n} asset(s) — matches the build"
+          # Latest 只在本 tag 是版本序最高的那个已发布 release 时才断言：重跑（或重打）
+          # 一个旧 tag 是允许的，那时 `releases/latest` 指向更新的版本并不代表这次失败。
+          # `--paginate`（外审提出的那一半，2026-09-23 采纳）：这个端点按**创建时间**倒序
+          # 返回，而下面按**版本序**取最大——不分页时只读最新的一页（100 个），两者一致
+          # 就成了「创建序与版本序在这 100 个之内不得相反」这一未被写下的前提。分页后读的
+          # 是全量，这个前提消失。
+          newest="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --paginate \
+            --jq '.[]|select(.draft==false and .prerelease==false)|.tag_name' | sort -V | tail -1)"
+          if [ "$newest" = "$tag" ]; then
+            latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+            if [ "$latest" != "$tag" ]; then
+              echo "::error::${tag} is the newest published release but GitHub reports Latest=${latest}"
+              exit 1
+            fi
+            echo "release ${tag}: Published as Latest"
+          else
+            echo "not the newest published release (newest=${newest}) — the Latest assertion is about ${newest}, so it is not made here"
+          fi

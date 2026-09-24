@@ -391,14 +391,23 @@ def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsy
     assert "git merge FETCH_HEAD" not in out
 
 
-def test_a_run_still_going_waits(mod, monkeypatch, capsys):
+def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
+    """The verb is the instruction: `wait` told the reader to block on the run.
+
+    A run that has not concluded is not votable, so blocking on it spends the window
+    on a PR this cycle cannot move; the row is deferred to a later cycle instead
+    (host rant 2026-09-24T14:46:10). The name is asserted, not just the reason —
+    renaming the kind back to `wait` must fail this test.
+    """
     votes = FakeVotes(reviews=[])
     fresh = FakeFresh(stale=True, kind="running",
                       reason="CI is still in_progress on head aaaa")
     rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "wait" in out
+    assert "park" in out
+    assert "wait" not in out, "a row that is parked must not be told to wait"
+    assert "next cycle" in out, "the deferral has to name when the row comes back"
     assert "cast-vote.py" not in out
 
 
