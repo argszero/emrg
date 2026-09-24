@@ -31,9 +31,11 @@ from emrg.sandbox.providers import win32 as provider
 from emrg.sandbox.win32 import ffi
 from emrg.sandbox.win32.ffi import SIDAndAttributes
 from emrg.sandbox.win32.runner import (
+    RUNNER_FAILURE_EXIT,
     RUNNER_SIGNATURE,
     RunnerFailure,
     _build_sandbox,
+    fail,
     git_safety_env,
     main,
     parse_args,
@@ -553,6 +555,47 @@ def test_main_reports_a_bad_argv_as_the_runners_own_failure_exit(capsys):
     captured = capsys.readouterr()
     assert captured.err.startswith(f"{RUNNER_SIGNATURE}: ")
     assert "unknown argument: --nope" in captured.err
+
+
+def test_the_win32_rule_classifies_the_line_the_runner_really_prints(capsys):
+    """The rule the seam matches, fed the line this runner really writes.
+
+    The third rung of one family: ``linux`` got this pin in #1587 and ``darwin``
+    in #1590, where the fatal line comes from a third-party binary and therefore
+    had to be *recorded*. Here both halves live in this repository, which makes
+    the agreement mechanisable instead of recorded — and it is the agreement,
+    not the line, that is at stake: the prefix the runner writes is
+    :data:`~emrg.sandbox.win32.runner.RUNNER_SIGNATURE`, while the rule spells it
+    again as the literal ``"windows-acl-run: "`` in
+    :mod:`emrg.sandbox.providers.win32` (its exit gate, by contrast, *imports*
+    ``RUNNER_FAILURE_EXIT`` and so cannot drift). Rename one side alone and the
+    rule matches nothing: the seam then reads a runner failure as the command's
+    own non-zero exit — the misreading this rung exists to prevent — and every
+    test that used the constant on both sides stays green.
+
+    The exit half is pinned here too, and here it is this rung's deliberate
+    difference from its siblings: the darwin rule stays signature-only (#1590
+    records why an exit gate is one macOS version's behaviour), while this one
+    gates on the runner's own failure exit, so a confined command that merely
+    *prints* the signature is never read as "the command did not run".
+    """
+    from emrg.tools.bash_tool_v2 import classify_runner_failure
+
+    with pytest.raises(RunnerFailure, match="no such directory"):
+        fail("no such directory: C:\\nope")
+    printed = capsys.readouterr().err
+
+    # What the runner wrote, through the rule the seam consults: one line, the
+    # same one `main` exits 127 behind (the test above pins that half).
+    assert classify_runner_failure(RUNNER_FAILURE_EXIT, printed, provider.RUNNER_FAILURE_RULES) == (
+        printed.strip()
+    )
+    # The two spellings of the prefix, named so a rename fails as this agreement
+    # rather than as an incidental unmatched line.
+    assert provider.RUNNER_FAILURE_RULES[0].fatal_signatures == (f"{RUNNER_SIGNATURE}: ",)
+    # The gate, in the direction that matters: the same line beside a non-zero
+    # exit the *command* produced is the command's failure, not the runner's.
+    assert classify_runner_failure(1, printed, provider.RUNNER_FAILURE_RULES) is None
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is where the backend is loadable")
