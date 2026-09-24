@@ -449,7 +449,16 @@ jobs:
       # `releases/latest` 不可见，自动升级链因此看不到它 —— 而 CI 不会说一个字。
       # 所以终态由 API 断言，不由步骤自己的退出码断言：未发布 / 少产物 / 不是 Latest
       # 三者任一成立即红。判别信号刻意各自独立，任一条单独失效不掩盖另外两条。
+      #
+      # ⚠️ `if: !cancelled()` 不是装饰，是这条步骤的**存在前提**：没有显式 `if:` 时
+      # 步骤继承隐式 `success()`，于是在**上一步失败时被跳过**——而「创建 release 失败」
+      # 正是它要报告的那个状态（v0.3.1 的 `other side closed`：release 停在 draft、
+      # 少一个产物，而这条检查从未运行）。立论的一个检查如果只在一切正常时才跑，
+      # 就无法报告它为之而写的失败。
+      # 选 `!cancelled()` 而非 `always()`：后者在**取消**的运行里也执行，那时下载与上传
+      # 都停在中途，这条检查会把「release 不存在」报成红——为一个被取消的构建制造假红。
       - name: Confirm the release is published, complete, and Latest
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -501,7 +510,11 @@ jobs:
           echo "release ${tag}: published, not prerelease, ${n} asset(s) — matches the build"
           # Latest 只在本 tag 是版本序最高的那个已发布 release 时才断言：重跑（或重打）
           # 一个旧 tag 是允许的，那时 `releases/latest` 指向更新的版本并不代表这次失败。
+          # `--paginate`（外审提出的那一半，2026-09-23 采纳）：这个端点按**创建时间**倒序
+          # 返回，而下面按**版本序**取最大——两者在 100 个 release 的跨度内一致纯属巧合。
+          # 分页消除这个巧合要求：漏页时丢的是最旧的几页，版本序也仍在全量上取。
           newest="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --paginate \
             --jq '.[]|select(.draft==false and .prerelease==false)|.tag_name' | sort -V | tail -1)"
           if [ "$newest" = "$tag" ]; then
             latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"

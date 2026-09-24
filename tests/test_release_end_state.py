@@ -82,6 +82,31 @@ def _uncommented(body: str) -> str:
     return "\n".join(kept)
 
 
+def _newest_derivation_as_a_constant(body: str) -> str:
+    """The body with the `newest=` derivation replaced by the running tag.
+
+    The edit this guard must catch: with `newest` pinned to `${tag}` the comparison can no
+    longer tell "this tag is the newest published release" from "it is not", so an older tag
+    rebuilt while a newer release exists would be reported as a release defect. Anchored on
+    the statement's own shape and asserted, so the mutation cannot silently become a no-op
+    when the derivation is rewritten.
+    """
+    lines = body.splitlines()
+    starts = [i for i, ln in enumerate(lines) if 'newest="$(' in ln]
+    assert len(starts) == 1, (
+        f"expected exactly one `newest=` derivation to mutate, found {len(starts)}"
+    )
+    start = starts[0]
+    ends = [i for i in range(start, len(lines)) if lines[i].rstrip().endswith(')"')]
+    assert ends, "the `newest=` statement does not terminate with `)\"` — cannot slice it"
+    statement = "\n".join(lines[start : ends[0] + 1])
+    assert "releases?per_page" in statement, (
+        f"the slice is not the releases-listing derivation: {statement!r}"
+    )
+    lines[start : ends[0] + 1] = ['newest="${tag}"']
+    return "\n".join(lines)
+
+
 # `--jq <expr>` (the helper's own call, and two direct ones) and `api <expr>` (the
 # helper's callers) are the two positions in which this step names what it reads.
 _JQ_ARG = re.compile(
@@ -127,6 +152,38 @@ def test_the_release_job_verifies_its_own_end_state_after_publishing() -> None:
     assert "releases/tags/" in body, (
         "the end-state check does not look the release up by this run's tag"
     )
+    # ⚠️ The step must run when the step ABOVE it failed — that is the state it exists to
+    # report, and it is the one defect this guard was raised for (veto `cyc20260924-032325`,
+    # re-measured on head `24b62492`): with no explicit `if:`, the step inherits the implicit
+    # `success()` and is skipped exactly when `Create GitHub Release` fails. Read from the
+    # **parsed step**, not from the workflow text: an `if:` anywhere in the document (the
+    # `release` job carries one, and so do four other jobs here) would satisfy a text search.
+    #
+    # Named limit: this is a pin on a *string*, because GitHub's expression language has no
+    # evaluator here — a spelling pin is what is available for "is this condition true on
+    # failure". It accepts both spellings that are (`!cancelled()` and `always()`) by design:
+    # the claim it guards is about the *failed predecessor*, and `always()` satisfies it. The
+    # workflow prefers `!cancelled()` for a reason the pin does not enforce — `always()` also
+    # runs on a cancelled run, where reporting "no release exists" would be a false red. What
+    # this pin cannot be wrong about is the defect it was raised for, which is the *absence*
+    # of the key. The verdict half is executed, below.
+    condition = str(script.get("if") or "")
+    assert condition, (
+        "the end-state step carries no `if:` — it therefore inherits the implicit "
+        "`success()` and is skipped exactly when `Create GitHub Release` fails: the state "
+        "the step exists to report is the state it does not run in (measured v0.3.1, "
+        "`other side closed`: the release was left a draft, one asset short, and this "
+        "check never ran)"
+    )
+    assert "success()" not in condition, (
+        f"the end-state step's `if:` requires a successful predecessor (if={condition!r}) — "
+        "a check that only runs when everything already worked cannot report the failure it "
+        "was written for"
+    )
+    assert "!cancelled()" in condition or "always()" in condition, (
+        f"the end-state step's `if:` does not exempt it from a failed predecessor "
+        f"(if={condition!r}) — the step would be skipped in the very state it exists for"
+    )
     # The expected set is derived, never stored: a hardcoded count goes stale the moment
     # the build matrix gains or loses a platform.
     assert re.search(r"artifacts/\*", body) or re.search(r"\bexpected=", body), (
@@ -134,6 +191,17 @@ def test_the_release_job_verifies_its_own_end_state_after_publishing() -> None:
     )
     hardcoded = re.search(r"^\s*expected=\"?EMRG-", body, re.M)
     assert not hardcoded, f"the expected artifact set is a literal: {hardcoded.group(0)!r}"
+    # The releases listing is paginated. `releases?per_page=100` returns one page, ordered
+    # by *creation* time; the comparison below takes the highest by *version*, so the two
+    # agree only while version order and creation order agree within a page — 102 releases
+    # exist here, so page 1 is not the whole set. Pagination makes the reading independent
+    # of that coincidence (raised as an external review note, adopted by the cycle that
+    # answered it). Asserted on the comment-stripped body, so the word in the comment above
+    # the step cannot satisfy it.
+    assert "--paginate" in body, (
+        "the releases listing is not paginated — the `sort -V | tail -1` over it assumes "
+        "creation order and version order agree across a single page of 100 releases"
+    )
 
 
 _GH_STUB = '''#!/usr/bin/env python3
@@ -170,7 +238,12 @@ elif "releases/tags/" in url:
     else:
         sys.exit(2)
 elif "releases?per_page" in url:
-    emit(tag)
+    # The newest *published* release, answered from the scenario rather than from the tag.
+    # A stub that always answers the tag cannot represent the one state the outer comparison
+    # exists for — an older tag rebuilt while a newer release exists — and in that state
+    # "replace the derivation with a constant" is invisible (measured: with the tag
+    # unconditionally, that edit survived every arm; see the arm at the end of this file).
+    emit(os.environ.get("GH_NEWEST_TAG", tag))
 else:
     sys.exit(2)
 '''
@@ -216,7 +289,13 @@ def test_the_end_state_check_refuses_every_way_a_release_can_be_incomplete(tmp_p
     argv_log = tmp_path / "argv.log"
     argv_log.write_text("", encoding="utf-8")
 
-    def run(scenario: str, carried: list[str], script: str = body, latest: str = "") -> subprocess.CompletedProcess:
+    def run(
+        scenario: str,
+        carried: list[str],
+        script: str = body,
+        latest: str = "",
+        newest: str = "",
+    ) -> subprocess.CompletedProcess:
         env = {
             "PATH": f"{bindir}:/usr/bin:/bin",
             "GITHUB_REF_NAME": "v9.9.9",
@@ -228,6 +307,8 @@ def test_the_end_state_check_refuses_every_way_a_release_can_be_incomplete(tmp_p
         }
         if latest:
             env["GH_LATEST_TAG"] = latest
+        if newest:
+            env["GH_NEWEST_TAG"] = newest
         return subprocess.run(
             [shell, "-c", script],
             cwd=tmp_path,
@@ -244,6 +325,11 @@ def test_the_end_state_check_refuses_every_way_a_release_can_be_incomplete(tmp_p
         f"{published.stdout}{published.stderr}"
     )
     # The two states the real incident produced, plus the two neighbours it could have.
+    # `notlatest` and `older-tag` (below) are deliberately a **pair that differs in exactly
+    # one stub answer** — what the releases listing says the newest published release is —
+    # and reach opposite verdicts. That pair is what makes the outer comparison load-bearing:
+    # with `newest == tag` the Latest assertion must be made (and fails here), with
+    # `newest != tag` it must be skipped (and passes here), on identical everything else.
     for scenario, carried, latest, marker in (
         ("draft", full, "", "DRAFT"),
         ("partial", full[:-1], "", "does not carry"),
@@ -259,6 +345,40 @@ def test_the_end_state_check_refuses_every_way_a_release_can_be_incomplete(tmp_p
             f"the {scenario} run failed, but not for the reason it should: expected "
             f"{marker!r} in {result.stdout}{result.stderr}"
         )
+
+    # The state the outer comparison exists for: this tag is NOT the newest published
+    # release (an older tag rebuilt while a newer one exists), so the Latest assertion is
+    # about the newer release and is not made here — the rebuild must not be a false red.
+    # Measured on head `24b62492`: this state was unrepresentable (the stub answered the
+    # running tag unconditionally), which is why replacing the derivation with a constant
+    # survived every arm while a real rebuild of an old tag would have gone red.
+    older = run("older-tag", full, latest="v9.9.10", newest="v9.9.10")
+    assert older.returncode == 0, (
+        "the check fails a release whose tag is not the newest published one — a rebuild of "
+        "an older tag is allowed, and the Latest assertion belongs to the newer release: "
+        f"rc={older.returncode} {older.stdout}{older.stderr}"
+    )
+    assert "not the newest published release" in older.stdout, (
+        "the older-tag run passed without reporting WHY the Latest assertion was skipped — "
+        f"it may have passed for an unrelated reason: {older.stdout}"
+    )
+
+    # …and the arm for that pair, in the same sandbox: the green run above is the control,
+    # this is the mutation. Pinning `newest` to the tag removes the only thing that can skip
+    # the Latest assertion, so the older-tag state must go red.
+    mutated = run(
+        "older-tag", full, script=_newest_derivation_as_a_constant(body),
+        latest="v9.9.10", newest="v9.9.10",
+    )
+    assert mutated.returncode != 0, (
+        "replacing the `newest` derivation with a constant leaves the older-tag state green, "
+        "so the derivation is not load-bearing: a rebuild of an old tag would then be "
+        f"reported as a release defect. rc={mutated.returncode} {mutated.stdout}"
+    )
+    assert "reports Latest=" in mutated.stdout + mutated.stderr, (
+        "the mutated older-tag run failed, but not for the reason the edit causes: expected "
+        f"'reports Latest=' in {mutated.stdout}{mutated.stderr}"
+    )
     asked = argv_log.read_text(encoding="utf-8")
     assert "releases/latest" in asked and ".assets[].name" in asked, (
         f"the check did not ask both the asset list and `releases/latest`; it asked: {asked!r}"
