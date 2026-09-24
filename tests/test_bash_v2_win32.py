@@ -567,8 +567,10 @@ def test_the_win32_rule_classifies_the_line_the_runner_really_prints(capsys):
     not the line, that is at stake: the prefix the runner writes is
     :data:`~emrg.sandbox.win32.runner.RUNNER_SIGNATURE`, while the rule spells it
     again as the literal ``"windows-acl-run: "`` in
-    :mod:`emrg.sandbox.providers.win32` (its exit gate, by contrast, *imports*
-    ``RUNNER_FAILURE_EXIT`` and so cannot drift). Rename one side alone and the
+    :mod:`emrg.sandbox.providers.win32`. The exit half is written twice the same
+    way — that provider defines ``RUNNER_FAILURE_EXIT`` as its own ``127``, and
+    nothing imports it across the seam — so both halves rest on the assertions
+    below rather than on the compiler. Rename one side alone and the
     rule matches nothing: the seam then reads a runner failure as the command's
     own non-zero exit — the misreading this rung exists to prevent — and every
     test that used the constant on both sides stays green.
