@@ -21,8 +21,8 @@ unconfined.
 Measured on this profile (docker ``debian:bookworm-slim`` + ``bubblewrap 0.8.0``,
 kernel 6.8, 2026-09-22; the container needs ``--security-opt
 seccomp=unconfined --security-opt apparmor=unconfined --cap-add SYS_ADMIN`` —
-with only the first of the three, ``bwrap`` dies at ``Failed to make / slave:
-Permission denied`` before it reaches the profile):
+with only the first of the three, ``bwrap`` dies at ``bwrap: Failed to make /
+slave: Permission denied`` before it reaches the profile):
 
 * ``read-only``: reads pass; **every** write is refused with ``Read-only file
   system`` — outside the workspace, inside it, and in ``/tmp`` alike
@@ -64,6 +64,31 @@ DENIAL_SIGNATURES: tuple[str, ...] = ("read-only file system",)
 #: ordinary command can also exit with (the child's status is what ``bwrap``
 #: returns), so pinning it would misread a confined command's own failure as
 #: "the command never ran".  The signature is what identifies the runner.
+#:
+#: The prefix is literal, and load-bearing: both of bubblewrap's fatal printers
+#: write it — ``die`` delegates to ``warnv`` (``"bwrap: "`` + detail + newline)
+#: and ``die_with_error`` writes ``"bwrap: "`` + detail + ``": <strerror>"``;
+#: both then ``exit (1)`` — read at the pinned ``v0.8.0``, ``utils.c:35-82``
+#: (upstream ``containers/bubblewrap``), the version this backend's measurements
+#: above were taken on.  So the line for a namespace refusal really is ``bwrap:
+#: Failed to make / slave: Permission denied``, and the signature matches it; a
+#: bare ``Failed to make / slave`` would not be a line ``bwrap`` ever prints.
+#:
+#: The accepted cost, named rather than left to be rediscovered: the match is a
+#: case-insensitive substring on one stderr line (``classify_runner_failure``,
+#: the blueprint's own matcher — ``sandbox/src/diagnostics.ts:83``,
+#: ``lowered.includes(signature)``), and because this backend carries no exit
+#: gate, a confined command that itself prints ``bwrap: …`` and exits non-zero
+#: is reported as a runner failure.  That is the blueprint's decision, not an
+#: oversight to tighten here: its rule table says bubblewrap's "fatal paths exit
+#: 1 but its public contract does not reserve that status", so it "remain[s]
+#: signature-only", and the exit gate exists only where a runner reserves its
+#: own failure status (landlock 125, windows-acl 127) precisely "so a confined
+#: command that merely PRINTS the signature … is never misclassified as 'the
+#: command did not run'" (``packages/sandbox/sandbox-local/src/index.ts:214-232``,
+#: pinned ``ddefc45fbc``).  Anchoring the match to the start of a line would
+#: reduce the false positive without ending it (a command's own line can start
+#: with the prefix) and would deviate from that contract.
 RUNNER_FAILURE_RULES: tuple[RunnerFailureRule, ...] = (
     RunnerFailureRule(fatal_signatures=("bwrap: ",)),
 )

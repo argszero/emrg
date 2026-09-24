@@ -543,8 +543,10 @@ def test_linux_refuses_instead_of_running_bare_when_its_runner_is_missing(tmp_pa
 #
 # All three security options are needed: with only ``seccomp=unconfined`` the
 # AppArmor profile refuses ``mount --make-rslave /`` and ``bwrap`` dies with
-# ``Failed to make / slave: Permission denied`` **before** it reaches the profile
-# — a red suite that says nothing about this code (measured).
+# ``bwrap: Failed to make / slave: Permission denied`` **before** it reaches the
+# profile — a red suite that says nothing about this code (measured).  The
+# ``bwrap: `` prefix is quoted because it is the whole of why the fatal
+# signature matches that line; ``bwrap``'s own printers write it.
 
 
 def _bwrap_problem() -> str | None:
