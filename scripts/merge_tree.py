@@ -12,6 +12,16 @@ both are git's, not theirs:
    the clean answer - out of an unnamed merge is the one direction a gate must
    never invent, because the next step then judges a tree that was never built.
 
+   An unanswered merge has **two** reasons, and git's sentence is the same for both: the
+   two commits may really have no common ancestor, or this *clone* may have cut that
+   ancestor off with a **shallow boundary**. The second is the cheaper mistake to make -
+   fetching one commit for review with a depth (`git fetch --depth=1 origin pull/<n>/head`)
+   leaves the repository unable to answer any later merge-base question, so every gate in
+   this family reports a property of the *checkout* as a fact about the PRs. `Fold.shallow`
+   carries the one fact that separates them, asked only when the merge went unanswered,
+   and `Fold.diagnosis` names it with the repair; the probe's own measurement, on a real
+   PR, is in `shallow_boundary`'s docstring.
+
 2. **The conflicted paths come from the stage block, decoded.** `merge-tree`
    writes the block first, one line per side per conflicted path, then a blank
    line, then prose. Measured 2026-09-14 (`cyc20260914-104220`, git 2.50.1, in
@@ -212,6 +222,33 @@ def stage_block_paths(lines: Sequence[str]) -> list[str]:
     return paths
 
 
+def shallow_boundary(
+    run: Callable[..., subprocess.CompletedProcess], cwd: str | None = None
+) -> bool:
+    """Whether this repository carries a shallow boundary. `False` when git will not say.
+
+    Measured 2026-09-22 in this checkout, on this host, against a real PR rather than a
+    scratch repo: after `git fetch --depth=1 origin pull/1537/head`, `check-merge-plan-
+    suite.py 1537` answered `could not measure: merge-tree failed: fatal: refusing to
+    merge unrelated histories` about PR #1537 - a head whose merge base (`398e2319`) is
+    an ancestor of both it and master, cut off by the depth-1 fetch. `git fetch
+    --unshallow` was the whole repair, and the same command then measured the landing
+    tree. So the failure git reports as a property of the two commits was a property of
+    the *clone*, which is why this is asked at all.
+
+    An answer this module cannot read is `False`, never a guess: a runner that cannot
+    run, or a git without `--is-shallow-repository`. The probe only ever adds a
+    sentence to a question that was already unanswered, so an unreadable probe must not
+    turn into a claim (nor into an exception that reports a crash as a verdict).
+    """
+    argv = ["git", "rev-parse", "--is-shallow-repository"]
+    try:
+        proc = run(argv) if cwd is None else run(argv, cwd)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (proc.stdout or "").strip() == "true"
+
+
 @dataclass(frozen=True)
 class Fold:
     """What `git merge-tree --write-tree A B` answered, read once.
@@ -227,6 +264,12 @@ class Fold:
     stderr: str
     tree: str | None
     paths: tuple[str, ...]
+    #: True only when this merge went unanswered *and* the clone has a shallow
+    #: boundary. The one fact that separates git's two reasons for the same refusal -
+    #: "no common ancestor" from "no common ancestor left in this clone" - so it is
+    #: asked only when there is a refusal to explain (one extra git call on the
+    #: failure path, never on the merges that answer).
+    shallow: bool = False
 
     @property
     def answered(self) -> bool:
@@ -252,9 +295,25 @@ class Fold:
 
     @property
     def diagnosis(self) -> str:
-        """The tail of what git said, for a caller that has to explain itself."""
+        """What git said, plus the clone's boundary when that is the missing half.
+
+        The tail of git's output, for a caller that has to explain itself - and, when
+        the merge went unanswered in a shallow clone, the one fact that separates the
+        two reasons behind it. Git's own sentence for both is `fatal: refusing to merge
+        unrelated histories`: the commits may really be unrelated, or this clone may
+        have cut their common ancestor off. Reported as one, the second reads as a fact
+        about the PRs; named, it is a one-command repair of the *checkout*.
+        """
         detail = (self.stdout[-500:] + self.stderr[-500:]).strip()
-        return detail or f"no output (exit {self.code})"
+        said = detail or f"no output (exit {self.code})"
+        if not self.shallow or self.answered:
+            return said
+        return (
+            said
+            + " - and this checkout is shallow (`git rev-parse --is-shallow-repository`"
+            " answers true), so a common ancestor may have been cut out of this clone"
+            " rather than never existing: run `git fetch --unshallow` and ask again"
+        )
 
 
 def fold(a: str, b: str, run: Callable[..., subprocess.CompletedProcess], cwd: str | None = None) -> Fold:
@@ -275,6 +334,7 @@ def fold(a: str, b: str, run: Callable[..., subprocess.CompletedProcess], cwd: s
         stderr=proc.stderr,
         tree=tree,
         paths=tuple(stage_block_paths(lines)) if tree is not None else (),
+        shallow=tree is None and shallow_boundary(run, cwd=cwd),
     )
 
 

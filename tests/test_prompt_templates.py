@@ -30,16 +30,20 @@ content is any good.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import jinja2
 import yaml
 
 from emrg.protocol import InstanceIdentity
+from emrg.sandbox.policy import SandboxPolicy
+from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.server import scheduler as mod
+from emrg.server.daemon import EmrgServer
 from emrg.server.scheduler import TaskHandler
-from emrg.tools import bash_tool
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROMPTS_DIR = REPO_ROOT / "emrg" / "server"
@@ -185,134 +189,265 @@ def test_no_prompt_names_a_placeholder_the_builder_does_not_provide(
             ) from exc
 
 
-# `{{ evolution_cwd }}` followed by the rest of the path it names.
-EVOLUTION_CWD_REF = re.compile(r"\{\{\s*evolution_cwd\s*\}\}([^\s`)\"'|,;]*)")
+# `{{ source_dir }}` followed by the rest of the path it names. After D9 (design §6 D9,
+# host decision 2026-09-21 16:25) every memory path in every template is written against
+# this root — the session workspace — because it is both the directory the sandbox
+# confines writes to and the directory whose `.emrg/memory/MEMORY.md` the daemon embeds.
+SOURCE_DIR_REF = re.compile(r"\{\{\s*source_dir\s*\}\}([^\s`)\"'|,;]*)")
 
 # A path suffix that routes through a `memory/` directory.
 _MEMORY_SEGMENT = re.compile(r"(?:^|/)memory/")
 
 
-def _evolution_memory_refs(text: str) -> list[str]:
-    """Path suffixes of ``{{ evolution_cwd }}`` references that name a memory dir."""
+def _source_dir_memory_refs(text: str) -> list[str]:
+    """Path suffixes of ``{{ source_dir }}`` references that name a memory dir."""
     return [
         suffix
-        for suffix in EVOLUTION_CWD_REF.findall(text)
+        for suffix in SOURCE_DIR_REF.findall(text)
         if _MEMORY_SEGMENT.search(suffix)
     ]
 
 
-def test_prompt_memory_writes_land_where_the_sandbox_allows_them() -> None:
-    """A prompt's memory path must be one the ``workspace-write`` sandbox trusts.
+def _sandbox_defines(name_fragment: str) -> list[str]:
+    """Functions under ``emrg/sandbox/`` whose name contains this text.
 
-    Measured 2026-09-14 (rant 2026-09-14T14:35:47): `open_source_prompt.md` sent the
-    agent's identity file and its "key findings" to `{{ evolution_cwd }}/memory/`,
-    i.e. `~/.emrg/evolution/memory/`. That is out of the sandbox's boundary — every
-    such write is refused with "blocked write outside workspace", which the rant
-    reports an open-source task hitting 32 times in one day — and it is the wrong
-    root anyway: the evolution data root is `{{ evolution_cwd }}/.emrg/`, the only
-    part of `{{ evolution_cwd }}` `bash_tool._trusted_write_zones()` trusts and the
-    only memory the daemon loads. The directory exists, so a write that gets through
-    by a route the command-line scan cannot see (an `open()` inside a heredoc, as the
-    rant documents) lands in a folder no memory loader reads.
-
-    The expected location is taken from the sandbox's own trust list rather than
-    copied here, so if that list moves, this test reports the prompts may be stale
-    instead of agreeing with a second copy of the rule.
-
-    Named limit: only ``{{ evolution_cwd }}``-rooted *memory* paths are checked.
-    The state-file / reflection-file mechanism the same rant retires is covered by
-    ``test_retired_state_file_mechanism_is_gone_or_being_swept`` below, and the
-    paths that replaced it live in the memory root this test measures.
+    Read with ``ast`` rather than by scanning the source text: the deleted mechanism is
+    still *named* in a docstring (`emrg/sandbox/roots.py` explains what it replaced), and
+    a text scan would report that explanation as the mechanism itself.
     """
-    root = Path(mod.EVOLUTION_CWD)
-    zones = bash_tool._trusted_write_zones()
-    assert zones, "no trusted write zone — this check would pass vacuously"
+    found: list[str] = []
+    for path in sorted((REPO_ROOT / "emrg" / "sandbox").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if name_fragment in node.name:
+                    found.append(f"{path.name}:{node.name}")
+    return found
 
-    # Self-test of the device: it must reject the exact shape the rant measured,
-    # and the machine must actually consider that shape outside the boundary.
-    planted = _evolution_memory_refs("write `{{ evolution_cwd }}/memory/identity.md`")
-    assert planted == ["/memory/identity.md"], planted
-    assert not any(
-        bash_tool._is_within(str(root / "memory/identity.md"), zone) for zone in zones
-    ), (
-        "`~/.emrg/evolution/memory/` is inside a trusted zone on this machine, so "
-        "this test cannot discriminate between the two roots here"
+
+def test_prompt_memory_writes_land_where_the_daemon_loads_them(tmp_path, monkeypatch) -> None:
+    """A prompt's memory path must be the directory whose index the daemon embeds.
+
+    Rewritten for D9 (design §6 D9, host decision 2026-09-21 16:25). What it replaced,
+    and why the replacement measures instead of trusting a copy of the rule:
+
+    The templates used to send the agent's identity file and its cycle records to
+    `{{ evolution_cwd }}/.emrg/memory/` — `~/.emrg/evolution/.emrg/memory/`. The daemon
+    loads `<session.cwd>/.emrg/memory/`, a *different* directory, so the prompt told the
+    agent to write somewhere whose index it never read. Two things kept that invisible:
+    no session embeds the old root, and the old command-line sandbox carried a trusted
+    extra root for it, so the write went through anyway. D5 deleted that extra root
+    (P1), which turns the path into a fail-closed refusal as soon as v2 is the boundary.
+
+    The expected root is therefore not copied here. It is **measured**, by handing the
+    daemon's own loader a session whose `cwd` is the `{{ source_dir }}` the template
+    renders: if the write root and the loaded root ever split apart again, this fails.
+
+    Named limit: only *memory* paths are checked, and only where a template spells one
+    as a literal `{{ source_dir }}` path. A path assembled at runtime, or one written
+    into a shell heredoc, is outside what any static scan can see.
+    """
+    handler = _make_handler(
+        tmp_path, monkeypatch, "evolution_prompt.md", {"project": "demoproj"}
     )
+    source_dir = Path(handler._source_dir)
+    source_dir_str = str(handler._source_dir)
+    memory_root = source_dir / ".emrg" / "memory"
 
+    # (1) Every memory path a template names is expressed against the workspace root.
     checked = 0
     for task_type, filename in _builtin_templates():
         text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
-        for suffix in _evolution_memory_refs(text):
-            target = str(root / suffix.lstrip("/"))
-            assert any(
-                bash_tool._is_within(target, zone) for zone in zones
-            ), (
-                f"{task_type}/{filename}: tells the agent to write {target!r}, "
-                f"which the workspace-write sandbox blocks (trusted zones: {zones}); "
-                f"the evolution memory root is `{{{{ evolution_cwd }}}}/.emrg/memory/`"
+        for suffix in _source_dir_memory_refs(text):
+            assert suffix.startswith("/.emrg/memory/"), (
+                f"{task_type}/{filename}: a memory path is `{{{{ source_dir }}}}"
+                f"{suffix}` — memory belongs under `{{{{ source_dir }}}}/.emrg/memory/`, "
+                f"which is the root the daemon loads"
             )
             checked += 1
-    assert checked >= 2, (
+    assert checked >= 8, (
         f"only {checked} memory path(s) found across the templates — the scan is "
         f"not looking at what it thinks it is"
     )
 
+    # (2) The placeholder resolves to that workspace, through the real builder.
+    rendered = handler._build_evolution_prompt()
+    assert f"{source_dir_str}/.emrg/memory" in rendered, (
+        f"the rendered prompt does not name {source_dir_str}/.emrg/memory — "
+        f"`{{{{ source_dir }}}}` is not resolving to the session workspace"
+    )
 
-# The memory root the sweep re-based every phase hand-off onto: writable (the
-# guard above proves it) and readable via the `read` tool — but its own index is
-# NOT the one the daemon embeds.
-SWEEP_MEMORY_ROOT = "evolution_cwd }}/.emrg/memory"
-_INDEX_IN_PROMPT = re.compile(r"(part of|embedded in) this prompt", re.IGNORECASE)
+    # (3) That workspace's `.emrg/memory` is what the daemon embeds as project memory.
+    memory_root.mkdir(parents=True, exist_ok=True)
+    (memory_root / "MEMORY.md").write_text("# Index\n", encoding="utf-8")
+    # `_collect_memory_data` touches only `session.cwd` and `session.memory_dir`, and
+    # reaches the module-level `INDEX_SIZE_WARN` through a method — so an uninitialised
+    # instance is enough, and no daemon, socket or event loop is started to measure this.
+    daemon = EmrgServer.__new__(EmrgServer)
+    data = daemon._collect_memory_data(
+        SimpleNamespace(cwd=source_dir, memory_dir=tmp_path / "session-memory")
+    )
+    assert data, (
+        "the daemon embedded no project index for a session whose cwd carries one — "
+        "the comparison below would be against nothing"
+    )
+    assert data["project_memory_dir"] == str(memory_root), (
+        f"the templates tell the agent to write under {memory_root}, but the daemon "
+        f"embeds {data['project_memory_dir']} as project memory — the write root and "
+        f"the loaded root have split apart again"
+    )
+
+    # (4) The extra-root mechanism the old root lived in is gone from the boundary that
+    # survives — D5 deleted it from v2 (P1). The frozen old tool keeps its own copy until
+    # P7 deletes that file, which is why this is asserted against `emrg/sandbox/`: that
+    # is the boundary every session is on, since P6 made it the default.
+    assert not _sandbox_defines("trusted_write_zone"), (
+        "an extra trusted write root is defined again under `emrg/sandbox/` — the "
+        "mechanism D5 removed is back, and with it the reason this file exists"
+    )
 
 
-def test_no_template_calls_the_write_root_index_its_own_prompt_index() -> None:
-    """A root that is only *writable* must not be described as *loaded*.
+# The two roots `EmrgServer._collect_memory_data` embeds an index from, in the spelling a
+# template names them: the session's *project* memory (`<session.cwd>/.emrg/memory/`) and
+# its *session* memory (`<session.cwd>/.emrg/sessions/<id>/memory/`). After D9 these are
+# also the only two memory roots any template names — the guard above proves the first is
+# the one the loader reads, and `{{ source_dir }}` IS `session.cwd` (`scheduler.py:1666`
+# builds the session with `cwd=self._source_dir`) — so "this prompt embeds that index" is
+# now true wherever it appears. The guard's job narrowed accordingly: it *keeps* it true,
+# by refusing the claim wherever it is paired with any other root — including a root that
+# is merely writable, which is the shape D9 removed.
+LEGAL_EMBEDDED_MEMORY_ROOTS = ("/.emrg/memory", "/.emrg/sessions/{{ session_id }}/memory")
+# Every spelling the templates use, both directions of the sentence: "the memory index is
+# part of this prompt", "the memory index embedded in this prompt", and "memory entries
+# under …, whose index this prompt embeds". The first version of this pattern knew only the
+# passive forms, which made it blind to four live paragraphs — measured 2026-09-23 by a
+# mutation arm: a claim re-based onto the old root ("…whose index this prompt embeds; write
+# them under `{{ evolution_cwd }}/.emrg/memory/`") went unflagged by this guard, and only
+# the memory-root scan caught it. A detector blind to the majority spelling of the thing it
+# looks for reports success by not looking.
+_INDEX_IN_PROMPT = re.compile(
+    r"(?:part of|embedded in)\s+this prompt\b|this prompt\s+embeds?\b", re.IGNORECASE
+)
 
-    Measured 2026-09-14 (cyc20260914-175549), on this branch before the fix: three
-    of the paragraphs re-based onto memory entries under
-    `{{ evolution_cwd }}/.emrg/memory/` also called that directory's index "part
-    of this prompt". It is not. `_collect_memory_data` embeds
-    `session.cwd/.emrg/memory/MEMORY.md` — the *task project's* index — and the
-    session index, and never `{{ evolution_cwd }}/.emrg/memory/MEMORY.md`;
-    measured by pointing `EVOLUTION_CWD` at a directory whose memory index carries
-    a marker and rendering the system prompt through the real builder: the marker
-    stays out while the project's appears. The two roots differ by construction on
-    this installation — `{{ evolution_cwd }}` is `~/.emrg/evolution` (988 files,
-    the durable record) while the embedded index belongs to the session's cwd,
-    `{{ evolution_cwd }}/emrg`.
+# `{{ <name> }}` plus the path it is followed by, up to a `memory/` segment. Multi-part:
+# the session root goes through two placeholders, so a single-placeholder pattern would
+# be blind to `promote_prompt.md` — the template that writes memory entries to *both* roots.
+_ROOTED_MEMORY_REF = re.compile(
+    r"\{\{\s*(?P<var>[\w.]+)\s*\}\}(?P<rest>(?:/[\w.{}\s-]+?)*/memory(?![-\w]))"
+)
 
-    The pairing is what is false, not the path: writing memory entries under that
-    root is correct (the sandbox trusts it, guarded above), and saying "the memory
-    index is embedded in this prompt" without naming a path is correct too. Naming
-    that path *and* claiming its index is in the prompt points the agent at a
-    place whose contents it will not find — the same defect family the sweep
-    exists to remove.
+
+def _embedded_index_claims(text: str) -> list[str]:
+    """Paragraphs that claim an embedded index while naming a root that is not one.
+
+    Only paragraphs carrying the claim are examined: naming a memory root without the
+    claim is what most of every template does, and is not this guard's business.
     """
-    planted = (
+    offenders: list[str] = []
+    for paragraph in text.split("\n\n"):
+        if not _INDEX_IN_PROMPT.search(paragraph):
+            continue
+        for match in _ROOTED_MEMORY_REF.finditer(paragraph):
+            rest = match.group("rest").replace(" ", "")
+            legal = [
+                root.replace(" ", "") for root in LEGAL_EMBEDDED_MEMORY_ROOTS
+            ]
+            if match.group("var") != "source_dir" or not any(
+                rest == candidate or rest.startswith(candidate + "/")
+                for candidate in legal
+            ):
+                offenders.append(paragraph.strip()[:140])
+                break
+    return offenders
+
+
+def _embedded_index_claim_counts(text: str) -> tuple[int, int]:
+    """Paragraphs that claim an embedded index, and how many also name a memory root.
+
+    The second number is what keeps this guard from passing on a *different* file: if the
+    claim and the path stopped co-occurring, every paragraph would be trivially legal and
+    the check would answer only about paragraphs that name nothing.
+    """
+    claims = paired = 0
+    for paragraph in text.split("\n\n"):
+        if not _INDEX_IN_PROMPT.search(paragraph):
+            continue
+        claims += 1
+        if _ROOTED_MEMORY_REF.search(paragraph):
+            paired += 1
+    return claims, paired
+
+
+def test_a_prompt_may_only_call_an_embedded_index_its_own() -> None:
+    """A root must not be described as *loaded* unless it is the loaded one.
+
+    Measured 2026-09-14 (cyc20260914-175549), before the fix: three of the paragraphs
+    re-based onto memory entries under `{{ evolution_cwd }}/.emrg/memory/` also called
+    that directory's index "part of this prompt". It never was. `_collect_memory_data`
+    embeds `session.cwd/.emrg/memory/MEMORY.md` — the *task project's* index — and the
+    session index, and never `{{ evolution_cwd }}/.emrg/memory/MEMORY.md`; measured by
+    pointing `EVOLUTION_CWD` at a directory whose memory index carries a marker and
+    rendering the system prompt through the real builder: the marker stayed out while
+    the project's appeared.
+
+    The pairing was what was false, not the path: naming that root is fine, and claiming
+    "the memory index is embedded in this prompt" without naming a path is fine. Naming a
+    root *and* claiming its index is in the prompt points the agent at a place whose
+    contents it will not find. D9 removed the false pairing at its root — the two legal
+    roots are now the two embedded ones — so this guard keeps the pairing true rather
+    than repairing it.
+
+    Named limit: the claim is matched only in the paragraph that carries the path. A
+    template that names a root in one paragraph and claims embedding three paragraphs
+    later is not caught; that shape is not in the templates, and detecting it needs a
+    notion of "about" this file does not have.
+    """
+    # The control: the exact shape the guard was written for. It must be flagged, and
+    # `{{ evolution_cwd }}/.emrg/memory/` is still a root a template could name.
+    planted_bad = (
         "Record findings under `{{ evolution_cwd }}/.emrg/memory/`, "
         "whose index is part of this prompt."
     )
-    assert SWEEP_MEMORY_ROOT in planted and _INDEX_IN_PROMPT.search(planted), (
+    assert _embedded_index_claims(planted_bad), (
         "the detector no longer detects the shape it was written for"
     )
+    # …and the two forms that are true stay legal, or the guard forbids saying what the
+    # daemon actually does.
+    assert not _embedded_index_claims(
+        "Record findings under `{{ source_dir }}/.emrg/memory/`, whose index is part of "
+        "this prompt."
+    ), "the project-memory root IS the embedded one; flagging it is a false positive"
+    assert not _embedded_index_claims(
+        "Durable facts belong in **memory entries under `{{ source_dir }}/.emrg/sessions/"
+        "{{ session_id }}/memory/`**, whose index this prompt embeds."
+    ), "the session-memory root is embedded too (promote_prompt.md writes there)"
+    assert not _embedded_index_claims(
+        "The memory index is embedded in this prompt, under the session's own `.emrg/`."
+    ), "a claim that names no root is not this guard's business"
 
-    paragraphs_naming_the_root = 0
+    claims = paired = 0
     suspects: list[str] = []
     for _task_type, filename in _builtin_templates():
         text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
-        for paragraph in text.split("\n\n"):
-            if SWEEP_MEMORY_ROOT in paragraph:
-                paragraphs_naming_the_root += 1
-                if _INDEX_IN_PROMPT.search(paragraph):
-                    suspects.append(f"{filename}: {paragraph.strip()[:140]}")
+        found, with_root = _embedded_index_claim_counts(text)
+        claims += found
+        paired += with_root
+        suspects += [f"{filename}: {p}" for p in _embedded_index_claims(text)]
 
-    assert paragraphs_naming_the_root >= 3, (
-        f"only {paragraphs_naming_the_root} paragraph(s) name the memory root — "
-        f"the scan is not looking where it thinks it is"
+    # Floors, measured when D9 landed: 10 paragraphs claim an embedded index and 5 of
+    # them pair the claim with a memory root. Both may grow; shrinking means the guard
+    # stopped looking (and the second, that its live half went vacuous).
+    assert claims >= 8, (
+        f"only {claims} paragraph(s) in the templates claim an embedded index — the "
+        f"scan is not looking where it thinks it is, so 'no offenders' says nothing"
+    )
+    assert paired >= 3, (
+        f"only {paired} of them also name a memory root — the pairing this guard exists "
+        f"to check is no longer exercised by any real paragraph"
     )
     assert not suspects, (
-        "these paragraphs name the memory root and also claim its index is in the "
-        "prompt, which the daemon never embeds:\n  " + "\n  ".join(suspects)
+        "these paragraphs claim an index is in the prompt while naming a root the "
+        "daemon does not embed:\n  " + "\n  ".join(suspects)
     )
 
 
@@ -533,79 +668,154 @@ def test_widened_fingerprint_is_measured_on_the_real_templates() -> None:
         )
 
 
-# `{{ evolution_cwd }}` is `~/.emrg/evolution/`, and the sandbox trusts only
-# `~/.emrg/evolution/.emrg/` — `bash_tool._trusted_write_zones()` returns exactly
-# that one root (measured 2026-09-19 on master `97479c19`). A template that names
-# `{{ evolution_cwd }}/journal_..._state.md` therefore sends the agent to a write
-# the tool layer refuses: `workspace-write sandbox: blocked write outside
-# workspace`. That was the journal template's state and reflection files until
-# the sweep (rant 2026-09-14T14:35:47, acceptance item 3: "提示词内不存在指向工作区
-# 之外的写路径"). This is the guard for that item — the retired-mechanism pattern
-# above cannot see it, because a *different* out-of-zone path is not the retired
-# mechanism.
-_EVOLUTION_CWD_REF = re.compile(r"\{\{ evolution_cwd \}\}(?P<rest>[^\s`)\]},;]*)")
+# The boundary every session is on since P6 made v2 the default is
+# `emrg/sandbox/roots.writable_roots`: the policy's workspace root plus the temp areas,
+# and **nothing else**, because D5 deleted EMRG's extra deployer root
+# (`bash_tool._trusted_write_zones()`, `~/.emrg/evolution/.emrg/`) rather than carrying it
+# over under another name. `{{ evolution_cwd }}` is `~/.emrg/evolution/` — a sibling of
+# the session's workspace — so every path under it is refused with `workspace-write
+# sandbox: blocked write outside workspace`. That is what made D9 a prerequisite of P7
+# rather than a tidy-up: the memory root the templates named was outside the boundary that
+# survives. The old wording of this block cited the trusted-zone list as the reason the
+# path was legal; the list is gone, so the claim moved with the zone.
+#
+# Acceptance item 3 of rant 2026-09-14T14:35:47 ("提示词内不存在指向工作区之外的写路径") is
+# still the claim, and this is still its guard — the retired-mechanism pattern above
+# cannot see it, because a *different* out-of-zone path is not the retired mechanism.
+_MEMORY_DIR_REF = re.compile(
+    r"\{\{\s*(?P<var>[\w.]+)\s*\}\}(?P<rest>(?:/[\w.{}\s-]+?)*/memory(?![-\w]))"
+)
+# A memory directory spelled as an absolute (or `~`-rooted) path: whatever a template
+# hardcodes is outside the placeholder mechanism, so it cannot be re-based by a change to
+# the render context, and it is right only on the machine it was written on.
+_ABSOLUTE_MEMORY_DIR = re.compile(r"(?:^|[\s`'\"(])(?P<path>[/~][\w./~-]*/memory(?![-\w]))")
 
 
-def _out_of_zone_refs(text: str) -> list[str]:
-    """Every `{{ evolution_cwd }}` reference that names something outside `.emrg/`.
+def _inside(path: Path, root: str) -> bool:
+    """Is ``path`` at or under ``root``, in the identity the sandbox itself compares?
 
-    Two forms are legal, and only two: the bare root (used by the prohibition
-    sentence in `evolution_prompt.md`, which names the directory rather than a
-    path inside it) and `{{ evolution_cwd }}/.emrg/...` — the trusted subtree,
-    where the memory entries live.
+    Both sides go through ``canonical_path`` because the Seatbelt provider matches
+    *resolved* paths, and a root compared as spelled matches nothing.
     """
-    out: list[str] = []
-    for match in _EVOLUTION_CWD_REF.finditer(text):
-        rest = match.group("rest")
-        if rest == "" or rest.startswith("/.emrg/"):
-            continue
-        out.append(match.group(0))
-    return out
+    resolved = Path(canonical_path(str(path)))
+    canonical_root = Path(canonical_path(root))
+    return resolved == canonical_root or canonical_root in resolved.parents
 
 
-def test_no_prompt_names_a_path_outside_the_trusted_write_zone() -> None:
-    """A template's write paths must stay inside the zone the sandbox trusts."""
-    seen_refs = 0
+def test_every_memory_root_a_template_names_is_writable() -> None:
+    """The templates' memory roots must lie inside the boundary the sandbox derives.
+
+    Two claims, and the second is the control that makes the first mean something:
+
+    1. the root the templates name is inside a writable root, so the writes the prompt
+       prescribes are not the ones the tool layer refuses;
+    2. the root D9 moved *off* is outside it — the measured reason the migration was a
+       prerequisite rather than a preference. Without (2) this would pass even if the
+       boundary had grown to cover every path, in which case the migration was pointless
+       and the guard's premise is unmeasured.
+
+    Neither side is a copy of the boundary: both call ``writable_roots`` with a policy
+    built here, so a boundary change moves the answer.
+    """
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(REPO_ROOT))
+    roots = writable_roots(policy)
+    assert roots, "the policy derived no writable root — this check would pass vacuously"
+
+    project_root = REPO_ROOT / ".emrg" / "memory"
+    assert any(_inside(project_root, root) for root in roots), (
+        f"{project_root} is outside every writable root the sandbox derives "
+        f"({roots}) — the memory root the templates name is one the tool layer refuses"
+    )
+
+    old_root = Path(mod.EVOLUTION_CWD) / ".emrg" / "memory"
+    if _inside(old_root, str(REPO_ROOT)):
+        raise AssertionError(
+            f"this checkout is placed such that {old_root} IS inside the workspace "
+            f"{REPO_ROOT} — the two roots are indistinguishable here, so this test "
+            f"cannot answer the question it asks (it reports that, rather than passing)"
+        )
+    assert not any(_inside(old_root, root) for root in roots), (
+        f"{old_root} is inside a writable root ({roots}) on this machine, so the D9 "
+        f"premise ('the old root is refused under v2') does not hold here — re-measure "
+        f"before believing the guards above"
+    )
+
+
+def _memory_root_offenders(text: str) -> tuple[int, list[str]]:
+    """Memory references in ``text``, and those of them rooted at the wrong place."""
+    legal = [root.replace(" ", "") for root in LEGAL_EMBEDDED_MEMORY_ROOTS]
+    checked = 0
+    offenders: list[str] = []
+    for match in _MEMORY_DIR_REF.finditer(text):
+        checked += 1
+        rest = match.group("rest").replace(" ", "")
+        if match.group("var") != "source_dir" or not any(
+            rest == candidate or rest.startswith(candidate + "/") for candidate in legal
+        ):
+            offenders.append(match.group(0))
+    for match in _ABSOLUTE_MEMORY_DIR.finditer(text):
+        offenders.append(match.group("path"))
+    return checked, offenders
+
+
+def test_no_template_names_a_memory_root_other_than_the_two() -> None:
+    """Every memory path in every template is rooted at the session workspace.
+
+    After D9 exactly two roots are legal, and both are the session workspace's own
+    (`LEGAL_EMBEDDED_MEMORY_ROOTS` — the project and session memory the daemon embeds,
+    which are the same two directories the sandbox allows because ``{{ source_dir }}`` IS
+    ``session.cwd``). Everything else is a defect of one of two kinds: rooted at another
+    variable (the D9 shape), or hardcoded as an absolute path (which no render-context
+    change can re-base, and which is correct only on the machine that wrote it).
+    """
+    checked = 0
     offenders: list[str] = []
     for _task_type, filename in _builtin_templates():
         text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
-        seen_refs += len(_EVOLUTION_CWD_REF.findall(text))
-        for ref in _out_of_zone_refs(text):
-            offenders.append(f"{filename}: {ref}")
-
-    # The scan must be looking somewhere: fewer references than the templates
-    # actually carry would mean this test passes by matching nothing.
-    assert seen_refs >= 8, (
-        f"only {seen_refs} `{{{{ evolution_cwd }}}}` reference(s) found across the "
-        f"built-in templates — the scan is not looking where it thinks it is"
+        found, bad = _memory_root_offenders(text)
+        checked += found
+        offenders += [f"{filename}: {ref}" for ref in bad]
+    # A floor, not a target: 13 references stood across the templates when D9 landed
+    # (10 project + 3 session). It may grow; shrinking means the scan stopped looking.
+    assert checked >= 13, (
+        f"only {checked} `{{{{ <var> }}}}/…/memory/` reference(s) found across the "
+        f"templates — the scan is not looking where it thinks it is"
     )
     assert not offenders, (
-        "these templates name a write path outside the sandbox's trusted zone "
-        f"(`~/.emrg/evolution/.emrg/`): {offenders} — the agent is sent to a write "
-        "the tool layer blocks"
+        f"these templates name a memory root that is neither the session workspace's "
+        f"project memory nor its session memory: {offenders}"
     )
 
 
-def test_the_write_zone_scan_answers_both_ways() -> None:
+def test_the_memory_root_scan_answers_both_ways() -> None:
     """The instrument's controls: what it flags, and what it must leave alone.
 
-    Without the refusing half this test would pass on a regex that matches
-    nothing; without the accepting half it would pass on one that refuses the
-    legal forms the swept templates actually use. Both halves are taken from
-    real template text.
+    Without the refusing half the scan would pass on a regex that matches nothing;
+    without the accepting half it would pass on one that refuses the legal forms the
+    templates actually use. Both halves are taken from real template text.
     """
-    assert _out_of_zone_refs(
-        "- State file: `{{ evolution_cwd }}/journal_argszero_x_editor_state.md`"
-    ), "the retired journal state-file path is exactly what this guard exists for"
-    assert _out_of_zone_refs(
-        "{{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_reflections.md"
-    ), "the retired reflection-file path must be flagged too"
-    assert not _out_of_zone_refs(
+    # Refuses: the root D9 re-based off, the same root reached through another variable,
+    # and a hardcoded absolute path.
+    assert _memory_root_offenders(
         "memory entries under `{{ evolution_cwd }}/.emrg/memory/`"
-    ), "the trusted subtree is where the replacement text sends the agent"
-    assert not _out_of_zone_refs(
-        "Do not modify files under `{{ evolution_cwd }}` outside `{{ source_dir }}/`"
-    ), "the bare root names the directory in a prohibition; it is not a write path"
+    )[1], "the D9 shape is exactly what the scan exists for"
+    assert _memory_root_offenders(
+        "write `{{ session_dir }}/memory/cycle-1.md`"
+    )[1], "a memory root behind any other variable is the same defect"
+    assert _memory_root_offenders(
+        "append to /Users/someone/.emrg/evolution/.emrg/memory/MEMORY.md"
+    )[1], "an absolute memory path cannot be re-based by the render context"
+    # Accepts: the two roots a template is allowed to name, in the spellings the
+    # templates actually use (both halves of the session root's two placeholders included).
+    assert not _memory_root_offenders(
+        "memory entries under `{{ source_dir }}/.emrg/memory/`"
+    )[1], "the project-memory root is where D9 sends every hand-off"
+    assert not _memory_root_offenders(
+        "`{{ source_dir }}/.emrg/sessions/{{ session_id }}/memory/`"
+    )[1], "the session-memory root is the second legal one (promote_prompt.md)"
+    assert not _memory_root_offenders(
+        "Write `{{ source_dir }}/.emrg/memory/cycle-{{ timestamp }}.md`"
+    )[1], "a *file* under the legal root is not a third root"
 
 
 # `open_source_prompt.md` is the one built-in template whose `{{ source_dir }}` is the HOST's own
