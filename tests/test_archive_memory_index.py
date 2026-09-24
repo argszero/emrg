@@ -310,6 +310,48 @@ def test_nothing_to_move_still_reports_the_row_length_rule(tmp_path, mod, capsys
     assert mod.main([str(index), "--cap", "50"]) == 0
     assert "over the per-row cap" in capsys.readouterr().err
 
+def test_check_mode_answers_from_one_snapshot(tmp_path, mod, monkeypatch, capsys):
+    """The count and the rule list must describe the same file.
+
+    The index has other writers — every task's cycles append to the same one — which is
+    why the move is a compare-and-swap and why `changed_since_planned` exists. `--check`
+    read the file **twice**: the printed count came from the first read and the rules
+    from the second, so a row appended in between put two snapshots in one answer, and
+    the two lines of that answer contradicted each other (`3 cycle row(s) …` beside
+    `VIOLATION: 4 cycle rows, over the cap 2`).
+
+    The file here is never written between the reads: the second read is made to return
+    a different text, which is what a parallel writer's append looks like from inside a
+    process whose other read already happened.
+    """
+    index = tmp_path / "MEMORY.md"
+    before = _write_index(index, [_row(NEW), _row(MID), _row(OLD)])
+    after = _write_index(index, [_row(NEW), _row(MID), _row(OLD), _row(NEWEST)])
+
+    real_read = Path.read_text
+    seen: list[str] = []
+
+    def racing_read(self, *args, **kwargs):
+        text = real_read(self, *args, **kwargs)
+        if self != index:
+            return text
+        seen.append(text)
+        return before if len(seen) == 1 else after
+
+    monkeypatch.setattr(Path, "read_text", racing_read)
+    assert mod.main([str(index), "--cap", "2", "--check"]) == 1
+    out = capsys.readouterr().out
+
+    counted = int(re.search(r"^(\d+) cycle row\(s\)", out, re.M).group(1))
+    violated = int(re.search(r"^VIOLATION: (\d+) cycle rows", out, re.M).group(1))
+    assert counted == violated, (
+        f"the answer describes two snapshots: it counts {counted} cycle row(s) and then "
+        f"reports {violated} over the cap\n{out}"
+    )
+    assert len(seen) == 1, (
+        f"the index was read {len(seen)} times; one answer must come from one snapshot"
+    )
+
 
 def test_the_verifiers_rules_fire_on_a_bad_plan(tmp_path, mod):
     """The guard's own arms: each rule must fire when the plan breaks it.

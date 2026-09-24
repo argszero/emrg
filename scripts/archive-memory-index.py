@@ -433,15 +433,22 @@ def verify_plan(plan: Plan, cap: int) -> list[str]:
     return problems
 
 
-def check_rules(index_path: Path, cap: int) -> list[str]:
-    """The row rules `--check` enforces (read-only).
+def check_rules(text: str, cap: int) -> list[str]:
+    """The row rules `--check` enforces, against the text it was handed (read-only).
 
     Rows this parser cannot read are not a rule `--check` can test - `main` refuses
     before either mode runs, because a rule list printed beside a count taken over
     the rows it *could* see is the false OK this tool exists to prevent. What is
     left here is what the protocol states about rows that are readable.
+
+    The **text**, not the path, and that is the point of the signature: `main` has
+    already read the index to answer the count it prints beside these rules, and
+    this function used to read the file a second time. The index has other writers
+    (every task's cycle appends to the same one - the reason `changed_since_planned`
+    exists), so an append between the two reads put two snapshots in one answer, and
+    the answer contradicted itself: `3 cycle row(s) of 3 row(s)` printed above
+    `VIOLATION: 4 cycle rows, over the cap 2`. One read, one snapshot, one verdict.
     """
-    text = index_path.read_text(encoding="utf-8")
     rows = parse_rows(text)
     problems: list[str] = []
 
@@ -688,7 +695,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.check:
-        problems = check_rules(index_path, args.cap)
+        # The same text the count above is taken from - one read, so the count and the
+        # rules cannot be about two different files (see `check_rules`).
+        problems = check_rules(index_text, args.cap)
         cycle_rows = [row for row in rows if row.is_cycle]
         print(f"index: {index_path}")
         print(f"{len(cycle_rows)} cycle row(s) of {len(rows)} row(s), cap {args.cap}")
