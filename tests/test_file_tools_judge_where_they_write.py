@@ -56,10 +56,19 @@ def _workspace(tmp_path: Path) -> Path:
 
 
 def test_a_relative_target_is_joined_onto_the_workspace_not_the_cwd(tmp_path, monkeypatch):
-    """The one decision, stated: the base is the declared workspace."""
+    """The one decision, stated: the base is the declared workspace.
+
+    The comparison is ``Path``-to-``Path``, not string-to-string, and that is a
+    measured requirement rather than tidiness: ``os.path.join`` appends the
+    second part **as spelled**, so a relative target written with a forward slash
+    comes back as ``…\\ws\\sub/f.txt`` on Windows — the mixed-separator spelling
+    of the file ``tmp_path/"sub"/"f.txt"`` names. String equality would call that
+    a regression on Windows and only on Windows (this test failed the Windows CI
+    leg on exactly that line, 2026-09-24); path equality compares the file.
+    """
     monkeypatch.chdir(tmp_path)
     ws = _workspace(tmp_path)
-    assert resolve_file_target("sub/f.txt", str(ws)) == str(ws / "sub" / "f.txt")
+    assert Path(resolve_file_target("sub/f.txt", str(ws))) == ws / "sub" / "f.txt"
     # An absolute target is judged as spelled; a caller that declared no boundary
     # has no base to join onto and keeps the old reading.
     assert resolve_file_target(str(tmp_path / "abs.txt"), str(ws)) == str(tmp_path / "abs.txt")
@@ -123,7 +132,13 @@ def test_a_relative_escape_is_judged_like_its_absolute_spelling(tmp_path, monkey
     # property under test. The refusal is additionally required to name where the
     # spelling resolved — a relative target that is refused without saying where it
     # pointed is the same "which file?" gap one layer down.
-    assert os.path.realpath(str(outside)) in relative_verdict, relative_verdict
+    #
+    # Compared as ``repr`` because that is how the message renders it (`{real!r}`):
+    # on Windows a raw backslash path is *doubled* inside the string, so the
+    # un-repr'd spelling is not a substring of it and this line was red on the
+    # Windows CI leg alone (measured 2026-09-24). ``repr`` is the same on both
+    # sides of that comparison, so one assertion holds on either platform.
+    assert repr(os.path.realpath(str(outside))) in relative_verdict, relative_verdict
     # The control: inside the workspace both spellings are allowed.
     inside = ws / "f.txt"
     assert check_workspace_write(str(inside), str(ws)) is None
