@@ -77,7 +77,7 @@ def _scan(mod, monkeypatch, chain, verdicts, prs=(1, 2), base=BASE):
     monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: heads[n])
     # The base is refreshed for real in `main` (a `git fetch`), so it is stubbed here:
     # a test that reaches the network is not a test of this tool. The call itself is
-    # asserted in `test_the_base_is_refreshed_before_it_is_read`.
+    # asserted in `test_the_base_is_refreshed_between_the_probe_and_the_read`.
     monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
 
     def fake_merge(a, b):

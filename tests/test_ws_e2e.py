@@ -987,7 +987,7 @@ class TestWSProtocol:
                 server, _, cleanup = await _boot_server(cwd)
                 try:
                     # Slow stream: the round is still in-flight when the
-                    # cancel lands (mirrors test_turn_start_end_broadcast's
+                    # cancel lands (mirrors test_turn_start_end_broadcast_lifecycle's
                     # slow_chat_stream pattern).
                     async def slow_chat_stream(messages, tools=None):
                         yield {"content": "处理中", "tool_calls": None,
