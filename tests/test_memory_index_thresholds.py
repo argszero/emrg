@@ -14,14 +14,28 @@ not: measured 2026-09-24, a 30,024-char / 61,160-byte CJK index fires the adviso
 while the cap truncates nothing. The band where they disagree is wide, because CJK
 runs ~3 bytes per character — and every index this machine actually carries is CJK.
 
-What has to hold, and why it does
----------------------------------
+What has to hold, and why it does — for one of the cap's two subjects
+--------------------------------------------------------------------
 Not "the two agree": they don't, and this file pins that they don't rather than
 pretending otherwise. What must hold is the direction the cap was written for —
 **the cap may only truncate an index the advisory has already flagged, never one it
 stayed silent about**. That holds structurally, not by luck: the advisory reads
 bytes, the cap reads characters, and UTF-8 never encodes a string in fewer bytes
 than characters, so `chars > T` implies `bytes > T`.
+
+**And it holds for the session index, which is the index this file measures.** The
+cap has two subjects (`EmrgServer._collect_memory_data` caps the project index and
+the session index) and an advisory for one: `_warn_index_thresholds` and the
+`_save_index` that calls it live on `SessionMemoryStore`, `ProjectMemoryStore`
+defines neither, and the hygiene note reads `session.memory_store`. Measured
+2026-09-24 on one fixture, both stores: a 56,214-char project index is truncated by
+the cap with **no advisory having looked at its size**, where the same file as a
+session index fires the advisory first. So a project index crossing the cap is the
+one case this file cannot pin — not a race and not a unit effect, but an absent
+reader — and it is filed as issue **#1581** (wire the project index to the same
+advisory, or state the asymmetry). Naming it here is the point: the claim above is a
+property of a surface, and a reader who takes it for a property of the cap will
+believe a truncated project index was warned about.
 
 The arms this guards against are the plausible single edits, not hypothetical ones.
 Change either reader alone and the pair stops being the pair: make the **cap** measure
@@ -132,8 +146,16 @@ def test_the_advisory_reads_bytes_while_the_cap_reads_characters(tmp_path, caplo
     )
 
 
-def test_the_cap_never_truncates_an_index_the_advisory_left_alone(tmp_path, caplog):
-    """The invariant the cap was written for: truncated ⟹ already flagged.
+def test_the_cap_never_truncates_a_session_index_the_advisory_left_alone(tmp_path, caplog):
+    """The invariant the cap was written for, on the index the advisory covers:
+    truncated ⟹ already flagged.
+
+    **The subject is the session index, and the name says so because that is the whole
+    scope of the claim.** `_advisory_fires` drives a `SessionMemoryStore`, so this test
+    cannot see the cap's other subject at all: the project index is truncated by
+    `_cap_memory_index` while no advisory watches it (issue **#1581**, measured — see
+    the module docstring). A name without the qualifier would read as a guarantee about
+    the cap, and would be false for half its surface.
 
     Measured on both an ASCII and a CJK index, since the CJK one is where the two
     units diverge most. This pins the ordinary case — over the threshold in both

@@ -151,11 +151,23 @@ INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 # (the incident the cap came from is quoted that way: 77% of a 452,972-char prompt).
 # The two disagree about one CJK index — measured 2026-09-24, a 30,024-char /
 # 61,160-byte index fires the advisory while the cap truncates nothing, and the band
-# where that happens is wide, since CJK runs ~3 bytes per character. The direction
-# that matters holds structurally rather than by luck: the cap can only truncate an
-# index the advisory has already flagged, never one it stayed silent about, because
-# UTF-8 never encodes a string in fewer bytes than characters. Mechanised in
-# `tests/test_memory_index_thresholds.py`.
+# where that happens is wide, since CJK runs ~3 bytes per character.
+#
+# Where the direction that matters holds, and where it does not — both measured
+# 2026-09-24, and the scope matters because the cap has **two** subjects. For the
+# **session index** it holds structurally rather than by luck: the cap can only
+# truncate it after the advisory has already flagged it, never while the advisory
+# stayed silent, because UTF-8 never encodes a string in fewer bytes than
+# characters. For the **project index** there is nothing to hold it: the cap
+# truncates that file too (`EmrgServer._collect_memory_data` caps both), while the
+# advisory is a `SessionMemoryStore` method that `ProjectMemoryStore` does not
+# define, and the hygiene note reads `session.memory_store`. Measured on one
+# fixture, both stores: a 56,214-char project index is **truncated with no advisory
+# having looked at it**, while the same file as a session index fires the advisory
+# first. So "the cap only truncates what was already flagged" is a property of one
+# surface, not of the cap — filed as issue #1581, whose remedies are to wire the
+# project index to the same advisory or to state the asymmetry here. Mechanised for
+# the session index in `tests/test_memory_index_thresholds.py`.
 INDEX_SIZE_WARN = 50 * 1024
 
 # Order of the `## type` sections when the index has to be rendered from
