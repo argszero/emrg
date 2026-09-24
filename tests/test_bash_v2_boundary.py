@@ -332,6 +332,63 @@ def test_the_deployer_declared_cache_wins(tmp_path, monkeypatch):
     assert "PIP_CACHE_DIR" in env, "the others are still relocated"
 
 
+# ── the runner's own import root ──────────────────────────────────────────
+#
+# The Windows rung runs its boundary as a Python entry, spawned with the session
+# workdir as its ``cwd``, and its argv keeps that workdir out of ``sys.path`` so a
+# checkout used as a workdir cannot shadow the package the runner must import
+# (``providers/win32.runner_invocation``).  That leaves the environment as the
+# only place the import root can come from — and this is it, read off the running
+# package rather than off a variable, so the runner imports the same code the
+# daemon does.
+
+
+def _running_root() -> str:
+    """The directory holding the ``emrg`` package this process imported."""
+    import emrg
+
+    return os.path.dirname(os.path.dirname(os.path.abspath(emrg.__file__)))
+
+
+def test_the_runner_is_told_where_the_package_it_must_import_lives(monkeypatch):
+    """Nothing to find, so the root is declared — on its own, and first."""
+    from emrg.tools.shell_env import runner_import_env
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    env = runner_import_env()
+    assert list(env) == ["PYTHONPATH"], "one variable, and only because none named the root"
+    assert env["PYTHONPATH"].split(os.pathsep) == [_running_root()]
+
+
+def test_the_root_is_prepended_to_the_deployers_own_entries(monkeypatch):
+    """Adding a root is not replacing one: nothing the deployer declared is dropped."""
+    from emrg.tools.shell_env import runner_import_env
+
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/deployer/first", "/deployer/second"]))
+    assert runner_import_env()["PYTHONPATH"].split(os.pathsep) == [
+        _running_root(),
+        "/deployer/first",
+        "/deployer/second",
+    ]
+
+
+def test_a_declaration_that_already_names_the_root_is_left_alone(monkeypatch):
+    """Production is the launcher's own answer (``bin/emrgd.cmd`` sets it), so nothing is added.
+
+    Asserted through a *different spelling* of the same directory — a trailing
+    separator and the platform's case convention — because comparing spellings
+    instead of directories would prepend a duplicate here and still look correct
+    in the two tests above.
+    """
+    from emrg.tools.shell_env import runner_import_env
+
+    spelling = _running_root() + os.sep
+    if os.name == "nt":
+        spelling = spelling.swapcase()
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([spelling, "/deployer/other"]))
+    assert runner_import_env() == {}
+
+
 def test_the_unconfined_path_relocates_nothing(tmp_path, monkeypatch):
     """``danger-full-access`` runs bare, so its caches belong where they always were."""
     import emrg.tools.bash_tool_v2 as v2

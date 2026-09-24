@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 # them by this path, and re-exporting is what keeps one definition while
 # leaving that surface where it was.
 from emrg.tools.shell_env import CACHE_ENV as _CACHE_ENV  # noqa: F401  (re-export)
-from emrg.tools.shell_env import confined_env  # noqa: F401  (re-export)
+from emrg.tools.shell_env import confined_env, runner_import_env  # noqa: F401  (re-export)
 
 
 #: Output budget and framing, unchanged from the old tool: keep stderr intact
@@ -374,11 +374,13 @@ async def run_command(
     )
     # The child's environment: the caller's, with interactive git prompts off
     # (that is the old tool's behaviour, kept) and — when this run really is
-    # confined and the mode grants somewhere to write — the package caches
-    # relocated into the run's granted temp area (see ``confined_env``).
+    # confined — the two things the boundary itself needs from it: the package
+    # caches relocated into the run's granted temp area, and the runner's own
+    # import root (see ``confined_env`` / ``runner_import_env``).
     child_env = no_prompt_env()
     if confined is not None:
         child_env.update(confined_env(policy))
+        child_env.update(runner_import_env())
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,

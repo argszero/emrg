@@ -24,7 +24,10 @@ Without the pair (standalone use), ``workspace-write`` treats ``--temp`` as a
 and removes that directory after the child exits.  In both flows the runner
 rewrites ``TMP``/``TEMP`` in its **own** environment before spawning, so the
 child inherits the private directory; ``read-only`` leaves the ambient temp
-entries untouched (writes there are denied anyway).
+entries untouched (writes there are denied anyway).  It also announces the
+granted workspace as git's ``safe.directory`` — the token's restriction changes
+the child's *identity*, which is what makes git refuse a repository the
+deployer's own elevated process created (``git_safety_env``).
 
 Failure contract: every runner-side failure (bad args, missing directories,
 token/grant/spawn errors) prints ``windows-acl-run: <detail>`` to stderr and
@@ -38,9 +41,10 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from emrg.sandbox.win32.ffi import Win32Bindings, win32
+from emrg.sandbox.win32.ffi import Win32Bindings, set_environment_variable, win32
 from emrg.sandbox.win32.sandbox import AclSandbox
 from emrg.sandbox.win32.sid import assert_temp_root_outside_workspace, temp_write_sid, workspace_write_sid
 from emrg.sandbox.win32.spawn import exit_status_for_mirroring
@@ -152,6 +156,72 @@ def require_directory(label: str, path: str) -> None:
         fail(f"{label} is not an existing directory: {path}")
 
 
+#: The variables git reads as extra global config entries (git ≥ 2.31).  They are
+#: the only way to hand git a config *entry* without writing a config file, which
+#: matters here: the private temp is the run's only writable directory and
+#: ``read-only`` grants none at all.
+GIT_CONFIG_COUNT = "GIT_CONFIG_COUNT"
+
+#: The git key that names a directory git may work in however it is owned.
+GIT_SAFE_DIRECTORY = "safe.directory"
+
+
+def git_safety_env(workspace: str, environ: Mapping[str, str]) -> dict[str, str]:
+    """The ``GIT_CONFIG_*`` entries that announce the granted workspace to git.
+
+    Why confinement alone is not enough: the ``WRITE_RESTRICTED`` token is also a
+    change of **identity**.  It carries the logon SID and Everyone, and the
+    capability SIDs — but not the group membership that made objects created by
+    this host's elevated daemon look like the caller's own, and the default owner
+    of such an object is ``BUILTIN\\Administrators``.  git refuses to work in a
+    repository whose owner is not the caller, and it refuses in a dialect no
+    denial signature covers.  Measured on Windows Server 2022 at both confined
+    tiers, with a repository at the granted workspace root:
+
+        $ git status --porcelain
+        fatal: detected dubious ownership in repository at '…'
+        [exit 128]
+
+    The same spawn outside the boundary exits 0, because an unrestricted
+    Administrator's token *is* an Administrators member — which is exactly the
+    trap: the failure appears only under the boundary, so a confined tier looks
+    unusable and the operator's way out is ``danger-full-access``.
+
+    The answer is to announce the root the policy granted, never to disable the
+    check: this value is the same directory the workspace ACE already names, so
+    git is told nothing the run was not already allowed to write.  Nested
+    repositories keep git's refusal, because git matches this value against the
+    repository path **exactly** (measured: a repository at ``<workspace>/sub/repo``
+    is still refused when the entry names ``<workspace>``); widening it to ``*``
+    would cover them, and would also cover every repository the child can reach
+    outside the grant, which is not this run's to declare safe.
+
+    An environment that already carries a count keeps it — the entry is appended
+    at the first free index — and a count that is not an integer leaves the
+    environment untouched rather than guessed at.
+
+    :param workspace: the canonical workspace root this runner was granted.
+    :param environ: the environment the entries are computed against.
+    :returns: the variables to set, or ``{}`` when nothing can be added safely.
+    """
+    index = 0
+    raw = environ.get(GIT_CONFIG_COUNT)
+    if raw is not None:
+        try:
+            index = int(raw)
+        except ValueError:
+            return {}
+        if index < 0:
+            return {}
+    while f"GIT_CONFIG_KEY_{index}" in environ or f"GIT_CONFIG_VALUE_{index}" in environ:
+        index += 1
+    return {
+        GIT_CONFIG_COUNT: str(index + 1),
+        f"GIT_CONFIG_KEY_{index}": GIT_SAFE_DIRECTORY,
+        f"GIT_CONFIG_VALUE_{index}": workspace,
+    }
+
+
 def _build_sandbox(parsed: ParsedArgs) -> tuple[AclSandbox, str | None]:
     """Turn the parsed argv into a ready-to-init sandbox.
 
@@ -217,10 +287,14 @@ def run(parsed: ParsedArgs, api: Win32Bindings) -> int:
         sandbox.init(api)
         initialized = True
         if sandbox.temp_dir is not None:
-            from emrg.sandbox.win32.ffi import set_environment_variable
-
             set_environment_variable(api, "TMP", sandbox.temp_dir)
             set_environment_variable(api, "TEMP", sandbox.temp_dir)
+        # The token's identity change travels with the child, and the granted
+        # workspace is the one directory this run may declare safe (see
+        # ``git_safety_env``): without it every git command in a workspace the
+        # deployer's own elevated process created is refused.
+        for name, value in git_safety_env(parsed.workspace, os.environ).items():
+            set_environment_variable(api, name, value)
         child = sandbox.spawn([parsed.command, *parsed.args])
         try:
             return child.wait()
