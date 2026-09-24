@@ -5236,6 +5236,40 @@ def _is_absolute_path(p: str) -> bool:
     )
 
 
+def resolve_file_target(file_path: str, workspace: str | None) -> str:
+    """The path the in-process file tools will actually touch (issue #1558).
+
+    One home for the base a relative ``file_path`` is joined onto, because the
+    defect this exists to close is precisely a disagreement: the predicates
+    below treated a relative target as "in the workspace" — a *spelling* — while
+    the write resolved it against the **daemon process's cwd**, a different tree.
+    The gate answered a question about one file and the write touched another, so
+    no gate downstream could refuse anything (there is no fence for in-process
+    writes, unlike bash, which is kernel-confined by the Seatbelt/bwrap profile).
+
+    So both callers read the same reduction here: the target joined onto the
+    directory the write happens in — ``workspace``, the session cwd the daemon
+    injects into ``write``/``edit`` exactly as it injects ``workdir`` into bash.
+    This is the same rule #1353 installed for the command scan (`os.path.join`
+    of the target onto the base the child starts in, then a realpath containment
+    test); the in-process tools have no child, so their base is the declared
+    workspace.
+
+    An absolute target is returned as spelled, and a relative one with **no**
+    workspace has no base to join onto — it is returned as spelled too, which is
+    the pre-existing behaviour for a caller that declared no boundary (the tools
+    are then fail-open, as their docstrings say).
+
+    :param file_path: the target as the model spelled it.
+    :param workspace: the session cwd, or ``None`` when none was declared.
+    :returns: the absolute target to judge and to write.
+    """
+    expanded = os.path.expanduser(file_path)
+    if not expanded or _is_absolute_path(expanded) or not workspace:
+        return expanded
+    return os.path.join(os.path.expanduser(workspace), expanded)
+
+
 def _is_within(path: str, root: str) -> bool:
     """True when ``path`` (absolute) is inside ``root`` (absolute) or equals it.
 
@@ -5269,8 +5303,15 @@ def check_read_only_file_write(file_path: str, workspace: str | None = None) -> 
     read-only cycle can still record state and write its own artifacts — the
     guard protects the host's uncommitted work, not the agent's own scratch
     space. Mirrors the bash tool's read-only semantics for file tools.
+
+    A relative target is joined onto ``workspace`` first (issue #1558): this used
+    to realpath the spelling as given, i.e. against the **daemon's cwd**, while
+    the write that followed resolved it somewhere else — so a relative path could
+    land inside the workspace without this function ever having looked there. The
+    judgement and the write now name the same file, which is what makes the
+    containment answer mean anything. See :func:`resolve_file_target`.
     """
-    path = os.path.realpath(os.path.expanduser(file_path))
+    path = os.path.realpath(resolve_file_target(file_path, workspace))
     if workspace:
         ws = os.path.realpath(os.path.expanduser(workspace))
         if _is_within(path, ws):
@@ -5293,18 +5334,27 @@ def check_workspace_write(file_path: str, workspace: str | None = None) -> str |
     (OS temp allowed — mirrors dsh's workspace + backend-promised temp area);
     returns None when allowed.
 
-    Relative paths are assumed in-workspace (cwd = the workspace root), matching
-    the bash tool's workspace-write semantics (2026-08-20T15:46:50) and dsh's
-    writableRoots single-source + tool-symmetry design. Without this check the
-    write/edit tools let ``workspace-write`` sessions write anywhere outside the
-    session cwd, while the bash tool is correctly blocked — the asymmetric hole
-    this function closes.
+    Relative paths are joined onto ``workspace`` and then judged exactly like
+    absolute ones (issue #1558) — they used to return early on the assumption
+    "cwd = the workspace root", which is not where a write resolves when the
+    caller passes the spelling the model gave it. That asymmetry inside one
+    function was the hole: the absolute branch below realpaths both sides and
+    requires containment, and the relative branch reached none of it. A relative
+    target with no declared workspace still has no base to join onto, so it keeps
+    the old reading — and both tools pass the joined target, so in daemon use
+    (``workspace`` always injected) the base is never in doubt.
+
+    Without this check the write/edit tools let ``workspace-write`` sessions write
+    anywhere outside the session cwd, while the bash tool is correctly blocked —
+    the asymmetric hole this function closes.
     """
     if not file_path:
         return None
-    expanded = os.path.expanduser(file_path)
+    expanded = resolve_file_target(file_path, workspace)
     if not _is_absolute_path(expanded):
-        # Relative target: assumed in-workspace (cwd = the workspace root).
+        # No workspace was declared, so there is no base to join onto and no
+        # boundary to require containment against (non-daemon use; the tools are
+        # fail-open there by construction).
         return None
     real = os.path.realpath(expanded)
     if real in _protected_paths():
@@ -5331,6 +5381,7 @@ def check_workspace_write(file_path: str, workspace: str | None = None) -> str |
     ):
         return (
             f"workspace-write sandbox: blocked write outside workspace {file_path!r}"
+            + (f" (resolves to {real!r})" if real != os.path.expanduser(file_path) else "")
         )
     return None
 
