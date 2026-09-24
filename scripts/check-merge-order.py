@@ -285,12 +285,28 @@ def _fetch_head(repo: str, number: int) -> str:
     sha = _rev_parse(ref)
     merge_tree.drop_ref(ref, run=_run)
     return sha
-def _conflict_paths(a: str, b: str) -> list[str] | None:
-    """Paths that conflict when `a` and `b` are merged; None if the merge is not answered.
+def _conflict_paths(a: str, b: str) -> tuple[list[str] | None, str]:
+    """`(paths that conflict, what git said)`; the paths are None if not answered.
 
     An empty list means the merge is clean - distinct from None, which means the
     question was not answered (a bad ref, a git that rejects `--write-tree`, or a
     report that names no merged tree).
+
+    **The second element is why this returns a pair.** Both callers below raise when
+    the answer is None, and they used to raise with a literal - "the merge question
+    was not answered" - so everything `merge_tree.Fold.diagnosis` learns was computed
+    for this gate and dropped (issue #1559). What that costs is not hypothetical: the
+    fold spends an extra git call to find out whether an unanswered merge is an
+    unrelated-history refusal *in a shallow clone*, the one fact that separates "the
+    PRs are at fault" from "this checkout cut their common ancestor off", and the
+    repair (`git fetch --unshallow`) is in git's words rather than in the literal. It
+    is carried as a value rather than fetched at the raise site because a second
+    `merge_tree.fold` would be a second measurement of a question already asked.
+    `check-merge-plan-suite.py::_merge_tree` needs no such carrier: its raises sit in
+    the fold's own frame, so `answer.diagnosis` is simply in scope. Here the raise is
+    one frame up, in `forecast`, so the one field that frame needs is what the pair
+    carries - not the whole `Fold`, whose other fields are this tool's mapping and
+    must not leak to a caller that would then re-derive them.
 
     **The exit code is not the answer; the name on the first line is.** Both of the
     answers this function can give have to be evidenced by `merge-tree`'s report,
@@ -318,14 +334,14 @@ def _conflict_paths(a: str, b: str) -> list[str] | None:
     """
     answer = merge_tree.fold(a, b, run=_run)
     if answer.verdict == "clean":
-        return []
+        return [], answer.diagnosis
     if answer.verdict != "conflict":
-        return None
+        return None, answer.diagnosis
     paths: list[str] = []
     for path in answer.paths:
         if path not in paths:
             paths.append(path)
-    return paths or None
+    return paths or None, answer.diagnosis
 
 
 def forecast(base: str, numbers: list[int], repo: str) -> dict:
@@ -336,22 +352,22 @@ def forecast(base: str, numbers: list[int], repo: str) -> dict:
     heads = {number: _rev_parse(_fetch_head(repo, number)) for number in numbers}
     report: dict = {"base": base_sha, "prs": {}, "base_conflicts": []}
     for number in numbers:
-        paths = _conflict_paths(base_sha, heads[number])
+        paths, diagnosis = _conflict_paths(base_sha, heads[number])
         if paths is None:
             raise RuntimeError(
                 f"could not classify PR #{number} against {base} - "
-                "the merge question was not answered"
+                f"the merge question was not answered: {diagnosis}"
             )
         report["prs"][number] = {"paths": paths, "dirtied": []}
         if paths:
             report["base_conflicts"].append(number)
     for i, a in enumerate(numbers):
         for b in numbers[i + 1 :]:
-            paths = _conflict_paths(heads[a], heads[b])
+            paths, diagnosis = _conflict_paths(heads[a], heads[b])
             if paths is None:
                 raise RuntimeError(
                     f"could not classify #{a} against #{b} - "
-                    "the merge question was not answered"
+                    f"the merge question was not answered: {diagnosis}"
                 )
             if paths:
                 report["prs"][a]["dirtied"].append({"pr": b, "paths": paths})

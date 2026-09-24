@@ -77,7 +77,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 0, _TREE + "\n", ""),
         )
-        assert mod._conflict_paths("a", "b") == []
+        assert mod._conflict_paths("a", "b")[0] == []
 
     def test_a_conflicting_merge_names_the_paths(self, mod, monkeypatch) -> None:
         out = (
@@ -94,7 +94,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 1, out, ""),
         )
-        assert mod._conflict_paths("a", "b") == ["Agent.md"]
+        assert mod._conflict_paths("a", "b")[0] == ["Agent.md"]
 
     def test_two_conflicted_paths_are_both_reported_and_not_duplicated(
         self, mod, monkeypatch
@@ -113,7 +113,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 1, out, ""),
         )
-        assert mod._conflict_paths("a", "b") == ["Agent.md", "tests/test_x.py"]
+        assert mod._conflict_paths("a", "b")[0] == ["Agent.md", "tests/test_x.py"]
 
     def test_a_bad_ref_is_not_reported_as_a_conflict(self, mod, monkeypatch) -> None:
         """rc 128 (unknown revision) must be "not answered", never "conflict".
@@ -129,7 +129,7 @@ class TestTheMergeQuestionIsAnswered():
                 argv, 128, "", "fatal: Not a valid object name"
             ),
         )
-        assert mod._conflict_paths("nope", "b") is None
+        assert mod._conflict_paths("nope", "b")[0] is None
 
     def test_a_conflict_with_no_parseable_block_is_also_not_answered(
         self, mod, monkeypatch
@@ -139,7 +139,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 1, "garbage\n", ""),
         )
-        assert mod._conflict_paths("a", "b") is None
+        assert mod._conflict_paths("a", "b")[0] is None
 
     def test_a_clean_exit_with_no_named_tree_is_not_an_answer(
         self, mod, monkeypatch
@@ -161,7 +161,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
         )
-        assert mod._conflict_paths("a", "b") is None
+        assert mod._conflict_paths("a", "b")[0] is None
 
     def test_a_conflict_block_without_a_named_tree_is_not_answered(
         self, mod, monkeypatch
@@ -184,7 +184,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 1, out, ""),
         )
-        assert mod._conflict_paths("a", "b") is None
+        assert mod._conflict_paths("a", "b")[0] is None
 
     def test_only_an_object_name_counts_as_the_named_tree(
         self, mod, monkeypatch
@@ -201,7 +201,7 @@ class TestTheMergeQuestionIsAnswered():
                 argv, 0, "merge-tree: not something we can merge\n", ""
             ),
         )
-        assert mod._conflict_paths("a", "b") is None
+        assert mod._conflict_paths("a", "b")[0] is None
 
     def test_both_object_formats_name_a_tree(self, mod, monkeypatch) -> None:
         """SHA-256 clones exist; the shape of the answer must not depend on the clone."""
@@ -210,7 +210,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 0, "a" * 64 + "\n", ""),
         )
-        assert mod._conflict_paths("a", "b") == []
+        assert mod._conflict_paths("a", "b")[0] == []
 
     def test_the_reading_decodes_the_names_git_writes(self, mod, monkeypatch) -> None:
         """The wiring arm: a pass-through copy of the shape answers a name nobody has.
@@ -241,7 +241,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 1, report, ""),
         )
-        assert mod._conflict_paths("a", "b") == ["\u4e2d\u6587.txt"]
+        assert mod._conflict_paths("a", "b")[0] == ["\u4e2d\u6587.txt"]
 
     def test_the_dedupe_and_the_not_answered_answer_stay_this_tools(
         self, mod, monkeypatch
@@ -265,7 +265,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 1, repeated, ""),
         )
-        assert mod._conflict_paths("a", "b") == ["Agent.md"]
+        assert mod._conflict_paths("a", "b")[0] == ["Agent.md"]
 
         blockless = _TREE + "\nCONFLICT (content): Merge conflict in Agent.md\n"
         monkeypatch.setattr(
@@ -273,7 +273,7 @@ class TestTheMergeQuestionIsAnswered():
             "_run",
             lambda argv: subprocess.CompletedProcess(argv, 1, blockless, ""),
         )
-        assert mod._conflict_paths("a", "b") is None, (
+        assert mod._conflict_paths("a", "b")[0] is None, (
             "a conflict whose paths the report does not name is 'not answered', "
             "never the clean answer"
         )
@@ -577,8 +577,8 @@ class TestAgainstRealGitHistory:
 
         monkeypatch.chdir(repo)
         mod = _load_module()
-        assert mod._conflict_paths("main", "clean") == []
-        assert mod._conflict_paths("main", "grow") == ["f.txt"]
+        assert mod._conflict_paths("main", "clean")[0] == []
+        assert mod._conflict_paths("main", "grow")[0] == ["f.txt"]
 
     def test_a_quoted_path_is_reported_as_the_real_name(self, tmp_path, monkeypatch):
         """The arm that tells a decoding reading from a pass-through one.
@@ -616,7 +616,7 @@ class TestAgainstRealGitHistory:
 
         monkeypatch.chdir(repo)
         mod = _load_module()
-        paths = mod._conflict_paths("main", "side")
+        paths = mod._conflict_paths("main", "side")[0]
         assert paths == [name], paths
         assert (repo / paths[0]).exists(), "the report named something unopenable"
 
@@ -1175,3 +1175,73 @@ class TestTheBaseIsRefreshedBeforeItIsRead:
         assert rc == 2, "an unverifiable base is not a pass"
         assert "could not measure" in err, err
         assert forecasts == [], "nothing may be forecast from a base that was not verified"
+
+
+# --- the refusal says what git said (#1559) --------------------------------------
+#
+# `_conflict_paths` folds the merge and knows more than "unanswered": the fold asks
+# whether the checkout is shallow, which is the one fact separating "these two
+# commits share no ancestor" from "this clone cut their ancestor off" - git answers
+# `fatal: refusing to merge unrelated histories` for both. That reading used to die
+# inside the helper, because `forecast` raised a literal. The pair carries it out.
+
+
+def _proc(returncode: int, stdout: str = "", stderr: str = ""):
+    """A `CompletedProcess` in the shape `_run` returns."""
+    return subprocess.CompletedProcess(["git"], returncode, stdout, stderr)
+
+
+def _a_refusing_git(shallow: bool):
+    """A git that refuses the merge, and answers the boundary question.
+
+    Exit 1 with **empty** stdout is the shape measured on real git against a depth-1
+    fetch (see `merge_tree.shallow_boundary`): a genuine conflict exits 1 too, but
+    names the merged tree on its first line, so an unnamed tree is the refusal.
+    """
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[1:2] == ["rev-parse"]:
+            return _proc(0, "true\n" if shallow else "false\n")
+        return _proc(1, "", "fatal: refusing to merge unrelated histories\n")
+
+    return run
+
+
+class TestTheRefusalCarriesWhatGitSaid:
+    """The diagnosis reaches the operator on both branches of the pair."""
+
+    def _refusal(self, mod, monkeypatch, shallow: bool) -> str:
+        monkeypatch.setattr(mod, "_fetch_head", lambda repo, number: "refs/x")
+        monkeypatch.setattr(mod, "_rev_parse", lambda ref: "0" * 40)
+        monkeypatch.setattr(mod, "_run", _a_refusing_git(shallow))
+        with pytest.raises(RuntimeError) as caught:
+            mod.forecast("origin/master", [7], "argszero/emrg")
+        return str(caught.value)
+
+    def test_a_shallow_clone_is_named_with_its_repair(self, mod, monkeypatch) -> None:
+        """Named, the refusal is one command on the checkout rather than a verdict on the PR."""
+        message = self._refusal(mod, monkeypatch, shallow=True)
+        assert "refusing to merge unrelated histories" in message, message
+        assert "git fetch --unshallow" in message, message
+
+    def test_a_complete_clone_is_not_accused_of_being_shallow(self, mod, monkeypatch) -> None:
+        """The control: the same refusal where the common ancestor really is absent."""
+        message = self._refusal(mod, monkeypatch, shallow=False)
+        assert "refusing to merge unrelated histories" in message, message
+        assert "unshallow" not in message, message
+
+    def test_the_pair_is_total_on_an_answered_merge(self, mod, monkeypatch) -> None:
+        """The other direction: the second element is not a failure-path-only extra.
+
+        A caller reading only the paths is unaffected by the change - which is what
+        makes the pair additive rather than a new contract to satisfy - and the
+        diagnosis is still there when a later reader needs it.
+        """
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 0, _TREE + "\n", ""),
+        )
+        paths, diagnosis = mod._conflict_paths("a", "b")
+        assert paths == []
+        assert isinstance(diagnosis, str)
