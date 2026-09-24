@@ -391,12 +391,47 @@ def test_cap_memory_index_large_file(tmp_path):
     line = "- [cyc00000000-000000](cycle-20260823-000000.md) — " + "x" * 100 + "\n"
     idx.write_text(line * 600, encoding="utf-8")  # ~64KB > the cap
     capped = server._cap_memory_index(idx)
-    assert len(capped) <= INDEX_SIZE_WARN + 200  # head + notice
-    assert "truncated" in capped
-    assert "cycle-archive" in capped
+    head, sep, _ = capped.partition("\n… [truncated")
+    assert sep, "an over-cap index must carry a truncation notice"
+    # The cap holds on the *head*, measured rather than approximated. This used
+    # to read `len(capped) <= INDEX_SIZE_WARN + 200`, a magic allowance standing
+    # in for a notice length the assertion could not know — so it would have
+    # passed for any notice up to 200 chars and said nothing about the head.
+    assert len(head) <= INDEX_SIZE_WARN
     # truncation lands on a line boundary (no half-cut index row)
     last_line = capped.rsplit("\n", 1)[1]
     assert last_line.startswith("… [truncated")
+
+
+def test_the_truncation_notice_names_where_the_cut_text_is(tmp_path):
+    """The notice sends the reader to the file the cut text is actually in.
+
+    The notice used to say the dropped rows "live in cycle-archive-*.md". That
+    file holds rows *removed* from the index under the 50-row cap, while the
+    embed cap cuts rows still *present* in it — so it named a place the hidden
+    text is not, in a line every request embeds. Measured 2026-09-24 on the live
+    evolution index: of the 71 non-blank lines the cut dropped, **0** appeared in
+    any of the 19 `cycle-archive-*.md` files (issue #1551).
+
+    The shape checked here is the one this level can check without depending on
+    which rows happen to be archived: with **no archive file in existence at
+    all**, the notice still has to name something that exists — so it names the
+    index it was cut from. A notice that points at an absent file fails the
+    first arm; one that drifts back to promising an archive fails the second.
+    """
+    server = _make_server()
+    idx = tmp_path / "MEMORY.md"
+    line = "- [cyc00000000-000000](cycle-20260823-000000.md) — " + "x" * 100 + "\n"
+    idx.write_text(line * 600, encoding="utf-8")
+    assert list(tmp_path.glob("cycle-archive-*.md")) == []  # nothing to point at
+
+    capped = server._cap_memory_index(idx)
+    assert str(idx) in capped, "the notice must name the file the cut text is in"
+    assert "cycle-archive" not in capped, (
+        "the notice must not promise a location it cannot vouch for: the archive "
+        "holds rows removed from the index, not the text the embed cap cut "
+        "(issue #1551)"
+    )
 
 
 def test_the_embed_cap_is_the_number_the_store_warns_by(tmp_path):

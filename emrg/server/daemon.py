@@ -1836,10 +1836,20 @@ class EmrgServer:
         # size of the cap it was cut against: stating the threshold again here
         # buys nothing and drifts (rant 2026-09-14T13:23:04). The number is the
         # store's to say, and it says it when it warns.
+        #
+        # It names where the cut text IS, which is this same file — not
+        # `cycle-archive-*.md`, as it used to. That file holds rows *removed* from
+        # the index under the 50-row cap; the embed cap cuts rows still *present*
+        # in it, so the notice was pointing at a place the text is not. Measured
+        # 2026-09-24 on the live evolution index (108,491 chars, cap 51,200): of
+        # the 71 non-blank lines the cut dropped, **0** appeared in any of the 19
+        # archive files (issue #1551). A notice embedded in the system prompt is
+        # read on every request, so it may not point the reader away from the text
+        # it just hid.
         return head + (
-            f"\n… [truncated {over} chars — MEMORY.md exceeds the "
-            "embed cap; older cycle rows live in cycle-archive-*.md, readable via "
-            "the read tool]"
+            f"\n… [truncated {over} chars — this index exceeds the embed cap; the "
+            f"whole file, this text included, is {path} — readable via the read "
+            "tool]"
         )
 
     def _collect_memory_data(self, session: Session) -> dict[str, Any] | None:
