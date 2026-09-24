@@ -1859,7 +1859,7 @@ class EmrgServer:
         project_dir = session.cwd / ".emrg" / "memory"
         pindex_path = project_dir / "MEMORY.md"
         if pindex_path.exists():
-            data["project_memory_index"] = self._cap_memory_index(pindex_path)
+            data["project_memory_index"] = self._index_for_prompt(pindex_path)
             data["project_memory_dir"] = str(project_dir)
             data["project_memory_index_path"] = str(pindex_path)
             data["has_memories"] = True
@@ -1867,12 +1867,59 @@ class EmrgServer:
         smem_dir = session.memory_dir
         sindex_path = smem_dir / "MEMORY.md"
         if sindex_path.exists():
-            data["session_memory_index"] = self._cap_memory_index(sindex_path)
+            data["session_memory_index"] = self._index_for_prompt(sindex_path)
             data["session_memory_dir"] = str(smem_dir)
             data["session_memory_index_path"] = str(sindex_path)
             data["has_memories"] = True
 
         return data if data["has_memories"] else None
+
+    def _index_for_prompt(self, path) -> str:
+        """One index as the prompt carries it, or a notice that it could not be read.
+
+        `_cap_memory_index` reads the file and lets whatever the read raises
+        through — right for a pure function, wrong at this call site. The raise
+        lands in `_build_system_prompt`, which `_run_tool_loop` calls on the first
+        line of a `create_task` nobody awaits: the turn dies before its first LLM
+        request, nothing is streamed to the client, and the daemon's stderr is
+        discarded. It is also **sticky** — the same file is re-read on every
+        request, so the session answers nothing at all until the file is repaired
+        by hand.
+
+        Measured 2026-09-24: a `MEMORY.md` that is not valid UTF-8 raises
+        `UnicodeDecodeError` out of `_cap_memory_index`, and a file that goes away
+        between the caller's `exists()` and the read raises `FileNotFoundError`.
+        The first needs no hand-made file: `MemoryIndex.save` writes with
+        `path.write_text` (truncate, then write), so a reader in another process —
+        a shell child of a second session, an editor, a second instance — can
+        observe a partially written index, and a cut inside a multi-byte character
+        *is* a decode error. Measured on a 200-KB CJK index, the shape every index
+        on this host has: **37 of 121** reads raised while the file was being
+        rewritten.
+
+        The two sibling readers in this module already answer this question the
+        same way — `_collect_project_context` catches `(OSError, UnicodeDecodeError)`
+        per context file, and the file-preview handler answers `UnicodeDecodeError`
+        with a `binary` flag — so this was the one reader of a comparable file with
+        no answer, on the path where a raise costs everything.
+
+        A notice rather than dropping the section, because the prompt is the only
+        channel that reaches the agent on every request: the section stays present,
+        names the file and the reason, and the rows are still readable with the
+        `read` tool once the file is repaired. The notice carries no leading `…`,
+        which in `_cap_memory_index`'s notice means "text was dropped here": here
+        nothing was cut, the whole index was replaced, and the two must not read
+        alike.
+        """
+        try:
+            return self._cap_memory_index(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.debug("memory index could not be read: %s", path, exc_info=True)
+            return (
+                f"[this memory index could not be read — {type(exc).__name__}: {exc}. "
+                f"The file is {path}; its rows are not in this prompt, and this "
+                "section stays empty until the file can be read again]"
+            )
 
     def _collect_history_data(self, session: Session) -> dict[str, str]:
         """Return structured session/history data for template."""

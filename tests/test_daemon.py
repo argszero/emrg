@@ -488,6 +488,96 @@ def test_collect_memory_data_no_index(tmp_path):
     assert server._collect_memory_data(session) is None
 
 
+# An index no reader can decode: byte 0xe9 is latin-1's "é" and is not valid
+# UTF-8 anywhere. Written as bytes so the fixture cannot be "fixed" by the
+# encoding the test happens to save it with.
+UNDECODABLE_INDEX = b"# Index\n\n- [caf\xe9](x.md) - latin-1 text, not utf-8\n"
+
+
+def test_an_unreadable_index_costs_the_section_not_the_turn(tmp_path):
+    """A bad byte in MEMORY.md must not take the session's every turn with it.
+
+    The raise this replaces lands in `_build_system_prompt`, the first line of
+    `_run_tool_loop`, which the caller reaches through a `create_task` nobody
+    awaits — so the turn died before its first LLM request, nothing was streamed
+    to the client, and the daemon's stderr is discarded. Sticky, because the same
+    file is re-read on every request.
+
+    Both scopes, because `_collect_memory_data` embeds two indexes and both go
+    through the same reader. The read is asserted to **really fail** first, so
+    the guard cannot pass by never being reached: a fixture that decodes would
+    make the two assertions below vacuous rather than the guard proven.
+    """
+    server = _make_server()
+    session = Session.create_with_id("mem-unreadable", tmp_path)
+    for directory, key in (
+        (tmp_path / ".emrg" / "memory", "project_memory_index"),
+        (session.memory_dir, "session_memory_index"),
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        idx = directory / "MEMORY.md"
+        idx.write_bytes(UNDECODABLE_INDEX)
+
+        with pytest.raises(UnicodeDecodeError):
+            server._cap_memory_index(idx)
+
+        data = server._collect_memory_data(session)
+        assert data["has_memories"] is True, f"{key}: the section was dropped"
+        text = data[key]
+        assert str(idx) in text, f"{key}: the notice must name the file it could not read"
+        assert "UnicodeDecodeError" in text, (
+            f"{key}: the notice must say why — a reader who cannot name the reason "
+            "cannot tell a bad byte from a missing file from a permission problem"
+        )
+
+    # The exit point itself, driven once: `_build_system_prompt` is the first line
+    # of `_run_tool_loop`, so this is the call whose raise cost the whole turn.
+    prompt = server._build_system_prompt(session)
+    assert "could not be read" in prompt, (
+        "the prompt must carry the notice, not raise before the LLM request"
+    )
+
+
+def test_a_vanished_index_is_a_notice_too(tmp_path):
+    """The other half of the same read: the file is there when it is checked and
+    gone when it is read (`pindex_path.exists()` … `_cap_memory_index(path)`).
+
+    Reached through the helper directly, because the caller's `exists()` is what
+    normally keeps this branch out of play — the window it opens is the reason
+    the branch exists.
+    """
+    server = _make_server()
+    gone = tmp_path / "MEMORY.md"
+
+    with pytest.raises(FileNotFoundError):
+        server._cap_memory_index(gone)
+
+    text = server._index_for_prompt(gone)
+    assert str(gone) in text and "FileNotFoundError" in text
+
+
+def test_a_readable_index_still_reaches_the_prompt_verbatim(tmp_path):
+    """The negative half: the guard must add nothing to the ordinary path.
+
+    Without this, a notice returned for every index — decoded or not — would
+    satisfy the two tests above while silently replacing every prompt's memory
+    section with an error line.
+    """
+    server = _make_server()
+    session = Session.create_with_id("mem-readable", tmp_path)
+    directory = tmp_path / ".emrg" / "memory"
+    directory.mkdir(parents=True)
+    index_text = "# Memory Index\n\n- [row](x.md) — readable\n"
+    (directory / "MEMORY.md").write_text(index_text, encoding="utf-8")
+
+    data = server._collect_memory_data(session)
+
+    assert data["project_memory_index"] == index_text, (
+        "a readable, under-cap index must reach the prompt byte for byte"
+    )
+    assert "could not be read" not in data["project_memory_index"]
+
+
 # ── _count_chars_for_tokens ───────────────────────────────────────
 
 
