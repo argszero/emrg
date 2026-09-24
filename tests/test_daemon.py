@@ -19,7 +19,7 @@ import pytest
 import yaml
 
 from emrg.config import LlmConfig
-from emrg.memory import INDEX_SIZE_WARN
+from emrg.memory import INDEX_SIZE_WARN, ProjectMemoryStore
 from emrg.protocol import InstanceIdentity, TaskRequest
 from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
@@ -486,6 +486,265 @@ def test_collect_memory_data_no_index(tmp_path):
     server = _make_server()
     session = Session.create_with_id("mem-none", tmp_path)
     assert server._collect_memory_data(session) is None
+
+
+# An index no reader can decode: byte 0xe9 is latin-1's "é" and is not valid
+# UTF-8 anywhere. Written as bytes so the fixture cannot be "fixed" by the
+# encoding the test happens to save it with.
+UNDECODABLE_INDEX = b"# Index\n\n- [caf\xe9](x.md) - latin-1 text, not utf-8\n"
+
+
+def test_an_unreadable_index_costs_the_section_not_the_turn(tmp_path):
+    """A bad byte in MEMORY.md must not take the session's every turn with it.
+
+    The raise this replaces lands in `_build_system_prompt`, the first line of
+    `_run_tool_loop`, which the caller reaches through a `create_task` nobody
+    awaits — so the turn died before its first LLM request, nothing was streamed
+    to the client, and the daemon's stderr is discarded. Sticky, because the same
+    file is re-read on every request.
+
+    Both scopes, because `_collect_memory_data` embeds two indexes and both go
+    through the same reader. The read is asserted to **really fail** first, so
+    the guard cannot pass by never being reached: a fixture that decodes would
+    make the two assertions below vacuous rather than the guard proven.
+    """
+    server = _make_server()
+    session = Session.create_with_id("mem-unreadable", tmp_path)
+    for directory, key in (
+        (tmp_path / ".emrg" / "memory", "project_memory_index"),
+        (session.memory_dir, "session_memory_index"),
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        idx = directory / "MEMORY.md"
+        idx.write_bytes(UNDECODABLE_INDEX)
+
+        with pytest.raises(UnicodeDecodeError):
+            server._cap_memory_index(idx)
+
+        data = server._collect_memory_data(session)
+        assert data["has_memories"] is True, f"{key}: the section was dropped"
+        text = data[key]
+        assert str(idx) in text, f"{key}: the notice must name the file it could not read"
+        assert "UnicodeDecodeError" in text, (
+            f"{key}: the notice must say why — a reader who cannot name the reason "
+            "cannot tell a bad byte from a missing file from a permission problem"
+        )
+
+    # The exit point itself, driven once: `_build_system_prompt` is the first line
+    # of `_run_tool_loop`, so this is the call whose raise cost the whole turn.
+    prompt = server._build_system_prompt(session)
+    assert "could not be read" in prompt, (
+        "the prompt must carry the notice, not raise before the LLM request"
+    )
+
+
+def test_a_vanished_index_is_a_notice_too(tmp_path):
+    """The other half of the same read: the file is there when it is checked and
+    gone when it is read (`pindex_path.exists()` … `_cap_memory_index(path)`).
+
+    Reached through the helper directly, because the caller's `exists()` is what
+    normally keeps this branch out of play — the window it opens is the reason
+    the branch exists.
+    """
+    server = _make_server()
+    gone = tmp_path / "MEMORY.md"
+
+    with pytest.raises(FileNotFoundError):
+        server._cap_memory_index(gone)
+
+    text = server._index_for_prompt(gone)
+    assert str(gone) in text and "FileNotFoundError" in text
+
+
+def test_a_readable_index_still_reaches_the_prompt_verbatim(tmp_path):
+    """The negative half: the guard must add nothing to the ordinary path.
+
+    Without this, a notice returned for every index — decoded or not — would
+    satisfy the two tests above while silently replacing every prompt's memory
+    section with an error line.
+    """
+    server = _make_server()
+    session = Session.create_with_id("mem-readable", tmp_path)
+    directory = tmp_path / ".emrg" / "memory"
+    directory.mkdir(parents=True)
+    index_text = "# Memory Index\n\n- [row](x.md) — readable\n"
+    (directory / "MEMORY.md").write_text(index_text, encoding="utf-8")
+
+    data = server._collect_memory_data(session)
+
+    assert data["project_memory_index"] == index_text, (
+        "a readable, under-cap index must reach the prompt byte for byte"
+    )
+    assert "could not be read" not in data["project_memory_index"]
+
+
+# ── the same condition on the client path ─────────────────────────
+#
+# `_handle_list_memories` / `_handle_read_memory` are reached from
+# `_process_message`, which `_handle_client` awaits inside its message loop. That
+# loop's `except Exception` ends the loop, and its `finally` cancels the session's
+# running tool task — so a raise from either handler does not fail a request, it
+# drops the client and the turn it was watching. Measured 2026-09-24 through this
+# dispatch, a 200-KB CJK index under a concurrent rewrite: 29 of 120
+# `list_memories` requests raised, and 41 of 120 `read_memory` requests raised
+# while 68 more answered "Memory not found" for a memory that was on disk.
+#
+# The same undecodable byte as `UNDECODABLE_INDEX`, in a memory file reached by id.
+UNDECODABLE_MEMORY = (
+    b"---\nid: aaaa1111\ntype: reference\nscope: project\nstatus: active\n"
+    b"title: A note \xe9\n---\n\nbody\n"
+)
+
+
+def _memory_project(tmp_path, index_bytes: bytes, note_bytes: bytes | None = None):
+    """A project whose memory directory holds `index_bytes` as MEMORY.md."""
+    directory = tmp_path / ".emrg" / "memory"
+    directory.mkdir(parents=True)
+    (directory / "MEMORY.md").write_bytes(index_bytes)
+    if note_bytes is not None:
+        (directory / "note.md").write_bytes(note_bytes)
+    return directory
+
+
+def _drive(server, msg: dict) -> list[dict]:
+    """One `_process_message` call, returning the frames it sent.
+
+    `_frames`, not `sent`: the daemon reaches the client through `_send` → `ws.send`,
+    and only `ws.send` records anything here.
+    """
+    writer = _FakeWriter()
+    asyncio.run(server._process_message(msg, writer))  # type: ignore[arg-type]
+    return [json.loads(raw) for raw in writer._frames]
+
+
+def test_an_unreadable_index_costs_the_listing_not_the_connection(tmp_path):
+    """A bad byte in MEMORY.md must not cost the client its connection.
+
+    The read is asserted to **really fail** first: a fixture that decodes would
+    make everything below vacuous rather than the guard proven.
+    """
+    server = _make_server()
+    directory = _memory_project(
+        tmp_path,
+        UNDECODABLE_INDEX,
+        note_bytes=(
+            b"---\nid: aaaa1111\ntype: reference\nscope: project\nstatus: active\n"
+            b"title: A note\n---\n\nbody\n"
+        ),
+    )
+    with pytest.raises(UnicodeDecodeError):
+        (directory / "MEMORY.md").read_text(encoding="utf-8")
+
+    # Driving the dispatch is the point: a handler-level catch would still leave
+    # the message loop's `except Exception` as the only thing between this file
+    # and a dropped connection.
+    frames = _drive(server, {"type": "list_memories", "scope": "project", "cwd": str(tmp_path)})
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    frame = frames[0]
+    assert frame["type"] == "memories_list"
+    assert "error" not in frame, (
+        "the listing must still arrive: the index is one field of the frame, and the "
+        "rows are readable ones the store already tolerates file by file"
+    )
+    assert [m["id"] for m in frame["memories"]] == ["aaaa1111"], (
+        "a bad index byte must not cost the memories the directory can still read"
+    )
+    assert str(directory / "MEMORY.md") in frame["index"]
+    assert "UnicodeDecodeError" in frame["index"], (
+        "the notice must say why — a reader who cannot name the reason cannot tell a "
+        "bad byte from a missing file from a permission problem"
+    )
+
+
+def test_a_readable_index_reaches_the_listing_verbatim(tmp_path):
+    """The negative half: the ordinary path gains nothing but the same text."""
+    server = _make_server()
+    index_text = "# Memory Index\n\n- [row](x.md) — readable\n"
+    _memory_project(tmp_path, index_text.encode("utf-8"))
+
+    frame = _drive(server, {"type": "list_memories", "scope": "project", "cwd": str(tmp_path)})[0]
+
+    assert frame["index"] == index_text
+    assert "could not be read" not in frame["index"]
+
+
+def test_a_memory_that_cannot_be_read_is_not_reported_as_absent(tmp_path):
+    """`None` from the store means two different things; the frame must not merge them.
+
+    "There is no such memory" and "I could not finish looking" are different
+    answers, and only the first is measured when a file cannot be decoded. The
+    store used to collapse them (the tolerant `(OSError, ValueError)` catch also
+    catches `UnicodeDecodeError`), and its second read raised out of the handler
+    on the same race.
+    """
+    server = _make_server()
+    directory = _memory_project(tmp_path, b"# Memory Index\n", note_bytes=UNDECODABLE_MEMORY)
+    with pytest.raises(UnicodeDecodeError):
+        (directory / "note.md").read_text(encoding="utf-8")
+
+    assert (directory / "note.md").exists(), "the file is there; it just cannot be read"
+
+    frames = _drive(
+        server,
+        {
+            "type": "read_memory",
+            "scope": "project",
+            "memory_id": "aaaa1111",
+            "cwd": str(tmp_path),
+        },
+    )
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    error = frames[0]["error"]
+    assert "Memory not found: aaaa1111" in error, "the id still has to be named"
+    assert "note.md" in error and "UnicodeDecodeError" in error, (
+        "the answer must carry what could not be read: the id cannot be matched "
+        "without reading the file, so a bare 'not found' claims more than the walk "
+        "measured"
+    )
+
+
+def test_a_missing_memory_is_still_a_plain_absence(tmp_path):
+    """The other negative half: no reason clause when nothing failed to be read.
+
+    Without this, appending a reason unconditionally would satisfy the test above
+    while making every real absence look like a read error.
+    """
+    server = _make_server()
+    _memory_project(tmp_path, b"# Memory Index\n", note_bytes=b"---\nid: bbbb2222\n---\n\nbody\n")
+
+    store = ProjectMemoryStore(tmp_path)
+    assert store.get_with_reason("nope") == (None, ""), (
+        "an id no file carries, with every file readable, is a plain absence"
+    )
+    assert store.get("nope") is None
+
+    frame = _drive(
+        server,
+        {
+            "type": "read_memory",
+            "scope": "project",
+            "memory_id": "nope",
+            "cwd": str(tmp_path),
+        },
+    )[0]
+    assert frame["error"] == "Memory not found: nope"
+
+
+def test_get_returns_the_memory_and_no_reason_when_readable(tmp_path):
+    """`get()` keeps its old answer for the ordinary case, and gains no raise."""
+    _memory_project(
+        tmp_path,
+        b"# Memory Index\n",
+        note_bytes=b"---\nid: cccc3333\ntitle: Readable\n---\n\n# Readable\n\nbody\n",
+    )
+    store = ProjectMemoryStore(tmp_path)
+
+    mem, why = store.get_with_reason("cccc3333")
+    assert mem is not None and why == ""
+    assert mem.title == "Readable"
+    assert store.get("cccc3333") is not None
 
 
 # ── _count_chars_for_tokens ───────────────────────────────────────
