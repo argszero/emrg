@@ -49,8 +49,13 @@ ABSOLUTE_ROOT = os.path.abspath(os.sep)
 
 #: How the Windows rung's runner is invoked.  Spelled out here rather than read
 #: back from the provider: a test that asks the code under test what it does can
-#: only ever agree with it.
-WINDOWS_ACL_INVOCATION = [sys.executable, "-m", "emrg.sandbox.win32.runner"]
+#: only ever agree with it.  ``-P`` is part of the invocation and not decoration —
+#: the seam spawns the runner with the session's workdir as its ``cwd``, and
+#: without the flag that workdir is the head of ``sys.path``, so an EMRG checkout
+#: used as a workdir shadows the package the runner must import.  ``-I`` is the
+#: neighbour that looks equivalent and is not: it implies ``-E``, which drops
+#: ``PYTHONPATH`` with it.
+WINDOWS_ACL_INVOCATION = [sys.executable, "-P", "-m", "emrg.sandbox.win32.runner"]
 
 
 def _grants(profile_args: list[str]) -> list[str]:

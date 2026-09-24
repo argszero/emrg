@@ -85,9 +85,30 @@ def runner_invocation() -> list[str]:
     replacement would keep the same contract"), and the seam sees one process
     either way.
 
+    ``-P`` is load-bearing rather than tidiness: ``-m`` puts the process's
+    **working directory** at the head of ``sys.path``, ahead of ``PYTHONPATH``,
+    and the seam spawns this runner with ``cwd`` set to the session's workdir
+    (:mod:`emrg.tools.pwsh_tool_v2`, :mod:`emrg.tools.bash_tool_v2`).  A workdir
+    that is itself an EMRG checkout — the ordinary state of this project's own
+    sessions — therefore shadows the installed package, and the runner dies at
+    import before it has spawned anything: measured on Windows Server 2022
+    under both confined tiers,
+
+        Error while finding module specification for 'emrg.sandbox.win32.runner'
+        (ModuleNotFoundError: No module named 'emrg.sandbox'), exit 1
+
+    The confined run then reports a failure that belongs to the boundary.  The
+    one-variable control is the same spawn with this flag, which exits 0.
+
+    ``-I`` is the tempting neighbour and is wrong: it implies ``-E``, so
+    ``PYTHONPATH`` is ignored too and ``emrg`` becomes unresolvable — the runner
+    cannot start at all.  Keeping the workdir out of ``sys.path`` moves the
+    runner's own import root onto the environment, which is why the seam hands
+    it one (:func:`emrg.tools.shell_env.runner_import_env`).
+
     :returns: the program plus the module that implements the runner.
     """
-    return [sys.executable, "-m", "emrg.sandbox.win32.runner"]
+    return [sys.executable, "-P", "-m", "emrg.sandbox.win32.runner"]
 
 
 @dataclass(frozen=True)

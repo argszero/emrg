@@ -44,9 +44,34 @@ DENIAL_SIGNATURES: tuple[str, ...] = ("operation not permitted",)
 
 #: ``sandbox-exec`` publishes no launcher-failure exit status, so the rule is
 #: signature-only, exactly as the blueprint has it.  A profile the kernel
-#: refuses (unbalanced parentheses, an unknown operation) exits 65 with
-#: ``sandbox-exec: <detail>`` on stderr — measured, and the only evidence that
-#: the command never ran.
+#: refuses exits 65 with ``sandbox-exec: <detail>`` on stderr — measured, and the
+#: only evidence that the command never ran.
+#:
+#: The lines, recorded rather than paraphrased because ``fatal_signatures`` is
+#: matched against them: ``/usr/bin/sandbox-exec`` on macOS 26.6.2 (build 25G83),
+#: each profile passed with ``-p``, the command ``/bin/echo hi``; all five cases
+#: exited 65 and printed the prefix first —
+#:
+#: * ``(version 1`` → ``sandbox-exec: syntax error: expecting ')'``
+#: * ``(version 1)(allow default)(bogus-op)`` → ``sandbox-exec: unbound variable:
+#:   bogus-op at <input string>, line 1, column 28``
+#: * ``(version 1)(allow default)(allow (bogus-filter))`` → the same, naming
+#:   ``bogus-filter``
+#: * ``(version 1)(allow default)(deny file-write* (literal "unterminated))`` →
+#:   ``sandbox-exec: Error reading string``
+#: * ``(allow default)`` → ``sandbox-exec: no version specified``
+#:
+#: So a profile ``seatbelt_profile_args`` builds that the kernel will not compile
+#: is a runner failure and not a denial, which is the distinction the rule exists
+#: for (a generator bug must not read as the policy saying no).
+#:
+#: The prefix is the half the rule matches on: unlike ``bwrap`` (whose ``linux``
+#: sibling records the same standard) no measured fatal line lacks it, and the
+#: bare detail is not a line this runner prints.  The exit status is *not* part of
+#: the rule even though 65 held in all five cases: that is one macOS version's
+#: behaviour, while the prefix is the launcher's own contract — and a gate would
+#: silently stop classifying a runner failure on a version that exits differently,
+#: turning the event this rule names into the denial it must not be read as.
 RUNNER_FAILURE_RULES: tuple[RunnerFailureRule, ...] = (
     RunnerFailureRule(fatal_signatures=("sandbox-exec: ",)),
 )

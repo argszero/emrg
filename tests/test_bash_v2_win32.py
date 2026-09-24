@@ -34,6 +34,7 @@ from emrg.sandbox.win32.runner import (
     RUNNER_SIGNATURE,
     RunnerFailure,
     _build_sandbox,
+    git_safety_env,
     main,
     parse_args,
     run,
@@ -47,6 +48,7 @@ from emrg.sandbox.win32.sid import (
     temp_write_sid,
     workspace_write_sid,
 )
+from emrg.tools.shell_env import runner_import_env
 
 #: A capability SID's string shape: ``S-1-4-<sub>-<sub>`` and the temp form's
 #: domain-separating ``-1``.
@@ -356,6 +358,7 @@ def test_the_runner_is_an_interpreter_entry_carrying_the_roots_and_the_mode():
     policy = SandboxPolicy(mode="read-only", workspace_root=os.path.abspath(os.sep))
     assert provider.runner_argv(policy) == [
         sys.executable,
+        "-P",
         "-m",
         "emrg.sandbox.win32.runner",
         "--workspace",
@@ -365,6 +368,26 @@ def test_the_runner_is_an_interpreter_entry_carrying_the_roots_and_the_mode():
         "--mode",
         "read-only",
     ]
+
+
+def test_the_runner_argv_keeps_the_workdir_out_of_sys_path():
+    """``-P``, and not the tempting neighbour that would break resolution instead.
+
+    The seam spawns this runner with ``cwd`` set to the session's workdir, and
+    ``-m`` resolves the module *through* ``sys.path``, whose head is that
+    workdir.  A workdir that is itself an EMRG checkout — this project's own
+    flagship session — then answers the import, and because a checkout need not
+    carry ``emrg/sandbox`` the runner dies before it has spawned anything; the
+    confined run reports it as the caller's command failing.  ``-P`` removes
+    exactly that entry.  ``-I`` looks like the same thing and is not: it implies
+    ``-E``, which ignores ``PYTHONPATH`` too, so ``emrg`` becomes unresolvable and
+    the runner cannot start at all — which is why the seam also hands the runner
+    its import root (``shell_env.runner_import_env``).
+    """
+    argv = provider.runner_invocation()
+    assert argv[1] == "-P", argv
+    assert "-I" not in argv and "-E" not in argv, argv
+    assert argv[-2:] == ["-m", "emrg.sandbox.win32.runner"], argv
 
 
 def test_a_session_run_hands_the_runner_both_capabilities_and_its_private_temp(store, monkeypatch, tmp_path):
@@ -602,15 +625,47 @@ needs_windows = pytest.mark.skipif(
 _TOKEN_USER = 1
 
 
+def _caller_ace(api, path, sid_ptr: int) -> None:
+    """Apply the ambient ACE a deployer's own workspace already carries.
+
+    Full control, not write alone, because the boundary checks a
+    ``WRITE_RESTRICTED`` child twice and a directory has to answer for both: the
+    capability ACE the sandbox added answers the restricting check, and this one
+    answers the check against the SIDs the token itself carries.  Write alone was
+    enough while the only subject was a file effect; it is not enough for a tool
+    that has to *open* the directory it works in (git reads the working directory
+    before it reads anything else), and the two arms would then be measuring the
+    harness's DACL instead of the boundary.
+
+    :param api: the binding table.
+    :param path: the directory that gains the ambient ACE, as a path string (the
+        API the sweep calls takes one).
+    :param sid_ptr: the caller's own SID, alive for the length of this call.
+    """
+    from emrg.sandbox.win32.abi import FILE_ALL_ACCESS, GRANT_ACCESS
+    from emrg.sandbox.win32.acl import (
+        build_explicit_access,
+        merge_and_apply,
+        read_current_dacl,
+        with_path_lock,
+    )
+
+    with with_path_lock(api, path):
+        current = read_current_dacl(api, path)
+        entry = build_explicit_access(sid_ptr, GRANT_ACCESS, FILE_ALL_ACCESS)
+        merge_and_apply(api, path, entry, current, "grantCaller")
+
+
 def _grant_caller(api, path) -> None:
-    """Give the running user's own SID write access to one boundary directory.
+    """Give the running user's own SID the control of one boundary directory it already has.
 
     Windows checks a ``WRITE_RESTRICTED`` child's access twice: once against the
     SIDs the token itself carries, and once against the restricting list.  A
     capability ACE can only answer the second, so a directory must already be
     reachable through the caller's own SID for the first — the blueprint's "the
     granted directories belong to the caller" precondition, and the ordinary
-    state of every workspace a deployer hands the sandbox.  Without it the
+    state of every workspace a deployer hands the sandbox (on this host's own
+    workspace: ``YD-RPA-NODE04\\Administrator:(I)(OI)(CI)(F)``).  Without it the
     restricted child is denied before the capability is ever consulted, which
     would make these tests measure the filesystem they run on rather than the
     boundary.
@@ -619,17 +674,17 @@ def _grant_caller(api, path) -> None:
     is a property of the harness rather than of the boundary: the ambient temp
     root above it grants the running user, while the pytest base directory is
     owned by ``BUILTIN\\Administrators`` and inherits only ``SYSTEM`` /
-    ``Administrators`` ACEs, which a filtered token reaches through no SID it
-    holds.  Granting the caller's SID restores what the tests assume; it does not
-    soften what they measure, because that SID appears in no restricting list, so
-    a capability ACE remains the only ACE a ``read-only`` child could use — and
+    ``Administrators`` / ``OWNER RIGHTS`` ACEs, which a filtered token reaches
+    through no SID it holds.  Granting the caller's SID restores what the tests
+    assume; it does not soften what they measure, because that SID appears in no
+    restricting list, so a capability ACE remains the only ACE a ``read-only``
+    child could use — and
     ``test_a_read_only_run_is_refused_inside_the_workspace_too`` is the proof
     that it still does not.
 
     :param api: the binding table.
     :param path: the directory that gains the ambient ACE.
     """
-    from emrg.sandbox.win32.acl import grant_write
     from emrg.sandbox.win32.ffi import alloc_bytes, alloc_uint32, decode_ptr, decode_uint32, is_null_ptr
     from emrg.sandbox.win32.token import open_current_process_token
 
@@ -651,7 +706,7 @@ def _grant_caller(api, path) -> None:
         assert read != 0, "the token's user SID could not be read"
         sid = decode_ptr(ctypes.c_void_p.from_address(ctypes.addressof(block)))
         assert not is_null_ptr(sid), "the token carries no user SID"
-        grant_write(api, str(path), sid)
+        _caller_ace(api, str(path), sid)
     finally:
         api.kernel32.CloseHandle(ctypes.c_void_p(token))
 
@@ -694,32 +749,36 @@ class _FakeUserSidApi:
 
 
 def test_grant_caller_grants_a_sid_that_its_own_buffer_still_owns(tmp_path, monkeypatch):
-    """The harness's one SID must outlive the grant call, exactly like the sandbox's.
+    """The harness's one SID must outlive the apply call, exactly like the sandbox's.
 
     ``_grant_caller`` reads a SID out of a ``TOKEN_USER`` block and passes the
-    *pointer* on, so the block has to be alive for as long as the grant call
-    needs it.  A helper that sized the block, read the SID and let it die would
-    hand ``grant_write`` an address the interpreter has already given to the next
-    allocation — the defect the sandbox itself carried (``NativeBuffer``),
-    reproduced in the test harness, where it would surface as the boundary test
-    being refused for a reason that has nothing to do with the boundary.
+    *pointer* on, so the block has to be alive for as long as the ACE that names
+    it is built and applied.  A helper that sized the block, read the SID and let
+    it die would hand the apply call an address the interpreter has already given
+    to the next allocation — the defect the sandbox itself carried
+    (``NativeBuffer``), reproduced in the test harness, where it would surface as
+    a grant that fails for a reason that has nothing to do with the boundary.
+
+    The seam is the harness's own apply step; what is asserted about it is the
+    pointer it receives, not how the product applies an ACE, and the pointer has
+    to survive the ambient churn that produced the original defect.
 
     The churn inside the granted call is that next allocation.  Nothing is
-    asserted about the memory after the call returns: the SID is consumed by
-    ``SetEntriesInAclW`` while the grant runs, which is the whole window the
-    buffer has to survive.
+    asserted about the memory after the call returns: the SID is copied by the
+    ACL merge while the apply runs, which is the whole window the buffer has to
+    survive.
     """
     api = _FakeUserSidApi()
     granted: list[tuple[str, int, bytes]] = []
 
-    def fake_grant_write(bindings, path, sid_ptr):
+    def fake_caller_ace(bindings, path, sid_ptr):
         for _ in range(256):
             ctypes.create_string_buffer(_FAKE_TOKEN_USER_SIZE)  # this block's own class
             ctypes.create_string_buffer(68)  # SECURITY_MAX_SID_SIZE
         gc.collect()
         granted.append((path, sid_ptr, ctypes.string_at(sid_ptr, 8)))
 
-    monkeypatch.setattr("emrg.sandbox.win32.acl.grant_write", fake_grant_write)
+    monkeypatch.setattr(sys.modules[__name__], "_caller_ace", fake_caller_ace)
     _grant_caller(api, tmp_path)
 
     assert api.sid_address is not None, "the fake never handed out a SID"
@@ -727,13 +786,28 @@ def test_grant_caller_grants_a_sid_that_its_own_buffer_still_owns(tmp_path, monk
     assert api.kernel32.closed == [0x7000], "the token it opened is closed again"
 
 
-def _confined(argv: list[str], workspace, temp_root, mode: str) -> subprocess.CompletedProcess:
-    """Spawn the runner the way the seam does, and let the child report for itself."""
+def _confined(
+    argv: list[str], workspace, temp_root, mode: str, cwd: str | None = None
+) -> subprocess.CompletedProcess:
+    """Spawn the runner the way the seam does, and let the child report for itself.
+
+    Both halves come from their production sources — the rung's own
+    ``runner_invocation`` and the seam's ``runner_import_env`` — rather than from
+    a copy spelled out here.  A copy is what this harness used to hold, and it is
+    how the argv could carry a flag the boundary tests never exercised.
+
+    ``cwd`` is the seam's third half and defaults to *inherited* only because most
+    of these tests are about the boundary rather than about a directory: the seam
+    itself always names the workdir (``pwsh_tool_v2``'s ``cwd=workdir``), the
+    confined child inherits it (``spawn_restricted`` passes it through), and a test
+    whose subject *is* a command's behaviour in a directory has to spawn from that
+    directory or it measures the test runner's instead.
+    """
+    env = dict(os.environ)
+    env.update(runner_import_env())
     return subprocess.run(
         [
-            sys.executable,
-            "-m",
-            "emrg.sandbox.win32.runner",
+            *provider.runner_invocation(),
             "--workspace",
             str(workspace),
             "--temp",
@@ -743,6 +817,8 @@ def _confined(argv: list[str], workspace, temp_root, mode: str) -> subprocess.Co
             "--",
             *argv,
         ],
+        cwd=None if cwd is None else str(cwd),
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -782,6 +858,57 @@ def test_a_confined_child_runs_and_reports_its_own_exit_code(tmp_path):
     completed = _confined([sys.executable, "-c", "pass"], workspace, tmp_path, "read-only")
     assert completed.returncode == 0, (
         f"a confined child did not run to completion ({_evidence(completed)})"
+    )
+
+
+@needs_windows
+def test_a_workdir_that_shadows_the_package_does_not_stop_the_runner(tmp_path):
+    """The workdir cannot answer the import the boundary itself needs.
+
+    Measured on Windows Server 2022: the same spawn with an argv that leaves the
+    workdir on ``sys.path`` dies here with
+    ``No module named 'emrg.sandbox'`` (exit 1), because the workdir holds an
+    ``emrg`` package of its own that resolution finds first.  That is not a
+    hypothetical checkout: it is the ordinary state of this project's own
+    sessions, and because such a checkout need not carry ``emrg/sandbox`` at all,
+    the run loses its boundary and reports the loss as the caller's command
+    failing.  The second arm is that failure, asserted rather than described, so
+    the flag stays load-bearing instead of decorative.
+    """
+    checkout = tmp_path / "checkout"
+    (checkout / "emrg").mkdir(parents=True)
+    (checkout / "emrg" / "__init__.py").write_text("", encoding="utf-8")
+
+    completed = _confined([sys.executable, "-c", "pass"], checkout, tmp_path, "read-only")
+    assert completed.returncode == 0, f"the workdir shadowed the package ({_evidence(completed)})"
+
+    shadowed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "emrg.sandbox.win32.runner",
+            "--workspace",
+            str(checkout),
+            "--temp",
+            str(tmp_path),
+            "--mode",
+            "read-only",
+            "--",
+            sys.executable,
+            "-c",
+            "pass",
+        ],
+        cwd=checkout,
+        env={**os.environ, **runner_import_env()},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        check=False,
+    )
+    assert "No module named 'emrg" in shadowed.stderr, (
+        f"the workdir did not shadow the package, so this arm proves nothing ({_evidence(shadowed)})"
     )
 
 
@@ -855,6 +982,95 @@ def test_a_read_only_run_is_refused_inside_the_workspace_too(tmp_path):
     assert not target.exists(), f"read-only wrote into the workspace ({_evidence(completed)})"
     assert completed.returncode != 0, f"the refusing child claimed success ({_evidence(completed)})"
     assert "denied" in completed.stderr.lower(), _evidence(completed)
+
+
+# ── what git is told about the granted workspace ──────────────────────────
+#
+# The token's restriction is also a change of identity, and git is the tool that
+# notices: it refuses a repository whose owner is not the caller, which is every
+# repository this host's elevated daemon created.  Measured on Windows Server
+# 2022, the refusal is the same at both confined tiers while the same command
+# outside the boundary exits 0 — so the confined tier looks unusable and the way
+# out an operator finds is `danger-full-access`.  The runner therefore announces
+# the root the policy granted, which is the directory its ACE already names.
+#
+# The keys are spelled out here rather than read back from the module: they are
+# git's vocabulary, and a test that asks the code under test how to spell them
+# can only ever agree with it.
+
+#: What a confined child can read back about git's own declaration.
+_GIT_SAFETY_SCRIPT = (
+    "import os;print(os.environ.get('GIT_CONFIG_COUNT'),"
+    " os.environ.get('GIT_CONFIG_KEY_0'),"
+    " repr(os.environ.get('GIT_CONFIG_VALUE_0')))"
+)
+
+
+def test_git_is_told_the_granted_workspace_is_safe():
+    """One entry, naming the granted root — nothing wider is this run's to declare."""
+    assert git_safety_env("C:\\work", {}) == {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "C:\\work",
+    }
+
+
+def test_git_entries_are_appended_to_a_deployers_own_count():
+    """A deployer's own ``GIT_CONFIG_*`` setup is extended, never overwritten."""
+    assert git_safety_env("/work", {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.pager"}) == {
+        "GIT_CONFIG_COUNT": "3",
+        "GIT_CONFIG_KEY_2": "safe.directory",
+        "GIT_CONFIG_VALUE_2": "/work",
+    }
+
+
+def test_an_entry_already_sitting_at_the_count_is_not_overwritten():
+    """The first *free* index is used, so an environment that disagrees with its own
+    count still keeps every entry it declared."""
+    assert git_safety_env("/work", {"GIT_CONFIG_KEY_0": "user.name"}) == {
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_1": "safe.directory",
+        "GIT_CONFIG_VALUE_1": "/work",
+    }
+
+
+@pytest.mark.parametrize("count", ["many", "-1"])
+def test_a_count_that_cannot_be_read_leaves_the_environment_alone(count):
+    """An unreadable count is not guessed at: a mangled ``GIT_CONFIG_*`` environment
+    is the deployer's to fix, and half-rewriting it would hide that."""
+    assert git_safety_env("/work", {"GIT_CONFIG_COUNT": count}) == {}
+
+
+@needs_windows
+def test_a_confined_git_run_works_in_the_workspace_it_was_granted(tmp_path):
+    """The measured failure, end to end: git works in the root the policy granted.
+
+    The declaration is asserted at the child as well as by the pure tests above,
+    because the two can come apart — the helper can be right while the runner
+    never applies it — and the end-to-end arm alone would pass on a host whose
+    workspace happens to be owned by the calling user, which is not this scenario.
+
+    Both arms run **in the granted root**: the repository's owner is what git
+    complains about, and a run from anywhere else would be asking git about a
+    different repository — the test runner's own checkout, which is exactly the
+    repository this harness used to interrogate by accident.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    api = ffi.win32()
+    _grant_caller(api, workspace)
+    _grant_caller(api, tmp_path)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True, capture_output=True)
+
+    declared = _confined(
+        [sys.executable, "-c", _GIT_SAFETY_SCRIPT], workspace, tmp_path, "read-only", cwd=workspace
+    )
+    assert declared.stdout.strip() == f"1 safe.directory {str(workspace)!r}", _evidence(declared)
+
+    status = _confined(
+        ["git", "status", "--porcelain"], workspace, tmp_path, "workspace-write", cwd=workspace
+    )
+    assert status.returncode == 0, f"git refused the granted workspace ({_evidence(status)})"
 
 
 # ── the SIDs a restricted token is built from ─────────────────────────────
