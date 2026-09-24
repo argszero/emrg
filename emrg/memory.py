@@ -142,7 +142,21 @@ VALID_STATUSES = {"active", "superseded", "merged"}
 # LLM-driven; these are soft guards (warn/truncate, never auto-delete).
 INDEX_TITLE_MAX_CHARS = 512  # max chars for one index title / line
 INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
-INDEX_SIZE_WARN = 50 * 1024  # >50KB MEMORY.md → consolidation recommended
+# >50KB MEMORY.md → consolidation recommended. One number, two *units*, which is
+# why neither site may assume the other's reading: the two advisory readers compare
+# it against the file's **byte** size (`SessionMemoryStore._warn_index_thresholds`
+# below, and the reflection prompt's hygiene note, which prints the reading as
+# "N bytes"), while `EmrgServer._cap_memory_index` applies it as a **character**
+# budget, because what it bounds is a prompt and prompts are counted in characters
+# (the incident the cap came from is quoted that way: 77% of a 452,972-char prompt).
+# The two disagree about one CJK index — measured 2026-09-24, a 30,024-char /
+# 61,160-byte index fires the advisory while the cap truncates nothing, and the band
+# where that happens is wide, since CJK runs ~3 bytes per character. The direction
+# that matters holds structurally rather than by luck: the cap can only truncate an
+# index the advisory has already flagged, never one it stayed silent about, because
+# UTF-8 never encodes a string in fewer bytes than characters. Mechanised in
+# `tests/test_memory_index_thresholds.py`.
+INDEX_SIZE_WARN = 50 * 1024
 
 # Order of the `## type` sections when the index has to be rendered from
 # entries alone (a rebuild, or entries the document never had). The parser

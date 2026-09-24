@@ -1818,11 +1818,22 @@ class EmrgServer:
         gets embedded; the full index and cycle-archive-*.md stay readable
         on disk via the read tool.
         """
-        # One knob, two readings. This used to spell the cap itself with a
-        # comment promising it matched `memory.INDEX_SIZE_WARN` — a promise nothing
-        # checked, so tuning the threshold the store warns by (the point of a soft
-        # guard) would leave the cap embedding an index the agent is already being
-        # warned about. The number is the store's; this reads it.
+        # One knob, two units. This used to spell the cap itself with a comment
+        # promising it matched `memory.INDEX_SIZE_WARN` — a promise nothing checked,
+        # so tuning the threshold the store warns by (the point of a soft guard)
+        # would leave the cap embedding an index the agent is already being warned
+        # about. The number is the store's; this reads it — but as a *character*
+        # budget, because a prompt is counted in characters, while the advisory
+        # readers compare the same constant against a *byte* file size
+        # (`SessionMemoryStore._warn_index_thresholds`, and the reflection prompt's
+        # hygiene note, which says "N bytes" as it prints it). "One knob, two
+        # readings" read as one unit, and was true only while the index was ASCII:
+        # measured 2026-09-24, a 30,024-char / 61,160-byte CJK index fires the
+        # advisory and leaves this cap silent. What must hold does hold, and
+        # structurally rather than by luck — this can only truncate an index the
+        # advisory already flagged, never one it stayed silent about, because UTF-8
+        # bytes never fall below characters — so the units stay as they are and the
+        # invariant is measured in `tests/test_memory_index_thresholds.py`.
         limit = INDEX_SIZE_WARN
         text = path.read_text(encoding="utf-8")
         if len(text) <= limit:
