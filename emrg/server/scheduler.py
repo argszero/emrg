@@ -54,6 +54,35 @@ def _receipt_note(receipt: str | None) -> str:
     return "; no receipt could be written (the stash is the durable record)"
 
 
+#: Where a *unique* tree's work is pinned before anything moves (host directive
+#: 2026-09-23). A ref rather than a file, because the question this guard asks is
+#: "does this content exist somewhere git can reach it?" — and a ref is the answer to
+#: exactly that question, so pinning makes the criterion *true* instead of making the
+#: tree absorbing (#1465).
+RESCUE_REF_PREFIX = "refs/emrg/rescue"
+
+
+def rescue_recipe(rescue_ref: str) -> str:
+    """The one place the *pinned* work's undo spelling is written.
+
+    Separate from :func:`recovery_recipe` because the selector differs, and the
+    difference is the reason the pin exists: an ordinary recovery is undone through the
+    stash list's ordinal, while a rescued tree is undone by **naming the ref**, which no
+    later stash, no `git stash drop` and no `git stash clear` can invalidate. Measured
+    in a scratch repository before this was written: after `git stash push
+    --include-untracked`, a ref at ``refs/emrg/rescue/<stamp>`` and then `git stash
+    clear` — so ``refs/stash`` is gone and every stash-shaped object is unreachable
+    *except* through the pin — `git stash apply --index refs/emrg/rescue/<stamp>`
+    restored the modification, the staged addition and the untracked file byte for byte,
+    with the index side still staged. `--index` carries the same requirement it has in
+    :data:`RECOVERY_RECIPE_TEMPLATE`.
+    """
+    return (
+        f"`git stash apply --index {rescue_ref}` (the ref outlives `git stash clear`; "
+        "`--index` restores the staged side too)"
+    )
+
+
 #: The undo recipe, written **once** (issue #1284). `{message}` is the stash message
 #: the recovery made; the placeholder form is what a reader sees when the receipt
 #: could not be read, because then there is no *this run's* message to name.
@@ -945,14 +974,22 @@ class TaskHandler:
 
         The exit the downgrade never had, performed by the daemon **itself** (host
         directive 2026-09-16: dirt must be recovered from, not merely detected and
-        reported). Nothing here is a decision for a human: the criterion says every
-        byte in the tree is already in ``HEAD`` or in the upstream tip, so moving it
-        aside cannot lose anything - and the move is a stash, which holds every byte
-        and is undone with ``git stash apply --index``, the spelling the receipt
-        names: a bare ``git stash pop`` is *not* the inverse, since it takes the
-        newest stash, brings a staged change back unstaged, and consumes the stash
-        (issue #1284). No branch is reset and no commit is dropped:
-        ``HEAD`` is compared before and after, and a moved ``HEAD`` is reported.
+        reported). Nothing here is a decision for a human: the move is a stash, which
+        holds every byte, and is undone with ``git stash apply --index``, the spelling
+        the receipt names: a bare ``git stash pop`` is *not* the inverse, since it takes
+        the newest stash, brings a staged change back unstaged, and consumes the stash
+        (issue #1284). No branch is reset and no commit is dropped: ``HEAD`` is compared
+        before and after, and a moved ``HEAD`` is reported.
+
+        **Work the criterion calls unique is pinned, not refused** (host directive
+        2026-09-23: a dirty tree must clean itself up, it must not get stuck — the
+        absorbing state tracked as #1465). "Found nowhere else" is a statement about
+        reachability, and a ref is reachability, so the tree is recorded under
+        ``refs/emrg/rescue/`` and the statement stops being true; the pin outlives
+        ``git stash clear``, which is measured rather than assumed
+        (:func:`rescue_recipe`). Refusing instead is what made the state absorbing: the
+        refusal arrived together with ``read-only``, and that tier refuses the git verbs
+        that would have converged the tree, so no cycle could leave it.
 
         **The criterion is measured here, always, and no caller can supply an
         answer.** An earlier revision accepted the caller's already-measured verdict
@@ -967,15 +1004,21 @@ class TaskHandler:
         described by the earlier answer while being moved by the later one.
 
         Answers ``(status, detail)``, and callers must **branch on the status** rather
-        than on truthiness - the four are not two:
+        than on truthiness - the three are not two:
 
-        ``"recovered"``  the tree was converged and verified clean; ``detail`` names
-                         the stash to reverse it;
+        ``"recovered"``  the tree was converged and verified clean; ``detail`` names the
+                         stash to reverse it, and — when the criterion called the dirt
+                         unique — the ``refs/emrg/rescue/`` refs that pin it;
         ``"clean"``      there was nothing to recover, no stash was made;
-        ``"refused"``    the tree holds work that exists nowhere else: **nothing was
-                         touched**, and ``detail`` names it;
-        ``"error"``      the question could not be answered, or the convergence
-                         failed; ``detail`` says which.
+        ``"error"``      the question could not be answered, or the convergence failed;
+                         ``detail`` says which, and when the tree *was* converged before
+                         the failure it names the stash holding every byte.
+
+        There is deliberately **no "refused"** any more: the status meant "the tree holds
+        work found nowhere else", which is now answered by pinning it instead of by
+        touching nothing. A guard whose only exit is an action a human must take is the
+        guard that strands the tree (#1465), and the criterion's own claim — that the
+        bytes are reachable from nowhere — is the claim a ref is able to falsify.
         """
         import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
 
@@ -1013,10 +1056,45 @@ class TaskHandler:
             return "clean", "the tree was already clean; nothing to recover"
 
         loses, reason = TaskHandler._dirty_tree_would_lose_work_sync(source_dir)
+        # Unique work no longer refuses the convergence (host directive 2026-09-23:
+        # a dirty tree must clean itself up, it must not leave the cycle stuck). The
+        # criterion keeps its useful half and loses the half that froze the tree:
+        #
+        #   * the stash was never the lossy step. `push --include-untracked` holds every
+        #     byte of an untracked file and of a staged change, and `refs/stash` is a
+        #     ref, so nothing it names can be collected while it stands;
+        #   * what made this state **absorbing** was the tier, not the move (#1465): the
+        #     refusal came with `read-only`, and read-only refuses the very git verbs
+        #     that would have converged the tree, so the state could only be left by a
+        #     human — measured over this host: 10/10 git mutators blocked, and even
+        #     `pytest` could not start.
+        #
+        # So the unique tree is **pinned** rather than refused: `HEAD` and then the stash
+        # commit are recorded under `refs/emrg/rescue/`, which is what "exists nowhere
+        # else" was about in the first place. Nothing is discarded at any point, and the
+        # pin survives `git stash clear` (measured — see `rescue_recipe`).
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        head_ref = f"{RESCUE_REF_PREFIX}/{stamp}-head"
+        head_pin_error = ""
         if loses:
-            return "refused", f"this tree holds work that exists nowhere else ({reason})"
+            # Pinned BEFORE anything moves, because the clause that made this tree unique
+            # can be about a **commit** rather than about the worktree ("a commit that
+            # exists in no ref other than this checkout's own two self-references", issue
+            # #1338) — and a stash does not move HEAD, so it cannot pin that. Recording
+            # HEAD first is also the only pin that can be taken without touching the tree.
+            #
+            # A failure here is recorded rather than fatal: the stash pin below is what
+            # holds the worktree's bytes, and refusing to converge because an *extra* pin
+            # could not be taken would rebuild the absorbing state (#1465) out of a
+            # belt-and-braces step. The receipt carries the reason either way.
+            pin = git("update-ref", head_ref, head.stdout.strip())
+            if pin.returncode != 0:
+                head_pin_error = (
+                    f"pinning HEAD at {head_ref} failed: "
+                    f"{(pin.stderr or pin.stdout).strip() or 'no output'}"
+                )
 
-        message = "emrg-recovery-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        message = "emrg-recovery-" + stamp
         stash = git("stash", "push", "--include-untracked", "-m", message, *spec)
         # `stash push -- <pathspec>` exits 1 with "No valid patches in input" when the
         # *tracked* diff under the pathspec is empty — measured for issue #1507: a staged
@@ -1042,6 +1120,34 @@ class TaskHandler:
             )
 
         head_after = git("rev-parse", "HEAD").stdout.strip()
+
+        # The second pin, and the one that carries the worktree's bytes: the stash commit
+        # itself. Read back and compared rather than trusted, because a pin that silently
+        # did not resolve is indistinguishable from no pin at all - and the failure that
+        # would follow (a later `git stash clear`, then a collectable object) is exactly
+        # the loss this whole path exists to make impossible.
+        rescue_ref = ""
+        if loses:
+            stash_sha = git("rev-parse", "refs/stash").stdout.strip()
+            if not stash_sha:
+                return "error", (
+                    "the tree was converged, but the stash it went into could not be read "
+                    "back to pin it; the stash itself is intact and holds every byte "
+                    f"(`git stash list` -> {message})"
+                )
+            rescue_ref = f"{RESCUE_REF_PREFIX}/{stamp}"
+            pin = git("update-ref", rescue_ref, stash_sha)
+            pinned_sha = git(
+                "rev-parse", "--verify", "--quiet", rescue_ref
+            ).stdout.strip()
+            if pin.returncode != 0 or pinned_sha != stash_sha:
+                return "error", (
+                    f"the tree was converged, but its work could not be pinned at "
+                    f"{rescue_ref} "
+                    f"({(pin.stderr or pin.stdout).strip() or 'the ref did not resolve'}); "
+                    "the stash itself is intact and holds every byte "
+                    f"(`git stash list` -> {message})"
+                )
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "repo": source_dir,
@@ -1061,6 +1167,18 @@ class TaskHandler:
             # Recorded rather than swallowed: the convergence is claimed on the state
             # below, so the receipt says what git reported alongside that claim.
             payload["stash_note"] = empty_patch
+        if loses:
+            # The half of the receipt a rescue adds: the criterion's own reason (why these
+            # bytes were treated as unique) and the two refs that now hold them. The
+            # manual tool reads `reversible_with`, so the pin's recipe goes there too -
+            # one spelling, one owner, exactly as the stash's does.
+            payload["rescued_unique"] = True
+            payload["rescue_reason"] = reason
+            payload["rescue_head_ref"] = head_ref
+            payload["rescue_ref"] = rescue_ref
+            payload["reversible_with"] = rescue_recipe(rescue_ref)
+            if head_pin_error:
+                payload["rescue_head_pin_note"] = head_pin_error
         receipt = TaskHandler._write_recovery_receipt(source_dir, payload)
         if head_after != head.stdout.strip():
             # Not expected - a stash does not move HEAD - so this is asserted rather
@@ -1071,15 +1189,22 @@ class TaskHandler:
                 f"(`git stash list` -> {message})"
                 + _receipt_note(receipt)
             )
+        if loses:
+            return "recovered", (
+                f"{len(before)} change(s) holding work that exists nowhere else "
+                f"({reason}) were stashed as {message} and PINNED: the work at "
+                f"{rescue_ref}, HEAD at {head_ref} (unmoved at {head_after[:8]}); "
+                f"reverse with {rescue_recipe(rescue_ref)}"
+                + (f"; {head_pin_error}" if head_pin_error else "")
+                + _receipt_note(receipt)
+            )
         return "recovered", (
             f"{len(before)} reconstructible change(s) stashed as {message}; "
             f"HEAD unmoved at {head_after[:8]}"
             + _receipt_note(receipt)
         )
 
-    async def _effective_sandbox(
-        self, dirty: bool | None = None, loses_unique: bool | None = None
-    ) -> str:
+    async def _effective_sandbox(self) -> str:
         """Per-cycle effective bash sandbox tier for the task message.
 
         Structural dirty-tree guard (community issue #979 — heinrichneb's
@@ -1100,19 +1225,33 @@ class TaskHandler:
         must be recovered from, not merely detected and reported - a guard whose exit
         is a command a human has to run is a guard that strands the tree):
 
-        * a dirty tree whose changes are all recoverable from ``HEAD`` or the upstream
-          tip is **converged by the daemon itself**, reversibly (stash, ``HEAD``
-          compared, receipt in the git dir), and the configured tier is left intact;
-        * a dirty tree holding anything found nowhere else is forced ``read-only`` as
-          before, with the offending paths named - the daemon touches nothing, because
-          discarding that is a decision for whoever wrote it.
+        * a dirty tree is **converged by the daemon itself**, reversibly (stash, ``HEAD``
+          compared, receipt in the git dir), and the configured tier is left intact —
+          whether or not its changes are recoverable from a commit the repository
+          already holds, because a stash holds either kind;
+        * a dirty tree holding anything found nowhere else is **pinned before it is
+          converged**: ``HEAD`` and the stash commit are recorded under
+          ``refs/emrg/rescue/``, which is what "found nowhere else" was about, so the
+          criterion is made *true* rather than merely reported. Host directive
+          2026-09-23: *a dirty tree must clean itself up, it must not get stuck.* No
+          byte is discarded in either case;
+        * only a convergence that **failed** forces ``read-only``, and that is no longer
+          an absorbing state: such a failure either moved nothing, or converged the tree
+          and named the ref holding the bytes.
 
-        The action re-measures the criterion and **its answer governs the tier**: a
-        refusal (unique work) or a failed convergence forces ``read-only`` regardless
-        of the verdict reached above, so the safety of the tree does not depend on how
-        this method's own parameters were filled in. ``loses_unique`` remains as a
-        test seam and an optimisation for the *log line*; it cannot unlock a tree
-        holding unique work, because the action would find it.
+        The action re-measures the criterion and **its answer governs what is pinned**,
+        so the safety of the tree does not depend on how this method's own parameters
+        were filled in — and there are no such parameters any more. ``dirty`` and
+        ``loses_unique`` were seams for the tests, and the pair was the same defect
+        ``_recover_dirty_tree_sync`` had already removed one level down (#1274): a
+        verdict a caller supplies is a verdict the guard believes, and believing it is
+        what makes the guarantee conditional. ``dirty=False`` on a tree that is dirty
+        was a guard bypass; ``dirty=True`` on a tree the test had not built was a
+        *destructive* seam — measured 2026-09-23, the flag alone drove a real
+        ``git stash push -u`` against this repository and moved an uncommitted fix out
+        of the working tree (recovered from the pinned stash). The probe and the
+        criterion are cheap, and the only production caller passed neither, so the
+        parameters are gone rather than documented.
 
         A human may still override with the env var ``EMRG_TASK_DIRTY_OVERRIDE``
         (comma-separated task names, or ``*`` for all); every release of the guard is
@@ -1125,10 +1264,9 @@ class TaskHandler:
         # `read-only` was EMRG's own, and the tier that followed from it is
         # what refused the git verbs that would have converged it.
         self._exclude_own_runtime_dir()
-        if dirty is None:
-            dirty = await asyncio.to_thread(
-                self._is_dirty_tree_sync, str(self._source_dir)
-            )
+        dirty = await asyncio.to_thread(
+            self._is_dirty_tree_sync, str(self._source_dir)
+        )
         if not dirty:
             return self._sandbox
         override = os.environ.get("EMRG_TASK_DIRTY_OVERRIDE", "")
@@ -1140,46 +1278,46 @@ class TaskHandler:
                 self.name, self._sandbox,
             )
             return self._sandbox
-        if loses_unique is None:
-            loses_unique, why = await asyncio.to_thread(
-                self._dirty_tree_would_lose_work_sync, str(self._source_dir)
-            )
-        else:
-            why = "reported by the caller"
-        if not loses_unique:
-            status, detail = await asyncio.to_thread(
-                self._recover_dirty_tree_sync, str(self._source_dir)
-            )
-            if status in ("refused", "error"):
-                # The action measures the criterion itself, so this is the freshest
-                # answer there is, and it governs: when it finds work that exists
-                # nowhere else - or cannot clear the tree - the cycle gets read-only
-                # even if the verdict above said otherwise. Without this, supplying a
-                # "no loss" verdict would buy a write-capable cycle on a tree holding
-                # unique work, which is the state the guard exists to prevent.
-                self._logger.warning(
-                    "TaskHandler[%s]: dirty working tree — self-recovery did not clear "
-                    "it (%s) — cycle forced read-only (structural guard, community "
-                    "issue #979 / #1237, audited receipt)",
-                    self.name, detail,
-                )
-                return "read-only"
-            self._logger.warning(
-                "TaskHandler[%s]: dirty working tree holding no unique work (%s) — "
-                "self-recovery %s; cycle keeps %s (structural guard, community "
-                "issue #979 / #1237, audited receipt)",
-                self.name, why, detail, self._sandbox,
-            )
-            return self._sandbox
-        self._logger.warning(
-            "TaskHandler[%s]: dirty working tree holding work that exists nowhere "
-            "else (%s) — cycle forced read-only (structural guard, community "
-            "issue #979); the daemon leaves that work untouched and names it here; "
-            "a human decides whether to commit, stash or discard it "
-            "(`scripts/recover-worktree.py --repo <dir>` reports the same verdict)",
-            self.name, why,
+        loses_unique, why = await asyncio.to_thread(
+            self._dirty_tree_would_lose_work_sync, str(self._source_dir)
         )
-        return "read-only"
+        # Both verdicts take the same action now (host directive 2026-09-23: a dirty tree
+        # must clean itself up, it must not leave the cycle stuck). What used to differ
+        # was not the *action* — a stash holds unique bytes exactly as it holds
+        # reconstructible ones — but the **tier** the verdict bought: unique work forced
+        # `read-only`, and read-only refuses the git verbs that converge a tree, so the
+        # verdict became self-fulfilling (#1465, #1552). The criterion is still measured,
+        # and still governs, in the one way that costs nothing: the action pins a unique
+        # tree (see `_recover_dirty_tree_sync`) before it moves anything.
+        #
+        # The action measures the criterion itself, so it is the freshest answer there is;
+        # what the tier now keys on is whether the convergence **succeeded**, which is a
+        # question about the tree rather than about a prediction of what discarding it
+        # would cost.
+        status, detail = await asyncio.to_thread(
+            self._recover_dirty_tree_sync, str(self._source_dir)
+        )
+        if status == "error":
+            # Kept as the fail-closed direction, and it is no longer absorbing: the
+            # recovery has either left the tree exactly as it found it (an "error" that
+            # moved nothing) or converged it and said where the bytes are (an "error"
+            # whose detail names the stash), so the next cycle's probe sees a clean tree.
+            self._logger.warning(
+                "TaskHandler[%s]: dirty working tree — self-recovery did not clear "
+                "it (%s) — cycle forced read-only (structural guard, community "
+                "issue #979 / #1237, audited receipt)",
+                self.name, detail,
+            )
+            return "read-only"
+        self._logger.warning(
+            "TaskHandler[%s]: dirty working tree holding %s work (%s) — self-recovery "
+            "%s; cycle keeps %s (structural guard, community issue #979 / #1237, "
+            "audited receipt)",
+            self.name,
+            "work that exists nowhere else, now pinned" if loses_unique else "no unique",
+            why, detail, self._sandbox,
+        )
+        return self._sandbox
 
     # ── Saturation state (restored from disk across daemon restarts) ──
 

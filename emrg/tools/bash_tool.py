@@ -2453,17 +2453,22 @@ def _unresolved_operator_run_tails(tokens: list[str],
 #
 # Only verbs whose destination option means one thing regardless of the other flags
 # are listed, because the alternative is a per-verb flag grammar (the #461 class).
-# `tar` is the case that proves the point and is deliberately absent: `-f`'s value
-# is a *write* under `-c`/`-r`/`-u` and a *read* under `-x`/`-t`, and `-C` is where
-# files land when extracting but only a directory to collect from when creating —
-# so `tar -cf out.tgz -C /etc .` writes nothing outside and would be falsely
-# refused by a rule that named `-C`. Measured ground truth for the families it does
-# not cover (`tar`, `git clone`, and the cluster spelling `curl -so<dir>`) is pinned
-# as a measured hole in `tests/test_bash_tool_option_destinations.py` — with the
-# verdict each one really gets rather than a blanket "allowed": all of them reach
-# `workspace-write` with an empty target list, and `git clone` is refused under
-# `read-only` by the git-mutator rule (which is not this walk) rather than by any
-# named destination.
+# `tar` is the case that proves the point and is still absent from *this table*: `-f`'s
+# value is a *write* under `-c`/`-r`/`-u` and a *read* under `-x`/`-t`, and `-C` is where
+# members land when extracting but only a directory to collect from when creating — so
+# `tar -cf out.tgz -C /etc .` writes nothing outside and would be falsely refused by a
+# rule that named `-C`. That is what made it a pinned hole here. What this table could
+# not express is decidable from the line itself — the operation letter chooses between
+# the two meanings — so tar left the hole table for a **per-verb rule**
+# (`_tar_write_targets`, measured table above `_TAR_LONG_OPERATIONS`, rows in
+# `tests/test_bash_tool_tar_targets.py`), the same departure `rsync`, `split`, `csplit`
+# and `zip` took; the objection above is answered by that rule, which names `-C` **only**
+# under `-x`, where members really land in it. Measured ground truth for what the table
+# still does not cover (`git clone`, and the cluster spelling `curl -so<dir>`) is pinned
+# as a measured hole in `tests/test_bash_tool_option_destinations.py` — with the verdict
+# each one really gets rather than a blanket "allowed": both reach `workspace-write` with
+# an empty target list, and `git clone` is refused under `read-only` by the git-mutator
+# rule (which is not this walk) rather than by any named destination.
 #
 # `rsync` used to be on that list and is no longer: its destination is an operand
 # rather than an option, so the list's own reason for excluding it never applied to
@@ -2482,8 +2487,9 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # its own file `tests/test_bash_tool_zip_archive.py`. Its row was added to the
 # pinned-hole table when `split` left, and removed again when the rule landed — the
 # same departure, not a reversal of it: what the table could not express is the
-# operand-shaped destination, and `zip` is one (`tar`'s per-verb grammar is the case
-# that still refuses a rule). The measured table for it is the comment above
+# operand-shaped destination, and `zip` is one. (The claim this sentence used to make —
+# that `tar`'s per-verb grammar is the case still refusing a rule — is no longer true;
+# see the `tar` paragraph above.) The measured table for it is the comment above
 # `_ZIP_OPTIONS_WITH_VALUE`, and the residual the rule still leaves — a spelling it
 # names nothing for — is recorded there rather than in the hole table.
 #
@@ -2611,8 +2617,9 @@ _OPTION_DESTINATION_VALUE_TAKING: dict[str, frozenset[str]] = {
 # A destination option's value can be **relocated** by a modifier option, and `curl`'s
 # `--output-dir` is the first of those this walk meets. It names no destination of its own
 # and alone writes nothing at all (measured below), so it does not belong in
-# `_OPTION_DESTINATION_VERBS`: naming it as one would be the false block `tar -C` is kept
-# out of this walk for. It is read as a modifier of the destination's value instead.
+# `_OPTION_DESTINATION_VERBS`: naming it as one would be a false block of the same class
+# `tar -C` is a false block of outside extract mode — a destination-shaped option that
+# alone writes nothing. It is read as a modifier of the destination's value instead.
 #
 # Measured 2026-09-21 on this host (curl 8.9.0, win64), one scratch directory per row, a
 # `file:///` source, the tree read back off disk after each run:
@@ -3360,7 +3367,8 @@ _WRITE_VERB_WORDS: frozenset[str] = frozenset().union(
     _PZSTD_VERBS,
     _BROTLI_VERBS,
     _OPTION_DESTINATION_VERBS,
-    {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip"},
+    {"git", "rsync", "split", "dd", "patch", "sed", "perl", "find", "csplit", "zip",
+     "tar", "bsdtar"},
 )
 
 
@@ -3696,6 +3704,14 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # remaining row). The rule, its measured table and its two named
             # limits are in `_zip_write_targets`.
             targets.extend(_zip_write_targets(tokens, i))
+        elif word in _TAR_PROGRAM_WORDS:
+            # `tar -cf <archive> f` creates the archive and `tar -xf <archive> -C <dir>`
+            # extracts into the directory — neither is an operand position a shared rule
+            # can reach, because `-f` is a write in one operation and a read in the next.
+            # The rule, its measured table and its named limits are in
+            # `_tar_write_targets`; the set it is asked about holds both of the words this
+            # host's tar answers to, because they name one binary.
+            targets.extend(_tar_write_targets(tokens, i))
         elif word == "sed":
             # `sed -i` rewrites its file operands in place; a bare `sed` is a
             # filter that writes only to stdout and must stay allowed. The flag
@@ -4610,6 +4626,307 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     if any(tok in _ZIP_MOVE_FLAGS for tok in words):
         return operands + logfile
     return operands[:1] + logfile
+
+
+# ── tar ───────────────────────────────────────────────────────────────────────
+#
+# `tar` is the verb `_OPTION_DESTINATION_VERBS` names as the proof that a destination
+# option does not mean one thing: `-f`'s value is a **write** under `-c`/`-r`/`-u` and a
+# **read** under `-x`/`-t`, and `-C` is where members land when extracting but only
+# where they are collected from when creating. That is why the shared table refuses it —
+# and why it is a **per-verb rule** instead, the same departure `rsync`, `split`,
+# `csplit` and `zip` took. The missing fact is the **operation letter**, and the command
+# line always spells it.
+#
+# Before this rule the run was invisible: `tar -cf <outside>/a.tar f` reported an empty
+# target list at both tiers, which is ALLOW by construction (the loop that judges targets
+# never runs) while the archive was really created outside every allowed root — the same
+# fail-open `gzip` had (#1418) and `zip` had (#1529).
+#
+# Measured 2026-09-22 on this host (bsdtar 3.5.3, libarchive 3.7.4), one scratch directory
+# per row, the tree read back off disk after each run:
+#
+#   tar -cf out/a.tar src/f.txt           rc=0  out/a.tar created
+#   tar cf out/b.tar src/f.txt            rc=0  out/b.tar created (dashless)
+#   tar -vcf out/i.tar src/f.txt          rc=0  out/i.tar created — the operation letter
+#                                                need not lead its cluster
+#   tar c -f out/n.tar src/f.txt          rc=0  out/n.tar created — dashless word, `-f`
+#                                                in a later word
+#   tar --create --file=out/c.tar f       rc=0  out/c.tar created
+#   tar --create --file out/d.tar f       rc=0  out/d.tar created
+#   tar -rf out/e.tar src/f.txt           rc=0  out/e.tar created — append *creates* one
+#   tar --append --file out/y.tar f       rc=0  out/y.tar created
+#   tar -uf out/g.tar src/f.txt           rc=1  `Cannot open …out/g.tar: No such file or
+#                                                directory`, nothing created
+#   tar --update -f out/z.tar src/f.txt   rc=1  the same
+#   tar -f out/l.tar src/f.txt            rc=1  `Must specify one of -c, -r, -t, -u, -x`,
+#                                                nothing created
+#   tar -fc out/j.tar src/f.txt           rc=1  the same — `f` takes `c` as its value, so
+#                                                no operation is left on the line
+#   tar -cf out/h.tar -C src f.txt        rc=0  out/h.tar created, `src` only read
+#   tar -cf out/u.tar src/f.txt cf        rc=0  archive created and then `cf` reported as
+#                                                an unstattable *member* — a later word is
+#                                                never an option word
+#   tar -cf - src/f.txt                   rc=0  the archive went to stdout, no file
+#   tar -tf ref.tar / tar --list -f ref   rc=0  nothing written (list mode)
+#   tar -tf ref.tar -C out                rc=0  nothing written
+#
+#   tar -xf ref.tar -C out                rc=0  members landed under `out`
+#   tar -xf ref.tar -Cout                 rc=0  the same (attached value)
+#   tar -C out -xf ref.tar                rc=0  the same — the directory may lead
+#   tar -xf ref.tar --directory out       rc=0  the same
+#   tar -xf ref.tar --directory=out       rc=0  the same
+#   tar -xf ref.tar --cd out              rc=0  the same
+#   tar --extract --directory out -f ref  rc=0  the same
+#   tar xf ../ref.tar (from out/)         rc=0  members landed in the cwd
+#   tar -xf ref.tar -C out/nope           rc=1  `could not chdir to 'out/nope'`, nothing
+#   tar -xOf ref.tar -C out               rc=0  **nothing created** — `-O` sends the
+#   tar -xO --directory out -f ref.tar    rc=0  members to stdout instead
+#   tar --get --directory out -f ref.tar  rc=1  `Option --get is not supported`
+#
+# What the rule reads, and why each half sits where it does:
+#
+# * the **operation letter** decides the meaning of both options, so it is read first.
+#   `c`/`r`/`u` (and `--create`/`--append`/`--update`) write the `-f` archive and only
+#   *read* `-C`; `x` (and `--extract`/`--get`) writes into `-C`; `t` (and `--list`)
+#   writes nothing at all. With **no** operation letter the run writes nothing at all
+#   (`tar -f out/l.tar x` is rc=1), so the rule names nothing — that row is what keeps a
+#   bare `-f` from becoming a false block.
+# * the letters are read the way getopt reads them: a value-taking letter consumes the
+#   rest of its cluster, or the **next word** when it is the cluster's last. That is what
+#   makes `-vcf out/i.tar` name `out/i.tar`, and what keeps `-fc out/j.tar` quiet — the
+#   second row is a measurement, and a scanner that only hunted the operation letter
+#   would read `f`'s value as the archive on the first and invent an operation on the
+#   second.
+# * the **dashless** spelling (`tar cf out/b.tar f`) is read only in the word immediately
+#   after the command, which is exactly where tar reads it: `tar -cf out/u.tar src/f.txt
+#   cf` created its archive and then failed to stat a *member* named `cf` (measured), so
+#   a later word is never an option word.
+# * under `-x`, a run that also spells `-O`/`--to-stdout` creates nothing even though
+#   `-C` is present (both rows above), so the to-stdout spelling gates the extraction
+#   branch the way `gzip -c` gates the compressor family — a read spelling is not a write
+#   just because a destination-shaped option came along.
+#
+# The two deliberate readings, each measured, each in the direction this walk treats as
+# the costly one (a loud over-block rather than a silent allow):
+#
+# * `--get` is read as extract although **this** host's bsdtar rejects it (rc=1, nothing
+#   created): on GNU tar it is a synonym for `--extract` and members really do land in
+#   `-C`, so the reading over-blocks here and names a real write there. The
+#   `--output-dir=` row above `_OPTION_RELOCATES_DESTINATION` makes the same trade.
+# * `-u`/`--update` against a **missing** archive writes nothing (measured, rc=1) and is
+#   still named, because with the archive present the same run rewrites it — what a run
+#   will do is not decidable from the command line, the answer `_zip_write_targets` gives
+#   the same question about a member pattern that matches nothing.
+#
+# Named limits, so a later reader does not mistake them for oversights: `-T`/`-X` (and the
+# long `--files-from`/`--exclude-from`) name member lists and exclude files, which are
+# **read**, never named; the values of `-b`, `-s` and `-I` are not paths; an **empty** or
+# `-` value is dropped rather than named (`-f -` writes the archive to stdout, and a token
+# that names nothing resolves to the cwd — the rule `_zip_out_values` states); and
+# **several** `-C` options are chained by tar rather than replaced until the last one wins
+# (`-C out --directory out2` failed with `could not chdir to 'out/out2'`, measured), while
+# this rule names each value as it is written — the literal reading the walk gives every
+# option value it does not resolve.
+_TAR_LONG_OPERATIONS: dict[str, str] = {
+    "--create": "c",
+    "--append": "r",
+    "--update": "u",
+    "--extract": "x",
+    "--get": "x",
+    "--list": "t",
+}
+# The long spellings that consume a following word, so that a value of theirs is never
+# read back as an option word of this run. Every one of them is named in this host's
+# manual; an exotic long option outside this list whose value itself starts with `-` is
+# the residual, and it can only make the rule read *more* letters than the run has.
+_TAR_LONG_WITH_VALUE = frozenset({
+    "--file", "--cd", "--directory", "--files-from", "--exclude-from", "--exclude",
+    "--format", "--block-size", "--options", "--uname", "--gname", "--newer",
+    "--newer-mtime", "--newer-than", "--newer-mtime-than", "--older", "--older-mtime",
+    "--older-than", "--older-mtime-than", "--strip-components",
+})
+# The programs this rule is about, which is **two words for one binary** rather than two
+# tools: on this host `/usr/bin/tar` is a symlink to `/usr/bin/bsdtar` (measured 2026-09-22:
+# `ls -l /usr/bin/tar` → `tar -> bsdtar`, and `/usr/bin/bsdtar --version` prints the
+# `bsdtar 3.5.3 - libarchive 3.7.4` the table below was measured with), so every row in
+# that table is this program's row whatever word reached it. The walk read only the word
+# `tar`, which left the same binary's other name naming nothing at all: measured on the
+# head of PR #1537, `bsdtar -cf <outside>/a.tar f` and `bsdtar -xf a.tar -C <outside>` were
+# ALLOW with an empty target list while their `tar` twins were refused. `_command_word`
+# already reduces a path or a `.exe` to its bare spelling, so `/usr/bin/bsdtar` is covered
+# by the same set. GNU tar keeps its own name (`gtar`) on systems that carry two tars; it is
+# a different implementation whose option list this table has not measured, so it is named
+# in issue #1538 with the rest of the measured remainder rather than read as if it were here.
+#
+# Two sites hold this fact and the tests keep them in step: the dispatch below reads this
+# set, and `_WRITE_VERB_WORDS` carries the same words so a name in **data** position stays a
+# mention (`echo bsdtar -cf out.tar f` names nothing) — a name added here without that entry
+# would refuse the mention, which the parametrised rows fail on.
+_TAR_PROGRAM_WORDS = frozenset({"tar", "bsdtar"})
+# `-t` is named although it writes nothing, because "this run writes nothing" is a
+# different answer from "this run has no operation" and the rule must not fuse them: the
+# first is a reading of the line, the second is a line tar itself refuses.
+_TAR_WRITING_OPERATIONS = frozenset("cru")
+_TAR_EXTRACTING_OPERATIONS = frozenset("x")
+_TAR_OPERATION_LETTERS = frozenset("crtux")
+# bsdtar's short options that take an argument, taken from its own manual (`-b blocksize`,
+# `-C directory`, `-f file`, `-I` — a synonym for `-T filename`, `-s pattern`,
+# `-T filename`, `-W` — bsdtar's word-shaped long option, `-X filename`) and each
+# measured through the cluster probe `tar -c<L>f out/p.tar src/f.txt`, where a
+# value-taking letter swallows the `f` and therefore creates **no** archive: `b C f I s T
+# W X` created nothing, `H L v z k Z` created one. `-O` is the letter that probe would
+# have mis-sorted — it created nothing either, but for a different reason (`Option -O is
+# not permitted in mode -c`), which is why it is not in this set.
+_TAR_VALUE_TAKING_LETTERS = frozenset("bCfIsTWX")
+# Every short letter this host's manual lists, read off its own option list
+# (`-c -r -t -u -x -a -B -b -C -f -H -h -I -J -j -k -L -l -m -n -O -o -P -p -q -S -s -T
+# -U -v -w -X -y -Z -z`), plus the two it does not carry: `-W`, which bsdtar parses as a
+# word-shaped long option (`tar -W foo …` answers `Option -W foo is not supported`, so the
+# following word is consumed), and `-i`, which this host's tar rejects outright (`tar -cif
+# …` prints its usage) while GNU tar reads it as `--ignore-zeros` — read for the reason
+# `--get` is, so the spelling that writes elsewhere is the one this walk judges.
+# The dashless word is read as an option cluster only when it is built from these, so a
+# member name that is not cannot be mistaken for one, while `tar c -f out/n.tar f` is read
+# the way tar reads it.
+_TAR_SHORT_LETTERS = frozenset("aBbcCfHhIijJklLmnoOpPqrsStTuUvwWxXyZz")
+_TAR_FILE_OPTIONS = ("-f", "--file")
+_TAR_DIRECTORY_OPTIONS = ("-C", "--cd", "--directory")
+_TAR_TO_STDOUT_OPTION = "--to-stdout"
+
+
+def _tar_option_word_body(tok: str, is_first: bool) -> str | None:
+    """The option letters ``tok`` carries, or ``None`` when it is not an option word.
+
+    Three shapes are option words: the dashed cluster (``-cf``, ``-Cout``), the dashless
+    old-style word (``cf``, ``x``) — read **only** in first position, where tar reads it
+    — and nothing else. ``-`` alone is the stdin/stdout spelling and is not one of them.
+    """
+    if tok.startswith("--"):
+        return None
+    if tok.startswith("-"):
+        return tok[1:] if len(tok) > 1 else None
+    if is_first and tok and all(ch in _TAR_SHORT_LETTERS for ch in tok):
+        return tok
+    return None
+
+
+def _tar_operation_and_values(
+    words: list[str],
+) -> tuple[str | None, list[str], list[str]]:
+    """The operation letter of a ``tar`` line and the values it gives ``-f`` and ``-C``.
+
+    Returns ``(operation, archive_values, directory_values)``; which of the two lists the
+    caller may use is the operation's job, not this function's — see
+    `_tar_write_targets`. Both lists hold the value **as written**, in the order the line
+    spells them, with an empty value and a bare ``-`` (stdin/stdout) dropped rather than
+    named. A value-taking letter consumes the rest of its cluster or the next word
+    (getopt's rule), so nothing it ate can be read back as an option.
+    """
+    operation: str | None = None
+    archive_values: list[str] = []
+    directory_values: list[str] = []
+    idx = 0
+    while idx < len(words):
+        tok = words[idx]
+        if tok == "--":
+            break
+        if tok.startswith("--"):
+            name, sep, attached = tok.partition("=")
+            if name in _TAR_LONG_OPERATIONS:
+                if operation is None:
+                    operation = _TAR_LONG_OPERATIONS[name]
+            elif name in _TAR_LONG_WITH_VALUE:
+                # The value is the text after `=`, or the next word — which is then
+                # *eaten* and must not be read back as an option word. How many words an
+                # eaten value costs is not this reader's own fact to decide: it is
+                # `_words_eaten`, the one definition the walk's readers share.
+                value = attached if sep else (
+                    words[idx + 1] if idx + 1 < len(words) else ""
+                )
+                idx += _words_eaten(bool(sep)) - 1
+                if value and value != "-":
+                    if name in _TAR_FILE_OPTIONS:
+                        archive_values.append(value)
+                    elif name in _TAR_DIRECTORY_OPTIONS:
+                        directory_values.append(value)
+            idx += 1
+            continue
+        body = _tar_option_word_body(tok, idx == 0)
+        if body is not None:
+            k = 0
+            while k < len(body):
+                ch = body[k]
+                if ch in _TAR_VALUE_TAKING_LETTERS:
+                    rest = body[k + 1:]
+                    value = rest or (words[idx + 1] if idx + 1 < len(words) else "")
+                    idx += _words_eaten(bool(rest)) - 1
+                    if value and value != "-":
+                        if ch == "f":
+                            archive_values.append(value)
+                        elif ch == "C":
+                            directory_values.append(value)
+                    break
+                if ch in _TAR_OPERATION_LETTERS and operation is None:
+                    operation = ch
+                k += 1
+        idx += 1
+    return operation, archive_values, directory_values
+
+
+def _tar_writes_to_stdout(words: list[str]) -> bool:
+    """True when this ``tar`` run sends its members to stdout instead of to disk (``-O``).
+
+    Measured: `tar -xOf ref.tar -C out` and `tar -xO --directory out -f ref.tar` both exit
+    0 having created **nothing**, so a run that spells the option writes no file even
+    though a destination-shaped `-C` came along. The letter is found inside a cluster
+    (`-xOf`, where `f` still takes the next word) and scanning stops at a value-taking
+    letter, so an `O` that is really another option's value is not read as this one.
+    """
+    for idx, tok in enumerate(words):
+        if tok == "--":
+            break
+        if tok == _TAR_TO_STDOUT_OPTION:
+            return True
+        body = _tar_option_word_body(tok, idx == 0)
+        if body is None:
+            continue
+        for ch in body:
+            if ch == "O":
+                return True
+            if ch in _TAR_VALUE_TAKING_LETTERS:
+                break
+    return False
+
+
+def _tar_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The paths a ``tar`` run writes: its archive when creating, its ``-C`` when extracting.
+
+    The measured table is the comment above `_TAR_LONG_OPERATIONS`, and the rule is one
+    line per operation:
+
+    * ``c``/``r``/``u`` — the `-f` archive is created, appended to or rewritten, and
+      `-C` is only where the *members are collected from*: measured, `tar -cf out/h.tar
+      -C src f.txt` created `out/h.tar` and read `src`, so naming `-C` here would refuse
+      a run that writes nothing outside — which is the exact objection
+      `_OPTION_DESTINATION_VERBS` raises against a table entry for tar;
+    * ``x`` — the members land in `-C`, while the `-f` archive is a **read**; naming it
+      would refuse a run that only opens the archive it was given. A run that also spells
+      `-O`/`--to-stdout` creates nothing at all and is left unnamed;
+    * ``t`` (and no operation letter at all) — nothing is written, so nothing is named.
+
+    The line's **first** word is the only place the dashless spelling is read, which is
+    what keeps a member named `cf` from being read as an option word (measured).
+    """
+    words = _args_after_command(tokens, i)
+    operation, archives, directories = _tar_operation_and_values(words)
+    if operation in _TAR_WRITING_OPERATIONS:
+        return archives
+    if operation in _TAR_EXTRACTING_OPERATIONS:
+        if _tar_writes_to_stdout(words):
+            return []
+        return directories
+    return []
 
 
 def _is_directory_install(tokens: list[str], i: int) -> bool:

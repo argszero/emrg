@@ -221,7 +221,7 @@ For a staged arrangement such as "preliminary rounds online, final round offline
 Two things the daemon already gives you every round carry the state:
 
 - **The session history** — this task's session id is fixed and its messages are loaded each round, so what previous rounds evaluated, submitted and concluded is in front of you.
-- **Memory** (`{{ evolution_cwd }}/.emrg/memory/`) — the durable record; these entries are files you open yourself, via the `read` tool. (What this prompt embeds is the index of this task's *project* memory, a different directory.)
+- **Memory** (`{{ source_dir }}/.emrg/memory/`) — the durable record; these entries are files you open yourself, via the `read` tool. This prompt embeds that same directory's `MEMORY.md` index, so the entries you write are the ones you read back.
 
 Record one memory entry per competition, in the form a later round (or the host) can re-check:
 

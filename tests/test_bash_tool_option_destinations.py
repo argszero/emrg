@@ -336,11 +336,19 @@ def test_a_cluster_that_does_not_end_on_the_destination_letter_names_nothing():
 # moved into `OPTION_DESTINATIONS` with its siblings rather than being relabelled here.
 # Its two neighbour rows are the reason the letters must be the verb's own, and both
 # are pinned as *allowed*: `sort -ko` and `curl -do` in that table's false-block list.
+#
+# `tar` was the eighth and last row here, and it has left through the door the *table's
+# own reason* opens: the operation letter on the command line decides what `-f` and `-C`
+# mean, and tar always spells it — so the per-verb grammar the table could not express is
+# readable after all, in the three operations it needs (`c`/`r`/`u` write the `-f`
+# archive, `x` writes into `-C`, `t` and a line with no operation write nothing). Its
+# rule is `_tar_write_targets`, its measured table is the comment above
+# `_TAR_LONG_OPERATIONS`, and its rows live in `tests/test_bash_tool_tar_targets.py`.
+# The departure was measured while moving it: all three rows redded here (each now names
+# its real target, `/outside/emrg/a.tgz` and `/outside/emrg`), which is the signal this
+# table is written to give.
 UNCOVERED_WRITERS = (
     # (row, command, allowed under read-only, allowed under workspace-write)
-    ("tar -cf", "tar -cf OUT/a.tgz x", True, True),
-    ("tar -xf -C spaced", "tar -xf a.tgz -C OUT", True, True),
-    ("tar -xf -C attached", "tar -xf a.tgz -COUT", True, True),
     ("git clone", "git clone https://example.invalid/r.git OUT/clone", False, True),
 )
 

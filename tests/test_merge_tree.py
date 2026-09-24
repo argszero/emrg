@@ -71,6 +71,12 @@ _unknown_code = lambda argv: _proc(argv, 3, _TREE + "\n")  # noqa: E731
 _silent_zero = lambda argv: _proc(argv, 0, "")  # noqa: E731
 _silent_one = lambda argv: _proc(argv, 1, "")  # noqa: E731
 
+#: The refusal git prints for *both* of its two reasons: no common ancestor, and a
+#: common ancestor cut out of this clone by a shallow boundary.
+_refused = lambda argv: _proc(  # noqa: E731
+    argv, 1, "", "fatal: refusing to merge unrelated histories"
+)
+
 
 class TestTheVerdictIsTheNamedTree:
     """`rc` decides nothing; the OID on line 1 decides everything."""
@@ -339,6 +345,57 @@ class TestAgainstRealGit:
         with pytest.raises(mod.MeasurementError):
             mod.merged_tree_sha(a, b, run=run)
 
+    def test_a_depth_one_clone_turns_one_merge_into_unrelated_histories(
+        self, mod, tmp_path
+    ) -> None:
+        """The same two commits, two answers, one variable: the clone's boundary.
+
+        Measured 2026-09-22 (git on this host, scratch repo): a depth-1 clone of a
+        two-branch repository answers `fatal: refusing to merge unrelated histories`
+        (exit 128, no tree) for branches whose common ancestor is one commit behind the
+        boundary, and names a tree for the *same* two refs once `git fetch --unshallow`
+        restores it. That is why the diagnosis asks: read alone, the refusal looks like a
+        fact about the two commits, and on a real PR it cost a cycle of triage about
+        PRs that were fine (the measurement is in `shallow_boundary`).
+
+        The clone is a repository this test creates and cuts itself, so nothing outside
+        `tmp_path` is read or written.
+        """
+        repo, a, b = self._conflict_on(tmp_path, "plain.txt")
+        clone = tmp_path / "shallow"
+        self._git(
+            tmp_path, "clone", "-q", "--depth=1", "--branch", a, repo.as_uri(), str(clone)
+        )
+        self._git(
+            clone,
+            "fetch",
+            "-q",
+            "--depth=1",
+            "origin",
+            f"refs/heads/{b}:refs/remotes/origin/{b}",
+        )
+
+        def run(argv, cwd=None):
+            return subprocess.run(
+                argv,
+                cwd=cwd or str(clone),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        before = mod.fold(f"origin/{a}", f"origin/{b}", run=run)
+        assert before.verdict == "unmeasured"
+        assert "unrelated histories" in before.diagnosis
+        assert before.shallow is True
+        assert "git fetch --unshallow" in before.diagnosis
+
+        self._git(clone, "fetch", "-q", "--unshallow")
+        after = mod.fold(f"origin/{a}", f"origin/{b}", run=run)
+        assert after.verdict == "conflict", "the same merge, once the ancestor is back"
+        assert after.tree is not None
+        assert after.shallow is False, "the probe is never asked of an answered merge"
+
 
 class TestOnlyACleanMergeIsATree:
     """The one mapping the owner keeps: verdict -> a tree, or `None`, or a raise.
@@ -464,3 +521,131 @@ class TestTheSyntheticFold:
         assert "-m" in seen[-1]
         assert seen[-1][seen[-1].index("-m") + 1] == f"merge {'b' * 8} into {'a' * 8}"
         assert seen[-1][1:3] == ["commit-tree", _TREE]
+
+
+#: A runner that answers the shallow probe with one of git's two spellings and passes
+#: every other question to `runner`. The probe is the *only* call this module makes of
+#: its own accord, so a test that wants the diagnosis must say what git would have said.
+def _probe_says(shallow: bool, runner=_refused):
+    def run(argv, cwd=None):
+        if argv[1:2] == ["rev-parse"]:
+            return _proc(argv, 0, "true\n" if shallow else "false\n")
+        return runner(argv)
+
+    return run
+
+
+class TestAnUnansweredMergeAsksWhetherTheCloneIsShallow:
+    """Git says one sentence for two reasons, and they have different owners.
+
+    `fatal: refusing to merge unrelated histories` is what git answers both for two
+    commits that really share no ancestor and for two that do, with the ancestor cut off
+    by a shallow boundary (`git fetch --depth=1`, measured on real git above). Reported
+    as one, the second sends a reader after the PRs; named, it is one command on the
+    checkout. The probe costs a git call, so it is asked only where there is a refusal
+    to explain - and an answer the module cannot read is `False`, never a claim.
+    """
+
+    def test_a_shallow_clone_is_named_with_its_repair(self, mod) -> None:
+        answer = mod.fold("a", "b", run=_probe_says(True))
+        assert answer.verdict == "unmeasured"
+        assert answer.shallow is True
+        assert "unrelated histories" in answer.diagnosis, "git's own words are kept"
+        assert "is-shallow-repository" in answer.diagnosis
+        assert "git fetch --unshallow" in answer.diagnosis, "the reading must carry its repair"
+
+    def test_a_complete_clone_is_not_accused(self, mod) -> None:
+        """The control: the same refusal, a clone that holds the whole history."""
+        answer = mod.fold("a", "b", run=_probe_says(False))
+        assert answer.shallow is False
+        assert "unrelated histories" in answer.diagnosis
+        assert "shallow" not in answer.diagnosis
+
+    def test_an_answered_merge_never_asks(self, mod) -> None:
+        """One git call for a clean merge, and the question is not silently doubled."""
+        seen: list[list[str]] = []
+
+        def run(argv, cwd=None):
+            seen.append(list(argv))
+            return _proc(argv, 0, _TREE + "\n")
+
+        assert mod.fold("a", "b", run=run).verdict == "clean"
+        assert [argv[1] for argv in seen] == ["merge-tree"], seen
+
+    def test_a_conflict_is_answered_and_never_asks_either(self, mod) -> None:
+        """A conflict names a tree, so it is an answer - the probe is not asked of it."""
+        seen: list[list[str]] = []
+        report = _TREE + "\n" + _BLOCK + "\nCONFLICT (content): Merge conflict in x\n"
+
+        def run(argv, cwd=None):
+            seen.append(list(argv))
+            return _proc(argv, 1, report)
+
+        assert mod.fold("a", "b", run=run).verdict == "conflict"
+        assert [argv[1] for argv in seen] == ["merge-tree"], seen
+
+    def test_the_probe_asks_a_repository_question_in_the_callers_repository(self, mod) -> None:
+        """The argv and the cwd, because a probe answered by another checkout is a guess.
+
+        The gates measure repositories they do not stand in
+        (`check-merge-tree-health.py`), so the probe carries the caller's `cwd` the same
+        way the merge question does.
+        """
+        seen: list[tuple] = []
+
+        def run(argv, cwd=None):
+            seen.append((list(argv), cwd))
+            if argv[1:2] == ["rev-parse"]:
+                return _proc(argv, 0, "true\n")
+            return _proc(argv, 1, "")
+
+        mod.fold("a", "b", run=run, cwd="/elsewhere")
+        asked, cwd = seen[-1]
+        assert asked == ["git", "rev-parse", "--is-shallow-repository"], asked
+        assert cwd == "/elsewhere", cwd
+
+    def test_a_probe_that_cannot_run_is_not_a_claim(self, mod) -> None:
+        """A runner that cannot answer leaves git's words alone and raises nothing.
+
+        An unreadable probe must not become "not shallow" *asserted* - the flag only ever
+        adds a sentence - and it must certainly not turn into an exception, which the
+        callers report as a verdict about a tree nobody measured.
+        """
+
+        def run(argv, cwd=None):
+            if argv[1:2] == ["rev-parse"]:
+                raise OSError("no git")
+            return _proc(argv, 1, "", "fatal: refusing to merge unrelated histories")
+
+        answer = mod.fold("a", "b", run=run)
+        assert answer.shallow is False
+        assert "shallow" not in answer.diagnosis
+        assert "unrelated histories" in answer.diagnosis
+
+    def test_the_reading_matches_this_hosts_git(self, mod, tmp_path) -> None:
+        """`shallow_boundary` reads git's own answer, not a shape it invented.
+
+        Asked of a repository this test creates in `tmp_path`, so the claim is measured
+        against the git that will run it rather than against a fixture.
+        """
+
+        def run(argv, cwd=None):
+            return subprocess.run(
+                argv,
+                cwd=cwd or str(tmp_path),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        assert subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=tmp_path, capture_output=True
+        ).returncode == 0
+        assert mod.shallow_boundary(run, cwd=str(tmp_path)) is False
+        assert subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip() == "false", "the reading is git's, spelled the same way"
