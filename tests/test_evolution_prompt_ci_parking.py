@@ -49,6 +49,14 @@ REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
         "A run that has not concluded is a `park`, never a `wait`",  # the rule
         "park this PR and move on",                                  # the action
         "read it again next cycle",                                  # when it comes back
+        # The merge-conditions bullet, which the PR rewrote into "park it …" — the third
+        # site the rule is stated at. Pinned verbatim because a mutation arm re-spelled it
+        # back to "keep waiting" and *survived* the first version of this table (issue
+        # #1572): the old spelling is only caught for the two phrases in `REMOVED_TERMS`,
+        # and this site has its own. A section-wide negative scan is not available - §1.1
+        # legitimately contains the rule's own words ("never a `wait`", "not a row to
+        # block on") - so the site is pinned by what it must say.
+        "Not satisfied → **park it and go do other work in this cycle**",
     ),
     "### 5. Submit": (
         "Submitting ends at `gh pr create`",  # the rule
