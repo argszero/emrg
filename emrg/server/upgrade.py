@@ -344,9 +344,16 @@ class UpgradeManager:
         host's budget is spent either way, and the alternative (distinguishing them
         here) would need `_trigger` to report *why* it ended, which is knowledge the
         caller cannot use: the wait is bounded, and a new target resets it.
+
+        A third outcome is neither: an attempt that leaves **no** readable version at
+        all. `_read_local_version` answers `""` for a file that is missing or
+        unreadable, so it is not compared — an empty answer is the absence of
+        evidence, and reading it as a new version would clear the wait for a session
+        that destroyed `version.txt`, which is the moment the chain is most broken
+        rather than the one where it worked.
         """
         after = self._read_local_version()
-        if after != before:
+        if after and after != before:
             self._ineffective_attempts = 0  # the install moved: this path works
             self._attempted_tag = None
             return
