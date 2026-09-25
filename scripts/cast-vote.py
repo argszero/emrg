@@ -22,7 +22,7 @@ afterwards, which is exactly what a reader who trusts "rc 0" does not do.
 
 The rule, made structural
 -------------------------
-Two properties are needed for a posted review to be a vote, and neither is
+Three properties are needed for a posted review to be a vote, and none is
 visible at the moment of posting:
 
 * **it carries exactly one cycle id** — the counter's only handle on who voted. A
@@ -31,12 +31,28 @@ visible at the moment of posting:
   none of them. Credit by text order — a vote filed under whichever id the body
   named first — is the old reading, and what removed it is the counter's own
   `cycle = ids[0] if len(ids) == 1 else None`.
+* **the counter reads a verdict out of it at all** — a body whose first line
+  states no verdict is not a weaker vote, it is not a vote: the counter skips it
+  before the cycle id is even looked for. Measured 2026-09-25
+  (`cyc20260925-135307`), which is when this clause was added: three votes were
+  posted with the ✅ on the **last** line, all three were read as plain comments,
+  and the counts did not move. The cycle-id clause above would not have caught
+  any of them — the ids were right. What made it survivable is that this tool
+  *reports* the uncounted post (exit 1) rather than assuming it worked; what it
+  cost is three reviews spent discovering it.
 * **the counter counts it** — a valid vote can still fail to count (a second vote
   from a cycle already in the run contributes nothing).
 
 So this tool refuses to post a body the counter cannot read, and then **reads the
 counter back** rather than assuming the post worked. Exit 1 is reserved for the
 one state the caller cannot detect on its own: posted, and not counted.
+
+The first two clauses are decided by **asking the counter**, not by a second
+reading of its rule: the cycle pattern is its `_CYCLE_RE` pinned equal by a test,
+and the verdict is its own `classify()`, called directly. A lookalike classifier
+here would be a second answer to "is this body a vote", and the two would disagree
+exactly where it matters — this tool would post what the counter skips, which is
+the defect the clause exists to close.
 
 The landing tree, read before the vote is spent
 -----------------------------------------------
@@ -162,7 +178,11 @@ Exit codes
        slug a wrapper can branch on (`body-unreadable`: the body could not be read
        from `--body-file` — a path, or `-` for stdin, and an undecodable body
        counts here rather than crashing; `cycle-id`: the body has no cycle id, or more than one,
-       or `--cycle` disagrees with it; `count-unreadable`: the vote count could
+       or `--cycle` disagrees with it; `verdict-mark`: the counter reads no verdict out of the
+       body at all, so it would skip the review instead of counting or voiding it — an
+       **approval** is read only from the first line, so a ✅ stated below it reads as a
+       plain comment (a ❌ lower down is still found, so the asymmetry is on the approval
+       side, which is the one that loses a vote silently); `count-unreadable`: the vote count could
        not be read; `already-voted`: this cycle already has a counted vote or a
        veto here; `own-head-window`: the abstention clause is why nothing was
        posted — either the head was pushed by this cycle or by the one immediately
@@ -223,6 +243,7 @@ _CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
 RC2_CAUSES = (
     "body-unreadable",   # --body-file (a path, or `-` for stdin) could not be read
     "cycle-id",          # no cycle id, several of them, or --cycle disagrees
+    "verdict-mark",      # the counter reads no verdict out of the body: it would skip the review
     "count-unreadable",  # the sibling counter raised
     "already-voted",     # this cycle already has a counted vote or a veto here
     "own-head-window",   # the head is this cycle's own, or its window cannot be decided
@@ -597,9 +618,10 @@ def cycles_in(body: str) -> list[str]:
 def preflight(body: str, cycle: str | None) -> tuple[str | None, str]:
     """`(the cycle id to vote with, "")`, or `(None, why nothing may be posted)`.
 
-    Decided from the body alone, before any network call: a body the counter
-    cannot attribute is not worth sending, and sending it is what makes the loss
-    silent (`gh pr review` prints nothing, so the caller sees success).
+    Decided from the body alone and **offline** — the counter module is loaded from
+    its file, which is a local read, so nothing here depends on a request. A body the
+    counter cannot attribute is not worth sending, and sending it is what makes the
+    loss silent (`gh pr review` prints nothing, so the caller sees success).
     """
     if cycle is not None and not _CYCLE_RE.fullmatch(cycle):
         return None, (
@@ -629,7 +651,42 @@ def preflight(body: str, cycle: str | None) -> tuple[str | None, str]:
             "rather than for whichever id came first; a vote body must name exactly "
             "one, so leave exactly one"
         )
+    # Asked of the counter, never re-derived here: `classify` owns the reading, and a
+    # second implementation of "is this body a vote" would disagree with the counter
+    # exactly where it matters - this tool posting what the counter skips. Checked in
+    # `verdict_unreadable`, which main calls as its own refusal so the cause it declares
+    # is the one that actually happened.
     return found[0], ""
+
+
+def verdict_unreadable(body: str) -> str:
+    """The refusal for a body the counter reads no verdict out of, or `""` to post it.
+
+    Asked of the counter (`check-vote-count.py`'s `classify`) rather than re-derived
+    here: `classify` owns the reading — it has three measured wrong versions behind it,
+    each of which read a real verdict as something else — and a second implementation
+    would disagree with the counter exactly where it matters, this tool posting what the
+    counter skips.
+
+    Separate from `preflight` on purpose: each `return 2` in `main` declares its own
+    `# cause: <slug>`, and "the body has no cycle id" and "the counter reads no verdict
+    out of it" are different situations with different remedies. Sharing one return site
+    would have filed this under `cycle-id`, whose name would then be a lie — the ids in
+    the lost bodies were right.
+    """
+    if votes_counter().classify(body) != "comment":
+        return ""
+    return (
+        "the counter reads no verdict out of this body: `check-vote-count.py` takes the "
+        "verdict mark from the **first line** and skips a body that states none "
+        '(`if kind == "comment": continue`), so the review would be posted, '
+        "`gh pr review` would print nothing, and the vote would count for nothing at "
+        "all - not even as a void one, which is at least visible. An **approval** written "
+        "below its reasoning is this case; a `❌ needs fix` is read wherever it sits, so "
+        "the asymmetry is on the approval side, which is the one that loses a vote "
+        "silently. Put the verdict on the first line (`✅ LGTM — cycle <cycle id>`) and "
+        "leave the reading below it, where it can say anything."
+    )
 
 
 def _state_of(verdict: object, cycle: str) -> tuple[str, str]:
@@ -817,6 +874,11 @@ def main(argv: list[str] | None = None) -> int:
     if cycle is None:
         print(f"refusing to post: {why}", file=sys.stderr)
         return 2  # cause: cycle-id
+
+    unreadable = verdict_unreadable(body)
+    if unreadable:
+        print(f"refusing to post: {unreadable}", file=sys.stderr)
+        return 2  # cause: verdict-mark
 
     try:
         state, note, verdict = existing_vote(

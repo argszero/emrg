@@ -153,16 +153,16 @@ def test_the_instructed_vote_examples_read_as_the_verdict_they_advertise(
                 by_mark[mark].append(body)
     assert len(by_mark["✅"]) == 2 and len(by_mark["❌"]) == 1, by_mark
     for body in by_mark["✅"]:
-        assert counter._classify(body) == "approve", body
+        assert counter.classify(body) == "approve", body
     for body in by_mark["❌"]:
-        assert counter._classify(body) == "veto", body
+        assert counter.classify(body) == "veto", body
 
 
 def _as_vote(counter, body: str, ids: list[str]):
     """A `Vote` carrying what the reader loop derives, for labelling only."""
     return counter.Vote(
         at="2026-09-19T00:00:00Z",
-        kind=counter._classify(body),
+        kind=counter.classify(body),
         cycle=ids[0] if len(ids) == 1 else None,
         valid=len(ids) == 1,
         why="" if len(ids) == 1 else "no cycle id in the vote body",
@@ -180,7 +180,7 @@ def test_the_instrument_sees_the_body_that_was_shipped(counter) -> None:
     """
     old = "✅ LGTM — cycle"
     assert counter.distinct_cycle_ids(old) == []
-    assert counter._classify(old) == "approve", (
+    assert counter.classify(old) == "approve", (
         "the dangerous direction: the body reads as an approval, so a cycle that posted "
         "it had every reason to believe it had voted"
     )
