@@ -143,6 +143,165 @@ class TestMemoryReflection:
         asyncio.run(_test())
 
 
+def _prompt_text(server) -> str:
+    """The reflection prompt the server actually sent."""
+    return server.llm.chat.call_args[0][0][0]["content"]
+
+
+async def _reflect(server, session) -> str:
+    """Run one reflection and return the prompt it sent, or "" if none was sent."""
+    server._maybe_reflect_memory(session, "Any feedback?", "Nothing to report yet.")
+    await asyncio.sleep(0.15)
+    if not server.llm.chat.call_args:
+        return ""
+    return _prompt_text(server)
+
+
+class TestMemoryIndexCompactionPrompt:
+    """An index over `MEMORY_INDEX_ROW_CAP` lines asks the agent to compact it.
+
+    Host design 2026-09-25 (`~/.emrg/designs/memory-index-compaction-design.md`): the
+    trigger is a per-round line count of each index the prompt carries, the condition
+    is `lines > cap`, and what fires is a *prompt* — the agent has read/edit/write, so
+    merging, shortening and dropping rows is prose, not a mechanism. These tests pin
+    the trigger and the reading; they do not pin the prompt's wording beyond the parts
+    that carry a number the agent acts on.
+    """
+
+    def _index(self, path, lines: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(f"- row {i}" for i in range(lines)), encoding="utf-8")
+
+    def test_an_index_over_the_cap_is_named_with_its_own_line_count(self):
+        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                session = Session.create_with_id("s_test_cap", cwd)
+                index = session.memory_dir / "MEMORY.md"
+                self._index(index, MEMORY_INDEX_ROW_CAP + 1)
+                server = _make_server({"content": "no new memories"})
+
+                prompt = await _reflect(server, session)
+
+                assert "Memory index compaction" in prompt
+                assert str(index) in prompt, "the section must name the file it is about"
+                assert f"has {MEMORY_INDEX_ROW_CAP + 1} lines" in prompt, (
+                    "the number printed must be the one counted — a caller passing a "
+                    "reading and the text printing another teaches distrust of both"
+                )
+
+        asyncio.run(_test())
+
+    def test_an_index_at_the_cap_says_nothing(self):
+        """The boundary: the condition is `> cap`, so exactly cap lines is silent.
+
+        Both directions matter — an off-by-one here either never fires or fires on
+        every index the prompt can already hold.
+        """
+        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                session = Session.create_with_id("s_test_cap_edge", cwd)
+                self._index(session.memory_dir / "MEMORY.md", MEMORY_INDEX_ROW_CAP)
+                server = _make_server({"content": "no new memories"})
+
+                prompt = await _reflect(server, session)
+
+                assert "Memory index compaction" not in prompt
+
+        asyncio.run(_test())
+
+    def test_the_project_index_is_counted_too(self):
+        """Two indexes reach the prompt; the project one is the other half.
+
+        A rule that only watched the session index would miss every long-lived
+        project index — the ones a project's own cycles keep appending to.
+        """
+        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                session = Session.create_with_id("s_test_cap_proj", cwd)
+                project_index = cwd / ".emrg" / "memory" / "MEMORY.md"
+                self._index(project_index, MEMORY_INDEX_ROW_CAP + 7)
+                server = _make_server({"content": "no new memories"})
+
+                prompt = await _reflect(server, session)
+
+                assert "Memory index compaction" in prompt
+                assert str(project_index) in prompt
+                assert f"has {MEMORY_INDEX_ROW_CAP + 7} lines" in prompt
+
+        asyncio.run(_test())
+
+    def test_both_indexes_over_the_cap_get_one_section_each(self):
+        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                session = Session.create_with_id("s_test_cap_two", cwd)
+                self._index(session.memory_dir / "MEMORY.md", MEMORY_INDEX_ROW_CAP + 1)
+                self._index(cwd / ".emrg" / "memory" / "MEMORY.md", MEMORY_INDEX_ROW_CAP + 2)
+                server = _make_server({"content": "no new memories"})
+
+                prompt = await _reflect(server, session)
+
+                assert prompt.count("## Memory index compaction") == 2, (
+                    "one index, one section — an instruction naming the wrong file "
+                    "sends the agent to compact something that is not over the cap"
+                )
+
+        asyncio.run(_test())
+
+    def test_the_targets_in_the_text_come_from_the_constants(self):
+        """The numbers the agent is told to reach are the rulers, not a second spelling."""
+        from emrg.memory import INDEX_TITLE_MAX_CHARS
+        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                session = Session.create_with_id("s_test_cap_nums", cwd)
+                self._index(session.memory_dir / "MEMORY.md", MEMORY_INDEX_ROW_CAP + 1)
+                server = _make_server({"content": "no new memories"})
+
+                prompt = await _reflect(server, session)
+
+                assert f"≤ {MEMORY_INDEX_ROW_CAP} lines" in prompt
+                assert f"longer than {INDEX_TITLE_MAX_CHARS} chars" in prompt
+
+        asyncio.run(_test())
+
+    def test_an_unreadable_index_shows_no_section_instead_of_breaking_the_round(self):
+        """A background task must not die on a torn read.
+
+        `_index_for_prompt` already answers the unreadable case with a notice in the
+        prompt; this reader must not raise on top of it, or the reflection (the one
+        memory entry point) stops happening at all.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                session = Session.create_with_id("s_test_cap_bad", cwd)
+                index = session.memory_dir / "MEMORY.md"
+                index.parent.mkdir(parents=True, exist_ok=True)
+                index.write_bytes(b"\xff\xfe\x00 not utf-8")
+                server = _make_server({"content": "no new memories"})
+
+                prompt = await _reflect(server, session)
+
+                assert prompt, "the reflection must still run"
+                assert "Memory index compaction" not in prompt
+
+        asyncio.run(_test())
+
+
 class TestDisconnectConsolidationDisabled:
     """Rant 2026-08-28T22:12:16 — the on-disconnect consolidation entry
     (_consolidate_session_memories) is REMOVED. The single memory entry point is
