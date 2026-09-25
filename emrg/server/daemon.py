@@ -306,10 +306,14 @@ def _unreadable_index_notice(path, exc: BaseException, *, where: str) -> str:
 
 
 # The compaction instruction, rendered only for an index over `MEMORY_INDEX_ROW_CAP`
-# and always with the numbers of the reading that fired it. Two properties of this
-# text are deliberate and were both learned from the mechanism it replaces
-# (rant 2026-08-28T22:12:16, PR #1067 — the previous consolidation instruction
-# produced **zero** writes across nine real runs):
+# and always with the numbers of the reading that fired it — it lives in its own
+# template, `emrg/server/prompts/memory_compaction.j2`, rendered through the same lazy
+# `_get_jinja_env()` the other prompts use, so the wording is the host's to edit without
+# touching Python (host 2026-09-25T15:10) and without restarting the daemon.
+#
+# Two properties of that text are deliberate and were both learned from the mechanism
+# it replaces (rant 2026-08-28T22:12:16, PR #1067 — the previous consolidation
+# instruction produced **zero** writes across nine real runs):
 #
 # * it states the target and the done condition as numbers, because "if it looks
 #   long, consolidate" gave the agent nothing to reach for;
@@ -319,31 +323,7 @@ def _unreadable_index_notice(path, exc: BaseException, *, where: str) -> str:
 # The steps themselves are prose on purpose: merging rows, shortening a row and
 # dropping a superseded one all require reading the content, which is exactly what a
 # script cannot do (it can only move a row, and a moved row leaves the prompt).
-_COMPACTION_NOTE = """
-## Memory index compaction (MEMORY.md is over {cap} lines)
-
-{path} has {lines} lines. This index is embedded into every system prompt, and past
-{cap} lines it buys nothing: a reader needs the title, and every fact belongs in the
-detail file its row points at. Compact it in this turn.
-
-You have `read`, `edit` and `write`. Use them.
-
-How:
-1. `read` the index. Group the rows by topic.
-2. Merge: several rows on one topic become one row that still names every id and
-   file it replaces.
-3. Shorten: a row longer than {row_max} chars becomes one line. Before you cut a fact
-   out of a row, `read` that row's detail file — if the fact is not there, write it
-   there first. An index row is not a backup: `.emrg/` is not under version control,
-   and the detail file is the only place the fact survives.
-4. Drop: a row whose memory is `superseded`/`merged` and whose facts are in its
-   detail file can go.
-5. Never: delete a detail file, invent a fact, or leave a fact only in a row you
-   removed. Never reference an archive file from the index.
-
-Done when: the index is ≤ {cap} lines and no row is longer than {row_max} chars.
-Then report: lines before → after, and the ids you merged or dropped.
-"""
+COMPACTION_TEMPLATE = "memory_compaction.j2"
 
 
 def _memory_index_compaction_note(paths) -> str:
@@ -381,14 +361,21 @@ def _memory_index_compaction_note(paths) -> str:
             continue
         if lines <= MEMORY_INDEX_ROW_CAP:
             continue
-        sections.append(
-            _COMPACTION_NOTE.format(
+        rendered = (
+            _get_jinja_env()
+            .get_template(COMPACTION_TEMPLATE)
+            .render(
                 cap=MEMORY_INDEX_ROW_CAP,
                 lines=lines,
                 path=str(path),
                 row_max=INDEX_TITLE_MAX_CHARS,
             )
         )
+        # `_get_jinja_env` leaves `keep_trailing_newline` at its default (off), so a
+        # template's own final newline is stripped on render. This note is
+        # concatenated with the sections around it, so the separator is restored
+        # here instead of resting on the template file's last byte.
+        sections.append(rendered + "\n")
     return "".join(sections)
 
 
