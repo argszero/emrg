@@ -52,7 +52,19 @@ Exit codes
        here, a response was not readable) - fail loud, never report "landed" for a
        question that was not answered
 
-`gh` and network access are required for the PR half; the tree half is local git.
+`gh` and network access are required for the PR half; the tree half is local git —
+and **which** local git is said out loud, first, before any verdict (`tree: <this
+checkout>` in prose; a `tree` field in `--json`, which stays one JSON document).
+
+The naming is not decoration, because the tree half's reading *is* a function of the
+clone that answered: `named_trees` resolves every hex token against this checkout's
+object store, so the same review body reads `UNCHECKED` here and `NAMED` in a clone
+that holds the object — at the same exit code, in the same words, with nothing in the
+report to tell the two apart. This tool is module-rooted (`REPO_ROOT` is derived from
+the file's own path and every `git` call runs with it as the cwd), which is exactly the
+shape `tests/test_a_tree_reading_guard_names_its_tree.py` requires a `tree: ` line of:
+a guard that answers about its own checkout must say so, or the caller cannot tell
+which tree answered.
 """
 
 from __future__ import annotations
@@ -351,6 +363,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
     args = parser.parse_args(argv)
 
+    # The checkout the tree half reads, out loud and first: every token below is
+    # resolved against *this* clone's object store, so which clone answered is part of
+    # the reading. Printed before the first verdict — and before the first failure, so a
+    # question this clone cannot answer still says whose objects were missing. Prose
+    # only: in `--json` mode the same fact is a field, because a machine consumer is
+    # owed one JSON document.
+    if not args.json:
+        print(f"tree: {REPO_ROOT}")
+
     try:
         verdicts = [check_pr(n, args.repo) for n in args.prs]
     except (RuntimeError, KeyError, ValueError, TypeError, AssertionError) as exc:
@@ -362,6 +383,10 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 [
                     {
+                        # The clone every token above was resolved against, carried in
+                        # the document rather than as a line before it (the prose path
+                        # prints it as `tree: `, which would break a JSON reader).
+                        "tree": str(REPO_ROOT),
                         "pr": v.pr,
                         "state": v.state,
                         "reading": v.reading,

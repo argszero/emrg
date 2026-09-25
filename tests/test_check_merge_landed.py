@@ -391,3 +391,64 @@ def test_the_json_report_carries_both_trees(mod, merged_repo, monkeypatch, capsy
     assert payload[0]["reading"] == mod.NAMED
     assert payload[0]["landed_tree"] == fixture["landed_tree"]
     assert payload[0]["claimed_trees"] == [fixture["landed_tree"]]
+
+
+def test_it_names_the_clone_it_read_before_any_verdict(mod, merged_repo, monkeypatch, capsys):
+    """The tree half is local git, so the report says *which* local git answered.
+
+    Every token this tool resolves comes out of this checkout's object store, and the
+    reading changes with it: the body in the unresolvable-claim test above reads
+    `UNCHECKED` here and `NAMED` in a clone that holds the
+    object, at the same exit code and in the same words. So the checkout is said out
+    loud, first, before any verdict — the `tree: ` line its module-rooted siblings
+    (`check-doc-count.py`, `check_nonlocal.py`) carry, which
+    `tests/test_a_tree_reading_guard_names_its_tree.py` requires of them and, until now,
+    classified this tool as not needing ("answers about something other than a working
+    tree", in the bucket entry that also says it "reads merged trees from local git").
+
+    The fixture is the control: it points `REPO_ROOT` at a `tmp_path` repository, so a
+    line hardcoded to this repository, or one reporting the caller's cwd, dies here.
+    """
+    fixture = merged_repo
+    fake = FakeGh(
+        _view(fixture["merge_commit"]),
+        [_review(f"✅ LGTM — landing tree {fixture['landed_tree'][:12]}")],
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc = mod.main(["1613"])
+
+    out = capsys.readouterr()
+    lines = out.out.splitlines()
+    first = lines[0] if lines else ""
+    assert rc == 0
+    assert first == f"tree: {fixture['repo']}", (
+        f"the first line is {first!r} - a guard that reads a working tree names the one "
+        "that answered before it gives a verdict"
+    )
+    assert str(REPO_ROOT) not in first, (
+        "the line must follow the checkout the tool read, not the one this test runs from"
+    )
+
+
+def test_the_json_report_names_the_same_tree_without_breaking_the_document(
+    mod, merged_repo, monkeypatch, capsys
+):
+    """`--json` carries the same fact as a field, because it is still one document.
+
+    The prose line would be a second kind of line in a stream a machine consumer parses,
+    so the JSON half states the clone inside the payload instead. Both halves are pinned
+    because "names its tree" has to hold wherever the reader is.
+    """
+    fixture = merged_repo
+    fake = FakeGh(
+        _view(fixture["merge_commit"]),
+        [_review(f"✅ LGTM — landing tree {fixture['landed_tree'][:12]}")],
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc = mod.main(["1613", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload[0]["tree"] == str(fixture["repo"])
