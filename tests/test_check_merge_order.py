@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -1303,3 +1304,214 @@ class TestThePairwiseRefusalCarriesItToo:
         message = self._pairwise_refusal(mod, monkeypatch, shallow=False)
         assert "refusing to merge unrelated histories" in message, message
         assert "unshallow" not in message, message
+
+
+class TestWhatAMergeLands:
+    """Containment: the upper PR's landing change is not only its own diff.
+
+    Measured 2026-09-25 (`cyc20260925-165507`) on the live queue: `#1614`'s head
+    contains `#1611`'s, both read `MERGEABLE/CLEAN`, this tool said "merging it dirties
+    nothing else" for each, and `check-merge-landing-diff.py 1614` listed `#1611`'s five
+    files inside `#1614`'s landing change. `check-pr-base.py` cannot see it — that gate
+    reads the base a PR *declares*, and the stacked PR here declares `master`.
+
+    The three-answer discipline is the part worth pinning: `git merge-base --is-ancestor`
+    answers with its exit code alone (0 yes, 1 no, above that "I cannot tell"), and
+    reading "not 0" as "no" would report two PRs as independent because *this checkout*
+    could not tell — independence being the reassuring answer, and the one a caller acts
+    on by merging in either order.
+    """
+
+    _LOWER = "a" * 40
+    _UPPER = "b" * 40
+
+    @classmethod
+    def _git_that_knows(cls, answers: dict[tuple[str, str], bool]):
+        def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["git", "rev-parse"]:
+                return _proc(0, "c" * 40 + "\n")
+            if argv[:2] == ["git", "merge-base"]:
+                pair = (argv[-2], argv[-1])
+                return _proc(0 if answers.get(pair) else 1)
+            return _proc(0, _TREE + "\n")
+        return run
+
+    def _forecast(self, mod, monkeypatch, heads: dict[str, str], answers) -> dict:
+        # The base is rev-parsed first, before any head is fetched - so the fixture
+        # answers it too, with the same git a real run would ask.
+        monkeypatch.setattr(mod, "_fetch_head", lambda repo, n: f"refs/pr{n}")
+        monkeypatch.setattr(
+            mod, "_rev_parse", lambda ref: {"origin/master": "c" * 40, **heads}[ref]
+        )
+        monkeypatch.setattr(mod, "_run", self._git_that_knows(answers))
+        return mod.forecast("origin/master", [1, 2], "argszero/emrg")
+
+    def test_the_upper_pr_is_reported_as_containing_the_lower(self, mod, monkeypatch) -> None:
+        heads = {"refs/pr1": self._LOWER, "refs/pr2": self._UPPER}
+        report = self._forecast(
+            mod, monkeypatch, heads, {(self._LOWER, self._UPPER): True}
+        )
+        # Keyed by the PR whose merge lands the other's commits: #2 contains #1.
+        assert report["contains"] == {2: [1]}, report["contains"]
+        assert report["identical"] == []
+
+    def test_the_direction_is_not_guessed(self, mod, monkeypatch) -> None:
+        """The same pair, the other way round: #1 contains #2, so #1 must land second."""
+        heads = {"refs/pr1": self._LOWER, "refs/pr2": self._UPPER}
+        report = self._forecast(
+            mod, monkeypatch, heads, {(self._UPPER, self._LOWER): True}
+        )
+        assert report["contains"] == {1: [2]}, report["contains"]
+
+    def test_two_independent_heads_report_no_containment(self, mod, monkeypatch) -> None:
+        """The control: a git that answers "no" in both directions reports nothing."""
+        heads = {"refs/pr1": self._LOWER, "refs/pr2": self._UPPER}
+        report = self._forecast(mod, monkeypatch, heads, {})
+        assert report["contains"] == {}
+        assert report["identical"] == []
+
+    def test_the_same_head_commit_is_not_reported_as_containment(
+        self, mod, monkeypatch
+    ) -> None:
+        """A commit is an ancestor of itself, so both directions would answer yes.
+
+        Two open PRs on one head is a real state (a duplicate submission, or a
+        re-push that both branches share). Reporting it as containment would be true
+        and useless — and it would print one PR as "stacked on" the other with no
+        order that helps.
+        """
+        heads = {"refs/pr1": self._LOWER, "refs/pr2": self._LOWER}
+        report = self._forecast(mod, monkeypatch, heads, {(self._LOWER, self._LOWER): True})
+        assert report["contains"] == {}
+        assert report["identical"] == [{"a": 1, "b": 2, "head": self._LOWER}]
+
+    def test_a_git_that_cannot_answer_is_not_read_as_no(self, mod, monkeypatch) -> None:
+        """Exit 2+ is "I cannot tell" — never the reassuring answer.
+
+        A shallow clone without the pair's common ancestor answers this way, so the one
+        reading that must not happen is "these two are independent": the caller merges
+        them in either order and lands one PR's work under the other's review.
+        """
+        monkeypatch.setattr(mod, "_fetch_head", lambda repo, n: f"refs/pr{n}")
+        monkeypatch.setattr(
+            mod,
+            "_rev_parse",
+            lambda ref: {
+                "origin/master": "c" * 40,
+                "refs/pr1": self._LOWER,
+                "refs/pr2": self._UPPER,
+            }[ref],
+        )
+
+        def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["git", "rev-parse"]:
+                return _proc(0, "c" * 40 + "\n")
+            if argv[:2] == ["git", "merge-base"]:
+                return _proc(128, "", "fatal: Not a valid object name\n")
+            return _proc(0, _TREE + "\n")
+
+        monkeypatch.setattr(mod, "_run", run)
+        with pytest.raises(RuntimeError) as caught:
+            mod.forecast("origin/master", [1, 2], "argszero/emrg")
+        message = str(caught.value)
+        assert "could not ask whether" in message, message
+        assert self._LOWER[:8] in message and self._UPPER[:8] in message, message
+        assert "Not a valid object name" in message, message
+
+    def test_the_pair_is_asked_about_the_commits_it_measured(
+        self, mod, monkeypatch
+    ) -> None:
+        """The ancestry operands are the fetched heads, never a ref name.
+
+        The same invariant this file already pins for `merge-tree`: a name is mutable
+        (a fetch rewrites it), so an ancestry question asked with a name answers about
+        whatever the ref pointed at afterwards.
+        """
+        seen: list[tuple[str, str]] = []
+
+        def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["git", "rev-parse"]:
+                return _proc(0, "c" * 40 + "\n")
+            if argv[:2] == ["git", "merge-base"]:
+                seen.append((argv[-2], argv[-1]))
+                return _proc(1)
+            return _proc(0, _TREE + "\n")
+
+        monkeypatch.setattr(mod, "_fetch_head", lambda repo, n: f"refs/pr{n}")
+        monkeypatch.setattr(
+            mod,
+            "_rev_parse",
+            lambda ref: {
+                "origin/master": "c" * 40,
+                "refs/pr1": self._LOWER,
+                "refs/pr2": self._UPPER,
+            }[ref],
+        )
+        monkeypatch.setattr(mod, "_run", run)
+        mod.forecast("origin/master", [1, 2], "argszero/emrg")
+        assert seen == [(self._LOWER, self._UPPER), (self._UPPER, self._LOWER)], seen
+
+
+class TestTheLandingSectionIsPrinted:
+    """The report a cycle reads: the stack and the order, with the exit code untouched."""
+
+    def _report(self, contains: dict, identical: list) -> dict:
+        return {
+            "base": "abc",
+            "prs": {1611: {"paths": [], "dirtied": []}, 1614: {"paths": [], "dirtied": []}},
+            "base_conflicts": [],
+            "contains": contains,
+            "identical": identical,
+        }
+
+    def test_the_stacked_pr_and_its_order_are_printed(self, mod, capsys) -> None:
+        mod._print_report(self._report({1614: [1611]}, []))
+        out = capsys.readouterr().out
+        assert "#1614 is stacked on #1611" in out, out
+        assert "land in this order: #1611 -> #1614" in out, out
+
+    def test_an_independent_queue_prints_no_landing_section(self, mod, capsys) -> None:
+        """The control: nothing to report means no section, not an empty one."""
+        mod._print_report(self._report({}, []))
+        out = capsys.readouterr().out
+        assert "What a merge would land" not in out, out
+
+    def test_a_shared_head_is_reported_as_its_own_fact(self, mod, capsys) -> None:
+        mod._print_report(self._report({}, [{"a": 1, "b": 2, "head": "c" * 40}]))
+        out = capsys.readouterr().out
+        assert "#1 and #2 have the same head commit" in out, out
+        assert "cccccccc" in out, out
+
+    def test_a_stack_does_not_change_the_exit_code(self, mod, monkeypatch) -> None:
+        """`check-pr-base.py`'s `LIVE` rule: reported, not failed.
+
+        Stacking is a legitimate way to carry work; the queue needs the order from it,
+        not a refusal. A gate that failed here would make the correct action (land the
+        lower PR first) look like a defect.
+        """
+        monkeypatch.setattr(mod, "_run", lambda argv: _proc(0, "", ""))
+        monkeypatch.setattr(
+            mod,
+            "forecast",
+            lambda base, numbers, repo: {
+                "base": "abc",
+                "prs": {1: {"paths": [], "dirtied": []}},
+                "base_conflicts": [],
+                "contains": {1: [2]},
+                "identical": [],
+            },
+        )
+        assert mod.main(["1"]) == 0
+
+    def test_the_json_report_carries_both_readings(self, mod, monkeypatch, capsys) -> None:
+        """`--json` is the other consumer, and it must not be the poorer one."""
+        monkeypatch.setattr(mod, "_run", lambda argv: _proc(0, "", ""))
+        monkeypatch.setattr(
+            mod,
+            "forecast",
+            lambda base, numbers, repo: self._report({1614: [1611]}, [{"a": 3, "b": 4, "head": "e" * 40}]),
+        )
+        assert mod.main(["1", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["contains"] == {"1614": [1611]}, payload
+        assert payload["identical"][0]["a"] == 3, payload
