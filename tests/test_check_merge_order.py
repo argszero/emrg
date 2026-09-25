@@ -1465,19 +1465,21 @@ class TestTheLandingSectionIsPrinted:
         }
 
     def test_the_stacked_pr_and_its_order_are_printed(self, mod, capsys) -> None:
-        mod._print_report(self._report({1614: [1611]}, []))
+        mod._print_report(self._report({1614: [1611]}, []), selection="open")
         out = capsys.readouterr().out
         assert "#1614 is stacked on #1611" in out, out
         assert "land in this order: #1611 -> #1614" in out, out
 
     def test_an_independent_queue_prints_no_landing_section(self, mod, capsys) -> None:
         """The control: nothing to report means no section, not an empty one."""
-        mod._print_report(self._report({}, []))
+        mod._print_report(self._report({}, []), selection="open")
         out = capsys.readouterr().out
         assert "What a merge would land" not in out, out
 
     def test_a_shared_head_is_reported_as_its_own_fact(self, mod, capsys) -> None:
-        mod._print_report(self._report({}, [{"a": 1, "b": 2, "head": "c" * 40}]))
+        mod._print_report(
+            self._report({}, [{"a": 1, "b": 2, "head": "c" * 40}]), selection="open"
+        )
         out = capsys.readouterr().out
         assert "#1 and #2 have the same head commit" in out, out
         assert "cccccccc" in out, out
@@ -1515,3 +1517,81 @@ class TestTheLandingSectionIsPrinted:
         payload = json.loads(capsys.readouterr().out)
         assert payload["contains"] == {"1614": [1611]}, payload
         assert payload["identical"][0]["a"] == 3, payload
+
+
+class TestTheHeaderNamesTheSelectionNotTheRepository:
+    """The count and the per-PR verdict are about the numbers the caller chose.
+
+    Measured 2026-09-26 (`cyc20260926-015635`): with three PRs open,
+    `check-merge-order.py 1627` printed `1 open PR(s), 0 of 0 pairs conflict` and
+    `#1627: mergeable, and merging it dirties nothing else`. Both sentences are true
+    of the one-number list that was asked about and false of the repository, and the
+    cycle that ran it (this one) read them as the queue-wide all-clear a merge gate
+    wants - the same collapse of "clean" into "could not measure" the family keeps
+    apart, reached from the argument list rather than from an unanswered merge.
+    """
+
+    def _report(self, numbers: list[int]) -> dict:
+        return {
+            "base": "abc",
+            "prs": {n: {"paths": [], "dirtied": []} for n in numbers},
+            "base_conflicts": [],
+            "contains": {},
+            "identical": [],
+        }
+
+    def test_a_named_list_is_not_reported_as_the_open_set(self, mod, capsys) -> None:
+        mod._print_report(self._report([1627]), selection="named")
+        out = capsys.readouterr().out
+        assert "1 named PR(s)" in out, out
+        assert "open PR(s)" not in out, out
+
+    def test_the_default_still_says_open(self, mod, capsys) -> None:
+        """The control: when the selection *is* the open set, the old wording is right."""
+        mod._print_report(self._report([1, 2]), selection="open")
+        out = capsys.readouterr().out
+        assert "2 open PR(s)" in out, out
+        assert "named" not in out, out
+
+    def test_the_verdict_says_which_set_nothing_else_was(self, mod, capsys) -> None:
+        """`nothing else` is a claim about a set, so it is asserted in both directions."""
+        mod._print_report(self._report([1, 2]), selection="named")
+        out = capsys.readouterr().out
+        assert "dirties nothing else among the 2 PR(s) named" in out, out
+
+        mod._print_report(self._report([1, 2]), selection="open")
+        out = capsys.readouterr().out
+        assert "mergeable, and merging it dirties nothing else\n" in out, out
+        assert "among the" not in out, out
+
+    def test_a_named_list_of_one_says_it_had_nothing_to_compare(self, mod, capsys) -> None:
+        """Vacuity is announced rather than left to a reader who counts the pairs."""
+        mod._print_report(self._report([1627]), selection="named")
+        err = capsys.readouterr().err
+        assert "1 PR(s) named" in err, err
+        assert "no other PR to dirty" in err, err
+
+    def test_a_named_list_of_two_is_not_told_it_had_nothing_to_compare(
+        self, mod, capsys
+    ) -> None:
+        """The control: with a pair in the set there *is* something to compare."""
+        mod._print_report(self._report([1, 2]), selection="named")
+        assert capsys.readouterr().err == ""
+
+    def test_the_json_report_carries_the_selection(self, mod, monkeypatch, capsys) -> None:
+        """`--json` is the other consumer, so it says what the header says."""
+        monkeypatch.setattr(mod, "_run", lambda argv: _proc(0, "", ""))
+        monkeypatch.setattr(mod, "forecast", lambda base, numbers, repo: self._report([1]))
+        assert mod.main(["1", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["selection"] == "named"
+
+    def test_the_default_json_says_the_selection_is_open(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.setattr(mod, "_run", lambda argv: _proc(0, "", ""))
+        monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2])
+        monkeypatch.setattr(
+            mod, "forecast", lambda base, numbers, repo: self._report([1, 2])
+        )
+        assert mod.main(["--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["selection"] == "open"

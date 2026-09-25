@@ -99,6 +99,10 @@ name that denotes *only* a local branch is refused rather than measured (exit 2)
 The default path is unaffected: it fetches master into `FETCH_HEAD`, which is
 neither ambiguous nor remote-tracking, and is left exactly as it is.
 
+(That quoted header has a second defect of its own, found later and fixed separately:
+`1 open PR(s)` counts the number the caller *named* (1196), not the repository's open
+PR(s) - see "What the header counts" below. The line is left as it was measured.)
+
 Resolving the name is only half of that; the other half is *when* the commit behind
 it is read
 ------------------------------------------------------------------------------
@@ -164,6 +168,31 @@ Usage
 With no PR numbers, every open PR is used. Heads are resolved by fetching
 `refs/pull/<N>/head` into a temporary ref, so the measurement uses each PR's real
 head rather than whatever a local branch of a similar name happens to point at.
+
+What the header counts
+----------------------
+The numbers printed are the **selection's**, and the header says which one it is:
+`N open PR(s)` only when the caller named none - the case where the selection *is*
+the open set - and `N named PR(s)` when the caller supplied them. The distinction is
+not cosmetic. Measured 2026-09-26 (`cyc20260926-015635`) with three PRs open:
+
+    uv run --no-sync python3 scripts/check-merge-order.py 1627
+    base 3d9e4557..., 1 open PR(s), 0 of 0 pairs conflict
+
+    #1627: mergeable, and merging it dirties nothing else
+
+Three PRs were open and this PR dirtied nothing - a true sentence about the caller's
+one-number list, printed in the vocabulary of a fact about the repository, and read
+by the cycle that ran it (this one) as the queue-wide all-clear the merge gate wants.
+The per-PR verdict carries the same bound: under the default `dirties nothing else`
+means every open PR, and under a named list it says `among the N PR(s) named`, because
+that is what was compared. A named list of fewer than two has nothing to compare at
+all - no pair conflicts and no other PR to dirty - so it says so on stderr, with the
+exit code unchanged: the measurement was made, and what went unanswered is a different
+question (the shape `check-merge-landed.py`'s `UNCHECKED`/`PENDING` notes use).
+
+Since the selection is the caller's, so is the fix: pass the other open numbers, or
+none at all.
 
 An explicit `--base` that names a remote-tracking ref (`origin/<branch>`) is taken
 by its **full name**, so a stray local branch of the same name cannot stand in for
@@ -448,12 +477,24 @@ def forecast(base: str, numbers: list[int], repo: str) -> dict:
     return report
 
 
-def _print_report(report: dict) -> None:
+def _print_report(report: dict, *, selection: str) -> None:
+    """Print the forecast, naming the set it is about.
+
+    `selection` is where the numbers came from - `"open"` when the caller named none, so
+    every open PR was used, `"named"` when the caller supplied the numbers. It is
+    required rather than defaulted, because the default would be the very claim this
+    argument exists to stop: measured 2026-09-26 (`cyc20260926-015635`) with three PRs
+    open, `check-merge-order.py 1627` printed `1 open PR(s), 0 of 0 pairs conflict` and
+    `mergeable, and merging it dirties nothing else` - a count of the caller's list
+    reported as a fact about the repository, and a verdict about "everybody else" said
+    about a set with nobody else in it.
+    """
     prs = report["prs"]
     total = len(prs)
     pairs = total * (total - 1) // 2
     conflicting = sum(len(v["dirtied"]) for v in prs.values()) // 2
-    print(f"base {report['base']}, {total} open PR(s), {conflicting} of {pairs} pairs conflict")
+    where = "open" if selection == "open" else "named"
+    print(f"base {report['base']}, {total} {where} PR(s), {conflicting} of {pairs} pairs conflict")
     if report["base_conflicts"]:
         print(
             "  conflicts with the base already: "
@@ -467,7 +508,11 @@ def _print_report(report: dict) -> None:
             continue
         dirtied = entry["dirtied"]
         if not dirtied:
-            print(f"  #{number}: mergeable, and merging it dirties nothing else")
+            # "nothing else" is a claim about a set, so the set is named. Under the
+            # default it is every open PR and needs no qualifier; a named list is not
+            # the open set, and with one number in it there is no "else" at all.
+            bound = "" if selection == "open" else f" among the {total} PR(s) named"
+            print(f"  #{number}: mergeable, and merging it dirties nothing else{bound}")
             continue
         counts: dict[str, int] = {}
         for item in dirtied:
@@ -505,6 +550,19 @@ def _print_report(report: dict) -> None:
     print("Merging a PR costs one resolution per later PR it dirties, and each")
     print("resolution push voids that PR's votes. Cheapest-first is not always")
     print("most-valuable-first; choose deliberately.")
+    if selection != "open" and total < 2:
+        # rc is unchanged: the measurement was made, and what was not answered is a
+        # different question. A vacuous all-clear and a real one must not print the
+        # same thing, which is the whole point of saying it here rather than in a
+        # docstring nobody runs.
+        print(
+            f"\n{total} PR(s) named: this forecast compares the numbers it was given "
+            "against each other, so with fewer than two there is no other PR to dirty "
+            "and no pair to conflict - the line above is about no other PR, not about "
+            "the open queue. Pass the other open numbers, or none at all to use every "
+            "open PR.",
+            file=sys.stderr,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -566,10 +624,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
+    selection = "named" if args.prs else "open"
     if args.json:
+        report["selection"] = selection
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
-        _print_report(report)
+        _print_report(report, selection=selection)
     return 1 if report["base_conflicts"] else 0
 
 
