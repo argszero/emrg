@@ -20,6 +20,8 @@ import pytest
 
 from emrg.config import UpdateConfig
 from emrg.server.upgrade import (
+    INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS,
+    MAX_INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS,
     RELEASES_URL,
     SESSION_ID,
     UpgradeManager,
@@ -222,6 +224,200 @@ def test_inflight_guard_skips_retrigger(monkeypatch, tmp_path):
         assert mgr._inflight is False, "session end → in-flight reset"
 
     asyncio.run(scenario())
+
+
+# ── an attempt that does not install is paid for (issue #1598) ────────────
+#
+# `_trigger` starts a full LLM session per tick. A target that cannot be installed
+# therefore costs one session every 300 s, forever, and before this the code could
+# not tell that attempt from the first one. Measured live while this was written: the
+# upgrade session's own record rewritten at 06:44:30 local, `version.txt` never
+# moving because the session's writes are refused (the issue holds the probe table).
+
+
+def _repeatable_manager(
+    monkeypatch, tmp_path, releases, *, version="0.2.55", delay_minutes=1440
+):
+    """A manager whose `tick()` can be run over and over with no real endpoint.
+
+    The clock (`upgrade._now`) and the session callback are test-owned, so a test
+    states how many **attempts** a sequence of ticks spends rather than how many
+    ticks happened. A session writes a version into `version.txt` only when the
+    returned `installs` list holds one — that is how a test says "this attempt
+    installs". Everything else the chain touches is stubbed by `tests/conftest.py`'s
+    autouse guard; the releases client is stubbed here because exercising `tick()`
+    at all is what that guard requires a test to do for itself.
+
+    :returns: `(manager, attempts, clock, installs, damage)` — `attempts` collects
+        the rendered prompt of every session started, `clock` is a one-element list
+        the test advances in seconds, `installs` is what the next session writes into
+        `version.txt` (its first element, popped nowhere: a test that wants the write
+        to happen once sets it and clears it), and `damage` makes the next session
+        leave the file **unreadable** instead — the crashed-overwrite case a backup
+        restore would produce, which is how a test reaches the empty read.
+    """
+    import emrg.server.upgrade as up
+
+    monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "version.txt")
+    version_file = tmp_path / "version.txt"
+    version_file.write_text(f"{version}\n", encoding="utf-8")
+
+    clock = [1_000_000.0]
+    monkeypatch.setattr(up, "_now", lambda: clock[0])
+
+    attempts: list[str] = []
+    installs: list[str] = []
+    damage: list[bool] = []
+
+    async def session(session_id, cwd, prompt):
+        attempts.append(prompt)
+        if damage:
+            version_file.unlink()
+        elif installs:
+            version_file.write_text(f"{installs[0]}\n", encoding="utf-8")
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return releases
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            return _Resp()
+
+    monkeypatch.setattr(up.httpx, "AsyncClient", _FakeClient)
+    return UpgradeManager(UpdateConfig(delay_minutes=delay_minutes), session), (
+        attempts,
+        clock,
+        installs,
+        damage,
+    )
+
+
+def test_an_attempt_that_did_not_install_is_not_repeated_at_tick_cadence(monkeypatch, tmp_path):
+    """The defect itself: two ticks, one session.
+
+    The gap used is 50 s — well inside the daemon's 300 s cadence — so the second
+    tick stands for the next real one. Without the wait it starts a second session.
+    """
+    mgr, (attempts, clock, _installs, damage) = _repeatable_manager(
+        monkeypatch, tmp_path, [_release("v0.2.57", 60 * 60 * 24 * 3)]
+    )
+
+    asyncio.run(mgr.tick())
+    assert len(attempts) == 1, "the first attempt must happen"
+
+    clock[0] += 50
+    asyncio.run(mgr.tick())
+    assert len(attempts) == 1, (
+        "a target whose install did not move version.txt must not be attempted "
+        "again at tick cadence — that is one full LLM session per 300 s (issue #1598)"
+    )
+
+    clock[0] += INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS
+    asyncio.run(mgr.tick())
+    assert len(attempts) == 2, "once the wait has elapsed the tag is attempted again"
+
+
+def test_the_wait_grows_per_attempt_and_stops_at_the_ceiling():
+    """Named numbers: "exponential" is not a reading, a list is."""
+    mgr = UpgradeManager(UpdateConfig(), lambda **kw: asyncio.sleep(0))
+    assert mgr._ineffective_backoff() == 0.0, "nothing owing before any attempt"
+
+    waits = []
+    for _ in range(7):
+        mgr._ineffective_attempts += 1
+        waits.append(mgr._ineffective_backoff())
+
+    assert waits == [1800, 3600, 7200, 14400, 21600, 21600, 21600]
+    assert waits[0] == INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS
+    assert max(waits) == MAX_INEFFECTIVE_ATTEMPT_BACKOFF_SECONDS, (
+        "the ceiling must be reached and then held: 4 attempts a day, not 288"
+    )
+
+
+def test_a_newer_target_is_attempted_at_once(monkeypatch, tmp_path):
+    """The clause that keeps the wait from delaying the repair it pays for.
+
+    For a host blocked by the release it keeps re-installing, the next release *is*
+    the fix arriving — holding it back behind the previous target's failure would
+    push a repair out by the ceiling.
+    """
+    releases = [_release("v0.2.57", 60 * 60 * 24 * 3)]
+    mgr, (attempts, clock, _installs, damage) = _repeatable_manager(
+        monkeypatch, tmp_path, releases
+    )
+
+    asyncio.run(mgr.tick())
+    assert len(attempts) == 1
+    clock[0] += 50  # inside the wait for v0.2.57
+
+    releases.insert(0, _release("v0.2.58", 60 * 60 * 24 * 2))
+    asyncio.run(mgr.tick())
+    assert len(attempts) == 2, "a different target must not wait out the previous one's failure"
+    assert "v0.2.58" in attempts[1], "and it is the newer target that is attempted"
+
+
+def test_an_install_clears_the_wait(monkeypatch, tmp_path):
+    """The other direction: the wait answers an outcome, it is not a state to drift into."""
+    releases = [_release("v0.2.57", 60 * 60 * 24 * 3)]
+    mgr, (attempts, clock, installs, damage) = _repeatable_manager(
+        monkeypatch, tmp_path, releases
+    )
+
+    asyncio.run(mgr.tick())
+    assert mgr._ineffective_attempts == 1, "a session that changed nothing leaves a debt"
+
+    clock[0] += 50
+    releases.insert(0, _release("v0.2.58", 60 * 60 * 24 * 2))
+    installs.append("0.2.58")  # this session does its job
+    asyncio.run(mgr.tick())
+    assert len(attempts) == 2
+    assert mgr._ineffective_attempts == 0, "version.txt moving clears the debt"
+    assert mgr._ineffective_backoff() == 0.0
+    assert mgr._is_waiting("v0.2.58") is False
+
+
+def test_a_destroyed_version_file_is_not_read_as_progress(monkeypatch, tmp_path):
+    """The third outcome: an attempt that leaves no version at all.
+
+    `_read_local_version` answers `""` for a file that is missing or empty, and the
+    charge for an attempt compared `after != before` — so a session that *deleted*
+    `version.txt` (the crashed overwrite the upgrade prompt's own `previous-version`
+    step exists for) read as "the install moved" and **cleared the wait**, at exactly
+    the moment the chain is most broken. An empty answer is not a version: it is the
+    absence of evidence, and the debt must survive it.
+    """
+    releases = [_release("v0.2.57", 60 * 60 * 24 * 3)]
+    mgr, (attempts, clock, _installs, damage) = _repeatable_manager(
+        monkeypatch, tmp_path, releases
+    )
+
+    asyncio.run(mgr.tick())
+    assert mgr._ineffective_attempts == 1
+
+    clock[0] += 50  # inside the wait
+    damage.append(True)  # the next session leaves the file unreadable
+    releases.insert(0, _release("v0.2.58", 60 * 60 * 24 * 2))
+    asyncio.run(mgr.tick())
+    assert len(attempts) == 2, "a different target is still attempted at once"
+    assert not (tmp_path / "version.txt").exists(), "the fixture must really destroy it"
+    assert mgr._ineffective_attempts == 2, (
+        "an attempt that left no version at all is not progress: reading `after != "
+        "before` counts the empty string as a new version, so a destroyed version.txt "
+        "cleared the wait (issue #1600's self-review)"
+    )
+    assert mgr._is_waiting("v0.2.58") is True, "so the next attempt of that tag waits"
 
 
 # ── config: new [update] fields ───────────────────────────────────────────
