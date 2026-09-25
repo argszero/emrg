@@ -358,9 +358,17 @@ def _memory_index_compaction_note(paths) -> str:
     text prints is the number it counted: a caller passing one reading and the text
     printing another is how an agent comes to distrust both.
 
-    An index that cannot be read is skipped rather than raised on — this runs inside
-    a background reflection task, and `_index_for_prompt` already answers the same
-    condition with a notice in the prompt itself, so the agent is told either way.
+    An index that cannot be read is skipped rather than raised on, and it is *not*
+    this prompt that reports it: this prompt carries no index text at all, so there
+    is nothing here for a notice to replace. Two reasons the skip is still safe, and
+    the first is the operative one — the count is per-round and stateless, so a read
+    that fails is answered by the next round rather than by the agent (measured on a
+    200-KB CJK index, `_index_for_prompt` raised on **37 of 121** reads while the
+    file was being rewritten, so a torn read is ordinary rather than an emergency);
+    and the condition *is* reported, by the carrier that does embed an index — the
+    session's system prompt, rebuilt on every request through `_collect_memory_data`
+    and `_index_for_prompt`, so the agent is never left believing the index was
+    empty (`tests/test_daemon.py::test_an_unreadable_index_costs_the_section_not_the_turn`).
 
     :param paths: the index files to judge, one section per file over the cap.
     :returns: the concatenated sections, or ``""`` when none is over the cap.
@@ -5449,10 +5457,18 @@ class EmrgServer:
                 # count above because the subjects differ — that one measures the
                 # session store's entries and bytes, this one measures each index
                 # file, and only this one can name the project index at all.
+                #
+                # The session half is asked of the store that writes it instead of
+                # being spelled again here, so the file counted and the file written
+                # are one expression. The project half is spelled out on purpose:
+                # `ProjectMemoryStore.__init__` → `MemoryStore.__init__` mkdirs the
+                # directory it is handed, and a count that creates `<cwd>/.emrg/
+                # memory/` in every session's cwd — including sessions whose project
+                # has no memory at all — would be a reading with a side effect.
                 hygiene_note += _memory_index_compaction_note(
                     (
                         session.cwd / ".emrg" / "memory" / "MEMORY.md",
-                        session.memory_dir / "MEMORY.md",
+                        store.index_path,
                     )
                 )
 

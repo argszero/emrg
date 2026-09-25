@@ -279,11 +279,15 @@ class TestMemoryIndexCompactionPrompt:
         asyncio.run(_test())
 
     def test_an_unreadable_index_shows_no_section_instead_of_breaking_the_round(self):
-        """A background task must not die on a torn read.
+        """A background task must not die on a torn read — and this prompt is not the
+        carrier that reports one.
 
-        `_index_for_prompt` already answers the unreadable case with a notice in the
-        prompt; this reader must not raise on top of it, or the reflection (the one
-        memory entry point) stops happening at all.
+        The condition is reported, by the session's system prompt, which embeds an
+        index and so has something for a notice to replace
+        (`tests/test_daemon.py::test_an_unreadable_index_costs_the_section_not_the_turn`).
+        This prompt carries no index text at all, so neither the section nor the
+        notice belongs in it; the skip is safe for the other reason — the count is
+        per-round and stateless, so the next round asks again.
         """
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
@@ -298,6 +302,11 @@ class TestMemoryIndexCompactionPrompt:
 
                 assert prompt, "the reflection must still run"
                 assert "Memory index compaction" not in prompt
+                assert "could not be read" not in prompt, (
+                    "this prompt carries no index text, so a notice here would "
+                    "replace nothing — the file it names is still on disk and the "
+                    "reading that failed is the next round's"
+                )
 
         asyncio.run(_test())
 
