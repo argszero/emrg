@@ -6,7 +6,8 @@ Eleven PRs were open, each green in CI, each `MERGEABLE`. Every gate the repo ha
 answered a question *about a PR*: are the votes current, can the base reach
 master, is the CI verdict fresh, what would this dirty. None answered the one
 that decides whether master is healthy a minute later: **does the tree produced
-by merging this PR pass the guards the repo enforces on master?**
+by merging this PR pass the repository's own guard
+(`scripts/check-doc-count.py`, `GUARD`)?**
 
 It does not, for a whole class of pairs. Two PRs that each add tests and each
 rewrite Agent.md's documented count to the value true *for itself* merge with **no
@@ -1135,3 +1136,54 @@ class TestTheVerdictSaysWhatItMeasured:
         out = self._summary(mod, monkeypatch, capsys)
         assert "the tree's guards" not in out, out
         assert "check-merge-plan-suite.py" in out, out
+
+    def test_the_help_text_names_the_guard_rather_than_a_family(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """`--help` is this tool's own claim about what it judges, and it claimed a family.
+
+        Measured 2026-09-25 (`cyc20260925-230919`) on master `acdb8317`: `--help` read
+        "a tree that passes the repo's guards" while exactly one guard is run (`GUARD`,
+        and `_guard_verdict` executes the *tree's own* copy of it), and the same file's
+        summary — fixed a cycle earlier — already named that one guard. One file, two
+        answers; the reader who acts on the wrong one is the one opening `--help` first.
+        """
+        with pytest.raises(SystemExit):
+            mod.main(["--help"])
+        out = capsys.readouterr().out
+
+        assert f"tree {mod.GUARD} passes" in out, out
+        assert "guards" not in out, out
+
+    def test_the_help_text_follows_the_guard_rather_than_a_literal(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """The control: a hardcoded name would pass the test above and die here.
+
+        The description is rendered from `GUARD`, and the tool loads the tree's own copy
+        of that constant, so a literal spelled in would name a guard that did not answer
+        as soon as the constant moves.
+        """
+        monkeypatch.setattr(mod, "GUARD", "scripts/check-elsewhere.py")
+        with pytest.raises(SystemExit):
+            mod.main(["--help"])
+        out = capsys.readouterr().out
+
+        assert "scripts/check-elsewhere.py" in out, out
+        assert "check-doc-count.py" not in out, out
+
+    def test_the_exit_code_contract_names_the_guard_it_judges_by(self, mod) -> None:
+        """The contract is read by whoever hits rc 1, and it claimed a family.
+
+        Asserted on the `Exit codes` section rather than on the whole docstring: the
+        docstring also *quotes* the retired wording where it records what the summary
+        used to say (a marked quotation is not a claim), and a word-level assertion
+        would forbid saying what changed.
+        """
+        doc = mod.__doc__ or ""
+        section = doc.split("Exit codes", 1)[1].split("\n\n", 1)[0]
+
+        assert "repository's own guard" in section, section
+        assert "`scripts/check-doc-count.py`" in section, section
+        assert "`GUARD`" in section, section
+        assert "guards" not in section, section

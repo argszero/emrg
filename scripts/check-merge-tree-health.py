@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that *merging a PR* produces a tree that passes the repo's own guards.
+"""Check that *merging a PR* produces a tree the repository's own guard accepts.
 
 The class this exists for
 ------------------------
@@ -12,9 +12,10 @@ This repo's merge gates all answer a question *about a PR*:
 
 None of them answers the question that decides whether master is healthy one
 minute after the merge: **does the tree produced by merging this PR pass the
-guards the repo enforces on master?** That question is not about the branch - a
-branch is routinely self-consistent - it is about the *union* of the branch and
-master, and it can be answered only by building that union and asking it.
+repository's own guard (`scripts/check-doc-count.py`, `GUARD`)?** That question is
+not about the branch - a branch is routinely self-consistent - it is about the
+*union* of the branch and master, and it can be answered only by building that union
+and asking it.
 
 Measured 2026-09-12 (`cyc20260912-040220`), while draining a queue of eleven
 green PRs. #1133 and #1140 each added tests and each rewrote Agent.md's
@@ -100,8 +101,9 @@ refspec is taken literally. See `_refresh_base` for the measurements.
 
 Exit codes
 ----------
-    0  every clean merge produced a tree that passes the repo's guards
-    1  at least one clean merge produced a tree that FAILS them (the finding)
+    0  every clean merge produced a tree that passes the repository's own guard,
+       `scripts/check-doc-count.py` (`GUARD`)
+    1  at least one clean merge produced a tree that FAILS it (the finding)
     2  the question could not be answered (gh/git/guard failure) - fail loud,
        never report health that was not measured
 
@@ -512,7 +514,8 @@ def check_pr(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Check that merging a PR produces a tree that passes the repo's guards."
+            f"Check that merging a PR produces a tree {GUARD} passes - that guard "
+            "alone; the suite is check-merge-plan-suite.py's question."
         )
     )
     parser.add_argument("prs", nargs="*", type=int, help="PR numbers (default: all open)")
