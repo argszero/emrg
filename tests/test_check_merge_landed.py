@@ -476,3 +476,44 @@ def test_the_json_report_carries_both_trees(mod, merged_repo, monkeypatch, capsy
     assert payload[0]["reading"] == mod.NAMED
     assert payload[0]["landed_tree"] == fixture["landed_tree"]
     assert payload[0]["claimed_trees"] == [fixture["landed_tree"]]
+
+
+def test_every_state_that_asks_for_a_remedy_gets_its_own(mod) -> None:
+    """`_remedy`'s docstring claims one branch per state, and a fallthrough is not a branch.
+
+    Measured 2026-09-26 (`cyc20260926-015635`) at head `63f97391`: the function ended in
+    a bare `return` carrying the *unchecked* sentence, so `UNCHECKED` had no branch of its
+    own and any reading added later would inherit whichever sentence came last - exactly
+    the inheritance the docstring says the branches prevent. Harmless only because each
+    call site filters to one state, and nothing said so.
+    """
+    def verdict(reading: str):
+        return mod.Verdict(pr=1, state="merged", reading=reading)
+
+    sentences = {
+        reading: mod._remedy(verdict(reading))
+        for reading in (mod.DIVERGED, mod.UNCHECKED, mod.PENDING)
+    }
+    # Each state's advice is its own: three states, three distinct sentences. A
+    # fallthrough makes two of these equal, which is the defect, stated as equality.
+    assert len(set(sentences.values())) == 3, sentences
+    assert "audited against nothing" in sentences[mod.PENDING], sentences[mod.PENDING]
+    assert "not a weaker vote" in sentences[mod.UNCHECKED], sentences[mod.UNCHECKED]
+    assert "write the landed tree" in sentences[mod.DIVERGED], sentences[mod.DIVERGED]
+
+
+def test_a_reading_with_no_branch_is_refused_not_inherited(mod) -> None:
+    """The control, and the half that survives a new state being added.
+
+    `NAMED` is a pass and no caller asks for its remedy, so it is the standing example of
+    a reading with no branch: refused loudly, never answered with someone else's advice.
+    """
+    named = mod.Verdict(pr=1, state="merged", reading=mod.NAMED)
+    with pytest.raises(AssertionError) as exc:
+        mod._remedy(named)
+
+    assert repr(mod.NAMED) in str(exc.value), str(exc.value)
+
+    unknown = mod.Verdict(pr=1, state="merged", reading="SOMETHING_NEW")
+    with pytest.raises(AssertionError):
+        mod._remedy(unknown)

@@ -340,12 +340,17 @@ def _report(v: Verdict) -> list[str]:
 
 
 def _remedy(v: Verdict) -> str:
-    """The next action for a state that is not a pass - one branch per state.
+    """The next action for a state that is not a pass - **one named branch per state**.
 
-    Every branch is named rather than a fallthrough, because a verdict with no branch of
-    its own silently inherits the last one: `PENDING` reaches this function now that it
-    is announced, and the unchecked sentence ("a vote that names no tree is not a weaker
-    vote") would be an answer about a vote for a PR that has not merged anything.
+    The branches used to end in a fallthrough, so a reading with no branch of its own
+    inherited whichever sentence happened to be last: when `PENDING` began to be
+    announced it would have been handed the *unchecked* sentence - "a vote that names no
+    tree is not a weaker vote" - which is an answer about a vote for a PR that has
+    merged nothing. `UNCHECKED` is now named rather than left as that fallthrough, and a
+    reading this function has no branch for is refused loudly: a state added later must
+    not silently inherit someone else's next action (the class this whole tool exists to
+    keep out of a verdict). `NAMED` is a pass, reaches no caller, and is refused here
+    rather than given a sentence it would never print.
     """
     if v.reading == DIVERGED:
         return (
@@ -360,10 +365,16 @@ def _remedy(v: Verdict) -> str:
             f"  #{v.pr}: nothing has landed, so this number was audited against nothing "
             "- re-run this audit after the merge it names, and read no verdict here"
         )
-    return (
-        f"  #{v.pr}: a vote that names no tree is not a weaker vote, but nothing "
-        "compared this merge to one - `cast-vote.py`'s `tree_claim_refusal` only checks "
-        "a claim that was made"
+    if v.reading == UNCHECKED:
+        return (
+            f"  #{v.pr}: a vote that names no tree is not a weaker vote, but nothing "
+            "compared this merge to one - `cast-vote.py`'s `tree_claim_refusal` only checks "
+            "a claim that was made"
+        )
+    raise AssertionError(
+        f"_remedy has no branch for reading {v.reading!r} - a state with no branch of its "
+        "own would inherit the last one's advice, which is what each branch above exists "
+        "to prevent; add the branch, or do not call this for a pass"
     )
 
 
