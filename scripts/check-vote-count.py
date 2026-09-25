@@ -546,8 +546,16 @@ def _gh_json_paginated(args: list[str]) -> list:
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
 
 
-def _classify(body: str) -> str:
+def classify(body: str) -> str:
     """`veto`, `approve` or `comment`, from the verdict mark on the first line.
+
+    **Public on purpose, like `distinct_cycle_ids` beside it**: this is the reading
+    the *posting* side must agree with. `cast-vote.py` refuses to post a body this
+    answers `comment` for, because the loop below skips such a body entirely
+    (`if kind == "comment": continue`), so the review posts, `gh pr review` exits 0,
+    and the vote is spent in silence. Measured 2026-09-25 (`cyc20260925-135307`):
+    three votes were posted with the ✅ on the *last* line and read as plain
+    comments — the count did not move and nothing on the posting side said so.
 
     Two wrong versions came before this one, and they failed in opposite
     directions. Both are pinned by tests; both mistakes are worth naming because
@@ -1014,7 +1022,7 @@ def check_pr(
             )
         body = str(r.get("body") or "")
         at = str(r.get("at"))
-        kind = _classify(body)
+        kind = classify(body)
         if kind == "comment":
             continue
         # Every *distinct* id the body names, not the first one. One id is the handle a

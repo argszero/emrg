@@ -34,6 +34,7 @@ ones would, so no test can pass by never calling them.
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import io
 import sys
@@ -110,6 +111,16 @@ def counter_mod():
     return _load(COUNTER_SCRIPT, "check_vote_count_for_cast")
 
 
+@functools.lru_cache(maxsize=1)
+def _the_counter():
+    """The **real** counter module, for the one reading a fake must not answer itself.
+
+    Loaded once and shared: `_load` registers the module in `sys.modules`, and the
+    `counter_mod` fixture loads the same file under the same name.
+    """
+    return _load(COUNTER_SCRIPT, "check_vote_count_for_cast")
+
+
 # ── the counter's payload, faked at its own interface ──────────────────────
 
 
@@ -162,7 +173,21 @@ def verdict_with(
     )
 
 
-class FakeCounter:
+class _ReadsBodiesLikeTheCounter:
+    """The pure half of the counter, which a double must answer and must not invent.
+
+    `check_pr` is a *network* reading, so a scripted stand-in is the point of every
+    double here. Classification is a pure function of the body, and the reason
+    `cast-vote.py` asks the counter for it is that one body has to read the same way on
+    both sides — a double answering this with its own lookalike would test the
+    lookalike, and would stay green while the real classifier moved.
+    """
+
+    def classify(self, body: str) -> str:
+        return _the_counter().classify(body)
+
+
+class FakeCounter(_ReadsBodiesLikeTheCounter):
     """Scripted `check_pr` readings, recording every call.
 
     The last verdict repeats, so a test can script "the first read sees nothing,
@@ -187,6 +212,18 @@ class FakeCounter:
         if len(self._verdicts) > 1:
             return self._verdicts.pop(0)
         return self._verdicts[0]
+
+    def classify(self, body: str) -> str:
+        """Delegated to the real counter, and deliberately **not** faked.
+
+        `check_pr` is a *network* reading, so a scripted stand-in is the whole point
+        of this fake. The verdict classification is a pure function of the body, and
+        the reason `cast-vote.py` asks the counter for it at all is that one body
+        must read the same way on both sides — a fake answering this with its own
+        lookalike would test the lookalike, and would stay green while the real
+        classifier moved.
+        """
+        return _the_counter().classify(body)
 
 
 class FakeGh:
@@ -362,6 +399,122 @@ def test_two_cycle_ids_in_one_body_are_refused(mod, monkeypatch, capsys, body_fi
     # "which cycle wrote it cannot be measured, so it counts for none of them").
     assert "count for none of them" in err, "the refusal must state the counter's consequence"
     assert "first match" not in err, "the counter no longer takes the first match"
+
+
+# ── the verdict must be where the counter reads it: the first line ─────────
+#
+# Measured 2026-09-25 (`cyc20260925-135307`), and it cost three votes before anyone
+# noticed: `check-vote-count.py` reads the verdict mark off the **first line** and
+# `continue`s past a body that states none, so a review whose ✅ sits at the end is not
+# a weak vote or a void one — it is not seen at all. The cycle-id clause above would
+# not have caught any of the three: the ids were right, and `cast-vote.py` posted them,
+# reporting the loss only afterwards (exit 1), by which point the reviews were on
+# GitHub and un-postable. So the clause that prevents it belongs here, beside the
+# other one, and it asks the counter rather than deciding for itself.
+
+
+VERDICT_LAST = (
+    "Reviewed the landing change (5 paths, prose only) and re-measured the tree this\n"
+    "merge would land: `c8c3788a5e37` (5318 passed / 32 skipped).\n"
+    "\n"
+    "The docstrings are the whole change, so there is nothing executable to arm.\n"
+    "\n"
+    f"✅ LGTM — cycle {CYCLE}\n"
+)
+
+
+def test_a_verdict_below_the_first_line_is_refused_before_anything_is_posted(
+    mod, monkeypatch, capsys, body_file
+):
+    """The exact body that was spent three times: correct id, unreadable verdict.
+
+    The refusal has to happen **before** the post, which is the whole difference
+    between this clause and the exit-1 report that follows a post: one costs a
+    review, the other costs nothing.
+    """
+    counter = FakeCounter(verdict_with())
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", body_file(VERDICT_LAST)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert gh.calls == [], "a body the counter reads no verdict out of must reach no network call"
+    assert counter.calls == [], "the count is not worth reading for a refused post"
+    # The remedy is the message's job: the mark's position is not obvious from the
+    # failure, and a reader who re-posts the same shape loses another review.
+    assert "first line" in err
+    assert "count for nothing at all" in err, (
+        "the refusal must say the vote is not merely void — a void vote at least exists"
+    )
+
+
+def test_the_same_body_with_the_verdict_first_is_posted(mod, monkeypatch, capsys, body_file):
+    """The negative control: move the mark up, and nothing else about the body matters.
+
+    Without this the clause above could be refusing the *reasoning* rather than the
+    position, and the refusal would be indistinguishable from one that rejects every
+    long body.
+    """
+    first = VERDICT_LAST.split("\n")
+    body = "\n".join([first[-2], *(line for line in first if line != first[-2])])
+    counter = FakeCounter(verdict_with(), verdict_with([vote()], counted=[True], valid_count=1))
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", body_file(body)])
+    assert rc == 0
+    assert len(gh.calls) == 1, "the same reading, with the verdict first, must be posted"
+
+
+def test_a_veto_below_the_first_line_is_still_posted(mod, monkeypatch, capsys, body_file):
+    """The counter's rule is asymmetric, and the refusal must not be wider than it.
+
+    A ✅ lower down is never read, but a ❌ lower down **is** — so a veto stated
+    below its reasoning is a vote, and refusing it would substitute this tool's
+    reading for the counter's. Pinned here because the asymmetry is the non-obvious
+    half: it is why the clause may only ask "did the counter read a verdict", never
+    "is the mark on line one".
+    """
+    counter = FakeCounter(verdict_with(), verdict_with([vote(kind="veto")], counted=[True]))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        [
+            "1255",
+            "--body-file",
+            body_file(f"Checked the landing tree and it does not hold.\n\n❌ Needs fix — cycle {CYCLE}\n"),
+        ],
+    )
+    assert rc == 0
+    assert len(gh.calls) == 1, "a veto the counter reads must be posted, wherever it sits"
+
+
+def test_the_refusal_is_the_counters_own_reading_not_a_local_one(mod, counter_mod):
+    """Both ways, against the real classifier: refused exactly where it says `comment`.
+
+    The clause survives only while it agrees with the counter, so agreement is
+    measured rather than assumed — and measured on the table of shapes the counter's
+    own tests pin, so a change to either side shows up here as a disagreement instead
+    of as an unreadable vote in the field.
+    """
+    shapes = {
+        f"✅ LGTM — cycle {CYCLE}": "approve, stated first",
+        f"Reviewed it.\n\n✅ LGTM — cycle {CYCLE}": "approve stated below the first line",
+        f"❌ Needs fix — cycle {CYCLE}": "veto, stated first",
+        f"Reviewed it.\n\n❌ Needs fix — cycle {CYCLE}": "veto below the first line",
+        f"**✅ LGTM** — cycle {CYCLE}": "decorated approval",
+        f"cyc — ✅ LGTM on the landing tree {CYCLE}": "mark mid-sentence, nothing lost",
+        f"Follow-up on the thread — cycle {CYCLE}": "no verdict at all",
+        f"I voted ✅ on this head — cycle {CYCLE}": "a report *about* a vote",
+    }
+    for body, what in shapes.items():
+        kind = counter_mod.classify(body)
+        refusal = mod.verdict_unreadable(body)
+        assert bool(refusal) == (kind == "comment"), (
+            f"{what}: the counter reads {kind!r} and this tool "
+            f"{'refused' if refusal else 'accepted'} it — the refusal must be the "
+            "counter's own reading, never a second one"
+        )
 
 
 # ── counting: posted is not the same as counted ────────────────────────────
@@ -604,7 +757,7 @@ def test_an_unreadable_vote_count_exits_2_and_posts_nothing(mod, monkeypatch, ca
     distinction matters: `1` would tell a wrapper the vote went out and did not count.
     """
 
-    class RaisingCounter:
+    class RaisingCounter(_ReadsBodiesLikeTheCounter):
         def __init__(self):
             self.calls = 0
 
