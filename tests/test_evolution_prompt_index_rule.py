@@ -36,12 +36,17 @@ prompt, and fails saying it cannot measure rather than passing quietly.
 
 Named limit
 -----------
-`512` is pinned to the constant that truncates the line (`emrg/memory.py`), and that
-half is exact. The **100** is not: the line-count ruler has no constant in this tree
-yet — the design (§2) puts it in the daemon's trigger, which is PR #1602's change and
-is unmerged as of this branch. So the literal is asserted against the design's stated
-value and labelled here rather than dressed up: when `MEMORY_INDEX_ROW_CAP` lands,
-this file must pin it the way it pins 512, and the two spellings must be one number.
+Both numbers are pinned, each to the source of truth that acts on it: `512` to
+`emrg/memory.py`'s `INDEX_TITLE_MAX_CHARS`, which truncates the line the writer
+stores, and `100` to `emrg/server/daemon.py`'s `MEMORY_INDEX_ROW_CAP`, which is the
+count the daemon's own compaction instruction renders (`cap=MEMORY_INDEX_ROW_CAP`) and
+the count its trigger fires on. The design's §2 requires the prompt's `100` to come
+from that constant and forbids a second spelling of it; the two are asserted equal
+here, so a change to either one alone fails this file instead of leaving the shipped
+prompt quietly wrong about when a cycle must compact. (When this file was first
+written the constant did not exist in the tree — it landed with #1602 — and the
+literal was the only spelling available; pinning it was the follow-up both that PR and
+#1603 named, and it is done here.)
 """
 
 from __future__ import annotations
@@ -88,10 +93,10 @@ DESIGN_NAME = "memory-index-compaction-design.md"
 DESIGN_RELATIVE = f".emrg/designs/{DESIGN_NAME}"
 DESIGN_RESOLVABLE = re.compile(rf"~/\.emrg/designs/{re.escape(DESIGN_NAME)}")
 
-#: The design's own threshold, §0: 行数 > 100. A literal here because no constant in
-#: this tree carries it yet — see the module docstring's named limit.
-DESIGN_LINE_THRESHOLD = 100
-
+#: The design's own threshold, §0: 行数 > 100 — deliberately not spelled here. The
+#: number this file asserts is the one the daemon counts with (`MEMORY_INDEX_ROW_CAP`,
+#: imported inside the test below), because the design's §2 forbids a second spelling
+#: of the same number; a literal in this file would be that second spelling.
 LINE_THRESHOLD = re.compile(r"\*\*(\d+) lines\*\*")
 ROW_BOUND = re.compile(r"`INDEX_TITLE_MAX_CHARS`\s*\(\*\*(\d+)\*\*")
 
@@ -150,7 +155,17 @@ def test_the_retired_protocol_is_gone_from_the_shipped_prompt(rendered: str) -> 
 
 
 def test_the_prompt_states_the_replacement_ruler_where_a_cycle_reads_it(rendered: str) -> None:
-    """Line count first, then the per-row bound, then the blueprint that explains it."""
+    """Line count first, then the per-row bound, then the blueprint that explains it.
+
+    The threshold is pinned to the number the daemon counts with, not to a literal in
+    this file: the design's §2 says the prompt's `100` is rendered from that constant
+    and bans a second spelling of it. `MEMORY_INDEX_ROW_CAP` is the spelling the
+    trigger acts on, and it is also what the daemon's own compaction instruction
+    renders — so a cycle reading the prompt compacts at exactly the count that fires
+    the instruction.
+    """
+    from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
+
     block = _hygiene_block(rendered)
 
     stated = LINE_THRESHOLD.findall(block)
@@ -159,11 +174,12 @@ def test_the_prompt_states_the_replacement_ruler_where_a_cycle_reads_it(rendered
         "'**N lines**') — the retired protocol is gone and nothing names the ruler that "
         "replaced it, so a cycle has no target"
     )
-    assert set(stated) == {str(DESIGN_LINE_THRESHOLD)}, (
-        f"the block states {sorted(set(stated))} lines and the design's ruler is "
-        f"{DESIGN_LINE_THRESHOLD} (memory-index-compaction-design.md §0); if the "
-        "threshold really moved, move it here and in the design together — the two are "
-        "one number"
+    assert set(stated) == {str(MEMORY_INDEX_ROW_CAP)}, (
+        f"the block states {sorted(set(stated))} lines and the trigger fires at "
+        f"MEMORY_INDEX_ROW_CAP = {MEMORY_INDEX_ROW_CAP} (emrg/server/daemon.py) — one "
+        "number, two spellings: the prompt would tell a cycle to compact at a line count "
+        "the daemon does not count with. Move both together, or render the prompt's "
+        "number from the constant"
     )
     assert DESIGN_RESOLVABLE.search(block), (
         f"the block no longer points at the blueprint as `~/` + `{DESIGN_RELATIVE}` — "
