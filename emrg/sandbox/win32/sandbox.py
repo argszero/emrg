@@ -223,10 +223,17 @@ class AclSandbox:
             # The restricted token's default DACL still names only the user's
             # ambient SIDs — none of the restricting ones.  Every NEW object the
             # confined process creates takes its DACL from that default, so the
-            # write pass-2 check would deny pipe creation and break every
-            # piped-stdio grandchild spawn.  Choosing the temp SID first keeps
-            # default-DACL objects in one session's temp tree from acquiring the
-            # shared workspace capability.
+            # write check would deny pipe creation and break every piped-stdio
+            # grandchild spawn.  Choosing the temp SID first keeps default-DACL
+            # objects in one session's temp tree from acquiring the shared
+            # workspace capability.
+            #
+            # Two lists, not one, and the fallback is why the tiers differ: a
+            # restricting-only SID is refused by the enabled-group pass, so the
+            # temp write SID (this branch) fails where EVERYONE (the read-only
+            # fallback, ``world_sid``) passes.  The measured rule and the six rows
+            # behind it are in ``token.set_token_default_dacl_grant``'s docstring
+            # — read it before changing this argument (issue #1560).
             set_token_default_dacl_grant(
                 bindings,
                 restricted_token,
