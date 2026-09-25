@@ -155,7 +155,7 @@ def test_a_vote_that_merely_mentions_the_absence_of_a_veto_is_still_an_approval(
         "\u2705 **LGTM - third vote at this head**, from cycle `x` "
         "(two prior \u2705 at this head; **no \u274c at this head**).\n\nVerified from scratch:"
     )
-    assert from_check._classify(body) == "approve"
+    assert from_check.classify(body) == "approve"
 
 
 def test_the_verdict_mark_is_read_after_markdown_decoration(mod):
@@ -175,14 +175,14 @@ def test_the_verdict_mark_is_read_after_markdown_decoration(mod):
     fallback below, so only the veto side was ever wrong - which is why the fix
     has to cover both marks.
     """
-    assert mod._classify("**\u274c Needs fix:** something") == "veto", "bold veto"
-    assert mod._classify("- \u274c needs fix") == "veto", "bullet veto"
-    assert mod._classify("> \u274c needs fix") == "veto", "quoted veto"
-    assert mod._classify("## \u274c Needs fix") == "veto", "heading veto"
-    assert mod._classify("1. \u274c needs fix") == "veto", "ordered-list veto"
-    assert mod._classify("**\u2705 LGTM** - cycle `c`") == "approve", "bold approval"
-    assert mod._classify("- \u2705 LGTM - cycle `c`") == "approve", "bullet approval"
-    assert mod._classify("> \u2705 LGTM - cycle `c`") == "approve", "quoted approval"
+    assert mod.classify("**\u274c Needs fix:** something") == "veto", "bold veto"
+    assert mod.classify("- \u274c needs fix") == "veto", "bullet veto"
+    assert mod.classify("> \u274c needs fix") == "veto", "quoted veto"
+    assert mod.classify("## \u274c Needs fix") == "veto", "heading veto"
+    assert mod.classify("1. \u274c needs fix") == "veto", "ordered-list veto"
+    assert mod.classify("**\u2705 LGTM** - cycle `c`") == "approve", "bold approval"
+    assert mod.classify("- \u2705 LGTM - cycle `c`") == "approve", "bullet approval"
+    assert mod.classify("> \u2705 LGTM - cycle `c`") == "approve", "quoted approval"
 
 
 def test_a_decorated_veto_resets_the_run_instead_of_being_skipped(mod, monkeypatch, capsys):
@@ -206,11 +206,11 @@ def test_a_decorated_veto_resets_the_run_instead_of_being_skipped(mod, monkeypat
 
 def test_a_negated_mark_is_not_a_statement_of_that_mark(mod):
     """"no ❌" is prose about the veto; "Not LGTM" is a refusal, not an approval."""
-    assert mod._classify("\u2705 LGTM - cycle `c` (no \u274c at this head)") == "approve"
-    assert mod._classify("Not LGTM - cycle `c`") == "veto", "a refusal must not count as a vote"
-    assert mod._classify("no \u2705 from me yet, cycle `c`") == "comment"
+    assert mod.classify("\u2705 LGTM - cycle `c` (no \u274c at this head)") == "approve"
+    assert mod.classify("Not LGTM - cycle `c`") == "veto", "a refusal must not count as a vote"
+    assert mod.classify("no \u2705 from me yet, cycle `c`") == "comment"
     # The negation must not reach across a word: "not bad" is praise.
-    assert mod._classify("Not bad, LGTM - cycle `c`") == "approve"
+    assert mod.classify("Not bad, LGTM - cycle `c`") == "approve"
 
 
 def test_a_leading_mark_decides_the_line(mod):
@@ -233,35 +233,35 @@ def test_a_leading_mark_decides_the_line(mod):
     approval only has to outrun the vocabulary once. So the leading mark decides,
     and the scan below is the fallback for verdicts written as prose.
     """
-    assert mod._classify("\u2705 LGTM - cycle `c` (0 \u274c at this head)") == "approve"
-    assert mod._classify("\u2705 LGTM - cycle `c` (zero \u274c)") == "approve"
-    assert mod._classify("\u2705 LGTM - cycle `c` (none \u274c)") == "approve"
-    assert mod._classify("\u2705 LGTM - cycle `c` (no prior \u274c)") == "approve"
-    assert mod._classify("\u2705 LGTM - cycle `c` (no     \u274c)") == "approve"
-    assert mod._classify("\u2705 LGTM - cycle `c` (not a single \u274c)") == "approve"
+    assert mod.classify("\u2705 LGTM - cycle `c` (0 \u274c at this head)") == "approve"
+    assert mod.classify("\u2705 LGTM - cycle `c` (zero \u274c)") == "approve"
+    assert mod.classify("\u2705 LGTM - cycle `c` (none \u274c)") == "approve"
+    assert mod.classify("\u2705 LGTM - cycle `c` (no prior \u274c)") == "approve"
+    assert mod.classify("\u2705 LGTM - cycle `c` (no     \u274c)") == "approve"
+    assert mod.classify("\u2705 LGTM - cycle `c` (not a single \u274c)") == "approve"
     # The fallback still catches a veto written as prose, and still lets it win
     # there: with no leading mark there is nothing to read the line through.
-    assert mod._classify("Result: \u274c needs fix - cycle `c`") == "veto"
-    assert mod._classify("Result: \u274c because \u2705 was premature") == "veto"
+    assert mod.classify("Result: \u274c needs fix - cycle `c`") == "veto"
+    assert mod.classify("Result: \u274c because \u2705 was premature") == "veto"
     # ...but a prose line that *claims* LGTM is an approval, and the mark on it is
     # a mention of the other mark - the same reasoning as the leading case, applied
     # to the shape prose takes. Each of these was read as a veto before:
-    assert mod._classify("Results: no \u274c; LGTM - cycle `c`") == "approve"
-    assert mod._classify("Results: no \u274c, LGTM - cycle `c`") == "approve"
-    assert mod._classify("Summary: zero \u274c so LGTM from me") == "approve"
-    assert mod._classify("Findings: no \u274c -> LGTM") == "approve"
+    assert mod.classify("Results: no \u274c; LGTM - cycle `c`") == "approve"
+    assert mod.classify("Results: no \u274c, LGTM - cycle `c`") == "approve"
+    assert mod.classify("Summary: zero \u274c so LGTM from me") == "approve"
+    assert mod.classify("Findings: no \u274c -> LGTM") == "approve"
     # The leading mark is read as a *mark*, not inferred from the word "LGTM":
     # 37 of the 173 measured bodies state their verdict with a bare ✅ and no
     # "LGTM" anywhere. Without the leading branches these fall through to the
     # substring test and stop counting as votes at all.
-    assert mod._classify("\u2705 - third vote at this head, verified from scratch") == "approve"
-    assert mod._classify("\u274c LGTM was premature - cycle `c`") == "veto"
+    assert mod.classify("\u2705 - third vote at this head, verified from scratch") == "approve"
+    assert mod.classify("\u274c LGTM was premature - cycle `c`") == "veto"
     # A prose line that names the absence of a veto is not a veto either - the
     # scan below is negation-aware for the same reason.
-    assert mod._classify("Results: no \u274c anywhere in this diff") == "comment"
+    assert mod.classify("Results: no \u274c anywhere in this diff") == "comment"
     # and a refusal is still a veto, since it is a claim *against* LGTM:
-    assert mod._classify("Not LGTM - cycle `c`") == "veto"
-    assert mod._classify("I can't LGTM this") == "veto"
+    assert mod.classify("Not LGTM - cycle `c`") == "veto"
+    assert mod.classify("I can't LGTM this") == "veto"
 
 
 def test_an_approval_mentioning_a_veto_does_not_reset_the_run(mod, monkeypatch, capsys):
@@ -282,21 +282,21 @@ def test_an_approval_mentioning_a_veto_does_not_reset_the_run(mod, monkeypatch, 
 
 
 def test_the_verdict_is_read_from_the_first_content_line(mod):
-    assert mod._classify("\u2705 LGTM - cycle `c`") == "approve"
-    assert mod._classify("\u274c Needs fix: something") == "veto"
-    assert mod._classify("  \u2705 LGTM - cycle `c`") == "approve", "leading whitespace is common"
-    assert mod._classify("Just a comment about the code") == "comment"
-    assert mod._classify("") == "comment"
-    assert mod._classify("\n\n   \n") == "comment", "whitespace-only body is not a vote"
+    assert mod.classify("\u2705 LGTM - cycle `c`") == "approve"
+    assert mod.classify("\u274c Needs fix: something") == "veto"
+    assert mod.classify("  \u2705 LGTM - cycle `c`") == "approve", "leading whitespace is common"
+    assert mod.classify("Just a comment about the code") == "comment"
+    assert mod.classify("") == "comment"
+    assert mod.classify("\n\n   \n") == "comment", "whitespace-only body is not a vote"
     # A decoration-only first line is skipped: the verdict is on the line after it.
-    assert mod._classify("---\n\u274c needs fix - cycle `c`") == "veto"
-    assert mod._classify("---\n\u2705 LGTM - cycle `c`") == "approve"
+    assert mod.classify("---\n\u274c needs fix - cycle `c`") == "veto"
+    assert mod.classify("---\n\u2705 LGTM - cycle `c`") == "approve"
 
 
 def test_a_body_that_does_not_open_with_a_mark_but_claims_lgtm_counts(mod):
     """Human-written reviews in this repo sometimes omit the mark."""
-    assert mod._classify("LGTM, verified locally.") == "approve"
-    assert mod._classify("## Review\nThis needs work") == "comment"
+    assert mod.classify("LGTM, verified locally.") == "approve"
+    assert mod.classify("## Review\nThis needs work") == "comment"
 
 
 # --- the mergeable clause: enough votes is not the same as mergeable -------
@@ -595,7 +595,7 @@ def test_the_pr_view_actually_requests_the_merge_fields(mod, monkeypatch, capsys
     fields = " ".join(seen[0])
     assert "mergeable" in fields and "mergeStateStatus" in fields, seen[0]
 def test_a_veto_stated_below_a_prose_intro_is_still_a_veto(mod):
-    """Found in cyc20260911-153707 by probing `_classify` itself.
+    """Found in cyc20260911-153707 by probing `classify` itself.
 
     Reading only the *first* content line means a veto whose mark sits below a
     prose intro is classified `comment` - and `check_pr` **skips comments**, so
@@ -607,12 +607,12 @@ def test_a_veto_stated_below_a_prose_intro_is_still_a_veto(mod):
     practice, so the shape is worth handling even though no real body in the
     corpus currently uses it (all of them state the mark first).
     """
-    assert mod._classify("Checked all three fixes.\n\n\u274c Needs fix: the third leaks") == "veto"
-    assert mod._classify("Reviewed head abc.\n\n\n\u274c needs fix") == "veto"
-    assert mod._classify("Here is my review.\n\n**\u274c Needs fix:** decorated") == "veto"
-    assert mod._classify("Intro.\n\n- \u274c needs fix") == "veto", "bullet below the intro"
+    assert mod.classify("Checked all three fixes.\n\n\u274c Needs fix: the third leaks") == "veto"
+    assert mod.classify("Reviewed head abc.\n\n\n\u274c needs fix") == "veto"
+    assert mod.classify("Here is my review.\n\n**\u274c Needs fix:** decorated") == "veto"
+    assert mod.classify("Intro.\n\n- \u274c needs fix") == "veto", "bullet below the intro"
     # The mirror: an approval stated below a prose intro.
-    assert mod._classify("Checked all three.\n\n\u2705 LGTM - cycle `c`") == "comment"
+    assert mod.classify("Checked all three.\n\n\u2705 LGTM - cycle `c`") == "comment"
 
 
 def test_a_quoted_veto_in_a_code_fence_is_not_a_stated_one(mod):
@@ -627,18 +627,18 @@ def test_a_quoted_veto_in_a_code_fence_is_not_a_stated_one(mod):
     Found independently by how2how2how2-arch and pm25coder on the PR.
     """
     quoted = "Tested on Windows.\n\n```text\n\u274c Needs fix: x\n```\n\nNothing else.\n"
-    assert mod._classify(quoted) == "comment", (
+    assert mod.classify(quoted) == "comment", (
         "a fenced example is the reviewer quoting output, not stating a verdict"
     )
     # A real (unfenced) veto below a prose intro must still read as a veto - the
     # fence fix must not close the hole it was built on top of.
-    assert mod._classify("Checked all three.\n\n\u274c Needs fix: the third leaks\n") == "veto"
+    assert mod.classify("Checked all three.\n\n\u274c Needs fix: the third leaks\n") == "veto"
     # The first line is a quote too, when it is inside a fence.
-    assert mod._classify("```text\n\u274c Needs fix: template\n```\n\nAll fine.\n") == "comment"
+    assert mod.classify("```text\n\u274c Needs fix: template\n```\n\nAll fine.\n") == "comment"
     # ~~~ is a fence as well.
-    assert mod._classify("Intro.\n\n~~~\n\u274c Needs fix: x\n~~~\n\nOutro.\n") == "comment"
+    assert mod.classify("Intro.\n\n~~~\n\u274c Needs fix: x\n~~~\n\nOutro.\n") == "comment"
     # And a genuine approval that quotes the shape stays an approval.
-    assert mod._classify("\u2705 LGTM\n\nReproduced:\n\n```\n\u274c Needs fix\n```\n") == "approve"
+    assert mod.classify("\u2705 LGTM\n\nReproduced:\n\n```\n\u274c Needs fix\n```\n") == "approve"
 
 
 def test_nested_fences_close_by_length_not_by_toggle(mod):
@@ -660,7 +660,7 @@ def test_nested_fences_close_by_length_not_by_toggle(mod):
         "````\n\n"
         "Outro.\n"
     )
-    assert mod._classify(nested) == "comment"
+    assert mod.classify(nested) == "comment"
     assert mod._fence_flags(nested.splitlines()).count(True) == 5, (
         "the outer opener, inner opener, quoted veto, inner closer and outer closer"
     )
@@ -674,7 +674,7 @@ def test_an_unbalanced_fence_does_not_hide_a_real_veto(mod):
     module documents at length. Failing toward "read it as prose" is the honest
     reading of a body whose formatting is broken.
     """
-    assert mod._classify("Intro.\n\n```text\n\u274c Needs fix: real, never closed\n") == "veto"
+    assert mod.classify("Intro.\n\n```text\n\u274c Needs fix: real, never closed\n") == "veto"
     assert mod._fence_flags(["a", "```", "b"]) == [False, False, False], (
         "an unclosed fence is not a region - the whole body reads as prose"
     )
@@ -696,7 +696,7 @@ def test_the_unbalanced_fallback_covers_only_the_tail_not_closed_fences(mod):
     closed_then_stray_open = (
         "Reviewed on Windows.\n\n```\n\u274c Needs fix: quoted example\n```\n\nNote.\n```\n"
     )
-    assert mod._classify(closed_then_stray_open) == "comment", (
+    assert mod.classify(closed_then_stray_open) == "comment", (
         "a mark quoted in a *closed* fence is a quotation, not a statement, even "
         "when a stray opener appears later in the same body"
     )
@@ -706,7 +706,7 @@ def test_the_unbalanced_fallback_covers_only_the_tail_not_closed_fences(mod):
     assert flags[6] is False and flags[7] is False, "the unmatched tail reads as prose"
     # And the tail-only rule must not re-introduce the failure the fallback was for:
     # a real veto below a genuinely unclosed fence is still a veto.
-    assert mod._classify("Intro.\n\n```\ncode\n\n\u274c Needs fix: real\n") == "veto"
+    assert mod.classify("Intro.\n\n```\ncode\n\n\u274c Needs fix: real\n") == "veto"
 
 
 def test_only_a_stated_veto_counts_not_a_mention_of_one(mod):
@@ -718,11 +718,11 @@ def test_only_a_stated_veto_counts_not_a_mention_of_one(mod):
     discard every approval before them - so a mark only counts as a stated veto
     when it opens its line.
     """
-    assert mod._classify("I tested on Windows.\n- README marked \u274c for security") == "comment"
-    assert mod._classify("Follow-up.\n\nI voted \u2705 on this head.") == "comment"
-    assert mod._classify("Intro.\n\nno \u274c found") == "comment", "a negated mention"
+    assert mod.classify("I tested on Windows.\n- README marked \u274c for security") == "comment"
+    assert mod.classify("Follow-up.\n\nI voted \u2705 on this head.") == "comment"
+    assert mod.classify("Intro.\n\nno \u274c found") == "comment", "a negated mention"
     # A later line that states the *other* verdict stops the scan entirely.
-    assert mod._classify("Intro\n\n\u2705 LGTM - cyc1\n\n\u274c but also this") == "comment"
+    assert mod.classify("Intro\n\n\u2705 LGTM - cyc1\n\n\u274c but also this") == "comment"
 
 
 def test_a_prose_intro_then_a_veto_resets_the_run(mod, monkeypatch, capsys):

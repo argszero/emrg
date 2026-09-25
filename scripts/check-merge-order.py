@@ -133,6 +133,28 @@ always "most valuable first" - on 2026-09-11 the right first move was the CI-rea
 fix (#1149), which conflicted with everything but unblocked CI for every stacked PR
 behind it.
 
+What a merge *lands*, not only what it dirties
+----------------------------------------------
+Conflict is one way a merge reaches past its own PR. The other is **containment**, and
+this tool looked for neither until now: a PR's head can already *contain* another open
+PR's head, which makes the upper PR's landing change that PR's change plus this one's,
+and leaves the lower PR with nothing to land once the upper one merges. Nothing in the
+family caught it. Measured 2026-09-25 (`cyc20260925-165507`) on this queue: `#1614`'s
+head `d2d10064` contains `#1611`'s `cf5fa701`, because the cycle that wrote it branched
+from the branch it had just been standing on while resolving `#1611`'s conflict. Both
+read `MERGEABLE/CLEAN`, both were green, this tool printed `0 of 10 pairs conflict` and
+`merging it dirties nothing else` for each, and `check-merge-landing-diff.py 1614` showed
+`#1611`'s five files inside `#1614`'s landing change. `check-pr-base.py` does not see it
+either, and cannot: that gate reads the base a PR **declares**, and `#1614` declares
+`master`.
+
+The relation is one `git merge-base --is-ancestor` per ordered pair, on commits the run
+has already fetched for the conflict measurement, so it costs no network and no new
+ref. Like `check-pr-base.py`'s `LIVE`, a stack is **reported, not failed**: stacking is a
+legitimate way to carry work, and what a queue needs from it is the order - land the
+lower PR first, so each lands its own change and neither rides on the other's review.
+The exit code is unchanged by this section.
+
 Usage
 -----
     uv run --no-sync python3 scripts/check-merge-order.py [PR ...]
@@ -352,13 +374,46 @@ def _conflict_paths(a: str, b: str) -> tuple[list[str] | None, str]:
     return paths or None, answer.diagnosis
 
 
+def _is_ancestor(earlier: str, later: str) -> bool:
+    """True when commit `earlier` is an ancestor of (or equal to) commit `later`.
+
+    `git merge-base --is-ancestor` answers with its exit code and prints nothing: 0 for
+    yes, **1 for no**, and anything above that is git declining to answer at all (a
+    missing object, an unusable repository, a shallow clone without the common
+    ancestor). The third case is why this raises instead of returning False: "not 0" is
+    not "no", and independence is the reassuring answer here - the same asymmetry
+    `merge_tree.fold` refuses for merges, where a failure to merge the two *inputs* also
+    exits 1 with no output and must not be read as a conflict. A pair this checkout
+    cannot ask about is reported as unmeasured, by exiting 2, never as unrelated.
+    """
+    proc = _run(["git", "merge-base", "--is-ancestor", earlier, later])
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    raise RuntimeError(
+        f"could not ask whether {earlier[:8]} is an ancestor of {later[:8]}: "
+        f"{proc.stderr.strip() or f'git exited {proc.returncode}'}"
+    )
+
+
 def forecast(base: str, numbers: list[int], repo: str) -> dict:
-    """Per-PR: does it conflict with the base, and which PRs would it dirty."""
+    """Per-PR: does it conflict with the base, what would it dirty, what does it contain.
+
+    Two questions per pair, asked in one pass so they cannot be about different pairs:
+    the merge (conflict, `merge_tree`'s) and the ancestry (containment, `_is_ancestor`'s).
+    """
     # Resolve the base first: fetching the PR heads below rewrites FETCH_HEAD, so a
     # name held across them would silently become the last head fetched.
     base_sha = _rev_parse(base)
     heads = {number: _rev_parse(_fetch_head(repo, number)) for number in numbers}
-    report: dict = {"base": base_sha, "prs": {}, "base_conflicts": []}
+    report: dict = {
+        "base": base_sha,
+        "prs": {},
+        "base_conflicts": [],
+        "contains": {},
+        "identical": [],
+    }
     for number in numbers:
         paths, diagnosis = _conflict_paths(base_sha, heads[number])
         if paths is None:
@@ -380,6 +435,16 @@ def forecast(base: str, numbers: list[int], repo: str) -> dict:
             if paths:
                 report["prs"][a]["dirtied"].append({"pr": b, "paths": paths})
                 report["prs"][b]["dirtied"].append({"pr": a, "paths": paths})
+            # Equal heads are the degenerate case and must not reach the branch below:
+            # a commit is an ancestor of itself, so both directions answer yes and the
+            # pair would be printed as "one contains the other" - true, and useless.
+            # Two open PRs sharing a head is its own fact, reported as such.
+            if heads[a] == heads[b]:
+                report["identical"].append({"a": a, "b": b, "head": heads[a]})
+            elif _is_ancestor(heads[a], heads[b]):
+                report["contains"].setdefault(b, []).append(a)
+            elif _is_ancestor(heads[b], heads[a]):
+                report["contains"].setdefault(a, []).append(b)
     return report
 
 
@@ -414,6 +479,29 @@ def _print_report(report: dict) -> None:
             f" - {' '.join('#' + str(i['pr']) for i in dirtied)}"
         )
     print()
+    stacked = report.get("contains") or {}
+    identical = report.get("identical") or []
+    if stacked or identical:
+        print("What a merge would land, beyond its own change (the base field does not")
+        print("declare this, and no other gate reads it):")
+        for upper in sorted(stacked):
+            lowers = sorted(stacked[upper])
+            names = ", ".join(f"#{n}" for n in lowers)
+            print(
+                f"  #{upper} is stacked on {names}: its head already contains the "
+                f"commits of {'those PRs' if len(lowers) > 1 else 'that PR'}, so a "
+                f"merge of #{upper} lands them too - and leaves "
+                f"{'them' if len(lowers) > 1 else 'it'} with nothing left to land on "
+                "its own review."
+            )
+            order = " -> ".join(f"#{n}" for n in lowers) + f" -> #{upper}"
+            print(f"    land in this order: {order}")
+        for pair in identical:
+            print(
+                f"  #{pair['a']} and #{pair['b']} have the same head commit "
+                f"({pair['head'][:8]}) - a merge of either lands it"
+            )
+        print()
     print("Merging a PR costs one resolution per later PR it dirties, and each")
     print("resolution push voids that PR's votes. Cheapest-first is not always")
     print("most-valuable-first; choose deliberately.")

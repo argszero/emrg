@@ -120,8 +120,13 @@ cd {{ source_dir }} && git status --short --branch 2>&1
 > - **Never** run `git stash`, `git checkout .`, `git restore .`, `git clean`,
 >   `git reset --hard`, or any other command that hides/discards uncommitted changes.
 > - **Never** create branches, commit, push, or open PRs while the tree is dirty.
-> - A dirty tree is not an error — it means this cycle runs **read-only**: scanning,
->   review, issue discussion, and memory updates only. Record
+> - A dirty tree is not an error, and dirt alone no longer costs this cycle its tier:
+>   the daemon **converges the host's tree itself** before this cycle's prompt is sent —
+>   a reversible stash, with anything found nowhere else pinned under
+>   `refs/emrg/rescue/` first — and the cycle keeps its configured tier. `read-only` is
+>   what it runs at when that convergence **failed**, or when the project configures it.
+>   So a tree that is still dirty when *you* look, or a tier of `read-only`, is the
+>   failure case, not the dirt rule: record
 >   `工作树非干净（dirty working tree）— 本周期只读` in the closing summary and proceed
 >   with the read-only parts of the cycle; finish without any git write operations.
 
@@ -139,10 +144,13 @@ cd {{ source_dir }} && git status --short --branch 2>&1
 > `git checkout -b` in `{{ source_dir }}` itself — the one directory the dirty-tree rule and
 > the sandbox both exist to protect.
 
-- **Uncommitted local changes present** → do NOT stash/reset/restore. Record
-  "dirty working tree — read-only cycle" in the closing summary; run the cycle
-  **read-only** (scan / review / issue discussion only, no git writes, no PR
-  submission), then finish. Skip `git pull --rebase` this cycle too.
+- **Uncommitted local changes present** → do NOT stash/reset/restore. The daemon
+  converges host dirt itself, before the prompt is sent (a reversible stash, unique
+  work pinned under `refs/emrg/rescue/` first), so a tree that is still dirty here is
+  its convergence having **failed** — not the tier rule it used to be. Record
+  "dirty working tree — the daemon's convergence did not clear it" in the closing
+  summary; run the cycle **read-only** (scan / review / issue discussion only, no git
+  writes, no PR submission), then finish. Skip `git pull --rebase` this cycle too.
 - Behind upstream **and working tree clean** → `git pull --rebase`
 - Behind upstream **and working tree dirty** → skip the pull, record
   "behind upstream, dirty tree — pull skipped" in the closing summary
@@ -368,7 +376,8 @@ ancestor. Basing on the fetched upstream ref is what keeps B.5 measuring the tre
 **This flow needs the `workspace-write` tier — measured 2026-09-21**, not assumed: `git clone`,
 `git checkout -b`, `git add` and `git commit` are each `BLOCK` under `read-only` and each `ALLOW`
 under `workspace-write`, because `$DEV` lies inside the workspace. A cycle whose tier is
-`read-only` (configured for the project, or forced by the dirty-tree guard above) cannot start
+`read-only` (configured for the project, or left by a dirty-tree convergence that
+**failed** — dirt alone no longer forces it) cannot start
 this flow at all: do **not** improvise another location — record the exact command the sandbox
 refused in the closing summary as a blocker, and finish the read-only parts of the cycle.
 

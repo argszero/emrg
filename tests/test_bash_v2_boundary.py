@@ -536,6 +536,51 @@ def test_read_only_refuses_a_write_inside_the_workspace(boundary):
 
 
 @needs_seatbelt
+def test_deletion_is_governed_by_the_same_grant_as_a_write(boundary):
+    """``file-write*`` covers removal, so ``enforcement = "full"`` is not hiding a hole.
+
+    The darwin provider's claim is that Seatbelt governs every promised file
+    effect by construction.  Removal is the effect that could escape it without
+    anyone noticing: ``rm`` is a directory-entry change rather than a content
+    write, and the v1 fence needed a separate remover set for exactly that reason
+    (``tests/test_bash_tool_unlink_remover.py``).  If the operation set covered
+    contents alone, a confined process could not rewrite a file but could still
+    delete it — and the read-only tier, whose whole promise is *no writes*, would
+    let a command destroy the tree it was protecting.
+
+    Rows two and three are the ones a content-only boundary passes by accident:
+    a file outside the workspace, and a move whose create half is outside the
+    grant and whose unlink half is inside it.  The last row is the control — the
+    same command under a grant that covers the file must succeed, so a profile
+    that refused every removal would fail this test rather than satisfy it.
+    """
+    inside = boundary.workspace / "victim.txt"
+    inside.write_text("victim\n")
+
+    refused = boundary.run(f"rm -f {_shell_quote(str(inside))}", mode="read-only")
+    assert refused.exit_code not in (0, None)
+    assert inside.exists(), "read-only removed a file it must not touch"
+    assert refused.sandbox == {"mode": "read-only", "denied": True, "enforcement": "full"}
+
+    outside = boundary.outside / "victim.txt"
+    outside.write_text("victim\n")
+    refused = boundary.run(f"rm -f {_shell_quote(str(outside))}")
+    assert refused.exit_code not in (0, None)
+    assert outside.exists(), "a granted workspace removed a file outside it"
+    assert refused.sandbox["denied"] is True
+
+    escaped = boundary.outside / "moved.txt"
+    moved = boundary.run(f"mv {_shell_quote(str(inside))} {_shell_quote(str(escaped))}")
+    assert moved.exit_code not in (0, None)
+    assert inside.exists(), "a refused move took its source with it"
+    assert not escaped.exists()
+
+    removed = boundary.run(f"rm -f {_shell_quote(str(inside))}")
+    assert (removed.exit_code, removed.stderr) == (0, "")
+    assert not inside.exists(), "the workspace grant could not remove a file inside it"
+
+
+@needs_seatbelt
 def test_the_command_reaches_the_shell_as_one_element(boundary):
     """No second parse and no re-quoting: the source survives verbatim.
 
