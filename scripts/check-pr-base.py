@@ -62,6 +62,16 @@ Exit codes
 2  the question could not be answered (gh failed, response unparseable, or a
    requested PR number is not among the open PRs)
 
+What the count covers
+---------------------
+Every exit code above is about the PRs this run **looked at**, and those are the numbers
+the caller gave (or all open PRs when none were given). The summary line says which:
+`N of the M open PR(s)` under the default, `N of the M named PR(s)` when numbers were
+passed. Measured 2026-09-26 (`cyc20260926-023125`): asked about a single number, the line
+read `1 open PR(s) are based on a branch that cannot reach master` - a count of the
+caller's list, in the vocabulary of a fact about the repository. The per-PR lines above it
+were always per-PR; only the summary generalised, and it is the line a reader quotes.
+
 Never reports a count it could not obtain: a check that guesses "OK" when it
 could not read the state is worse than no check, because the failure it hides is
 exactly the silent one.
@@ -275,8 +285,17 @@ def main(argv: list[str] | None = None) -> int:
             dead += 1
 
     if dead:
+        # The count is the **selection's**, and the sentence says which one it is: with
+        # no numbers given the selection *is* every open PR, and with numbers given it is
+        # those. Measured 2026-09-26 (`cyc20260926-023125`) after the sibling
+        # `check-merge-order.py` was corrected for the same shape: asked about one number,
+        # this sentence read "1 open PR(s) are based on a branch that cannot reach
+        # master" - true of the one PR asked about, and a claim about the repository that
+        # nobody measured. `of the N` costs three words and makes the subject explicit.
+        where = "named" if args.prs else "open"
         print(
-            f"\n{dead} open PR(s) are based on a branch that cannot reach master. "
+            f"\n{dead} of the {len(prs)} {where} PR(s) are based on a branch that cannot "
+            "reach master. "
             f"Retarget with: gh api -X PATCH repos/<owner>/<repo>/pulls/<N> -f base=master"
         )
         return 1

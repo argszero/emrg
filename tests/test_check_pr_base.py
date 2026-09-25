@@ -296,3 +296,75 @@ class TestRealInvocationSurface:
         # On a machine with no `gh` at all (e.g. the Windows runner) this is 2 as
         # well - the code path is now the same, which is the point.
         assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+
+
+class TestTheSummaryCountsTheSelectionNotTheRepository:
+    """The dead-end summary is about the PRs looked at, and says which they are.
+
+    Measured 2026-09-26 (`cyc20260926-023125`), the cycle after the sibling
+    `check-merge-order.py` was corrected for the same shape: `check-pr-base.py 1148`
+    printed `1 open PR(s) are based on a branch that cannot reach master` - a count of the
+    caller's one-number list, in the vocabulary of a fact about the whole repository.
+    The per-PR lines were always per-PR; only the summary generalised, and it is the line
+    a reader quotes into a merge decision.
+    """
+
+    def _wire(self, mod, monkeypatch, prs, branches, on_master):
+        monkeypatch.setattr(mod, "_open_prs", lambda repo: prs)
+        monkeypatch.setattr(mod, "_branch_heads", lambda repo: branches)
+        monkeypatch.setattr(mod, "_ref_is_on_master", lambda sha, repo: on_master(sha))
+
+    @staticmethod
+    def _dead():
+        """One dead-end base and one fine one: the shape the summary line is about."""
+        return [
+            {"number": 1148, "baseRefName": "feature/dead", "headRefName": "h1"},
+            {"number": 1151, "baseRefName": "master", "headRefName": "h2"},
+        ]
+
+    def test_a_named_list_is_not_reported_as_the_open_set(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        prs = self._dead()
+        self._wire(mod, monkeypatch, prs, {"feature/dead": "s1"}, lambda sha: False)
+        rc = mod.main(["--repo", "owner/repo", "1148"])
+        out = capsys.readouterr().out
+
+        assert rc == 1, out
+        assert "1 of the 1 named PR(s)" in out, out
+        assert "open PR(s)" not in out, out
+
+    def test_the_default_still_says_open(self, mod, monkeypatch, capsys) -> None:
+        """The control: with no numbers given, the selection *is* every open PR."""
+        prs = self._dead()
+        self._wire(mod, monkeypatch, prs, {"feature/dead": "s1"}, lambda sha: False)
+        rc = mod.main(["--repo", "owner/repo"])
+        out = capsys.readouterr().out
+
+        assert rc == 1, out
+        assert "1 of the 2 open PR(s)" in out, out
+        assert "named" not in out, out
+
+    def test_the_two_halves_of_the_sentence_are_different_numbers(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """`N of the M`: the numerator is the dead ones, the denominator the selection.
+
+        The numbers must **differ** here, and that is the point of the three-PR fixture:
+        an earlier version of this test named only the two dead PRs, so `N == M`, and a
+        mutant that printed `dead` for both halves survived it (measured while writing
+        this: arm B, `{len(prs)}` -> `{dead}`, rc 0). A test whose two subjects are equal
+        cannot say which one the code read.
+        """
+        prs = [
+            {"number": 1, "baseRefName": "feature/dead", "headRefName": "h1"},
+            {"number": 2, "baseRefName": "feature/dead2", "headRefName": "h2"},
+            {"number": 3, "baseRefName": "master", "headRefName": "h3"},
+        ]
+        self._wire(mod, monkeypatch, prs, {"feature/dead": "s1", "feature/dead2": "s2"},
+                   lambda sha: False)
+        rc = mod.main(["--repo", "owner/repo", "1", "2", "3"])
+        out = capsys.readouterr().out
+
+        assert rc == 1, out
+        assert "2 of the 3 named PR(s)" in out, out
