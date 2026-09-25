@@ -124,6 +124,22 @@ def mod():
     return _load_module()
 
 
+def _load_sibling(name: str):
+    """A sibling gate, loaded from its own file so its constant is the one it runs.
+
+    Registered in `sys.modules` before `exec_module`, the loader rule the family's scripts
+    follow for each other: these modules resolve annotations through
+    `sys.modules[cls.__module__]`, so a sibling that grows a dataclass would otherwise fail
+    to load here for a reason unrelated to what is being asserted.
+    """
+    spec = importlib.util.spec_from_file_location(name, REPO_ROOT / "scripts" / f"{name}.py")
+    assert spec is not None and spec.loader is not None, f"could not load {name}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _git(cwd: Path, *args: str) -> str:
     proc = subprocess.run(
         ["git", *args],
@@ -2367,3 +2383,44 @@ def test_the_tree_under_test_is_named_by_this_process_s_own_commit(
         assert all(
             re.fullmatch(r"refs/emrg-plan-suite/pr\d+", name) for name in named
         ), f"the gate wrote a ref of its own that is not a fetched PR head: {argv}"
+
+
+def test_the_roll_call_names_the_guard_the_gate_it_maps_actually_runs(mod) -> None:
+    """This file's opening roll-call is a *map of a sibling*, and it said "the guards".
+
+    `check-merge-tree-health.py` judges every merge by exactly one guard (`GUARD`), and the
+    family's gates were corrected for naming a family they never ran, one member at a time,
+    on 2026-09-25. This file was not among them, and could not be reached by those fixes: the
+    offending carrier is not a claim about *this* tool at all — it is the one-line description
+    of the sibling, in a third file, which is exactly why a fix to the sibling's own file
+    leaves it standing (`#1626` records the same shape for `Agent.md` and
+    `check-merge-landing-diff.py`). It is worth pinning because the roll-call is read at the
+    moment a reader is deciding which gate to run, and it is the sentence that decides how far
+    to trust the answer.
+
+    Asserted against the **fact** rather than a remembered string: the guard named here must be
+    the one the mapped gate's own `GUARD` constant holds, read by loading that gate — so an
+    edit that moves the constant reddens here instead of leaving two answers in the tree.
+
+    Asserted in both directions, because "no family claim here" passes vacuously on silence —
+    an absent or renamed roll-call contains none of the words it forbids. So the map must still
+    be present and still name the gate, and only then is the singular claim made about it.
+    """
+    doc = mod.__doc__ or ""
+    assert "check-merge-tree-health.py" in doc, (
+        "the roll-call no longer names the tree-health gate, so the assertions below would "
+        "pass on silence rather than on the map being fixed"
+    )
+    assert "does merging this PR alone produce a tree" in doc, "the roll-call itself moved"
+
+    sibling = _load_sibling("check-merge-tree-health")
+    assert sibling.GUARD in doc, (
+        f"the map does not name {sibling.GUARD}, the one guard the gate it describes runs - "
+        "the guard named in the map must be the guard that answers there, or a reader picks a "
+        "gate from a sentence that is wrong about it"
+    )
+    assert "guards" not in doc, (
+        "this file's roll-call maps gates whose verdicts come from one guard each; a plural "
+        "claims a family that does not run. A marked quotation of retired wording would be "
+        "the one legitimate exception, and there is none here"
+    )
