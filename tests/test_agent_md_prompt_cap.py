@@ -4,8 +4,8 @@ Rant 2026-09-14T07:20:11 ("Agent.md 内容不应该包含演化的历史。Agent
 原则") reported the drift; the measurement here is what let it happen unnoticed.
 
 Measured on master `e644cf6` (2026-09-14, this cycle):
-`EmrgServer._collect_project_context` reads each project-context file
-(`CLAUDE.md`, `AGENTS.md`, `Agent.md`, `MANIFESTO.md`) out of the session cwd and
+`EmrgServer._collect_project_context` reads each file in `PROJECT_CONTEXT_FILES`
+out of the session cwd and
 keeps at most `PROJECT_CONTEXT_MAX_CHARS` of it, appending a truncation notice —
 so an over-long file still parses, and what it loses is the **tail**. `Agent.md`
 had grown to 64466 chars: the model received the first 8000 (per-rule evidence, PR
