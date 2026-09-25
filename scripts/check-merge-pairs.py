@@ -24,6 +24,15 @@ builds the tree those heads produce and runs the tests on it - measured green on
 above, 3859 passed and 22 skipped. This tool answers the count-line class, that one answers
 the suite, and neither answers the other's question.
 
+Every carrier in this file names that guard rather than a family: the docstring sections above
+and here, the exit-code contract, the `--help` description and the printed verdict - all five
+pinned by `tests/test_check_merge_pairs.py` since 2026-09-25 (`cyc20260925-222124`), which
+holds this file's own prose to the singular it judges by. The claim is worth pinning because a
+reader reaches those lines exactly when a verdict has gone wrong, and because this file
+carried both answers in one revision (a family claim sitting three paragraphs below "That
+verdict is one guard's"). The sibling gates received the same fix one member at a time on the
+same date; a carrier that names a family the tool never ran is the defect, not the wording.
+
 Measured 2026-09-13 (`cyc20260913-091152`) on the six PRs that were `MERGEABLE`/`CLEAN`
 at the time, all 15 pairs in both orders (30 measurements of `master -> A -> B`):
 
@@ -55,8 +64,9 @@ The tempting shortcut is to compare the PRs' count lines and flag equal values. 
 have found this instance, and would be wrong as a rule: the property is "a derived fact
 merged silently", and the count line is only today's instance of it (the same file family
 has already had the duplicate-content, count-rebreakdown and locale-decode variants).
-Reading the guards' verdict on the actually-merged tree is what the sibling tools settled
-on, and it does not need the derived fact to be a count. The primitives are imported from
+Reading that one guard's verdict (`scripts/check-doc-count.py`, `seq.GUARD`) on the
+actually-merged tree is what the sibling tools settled on, and it does not need the derived
+fact to be a count. The primitives are imported from
 `check-merge-sequence.py` rather than copied, so "materialise a merge" and "judge a tree"
 keep one spelling.
 
@@ -128,7 +138,8 @@ Exit codes
        (a pair blocked by a conflict is *answered*: the pair cannot land, so it cannot
        land badly - that is why this is 0 here and 3 in `check-merge-sequence.py`, where
        a conflict leaves later steps of a chain unmeasured)
-    1  at least one ordered pair merges cleanly and lands a tree that fails the guards
+    1  at least one ordered pair merges cleanly and lands a tree that fails the
+       repository's own guard, `scripts/check-doc-count.py` (`seq.GUARD`)
     2  the question could not be answered (git/gh/guard failure, or a requested PR
        number whose head cannot be fetched) - fail loud; never
        report "no dangerous pair" about pairs that were not measured
@@ -228,8 +239,9 @@ def _resolve_base(ref: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Check every ordered pair of PRs for a clean merge that lands a tree the "
-            "repo's guards reject."
+            "Check every ordered pair of PRs for a clean merge that lands a tree "
+            f"{seq.GUARD} rejects - that guard alone; the suite is "
+            "check-merge-plan-suite.py's question."
         )
     )
     parser.add_argument(
