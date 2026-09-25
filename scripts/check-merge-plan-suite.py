@@ -5,10 +5,11 @@ The question this exists for
 ----------------------------
 The other gates in this family answer a question about *one* PR, or about *one*
 merge: are the votes current, can the base reach master, is the CI verdict fresh,
-which other PRs would this dirty, does merging this PR alone produce a tree the
-guards accept. None of them answers the question that decides whether master is
-healthy a minute after a *plan* lands: **does the tree those PRs produce together
-pass the repository's own tests?**
+which other PRs would this dirty, does merging this PR alone produce a tree one
+guard accepts (`check-merge-tree-health.py`, judged by `scripts/check-doc-count.py`
+alone). None of them answers the question that decides whether master is healthy a
+minute after a *plan* lands: **does the tree those PRs produce together pass the
+repository's own tests?**
 
 Per-PR CI cannot answer it either, and not by accident: a `pull_request` run
 builds `Merge <head> into <merge-base>`, so a PR's CI contains master and that PR
