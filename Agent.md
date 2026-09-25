@@ -63,7 +63,7 @@ Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (537: 5 snapsh
 - Post-merge audit: `uv run --no-sync python3 scripts/check-merge-landed.py <N>` (did the merge land a tree its reviews named)
 - Other tools: `uv run --no-sync python3 scripts/check-node-test-count.py --write` (syncs the Node totals above), `scripts/check-patch-files.py` (a rebuilt patch carries every file the previous one did), `scripts/cast-vote.py` (a vote the counter counts), `bump-version.py`, `classify-conflict.py`, `sync-master-from-api.py`, `push-branch-from-api.py`
 
-Every guard reads the tree you are **standing in** and says so in its first line; a question it cannot answer is reported unmeasurable, never as a pass.
+Every guard that reads a working tree names it before its verdict; a question it cannot answer is reported unmeasurable, never as a pass.
 
 ## Releasing
 
