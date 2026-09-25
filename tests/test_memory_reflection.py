@@ -310,6 +310,70 @@ class TestMemoryIndexCompactionPrompt:
 
         asyncio.run(_test())
 
+    def test_the_wording_is_a_template_the_host_can_edit(self):
+        """The instruction is a file, not a Python string (host 2026-09-25T15:10).
+
+        The whole point of moving it is that editing the wording needs no Python —
+        and each half of that can regress while the other still holds. Rendering
+        alone is satisfied by a string constant: `_COMPACTION_NOTE`, which this
+        replaced, was exactly that, and its text was invisible to anyone who wanted
+        to change it. A template file existing alone is satisfied by a file nothing
+        renders. So the fingerprint is asserted on the **rendered** text and then
+        searched for across the package's Python: the template carries the wording,
+        and no code does.
+
+        The numbers are excluded from the fingerprint on purpose — they are
+        placeholders the daemon fills from the rulers, and a template spelling them
+        would be the second copy `test_the_targets_in_the_text_come_from_the_constants`
+        exists to refuse.
+        """
+        from emrg.server import daemon
+
+        package = Path(daemon.__file__).parent
+        template_path = package / "prompts" / daemon.COMPACTION_TEMPLATE
+        assert template_path.is_file(), (
+            f"{daemon.COMPACTION_TEMPLATE} is what the daemon renders; a name that "
+            "resolves to nothing is an undefined render, not a fallback"
+        )
+        template_text = template_path.read_text(encoding="utf-8")
+        assert "{{ cap }}" in template_text and "{{ row_max }}" in template_text, (
+            "the targets reach the template as placeholders, so it cannot drift "
+            "into carrying its own reading of either number"
+        )
+
+        fingerprints = [
+            "An index row is not a backup",
+            "Never reference an archive file from the index.",
+        ]
+        for fingerprint in fingerprints:
+            assert fingerprint in template_text, (
+                f"{fingerprint!r} is the pinned wording of step 3/5; if it is gone "
+                "from the template, this guard is measuring nothing"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            index = Path(tmp) / "MEMORY.md"
+            index.write_text("\n" * (daemon.MEMORY_INDEX_ROW_CAP + 1), encoding="utf-8")
+            rendered = daemon._memory_index_compaction_note([index])
+
+        for fingerprint in fingerprints:
+            assert fingerprint in rendered, (
+                f"{fingerprint!r} is in the template but not in what the daemon "
+                "sends — the render is not the file"
+            )
+
+        in_python = [
+            str(py.relative_to(package))
+            for py in sorted(package.rglob("*.py"))
+            if any(f in py.read_text(encoding="utf-8") for f in fingerprints)
+        ]
+        assert in_python == [], (
+            "the instruction's wording must live only in "
+            f"{daemon.COMPACTION_TEMPLATE} — a copy in {in_python} can silently "
+            "shadow it, and a host editing the template would then be editing "
+            "nothing that is sent"
+        )
+
 
 class TestDisconnectConsolidationDisabled:
     """Rant 2026-08-28T22:12:16 — the on-disconnect consolidation entry

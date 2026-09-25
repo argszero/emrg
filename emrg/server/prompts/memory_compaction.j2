@@ -1,0 +1,24 @@
+
+## Memory index compaction (MEMORY.md is over {{ cap }} lines)
+
+{{ path }} has {{ lines }} lines. This index is embedded into every system prompt, and past
+{{ cap }} lines it buys nothing: a reader needs the title, and every fact belongs in the
+detail file its row points at. Compact it in this turn.
+
+You have `read`, `edit` and `write`. Use them.
+
+How:
+1. `read` the index. Group the rows by topic.
+2. Merge: several rows on one topic become one row that still names every id and
+   file it replaces.
+3. Shorten: a row longer than {{ row_max }} chars becomes one line. Before you cut a fact
+   out of a row, `read` that row's detail file — if the fact is not there, write it
+   there first. An index row is not a backup: `.emrg/` is not under version control,
+   and the detail file is the only place the fact survives.
+4. Drop: a row whose memory is `superseded`/`merged` and whose facts are in its
+   detail file can go.
+5. Never: delete a detail file, invent a fact, or leave a fact only in a row you
+   removed. Never reference an archive file from the index.
+
+Done when: the index is ≤ {{ cap }} lines and no row is longer than {{ row_max }} chars.
+Then report: lines before → after, and the ids you merged or dropped.
