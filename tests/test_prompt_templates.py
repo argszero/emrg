@@ -26,6 +26,11 @@ Named limit: this pins the wiring, not the prose. It cannot show that an agent
 follows the procedure, that optional fields (``{% if task.extra_prompt %}``,
 ``{% if project.description %}``) are set in the host's config, or that the prompt's
 content is any good.
+
+A second hole is closed further down and is about *references* rather than
+placeholders: ``test_every_repo_path_a_prompt_names_is_a_file_in_the_tree`` — every
+repo-relative path a template names must be a file this repository holds. The regex
+beside it states the scope and what the scan does not read.
 """
 
 from __future__ import annotations
@@ -1231,3 +1236,106 @@ def test_the_create_head_scan_answers_both_ways() -> None:
     ) and not _create_calls("| `gh pr create` | ✅ | ✅ |\n"), (
         "a capability table and a sentence are not the command — the scan reads fenced blocks only"
     )
+
+
+# --- The paths a template names: a command is only a command if its file is there ------------------
+#
+# The templates tell a cycle which files to run and read, by name — the `scripts/` merge gates, the
+# test modules whose shapes a prompt holds up as the ones to copy. Nothing else in the tree knows
+# those names: retire or rename a gate and the prompt keeps instructing a file that no longer exists,
+# on every cycle, with no failure anywhere. That is the #1551 class (a record naming a script a merge
+# had retired) in the carrier that matters most, because the prompt *is* the instruction.
+#
+# Scope: the four top-level directories a template can only mean as *this* repository's. `.github/`
+# is out on purpose, and the measurement is why — the templates' only `.github/` citation is
+# `open_source_prompt.md`'s `cat .github/pull_request_template.md`, read in the flow that contributes
+# to *another* project; this repository's own `.github/` holds nothing but `workflows/`, so a scan
+# that required that path would fail a citation that is correct.
+#
+# What the scan does not read, and why: a path written after a slash, or inside a longer path — an
+# absolute one, a `{{ source_dir }}/`-qualified one, a `.emrg/`-nested one — locates a file in *some*
+# tree rather than naming one of this repository's, so it is not a citation this guard can check.
+# Named limit: a template that spelled this repository's own files that way would escape the scan.
+# Every path the templates name today is plain, which is what the surface assertion below shows.
+_REPO_PATH = re.compile(
+    r"(?<![\w./-])(?:\./)?"
+    r"((?:scripts|tests|emrg|packaging)/[\w./-]*\.(?:py|sh|md|json|toml|yml|j2))"
+)
+
+
+def _prompt_files() -> list[Path]:
+    """Every prompt the daemon renders: the task templates and the jinja prompts beside them."""
+    return sorted(PROMPTS_DIR.glob("*.md")) + sorted((PROMPTS_DIR / "prompts").glob("*.j2"))
+
+
+def _repo_paths_named_in(text: str) -> list[str]:
+    """The repo-relative paths this text names, distinct, in first-seen order."""
+    return list(dict.fromkeys(_REPO_PATH.findall(text)))
+
+
+def _named_repo_paths_without_a_file(text: str) -> list[str]:
+    """The named paths that are not a file in this checkout."""
+    return [path for path in _repo_paths_named_in(text) if not (REPO_ROOT / path).is_file()]
+
+
+def test_every_repo_path_a_prompt_names_is_a_file_in_the_tree() -> None:
+    """A template's commands name files this repository has.
+
+    Measured 2026-09-25 (cycle cyc20260925-130941) before the guard was written: every repo-relative
+    path the prompt files name resolves, and the ones under `scripts/` are the merge gates a cycle is
+    told to run by name. So this guard is green today, and its value is the next rename — nothing
+    else in CI reads the prompt's references: pytest collects the prompt content nowhere else, and
+    `check-citation-resolves.py` reads the other shape (a path, plus the test node in it).
+
+    Existence in the checkout is the criterion, and a fresh clone is why that is enough: CI holds the
+    tracked files, so a name that resolves only in an author's working tree fails there.
+    """
+    files = _prompt_files()
+    assert files, f"no prompt templates under {PROMPTS_DIR} — the scan below would pass vacuously"
+
+    texts = {path.name: path.read_text(encoding="utf-8") for path in files}
+    missing = {
+        name: gone
+        for name, text in texts.items()
+        if (gone := _named_repo_paths_without_a_file(text))
+    }
+    assert not missing, (
+        f"these templates name a path this repository does not have: {missing} — a prompt is an "
+        "instruction, so a citation that stopped resolving sends every cycle after it to a file "
+        "that is gone"
+    )
+
+    named = {path for text in texts.values() for path in _repo_paths_named_in(text)}
+    assert len(named) >= 5 and any(path.startswith("scripts/") for path in named), (
+        f"the scan found {sorted(named)} — too few paths, and none under `scripts/`, to show that it "
+        "is reading the templates' commands at all"
+    )
+
+
+def test_the_prompt_path_scan_answers_both_ways() -> None:
+    """The instrument's controls: a missing file is flagged, a real one is not."""
+    assert _named_repo_paths_without_a_file("run `python3 scripts/retired-by-a-merge.py <N>`") == [
+        "scripts/retired-by-a-merge.py"
+    ], "a prompt naming a gate a merge deleted is exactly what this guard exists for"
+
+    assert not _named_repo_paths_without_a_file(
+        "run `python3 scripts/review-queue.py --cycle <cycle id>`"
+    ), "a command that resolves must not be flagged, or every cycle fails this test"
+
+    assert _repo_paths_named_in("cd . && ./scripts/review-queue.py --cycle <cycle id>") == [
+        "scripts/review-queue.py"
+    ], "`./name` is the same file as `name`, and the scan has to read it as one"
+
+    for text in (
+        "see `emrg/tools/` for the file tools",
+        "actionlint .github/workflows/*.yml",
+        "the installed package at /Users/x/.emrg/install/source/emrg/tool_types.py",
+    ):
+        assert _repo_paths_named_in(text) == [], (
+            f"{text!r} does not name one of this repository's files: a directory, a glob, and an "
+            "absolute path into another tree are all outside what this scan can check"
+        )
+
+    # The `.github/` exclusion is a decision rather than an oversight — the open-source flow reads the
+    # *target* project's conventions. Pinned here so widening the scope is a visible change.
+    assert _repo_paths_named_in("cat .github/pull_request_template.md 2>/dev/null") == []
