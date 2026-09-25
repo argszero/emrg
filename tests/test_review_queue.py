@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -750,6 +751,141 @@ def test_the_previous_cycle_is_read_from_the_cycle_records(mod, monkeypatch, cap
     out = capsys.readouterr().out
     assert "abstain" in out
     assert PREV_CYCLE in out
+
+
+def test_a_corpus_split_across_two_roots_is_read_whole(mod, tmp_path):
+    """The newest record wins *across* the roots, not within one of them.
+
+    The state this search exists for (measured 2026-09-25): 1,354 records sit beside
+    the checkout, while the root this tree's template names — the checkout one D9
+    (PR #1555) re-based onto — is empty, so a reinstall moves the next records onto
+    the other side. Either root alone then answers a different question: the older one
+    freezes the window at the last cycle before the move, the newer one cannot resolve
+    it at all until records accumulate there. The control is the first assertion — the
+    older root read alone really does answer the older cycle. Order is not the claim:
+    the same answer has to come out either way round.
+    """
+    legacy, project = tmp_path / "legacy", tmp_path / "project"
+    legacy.mkdir()
+    project.mkdir()
+    (legacy / "cycle-20260917-100000.md").write_text("x", encoding="utf-8")
+    (project / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+
+    frozen, _ = mod.previous_cycle(CYCLE, (legacy,))
+    assert frozen == "cyc20260917-100000", "the older root alone is the frozen reading"
+
+    for order in ((project, legacy), (legacy, project)):
+        previous, where = mod.previous_cycle(CYCLE, order)
+        assert previous == PREV_CYCLE, (
+            f"the newest record wins across the roots, in either order ({order})"
+        )
+        assert where == str(project), "the answer names the root it came from"
+
+
+def test_a_root_that_cannot_be_read_is_named_rather_than_passed_over(mod, tmp_path):
+    """An answer drawn from the readable half is still an answer — and the reader is
+    told which half it came from, because a record in the unreadable one could be
+    newer."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    missing = tmp_path / "gone"
+
+    previous, where = mod.previous_cycle(CYCLE, (project, missing))
+    assert previous == PREV_CYCLE
+    assert str(missing) in where and "could not be read" in where
+
+    # Nothing readable at all: the reason is the read failure, not "no record" —
+    # the two are different facts and only one of them is a gap in the corpus.
+    previous, where = mod.previous_cycle(CYCLE, (missing,))
+    assert previous == ""
+    assert "could not be read" in where and "no cycle record" not in where
+
+
+def test_the_cycle_log_override_names_one_root_or_several(mod, monkeypatch, tmp_path):
+    """`--cycles-log` / `EMRG_CYCLES_LOG` keep the single-directory meaning and accept
+    the pair, so a caller can state the roots instead of relying on the defaults."""
+    first, second = tmp_path / "first", tmp_path / "second"
+    assert mod.resolve_cycle_logs(str(first)) == (first,)
+    assert mod.resolve_cycle_logs(os.pathsep.join([str(first), str(second)])) == (
+        first,
+        second,
+    )
+    monkeypatch.setenv("EMRG_CYCLES_LOG", str(second))
+    assert mod.resolve_cycle_logs(None) == (second,)
+    monkeypatch.delenv("EMRG_CYCLES_LOG")
+    assert mod.resolve_cycle_logs(None) == mod.DEFAULT_CYCLES_LOGS
+
+
+def test_the_cli_reads_both_roots_named_by_the_override(mod, monkeypatch, capsys, tmp_path):
+    """The wiring, end to end: `--cycles-log` carrying two roots resolves the window
+    from the newer record, so the row is an abstain rather than a vote."""
+    legacy, project = tmp_path / "legacy", tmp_path / "project"
+    legacy.mkdir()
+    project.mkdir()
+    (legacy / "cycle-20260917-100000.md").write_text("x", encoding="utf-8")
+    (project / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh,
+         ["1", "--cycle", CYCLE, "--cycles-log",
+          os.pathsep.join([str(legacy), str(project)])])
+    out = capsys.readouterr().out
+    assert "abstain" in out and PREV_CYCLE in out
+    assert str(project) in out
+
+
+def test_the_prompt_writes_its_cycle_records_where_the_queue_reads_them(mod):
+    """The template's record path lands in a directory this tool searches.
+
+    *Which directory holds the cycle records* is a fact about the template, not about
+    this tool — and it moved once already: D9 (PR #1555, in every build from v0.3.2)
+    re-based the prompt's memory roots from `{{ evolution_cwd }}` onto
+    `{{ source_dir }}`, i.e. from the root beside the checkout to the project memory
+    root inside it, while the corpus stayed where it was. Repairing the reader once
+    would not have caught that, and would not catch the next move; so the template is
+    rendered here, with the two variables the daemon supplies for the evolution task
+    (`scheduler._build_evolution_prompt`), and every directory its `cycle-<ts>.md`
+    path names is required to be one of the roots this tool reads. A record written
+    anywhere else is a record no window reads.
+    """
+    import re
+
+    import jinja2
+
+    template = (
+        REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
+    ).read_text(encoding="utf-8")
+    rendered = (
+        jinja2.Environment(undefined=jinja2.Undefined)
+        .from_string(template)
+        .render(
+            source_dir=str(REPO_ROOT),
+            evolution_cwd=str(REPO_ROOT.parent),
+            timestamp="20260925-101010",
+            # The two mappings the template iterates over; every other name it uses is
+            # a display field, and the daemon's `Undefined` renders those empty here as
+            # it would there. The claim below is about a *path*, built from the three
+            # names set above, which the daemon supplies from
+            # `_source_dir`, `EVOLUTION_CWD` and the render clock.
+            task={},
+            project={},
+        )
+    )
+    written = [
+        Path(match) for match in re.findall(r"`([^`]*/cycle-[^`]*\.md)`", rendered)
+    ]
+    assert written, (
+        "the template no longer names a cycle-record path this guard can read - "
+        "update the guard with it rather than deleting the claim"
+    )
+    roots = {root.resolve() for root in mod.DEFAULT_CYCLES_LOGS}
+    elsewhere = [path for path in written if path.parent.resolve() not in roots]
+    assert not elsewhere, (
+        "these cycle-record paths land outside the roots review-queue searches "
+        f"({', '.join(str(root) for root in mod.DEFAULT_CYCLES_LOGS)}): "
+        + ", ".join(str(path) for path in elsewhere)
+    )
 
 
 def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(

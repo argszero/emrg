@@ -74,7 +74,9 @@ window, and the sibling reported `abstain` for it minutes later.
 So the clause is applied here too, from the same reading, and refuses to post. The
 window is the previous cycle's start when it can be found (`--prev-cycle`, else the
 newest cycle record that sorts before this cycle's id in `--cycles-log`, default
-`$EMRG_CYCLES_LOG`, else the records beside the checkout) and this cycle's own start
+`$EMRG_CYCLES_LOG`, else both directories the evolution template may name a record in:
+the project memory root inside this checkout and the evolution root beside it) and this
+cycle's own start
 when it cannot — narrowed and said so, never abandoned and never widened by a guess.
 A head whose push time fell back to the commit date is **refused rather than judged**:
 a lower bound cannot decide a window, so nothing is posted and the refusal names the
@@ -269,12 +271,9 @@ def own_head_window(
     if prev_cycle:
         previous, where = prev_cycle, "named by --prev-cycle"
     else:
-        log = Path(
-            cycles_log
-            or os.environ.get("EMRG_CYCLES_LOG")
-            or queue.DEFAULT_CYCLES_LOG
+        previous, where = queue.previous_cycle(
+            cycle, queue.resolve_cycle_logs(cycles_log)
         )
-        previous, where = queue.previous_cycle(cycle, log)
     window = queue.abstain_window(cycle, previous, where)
 
     note = ""
@@ -558,9 +557,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cycles-log",
         default=None,
-        help="directory holding the `cycle-<date>-<time>.md` records the previous "
-        "cycle is read from when --prev-cycle is not given (default: "
-        "$EMRG_CYCLES_LOG, else the records beside the checkout)",
+        help="directory (or several, joined by `os.pathsep`) holding the "
+        "`cycle-<date>-<time>.md` records the previous cycle is read from when "
+        "--prev-cycle is not given (default: $EMRG_CYCLES_LOG, else both the project "
+        "memory root inside this checkout and the evolution root beside it)",
     )
     parser.add_argument("--repo", default=REPO, help="owner/name the PR lives in")
     parser.add_argument(
