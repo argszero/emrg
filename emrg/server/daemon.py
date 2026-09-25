@@ -184,6 +184,13 @@ def _get_jinja_env() -> "jinja2.Environment":
 # ── Module-level constants ──
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
+# Which files `_collect_project_context` reads out of a session's cwd into the prompt,
+# in precedence order. Named rather than inline for the same reason the cap below is:
+# a guard that reads this list — that the files it embeds name paths this repository
+# still has (`tests/test_project_context_paths.py`) — would otherwise carry a second
+# spelling of the set, and the two could disagree about what is embedded at all.
+PROJECT_CONTEXT_FILES = ("CLAUDE.md", "AGENTS.md", "Agent.md", "MANIFESTO.md")
+
 # How much of each project-context file (Agent.md and its siblings — see
 # `_collect_project_context`) reaches the prompt. Named rather than inline so the
 # guard that keeps this repo's own `Agent.md` inside it reads the same number the
@@ -1905,7 +1912,7 @@ class EmrgServer:
         away. `_cap_memory_index` below has always pointed at where the cut text
         lives; this now does the same.
         """
-        candidates = ["CLAUDE.md", "AGENTS.md", "Agent.md", "MANIFESTO.md"]
+        candidates = PROJECT_CONTEXT_FILES
         found: list[dict[str, str]] = []
 
         for name in candidates:
