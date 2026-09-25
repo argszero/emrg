@@ -45,6 +45,29 @@ scratch dir; the working tree is never touched) and the tree's **own**
 path, reading its own tree (which it names, since #1140). Modelling the guard
 would only move the guess one level up.
 
+Which question this answers, and which it does not (measured 2026-09-25)
+-----------------------------------------------------------------------
+Two things a reader of a verdict needs, and this gate used to leave both to
+inference (`cyc20260925-200139`):
+
+* **the verdict is one guard's.** The summary used to call it "the tree's guards",
+  and the unhealthy note asserted a cause - "the count line was rewritten on both
+  sides" - that #1603 retired on this date: the count is measured now, never
+  stored, so no clean union can produce that line. The note states what was
+  measured (the tree's own copy of `GUARD` rejected it) and keeps the repair,
+  which is still the only one: measure the merged tree, never pick a side, and
+  remember that a push voids the votes.
+* **the class it was built for is not this gate's to catch any more**, for the same
+  reason: a rule every tracked file already satisfies cannot be broken by a union.
+  The class itself is alive - measured the same day, `#1618` + `#1619` are each
+  green while their union (`53780d3db66e`) fails
+  `tests/test_a_tree_reading_guard_names_its_tree.py::test_every_guard_in_the_family_is_classified`,
+  a rule whose subject is the *set* of `scripts/check*.py`, which no cheap per-PR
+  gate can read. That question belongs to `check-merge-plan-suite.py` (the plan's
+  final tree passes the suite; `--steps` judges every intermediate tree too, issue
+  #1161), and the report prints the sibling tools' own sentence for it - one
+  spelling of one fact - rather than leaving the reader to infer it from a label.
+
 The uncommitted-repair trap
 ---------------------------
 Measured the same cycle, and the reason the first attempt at #1140 failed CI:
@@ -533,16 +556,17 @@ def main(argv: list[str] | None = None) -> int:
                 conflicts.append(number)
 
     print(
-        f"\nclean+healthy: {healthy}\n"
-        f"clean but FAILS the tree's guards: {unhealthy}\n"
-        f"conflicts (not judged here): {conflicts}"
+        f"\nclean, and {GUARD} passed: {healthy}\n"
+        f"clean but FAILS {GUARD}: {unhealthy}\n"
+        f"conflicts (not judged here): {conflicts}\n"
+        f"(judged by {GUARD} alone - the suite is check-merge-plan-suite.py's question)"
     )
     if unhealthy:
         print(
-            "\nAn unhealthy entry merges without conflict but lands a tree its own "
-            "guards reject - the count line was rewritten on both sides. Resolve it "
-            "on the merged tree (measure, never pick a side), commit that edit, and "
-            "push: pushing voids the votes, so the repair is not free."
+            "\nAn unhealthy entry merges without conflict but lands a tree whose own "
+            f"copy of {GUARD} rejects it. Resolve it on the merged tree (measure, never "
+            "pick a side), commit that edit, and push: pushing voids the votes, so the "
+            "repair is not free."
         )
         return 1
     return 0
