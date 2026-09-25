@@ -71,6 +71,7 @@ from emrg.server.tool_types import ToolResult
 from emrg.memory import (
     INDEX_COUNT_WARN,
     INDEX_SIZE_WARN,
+    INDEX_TITLE_MAX_CHARS,
     ProjectMemoryStore,
     SessionMemoryStore,
 )
@@ -189,6 +190,27 @@ EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 # truncation uses: a second spelling could disagree with the code that cuts.
 PROJECT_CONTEXT_MAX_CHARS = 8000
 
+# Lines a memory index may reach before the reflection prompt asks the agent to
+# compact it (`_memory_index_compaction_note`). **Lines of the file**
+# (`len(text.splitlines())`) — nothing is parsed, so the reading has no format
+# assumptions, which is what makes it answer for a hand-maintained table as well as
+# for the row-per-entry indexes.
+#
+# The number is not a taste: `MEMORY_INDEX_ROW_CAP` rows x
+# `memory.INDEX_TITLE_MAX_CHARS` (512, the per-row write-time truncation) =
+# 51,200 chars, which is the embed cap's budget — the three constants sit together
+# in `emrg/memory.py` and `daemon._cap_memory_index` applies the third. While no
+# single row is over 512 chars, "rows <= 100" therefore *is* "the whole index fits
+# in the prompt", so the rule is conservative in the direction that matters: it can
+# fire on an index that would have fit, never miss one that would not.
+#
+# What it replaces counted a subset: the retired 50-*cycle*-row plus
+# `cycle-archive-YYYYMMDD.md` protocol measured its rows out of a file that could
+# satisfy it while being 108,491 chars and 195 lines (the reading is quoted at
+# `_cap_memory_index` as the incident the cap came from), i.e. the condition held
+# at the moment the prompt could not hold the index.
+MEMORY_INDEX_ROW_CAP = 100
+
 # The reloadable fields a connected client *displays*, so a revision that moves one
 # of them must be broadcast rather than only logged (issue #1374).
 # Measured before this existed: `vision = true` edited into `~/.emrg/config.toml`
@@ -281,6 +303,85 @@ def _unreadable_index_notice(path, exc: BaseException, *, where: str) -> str:
         f"The file is {path}; its rows are not in {where}, and they come back when "
         "the file can be read again]"
     )
+
+
+# The compaction instruction, rendered only for an index over `MEMORY_INDEX_ROW_CAP`
+# and always with the numbers of the reading that fired it. Two properties of this
+# text are deliberate and were both learned from the mechanism it replaces
+# (rant 2026-08-28T22:12:16, PR #1067 — the previous consolidation instruction
+# produced **zero** writes across nine real runs):
+#
+# * it states the target and the done condition as numbers, because "if it looks
+#   long, consolidate" gave the agent nothing to reach for;
+# * it offers no "skip if fine" exit — the *trigger* decides whether it appears, and
+#   an agent asked to compact should not be able to answer that it declined.
+#
+# The steps themselves are prose on purpose: merging rows, shortening a row and
+# dropping a superseded one all require reading the content, which is exactly what a
+# script cannot do (it can only move a row, and a moved row leaves the prompt).
+_COMPACTION_NOTE = """
+## Memory index compaction (MEMORY.md is over {cap} lines)
+
+{path} has {lines} lines. This index is embedded into every system prompt, and past
+{cap} lines it buys nothing: a reader needs the title, and every fact belongs in the
+detail file its row points at. Compact it in this turn.
+
+You have `read`, `edit` and `write`. Use them.
+
+How:
+1. `read` the index. Group the rows by topic.
+2. Merge: several rows on one topic become one row that still names every id and
+   file it replaces.
+3. Shorten: a row longer than {row_max} chars becomes one line. Before you cut a fact
+   out of a row, `read` that row's detail file — if the fact is not there, write it
+   there first. An index row is not a backup: `.emrg/` is not under version control,
+   and the detail file is the only place the fact survives.
+4. Drop: a row whose memory is `superseded`/`merged` and whose facts are in its
+   detail file can go.
+5. Never: delete a detail file, invent a fact, or leave a fact only in a row you
+   removed. Never reference an archive file from the index.
+
+Done when: the index is ≤ {cap} lines and no row is longer than {row_max} chars.
+Then report: lines before → after, and the ids you merged or dropped.
+"""
+
+
+def _memory_index_compaction_note(paths) -> str:
+    """The compaction instruction for each index over ``MEMORY_INDEX_ROW_CAP``.
+
+    One section per index, because the two indexes the prompt carries (the project's
+    and the session's — the same two `_collect_memory_data` embeds) are separate
+    files with separate readers, and an instruction naming the wrong one would send
+    the agent to compact a file that is not over the cap.
+
+    The file is read *here* rather than handed a precomputed size, so the number the
+    text prints is the number it counted: a caller passing one reading and the text
+    printing another is how an agent comes to distrust both.
+
+    An index that cannot be read is skipped rather than raised on — this runs inside
+    a background reflection task, and `_index_for_prompt` already answers the same
+    condition with a notice in the prompt itself, so the agent is told either way.
+
+    :param paths: the index files to judge, one section per file over the cap.
+    :returns: the concatenated sections, or ``""`` when none is over the cap.
+    """
+    sections: list[str] = []
+    for path in paths:
+        try:
+            lines = len(path.read_text(encoding="utf-8").splitlines())
+        except (OSError, UnicodeDecodeError):
+            continue
+        if lines <= MEMORY_INDEX_ROW_CAP:
+            continue
+        sections.append(
+            _COMPACTION_NOTE.format(
+                cap=MEMORY_INDEX_ROW_CAP,
+                lines=lines,
+                path=str(path),
+                row_max=INDEX_TITLE_MAX_CHARS,
+            )
+        )
+    return "".join(sections)
 
 
 def build_shell_tool(
@@ -5342,6 +5443,18 @@ class EmrgServer:
                         "bytes (past a soft cap) — prioritize "
                         "consolidation this round.\n"
                     )
+
+                # Per-round, both indexes: the same two `_collect_memory_data`
+                # embeds, counted by line. Read here rather than beside the entry
+                # count above because the subjects differ — that one measures the
+                # session store's entries and bytes, this one measures each index
+                # file, and only this one can name the project index at all.
+                hygiene_note += _memory_index_compaction_note(
+                    (
+                        session.cwd / ".emrg" / "memory" / "MEMORY.md",
+                        session.memory_dir / "MEMORY.md",
+                    )
+                )
 
                 prompt = (
                     "You are the memory reflection module of EMRG. "
