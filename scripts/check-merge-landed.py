@@ -54,6 +54,15 @@ asked about a batch it covers every number in it. `PENDING` was the quieter hole
 two - a batch of still-open numbers compares nothing at all, and the line under each one
 said so only in prose nobody scripting the tool reads.
 
+Each summary counts the set its own noun names, and no larger one. The unclaimed line is
+a count of the **merges** in the batch, so an unmerged number is not in its denominator;
+the unmerged line is a count of every number given. Measured 2026-09-26: asking about a
+merged claimless PR together with a still-open one printed "1 of 2 merged PR(s) carried
+no tree claim", where the denominator counted a PR that had merged nothing - a count of
+the caller's list wearing the grammar of a fact about merges, which is the class this
+tool exists to keep out of a verdict. A batch that mixes the two states now reads as two
+sentences that agree about their own subjects.
+
 Exit codes
 ----------
     0  no divergence: every merged PR landed a tree one of its reviews names, or had
@@ -419,6 +428,14 @@ def main(argv: list[str] | None = None) -> int:
     diverged = [v for v in verdicts if v.diverged]
     unchecked = [v for v in verdicts if v.reading == UNCHECKED]
     pending = [v for v in verdicts if v.reading == PENDING]
+    # The denominator is the merges this run audited, not the batch it was handed: an
+    # unmerged number has no merge to compare, so counting it under the noun "merged
+    # PR(s)" states a fact about a set that contains non-merges (measured 2026-09-26:
+    # asking about #1400, merged and claimless, together with #1627, still open, printed
+    # "1 of 2 merged PR(s) carried no tree claim" - and the line above it said #1627 was
+    # unmerged). The unmerged half is counted by the block below, in its own sentence,
+    # about its own noun.
+    audited = [v for v in verdicts if v.reading != PENDING]
     if diverged:
         print(
             "\nA merge that landed a tree nobody voted on is not a merge those votes "
@@ -431,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if unchecked:
         print(
-            f"\n{len(unchecked)} of {len(verdicts)} merged PR(s) carried no tree claim: "
+            f"\n{len(unchecked)} of {len(audited)} merged PR(s) carried no tree claim: "
             "the merge landing the voted tree was **not** checked for them. This is not "
             "a pass - it is a question with nothing to answer it.",
             file=sys.stderr,

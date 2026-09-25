@@ -408,6 +408,47 @@ def test_a_batch_reports_which_of_its_numbers_could_be_audited(mod, merged_repo,
     assert "not" in out.err and "a pass" in out.err
 
 
+def test_the_unclaimed_count_counts_merges_not_the_numbers_asked_about(
+    mod, merged_repo, monkeypatch, capsys
+):
+    """The denominator is the merges this run audited, not the batch it was handed.
+
+    Measured on this repo 2026-09-26: asking about #1400 (merged, and no review of it
+    names a tree) together with #1627 (still open) printed "1 of 2 merged PR(s) carried
+    no tree claim" - a count of the caller's list under a noun that names merges, with
+    the line above it saying #1627 had merged nothing.
+
+    The two candidate readings are told apart by making their sets different sizes: three
+    numbers are asked about, one of them has merged (and carries no claim), two have not.
+    The correct reading is "1 of 1"; counting the batch reads "1 of 3". Without that
+    difference the test would pass whichever the code counted - a test whose numerator
+    and denominator are both derived from the same size cannot say which set was read.
+    """
+    fixture = merged_repo
+    fake = FakeGh(
+        {
+            1613: _view(fixture["merge_commit"]),
+            1625: _view("", state="open", merged=False),
+            1626: _view("", state="open", merged=False),
+        },
+        [_review("✅ LGTM — cycle cyc20260925-174000")],
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc = mod.main(["1613", "1625", "1626"])
+
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "1 of 1 merged PR(s) carried no tree claim" in out.err, out.err
+    assert "1 of 3" not in out.err, (
+        "the denominator fell back to the batch, so numbers that have merged nothing are "
+        "counted under the noun 'merged PR(s)'"
+    )
+    assert "2 of 3 PR(s) are unmerged" in out.err, (
+        "the unmerged half must keep its own sentence, counting every number given"
+    )
+
+
 def test_the_exit_code_contract_names_the_state_it_used_to_leave_out(mod):
     """A state the tool can print belongs in the contract written for its exit codes.
 
