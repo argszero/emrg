@@ -65,9 +65,17 @@ why the two "sides" were identical there.
 The tell was the count line: the run printed nothing about master, but master
 really sat at 1490 while the run behaved as if the base said 1503. So the rule is
 that a **mutable ref name must never reach `merge-tree`**: the base is resolved
-with `rev-parse` first, and the test
-`test_no_mutable_ref_name_reaches_merge_tree` asserts that invariant over the
-argv the tool builds, which is what would have caught this.
+with `rev-parse` first, and
+`tests/test_check_merge_order.py::TestNoMutableRefNameReachesMergeTree::test_the_shipped_source_passes_only_commits_to_merge_tree`
+asserts that invariant over the calls the tool builds, which is what would have
+caught this.
+
+The class segment is not decoration: the name this line carried before
+(`test_no_mutable_ref_name_reaches_merge_tree`) never existed, and the one that does
+sits inside `TestNoMutableRefNameReachesMergeTree`, so a node id without that segment
+collects nothing - running it answers `ERROR: not found`. A citation that cannot be
+run is the defect this file is about; `scripts/check-citation-resolves.py` holds the
+rule.
 
 An explicit `--base origin/master` names two refs, and git picks one of them
 --------------------------------------------------------------------------

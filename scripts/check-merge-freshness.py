@@ -13,8 +13,9 @@ was nevertheless unsafe, and the way it was unsafe is reproducible:
 Both sides set the count line to the same number, so git merged it without a
 conflict, kept 1397, and the merged tree collected 1401. Two guards
 (`test_doc_counts.py::test_python_count_matches_docs` and
-`test_check_doc_count.py::test_real_tree_is_consistent`) went red - *after* the
-merge, on master, where nobody was looking.
+`test_check_doc_count.py::test_real_tree_is_consistent` - both of the stored-count
+design that #1181 replaced with a measured count, so neither is at that location
+any more) went red - *after* the merge, on master, where nobody was looking.
 
 The CI verdict was not wrong. It was about a different tree. On `pull_request`
 GitHub builds `Merge <head> into <merge-base>` - the head merged onto the branch
