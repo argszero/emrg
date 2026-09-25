@@ -97,8 +97,10 @@ the clock, and a cycle id **is** its start time in the host's local zone
 (`cyc20260917-221117` began at 22:11:17 local). So the window is decidable from two
 datums this tool already has — the push time (the counter prints it) and the cycle's
 id — plus one it does not: **the previous cycle**, which `--prev-cycle` supplies and
-which is otherwise read from the cycle records beside the checkout (`--cycles-log`,
-default `{{ evolution_cwd }}/.emrg/memory`). A head pushed inside
+which is otherwise read from the cycle records in either directory the evolution
+template may name them in (`--cycles-log`, default `DEFAULT_CYCLES_LOGS` — the
+project memory root inside the checkout, which D9 made the template's path, and
+the evolution root beside it, which holds the corpus). A head pushed inside
 `[previous cycle's start, now)` is reported `abstain` instead of `vote` or `merge`.
 
 When the previous cycle cannot be found, `--cycle` is not silently ignored: the
@@ -142,13 +144,49 @@ RUNNER = "uv run --no-sync python3"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
-#: Where the evolution task writes its cycle records: `<evolution_cwd>/.emrg/memory`,
-#: one `cycle-<date>-<time>.md` per cycle — the cycle's id without its `cyc` prefix in
-#: the filename, which is why the id is rebuilt rather than read off. `SCRIPTS_DIR` is
-#: `<source_dir>/scripts`, so `parent.parent` is `{{ evolution_cwd }}`. Overridable by
-#: `--cycles-log` / `EMRG_CYCLES_LOG`; a directory that is not there is reported as
-#: unreadable, never guessed at.
-DEFAULT_CYCLES_LOG = SCRIPTS_DIR.parent.parent / ".emrg" / "memory"
+#: Where the evolution task writes its cycle records — one `cycle-<date>-<time>.md`
+#: per cycle, the cycle's id without its `cyc` prefix in the filename, which is why
+#: the id is rebuilt rather than read off.
+#:
+#: **Two roots, because the template's path has moved and the corpus has not.**
+#: `SCRIPTS_DIR` is `<source_dir>/scripts`, so `SCRIPTS_DIR.parent` is the checkout and
+#: `SCRIPTS_DIR.parent.parent` is the evolution root beside it. The template **in this
+#: tree** names `{{ source_dir }}/.emrg/memory/cycle-{{ timestamp }}.md` — the checkout,
+#: where D9 (PR #1555) re-based the memory roots onto the project root the daemon loads.
+#: The template an installed daemon **delivers** still names the other one
+#: (`{{ evolution_cwd }}/.emrg/memory/...`), because the daemon renders the *installed*
+#: template and the hosts have not reinstalled since D9. So the corpus sits on one side
+#: and the next records will land on the other — measured 2026-09-25: 1,354 `cycle-*.md`
+#: beside the checkout, 0 inside it.
+#:
+#: Both roots are searched and the newest record that sorts before this cycle's id
+#: **across the union** is the answer. Reading only the checkout root leaves the window
+#: unresolvable for every cycle until records accumulate there; reading only the
+#: evolution root pins it, after the reinstall, to the last cycle before the reinstall —
+#: a window that never advances. A guard ties this set to a template's path
+#: (`tests/test_review_queue.py::test_the_prompt_writes_its_cycle_records_where_the_queue_reads_them`):
+#: it renders this tree's `evolution_prompt.md` and requires every cycle-record path in
+#: it to be one of these roots, so reader and template cannot drift apart silently again.
+#:
+#: Overridable by `--cycles-log` / `EMRG_CYCLES_LOG` (one directory, or several joined by
+#: `os.pathsep`); a directory that is not there is reported as unreadable, never guessed at.
+DEFAULT_CYCLES_LOGS: tuple[Path, ...] = (
+    SCRIPTS_DIR.parent / ".emrg" / "memory",          # this tree's template, and D9's root
+    SCRIPTS_DIR.parent.parent / ".emrg" / "memory",   # the installed template's root, and the corpus
+)
+
+
+def resolve_cycle_logs(override: str | None = None) -> tuple[Path, ...]:
+    """The cycle-record directories to search: the override, else both defaults.
+
+    `--cycles-log` and `EMRG_CYCLES_LOG` keep their old meaning for a single directory
+    and accept several joined by `os.pathsep`, so a caller can name the pair
+    explicitly instead of relying on the defaults.
+    """
+    raw = override or os.environ.get("EMRG_CYCLES_LOG")
+    if raw:
+        return tuple(Path(part) for part in raw.split(os.pathsep) if part)
+    return DEFAULT_CYCLES_LOGS
 
 
 # ── the abstention window ────────────────────────────────────────────────────
@@ -192,30 +230,52 @@ def instant(text: str) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def previous_cycle(cycle: str, cycles_log: Path | None) -> tuple[str, str]:
+def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str]:
     """`(the cycle immediately before `cycle`, where it was found)`.
 
     The newest cycle record whose id sorts before this cycle's; ids are fixed width,
     so string order is time order, and a file's `<date>-<time>` stem is turned back
-    into an id here because the filename does not carry the `cyc` prefix.
+    into an id here because the filename does not carry the `cyc` prefix. Several
+    directories are searched (`DEFAULT_CYCLES_LOGS`), and the newest record wins
+    *across* them, so a corpus that spans two roots — the state after the prompt's
+    record path moved — is read whole rather than half.
+
     `("", reason)` when there is none — an unresolvable window is the one input this
-    reading must not invent, because inventing it spends a vote.
+    reading must not invent, because inventing it spends a vote. A directory that
+    cannot be read is named in the answer rather than passed over: an answer drawn
+    from the readable half is still an answer, but a reader has to know which half
+    it came from.
     """
-    if cycles_log is None:
+    logs = tuple(Path(entry) for entry in (cycles_logs or ()))
+    if not logs:
         return "", "no cycle-record directory was named"
-    try:
-        names = [entry.name for entry in cycles_log.iterdir()]
-    except OSError as exc:
-        return "", f"{cycles_log} could not be read ({exc.strerror or exc})"
-    found = sorted(
-        "cyc" + match.group(1)
-        for name in names
-        if (match := _CYCLE_RECORD.fullmatch(name))
+    found: dict[str, Path] = {}
+    unreadable: list[str] = []
+    for log in logs:
+        try:
+            names = [entry.name for entry in log.iterdir()]
+        except OSError as exc:
+            unreadable.append(f"{log} ({exc.strerror or exc})")
+            continue
+        for name in names:
+            match = _CYCLE_RECORD.fullmatch(name)
+            if match:
+                found.setdefault("cyc" + match.group(1), log)
+    named = ", ".join(str(log) for log in logs)
+    if not found:
+        if len(unreadable) == len(logs):
+            return "", f"{'; '.join(unreadable)} could not be read"
+        detail = f" ({'; '.join(unreadable)} could not be read)" if unreadable else ""
+        return "", f"no cycle record before {cycle} in {named}{detail}"
+    earlier = sorted(entry for entry in found if entry < cycle)
+    where = (
+        str(found[earlier[-1]])
+        if earlier
+        else f"no cycle record before {cycle} in {named}"
     )
-    earlier = [entry for entry in found if entry < cycle]
-    if not earlier:
-        return "", f"no cycle record before {cycle} in {cycles_log}"
-    return earlier[-1], str(cycles_log)
+    if unreadable:
+        where += f" ({'; '.join(unreadable)} could not be read)"
+    return (earlier[-1], where) if earlier else ("", where)
 
 
 @dataclass
@@ -747,8 +807,9 @@ def main(argv: list[str] | None = None) -> int:
         "--cycles-log",
         default=None,
         help="directory of `cycle-<id>.md` records, used to find the previous cycle "
-             "when --prev-cycle is not given (default: $EMRG_CYCLES_LOG, else the "
-             "evolution layout beside this checkout)",
+             "when --prev-cycle is not given (default: $EMRG_CYCLES_LOG, else both "
+             f"{os.pathsep}-joined directories the template may name: "
+             f"{os.pathsep.join(str(d) for d in DEFAULT_CYCLES_LOGS)})",
     )
     parser.add_argument(
         "--min-votes",
@@ -775,12 +836,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.prev_cycle:
             previous, where = args.prev_cycle, "named by --prev-cycle"
         else:
-            log = Path(
-                args.cycles_log
-                or os.environ.get("EMRG_CYCLES_LOG")
-                or DEFAULT_CYCLES_LOG
+            previous, where = previous_cycle(
+                args.cycle, resolve_cycle_logs(args.cycles_log)
             )
-            previous, where = previous_cycle(args.cycle, log)
         window = abstain_window(args.cycle, previous, where)
 
     try:
