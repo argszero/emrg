@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Check that a *sequence* of merges lands a tree the repo's guards accept.
+"""Check that a *sequence* of merges lands a tree the repo's doc-count guard accepts.
+
+What "the guard" is here, and why the summary names it
+------------------------------------------------------
+This tool judges every step by exactly one guard (`GUARD`, `scripts/check-doc-count.py`).
+The docstring, the step legend, the exit-code contract and the summary used to say "the
+guards" - a family that never ran here - and a reader could not tell a plan whose trees
+pass one rule from a plan whose trees are healthy. The summary now names the guard and
+points at the tool that answers the other half (see "The guard is one, and the suite is
+another tool's question" below). `check-merge-tree-health.py` carried the same over-claim
+about a single PR's merge and names its guard too; this is the sibling that owns the
+verdict for a *plan*.
 
 The class this exists for
 ------------------------
@@ -13,7 +24,7 @@ The sibling gates answer questions about one PR, or about one merge:
 
 None of them answers the question the queue is actually stuck on: **given a
 plan — "merge these PRs in this order" — does every step still land a tree the
-repo's guards accept?** Health is a property of each *step*, and a step's
+repo's guard accepts?** Health is a property of each *step*, and a step's
 input is the tree the previous step produced, so it is not derivable from any
 per-PR fact.
 
@@ -72,8 +83,9 @@ Usage
 
 Each step is reported as one of:
 
-    OK        the merge is clean and the resulting tree passes the guards
-    DANGER    the merge is clean but the resulting tree FAILS the guards
+    OK        the merge is clean and the resulting tree passes the guard named
+              below (`GUARD`)
+    DANGER    the merge is clean but the resulting tree FAILS that guard
               (the silent case this tool exists for — git would not have told you)
     conflict  the merge conflicts, so no tree is produced and none is judged
               (not a failure: it is a question for a human / check-merge-order)
@@ -82,13 +94,39 @@ Each step is reported as one of:
 
 Exit codes
 ----------
-    0  every step of the plan was measured and landed a tree that passes the guards
-    1  at least one clean step landed a tree that FAILS them (the finding)
+    0  every step of the plan was measured and landed a tree that passes the guard
+    1  at least one clean step landed a tree that FAILS it (the finding)
     2  the question could not be answered (git/gh/guard failure, an empty open-PR
        list, or a default plan with no mergeable PR in it) - fail loud, never report
        health that was not measured
     3  the plan stopped at a conflict, so only a prefix was measured and the rest
        is unmeasured - "not measured" must not be spelled 0
+
+The guard is one, and the suite is another tool's question
+----------------------------------------------------------
+Every step here is judged by **one** guard - `GUARD`, `scripts/check-doc-count.py` -
+and the summary names it. "The guards" claimed a family that never ran, and a reader
+had no way to tell that the plan it called healthy had been measured against one rule.
+
+What this tool therefore does *not* answer is whether a step's tree passes the
+**suite**. That is `check-merge-plan-suite.py`'s question, and for a plan it is
+`--steps`, which judges every intermediate tree rather than only the final one.
+
+Measured 2026-09-25 (`cyc20260925-205403`) on the live queue, where the two answers
+genuinely differ - same plan, same trees:
+
+    $ check-merge-sequence.py 1618 1619
+    all 2 step(s) landed trees that pass the guards        <- exit 0, before this change
+
+    $ check-merge-plan-suite.py 1618 1619 --steps
+    step 2 (#1619) tree 53780d3db66e ... suite FAILED:
+      tests/test_a_tree_reading_guard_names_its_tree.py::test_every_guard_in_the_family_is_classified
+
+The first reading was not wrong about its own subject - the doc-count guard really
+does pass on both trees - but nothing in it said which subject that was, and the plan
+it called healthy lands a suite failure at step 2. The summary now names the guard it
+judged by and points at the tool that answers the other half; the DANGER line names
+the guard as well, since "fails the repo's guard" is the sentence a resolver acts on.
 
 The default plan, and why it is not "every open PR"
 ----------------------------------------------------
@@ -137,7 +175,8 @@ never a pass over zero steps.
 
 A pass over zero steps is refused at its source, not counted
 ------------------------------------------------------------
-The plan can never be empty, so "all 0 step(s) landed trees that pass the guards"
+The plan can never be empty, so a summary saying "all 0 step(s) landed trees the
+guard passed"
 is unreachable: the default source refuses an empty list itself -
 
     numbers = [int(line) for line in proc.stdout.split() if line.strip()]
@@ -159,7 +198,7 @@ Correcting this branch's own first revision: it documented this state as a
 shape is reproducible only by replacing the refusal -
 
     mod._open_pr_numbers = lambda repo: []      # the guard removed
-    # "all 0 step(s) landed trees that pass the guards", rc 0
+    # "all 0 step(s) landed trees the guard passed", rc 0
 
 - which is what produced that reading, and the same substitution its test made.
 The reading was therefore about the stub, not about the program, and the branch
@@ -660,7 +699,7 @@ def _extract_tree(tree_sha: str, workdir: Path) -> None:
     """Materialise `tree_sha` in a scratch directory, replacing what is there.
 
     Shared by the two questions that need to look inside a tree (does the merged
-    tree pass the guards, and does the base state the count): only this step is
+    tree passes the guard, and does the base state the count): only this step is
     common, so only this step is shared.
     """
     if workdir.exists():
@@ -827,7 +866,10 @@ def _count_line_clause(base: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Check that a sequence of merges lands trees the guards accept."
+        description=(
+            "Check that a sequence of merges lands trees that "
+            f"{GUARD} accepts (the suite is check-merge-plan-suite.py's question)."
+        )
     )
     parser.add_argument(
         "prs", nargs="*", type=int,
@@ -909,7 +951,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"DANGEROUS STEPS: {dangers}\n"
             "git reported these merges CLEAN and no CI run covers them: the tree "
-            "they produce fails the repo's own guards. Re-order the plan, or "
+            f"they produce fails {GUARD}. Re-order the plan, or "
             "re-measure the derived value on the merged tree before pushing."
         )
         return 1
@@ -926,7 +968,10 @@ def main(argv: list[str] | None = None) -> int:
             f"healthy."
         )
         return 3
-    print(f"all {len(numbers)} step(s) landed trees that pass the guards")
+    print(
+        f"all {len(numbers)} step(s) landed trees {GUARD} passed - that guard alone; "
+        f"the suite is check-merge-plan-suite.py's question"
+    )
     return 0
 
 

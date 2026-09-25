@@ -965,7 +965,8 @@ def test_a_sha_or_qualified_ref_is_passed_through(mod, monkeypatch):
 def test_an_empty_open_pr_list_is_refused_at_its_source(mod, monkeypatch, capsys):
     """The reachable form of "zero measured steps is never a verdict".
 
-    The tool cannot print "all 0 step(s) ... pass the guards" because the default
+    The tool cannot print a summary saying "all 0 step(s) landed trees ... passed"
+    because the default
     plan source refuses an empty list before any step count exists: `numbers =
     args.prs or _open_pr_numbers(...)` with `prs` declared `nargs="*"` means either
     positional numbers were given, or the source raised.
@@ -998,8 +999,10 @@ def test_an_empty_open_pr_list_is_refused_at_its_source(mod, monkeypatch, capsys
 
     assert rc == 2, "an unanswerable question must not be reported as health"
     assert "no open PRs reported" in captured.err, captured.err
-    # The false claim itself must be gone, not merely accompanied by a warning.
-    assert "pass the guards" not in captured.out, captured.out
+    # The false claim itself must be gone, not merely accompanied by a warning:
+    # the health line in its current spelling, quoted from the constant so a rename
+    # of the guard cannot leave this assertion testing nothing.
+    assert f"landed trees {mod.GUARD} passed" not in captured.out, captured.out
 
 
 def test_the_default_plan_source_still_measures_a_real_plan(mod, monkeypatch, capsys):
@@ -1022,7 +1025,7 @@ def test_the_default_plan_source_still_measures_a_real_plan(mod, monkeypatch, ca
     out = capsys.readouterr().out
 
     assert rc == 0, out
-    assert "all 1 step(s) landed trees that pass the guards" in out, out
+    assert f"all 1 step(s) landed trees {mod.GUARD} passed" in out, out
 
 
 # --- the default plan: what it plans, and what it names as left out ----------
@@ -1069,7 +1072,7 @@ def test_the_default_plan_leaves_out_prs_that_conflict_and_names_them(
     assert "plan: #1 -> #3" in out, out
     assert "excluded as conflicting: #2" in out, out
     assert "#2: OK" not in out and "#2: DANGER" not in out, out
-    assert "all 2 step(s) landed trees that pass the guards" in out, out
+    assert f"all 2 step(s) landed trees {mod.GUARD} passed" in out, out
 
 
 def test_all_plans_every_open_pr_conflicting_ones_included(mod, monkeypatch, capsys):
@@ -1093,7 +1096,7 @@ def test_a_queue_where_nothing_merges_is_not_a_pass(mod, monkeypatch, capsys):
     """No mergeable PR means the question was not answered - exit 2, never a pass.
 
     This is the state the live queue was in on 2026-09-13 (13 of 14 open PRs
-    conflicting). Reporting `all 0 step(s) landed trees that pass the guards` here
+    conflicting). Reporting `all 0 step(s) landed trees <guard> passed` here
     would be the vacuous pass this file already refuses for an empty open-PR list,
     one step further in: the list is not empty, the plan is.
     """
@@ -1111,7 +1114,7 @@ def test_a_queue_where_nothing_merges_is_not_a_pass(mod, monkeypatch, capsys):
 
     assert rc == 2, captured.out
     assert "conflict with" in captured.err, captured.err
-    assert "pass the guards" not in captured.out, captured.out
+    assert f"landed trees {mod.GUARD} passed" not in captured.out, captured.out
 
 
 def test_the_default_plan_is_built_against_the_tree_the_steps_build(
@@ -1155,7 +1158,7 @@ def test_the_default_plan_is_built_against_the_tree_the_steps_build(
     assert "plan: #1 -> #3" in out, out
     assert "plan source: open PRs that can be merged in this order (2 of 3)" in out, out
     assert "excluded as conflicting: #2" in out, out
-    assert "all 2 step(s) landed trees that pass the guards" in out, out
+    assert f"all 2 step(s) landed trees {mod.GUARD} passed" in out, out
     # The step the filter could not see must not be reported as measured, and the
     # plan must not walk into it: "#2: CONFLICT" here would be the old behaviour.
     assert "#2: OK" not in out and "#2: CONFLICT" not in out, out
@@ -1792,3 +1795,72 @@ def test_the_refusal_names_a_modify_delete_path_and_not_the_sentence(
     assert "Conflicting paths over those 2 PR(s): Agent.md x2." in err, err
     assert "CONFLICT (modify/delete)" not in err, "the prose sentence is not a path"
     assert "--resolve-conflict" in err, err
+
+
+# --- the verdict names the guard it judged by -------------------------------
+#
+# Every step here is judged by exactly one guard, and the reader of the summary is
+# deciding whether to land a plan. "The guards" claimed a family that never ran: the
+# reading above it (`all N step(s) landed trees that pass the guards`, exit 0) was said
+# about a plan whose second step fails the *suite* - measured 2026-09-25
+# (`cyc20260925-205403`) with `check-merge-plan-suite.py 1618 1619 --steps`. The two
+# tests below pin the two halves of the correction: the summary names the guard in
+# force, and it says which question it is *not* answering.
+
+
+def test_the_summary_names_the_guard_it_judged_by(mod, monkeypatch, capsys):
+    """The healthy line names the guard, and marks the question it does not answer.
+
+    Both directions are asserted on the same output, because either half alone is
+    satisfiable by a wrong tool: naming a guard while still claiming health in general
+    would leave the suite question looking answered, and disclaiming the suite without
+    naming the guard would leave the reader with no way to find out what did run.
+    """
+    heads = {1: C1, 2: C2}
+    verdicts = {1: (C1, (True, "documents 1530")), 2: (C2, (True, "documents 1541"))}
+    rc, _ = _plan(mod, monkeypatch, heads, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert f"all 2 step(s) landed trees {mod.GUARD} passed" in out, out
+    assert "the suite is check-merge-plan-suite.py's question" in out, out
+    # The over-claim itself: a plan-wide "the guards" was true of no run this tool made.
+    assert "the guards" not in out, out
+
+
+def test_the_named_guard_is_the_one_in_force_not_a_literal(mod, monkeypatch, capsys):
+    """The control arm: rename `GUARD` and the summary must follow it.
+
+    Without this, a summary that hardcodes `scripts/check-doc-count.py` passes the test
+    above - the literal and the constant agree today - and keeps printing a guard nobody
+    ran the day the constant moves.
+    """
+    heads = {1: C1}
+    verdicts = {1: (C1, (True, "documents 1"))}
+    monkeypatch.setattr(mod, "GUARD", "scripts/check-some-other-guard.py")
+    rc, _ = _plan(mod, monkeypatch, heads, verdicts, prs=(1,))
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "landed trees scripts/check-some-other-guard.py passed" in out, out
+    assert "check-doc-count.py" not in out, out
+
+
+def test_a_dangerous_step_names_the_guard_the_tree_fails(mod, monkeypatch, capsys):
+    """The DANGER sentence is what a resolver acts on, so it names the guard too.
+
+    It used to say "the repo's own guards" - a family, while one guard answered - and
+    that sentence is the one a reader quotes when deciding whether a red step is a
+    one-line repair or a re-measure.
+    """
+    heads = {1: C1, 2: C2}
+    verdicts = {
+        1: (C1, (True, "documents 1541")),
+        2: (C2, (False, "documents 1541 but 1560 are collected")),
+    }
+    rc, _ = _plan(mod, monkeypatch, heads, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert f"they produce fails {mod.GUARD}" in out, out
+    assert "the repo's own guards" not in out, out
