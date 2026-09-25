@@ -32,7 +32,11 @@ cannot satisfy:
   overwritten - the conservation check above cannot see that row, because it is in
   neither snapshot this process took;
 * both files are written by **rename**, so an index is never a truncated prefix of
-  itself when a write dies.
+  itself when a write dies;
+* the row-length rule has a **runner at the write** (`--append`): a row that would
+  break a rule `--check` states is refused with nothing written, and the row cap is
+  kept in the same verified write - the rules are applied to the row before it goes
+  into the file, not read back out of it afterwards.
 
 Every violated property is pinned in both directions: the same call on a
 compliant index reports OK, so a guard that fires on everything cannot pass.
@@ -1045,3 +1049,246 @@ def test_a_failed_replace_leaves_the_index_exactly_as_it_was(tmp_path, mod, monk
     assert not archive.exists()
     assert "writing failed" in capsys.readouterr().err
     _no_temp_left_behind(tmp_path)
+
+
+# --- appending a row: the rule gets a runner at the write (#1551) -----------
+#
+# The row-length rule had a checker (`--check`) and nothing that ran it, and the
+# measured cost is one cycle: `cyc20260925-070325` wrote its index row by hand, the
+# row came out 701 chars, and its own ad-hoc script refused it - after the index had
+# been read, with 39 rows already over the same cap. `--append` is the runner: the
+# rules are applied to the row *before* it is written, so an index maintained through
+# this tool cannot gain a row over the cap, and the row cap is kept in the same
+# verified write rather than by a second call.
+
+
+def _row_file(tmp_path: Path, text: str, name: str = "row.md") -> Path:
+    """A file holding the row `--append` is to write."""
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_append_writes_the_row_and_the_index_reads_back(tmp_path, mod, capsys):
+    """The compliant direction: one call adds the row, the rules still hold."""
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    _write_index(index, [_row(OLD), _row(MID)])
+
+    row_file = _row_file(tmp_path, _row(NEWEST))
+    assert mod.main([str(index), "--archive", str(archive), "--append", str(row_file)]) == 0
+
+    assert _targets(index) == [
+        f"cycle-{OLD}.md",
+        f"cycle-{MID}.md",
+        f"cycle-{NEWEST}.md",
+    ], "the row is added after the rows already there, in the order they were written"
+    out = capsys.readouterr()
+    assert f"appended 1 row(s) ({len(_row(NEWEST).rstrip(chr(10)))} chars)" in out.out
+    assert "verified conserved and append-only" in out.out
+    assert not archive.exists(), "nothing left the index, so no archive is created"
+    _no_temp_left_behind(tmp_path)
+
+    # The same index answers `--check` clean: the row the tool wrote is a row the
+    # tool reads, which is the property that makes the refusal below load-bearing.
+    assert mod.main([str(index), "--check"]) == 0
+    assert "OK: the index respects the row rules" in capsys.readouterr().out
+
+
+def test_append_refuses_a_row_over_the_cap_and_writes_nothing(tmp_path, mod, capsys):
+    """The measured defect, pinned on the write that produced it.
+
+    `cyc20260925-070325`: the row was written by hand, came out over the cap, and the
+    cycle's own script noticed afterwards. Here the refusal is the tool's, and the
+    index is asserted byte-identical - a refusal that still wrote would be worse than
+    no refusal at all, because the row would sit in the file looking checked.
+    """
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    before = _write_index(index, [_row(OLD), _row(MID)])
+    over = _over_cap_row(NEWEST, mod)
+    assert len(over.rstrip("\n")) == mod.ROW_MAX_CHARS + 1, "one char over, by construction"
+
+    row_file = _row_file(tmp_path, over)
+    assert mod.main([str(index), "--archive", str(archive), "--append", str(row_file)]) == 1
+
+    err = capsys.readouterr().err
+    assert f"{len(over.rstrip(chr(10)))}-char row" in err and str(mod.ROW_MAX_CHARS) in err
+    assert "detail file" in err, "the refusal says where the summary belongs instead"
+    assert index.read_text(encoding="utf-8") == before, "nothing was written"
+    assert not archive.exists()
+    _no_temp_left_behind(tmp_path)
+
+
+def test_append_refuses_a_line_the_tool_could_not_read_back(tmp_path, mod, capsys):
+    """Shape is a rule here, not a taste: an unreadable row makes the *next* run blind.
+
+    A row of another shape does not merely fail to parse - `main` refuses the whole
+    index as unclassifiable (exit 2), so the rule list printed beside it would be about
+    rows it could see. Writing one through this tool would take a clean index and make
+    it unanswerable.
+    """
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    before = _write_index(index, [_row(OLD), _row(MID)])
+
+    for shape in (f"- cyc{NEWEST} - cycle-{NEWEST}.md - plain text row",
+                  f"| cyc{NEWEST} | cycle-{NEWEST}.md |"):
+        row_file = _row_file(tmp_path, shape + "\n")
+        assert mod.main([str(index), "--archive", str(archive), "--append", str(row_file)]) == 1
+        err = capsys.readouterr().err
+        assert "could not read back as a row" in err
+        assert index.read_text(encoding="utf-8") == before
+        assert not archive.exists()
+    _no_temp_left_behind(tmp_path)
+
+
+def test_append_refuses_a_target_already_in_the_index(tmp_path, mod, capsys):
+    """The third rule `--check` states, applied before the write rather than after."""
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    before = _write_index(index, [_row(OLD), _row(MID)])
+
+    row_file = _row_file(tmp_path, _row(MID))
+    assert mod.main([str(index), "--archive", str(archive), "--append", str(row_file)]) == 1
+
+    err = capsys.readouterr().err
+    assert "already in the index" in err and f"cycle-{MID}.md" in err
+    assert index.read_text(encoding="utf-8") == before
+    assert not archive.exists()
+
+
+def test_append_keeps_the_row_cap_in_the_same_write(tmp_path, mod, capsys):
+    """At the cap, one call adds the row *and* moves the oldest out, verified.
+
+    Both rules at once, which is the case the row cap's own rule needs: refusing the
+    append because the index is at its cap would make the cap unkeepable, so the move
+    is folded into the append rather than asked for separately.
+    """
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    _write_index(index, [_row(OLD), _row(MID)])
+
+    row_file = _row_file(tmp_path, _row(NEWEST))
+    assert (
+        mod.main([str(index), "--cap", "2", "--archive", str(archive), "--append", str(row_file)])
+        == 0
+    )
+
+    assert _targets(index) == [f"cycle-{MID}.md", f"cycle-{NEWEST}.md"], (
+        "the appended row survives and the oldest row leaves"
+    )
+    assert _targets(archive) == [f"cycle-{OLD}.md"]
+    out = capsys.readouterr().out
+    assert "appended 1 row(s)" in out and "moved 1 row(s)" in out
+    assert "verified conserved and append-only" in out
+
+    # Conservation, counted the way the move's own tests count it: index + archive
+    # holds every row exactly once, the appended one included.
+    everything = Counter(_rows_in(index) + _rows_in(archive))
+    assert set(everything.values()) == {1}, everything
+    assert len(everything) == 3
+    _no_temp_left_behind(tmp_path)
+
+
+def test_append_is_a_compare_and_swap_too(tmp_path, mod, monkeypatch):
+    """Another writer's row arriving mid-run is planned for, not overwritten.
+
+    The plan's `index_before` is the text *read*, never the text with the appended row
+    folded in - folding it in would make the compare-and-swap compare against a file
+    that does not exist, and the run would refuse (or, worse, overwrite).
+    """
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    _write_index(index, [_row(MID), _row(OLD)])
+    sibling = _row("20260905-100000")
+    planning, calls = _appending_plan(mod, index, sibling)
+    monkeypatch.setattr(mod, "build_plan", planning)
+
+    row_file = _row_file(tmp_path, _row(NEWEST))
+    assert (
+        mod.main([str(index), "--cap", "2", "--archive", str(archive), "--append", str(row_file)])
+        == 0
+    )
+
+    assert _targets(index) == [
+        "cycle-20260905-100000.md",
+        f"cycle-{NEWEST}.md",
+    ], "the other writer's row and this run's row are both in the index"
+    assert len(calls) == 2, "the run re-plans on the text on disk"
+    assert _targets(archive) == [f"cycle-{OLD}.md", f"cycle-{MID}.md"], (
+        "the second plan moves the two oldest of the four rows it can see, the "
+        "arrived row among them"
+    )
+    _no_temp_left_behind(tmp_path)
+
+
+def test_append_places_the_row_after_the_last_of_its_kind(tmp_path, mod):
+    """Placement is decided by what the rows are, never by a line number.
+
+    The index has a non-row block after its rows (the shape the real indexes have),
+    and the appended row must land inside the row block, not at the end of the file.
+    """
+    index = tmp_path / "MEMORY.md"
+    index.write_text(
+        "# Index\n\n> notes, above the rows\n" + _row(OLD) + _row(MID) + "\n## a note below\n",
+        encoding="utf-8",
+    )
+    row_file = _row_file(tmp_path, _row(NEWEST))
+
+    assert mod.main([str(index), "--append", str(row_file)]) == 0
+
+    lines = index.read_text(encoding="utf-8").splitlines()
+    assert lines.index(_row(MID).rstrip("\n")) + 1 == lines.index(_row(NEWEST).rstrip("\n")), (
+        "the row follows the last row, not the last line of the file"
+    )
+    assert lines[-1] == "## a note below", "the note below the rows stays below them"
+
+
+def test_append_dry_run_writes_nothing(tmp_path, mod, capsys):
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    before = _write_index(index, [_row(MID), _row(OLD)])
+    row_file = _row_file(tmp_path, _row(NEWEST))
+
+    assert (
+        mod.main(
+            [str(index), "--cap", "1", "--dry-run", "--archive", str(archive), "--append", str(row_file)]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "append 1 row(s)" in out and "move 2 row(s)" in out and "nothing written" in out
+    assert index.read_text(encoding="utf-8") == before
+    assert not archive.exists()
+    _no_temp_left_behind(tmp_path)
+
+
+def test_append_needs_exactly_one_row_line(tmp_path, mod, capsys):
+    """Which row was meant is the caller's answer, not something this tool guesses."""
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    before = _write_index(index, [_row(OLD), _row(MID)])
+
+    for text, count in (("", 0), (_row(NEW) + _row(NEWEST), 2)):
+        row_file = _row_file(tmp_path, text)
+        assert mod.main([str(index), "--archive", str(archive), "--append", str(row_file)]) == 2
+        err = capsys.readouterr().err
+        assert f"exactly one row line, found {count}" in err
+        assert index.read_text(encoding="utf-8") == before
+        assert not archive.exists()
+
+
+def test_append_a_missing_row_file_is_a_measurement_error(tmp_path, mod, capsys):
+    """A file that is not there is a question that could not be answered - exit 2."""
+    index = tmp_path / "MEMORY.md"
+    archive = tmp_path / "cycle-archive-X.md"
+    before = _write_index(index, [_row(OLD), _row(MID)])
+
+    missing = tmp_path / "nope.md"
+    assert mod.main([str(index), "--archive", str(archive), "--append", str(missing)]) == 2
+
+    assert f"no row file at {missing}" in capsys.readouterr().err
+    assert index.read_text(encoding="utf-8") == before
+    assert not archive.exists()

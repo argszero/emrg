@@ -105,13 +105,25 @@ index: 31 rows over 512 chars, longest 4,280, and `moved N row(s); verified cons
 and append-only` reading as a clean verdict - issue #1551). The move now reports the
 length rule it does not enforce, on stderr, and its exit code is unchanged.
 
-A report rather than a refusal, because the two rules interact: this move is the only
-thing that brings the index under the *row* cap, so refusing to run while some row is
-over the *length* cap would leave the index over the row cap for good. The row cap is
-the one whose violation displaces the embedded budget; the length rule is a reading
-for whoever writes the rows.
+**`--append` is the runner.** A row written through it is refused *before* anything is
+written when it breaks a rule `--check` states: over the per-row cap, not a row this
+tool could read back (any other shape would make the next run refuse the whole index as
+unclassifiable), or repeating a target already in the index. Then the row cap is
+enforced in the same verified write, so one run can add a row and trim the oldest in
+one compare-and-swap, with the conservation check accounting for the added row.
+Measured cost that makes this a rule with a runner rather than a nicety
+(`cyc20260925-070325`): the cycle wrote its index row by hand, the row came out 701
+chars, and its own ad-hoc script refused it - after the index had been read, with 39
+rows already over the same cap. Writing a row is the one moment the rule can be kept
+cheaply, so it lives there.
+
+What `--append` does **not** do is rewrite the rows already in the index: `--check`
+still reports them and the move still does not enforce their length. Refusing to write
+while an old row is over the cap would leave the index over the row cap for good -
+the same interaction that makes the move's report a report.
+
 The other half of the file: what the prompt would not carry
-----------------------------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 `--check` also reports the **embed cap's** reading, because the row rules bound the
 file while the cap bounds what a reader of the system prompt sees of it. The daemon
 keeps the index's **head** up to `INDEX_SIZE_WARN` characters (cut at a line
@@ -130,24 +142,34 @@ re-implemented here, so the two cannot disagree about what is embedded.
 
 Exit codes
 ----------
-``0``  the index is within its cap (nothing to move), or the move was made and
-       verified. A per-row length violation the move cannot fix is reported on
-       stderr and does not change this code. ``1``  ``--check`` found a row-rule
-       violation in an index it could
-       read (too many cycle rows, a row over the per-row cap, a duplicate target).
+``0``  the index is within its cap (nothing to move), a row was appended (and the
+       cap kept), or the move was made and verified. A per-row length violation the
+       move cannot fix is reported on stderr and does not change this code.
+       ``1``  ``--check`` found a row-rule violation in an index it could read (too
+       many cycle rows, a row over the per-row cap, a duplicate target), or
+       ``--append`` was handed a row that would introduce one of those violations -
+       nothing is written in that case.
        ``2``  the question could not be answered - no index at that path, an index
        that could not be read, an index holding lines that name a cycle but are not
        rows this tool can read (so which rows are cycle rows is unknowable), an index
        whose row-like lines contain no row this tool can read at all (so the row rules
-       have nothing to be asserted about), or a move that did not verify. A
-       measurement error is never reported as a healthy index, and never as a rule
-       violation.
+       have nothing to be asserted about), a `--append` row file that does not exist,
+       cannot be read, or does not hold exactly one line (which row was meant is then
+       the caller's answer, not a rule this tool can guess at), or a move that did not
+       verify. A measurement error is never reported as a healthy index, and never as
+       a rule violation.
 
 Usage
 -----
     uv run --no-sync python scripts/archive-memory-index.py <path/to/MEMORY.md>
     uv run --no-sync python scripts/archive-memory-index.py <index> --check
     uv run --no-sync python scripts/archive-memory-index.py <index> --dry-run
+    uv run --no-sync python scripts/archive-memory-index.py <index> --append <row-file>
+
+`--append` is how a row should be added: it refuses a row that would break a rule
+`--check` states (over the per-row cap, unreadable shape, duplicate target) with
+nothing written, then keeps the row cap in the same verified write. `--dry-run`
+composes with it.
 """
 
 from __future__ import annotations
@@ -220,13 +242,22 @@ class Row:
 
 @dataclass(frozen=True)
 class Plan:
-    """What the index and the archive would look like after the move."""
+    """What the index and the archive would look like after the move.
+
+    ``added`` is the rows this run writes *into* the index (the `--append` mode);
+    it is what makes the conservation rule below checkable when a run both adds a
+    row and moves rows out, and it stays empty for a plain move. ``index_before``
+    is always the text read from disk - never a text with the appended row already
+    folded in - because `changed_since_planned` compares the plan against those
+    bytes to detect another writer.
+    """
 
     index_before: str
     archive_before: str
     index_after: str
     archive_after: str
     moved: tuple[Row, ...]
+    added: tuple[str, ...] = ()
 
 
 def parse_rows(text: str) -> list[Row]:
@@ -369,17 +400,140 @@ def archive_header(index: Path, cap: int, today: str) -> str:
     )
 
 
-def build_plan(index_path: Path, archive_path: Path, cap: int, today: str) -> Plan:
-    """Plan the move: the oldest cycle rows out, everything else untouched."""
-    index_text = index_path.read_text(encoding="utf-8")
+def is_cycle_row_text(line: str) -> bool:
+    """Whether one line is a row this tool reads, carrying a cycle id.
+
+    The same two tests `parse_rows` applies to a line of the file, asked of a line
+    that is not in a file yet - so the verdict on an offered row and the verdict on
+    a written one cannot disagree.
+    """
+    match = ROW_RE.match(line)
+    return bool(match and CYCLE_RE.search(match.group("target")))
+
+
+def insert_row(text: str, row_text: str) -> str:
+    """`text` with `row_text` inserted after the last row of its own kind.
+
+    Placed by what the rows *are*, never by a line number, for the same reason the
+    move picks rows by cycle id: a cycle row joins the cycle rows, so the index keeps
+    one block of them and a reader can still see where a later writer started; a
+    non-cycle row follows the last row of any kind; an index with no rows at all
+    keeps its notes and gets the row after them.
+
+    :param text: the index text as read.
+    :param row_text: the row to insert, with or without its trailing newline.
+    :returns: the new index text.
+    """
+    line = row_text.rstrip("\n")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    rows = parse_rows(text)
+    same_kind = [row for row in rows if row.is_cycle == is_cycle_row_text(line)]
+    anchor = same_kind[-1] if same_kind else (rows[-1] if rows else None)
+    if anchor is None:
+        return text + line + "\n"
+    lines = text.splitlines(keepends=True)
+    return "".join(lines[: anchor.lineno + 1]) + line + "\n" + "".join(
+        lines[anchor.lineno + 1 :]
+    )
+
+
+def offered_row_verdict(
+    row_file: Path, index_rows: list[Row], cap: int
+) -> tuple[int, str | None]:
+    """Whether the row `row_file` offers may be appended, and the refusal otherwise.
+
+    The rules are the ones this tool already states (`check_rules`), applied to the
+    row **before** it is written rather than read back later - which is the whole
+    point: `--check` reads rules that nothing ran, and the measured cost was a cycle
+    whose 701-char row was refused by its own ad-hoc script *after* the fact
+    (`cyc20260925-070325`), while 39 rows sat over the same cap in the index
+    (issue #1551). A row that would break a rule is refused here, with nothing
+    written, so an index maintained through this tool cannot gain one.
+
+    :param row_file: the file holding the row, one row line.
+    :param index_rows: the index's rows, parsed from the caller's one read.
+    :param cap: the per-row cap this run enforces.
+    :returns: `(0, row)` when the row may be written, else `(exit code, None)`.
+    """
+    if not row_file.is_file():
+        print(f"error: no row file at {row_file}", file=sys.stderr)
+        return 2, None
+    try:
+        text = row_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"error: could not read {row_file}: {exc}", file=sys.stderr)
+        return 2, None
+
+    offered = [line for line in text.splitlines() if line.strip()]
+    if len(offered) != 1:
+        # Zero could be a titled file; more than one would need an order this mode
+        # does not have. Both are a question the caller has to answer, not a rule
+        # violation to guess at.
+        print(
+            f"error: {row_file} must hold exactly one row line, found {len(offered)}",
+            file=sys.stderr,
+        )
+        return 2, None
+    row = offered[0].rstrip()
+    if not ROW_RE.match(row):
+        # Not a taste question: `parse_rows` reads `- [title](target)` and nothing
+        # else, so writing any other shape would make the *next* run refuse this
+        # index as one it cannot classify (exit 2), and the rule list it prints
+        # would be about rows it could see.
+        print(
+            f"error: refusing to append a line this tool could not read back as a "
+            f"row (expected `- [title](target)`): {row[:120]}",
+            file=sys.stderr,
+        )
+        return 1, None
+    if len(row) > ROW_MAX_CHARS:
+        print(
+            f"error: refusing to append a {len(row)}-char row: the per-row cap is "
+            f"{ROW_MAX_CHARS} chars and the summary belongs in the row's detail file",
+            file=sys.stderr,
+        )
+        return 1, None
+    target = ROW_RE.match(row).group("target")
+    if any(existing.target == target for existing in index_rows):
+        print(
+            f"error: refusing to append a row whose target is already in the index: "
+            f"{target}",
+            file=sys.stderr,
+        )
+        return 1, None
+    return 0, row
+
+
+def build_plan(
+    index_path: Path,
+    archive_path: Path,
+    cap: int,
+    today: str,
+    add_row: str | None = None,
+) -> Plan:
+    """Plan the move: the oldest cycle rows out, everything else untouched.
+
+    With `add_row`, the row is inserted first and the move is planned over the text
+    that includes it, so one run can append and trim in a single verified write. The
+    plan's `index_before` stays the text read from disk, which is what the caller's
+    compare-and-swap needs.
+    """
+    read_text = index_path.read_text(encoding="utf-8")
     archive_exists = archive_path.exists()
     archive_text = archive_path.read_text(encoding="utf-8") if archive_exists else ""
+
+    added: tuple[str, ...] = ()
+    index_text = read_text
+    if add_row is not None:
+        added = (add_row,)
+        index_text = insert_row(read_text, add_row)
 
     rows = parse_rows(index_text)
     cycle_rows = [row for row in rows if row.is_cycle]
     excess = len(cycle_rows) - cap
     if excess <= 0:
-        return Plan(index_text, archive_text, index_text, archive_text, ())
+        return Plan(read_text, archive_text, index_text, archive_text, (), added)
 
     # Ordered by the cycle id, not by file position: see the module docstring for
     # the incident (and the wrong end) this replaces.
@@ -405,7 +559,7 @@ def build_plan(index_path: Path, archive_path: Path, cap: int, today: str) -> Pl
             archive_text += "\n"
     archive_after = archive_text + "".join(row.text + "\n" for row in moved)
 
-    return Plan(index_text, archive_before, index_after, archive_after, moved)
+    return Plan(read_text, archive_before, index_after, archive_after, moved, added)
 
 
 def verify_plan(plan: Plan, cap: int) -> list[str]:
@@ -419,9 +573,13 @@ def verify_plan(plan: Plan, cap: int) -> list[str]:
 
     before = Counter(row_texts(plan.index_before) + row_texts(plan.archive_before))
     after = Counter(row_texts(plan.index_after) + row_texts(plan.archive_after))
-    if before != after:
-        lost = sorted((before - after).elements())
-        gained = sorted((after - before).elements())
+    # A run that appends is allowed to end with exactly the rows it wrote plus the
+    # rows that were already there - no more, so an append can never smuggle in a
+    # second row, and no fewer, so the row it wrote cannot vanish into the archive.
+    expected = before + Counter(plan.added)
+    if after != expected:
+        lost = sorted((expected - after).elements())
+        gained = sorted((after - expected).elements())
         problems.append(
             f"rows not conserved: lost={len(lost)} {lost[:3]} gained={len(gained)} "
             f"{gained[:3]}"
@@ -642,8 +800,29 @@ def announce(index_path: Path, archive_path: Path, plan: Plan) -> None:
     """Print what is about to move, once, after the plan is the one being used."""
     print(f"index: {index_path}")
     print(f"archive: {archive_path}")
+    for row in plan.added:
+        print(f"append: {row.strip()[:120]}")
     for row in plan.moved:
         print(f"move: {row.target}")
+
+
+def describe(plan: Plan, cap: int, *, dry: bool = False) -> str:
+    """What this run does, in the words of the two rules it enforces.
+
+    One phrasing for the dry run and the real one, so a `--dry-run` and the run it
+    previews cannot describe themselves differently - and a run that only moved keeps
+    the sentence it has always printed, because a reader of an older log should not
+    have to learn a second wording for the same event.
+    """
+    parts: list[str] = []
+    if plan.added:
+        chars = ", ".join(str(len(row)) for row in plan.added)
+        parts.append(f"{'append' if dry else 'appended'} {len(plan.added)} row(s) ({chars} chars)")
+    if plan.moved:
+        parts.append(f"{'move' if dry else 'moved'} {len(plan.moved)} row(s)")
+    else:
+        parts.append(f"nothing to move: the index is within its {cap}-row cap")
+    return "; ".join(parts)
 
 
 def apply_plan(index_path: Path, archive_path: Path, plan: Plan) -> None:
@@ -753,6 +932,16 @@ def main(argv: list[str] | None = None) -> int:
         "the index)",
     )
     parser.add_argument(
+        "--append",
+        type=Path,
+        default=None,
+        metavar="ROW_FILE",
+        help="append the one row ROW_FILE holds, refusing it (exit 1, nothing "
+        "written) when it is over the per-row cap, is not a row this tool could "
+        "read back, or repeats a target already in the index; the row cap is then "
+        "enforced by the move, in the same verified write",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="read-only: report row-rule violations (exit 1 if there are any) and the "
@@ -828,15 +1017,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     today = f"{date.today():%Y-%m-%d}"
+
+    add_row: str | None = None
+    if args.append is not None:
+        # Refused before anything is planned: a row that would break one of the
+        # rules `--check` states is never written, so the rules have a runner at
+        # the one write this tool performs (issue #1551).
+        code, add_row = offered_row_verdict(args.append, rows, args.cap)
+        if add_row is None:
+            return code
+
     for attempt in range(1, MOVE_ATTEMPTS + 1):
-        plan = build_plan(index_path, archive_path, args.cap, today)
+        plan = build_plan(index_path, archive_path, args.cap, today, add_row)
         problems = verify_plan(plan, args.cap)
         if problems:
             for problem in problems:
                 print(f"error: {problem}", file=sys.stderr)
             return 2
 
-        if not plan.moved:
+        if not plan.moved and not plan.added:
             print(f"index: {index_path}")
             print(f"nothing to move: the index is within its {args.cap}-row cap")
             report_row_lengths(index_text)
@@ -844,7 +1043,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.dry_run:
             announce(index_path, archive_path, plan)
-            print(f"dry run: {len(plan.moved)} row(s) would move, nothing written")
+            print(f"dry run: {describe(plan, args.cap, dry=True)}, nothing written")
             report_row_lengths(plan.index_after)
             return 0
 
@@ -886,7 +1085,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {failure}", file=sys.stderr)
         return 2
 
-    print(f"moved {len(plan.moved)} row(s); verified conserved and append-only")
+    print(f"{describe(plan, args.cap)}; verified conserved and append-only")
     # The *post-move* text, from the plan: this is the text `apply_plan` wrote and
     # `measure_on_disk` verified, so a row that was over the cap and moved out is not
     # reported as still sitting in the index.
