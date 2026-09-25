@@ -1053,14 +1053,28 @@ def _ownership_lines(
     it into "the base owns everything" is what the combination arm of the test pair
     catches (`--steps` mode keeps the older wording: it measures a different tree per
     step, so its owner is a step, not this split).
+
+    What the paragraph may claim is bounded by what this tool reads, and the old opening
+    clause was not: it said "the plan's steps are individually clean and **the per-PR
+    signals are green**", while the only `gh` call in this file is
+    `gh pr list --json number` (see `_open_pr_numbers`) - no code path here reaches a
+    per-PR CI verdict, which is also the thing the module header says is *invisible* to a
+    per-PR run ("each side is green, and the tree that reaches master is red"). Read on a
+    plan of one PR (measured 2026-09-25, `cyc20260925-213230`, on #1618's red landing
+    tree) it printed a green-signals claim about a plan whose single step was red on
+    master. The two clauses that replaced it are both inputs of this function and were
+    measured before it is called: the fold applied without a conflict (a conflicting step
+    stops earlier with rc 3), and each owned row does not fail on the base tree
+    (`_still_red_on` ran it there - absent and passing are both "does not fail").
     """
     own = [row for row in failing if row not in inherited]
     plan = ""
     if own:
         plan = (
-            "\nThe plan's steps are individually clean and the per-PR signals are green, "
-            "but the tree they produce together fails the suite. Fix it on the merged "
-            "tree and re-push the PR that owns the failure (a push voids its votes).\n"
+            "\nThe plan's steps fold onto the base without a conflict, and the tree "
+            "they produce together fails the suite on rows the base tree does not "
+            "fail. Fix it on the merged tree and re-push the PR that owns the "
+            "failure (a push voids its votes).\n"
             "  rows this plan's tree owns: " + ", ".join(own)
         )
     base = ""
