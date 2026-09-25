@@ -958,7 +958,7 @@ def test_the_open_source_flow_writes_only_in_the_session_clone() -> None:
 
     # The tier half is bound to B.3 rather than asserted anywhere in the file: a location
     # without the tier that unlocks it sends the next reader to the same dead end one layer
-    # down, which is what the rant measured (both the configured and the dirty-tree-forced
+    # down, which is what the rant measured (both the configured and the failed-convergence
     # `read-only` refuse every step of this flow).
     parts = text.split('DEV="{{ source_dir }}', 1)
     assert len(parts) == 2, "B.3 must define the clone as a shell variable the flow can reuse"
@@ -1238,6 +1238,49 @@ def test_the_create_head_scan_answers_both_ways() -> None:
     )
 
 
+#: The tier rule a dirty tree used to carry, in each template's own words. #1563
+#: (`69745b8c`, 2026-09-24) made the daemon converge the tree itself and leave the
+#: configured tier intact — and its file list contains **no** `prompt.md` (measured:
+#: `git show --name-only 69745b8c | grep -c prompt.md` → 0), so both task templates kept
+#: stating the retired rule while the code, its test and that test's own old name
+#: (`test_dirty_tree_forces_read_only_structural_guard`) all moved.
+RETIRED_DIRTY_TIER_CLAIMS = (
+    "it means this cycle runs **read-only**",
+    "read-only cycle (no git writes, no PR submission)",
+    "or forced by the dirty-tree guard above",
+    "**Dirty tree read-only**",
+)
+
+#: The mechanism the corrected clause names instead. It can only be present if the clause
+#: states what the daemon does now, so it is the positive anchor that keeps the absences
+#: above from passing on a clause someone deleted.
+CONVERGENCE_ANCHOR = "refs/emrg/rescue/"
+
+
+def test_a_dirty_tree_no_longer_costs_a_cycle_its_tier_in_either_prompt() -> None:
+    """Both task prompts state the tier rule the guard now implements, not the retired one.
+
+    A prompt is not documentation — its reader acts on it. `_effective_sandbox` converges a
+    dirty tree itself and leaves the configured tier intact, so a cycle told "a dirty tree
+    means you run read-only" either skips work it could do or reports a tier nothing set.
+    The retired strings are what a later edit would paste back if it re-derived the clause
+    from the pre-#1563 behaviour.
+    """
+    for name in ("journal_prompt.md", "open_source_prompt.md"):
+        text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
+        survivors = [claim for claim in RETIRED_DIRTY_TIER_CLAIMS if claim in text]
+        assert not survivors, (
+            f"{name} still states the retired dirty-tree tier rule: {survivors}. Since "
+            "#1563 the daemon converges a dirty tree itself and the cycle keeps its "
+            "configured tier; `read-only` follows a convergence that **failed**, never "
+            "dirt alone"
+        )
+        assert CONVERGENCE_ANCHOR in text, (
+            f"{name} no longer names the mechanism that replaced the rule "
+            f"({CONVERGENCE_ANCHOR!r}) — the absence asserted above would then pass on a "
+            "clause that was deleted rather than corrected, which is a failure to "
+            "measure, not a pass"
+        )
 # --- The paths a template names: a command is only a command if its file is there ------------------
 #
 # The templates tell a cycle which files to run and read, by name — the `scripts/` merge gates, the

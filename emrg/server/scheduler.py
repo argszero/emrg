@@ -1879,8 +1879,13 @@ class TaskHandler:
                 "stream": True,
                 "timestamp": cycle_time.isoformat(),
                 # Structural dirty-tree guard (community issue #979): effective
-                # sandbox per cycle — dirty tree forces read-only unless a
-                # human set EMRG_TASK_DIRTY_OVERRIDE (audited receipt).
+                # sandbox per cycle. Since #1563 (`69745b8c`, 2026-09-24) a dirty
+                # tree no longer forces read-only: `_effective_sandbox` converges
+                # the tree itself — a reversible stash, unique work pinned under
+                # `refs/emrg/rescue/` first — and leaves the **configured** tier
+                # intact, so `read-only` is what a convergence that **failed**
+                # forces, not what dirt does. `EMRG_TASK_DIRTY_OVERRIDE` (audited
+                # receipt) skips that convergence rather than a downgrade.
                 "sandbox": await self._effective_sandbox(),
             },
             ensure_ascii=False,

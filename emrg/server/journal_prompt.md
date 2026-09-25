@@ -78,9 +78,9 @@ cd {{ source_dir }} && git status --short --branch 2>&1
 > ⛔ **Never touch the host's uncommitted work** — the source directory is the HOST's working directory, not a dedicated clone:
 > - **Never** run `git stash`, `git checkout .`, `git restore .`, `git clean`, `git reset --hard` — nothing that hides/discards uncommitted changes.
 > - **Never** create branches/commit/push while the tree is dirty.
-> - A dirty tree is NOT an error — it means this cycle runs **read-only**: scanning, review and discussion only. Record `工作树非干净（dirty working tree）— 本周期只读` in this round's closing summary and finish the read-only parts.
+> - A dirty tree is NOT an error, and dirt alone no longer decides this round's tier: the daemon **converges the host's tree itself** before this round's prompt is sent — a reversible stash, with anything found nowhere else pinned under `refs/emrg/rescue/` first — and the round keeps its configured tier. `read-only` is what a round runs at when that convergence **failed**, or when the project configures it. So a tree that is still dirty when *you* look, or a tier of `read-only`, is the failure case, not the dirt rule: record `工作树非干净（dirty working tree）— 本周期只读` in this round's closing summary and finish the read-only parts.
 > - `papers/*/research/` is git-ignored by design (research workspace) — its presence is normal, do NOT treat it as dirty.
-- Uncommitted local changes (other than research/) → read-only cycle (no git writes, no PR submission)
+- Uncommitted local changes (other than research/) → do not touch them; read-only parts only (no git writes, no PR submission) — the daemon converges host dirt before the prompt, so dirt still visible here means that convergence did not clear it
 - Behind upstream and tree clean → `git pull --rebase`
 - Merge conflicts → `git rebase --abort`, record, finish — **never stash host work**
 
@@ -518,7 +518,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 
 ### 3. Common Rules
 
-1. **Dirty tree read-only**: never stash/reset/clean host work; `papers/*/research/` being present is normal
+1. **Never touch host dirt**: never stash/reset/clean host work — the daemon converges the tree itself before the prompt, so a tree still dirty here is a convergence that failed (and the round is then read-only); `papers/*/research/` being present is normal
 2. **git add exact path**: submission/revision commits use `git add papers/issue-<N>/` — never `-A` / `.`
 3. **Rant handling**: follow 0.5 — project must equal `{{ task.project }}`; pending → in_progress → completed
 4. **Language policy**: external journal-facing text (issues/PRs/reviews/decisions) in English; internal records (session history, memory entries, the closing summary) in the author's language
