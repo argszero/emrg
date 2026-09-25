@@ -1339,6 +1339,16 @@ class EmrgServer:
             # calls). Memory organization now happens through the single reflection
             # entry (_maybe_reflect_memory) with its always-on digest-style
             # self-review instruction.
+            #
+            # Blueprint: `.emrg/designs/memory-index-compaction-design.md` — what
+            # replaces the *scripted* half is a per-round **line count** of each
+            # index the prompt embeds, which rides this same reflection entry, so
+            # compaction is the agent's own edit under an instruction rather than a
+            # row moved out of the file by a tool. The tool that moved the rows —
+            # `scripts/archive-memory-index.py`, whose ≤50-cycle-row protocol the
+            # evolution prompt used to state — is retired with the protocol
+            # (design §4); it shortened nothing, since an archived row left the
+            # prompt and stayed in a file the prompt never embeds.
 
     async def _send(self, ws, data: dict) -> bool:
         """Send a JSON message to the client.
