@@ -37,6 +37,7 @@ from __future__ import annotations
 import functools
 import importlib.util
 import io
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -229,22 +230,29 @@ class FakeCounter(_ReadsBodiesLikeTheCounter):
 class FakeGh:
     """A stand-in for `_gh`: records the argv and stdin, answers with a fixed rc."""
 
-    def __init__(self, rc: int = 0, stderr: str = ""):
+    def __init__(self, rc: int = 0, stderr: str = "", stdout: str = ""):
         self.rc = rc
         self.stderr = stderr
+        self.stdout = stdout
         self.calls: list[list[str]] = []
         self.stdins: list[str | None] = []
 
     def __call__(self, args: list[str], stdin: str | None = None):
         self.calls.append(list(args))
         self.stdins.append(stdin)
-        return _Proc(self.rc, self.stderr)
+        return _Proc(self.rc, self.stderr, self.stdout)
 
 
 @dataclass
 class _Proc:
     returncode: int
     stderr: str
+    #: The real `_gh` captures both streams, so a fake that answers only on stderr
+    #: cannot receive a call site that reads stdout — and the landing-tree check is
+    #: exactly such a call site (`api ... --jq '.state + " " + .head.sha'`). A fake
+    #: without this field would have made that call site fail as an AttributeError
+    #: instead of being testable.
+    stdout: str = ""
 
 
 @pytest.fixture
@@ -460,7 +468,13 @@ def test_the_same_body_with_the_verdict_first_is_posted(mod, monkeypatch, capsys
     gh = FakeGh()
     rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", body_file(body)])
     assert rc == 0
-    assert len(gh.calls) == 1, "the same reading, with the verdict first, must be posted"
+    # The review, not the whole call log: `VERDICT_LAST` names a landing tree, so the
+    # tree-claim check asks `gh api` for the PR's state first (#1609). Counting every
+    # call would make this control fail for the right reason at the wrong level — the
+    # claim under test is that a verdict on the first line is *posted*, so that is what
+    # is counted, and exactly once.
+    reviews = [call for call in gh.calls if call[:2] == ["pr", "review"]]
+    assert len(reviews) == 1, "the same reading, with the verdict first, must be posted"
 
 
 def test_a_veto_below_the_first_line_is_still_posted(mod, monkeypatch, capsys, body_file):
@@ -1474,3 +1488,290 @@ def test_an_unresolvable_previous_cycle_cannot_widen_a_vote_into_a_pass(
     assert len(gh.calls) == 1
     assert "counted" in captured.out
     assert "could not be widened" in captured.err
+
+
+# ── the landing tree the body claims ────────────────────────────────────────
+#
+# A stale PR's vote *is* a landing-tree reading: the body names the tree the merge
+# would produce. Nothing read that SHA, so master could move between the
+# measurement and the vote and the body would still post, still count, and still
+# name a tree that can no longer land (measured 2026-09-25, `cyc20260925-121552`:
+# #1604's merge replaced both landing trees measured before it). The guard's whole
+# discrimination rests on git, not on phrasing — a token is a claim only if
+# `git cat-file -t` calls it a tree — so the tests below feed it **genuine** SHAs
+# from this checkout rather than literals of the right shape. A made-up token
+# would pass a shape test and prove nothing about the guard that ships.
+
+
+def _tree_of(rev: str = "HEAD^{tree}") -> str:
+    """A real tree object of this checkout, by revision expression.
+
+    The expression is passed whole — `HEAD^{tree}` and `HEAD:scripts` are both trees,
+    and only the former wants peeling, so a helper that appended `^{tree}` on its own
+    would break on the second (measured: `fatal: path 'scripts^{tree}' does not exist`).
+    """
+    proc = subprocess.run(
+        ["git", "rev-parse", rev],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert proc.returncode == 0, f"this checkout must have {rev}: {proc.stderr}"
+    return proc.stdout.strip()
+
+
+def _commit_of(path: str = "HEAD") -> str:
+    proc = subprocess.run(
+        ["git", "rev-parse", path],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert proc.returncode == 0, f"this checkout must have {path}: {proc.stderr}"
+    return proc.stdout.strip()
+
+
+def test_the_discriminator_is_gits_answer_not_the_token_shape(mod):
+    """A commit and a tree are the same 40 hex characters, and only one is a claim.
+
+    The control that matters is the commit: every real body names one (its head, master),
+    so a shape-based reader would call every vote body a landing-tree claim. The cycle id
+    is the second control — `named_trees` must be silent on the id every single body
+    carries, or the guard would fire on its own attribution.
+    """
+    tree = _tree_of()
+    head = _commit_of()
+    body = f"{CYCLE} — the merge lands {tree}, on top of {head}"
+
+    assert mod.named_trees(body) == [tree], (
+        "only the tree token is a claim: the head answers `commit` to git cat-file"
+    )
+    assert mod.named_trees(f"{CYCLE} — " + head) == [], (
+        "a body that names a commit and nothing else claims no tree"
+    )
+    assert mod.named_trees(f"{CYCLE} — {CYCLE}") == [], (
+        "the cycle id is not a git object, and its digits must not read as one"
+    )
+
+
+def test_a_tree_named_twice_is_one_claim(mod):
+    """De-duplicated, so a body that quotes a tree twice is not reported as two trees."""
+    tree = _tree_of()
+    assert mod.named_trees(f"{CYCLE} — {tree} and again {tree}") == [tree]
+
+
+def test_an_abbreviated_tree_is_the_same_claim_as_the_full_sha(mod):
+    """`9188c497904b` and the 40-char form must compare equal, or a correct body
+    would be refused for spelling its own measurement the short way — the form
+    `check-merge-plan-suite.py` prints and the form every real body quotes.
+    """
+    tree = _tree_of()
+    assert mod.named_trees(f"{CYCLE} — {tree[:12]}") == [tree]
+
+
+def test_landing_tree_asks_the_merge_about_an_open_pr(mod, monkeypatch):
+    """The wiring: REST's `open` (lowercase) must reach the merge, and it must be
+    asked about **master and the PR's head**, in that order.
+
+    Case is the defect this test exists for. REST answers `open` and GraphQL answers
+    `OPEN`; a literal `!= "OPEN"` read every open PR as not-open and left the check
+    reporting "unmeasurable" — the safe direction, and therefore silent. It was
+    measured on this very guard before this test was written.
+    """
+    tree, master = "1" * 40, "2" * 40
+    asked: dict[str, tuple] = {}
+
+    class Merge:
+        def merged_tree_sha(self, a, b, run=None, cwd=None):
+            asked["sides"] = (a, b)
+            return tree
+
+    monkeypatch.setattr(mod, "merge_tree_tool", lambda: Merge())
+
+    def fake_git(*args):
+        if args[:2] == ("rev-parse", "FETCH_HEAD"):
+            return _Proc(0, "", master)
+        return _Proc(0, "", "")
+
+    monkeypatch.setattr(mod, "_git", fake_git)
+    gh = FakeGh(stdout=f"open {HEAD}")
+    monkeypatch.setattr(mod, "_gh", gh)
+
+    assert mod.landing_tree(1605, "argszero/emrg") == (tree, "")
+    assert asked["sides"] == (master, HEAD), (
+        "the merge is asked about the fetched master and the PR's head"
+    )
+    assert gh.calls[0][1].endswith("/pulls/1605"), "the PR read is the one asked about"
+    assert "--jq" in gh.calls[0], "the state and the head come from one reading, not two"
+
+
+def test_landing_tree_reports_a_closed_pr_as_unmeasurable_and_asks_nothing(
+    mod, monkeypatch
+):
+    """A closed PR has no landing tree of its own, and the question is not merely
+    unnecessary there but wrong: merging it again is a no-op, so `merged_tree_sha`
+    would answer with master's tree and refuse a body written while it was open.
+
+    Unmeasurable, never a refusal — the difference is the whole point of returning a
+    reason beside `None`.
+    """
+    monkeypatch.setattr(
+        mod,
+        "merge_tree_tool",
+        lambda: pytest.fail("a closed PR must not reach the merge measurement"),
+    )
+    monkeypatch.setattr(mod, "_gh", FakeGh(stdout=f"closed {HEAD}"))
+    got, why = mod.landing_tree(1604, "argszero/emrg")
+    assert got is None
+    assert "closed" in why and "no landing tree" in why
+
+
+def test_landing_tree_reports_a_gh_failure_rather_than_guessing(mod, monkeypatch):
+    monkeypatch.setattr(
+        mod,
+        "merge_tree_tool",
+        lambda: pytest.fail("an unreadable PR must not reach the merge measurement"),
+    )
+    monkeypatch.setattr(mod, "_gh", FakeGh(rc=1, stderr="HTTP 404: Not Found"))
+    got, why = mod.landing_tree(99999, "argszero/emrg")
+    assert got is None
+    assert "could not be read" in why and "404" in why, (
+        "the reason carries what gh said, so the unmeasurable reading is diagnosable"
+    )
+
+
+def _posting_counter():
+    """A counter that reads nothing before the post and counts the vote after it."""
+    return FakeCounter(
+        verdict_with(push_time=_push(2026, 9, 16, 1, 0, 0)),
+        verdict_with([vote()], counted=[True], valid_count=1),
+    )
+
+
+def test_a_body_naming_the_tree_the_merge_would_land_is_posted(
+    mod, monkeypatch, capsys, body_file
+):
+    """The positive control: without it, every refusal below would be satisfied by a
+    guard that refused always — and the vote it must let through is the ordinary one.
+    """
+    tree = _tree_of()
+    monkeypatch.setattr(mod, "landing_tree", lambda pr, repo: (tree, ""))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        _posting_counter(),
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM, lands {tree}")],
+    )
+    assert rc == 0, f"a body naming the right tree is posted: {capsys.readouterr()}"
+    assert len(gh.calls) == 1
+
+
+def test_a_body_naming_a_tree_the_merge_would_not_land_is_refused(
+    mod, monkeypatch, capsys, body_file
+):
+    """Master moved after the reading. The vote would be about a tree that can no
+    longer land, and it counts either way — so nothing else would ever say so.
+    """
+    measured, stale = _tree_of("HEAD^{tree}"), _tree_of("HEAD:scripts")
+    assert measured != stale
+    monkeypatch.setattr(mod, "landing_tree", lambda pr, repo: (measured, ""))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        _posting_counter(),
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM, lands {stale}")],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert gh.calls == [], "nothing is posted when the claim is not the tree that would land"
+    assert stale[:12] in err and measured[:12] in err, (
+        "the refusal prints both trees: which one the body named, and which one would land"
+    )
+    assert "check-merge-plan-suite.py 1255" in err, (
+        "the refusal names the re-measurement, so the remedy is one command"
+    )
+
+
+def test_a_body_that_names_no_tree_is_not_checked(mod, monkeypatch, capsys, body_file):
+    """A commit SHA is not a landing-tree claim, so the merge is never asked — the
+    negative control that makes the refusal above a finding about the tree and not
+    about the body having a hash in it.
+    """
+    head = _commit_of()
+
+    def not_asked(pr, repo):
+        raise AssertionError("a body naming only commits claims no tree")
+
+    monkeypatch.setattr(mod, "landing_tree", not_asked)
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        _posting_counter(),
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM at {head}")],
+    )
+    assert rc == 0
+    assert len(gh.calls) == 1
+
+
+def test_an_uncheckable_claim_is_reported_beside_the_vote_not_silently_passed(
+    mod, monkeypatch, capsys, body_file
+):
+    """A claim nobody could check and a claim that agreed are different answers, and
+    only one of them is evidence. The unmeasurable one is said out loud and the vote
+    still goes out — silence here would read exactly like agreement.
+    """
+    tree = _tree_of()
+    monkeypatch.setattr(
+        mod,
+        "landing_tree",
+        lambda pr, repo: (None, "#1605 is closed, so there is no landing tree to be about"),
+    )
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        _posting_counter(),
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM, lands {tree}")],
+    )
+    captured = capsys.readouterr()
+    assert rc == 0 and len(gh.calls) == 1, "an unmeasurable check does not block the vote"
+    assert "note:" in captured.err and "left unchecked" in captured.err
+    assert "no landing tree" in captured.err, (
+        "the note carries the reason, not just the fact that it was skipped"
+    )
+
+
+def test_a_dry_run_refuses_a_wrong_tree_claim_too(mod, monkeypatch, capsys, body_file):
+    """`--dry-run` is the step every other refusal is discovered with, so the tree
+    check must run before it — a dry run that passes a wrong claim would send the
+    cycle on to the real post with a reading it never saw.
+    """
+    measured, stale = _tree_of("HEAD^{tree}"), _tree_of("HEAD:scripts")
+    monkeypatch.setattr(mod, "landing_tree", lambda pr, repo: (measured, ""))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        _posting_counter(),
+        gh,
+        [
+            "1255",
+            "--body-file",
+            body_file(f"{CYCLE} — ✅ LGTM, lands {stale}"),
+            "--dry-run",
+        ],
+    )
+    assert rc == 2
+    assert gh.calls == []
+    assert "dry run" not in capsys.readouterr().out, (
+        "the refusal comes before the dry-run line, so the run never reads as a pass"
+    )
