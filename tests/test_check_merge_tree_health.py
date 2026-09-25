@@ -1075,3 +1075,63 @@ class TestTheRefusalCarriesWhatGitSaid:
         message = self._refusal(mod, monkeypatch, shallow=False)
         assert "refusing to merge unrelated histories" in message, message
         assert "unshallow" not in message, message
+
+
+class TestTheVerdictSaysWhatItMeasured:
+    """The report must name the guard that answered, and where its own class is asked now.
+
+    The summary is what a committer reads, and it used to answer for "the tree's
+    guards" while exactly one guard ran - the same overstatement the sibling tools
+    already qualify in their own reports ("judged by X alone - the suite is
+    check-merge-plan-suite.py's question"). `cyc20260925-200139` measured the cost:
+    the class this gate exists for is alive in the queue (`#1618` + `#1619` are each
+    green, their union is not), while the guard it runs can no longer exhibit it.
+    """
+
+    def _summary(self, mod, monkeypatch, capsys, guard: str | None = None) -> str:
+        """One run of `main`, with the network and the merge mechanics stubbed out."""
+        if guard is not None:
+            monkeypatch.setattr(mod, "GUARD", guard)
+        monkeypatch.setattr(mod, "_refresh_base", lambda ref: None)
+        monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
+        monkeypatch.setattr(mod, "_fetch_head", lambda n: "refs/x")
+        monkeypatch.setattr(mod, "_merge_tree_paths", lambda a, b, cwd=None: ([], "stub"))
+        monkeypatch.setattr(mod, "_merged_tree_sha", lambda a, b, cwd=None: "0" * 40)
+        monkeypatch.setattr(
+            mod, "_guard_verdict", lambda tree, workdir, cwd=None: (True, "guard OK")
+        )
+
+        class _Done:
+            returncode = 0
+            stdout = "0" * 40
+            stderr = ""
+
+        monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _Done())
+        assert mod.main(["--base", "origin/master", "1"]) == 0
+        return capsys.readouterr().out
+
+    def test_the_summary_names_the_guard_that_ran(self, mod, monkeypatch, capsys) -> None:
+        out = self._summary(mod, monkeypatch, capsys)
+        assert f"clean, and {mod.GUARD} passed: [1]" in out, out
+        assert f"clean but FAILS {mod.GUARD}: []" in out, out
+
+    def test_the_summary_follows_the_guard_rather_than_a_hardcoded_name(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """The control: a literal in the report would pass the test above and die here.
+
+        The guard this tool runs is a constant, and the tool loads the *tree's own*
+        copy of it, so the name in the report has to be that constant - or the report
+        would name a guard that did not answer whenever the constant moves.
+        """
+        out = self._summary(mod, monkeypatch, capsys, guard="scripts/check-elsewhere.py")
+        assert "scripts/check-elsewhere.py" in out, out
+        assert "check-doc-count.py" not in out, out
+
+    def test_the_retired_plural_is_gone_and_the_suite_question_is_named(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """One guard answered, and the report says where the suite question is asked."""
+        out = self._summary(mod, monkeypatch, capsys)
+        assert "the tree's guards" not in out, out
+        assert "check-merge-plan-suite.py" in out, out
