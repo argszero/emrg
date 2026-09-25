@@ -711,3 +711,57 @@ def test_every_requested_head_is_resolved_once_before_any_pair(mod, monkeypatch,
 
     assert rc == 0, "three clean, healthy pairs"
     assert sorted(fetched) == [1, 2, 3], f"each head once, not once per pair: {fetched}"
+
+
+def test_the_help_text_names_the_guard_this_tool_judges_by(mod, capsys):
+    """`--help` is this tool's own claim about what it judges, and it claimed a family.
+
+    Measured 2026-09-25 (`cyc20260925-222124`) on master `28442e57`: `--help` read "a tree the
+    repo's guards reject" while the tool runs exactly one (`seq._guard_verdict` executes
+    `workdir / GUARD`), and the same docstring said so two sections above ("That verdict is
+    one guard's"). One file, two answers, and the reader who acts on the wrong one is the one
+    reading `--help` for the first time. The description is rendered from the constant, so it
+    cannot name a guard other than the one that runs.
+    """
+    with pytest.raises(SystemExit):
+        mod.main(["--help"])
+    out = capsys.readouterr().out
+
+    assert mod.seq.GUARD in out, out
+    assert "guards" not in out, out
+
+
+def test_the_help_text_follows_the_guard_rather_than_a_literal(mod, monkeypatch, capsys):
+    """The control: a hardcoded name would pass the test above and die here.
+
+    The guard this tool judges by is the sibling's constant, and the sibling loads the
+    *tree's own* copy of it - so a literal spelled into the description would name a guard
+    that did not answer as soon as the constant moves.
+    """
+    monkeypatch.setattr(mod.seq, "GUARD", "scripts/check-some-other-guard.py")
+    with pytest.raises(SystemExit):
+        mod.main(["--help"])
+    out = capsys.readouterr().out
+
+    assert "scripts/check-some-other-guard.py" in out, out
+    assert "check-doc-count.py" not in out, out
+
+
+def test_the_docstring_holds_this_file_to_the_singular_it_judges_by(mod):
+    """The prose carriers are read exactly when a verdict has gone wrong.
+
+    The exit-code contract is read by whoever hits rc 1, and the "why measurement" paragraph
+    by whoever pastes the tool's reasoning into a review. Both named a family - in the same
+    revision whose own section says the verdict is one guard's.
+
+    The assertion is on the *word*, not on a sentence: this file answers one guard's question,
+    so a plural anywhere in its own prose is the defect the sibling gates each had fixed
+    member by member on 2026-09-25, and a quote reproducing the retired wording would defeat
+    the check it is pinned by.
+    """
+    doc = mod.__doc__ or ""
+
+    assert "guards" not in doc, "this file judges by one guard; its own prose says otherwise"
+    assert "scripts/check-doc-count.py" in doc, "the docstring must name the guard it runs"
+    assert "seq.GUARD" in doc, "and the constant the name is taken from"
+    assert "check-merge-plan-suite.py" in doc, "and where the suite question is asked instead"

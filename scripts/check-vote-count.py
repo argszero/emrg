@@ -99,7 +99,8 @@ quietly pretend to answer it: `check-merge-freshness.py` asks whether the CI ver
 is still about the tree that would merge (a question about *which* tree ran CI, not
 about whether checks pass - `UNSTABLE` answers that one, and is read above). Likewise
 `check-merge-tree-health.py` (PR #1155) asks whether the merged tree passes the
-repo's own guards.
+repository's own guard, `scripts/check-doc-count.py` - that guard alone, the same
+bound every gate in this family states about itself.
 
 Push time, and the honest bound
 -------------------------------
