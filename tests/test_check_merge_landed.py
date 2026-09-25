@@ -25,6 +25,11 @@ Pinned in both directions (#455 - never infer from the finding alone):
   said not to be a pass, because "nothing to compare" and "agrees" are different
   answers;
 * an unmerged PR is `PENDING`: nothing has landed, so nothing is compared;
+* `PENDING` is announced on stderr and said not to be a pass, for a batch as well as for
+  a single number, and the advice printed under it is about the unmerged state - a
+  fallthrough in the remedy would hand it `UNCHECKED`'s sentence, which is about a vote;
+* the exit-code contract names the state the tool can produce instead of only the merged
+  ones, so `0` cannot be read as "every number given was audited";
 * an unanswerable question is rc 2 - a merge commit this clone cannot obtain, or a
   review response whose projection did not apply - never a pass.
 
@@ -139,10 +144,13 @@ def merged_repo(tmp_path: Path, mod, monkeypatch):
 class FakeGh:
     """A `gh` stand-in: one PR view and one review list, routed by endpoint.
 
-    Records every call, so a test cannot pass because the tool queried nothing.
+    Records every call, so a test cannot pass because the tool queried nothing. `view`
+    may also be a `{pr number: view}` mapping, which is what a batch needs: the states
+    this tool announces are per PR, and one fake answering the same view for every
+    number could not tell a batch of mixed states from a batch of identical ones.
     """
 
-    def __init__(self, view: dict, reviews: list[dict]):
+    def __init__(self, view: dict | dict[int, dict], reviews: list[dict]):
         self.view = view
         self.reviews = reviews
         self.calls: list[list[str]] = []
@@ -154,6 +162,11 @@ class FakeGh:
         if target.endswith("/reviews"):
             return self.reviews
         assert "/pulls/" in target, args
+        number = int(target.rsplit("/", 1)[-1])
+        if isinstance(self.view, dict) and number in self.view:
+            return self.view[number]
+        if isinstance(self.view, dict) and all(isinstance(k, int) for k in self.view):
+            raise AssertionError(f"no view is stubbed for PR #{number}")
         return self.view
 
     def _paginated(self, args: list[str]) -> list:
@@ -337,6 +350,78 @@ def test_an_unmerged_pr_is_pending_and_compares_nothing(mod, merged_repo, monkey
         "an unmerged PR has no landed tree to compare a claim against, so the reviews "
         "must not be read at all"
     )
+
+
+def test_an_unmerged_pr_is_said_not_to_be_a_pass(mod, merged_repo, monkeypatch, capsys):
+    """`PENDING` is announced on stderr, the way `UNCHECKED` already was.
+
+    The per-number line does say `PENDING`, so a reader of the prose is served either
+    way; the value a *script* acts on does not. `0` covers every number in a batch, and
+    under an unmerged one nothing was compared at all - which is the wider hole of the
+    two, since a batch of still-open numbers audits nothing.
+    """
+    fake = FakeGh(_view("", state="open", merged=False), [])
+    _install(mod, monkeypatch, fake)
+
+    rc = mod.main(["1625"])
+
+    out = capsys.readouterr()
+    assert rc == 0, "an unmerged PR is not a divergence - there is nothing to diverge from"
+    assert "not" in out.err and "a pass" in out.err, (
+        "an unmerged number must be said not to be a pass; exiting 0 without a word "
+        "reads as one"
+    )
+    assert "1 of 1" in out.err, (
+        "the note must say how much of the request went unmeasured, or a batch of "
+        "still-open numbers reads as an audited one"
+    )
+    assert "a vote that names no tree" not in out.err, (
+        "the advice under an unmerged number must be about the unmerged state; the "
+        "unchecked sentence is an answer about a vote, and this PR has none"
+    )
+
+
+def test_a_batch_reports_which_of_its_numbers_could_be_audited(mod, merged_repo, monkeypatch, capsys):
+    """One merged number and one open one: rc 0, and the reader still told which is which.
+
+    The batch is the case the note exists for - the merged number really is `NAMED`, and
+    a caller that read the exit code alone would carry that verdict over the open number
+    too. Both facts have to reach the reader, and the second one only on stderr.
+    """
+    fixture = merged_repo
+    fake = FakeGh(
+        {1613: _view(fixture["merge_commit"]), 1625: _view("", state="open", merged=False)},
+        [_review(f"✅ LGTM — cycle cyc20260925-174000\n\n{fixture['landed_tree'][:12]}")],
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc = mod.main(["1613", "1625"])
+
+    out = capsys.readouterr()
+    assert rc == 0
+    assert mod.NAMED in out.out and mod.PENDING in out.out, (
+        "the two numbers are in different states and both must be printed as such"
+    )
+    assert "1 of 2" in out.err, (
+        "the count of unmeasured numbers is what says this batch was not fully audited"
+    )
+    assert "not" in out.err and "a pass" in out.err
+
+
+def test_the_exit_code_contract_names_the_state_it_used_to_leave_out(mod):
+    """A state the tool can print belongs in the contract written for its exit codes.
+
+    `PENDING` is what any open number answers - the likeliest way to reach this tool by
+    accident - and the contract enumerated only the merged states, so the reader it is
+    written for had no line to read. Asserted in both directions: the section must exist
+    (a renamed heading would otherwise make the second assertion vacuous) and the state
+    must be named *inside* it, not merely somewhere in the docstring above.
+    """
+    doc = mod.__doc__ or ""
+    assert "Exit codes" in doc, "the contract this test pins was renamed or removed"
+    section = doc.split("Exit codes", 1)[1]
+    assert mod.PENDING in section, "the exit-code contract does not name the unmerged state"
+    assert mod.UNCHECKED in section, "and the merged-but-uncompared one must stay named too"
 
 
 def test_a_merge_commit_this_clone_cannot_get_is_unmeasurable(mod, tmp_path, monkeypatch, capsys):

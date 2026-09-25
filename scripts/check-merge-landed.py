@@ -41,11 +41,25 @@ as `UNCHECKED` rather than counted against the merge. And `named_trees` resolves
 hex token against *this* clone's object store, so a claim whose tree this checkout
 cannot resolve reads as no claim; the tool says `UNCHECKED`, never "agrees".
 
+The four states, and what rc 0 covers
+-------------------------------------
+    NAMED      a review body names the tree this merge landed
+    DIVERGED   the merge landed a tree no review of it names (rc 1)
+    UNCHECKED  merged, but no review of it names a tree - compared to nothing
+    PENDING    not merged, so there is no merge to audit
+
+The last two are rc 0 and neither is a pass, which is why both are announced on stderr
+rather than left to whoever reads the prose: `0` is the value a caller acts on, and
+asked about a batch it covers every number in it. `PENDING` was the quieter hole of the
+two - a batch of still-open numbers compares nothing at all, and the line under each one
+said so only in prose nobody scripting the tool reads.
+
 Exit codes
 ----------
     0  no divergence: every merged PR landed a tree one of its reviews names, or had
-       no tree claim to compare (`UNCHECKED` is printed as its own state and said not
-       to be a pass)
+       no tree claim to compare. This is a statement about what diverged and never
+       about how much was audited - `UNCHECKED` and `PENDING` are each printed as their
+       own state and said not to be a pass on stderr
     1  at least one merged PR landed a tree no review of it names - the votes were
        about a tree that never landed
     2  the question could not be asked (gh failed, the merge commit is not obtainable
@@ -326,6 +340,13 @@ def _report(v: Verdict) -> list[str]:
 
 
 def _remedy(v: Verdict) -> str:
+    """The next action for a state that is not a pass - one branch per state.
+
+    Every branch is named rather than a fallthrough, because a verdict with no branch of
+    its own silently inherits the last one: `PENDING` reaches this function now that it
+    is announced, and the unchecked sentence ("a vote that names no tree is not a weaker
+    vote") would be an answer about a vote for a PR that has not merged anything.
+    """
     if v.reading == DIVERGED:
         return (
             f"  #{v.pr}: write the landed tree ({_short(v.landed_tree or '')}) into the "
@@ -333,6 +354,11 @@ def _remedy(v: Verdict) -> str:
             "union it landed has had; re-measure every still-open PR "
             "(`check-merge-plan-suite.py <N>`) before the next merge, since their "
             "readings were taken on the same base that just moved"
+        )
+    if v.reading == PENDING:
+        return (
+            f"  #{v.pr}: nothing has landed, so this number was audited against nothing "
+            "- re-run this audit after the merge it names, and read no verdict here"
         )
     return (
         f"  #{v.pr}: a vote that names no tree is not a weaker vote, but nothing "
@@ -381,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
 
     diverged = [v for v in verdicts if v.diverged]
     unchecked = [v for v in verdicts if v.reading == UNCHECKED]
+    pending = [v for v in verdicts if v.reading == PENDING]
     if diverged:
         print(
             "\nA merge that landed a tree nobody voted on is not a merge those votes "
@@ -399,6 +426,15 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         for v in unchecked:
+            print(_remedy(v), file=sys.stderr)
+    if pending:
+        print(
+            f"\n{len(pending)} of {len(verdicts)} PR(s) are unmerged: nothing was compared "
+            "for them, so exit code 0 does not mean every number given was audited. This is "
+            "not a pass - it is an audit of nothing.",
+            file=sys.stderr,
+        )
+        for v in pending:
             print(_remedy(v), file=sys.stderr)
     return 0
 
