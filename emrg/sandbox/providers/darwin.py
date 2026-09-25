@@ -34,7 +34,12 @@ SEATBELT_EXEC = "/usr/bin/sandbox-exec"
 
 #: Seatbelt governs every promised file effect by construction, so the claim is
 #: a profile fact rather than a probe result — this is the static table's darwin
-#: row.
+#: row.  The half of that fact a sentence cannot carry is *removal*: an
+#: operation set named "file-write" reaching a directory-entry change is a
+#: property of this kernel, not of its name, and a confinement that covered
+#: contents alone would leave the path free.
+#: ``tests/test_bash_v2_boundary.py::test_deletion_is_governed_by_the_same_grant_as_a_write``
+#: measures it.
 ENFORCEMENT = "full"
 
 #: Seatbelt's denial dialect: the string a refused write produces (EPERM).

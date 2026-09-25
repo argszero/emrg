@@ -167,14 +167,41 @@ def set_token_default_dacl_grant(api: Win32Bindings, token: int, sid_ptr: int) -
     The default DACL is the one every *new* object the token holder creates
     takes.  A restricted token inherits the user's default DACL verbatim, which
     names no restricting SID — so a new anonymous pipe (a child's stdio) fails
-    the write pass-2 check at creation, and every piped-stdio grandchild spawn
-    breaks.  The merged ACE names a **restricting** SID, so each new object's own
-    DACL passes pass-2 while object *creation* stays gated by the parent
-    container's DACL (files outside the granted trees remain uncreatable).
+    the write check at creation, and every piped-stdio grandchild spawn breaks.
+
+    The ACE has to name a SID that is in **both** of the token's lists, and that
+    is the whole of the rule: a restricted token's access check is a pass over
+    the enabled groups and a second pass over the restricting ones, so a
+    restricting-only SID is denied on the first and an enabled-only SID on the
+    second.  Measured on Windows Server 2022 by driving
+    :class:`~emrg.sandbox.win32.sandbox.AclSandbox` directly, varying nothing but
+    this argument (issue #1560): ``os.pipe()`` and every ``capture_output=True``
+    spawn return ``WinError 5`` for the shipped temp write SID (*enabled=False,
+    restricting=True*) and for ``BUILTIN\\Users`` (*enabled=True,
+    restricting=False*), and succeed for EVERYONE, for the logon SID, and for
+    either of those added alongside the shipped SID.  Writes inside the granted
+    workspace and refusals outside it were identical in all six rows, so the SID
+    is the deciding variable rather than a pass the caller can compensate for.
+
+    Two consequences a reader of this file needs, because the code does not make
+    them visible.  The read-only branch names EVERYONE
+    (``sandbox.py``: ``self._temp_write_sid_ptr or self._write_sid_ptr or
+    world_sid.address``), which is in both lists — that is why pipes are created
+    at ``read-only`` and denied at ``workspace-write``, the tier *without* a temp
+    capability being the one the shipped grant breaks.  And :func:`find_logon_sid`
+    already runs at that call site, so the second list is reachable without a new
+    probe; whether the fix is the logon SID, EVERYONE-alongside, or a token whose
+    write SID is enabled is a decision for a host that can measure it.
+
+    What the ACE does *not* widen, in the same measurement: object creation stays
+    gated by the parent container's DACL, so a write outside every granted root
+    was still denied in all six rows — the grant reaches the new object's own
+    DACL, not the places the object can be created.
 
     :param api: the binding table.
     :param token: the restricted token to adjust (needs ``TOKEN_ADJUST_DEFAULT``).
-    :param sid_ptr: the restricting SID whose full-access ACE joins the default DACL.
+    :param sid_ptr: the SID whose full-access ACE joins the default DACL — it must
+        be in the token's enabled list **and** its restricting list.
     :raises Win32Error: when any call failed.
     """
     needed_slot = alloc_uint32()
