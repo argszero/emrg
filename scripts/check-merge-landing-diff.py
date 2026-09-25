@@ -6,8 +6,8 @@ The class this exists for
 The gates in this family ask, in the order a queue is drained: do the votes still
 apply (`check-vote-count.py`), can a merge here reach master (`check-pr-base.py`),
 is the green verdict about the tree that merges (`check-merge-freshness.py`),
-whom would this dirty (`check-merge-order.py`), does the landed tree pass the
-guards (`check-merge-tree-health.py`), does a whole plan's tree pass the suite
+whom would this dirty (`check-merge-order.py`), does the landed tree pass one guard
+(`check-merge-tree-health.py`), does a whole plan's tree pass the suite
 (`check-merge-plan-suite.py`).
 
 None of them answers the question a review *starts* with: **what change does
