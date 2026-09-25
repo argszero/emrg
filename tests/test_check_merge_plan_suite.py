@@ -1994,6 +1994,65 @@ def test_the_two_paragraphs_split_the_rows_and_no_row_is_in_both(mod) -> None:
     assert mod._ownership_lines(tree, ["a", "b"], set())[1] == ""
 
 
+def test_the_remedy_paragraph_claims_only_what_this_tool_reads(mod) -> None:
+    """The paragraph's reason has to be one of this tool's measurements.
+
+    The sentence that asks for a re-push opened by saying "the plan's steps are
+    individually clean and **the per-PR signals are green**" - and this tool has no code
+    path to a per-PR CI verdict: its one `gh` call is `gh pr list --json number`
+    (`_open_pr_numbers`), and the module header says that verdict is exactly what is
+    *invisible* here ("each side is green, and the tree that reaches master is red").
+    Read on a one-PR plan (measured 2026-09-25, cycle `cyc20260925-213230`, #1618's red
+    landing tree) it printed a green-signals claim about a plan whose single step was
+    red. A report that states a fact it never read is the class this family keeps
+    closing: the reader cannot tell an unmeasured clause from a measured one.
+
+    The two clauses that replaced it are inputs of this function, so they are asserted
+    here against the arguments rather than against a remembered sentence.
+    """
+    plan, _ = mod._ownership_lines("cd" * 20, ["row_a", "row_b"], set())
+
+    # Measured: the fold applied (a conflicting step stops earlier, rc 3).
+    assert "fold onto the base without a conflict" in plan, plan
+    # Measured: `_still_red_on` asked the base tree for each owned row, so "the base tree
+    # does not fail it" is a reading - and the owned rows are named right below.
+    assert "the base tree does not fail" in plan, plan
+    assert "row_a, row_b" in plan
+
+    # The claim itself: no per-PR signal may be reported from here. This is the half that
+    # kills the old sentence - a paragraph wording that asserts a verdict this tool cannot
+    # obtain fails here, whatever else it says.
+    lowered = plan.lower()
+    for word in ("signal", "ci ", "green", "check"):
+        assert word not in lowered, (
+            f"the re-push paragraph reports {word!r}: {plan!r} - this tool reads the "
+            "plan's tree, the base tree and PR numbers; a per-PR CI verdict has no code "
+            "path here, so the paragraph cannot be quoting one"
+        )
+
+
+def test_this_tool_cannot_read_a_per_pr_signal() -> None:
+    """The reason the pin above is not arbitrary, measured on the tool's own source.
+
+    `test_the_remedy_paragraph_claims_only_what_this_tool_reads` forbids the paragraph
+    from reporting a per-PR verdict. That is only the right rule while the tool cannot
+    read one - and this is where the two are kept in step: add a mergeability or
+    check-rollup read to `scripts/check-merge-plan-suite.py` and this test says so, so
+    the paragraph may be widened deliberately rather than quietly.
+    """
+    source = SCRIPT.read_text(encoding="utf-8")
+    for field in ("statusCheckRollup", "mergeStateStatus", "mergeable"):
+        assert field not in source, (
+            f"the tool now reads {field!r} - the re-push paragraph's rule (it may claim "
+            "no per-PR signal) was written while no code path here could obtain one, so "
+            "widen the paragraph and this test together"
+        )
+    # The one `gh` call it does make is the open-PR list, which carries no verdict.
+    assert '"gh",' in source and '"--json",' in source, (
+        "the gh call this test reasons about is gone - re-read the paragraph's rule"
+    )
+
+
 # --- issue #1386: a row is read from the machine-readable report ------------------
 #
 # A red tree is attributed *by row*: the plan's failing rows are re-run on the base, and a
