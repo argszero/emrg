@@ -77,8 +77,16 @@ RETIRED_TERMS = (
 BLOCK_START = "**Index hygiene protocol"
 BLOCK_END = "\n- Keep the file format identical"
 
-#: The blueprint the replacement points at (§4: "改指本文" — point at this document).
-DESIGN = ".emrg/designs/memory-index-compaction-design.md"
+#: The blueprint the replacement points at (§4: "改指本文" — point at this document),
+#: **as the reader can open it**. This clause is read by an agent whose cwd is the
+#: repository, and the repository's `.emrg/` holds `memory/` and `sessions/` — no
+#: `designs/`: measured 2026-09-25, `Path(".emrg/designs/<name>").resolve()` is
+#: `<repo>/.emrg/designs/<name>` and does not exist, while the `~` spelling resolves to
+#: the host's design and both `read` (`Path(...).expanduser()`) and `bash` expand it.
+#: So a bare repo-relative form is a pointer the prompt's own reader cannot follow.
+DESIGN_NAME = "memory-index-compaction-design.md"
+DESIGN_RELATIVE = f".emrg/designs/{DESIGN_NAME}"
+DESIGN_RESOLVABLE = re.compile(rf"~/\.emrg/designs/{re.escape(DESIGN_NAME)}")
 
 #: The design's own threshold, §0: 行数 > 100. A literal here because no constant in
 #: this tree carries it yet — see the module docstring's named limit.
@@ -157,9 +165,12 @@ def test_the_prompt_states_the_replacement_ruler_where_a_cycle_reads_it(rendered
         "threshold really moved, move it here and in the design together — the two are "
         "one number"
     )
-    assert DESIGN in block, (
-        f"the block no longer points at the blueprint ({DESIGN}) — the *how* of "
-        "compaction lives there and in the daemon's instruction, not in this clause"
+    assert DESIGN_RESOLVABLE.search(block), (
+        f"the block no longer points at the blueprint as `~/` + `{DESIGN_RELATIVE}` — "
+        "the *how* of compaction lives there and in the daemon's instruction, not in "
+        "this clause. A repo-relative spelling is not equivalent: `.emrg/` in this "
+        "checkout has no `designs/`, so it names a file the prompt's own reader cannot "
+        "open (measured 2026-09-25)"
     )
 
 
