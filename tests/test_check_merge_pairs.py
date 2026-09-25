@@ -16,7 +16,10 @@ and only a measurement of the pair shows it - which is what this tool automates.
 What is pinned here, in both directions (#455 - never infer from one side):
 * the finding: a pair whose clean merge lands a failing tree is reported and exits 1;
 * the non-finding: a pair whose clean merge lands a healthy tree exits 0 with no warning;
-* a pair blocked by a conflict is *answered* (exit 0, counted as blocked), not a failure;
+* a pair blocked by a conflict is *answered* (exit 0, counted as blocked), not a failure -
+  and since 2026-09-25 (`cyc20260925-191034`) it says **which** conflict and **where**:
+  a pair-level conflict is counted and named with its paths, while a PR that cannot land on
+  the base at all is counted apart and named once, because the two have different repairs;
 * both orders are measured as distinct pairs, and exactly one order can be the dangerous one;
 * an unmeasurable pair is exit 2, never a reassuring "no dangerous pair".
 
@@ -64,13 +67,17 @@ class _FakeProc:
         self.stderr = stderr
 
 
-def _scan(mod, monkeypatch, chain, verdicts, prs=(1, 2), base=BASE):
+def _scan(mod, monkeypatch, chain, verdicts, prs=(1, 2), base=BASE, paths=None):
     """Drive main() with faked head resolution, merges and guard verdicts.
 
     `chain` maps (onto, head) -> the commit the merge produces, or None for a conflict.
     `verdicts` maps the final commit -> (passed, report).
+    `paths` maps the same (onto, head) key -> the paths that conflict, for the pairs and
+    first steps the chain marks as conflicts; anything unlisted reads as a conflict whose
+    report named no path.
     """
     calls: list[tuple[str, str]] = []
+    conflict_paths: dict[tuple[str, str], list[str]] = dict(paths or {})
     heads = {n: c for n, c in zip((1, 2, 3), (C1, C2, C3))}
 
     monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: base)
@@ -85,6 +92,12 @@ def _scan(mod, monkeypatch, chain, verdicts, prs=(1, 2), base=BASE):
         return chain.get((a, b))
 
     monkeypatch.setattr(mod.seq, "_merge_commit", fake_merge)
+    # The real reader folds the merge a second time to decode git's stage block, so it is
+    # faked alongside `_merge_commit`: with fake SHAs it could only fail, and what these
+    # tests are about is what the run *prints*, not git's quoting.
+    monkeypatch.setattr(
+        mod.seq, "_conflict_paths", lambda a, b: list(conflict_paths.get((a, b), []))
+    )
     monkeypatch.setattr(mod.seq, "_guard_verdict", lambda tree, workdir: verdicts[tree])
     # `git rev-parse <commit>^{tree}` - echo the commit back as its own tree.
     monkeypatch.setattr(
@@ -178,6 +191,10 @@ def test_a_conflicting_pair_is_answered_not_a_finding(mod, monkeypatch, capsys):
     This is why a stopped scan is exit 0 here while a stopped *plan* is 3 in
     `check-merge-sequence.py`: every pair was answered, whereas a plan stopped at a
     conflict leaves the steps behind it unmeasured.
+
+    The word this asserts changed on 2026-09-25: the summary used to say "blocked by a
+    conflict" for both a pair-level conflict and a PR that cannot land on the base, so the
+    count named the wrong cause for one of them (see the test below). It now says which.
     """
     chain = {(BASE, C1): C1, (BASE, C2): C2, (C1, C2): None, (C2, C1): None}
     verdicts = {}
@@ -186,7 +203,54 @@ def test_a_conflicting_pair_is_answered_not_a_finding(mod, monkeypatch, capsys):
 
     assert rc == 0
     assert "DANGER" not in out
-    assert "2 blocked by a conflict" in out, out
+    assert "2 blocked by a pair conflict" in out, out
+
+
+def test_a_blocked_pair_names_the_paths_it_conflicts_on(mod, monkeypatch, capsys):
+    """A refusal that names no working way out is the defect, not the refusal.
+
+    `check-merge-order.py` names the pair's file (`dirties 1 other PR(s) on Agent.md`) about
+    the same pair, and this tool answered "blocked by a conflict" with no path: the reader
+    deciding an order could not tell a one-line `Agent.md` collision from a product-code
+    one. Measured 2026-09-25 (`cyc20260925-191034`) on the live queue, where `#1617` and
+    `#1618` conflict on `Agent.md` alone.
+
+    The path comes from the sibling's `_conflict_paths`, so the assertion is on the pair's
+    line rather than on the word "Agent.md" appearing somewhere: the reader needs it beside
+    the pair it belongs to.
+    """
+    chain = {(BASE, C1): C1, (BASE, C2): C2, (C1, C2): None, (C2, C1): None}
+    rc, _ = _scan(
+        mod,
+        monkeypatch,
+        chain,
+        {},
+        paths={(C1, C2): ["Agent.md"], (C2, C1): ["Agent.md", "emrg/server/daemon.py"]},
+    )
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "  #1 -> #2: blocked - conflicts on Agent.md\n" in out, out
+    assert (
+        "  #2 -> #1: blocked - conflicts on Agent.md, emrg/server/daemon.py\n" in out
+    ), out
+
+
+def test_a_conflict_whose_report_names_no_path_is_not_printed_as_silence(mod, monkeypatch, capsys):
+    """`_conflict_paths` returns `[]` for a conflict git's report did not name paths for.
+
+    `[]` is also what it returns for a *clean* merge, so the empty reading is only ever
+    reached here for a pair `_merge_commit` already said cannot land - and printing nothing
+    after "blocked - " would read as a conflict on no file, which is a different claim from
+    a report that named none.
+    """
+    chain = {(BASE, C1): C1, (BASE, C2): C2, (C1, C2): None, (C2, C1): C1}
+    verdicts = {C1: (True, "documents 1564")}
+    rc, _ = _scan(mod, monkeypatch, chain, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "  #1 -> #2: blocked - conflicts, but git's report names no path\n" in out, out
 
 
 def test_a_pr_that_cannot_land_blocks_every_pair_that_starts_with_it(mod, monkeypatch, capsys):
@@ -194,17 +258,27 @@ def test_a_pr_that_cannot_land_blocks_every_pair_that_starts_with_it(mod, monkey
 
     The pairs starting with the other PR are still measured - the scan must not stop at
     the first unusable candidate.
+
+    **This is the half that the summary used to get wrong.** The pair `1 -> 2` was counted
+    as "blocked by a conflict" - the same words, and the same number, as a conflict *between
+    the two PRs* - while its cause is A alone, and its repair is a rebase rather than an
+    order. The two are now counted apart, and this assertion is what pins that: the
+    `#1 -> #2` pair is not in the pair-conflict count at all.
     """
     chain = {(BASE, C1): None, (BASE, C2): C2, (C2, C1): C1}
     verdicts = {C1: (True, "documents 1564")}
-    rc, calls = _scan(mod, monkeypatch, chain, verdicts)
+    rc, calls = _scan(mod, monkeypatch, chain, verdicts, paths={(BASE, C1): ["Agent.md"]})
     out = capsys.readouterr().out
 
     assert rc == 0
     assert (BASE, C1) in calls, "the unreachable PR was tried and found blocking"
     assert (C2, C1) in calls, "the reachable order was still measured"
-    # `1 -> 2` is blocked because 1 cannot land at all; `2 -> 1` is measured and healthy.
-    assert "1 clean and healthy, 1 blocked by a conflict" in out, out
+    assert "  #1: cannot land on the base - conflicts on Agent.md" in out, out
+    assert "  #1 -> #2: blocked" not in out, "A's own conflict is not a blocked pair"
+    assert (
+        "1 clean and healthy, 0 blocked by a pair conflict, "
+        "1 unscanned because a PR conflicts with the base (#1)" in out
+    ), out
 
 
 # --- cost and hygiene ------------------------------------------------------

@@ -100,6 +100,28 @@ Every verdict this tool prints is `base -> A -> B`, so a stale base makes the wh
 measurement - and the `master + A` cached first step under it - about a tree the caller
 did not name. A base that cannot be refreshed is exit 2, never an answer.
 
+A blocked pair says *what* it is blocked on
+-------------------------------------------
+A pair that cannot land is answered, not a finding - which is why it is exit 0 here. But
+"cannot land" has two causes with different repairs, and this tool reported both under one
+number, naming neither:
+
+* **A conflicts with the base** - the reading belongs to A, not to the pair, and its repair
+  is a rebase. Every pair starting with A is unreachable until then, and the run says so
+  once per PR rather than once per pair.
+* **A -> B conflicts** - the reading belongs to the pair, and its repair is an *order*:
+  land the other one first. Named, with the paths.
+
+Measured 2026-09-25 (`cyc20260925-191034`) on the queue as it stood: `check-merge-order.py`
+named the pair's conflict (`#1617 ... dirties 1 other PR(s) on Agent.md`) while this tool
+said, about the same pair, only "2 blocked by a conflict" - a refusal that names no working
+way out, which is the defect `check-merge-sequence.py::_conflict_summary` records for the
+same sentence in its own refusal. The paths come from that sibling's `_conflict_paths`
+(imported, not copied), asked only for a pair that is already known not to land: one extra
+`merge-tree` per blocked pair, and a path is what tells a reader whether the resolution is
+mechanical (one line of `Agent.md`) or needs a judgement. A conflict whose report names no
+path is printed as exactly that, never as silence.
+
 Exit codes
 ----------
     0  every ordered pair was answered and none merges cleanly into a failing tree
@@ -139,6 +161,21 @@ def _load_sibling():
 seq = _load_sibling()
 
 MeasurementError = seq.MeasurementError
+
+
+def _conflict_clause(paths: list[str]) -> str:
+    """What a blocked pair conflicts *on* - the path, or the honest absence of one.
+
+    `check-merge-sequence.py`'s `_conflict_paths` is the reader (imported, not copied:
+    the stage block decoded out of git's path quoting is one measurement, and a second
+    spelling of it would be a second answer to "where does this conflict"). An empty
+    list from a *conflict* is not "clean" - the caller only asks after `_merge_commit`
+    said the pair cannot land - it is git's report naming no path, which is a reading
+    of its own and must not be printed as silence.
+    """
+    if not paths:
+        return "conflicts, but git's report names no path"
+    return "conflicts on " + ", ".join(paths)
 
 
 def _resolve_base(ref: str) -> str:
@@ -246,9 +283,14 @@ def main(argv: list[str] | None = None) -> int:
     # than once per pair (m merges instead of m * (m - 1)). None means A cannot land onto
     # the base at all, in which case no pair starting with A is reachable today.
     first_step: dict[int, str | None] = {}
+    #: PRs that cannot land on the base at all, with the paths they conflict in. Keyed by
+    #: PR because the reading is A's, not the pair's: it is taken once and printed once
+    #: however many pairs it costs.
+    base_conflicts: dict[int, list[str]] = {}
     dangers: list[tuple[int, int]] = []
     clean_healthy = 0
     blocked = 0
+    unscanned = 0
 
     with tempfile.TemporaryDirectory(prefix="emrg-merge-pairs-") as tmp:
         workdir = Path(tmp) / "tree"
@@ -256,13 +298,33 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 if a not in first_step:
                     first_step[a] = seq._merge_commit(base, heads[a])
+                    if first_step[a] is None:
+                        # A's conflict is with the **base**, not with B, so it is counted
+                        # and printed against A rather than as a blocked pair. The two
+                        # readings need different repairs - A needs a rebase, a blocked
+                        # pair needs an order - and this summary used to report both under
+                        # one number, which named the wrong thing for whoever read it.
+                        base_conflicts[a] = seq._conflict_paths(base, heads[a])
+                        print(
+                            f"  #{a}: cannot land on the base - "
+                            f"{_conflict_clause(base_conflicts[a])}; every pair starting "
+                            f"with it is unscanned"
+                        )
                 landed_a = first_step[a]
                 if landed_a is None:
-                    blocked += 1
+                    unscanned += 1
                     continue
                 landed_b = seq._merge_commit(landed_a, heads[b])
                 if landed_b is None:
+                    # `_conflict_paths` asks the same question `_merge_commit` just asked
+                    # of the same two commits, and only for a pair that could not land: a
+                    # blocked pair is the answer, not the finding, and one extra
+                    # measurement to name *where* it blocks is what makes the refusal
+                    # actionable (the resolution differs by path, and by whether the
+                    # conflict is one line or the product code).
+                    paths = seq._conflict_paths(landed_a, heads[b])
                     blocked += 1
+                    print(f"  #{a} -> #{b}: blocked - {_conflict_clause(paths)}")
                     continue
                 ok, report = seq._guard_verdict(
                     seq._run(["git", "rev-parse", f"{landed_b}^{{tree}}"]).stdout.strip(),
@@ -288,9 +350,17 @@ def main(argv: list[str] | None = None) -> int:
             "re-run this before landing the next."
         )
         return 1
+    summary = (
+        f"{clean_healthy} clean and healthy, {blocked} blocked by a pair conflict"
+    )
+    if unscanned:
+        summary += (
+            f", {unscanned} unscanned because a PR conflicts with the base "
+            f"({', '.join(f'#{n}' for n in sorted(base_conflicts))})"
+        )
     print(
         f"no ordered pair merges cleanly into a failing tree "
-        f"({clean_healthy} clean and healthy, {blocked} blocked by a conflict; "
+        f"({summary}; "
         f"judged by {seq.GUARD} alone - the suite is check-merge-plan-suite.py's question)"
     )
     return 0
