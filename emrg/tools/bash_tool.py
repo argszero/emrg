@@ -5302,7 +5302,28 @@ def check_read_only_file_write(file_path: str, workspace: str | None = None) -> 
     Writes OUTSIDE the workspace (memory dir, logs, OS temp) stay allowed so a
     read-only cycle can still record state and write its own artifacts — the
     guard protects the host's uncommitted work, not the agent's own scratch
-    space. Mirrors the bash tool's read-only semantics for file tools.
+    space.
+
+    This does **not** mirror the bash tool's read-only semantics, and the
+    sentence that said it did was the only statement anywhere of what the file
+    tools are supposed to do at this tier (issue #1553). Measured on this tree
+    (2026-09-25), both halves with pure predicates, nothing spawned or written:
+
+    ============================  =========================  ================
+    target                        this function              v2 fence
+    ============================  =========================  ================
+    inside the workspace          BLOCK                      (no root granted)
+    outside the workspace         allow                      (no root granted)
+    ============================  =========================  ================
+
+    The fence's allow-list is :func:`emrg.sandbox.roots.writable_roots` —
+    empty for every mode but ``workspace-write`` — and the process-boundary tool
+    derives its profile from it, so at ``read-only`` bash can write nowhere at
+    all while these tools may write anywhere outside the workspace. The two
+    layers disagree in both directions at once, and which semantics the file
+    tools should have is the open decision P7 carries (#1553): replacing this
+    function with the fence would deny a read-only cycle the very write named
+    above, its own cycle record.
 
     A relative target is joined onto ``workspace`` first (issue #1558): this used
     to realpath the spelling as given, i.e. against the **daemon's cwd** — a base
@@ -5334,9 +5355,20 @@ def check_workspace_write(file_path: str, workspace: str | None = None) -> str |
     """workspace-write sandbox check for the write/edit tools (rant 2026-09-01T15:10:23).
 
     Returns a block reason when the target file is a protected daemon state file,
-    is ``~/.emrg`` itself, or is an absolute path outside the workspace root
-    (OS temp allowed — mirrors dsh's workspace + backend-promised temp area);
-    returns None when allowed.
+    is ``~/.emrg`` itself, or is an absolute path outside the workspace root, the
+    OS-temp roots and the trusted zones named below; returns None when allowed.
+
+    The allowed list is the workspace root, the OS-temp roots, and **one root the
+    blueprint's derivation does not have**: :func:`_trusted_write_zones` —
+    ``~/.emrg/evolution/.emrg``, the evolution module's own data root, trusted
+    because the task runs at this tier and its cycle records land outside the
+    workspace (issue #1093, a self-regression from PR #1092). So this is not
+    exactly dsh's workspace + temp allow-list, and it is not identical to the v2
+    fence either: ``emrg.sandbox.roots.writable_roots`` grants the workspace and
+    the temp areas and nothing else, so at this tier the process-boundary tool
+    cannot write the evolution root these tools may. The divergence is measured
+    in :func:`check_read_only_file_write`'s docstring; which side should change is
+    the decision P7 carries (issue #1553).
 
     Relative paths are joined onto ``workspace`` and then judged exactly like
     absolute ones (issue #1558) — they used to return early on the assumption

@@ -161,8 +161,10 @@ def test_write_no_sandbox_unchanged(temp_dir):
 
 def test_write_workspace_write_blocks_outside_workspace(temp_dir, monkeypatch):
     """Rant 2026-09-01T15:10:23: a workspace-write session must not write to
-    an absolute path outside the session cwd — mirror the bash tool's block
-    so write/edit are symmetric with bash (the asymmetric hole)."""
+    an absolute path outside the session cwd — the same block the bash tool
+    applies, closing the hole where write/edit were the permissive side. The
+    boundary is the bash tool's except for one extra root,
+    `_trusted_write_zones()` (issue #1553)."""
     import tempfile as _tf
 
     # The test workspace + target live in the OS temp dir, which is always

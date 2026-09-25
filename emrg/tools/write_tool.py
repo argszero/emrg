@@ -79,15 +79,22 @@ class WriteTool(ToolExecutor):
         # The joined `target` is what both gates are handed, so the file they
         # judge is the file written below (before #1558 the spelling was passed
         # on and resolved elsewhere).
+        # This is the legacy predicate, not the v2 fence: at `read-only` it
+        # refuses only paths inside the workspace and allows everything outside
+        # it, while the process-boundary tool grants nothing at that tier — the
+        # divergence, measured, is in `check_read_only_file_write`'s docstring
+        # (issue #1553 is the decision that would align them).
         if arguments.get("sandbox") == "read-only":
             reason = check_read_only_file_write(target, arguments.get("workspace"))
             if reason:
                 return ToolResult(name="write", content=reason, error=True)
 
-        # workspace-write sandbox (rant 2026-09-01T15:10:23): mirror the bash
-        # tool's boundary so write/edit are symmetric with bash — a
-        # workspace-write session must not write outside the session cwd (or
-        # OS temp / protected daemon state).
+        # workspace-write sandbox (rant 2026-09-01T15:10:23): the same boundary
+        # the bash tool enforces — a workspace-write session must not write
+        # outside the session cwd (or OS temp / protected daemon state) — with
+        # one root the fence does not grant: `_trusted_write_zones()`
+        # (`~/.emrg/evolution/.emrg`, issue #1093). Close, not identical; see
+        # `check_workspace_write`'s docstring and issue #1553.
         if arguments.get("sandbox") == "workspace-write":
             reason = check_workspace_write(target, arguments.get("workspace"))
             if reason:
