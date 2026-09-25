@@ -90,6 +90,10 @@ NOT_TREE_READERS = {
     "check-merge-sequence.py": "requires PR numbers; names the base it folds onto",
     "check-merge-tree-health.py": "requires PR numbers; prints the repo it works in",
     "check-merge-landing-diff.py": "requires PR numbers; names the base it diffs against",
+    "check-merge-landed.py": (
+        "requires PR numbers; reads merged trees from local git and each PR's review "
+        "claims from the GitHub API"
+    ),
 }
 
 
