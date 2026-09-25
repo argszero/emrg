@@ -62,7 +62,7 @@ Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (537: 5 snapsh
 - Merge gates, run before merging — each answers a question no other gate asks: `uv run --no-sync python3 scripts/check-vote-count.py` (approvals still valid) · `scripts/check-pr-base.py` (base reaches master) · `scripts/check-merge-freshness.py` (that green CI is about the landing tree) · `scripts/check-merge-order.py` (dirt and what it lands) · `scripts/check-merge-landing-diff.py` (what the landing changes) · `scripts/check-merge-pairs.py` / `scripts/check-merge-sequence.py` (two PRs together; every step of an order) · `scripts/check-merge-tree-health.py` (the merged tree passes the guards) · `scripts/check-merge-plan-suite.py` (the plan's final tree passes the suite) — all under `uv run --no-sync python3`
 - Other tools: `uv run --no-sync python3 scripts/check-node-test-count.py --write` (syncs the Node totals above), `scripts/check-patch-files.py` (a rebuilt patch carries every file the previous one did), `scripts/cast-vote.py` (a vote the counter counts), `bump-version.py`, `classify-conflict.py`, `sync-master-from-api.py`, `push-branch-from-api.py`
 
-Every guard reads the tree you are **standing in** and says so in its first line; a question it cannot answer is reported unmeasurable, never as a pass.
+Every guard that reads a working tree names it before its verdict; a question it cannot answer is reported unmeasurable, never as a pass.
 
 ## Releasing
 

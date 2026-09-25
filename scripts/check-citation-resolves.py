@@ -48,6 +48,22 @@ not a citation rather than because it is inconvenient:
 * a **class** (`tests/test_ws_e2e.py::TestWSVibeCheck`) - pytest collects a class
   as written, so there is nothing to qualify.
 
+Which tree answered
+-------------------
+The scan takes its tree as an **argument** (defaulting to `.`), and until 2026-09-25
+(`cyc20260925-182347`) its verdict did not say which one it had read: the same sentence
+was printed for this checkout, for a worktree, and for a tmp directory built by a test.
+That is the defect `check-doc-count.py` records from 2026-09-11 - a confident `OK` about
+a checkout the caller was not in - and this file was the one guard in the family that
+had not inherited the remedy. It now prints `tree: <resolved root>` before any verdict,
+so an unmeasurable answer names the tree it could not measure as well.
+
+The line is not decoration: `check-merge-sequence.py` reads a sibling guard's report and
+**refuses it outright** unless it names the tree it read, and requires that name to be the
+tree it asked about (`TREE_IN_REPORT`). `tests/test_a_tree_reading_guard_names_its_tree.py`
+runs the guards that can be run without a toolchain and holds them to it, and proves this
+line tracks the argument rather than restating the repository root.
+
 Exit codes
 ----------
 ``0``  every citation names what it says. ``1``  at least one names a class
@@ -242,6 +258,15 @@ def main(argv: list[str] | None = None) -> int:
     if not root.is_dir():
         print(f"could not measure: {root} is not a directory", file=sys.stderr)
         return 2
+    # Say which tree answered, before any verdict. This scan takes the tree as an
+    # *argument* (defaulting to `.`), so its sentence is otherwise true of every
+    # checkout at once - the 2026-09-11 defect `check-doc-count.py` and
+    # `check_nonlocal.py` both record: a confident `OK` about a checkout the caller
+    # was not in. The line also reaches a verdict the whole family checks rather
+    # than assumes: `check-merge-sequence.py` refuses another guard's report
+    # outright unless it names the tree it read, and requires that name to be the
+    # tree it asked about (`TREE_IN_REPORT`).
+    print(f"tree: {root}")
     findings, unreadable = scan(root)
     if unreadable:
         print(
