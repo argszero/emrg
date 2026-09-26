@@ -203,13 +203,21 @@ PROJECT_CONTEXT_MAX_CHARS = 8000
 # assumptions, which is what makes it answer for a hand-maintained table as well as
 # for the row-per-entry indexes.
 #
-# The number is not a taste: `MEMORY_INDEX_ROW_CAP` rows x
-# `memory.INDEX_TITLE_MAX_CHARS` (512, the per-row write-time truncation) =
-# 51,200 chars, which is the embed cap's budget — the three constants sit together
-# in `emrg/memory.py` and `daemon._cap_memory_index` applies the third. While no
-# single row is over 512 chars, "rows <= 100" therefore *is* "the whole index fits
-# in the prompt", so the rule is conservative in the direction that matters: it can
-# fire on an index that would have fit, never miss one that would not.
+# The number is not a taste: `MEMORY_INDEX_ROW_CAP` rows of
+# `memory.INDEX_TITLE_MAX_CHARS` (512, the per-row write-time truncation) must fit the
+# embed cap's budget, which is the third constant — the three sit together in
+# `emrg/memory.py` and `daemon._cap_memory_index` applies the third. **A row owns its
+# newline** (the budget is measured on the file, not on the characters alone), so the
+# derivation is `100 x (512 + 1) = 51,300`, and it was written as `100 x 512 = 51,200`
+# — which was one newline per row short and made this comment's own promise false:
+# measured 2026-09-26, 100 maximum-width rows are 51,300 chars, so the cap truncated the
+# index (the first 99 rows kept, the newest dropped) while the trigger stayed silent.
+# The budget moved to 51 KiB for that arithmetic (`memory.INDEX_SIZE_WARN` carries the
+# reading); this comment states the invariant, and
+# `tests/test_memory_index_row_cap_fits_the_budget.py` measures it from both sides. So,
+# with every line inside the row cap, "lines <= 100" *is* "the whole index fits in the
+# prompt", and the rule is conservative in the direction that matters: it can fire on an
+# index that would have fit, never miss one that would not.
 #
 # What it replaces counted a subset: the retired 50-*cycle*-row plus
 # `cycle-archive-YYYYMMDD.md` protocol measured its rows out of a file that could
