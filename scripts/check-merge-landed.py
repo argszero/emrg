@@ -75,7 +75,22 @@ Exit codes
        here, a response was not readable) - fail loud, never report "landed" for a
        question that was not answered
 
-`gh` and network access are required for the PR half; the tree half is local git.
+`gh` and network access are required for the PR half; the tree half is local git —
+and **which** local git is said out loud, first, before any verdict (`tree: <this
+checkout>` in prose; a `tree` field in `--json`, which stays one JSON document). The
+order holds for the text a reader actually gets, not only for a terminal: `main()` sets
+`sys.stdout` to line buffering, because a pipe would otherwise hold the tree line to the
+end of the process while every stderr line went out as written.
+
+The naming is not decoration, because the tree half's reading *is* a function of the
+clone that answered: `named_trees` resolves every hex token against this checkout's
+object store, so the same review body reads `UNCHECKED` here and `NAMED` in a clone
+that holds the object — at the same exit code, in the same words, with nothing in the
+report to tell the two apart. This tool is module-rooted (`REPO_ROOT` is derived from
+the file's own path and every `git` call runs with it as the cwd), which is exactly the
+shape `tests/test_a_tree_reading_guard_names_its_tree.py` requires a `tree: ` line of:
+a guard that answers about its own checkout must say so, or the caller cannot tell
+which tree answered.
 """
 
 from __future__ import annotations
@@ -388,6 +403,26 @@ def _remedy(v: Verdict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The `tree: ` line below promises to come before the first verdict *and* before the
+    # first failure, and one line of buffering stood between that promise and the text a
+    # reader gets: stdout is block-buffered when it is not a tty - which is exactly how a
+    # cycle reads this report (`2>&1 | cat -n`, and CI's log capture) - while stderr is
+    # not, so the `error:` line overtook the tree line and the reader was told which
+    # clone answered *after* being told that clone could not answer. Measured on this
+    # branch by cycle `cyc20260926-091529` (`999999 2>&1 | cat -n`: `error:` at line 3,
+    # `tree:` at line 5) and reproduced by `cyc20260926-094103`, where `PYTHONUNBUFFERED=1`
+    # prints the tree line first - the program's own order, buffering aside. The same
+    # remedy is carried by the four gates whose two streams are reachable with one call
+    # (`check-doc-count.py`, `check-citation-resolves.py`, `check-node-test-count.py`,
+    # `check-rant-citations.py`), and this file needs it for the reason the family rule
+    # exists (#1633 asserts it over `scripts/check-*.py`, where a gate that gains a
+    # `tree: ` line without this call is reported). Pinned by
+    # `tests/test_check_merge_landed.py::test_the_tree_line_precedes_a_failure_under_a_pipe`.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(
         prog="check-merge-landed.py",
         description="Did a merged PR land the tree its votes were about?",
@@ -396,6 +431,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", default="argszero/emrg", help="owner/name (default: argszero/emrg)")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
     args = parser.parse_args(argv)
+
+    # The checkout the tree half reads, out loud and first: every token below is
+    # resolved against *this* clone's object store, so which clone answered is part of
+    # the reading. Printed before the first verdict — and before the first failure, so a
+    # question this clone cannot answer still says whose objects were missing. Prose
+    # only: in `--json` mode the same fact is a field, because a machine consumer is
+    # owed one JSON document.
+    if not args.json:
+        print(f"tree: {REPO_ROOT}")
 
     try:
         verdicts = [check_pr(n, args.repo) for n in args.prs]
@@ -408,6 +452,10 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 [
                     {
+                        # The clone every token above was resolved against, carried in
+                        # the document rather than as a line before it (the prose path
+                        # prints it as `tree: `, which would break a JSON reader).
+                        "tree": str(REPO_ROOT),
                         "pr": v.pr,
                         "state": v.state,
                         "reading": v.reading,
