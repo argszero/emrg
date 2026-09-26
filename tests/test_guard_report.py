@@ -44,9 +44,12 @@ This test is the rule, in three parts
 * one real gate end-to-end, in a synthetic tree it cannot damage (the copy's
   `REPO_ROOT` is that tree, and `--resolve-conflict` refuses before writing anything);
 * an AST sweep over `scripts/check-*.py`: every gate that prints a `tree: ` line to
-  stdout *and* writes to stderr must carry the call, and the swept set is pinned
-  equal to the four measured - so a gate that gains either half is visible instead of
-  silently out of scope.
+  stdout *and* writes to stderr must carry the call - unconditionally, so a gate that
+  gains the shape without the remedy is caught wherever it came from. The sweep also
+  holds a baseline of the gates known to have the shape and asserts it has not *shrunk*,
+  so a `tree: ` line that quietly disappears is visible; it deliberately allows the set
+  to grow, because a gate that gains the shape *and* the remedy has followed the rule
+  and should not be failed for it (`#1631` adds one).
 
 What is deliberately out of scope
 ---------------------------------
@@ -74,9 +77,10 @@ SCRIPTS = REPO_ROOT / "scripts"
 REMEDY = "sys.stdout.reconfigure(line_buffering=True)"
 
 # Measured 2026-09-26 by the sweep in the last test of this file: the gates that
-# print the family's identity line to stdout *and* write a verdict to stderr.
-# Pinned as a set so a gate that gains either half fails here instead of quietly
-# leaving the rule's scope.
+# print the family's identity line to stdout *and* write a verdict to stderr. Held as
+# a baseline the sweep must still cover - a gate losing either half leaves this set
+# and is caught there. It is not an upper bound: a gate that gains both halves and
+# carries the remedy is correct and passes without editing this.
 SWEPT = {
     "check-citation-resolves.py",
     "check-doc-count.py",
@@ -239,8 +243,21 @@ def test_every_gate_with_a_tree_line_and_a_verdict_buffers_its_stdout() -> None:
         f"{missing} print a `tree:` line and also write to stderr, so a piped reader "
         f"can see the verdict first; add `{REMEDY}` at the top of `main()`"
     )
-    assert needs == SWEPT, (
-        "the gates with a tree line and a verdict changed - the measured set is "
-        f"{sorted(SWEPT)}, the tree now has {sorted(needs)}; a new subject needs the "
-        "remedy too, and a removed `tree:` line belongs in this test's docstring"
+    # The rule above is unconditional; this half is about *scope*, and it is a
+    # one-way check on purpose. A gate that loses its tree line (or its stderr
+    # write) drops out of the swept set silently, so the baseline must not shrink
+    # without someone noticing - that is the drift worth catching.
+    #
+    # Growth is deliberately not a failure. A new gate that prints a tree line and
+    # writes a verdict is a *good* change, and if it carries the remedy it has
+    # followed the rule; failing it here would send CI red for whoever made it,
+    # over a test they had no reason to know about. A new gate that skips the
+    # remedy is already caught by the assertion above, with a message that says
+    # what to add. An equality here would also have failed on this PR's own
+    # reviewer feedback: #1631 adds a tree line to `check-merge-landed.py`, and
+    # with the remedy its arrival is correct rather than a red master.
+    assert SWEPT <= needs, (
+        f"a gate in the baseline no longer prints a `tree: ` line together with a "
+        f"verdict: baseline {sorted(SWEPT)}, measured {sorted(needs)}; if that was "
+        "deliberate, say so in this test's docstring and drop it from the baseline"
     )
