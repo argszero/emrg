@@ -178,6 +178,35 @@ class TestTheJudgementOfOneArm:
         out = capsys.readouterr().out
         assert rc == mod.EXIT_UNJUDGEABLE, out
 
+    def test_an_unjudgeable_arm_offers_the_assertions_the_run_did_echo(
+        self, mod, tree, capsys
+    ) -> None:
+        """The remedy for a wrong `--expect` is the fragment the run really printed.
+
+        This is the state measured 2026-09-26 (`cyc20260926-140150`): a fragment copied
+        from the test's *message* never appears, because an earlier assertion in the same
+        test fires first, and the caller then re-runs pytest by hand to find the line that
+        does. The report has the output in hand, so it names it - and the assertion below
+        is that the named text is usable as `--expect` verbatim, not a paraphrase of it.
+        """
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name',
+                  expect="a fragment no assertion prints")
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_UNJUDGEABLE, out
+        assert "any of which can be --expect" in out, out
+        assert "assert 'goodbye x' == 'hello x'" in out, out
+
+    def test_a_killed_arm_does_not_gain_that_block(self, mod, tree, capsys) -> None:
+        """The control: the expectation matched, so there is nothing to search for.
+
+        Without this half, printing the candidates unconditionally would pass the test
+        above while making every kill's report noisier for no reader.
+        """
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_KILLED, out
+        assert "any of which can be --expect" not in out, out
+
     def test_the_json_report_carries_the_verdict_and_the_observed_run(
         self, mod, tree, capsys
     ) -> None:
@@ -190,6 +219,9 @@ class TestTheJudgementOfOneArm:
         assert report["mutated_rc"] == 1, report
         assert report["restored"] is True, report
         assert report["preflight"] == "1 passed", report
+        # The candidates are a field on every report, not one the prose happens to print,
+        # so a consumer reading the JSON of an UNJUDGEABLE arm gets them too.
+        assert report["assertions"], report
 
 
 class TestTheFileTheArmMutates:
@@ -327,3 +359,57 @@ class TestTheSmallReadings:
 
     def test_a_unique_anchor_is_replaced_once(self, mod) -> None:
         assert mod._apply("x y", "x", "z") == "z y"
+
+    def test_the_echoed_assertions_are_read_marker_stripped_and_in_order(self, mod) -> None:
+        """Both of pytest's echoed forms, and what the reader must *not* be offered.
+
+        The `where` and exception lines are the ones to refuse: they sit in the same
+        block, they are not assertions, and a caller who pasted one would come back
+        with a second UNJUDGEABLE instead of a verdict.
+        """
+        report = (
+            "FAILED tests/x.py::test_a - AssertionError\n"
+            '>           assert mapping["a"] == 2\n'
+            "E           assert 0 == 1\n"
+            'E            +  where 0 = int("0")\n'
+            "E       AttributeError: boom\n"
+            "1 failed in 0.05s\n"
+        )
+        assert mod._assertion_lines(report) == [
+            'assert mapping["a"] == 2',
+            "assert 0 == 1",
+        ]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "1 passed in 0.02s",
+            "",
+            "E       AttributeError: boom\nE        +  where boom = f()\n",
+        ],
+    )
+    def test_a_run_that_echoed_no_assertion_offers_none(self, mod, text) -> None:
+        """Empty is an answer: a collection error has no assertion to hand back."""
+        assert mod._assertion_lines(text) == []
+
+    def test_the_candidate_list_is_capped_and_deduplicated(self, mod) -> None:
+        """The report is read from a terminal, and a fragment is not a transcript."""
+        many = "\n".join(f"E           assert n == {i}" for i in range(20))
+        lines = mod._assertion_lines(many)
+        assert len(lines) == mod._ASSERTION_CANDIDATES, lines
+        assert len(set(lines)) == len(lines), lines
+        assert mod._assertion_lines("E    assert x == 1\nE    assert x == 1\n") == [
+            "assert x == 1"
+        ]
+
+    def test_a_candidate_is_truncated_to_the_length_the_report_allows(self, mod) -> None:
+        """A parametrised assertion can be very long; the candidate is bounded like the rest.
+
+        Pinned because the bound is the only thing between a caller's terminal and a
+        hypothesis-generated assertion printed at full width - and an unpinned constant
+        is one a later edit can drop without any test noticing.
+        """
+        long_assertion = "assert " + "x" * (mod._ASSERTION_MAX_CHARS * 2) + " == 1"
+        (line,) = mod._assertion_lines(f"E           {long_assertion}\n")
+        assert len(line) == mod._ASSERTION_MAX_CHARS, len(line)
+        assert long_assertion.startswith(line), "the truncation must be a prefix, not a re-wrap"

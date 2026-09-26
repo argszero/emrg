@@ -65,11 +65,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 #: Run here, and the first line of stdout must be `tree: <this checkout>`. Each of
-#: these takes no required argument, imports nothing outside the standard library, and
-#: reads a working tree — the three conditions that make "run it and look" the way to
-#: ask the question instead of reading its source for a print statement.
+#: these takes no required argument, imports nothing outside the standard library
+#: **and this checkout's own package**, and reads a working tree — the conditions
+#: that make "run it and look" the way to ask the question instead of reading its
+#: source for a print statement. `check-memory-index.py` is the second kind: its
+#: two numbers come from `emrg.memory` and `emrg.server.daemon`, so it needs the
+#: project interpreter (which this suite is), and it reads the `.emrg/` trees under
+#: the checkout it stands in.
 RUN_HERE = (
     "check-doc-count.py",
+    "check-memory-index.py",
     "check-rant-citations.py",
     "check_nonlocal.py",
 )
