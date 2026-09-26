@@ -18,9 +18,19 @@ printed the same verdict for this checkout, for a worktree, and for a tmp direct
 test had just built. It now prints `tree: <resolved root>` before any verdict, and this
 file is the runner that makes the convention a rule rather than a claim.
 
+That sweep was over the family **as classified**, and one guard it did not have to look
+at was mis-classified the same day: `#1618` added `check-merge-landed.py` and put it in
+the "answers about something other than a working tree" bucket, in an entry that says it
+"reads merged trees from local git" — the bucket's premise contradicted by its own note.
+Its tree half is local git in this checkout (`REPO_ROOT`, derived from the file), it
+answers `UNCHECKED` where another clone answers `NAMED`, and it named nothing. Corrected
+2026-09-26 (`cyc20260926-034521`): the tool prints `tree: <this checkout>` first (a
+`tree` field under `--json`, so the JSON stays one document) and the entry moved to the
+bucket whose premise it fits.
+
 What is asserted, and the two legs that keep it from being decoration
 ---------------------------------------------------------------------
-* **every `scripts/check-*.py` is classified** below — run here, names its tree but
+* **every `scripts/check*.py` is classified** below — run here, names its tree but
   cannot be run in this suite (with the reason), or does not read a working tree (with
   what it reads instead). A guard added later fails this file until it is classified,
   which is what stops the rule from decaying into the absence of anyone's objection;
@@ -32,13 +42,17 @@ What is asserted, and the two legs that keep it from being decoration
   *given* — a tmp root, and explicitly **not** this repository (so a line hardcoded to
   the repository root dies).
 
-Named limits. The middle bucket is **classified, not verified**: those two guards read
-a working tree and name it, but cannot be run here (one needs the Node runners, which
-the pytest job's environment does not have; the other measures a separately installed
-interpreter), so nothing below checks them, and saying so is better than counting them
-as checked. The first line is the subject rather than "anywhere in the output" because
-that is what the convention says and what a reader's eye reaches first — a line printed
-after a verdict has already been given answers a question the reader did not ask.
+Named limits. The middle bucket is **classified, not verified**: its guards read a
+working tree and name it, but cannot be run here (one needs the Node runners, which the
+pytest job's environment does not have; another measures a separately installed
+interpreter; the third needs `gh` and the network), so nothing below checks them, and
+saying so is better than counting them as checked. One of the three is nonetheless
+verified — `check-merge-landed.py` by `tests/test_check_merge_landed.py`, which runs it
+against a `tmp_path` repository and a `gh` stand-in — so the limit now reads "not
+verified **here**" for that member rather than "not verified". The first line is the
+subject rather than "anywhere in the output" because that is what the convention says
+and what a reader's eye reaches first — a line printed after a verdict has already been
+given answers a question the reader did not ask.
 """
 
 from __future__ import annotations
@@ -80,6 +94,16 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "measures a separately installed interpreter (~/.emrg/install/bin/python), "
         "which a clean CI checkout does not have"
     ),
+    "check-merge-landed.py": (
+        "needs `gh` and the network for the review half. It was classified as a "
+        "NON-tree-reader when #1618 added it, by the bucket entry that says it 'reads "
+        "merged trees from local git' - the premise of that bucket contradicting its "
+        "own note. Its tree half is local git in the checkout its own file lives in "
+        "(`REPO_ROOT`), so the rule applies; the difference from the two above is that "
+        "this member's naming IS verified rather than classified - "
+        "`tests/test_check_merge_landed.py` runs it against a `tmp_path` repository with "
+        "a `gh` stand-in and pins the first line"
+    ),
 }
 
 #: Answers about something other than a working tree, so the rule does not apply - each
@@ -95,10 +119,6 @@ NOT_TREE_READERS = {
     "check-merge-sequence.py": "requires PR numbers; names the base it folds onto",
     "check-merge-tree-health.py": "requires PR numbers; prints the repo it works in",
     "check-merge-landing-diff.py": "requires PR numbers; names the base it diffs against",
-    "check-merge-landed.py": (
-        "requires PR numbers; reads merged trees from local git and each PR's review "
-        "claims from the GitHub API"
-    ),
 }
 
 
