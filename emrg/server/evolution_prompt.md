@@ -172,6 +172,17 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --limit 20
 
 - New issues need replies or triage? Stale issues can be closed?
 - Label, reply, or `gh issue close <N> -R {{ owner }}/{{ repo }}` to close resolved ones
+- **⚡ The link rule, and what finishes an issue** (host 2026-09-26T18:52:57, issue #1642): one
+  issue is finished by exactly one PR, and the two name each other; a PR that is rejected or asked
+  to change is updated in place, never replaced by a second one. Read the backlog with the tool that
+  answers it — `uv run --no-sync python3 scripts/check-issue-links.py` prints one row per open issue
+  and per open PR with its state (`linked` / `one-way` / `unclaimed` / `duplicate` / `unlinked`) and
+  the remedy for that state on the row; exit 0 all linked, 1 a fault, 2 not measurable — never a pass
+  (PR #1643).
+- **⚡ A re-measurement is not progress** (same rule, same host): an issue is finished when *its* PR
+  has landed and the reading above says the link is complete. Commenting another re-test of the old
+  behaviour on an issue is not a step of this loop; a row the reading reports as *work that has
+  landed* is closed with that reading, or says in the issue what it still leaves.
 
 #### 1.2 Follow up on your own PRs (everyone must do this)
 
