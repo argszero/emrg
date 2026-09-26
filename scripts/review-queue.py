@@ -78,7 +78,12 @@ Usage
 `--cycle` is what turns "may this PR be voted on" into "may *this cycle* still vote
 here" — the counter counts per cycle, so a cycle that has already voted at a head
 must get its next vote from another cycle. Without it the tool reports the first
-question only, and says so.
+question only, and says so: `window_note`'s `no --cycle was given` line is printed
+ahead of the rows, because a reader who has already reached a row has already copied
+its command. Until 2026-09-26 that sentence had no carrier — the prose of an
+unflagged run was identical in shape to a windowed one — and the printed remedy
+omitted `--cycle` as well, so the whole chain of commands read as if the clause had
+been applied.
 
 The other half of "may this cycle vote here" is the clause the counter cannot see
 -------------------------------------------------------------------------------
@@ -719,6 +724,59 @@ def rows(readings: list[Reading], cycle: str | None, repo: str,
     return [(reading, next_action(reading, cycle, repo, window)) for reading in readings]
 
 
+def window_note(window: Window | None) -> str:
+    """What the report owes the reader about the own-window clause, before its rows.
+
+    Two states are strictly weaker readings than "the clause was applied", and each of
+    them weakens a row that otherwise reads `vote`:
+
+    * **no `--cycle`** — the clause was not applied at all. The rows answer the count
+      question and nothing else, so a `vote` here may be a head this very cycle pushed.
+      Nothing said so: the prose was byte-identical in shape to a windowed run, and the
+      printed remedy (`cast-vote.py <PR> ...`, which omits `--cycle` because the tool
+      was not given one) completed the trap — the reader copies the one command that
+      spends the vote the clause exists to withhold. Measured 2026-09-26
+      (`cyc20260926-120320`): a first run without the flags answered `vote` for `#1636`,
+      the head the cycle immediately before it had pushed, and only re-running with
+      `--cycle` turned that row into `abstain`. The docstring above has promised "it
+      reports the first question only, and says so" since the clause was written, and
+      this line is that "so" — it had no carrier at all before.
+    * **a window narrowed to this cycle alone** — the previous cycle could not be read,
+      so a head *it* pushed is not reported as one's own. Already said, since
+      `test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so`; what moves
+      is *where*, and the two notes move together because they are the same debt.
+
+    The placement is the point, and it is this family's convention rather than a
+    preference: a caveat that follows the row it weakens is read after the reader has
+    already acted on it. Printed first, it also survives `| head`, which the tail
+    placement did not — a queue of eight PRs is ~40 lines, and the note was line 39.
+
+    Returns the note (empty when the clause was applied in full). Prose only: under
+    `--json` the same fact is the documented `vote_window_start: null` /
+    `vote_window_source: ""` pair, and a line ahead of the document would break it.
+    """
+    if window is None:
+        return (
+            "note: no --cycle was given, so the own-window clause was NOT applied - a "
+            'row reading "vote" may be a head this cycle pushed, which is the one '
+            "direction no later cycle can recount. Pass --cycle <this cycle's id> to "
+            "have the clause applied."
+        )
+    if not window.unresolved:
+        return ""
+    where = (
+        f"only pushes at or after {window.window_start_text()}"
+        if window.applied
+        else "and this cycle's own id could not be read, so the clause was not "
+             "applied at all"
+    )
+    return (
+        f"note: the abstention window could not be widened to the cycle before this "
+        f"one ({window.unresolved}) - {where} were checked. Pass --prev-cycle or "
+        "--cycles-log DIR to have the full window applied."
+    )
+
+
 def render(reading: Reading, action: Action) -> str:
     """One PR's block: what is true, then what to do, then the exact command."""
     head = reading.head[:8] if reading.head else "????????"
@@ -866,6 +924,12 @@ def main(argv: list[str] | None = None) -> int:
     elif not queue:
         print(f"no open PRs in {args.repo} - nothing to review")
     else:
+        # Before the first row, never after it: this says how strong the reading below
+        # is, and a reader who has already copied a row's command has already acted.
+        note = window_note(window)
+        if note:
+            print(note)
+            print()
         for reading, action in readings:
             print(render(reading, action))
             print()
@@ -874,18 +938,6 @@ def main(argv: list[str] | None = None) -> int:
             tally[action.kind] = tally.get(action.kind, 0) + 1
         summary = ", ".join(f"{kind} {count}" for kind, count in sorted(tally.items()))
         print(f"{len(readings)} PR(s): {summary}")
-        if window is not None and window.unresolved:
-            where = (
-                f"only pushes at or after {window.window_start_text()}"
-                if window.applied
-                else "and this cycle's own id could not be read, so the clause was not "
-                     "applied at all"
-            )
-            print(
-                f"note: the abstention window could not be widened to the cycle before "
-                f"this one ({window.unresolved}) - {where} were checked. Pass "
-                "--prev-cycle or --cycles-log DIR to have the full window applied."
-            )
         if unread:
             print(
                 f"unmeasurable: {', '.join(f'#{pr}' for pr in unread)} - "

@@ -906,6 +906,13 @@ def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
     # (the push time is on the row) instead of taking the silence for a pass.
     assert datetime(2026, 9, 17, 22, 11, 17, tzinfo=LOCAL).isoformat(timespec="seconds") \
         in out
+    # And it is printed *ahead* of the rows it weakens (`cyc20260926-120320` moved it
+    # there): the tail placement left it at line 39 of a queue a reader pipes through
+    # `head`, or reads only as far as the first row whose command they copy.
+    assert out.splitlines()[0].startswith("note: the abstention window could not be widened"), (
+        out.splitlines()[0]
+    )
+    assert out.index("could not be widened") < out.index("#1 "), out[:300]
 
 
 def test_a_narrowed_window_still_catches_this_cycles_own_push(mod, monkeypatch, capsys,
@@ -932,3 +939,66 @@ def test_without_a_cycle_the_clause_is_not_applied(mod, monkeypatch, capsys):
     assert "abstain" not in out
     assert "vote" in out
     assert f"pushed {pushed}" in out
+
+
+def test_without_a_cycle_the_report_says_the_clause_was_not_applied(mod, monkeypatch, capsys):
+    """The `says so` the docstring has promised since the clause was written, and the
+    line that had no carrier until it was measured missing.
+
+    Measured 2026-09-26 (`cyc20260926-120320`): the first run of a cycle, without the
+    flags, answered `vote` for the head the cycle immediately before it had pushed —
+    the row the clause exists to turn into `abstain` — and nothing in the prose
+    distinguished that report from a windowed one. The row's own printed remedy omits
+    `--cycle` too (the tool was never given one), so the reader who copies the command
+    spends exactly the vote the clause withholds.
+    """
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1"])
+    out = capsys.readouterr().out
+
+    assert "no --cycle was given" in out, (
+        "an unflagged run reports `vote` rows and says nothing about the own-window "
+        f"clause having been skipped: {out!r}"
+    )
+    assert "--cycle <this cycle's id>" in out, (
+        "the note has to name the remedy, or the reader is left to discover the flag: "
+        f"{out!r}"
+    )
+    # The placement is the assertion, not a detail of it: a caveat read *after* the row
+    # it weakens arrives after the reader has copied the command.
+    assert out.splitlines()[0].startswith("note: no --cycle was given"), out.splitlines()[0]
+    assert out.index("no --cycle was given") < out.index("#1 "), (
+        "the note is not ahead of the row it qualifies"
+    )
+
+
+def test_a_windowed_run_prints_no_such_note(mod, monkeypatch, capsys):
+    """The control: with `--cycle` and a previous cycle in hand the clause *is*
+    applied in full, and a note printed anyway would be a claim about a gap that is not
+    there — the reader would learn to skim the line that matters."""
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE, "--prev-cycle",
+                                          "cyc20260917-221117"])
+    out = capsys.readouterr().out
+
+    assert "no --cycle was given" not in out, out[:300]
+    assert "could not be widened" not in out, out[:300]
+    assert out.splitlines()[0].startswith("#1 "), out.splitlines()[0]
+
+
+def test_the_absent_cycle_note_stays_out_of_the_json_document(mod, monkeypatch, capsys):
+    """`--json` is one document: the gap is carried by the documented
+    `vote_window_start: null` / `vote_window_source: ""` pair, and a prose line ahead
+    of the list would break every machine consumer instead of warning them."""
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1", "--json"])
+    out = capsys.readouterr().out
+
+    payload = json.loads(out)  # a prose line here raises, which is the assertion
+    assert "no --cycle was given" not in out, out[:300]
+    assert payload[0]["vote_window_start"] is None
+    assert payload[0]["vote_window_source"] == ""
+    assert payload[0]["action"] == "vote"
