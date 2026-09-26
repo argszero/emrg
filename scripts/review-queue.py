@@ -81,9 +81,11 @@ must get its next vote from another cycle. Without it the tool reports the first
 question only, and says so: `window_note`'s `no --cycle was given` line is printed
 ahead of the rows, because a reader who has already reached a row has already copied
 its command. Until 2026-09-26 that sentence had no carrier — the prose of an
-unflagged run was identical in shape to a windowed one — and the printed remedy
-omitted `--cycle` as well, so the whole chain of commands read as if the clause had
-been applied.
+unflagged run was identical in shape to a windowed one — so the one tool a cycle runs
+first gave a wrong reading (`vote` for a head its own clause answers `abstain`) with
+nothing in the report to say the two questions had become one. The refusal that
+catches it lives one command later, in `cast-vote.py`'s `own-head-window`; a report
+whose rows are right is cheaper than a backstop that has to disagree with them.
 
 The other half of "may this cycle vote here" is the clause the counter cannot see
 -------------------------------------------------------------------------------
@@ -733,14 +735,25 @@ def window_note(window: Window | None) -> str:
     * **no `--cycle`** — the clause was not applied at all. The rows answer the count
       question and nothing else, so a `vote` here may be a head this very cycle pushed.
       Nothing said so: the prose was byte-identical in shape to a windowed run, and the
-      printed remedy (`cast-vote.py <PR> ...`, which omits `--cycle` because the tool
-      was not given one) completed the trap — the reader copies the one command that
-      spends the vote the clause exists to withhold. Measured 2026-09-26
+      remedy the row prints (`cast-vote.py <PR> ...`, which omits `--cycle` because the
+      tool was not given one) does not carry the correction either. Measured 2026-09-26
       (`cyc20260926-120320`): a first run without the flags answered `vote` for `#1636`,
       the head the cycle immediately before it had pushed, and only re-running with
-      `--cycle` turned that row into `abstain`. The docstring above has promised "it
-      reports the first question only, and says so" since the clause was written, and
-      this line is that "so" — it had no carrier at all before.
+      `--cycle` turned that row into `abstain`.
+
+      The **cost, measured rather than carried over** — the vote itself is not spent:
+      `cast-vote.py` reads the cycle id out of the body, resolves the previous cycle
+      itself, and refuses with `own-head-window` (rc 2), which it did on that very head
+      in this cycle's probe. What the unflagged run costs is a **wrong reading**: the
+      first tool a cycle runs states `vote` where its own windowed answer is `abstain`,
+      and a reader who acts on the row — writing the body, planning the merge, reading
+      the state as "this head is votable" — has acted on a verdict the tool does not
+      hold. The backstop is downstream, one command later, and it arrives as a refusal
+      rather than as the `abstain` the report should have printed.
+
+      The docstring above has promised "it reports the first question only, and says so"
+      since the clause was written, and this line is that "so" — it had no carrier at
+      all before.
     * **a window narrowed to this cycle alone** — the previous cycle could not be read,
       so a head *it* pushed is not reported as one's own. Already said, since
       `test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so`; what moves
@@ -758,9 +771,8 @@ def window_note(window: Window | None) -> str:
     if window is None:
         return (
             "note: no --cycle was given, so the own-window clause was NOT applied - a "
-            'row reading "vote" may be a head this cycle pushed, which is the one '
-            "direction no later cycle can recount. Pass --cycle <this cycle's id> to "
-            "have the clause applied."
+            'row reading "vote" may be a head this cycle pushed, which the clause turns '
+            "into `abstain`. Pass --cycle <this cycle's id> to have the clause applied."
         )
     if not window.unresolved:
         return ""

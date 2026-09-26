@@ -936,7 +936,13 @@ def test_without_a_cycle_the_clause_is_not_applied(mod, monkeypatch, capsys):
     fresh = FakeFresh()
     _run(mod, monkeypatch, votes, fresh, ["1"])
     out = capsys.readouterr().out
-    assert "abstain" not in out
+    # About the *rows*, not the whole output: the note added on 2026-09-26 names the
+    # verdict the clause would withhold (`abstain`), so the old whole-output proxy would
+    # now fail on the note that exists to make the reading honest. What must not happen
+    # is a row reading `abstain`, and that is what is asserted.
+    rowlines = [line for line in out.splitlines() if line.startswith("#")]
+    assert rowlines, out
+    assert all("abstain" not in line for line in rowlines), rowlines
     assert "vote" in out
     assert f"pushed {pushed}" in out
 
