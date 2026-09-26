@@ -106,6 +106,11 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
 NOT_TREE_READERS = {
     "check-vote-count.py": "reads reviews and mergeability from the GitHub API",
     "check-pr-base.py": "reads the base each PR declares on the GitHub API",
+    "check-issue-links.py": (
+        "reads the open issues and PRs and their timelines on the GitHub API - the "
+        "subject is the remote queue, so there is no local tree whose name would "
+        "answer anything (the repo it read is printed first instead)"
+    ),
     "check-patch-files.py": "reads the patch files it is given as arguments",
     "check-merge-freshness.py": "requires PR numbers; answers per head and its base",
     "check-merge-order.py": "requires PR numbers; names the base it plans against",
