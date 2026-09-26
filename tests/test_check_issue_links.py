@@ -80,7 +80,14 @@ def _pr(
     }
 
 
-def _refers_to(number: int, *, is_pr: bool, state: str = "open", body: str = "") -> dict:
+def _refers_to(
+    number: int,
+    *,
+    is_pr: bool,
+    state: str = "open",
+    body: str = "",
+    merged_at: str | None = None,
+) -> dict:
     """A `cross-referenced` event whose source is `number`.
 
     `is_pr` is one half of the test: GitHub records whether the *referrer* was a PR by
@@ -88,11 +95,26 @@ def _refers_to(number: int, *, is_pr: bool, state: str = "open", body: str = "")
     referrer's own text, which is what decides claim vs mention for a PR source, and it
     is present on a real event (measured 2026-09-26), so the fixtures carry it rather
     than fetching it separately.
+
+    `merged_at` is the third: it is what separates *landed* work from an abandoned
+    attempt, and it is on the real event too (measured 2026-09-26 on
+    `issues/1553/timeline`, where `#1565` carries `2026-09-24T05:24:54Z` and an issue
+    source carries nothing). A merged PR is `state: closed` **with** this set — which is
+    why the reading keys on it and not on the state, and why the fixture can express the
+    two separately.
     """
     source: dict = {"number": number, "state": state, "body": body}
     if is_pr:
-        source["pull_request"] = {"url": f"https://api.github.com/repos/{REPO}/pulls/{number}"}
+        pull: dict = {"url": f"https://api.github.com/repos/{REPO}/pulls/{number}"}
+        if merged_at:
+            pull["merged_at"] = merged_at
+        source["pull_request"] = pull
     return {"event": "cross-referenced", "source": {"issue": source}}
+
+
+def _merged(number: int, *, body: str = "", merged_at: str = "2026-09-25T00:00:00Z") -> dict:
+    """A merge that referenced the subject without declaring it — the shape #1644 names."""
+    return _refers_to(number, is_pr=True, state="closed", body=body, merged_at=merged_at)
 
 
 class FakeGh:
@@ -259,6 +281,183 @@ def test_a_negated_keyword_is_not_a_claim(mod) -> None:
         "it is not closed: #1 has no handler",         # a keyword in prose
     ):
         assert mod.declared_claims(body) == set(), body
+
+
+
+def test_a_quoted_keyword_is_not_a_claim(mod) -> None:
+    """A **quoted** closing keyword declares nothing — the second live self-caught defect.
+
+    Not hypothetical: this reading's own pull request (#1643) explained the
+    claim/mention distinction with the sentence *"of the two open PRs naming #1606,
+    #1638's body ends `Closes #1606.`"*, and the parsed claim made issue **#1606 read
+    `DUPLICATE`** — claimed by #1638 *and* by #1643, whose second claim existed only
+    inside backticks. A tool that documents the syntax it reads quotes it, so this is the
+    family's normal input rather than an edge.
+
+    Three forms are pinned, because the masking has two mechanisms and the weaker one
+    cannot cover the fenced case: an inline span, a fenced block (whose interior a
+    line-bounded inline rule cannot reach), and an **unterminated** fence, which the
+    fenced rule has to carry to the end of the body rather than leave open.
+
+    This test lives apart from the negation and list-form cases for a reason that was
+    measured: an arm disabling the fenced rule SURVIVED while these assertions sat inside
+    another test's body — the arm named the test that holds the contract, and the
+    contract was elsewhere. A mutation arm's node is part of the claim it makes.
+    """
+    assert mod.declared_claims("the body ends `Closes #1606.` while") == set()
+    assert mod.declared_claims("example:\n```\nCloses #11.\n```\nand Closes #12.") == {12}
+    assert mod.declared_claims("an unterminated fence:\n```\nCloses #13.") == set()
+    assert mod.declared_claims("a ``double `Closes #14.` `` span") == set()
+    # …and the masking is a shield, not a gag: a real declaration beside a quotation is
+    # still read, which is the case every PR body in this repo with a quoted example has.
+    assert mod.declared_claims("Closes #15.\n\n(the quote above is `Closes #16.`)") == {15}
+
+
+def test_a_quoted_keyword_does_not_claim_anything(mod, monkeypatch, capsys) -> None:
+    """The incident at report level: the quotation must not reach the issue's state.
+
+    Written as the live contradiction rather than as a unit call, because that is how it
+    was found: #1643 declared two issues as far as the reading could tell, so an issue
+    that one PR legitimately finishes read `duplicate` — the state that says a second PR
+    competes for the same work. The row for the *other* issue (#11 here) must stay
+    `unclaimed` while the declared one is claimed.
+    """
+    quoting = "Closes #10.\n\n(as #20's body says: `Closes #11.` — quoted, not claimed)"
+    fake = FakeGh(
+        [_issue(10, "the finished one"), _issue(11, "only quoted by name")],
+        [_pr(20, "the fix", body=quoting)],
+        {
+            10: [_refers_to(20, is_pr=True, body=quoting)],
+            11: [_refers_to(20, is_pr=True, body=quoting)],
+            20: [_refers_to(10, is_pr=False)],
+        },
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    assert "#11 issue UNCLAIMED" in out
+    assert "#11 issue DUPLICATE" not in out
+    assert "#10 issue ok" in out
+
+
+def test_landed_work_is_not_reported_as_nothing_being_opened(mod, monkeypatch, capsys) -> None:
+    """A merged referrer is work on master, and the row must say so (issue #1644).
+
+    The measured defect: five of nine open issues were reported as *"nothing has been
+    opened for it"* while merged PRs referenced them (all of #1553's #1565/#1569/#1607,
+    all six of #1554's, #1614, #1589, #1599/#1600). An idle issue and an issue whose
+    work landed read identically, which is exactly the ambiguity a never-closed backlog
+    is made of.
+
+    Both halves are asserted: the landed sentence appears, and the idle sentence is
+    *absent* — the second is the one that was wrong, and an assertion that only checks
+    for the new words would have passed against the old output too.
+    """
+    fake = FakeGh(
+        [_issue(10, "landed but open")],
+        [],
+        {10: [_merged(20, body="a related fix, never declaring it"), _merged(21)]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    assert "#20 #21 referenced it and are merged" in detail
+    assert "work has landed on master carrying this number" in detail
+    assert "nothing has been opened for it" not in detail
+
+
+def test_an_abandoned_attempt_is_named_as_one(mod, monkeypatch, capsys) -> None:
+    """A referrer closed **without** merging says a different thing again.
+
+    `state: closed` is true of a merge and of an abandoned attempt alike, so the reading
+    keys on `merged_at` — and this test is the one that keeps that distinction honest: a
+    closed-unmerged referrer must not be reported as landed work. The remedy it carries
+    is the host's third clause (`a rejected or change-requested PR is updated in place`),
+    which is the reader's next move for this class.
+    """
+    fake = FakeGh(
+        [_issue(10, "an attempt was abandoned")],
+        [],
+        {10: [_refers_to(20, is_pr=True, state="closed", body="a try, no keyword")]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    assert "#20 referenced it and were closed without merging" in detail
+    assert "updated in place, never replaced by a second one" in detail
+    assert "work has landed on master" not in detail
+
+
+def test_all_three_referrer_classes_are_named_in_one_row(mod, monkeypatch, capsys) -> None:
+    """An issue can carry all three at once, and a reader told only one gets it wrong.
+
+    Composing them is not decoration: the landed clause invites a close, the abandoned
+    clause explains a dead attempt, and the open clause is what the tool said before —
+    and an issue whose landed referrer does *not* finish it would be closed by a reader
+    who saw only the first clause. Order matters too and is asserted: the class that
+    changes what a reader does next comes first.
+    """
+    fake = FakeGh(
+        [_issue(10, "all three")],
+        [],
+        {
+            10: [
+                _refers_to(30, is_pr=True, body="mentions it"),
+                _merged(31),
+                _refers_to(32, is_pr=True, state="closed", body="abandoned"),
+            ]
+        },
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    assert "#31 referenced it and are merged" in detail
+    assert "#32 referenced it and were closed without merging" in detail
+    assert "#30 referenced it without declaring" in detail
+    assert (
+        detail.index("#31")
+        < detail.index("#32")
+        < detail.index("#30")
+    ), detail
+
+
+def test_the_mention_split_is_read_from_the_events_own_fields(mod) -> None:
+    """The classification, at unit level, on one event stream (issue #1644).
+
+    `merged_at` is the discriminator and `state` is not, and the two only disagree in the
+    direction that matters: a *closed issue* references a PR with `state: closed` and no
+    merge, and a *merge* is `state: closed` with one. Reading the state alone would call
+    an abandoned PR landed work.
+    """
+    events = [
+        _refers_to(20, is_pr=True, body="open mention"),                       # open PR
+        _merged(21),                                                           # merged
+        _refers_to(22, is_pr=True, state="closed", body="abandoned"),          # closed
+        _refers_to(23, is_pr=True, state="closed", body="Closes #10."),        # declared
+        _refers_to(24, is_pr=True, body="Closes #10."),                        # declared, open
+        _refers_to(25, is_pr=False),                                           # an *issue*
+    ]
+
+    refs = mod.referencing_prs(events, 10)
+
+    assert refs.declared_open == {24}
+    assert refs.declared_closed == {23}
+    assert refs.mentioned_open == {20}
+    assert refs.mentioned_landed == {21}
+    assert refs.mentioned_abandoned == {22}
+    # #25 is an issue referencing the subject, so it is in none of the five sets above.
+    assert 25 not in refs.mentioned_open | refs.mentioned_landed | refs.mentioned_abandoned
 
 
 def test_a_mention_is_not_a_claim(mod, monkeypatch, capsys) -> None:
@@ -530,14 +729,22 @@ def test_the_two_directions_are_read_from_opposite_sources_and_never_transposed(
 
     refs = mod.referencing_prs(events, 10)
     assert refs.declared_open == {20}
-    assert refs.mentioned == {30}
     assert refs.declared_closed == set()
+    # #30 is an *open* PR that only mentions the issue: the bucket a citation belongs in.
+    assert refs.mentioned_open == {30}
+    assert refs.mentioned_landed == set() and refs.mentioned_abandoned == set()
     assert mod.referencing_issues(events, {10}) == {10}
     assert mod.named_by_issue({20: {10}}) == {10: {20}}
 
     # An empty reading is empty, not a row of `None`s.
     empty = mod.referencing_prs([], 10)
-    assert (empty.declared_open, empty.declared_closed, empty.mentioned) == (set(), set(), set())
+    assert (
+        empty.declared_open,
+        empty.declared_closed,
+        empty.mentioned_open,
+        empty.mentioned_landed,
+        empty.mentioned_abandoned,
+    ) == (set(), set(), set(), set(), set())
     assert mod.referencing_issues([], {10}) == set()
     assert mod.named_by_issue({}) == {}
     assert mod.declared_claims(None) == set()

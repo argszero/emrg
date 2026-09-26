@@ -107,6 +107,37 @@ Exit codes
    reported as a pass, because a clean queue and an unreadable one are different
    answers and only one of them is evidence
 
+What a non-declaring reference is, and why it is three readings rather than one
+--------------------------------------------------------------------------------
+A reference that does not declare is evidence of attention, never of ownership — but
+"attention" is not one fact, and folding the three together was a defect this tool
+shipped (issue #1644, fixed on this branch). It printed *"nothing has been opened for
+it"* for five of the nine open issues while **merged** PRs referenced them (#1553 by
+#1565/#1569/#1607, #1554 by six, #1556 by #1614, #1560 by #1589, #1598 by
+#1599/#1600), so an idle issue and one whose work had landed on master read
+identically. So each referrer is classified by what it is, from the same event:
+
+* **open** — a PR in flight, and the sentence above is exactly right for it;
+* **landed** (`pull_request.merged_at` set) — work on master carrying this number that
+  never closed the issue: either close it with that reading, or state what remains;
+* **abandoned** (closed, never merged) — an attempt that ended, which the host's rule
+  answers in its own PR rather than with a second one.
+
+`merged_at` is the discriminator and `state` is not, because `state` is `closed` for a
+merge, for an abandoned PR and for a closed *issue* alike — the three are distinguished
+by the merge alone, and reading the state would call abandoned work landed.
+
+A **quoted** keyword declares nothing
+-------------------------------------
+Code spans and fenced blocks are blanked out before a claim is read, because a body that
+quotes a closing keyword is not making one — and this is measured, not theoretical: this
+tool's own pull request (#1643) quotes `Closes #1606.` while explaining the
+claim/mention distinction, and the quotation made issue **#1606 read `DUPLICATE`**,
+claimed by #1643 as well as by #1638. A tool that documents the syntax it reads quotes
+it, so the input is the family's normal case. The masking stops early, the same direction
+as the list and negation bounds: a missed claim is a loud row a reader can fix, an
+invented one is silent.
+
 A note on this docstring
 ------------------------
 It quotes the host verbatim, so it is not ASCII. That is safe only because the script
@@ -160,6 +191,33 @@ _NEGATED_KEYWORD = re.compile(
     r"|\bdon't\b|\bdoesn't\b|\bisn't\b|\baren't\b)\s+(?:\w+\s+){0,2}$"
 )
 
+#: Code spans and fenced blocks are masked out before a claim is read, because a body
+#: that *quotes* a closing keyword is not making one. This is the second live
+#: self-caught defect (issue #1644's family): while this tool's own pull request
+#: (#1643) explained the claim/mention distinction it wrote the sentence "of the two
+#: open PRs naming #1606, #1638's body ends `Closes #1606.` while …" — and the reading
+#: reported #1643 as **declaring** #1606, making issue #1606 read `DUPLICATE` (claimed
+#: by both #1638 and #1643) when the second claim existed only inside backticks. A
+#: quotation is the shape a tool's own documentation takes, so this is not an exotic
+#: input for this family.
+#:
+#: The direction is deliberate and is the same one the list and negation bounds take:
+#: masking **stops early**, which costs a loud `UNCLAIMED` row on a PR that does claim
+#: the issue, while reading the quotation **invents a link** — a silent falsehood, and
+#: the one direction this tool exists to prevent. What is genuinely unmeasured is what
+#: GitHub's own parser does with a keyword inside a code span; if it honours it, this
+#: reading under-claims, and the symptom is visible on the row rather than hidden. The
+#: masking is length-preserving so the negation window and match offsets keep pointing
+#: at the same characters.
+_FENCED_BLOCK = re.compile(r"^[ \t]*(?:```|~~~).*?(?:^[ \t]*(?:```|~~~)[ \t]*$|\Z)", re.S | re.M)
+_INLINE_CODE = re.compile(r"`[^`\n]*`|``.*?``", re.S)
+
+
+def _without_code(text: str) -> str:
+    """`text` with inline code spans and fenced blocks blanked out, same length."""
+    masked = _FENCED_BLOCK.sub(lambda m: " " * len(m.group(0)), text)
+    return _INLINE_CODE.sub(lambda m: " " * len(m.group(0)), masked)
+
 
 @dataclass
 class Row:
@@ -201,13 +259,24 @@ class Refs:
     * `declared_closed` - closed or merged PRs that declared it. A merged declarer whose
       issue is still open is the anomaly worth naming (the keyword should have closed
       it), and a closed unmerged declarer is simply abandoned work;
-    * `mentioned` - PRs that referenced the issue **without** declaring it. Evidence of
-      attention, never of ownership.
+    * `mentioned_open`, `mentioned_landed`, `mentioned_abandoned` - PRs that referenced
+      the issue **without** declaring it, split three ways because the reader's next move
+      differs for each, and folding them together is a defect this tool shipped (issue
+      #1644): "nothing has been opened for it" was printed for five issues that merged
+      PRs referenced. Evidence of attention, never of ownership - but "attention" is not
+      one fact. An **open** referrer is a PR in flight; a **landed** one is work on
+      master that never closed the issue, which is the shape that has to be either closed
+      with a reading or answered with what remains; an **abandoned** one is an attempt
+      that was closed unmerged, and the host's rule of 2026-09-26 names what should
+      happen to it (a rejected or change-requested PR is updated in place, never
+      replaced).
     """
 
     declared_open: set[int] = field(default_factory=set)
     declared_closed: set[int] = field(default_factory=set)
-    mentioned: set[int] = field(default_factory=set)
+    mentioned_open: set[int] = field(default_factory=set)
+    mentioned_landed: set[int] = field(default_factory=set)
+    mentioned_abandoned: set[int] = field(default_factory=set)
 
 
 def _gh(args: list[str]) -> str:
@@ -240,8 +309,13 @@ def declared_claims(body: str | None) -> set[int]:
     Public on purpose: this is the reading every caller must agree with, and the tests
     drive it directly so that "a citation is not a claim" is pinned at the unit level
     and not only through a whole report.
+
+    The text a keyword is read from has its code spans and fenced blocks blanked out
+    first (`_without_code`), because a quoted keyword is not a claim — the second live
+    defect this reading caught in itself, and the reason both the masking and the
+    negation window are asserted in the tests rather than described.
     """
-    text = body or ""
+    text = _without_code(body or "")
     claims: set[int] = set()
     for match in _CLOSING_KEYWORD.finditer(text):
         if _NEGATED_KEYWORD.search(text[: match.start()]):
@@ -317,7 +391,7 @@ def timeline(repo: str, number: int) -> list[dict]:
 
 
 def referencing_prs(events: list[dict], issue_number: int) -> Refs:
-    """The PRs that referenced this issue, split into claims and mentions.
+    """The PRs that referenced this issue, split into claims and the three mentions.
 
     Read off an **issue's** timeline: the subject is the issue, so a `cross-referenced`
     event's source is the *referrer*, and one whose source carries a `pull_request`
@@ -328,13 +402,22 @@ def referencing_prs(events: list[dict], issue_number: int) -> Refs:
     event - measured on a live event, not assumed - so the split costs no extra call.
     A source with no body at all (or no `state`) is treated as a mention and as not
     open, never as a claim: an unreadable referrer must not be able to claim an issue.
+
+    A non-claiming referrer is then classified by what it *is*, from the same event
+    (measured 2026-09-26 on `issues/1553/timeline`: the source carries
+    `pull_request.merged_at` - `#1565` → `2026-09-24T05:24:54Z`, `#1569` →
+    `2026-09-24T10:48:24Z`, `#1607` → `2026-09-25T06:07:15Z` - and it is `null` for a
+    referrer that was only closed). `merged_at` is the discriminator rather than
+    `state`, because `state` is `closed` for an abandoned PR and for a closed *issue*
+    alike, while only a merge says the change is on master.
     """
     refs = Refs()
     for event in events:
         if event.get("event") != "cross-referenced":
             continue
         source = (event.get("source") or {}).get("issue") or {}
-        if "pull_request" not in source:
+        pull = source.get("pull_request")
+        if not isinstance(pull, dict):
             continue
         number = source.get("number")
         if number is None:
@@ -345,8 +428,12 @@ def referencing_prs(events: list[dict], issue_number: int) -> Refs:
         open_pr = str(source.get("state") or "unknown") == "open"
         if issue_number in declared_claims(source.get("body")):
             (refs.declared_open if open_pr else refs.declared_closed).add(pr)
+        elif open_pr:
+            refs.mentioned_open.add(pr)
+        elif pull.get("merged_at"):
+            refs.mentioned_landed.add(pr)
         else:
-            refs.mentioned.add(pr)
+            refs.mentioned_abandoned.add(pr)
     return refs
 
 
@@ -407,6 +494,50 @@ def _numbers(values) -> str:
     return " ".join(f"#{n}" for n in sorted(values))
 
 
+def _mention_detail(refs: Refs, number: int) -> str:
+    """What a reader should do about each class of non-declaring referrer.
+
+    The measured reason this is three clauses rather than one (issue #1644): folding
+    them together printed *"nothing has been opened for it"* for five open issues that
+    **merged** PRs referenced, so an idle issue and one whose work landed read
+    identically - the ambiguity a backlog of never-closed issues is made of.
+
+    The landed clause comes first because it is the one that changes what a reader does
+    next: a merged referrer means the change is on master, so the question is whether
+    that *was* the remedy (close it with the reading) or not (say what remains). The
+    abandoned clause is second for the same reason from the other side - an attempt
+    died, and the host's rule of 2026-09-26 says it is answered in its own PR rather
+    than replaced. The open clause keeps the original sentence, which is still exactly
+    right for a PR in flight.
+
+    Every class present is named: an issue can carry all three at once, and a reader who
+    is told only the first would close an issue over landed work that does not finish
+    it.
+    """
+    clauses: list[str] = []
+    if refs.mentioned_landed:
+        clauses.append(
+            f"{_numbers(refs.mentioned_landed)} referenced it and are merged, and "
+            f"neither declares `Closes #{number}` - work has landed on master carrying "
+            "this number, so either close this issue with the reading that says that "
+            "was the remedy, or state here what it still leaves"
+        )
+    if refs.mentioned_abandoned:
+        clauses.append(
+            f"{_numbers(refs.mentioned_abandoned)} referenced it and were closed "
+            f"without merging and without declaring `Closes #{number}` - an attempt "
+            "that ended, which the rule answers in its own PR (a rejected or "
+            "change-requested PR is updated in place, never replaced by a second one)"
+        )
+    if refs.mentioned_open:
+        clauses.append(
+            f"{_numbers(refs.mentioned_open)} referenced it without declaring "
+            f"`Closes #{number}` - a mention is not a claim, so nothing has been "
+            "opened for it by them"
+        )
+    return "; ".join(clauses)
+
+
 def judge_issues(
     issues: list[dict],
     refs_by_issue: dict[int, Refs],
@@ -450,12 +581,8 @@ def judge_issues(
                     "was never closed - either close this issue with the reading that "
                     "says the work is done, or open the PR that finishes it"
                 )
-            elif refs.mentioned:
-                detail = (
-                    f"{_numbers(refs.mentioned)} referenced it without declaring "
-                    f"`Closes #{number}` - a mention is not a claim, so "
-                    "nothing has been opened for it"
-                )
+            elif refs.mentioned_landed or refs.mentioned_abandoned or refs.mentioned_open:
+                detail = _mention_detail(refs, number)
             else:
                 detail = "nothing has been opened for it"
             rows.append(Row("issue", number, issue["title"], "unclaimed", detail, age))
