@@ -215,6 +215,23 @@ def check_nonlocal(app_path: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The `tree: ` line below answers "which tree" *before* the verdict, and one line of
+    # buffering stood between that promise and the text a reader gets: stdout is
+    # block-buffered when it is not a tty — which is how a cycle reads this report
+    # (`2>&1 | cat -n`, and CI's log capture) — while stderr is not, so a verdict written
+    # to stderr overtook the tree line written to stdout. Measured on this file
+    # 2026-09-26: under `2>&1 | cat -n` the verdict is line 1 and `tree: ` is line 2;
+    # with `PYTHONUNBUFFERED=1` the program's own order prints correctly, which is what
+    # makes it buffering rather than sequencing. The same remedy is carried by every
+    # other member of the family — this file was the one the family's sweep could not
+    # reach while its glob was spelled `check-*.py` (issue: the hyphen-only spelling
+    # misses this name), and `tests/test_guard_report.py` now requires it of every gate
+    # that prints a tree line and writes verdicts to stderr.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(
         description="Verify nonlocal declarations in emrg/client/app.py are complete.",
     )
