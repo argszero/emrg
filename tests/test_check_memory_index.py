@@ -80,6 +80,18 @@ def _index(tmp_path: Path, name: str, lines: list[str]) -> Path:
     return path
 
 
+def _detail(tmp_path: Path, name: str) -> None:
+    """Write one detail file beside the index, so the row that names it resolves.
+
+    Every fixture that is about the two *numbers* needs this: since the resolution
+    reading landed, a row pointing at nothing makes the run exit 1 whatever its
+    length, so a fixture that names a file it never writes no longer isolates the
+    number it was built to test. Written from the row's own link, so the two
+    cannot drift apart.
+    """
+    (tmp_path / name).write_text(f"# {name}\n", encoding="utf-8")
+
+
 # ── the numbers, and where they come from ─────────────────────────────────────
 
 
@@ -153,6 +165,8 @@ def test_a_tree_whose_numbers_come_from_elsewhere_is_unmeasurable(tmp_path) -> N
 
 def test_an_index_of_exactly_the_cap_is_within(mod, tmp_path, capsys) -> None:
     """`cap` lines pass; the rule fires *past* the cap, not at it."""
+    for i in range(mod.MEMORY_INDEX_ROW_CAP):
+        _detail(tmp_path, f"f{i}.md")
     path = _index(
         tmp_path,
         "at-cap.md",
@@ -180,6 +194,7 @@ def test_one_line_past_the_cap_is_reported_with_its_number(mod, tmp_path, capsys
 def test_a_row_of_exactly_the_bound_is_within(mod, tmp_path, capsys) -> None:
     """A row of exactly `INDEX_TITLE_MAX_CHARS` chars passes."""
     bound = mod.INDEX_TITLE_MAX_CHARS
+    _detail(tmp_path, "f.md")
     path = _index(tmp_path, "at-bound.md", [_row("tail", bound)])
     assert mod.main([str(path)]) == 0
     out = capsys.readouterr().out
@@ -365,6 +380,120 @@ def test_the_tree_line_is_first_under_a_merged_pipe(tmp_path) -> None:
         f"the refusal overtook the identity line under a pipe: {proc.stdout[:200]!r}"
     )
     assert "could not measure" in proc.stdout
+
+
+# ── the third reading: a row's link, resolved ─────────────────────────────────
+
+
+def test_a_row_that_names_a_file_beside_the_index_resolves(mod, tmp_path, capsys) -> None:
+    """The resolving half, and the assertion is the *report's* count.
+
+    A row whose detail file is beside the index is the ordinary state, so the
+    reading has to say so positively: an instrument that only ever fires cannot be
+    told from one that fires on everything.
+    """
+    _detail(tmp_path, "detail.md")
+    path = _index(tmp_path, "links.md", ["- [a](detail.md)"])
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "row links 1, unresolved: 0" in out
+    assert "every row link resolves" in out
+
+
+def test_a_row_that_names_no_file_is_reported_with_its_line_and_target(
+    mod, tmp_path, capsys
+) -> None:
+    """The failing half: the row's line number *and* the target it named."""
+    path = _index(
+        tmp_path, "links.md", ["- [a](there.md)", "- [b](gone.md)"]
+    )
+    _detail(tmp_path, "there.md")
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row links 2, unresolved: 1" in out
+    assert "row at line 2 names gone.md" in out, out
+    assert "there.md" not in out.split("row at line")[1], (
+        "the row that resolves must not be reported as unresolved: " + out
+    )
+
+
+def test_resolution_is_relative_to_the_index_not_the_callers_cwd(
+    mod, tmp_path, capsys, monkeypatch
+) -> None:
+    """These rows name siblings, so the base is the index's own directory.
+
+    Run from a directory that holds nothing, so a reading that joined the target
+    onto the *cwd* would report every row unresolved - which is the defect the
+    position of the base decides, not a detail of the implementation.
+    """
+    _detail(tmp_path, "sibling.md")
+    path = _index(tmp_path, "links.md", ["- [a](sibling.md)"])
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert mod.main([str(path)]) == 0
+    assert "unresolved: 0" in capsys.readouterr().out
+
+
+def test_a_cross_directory_target_resolves_where_it_points(mod, tmp_path, capsys) -> None:
+    """A `../`-relative target is resolved as written, not treated as missing.
+
+    The store writes sibling links, but an agent hand-editing an index may point
+    at a detail file one level up; the check must read that spelling rather than
+    guess a second one.
+    """
+    (tmp_path / "mem").mkdir()
+    _detail(tmp_path, "up.md")
+    path = _index(tmp_path / "mem", "links.md", ["- [a](../up.md)"])
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+
+
+def test_a_url_and_an_anchor_are_not_rows_that_point_nowhere(
+    mod, tmp_path, capsys
+) -> None:
+    """The exemption list, in the state it exists for - and it is the whole list.
+
+    A row citing a GitHub URL or an in-file `#heading` is not naming a detail file,
+    so reporting it would make the reading fire on correct indexes and train its
+    reader to ignore it. Measured on this host's three live indexes 2026-09-26:
+    245 links, 0 unresolved, so the exemption is not doing the work of the rule.
+    """
+    path = _index(
+        tmp_path,
+        "links.md",
+        ["- [a](https://example.com/x.md) and [b](#heading) and [c](mailto:x@y.z)"],
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "row links 0, unresolved: 0" in out
+
+
+def test_several_links_in_one_row_are_all_resolved(mod, tmp_path, capsys) -> None:
+    """A hand-written pointer row carries several links; each is a thing to follow.
+
+    This host's evolution index is exactly that shape: 67 rows by the `- `
+    predicate, 221 links among them, while the store's parser recognises 21 rows.
+    A reading that checked only the first link would pass an index whose other 200
+    pointers are dead.
+    """
+    _detail(tmp_path, "one.md")
+    _detail(tmp_path, "three.md")
+    path = _index(
+        tmp_path, "links.md", ["- [a](one.md) · [b](two.md) · [c](three.md)"]
+    )
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row links 3, unresolved: 1" in out
+    assert "row at line 1 names two.md" in out, out
+
+
+def test_a_row_whose_link_resolves_is_not_repaired(mod, tmp_path, capsys) -> None:
+    """The tool reads. Rewriting a stale row is the agent's judgement, in place."""
+    path = _index(tmp_path, "links.md", ["- [a](gone.md)"])
+    before = path.read_bytes()
+    assert mod.main([str(path)]) == 1
+    assert path.read_bytes() == before
+    capsys.readouterr()
 
 
 # ── measures, never repairs ───────────────────────────────────────────────────

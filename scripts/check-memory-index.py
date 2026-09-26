@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A memory index, measured against the two numbers its rule names.
+"""A memory index, measured against the rule it answers to: two numbers, and its rows' links.
 
 Usage
 -----
@@ -43,8 +43,8 @@ references on one line. Those are rows the rule binds, the prompt pays for, and
 every store mechanism is blind to - so a reading that used the parser's grammar
 would exempt exactly the rows only an agent writes.
 
-Two readings, each from its own source
---------------------------------------
+Three readings, each from its own source
+----------------------------------------
 The line **cap** is `MEMORY_INDEX_ROW_CAP` and the row **bound** is
 `INDEX_TITLE_MAX_CHARS`, both imported here rather than spelled again: they are
 the two constants the prompt's rule is pinned to
@@ -54,7 +54,10 @@ the daemon's compaction note counts with, so the number printed and the number a
 trigger acts on are one reading. The row bound is counted in **characters**, which
 is the unit the rule names and the unit the embed budget spends (the store's
 *advisory* compares the file's bytes, a deliberately different reading - one CJK
-index fires one and not the other).
+index fires one and not the other). The row **links** are the third reading, and
+its source is not this rule's text but the resolution rule three other carriers
+already assert (named under *Scope*): the index's rows are the one carrier none of
+them read.
 
 Scope, named rather than implied
 --------------------------------
@@ -65,14 +68,33 @@ Scope, named rather than implied
   may live outside that tree - on this host it is the evolution root, which is
   issue #1606's measured divergence - so the path form is not a convenience but
   the way to reach it.
-* A row's target file is **not** checked. "The row names a detail file that is
-  there" is a different rule with a different remedy, and it is named here so this
-  tool is not read as covering it.
+* A row's target file **is** checked, and this is the third reading: a row link
+  that resolves to no file beside the index. The rule is the one this project
+  already asserts in three other carriers - `tests/test_project_context_paths.py`
+  for the paths `Agent.md`/`MANIFESTO.md` name, `check-citation-resolves.py` for
+  test node ids, `check-rant-citations.py` for the files a rant names - and the
+  index's own rows are the carrier none of them reads. Measured 2026-09-26 before
+  it was added: 245 links across this host's three live indexes, **0** unresolved,
+  so the value is the next rename, not a repair (the shape
+  `test_project_context_paths.py` was written in).
 * The character bound applies to **rows**. A title, a `>` note or a paragraph past
   512 chars is not a row and is not reported - the rule's subject is rows, which is
   what `100 x 512` bounds, and the renderer that writes them bounds the same thing.
 * An index with no rows (a title and prose only) is measured, not failed: it has
-  nothing for the bound to bind.
+  nothing for the bound to bind and nothing to resolve.
+
+What the resolution reading does not cover
+------------------------------------------
+* **Which** link is the row's own. A row carrying several `[x](file.md)`
+  references is checked for all of them, because the rule is "a row may not point
+  at nothing" and each link is a thing a reader can follow.
+* A target that exists but is not a *detail file* (a directory, an unrelated
+  file) resolves, and is not reported. "This row points somewhere that holds what
+  the row claims" is a different rule with a different remedy.
+* A target with a URL-escape spelling (`%20`) is resolved as written: this tool
+  does not guess a second spelling of a name the author wrote, and
+  `check-citation-resolves.py`'s own limit section is the precedent for saying so
+  rather than half-reading it.
 
 Which tree answered
 -------------------
@@ -83,9 +105,10 @@ derived from that root, so the two lines answer about one tree.
 
 Exit codes
 ----------
-``0``  every index read is within both numbers.
+``0``  every index read is within both numbers, and every row link resolves.
 ``1``  at least one index is over a number the rule names (the line cap, or a row
-       past the bound); each finding is printed with the line it is on.
+       past the bound), or carries a row link that resolves to no file; each
+       finding is printed with the line it is on.
 ``2``  nothing could be measured: no index under the tree, or a named index could
        not be read. An unreadable subject makes the reading incomplete, which is
        reported as such even when the other indexes were read - a partial reading
@@ -95,6 +118,8 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -173,6 +198,18 @@ except Exception as exc:  # noqa: BLE001 - reported by main(), never swallowed
 #: docstring's "What a row is, and why by shape").
 ROW_PREFIX = "- "
 
+#: A row's detail-file link: `](target)`. The same shape the store renders
+#: (`MemoryIndex._render_entry`) and the one the memory instructions tell an
+#: agent to write, so a row that carries several links is read as several.
+LINK = re.compile(r"\]\(([^)]+)\)")
+
+#: Targets that are not a file in the index's directory, and so are excluded
+#: from the resolution reading rather than reported as missing: an external URL
+#: is not this tree's to resolve, and a bare `#anchor` names a heading in the
+#: index itself. Named here as the whole exemption list, because an exemption
+#: that grows silently is how a check becomes vacuous.
+NON_FILE_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#)", re.IGNORECASE)
+
 RUNNER = "uv run --no-sync python3"
 
 
@@ -189,12 +226,16 @@ class Reading(NamedTuple):
     :param lines: its line count, `splitlines()` - the cap's subject.
     :param row_lines: the 1-based file line number of each row.
     :param row_lengths: each row's length in characters, in the same order.
+    :param row_targets: every file link a row carries, as
+        `(file line number, target)`, in file order - the resolution reading's
+        subject. Excludes what `NON_FILE_TARGET` names.
     """
 
     path: Path
     lines: int
     row_lines: tuple[int, ...]
     row_lengths: tuple[int, ...]
+    row_targets: tuple[tuple[int, str], ...] = ()
 
     @property
     def rows(self) -> int:
@@ -218,6 +259,30 @@ class Reading(NamedTuple):
             if length > bound
         ]
 
+    def unresolved(self) -> list[tuple[int, str]]:
+        """The row links that name no file, as `(file line number, target)`.
+
+        Resolved against the index's own directory, which is what a relative
+        target in one of these files means: the rows are written next to the
+        detail files they name, so `- [x](cycle-20260926-140150.md)` is a
+        sibling of the index, not of the caller's cwd. A target that is still
+        missing once resolved is reported - a row whose file is gone is a
+        pointer the reader follows into nothing, and the index is the only map
+        of the store.
+
+        Resolution is `os.path.exists` on the joined path: a symlink that
+        resolves is a file for this purpose, and a broken one is not (a broken
+        symlink is exactly the state a reader cannot follow).
+
+        :returns: one pair per unresolved link, in file order.
+        """
+        base = self.path.parent
+        out: list[tuple[int, str]] = []
+        for line, target in self.row_targets:
+            if not os.path.exists(os.path.join(base, target)):
+                out.append((line, target))
+        return out
+
 
 def measure(path: Path) -> Reading:
     """Read one index and count what the rule counts.
@@ -233,11 +298,17 @@ def measure(path: Path) -> Reading:
     lines = text.splitlines()
     row_lines: list[int] = []
     row_lengths: list[int] = []
+    row_targets: list[tuple[int, str]] = []
     for number, line in enumerate(lines, 1):
         if line.startswith(ROW_PREFIX):
             row_lines.append(number)
             row_lengths.append(len(line))
-    return Reading(path, len(lines), tuple(row_lines), tuple(row_lengths))
+            for target in LINK.findall(line):
+                if not NON_FILE_TARGET.match(target):
+                    row_targets.append((number, target))
+    return Reading(
+        path, len(lines), tuple(row_lines), tuple(row_lengths), tuple(row_targets)
+    )
 
 
 def default_indexes(root: Path) -> list[Path]:
@@ -282,11 +353,20 @@ def _report(reading: Reading) -> list[str]:
             f"  row at line {number} is {length} chars, "
             f"over the {INDEX_TITLE_MAX_CHARS} bound"
         )
+    unresolved = reading.unresolved()
+    out.append(
+        f"  row links {len(reading.row_targets)}, unresolved: {len(unresolved)}"
+    )
+    for number, target in unresolved:
+        out.append(
+            f"  row at line {number} names {target}, "
+            f"which is not beside {reading.path.name}"
+        )
     return out
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    """Measure each index and report against the rule's two numbers.
+    """Measure each index and report against the rule's numbers and its rows' links.
 
     :param argv: the command line, defaults to `sys.argv[1:]`.
     :returns: the exit code the docstring states.
@@ -305,19 +385,22 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Measure a MEMORY.md against the two numbers its rule names: "
+            "Measure a MEMORY.md against the rule for an index: "
             + (
-                f"{MEMORY_INDEX_ROW_CAP} lines, {INDEX_TITLE_MAX_CHARS} chars per row."
+                f"{MEMORY_INDEX_ROW_CAP} lines, {INDEX_TITLE_MAX_CHARS} chars per row"
                 if not THRESHOLD_ERROR
                 else "the rule's numbers are unreadable from this interpreter, so "
-                "every run reports that instead of a count."
+                "every run reports that instead of a count"
             )
+            + ", and every row link resolving to a file beside it."
         ),
         epilog=(
-            f"Exit 0: every index is within both numbers. Exit 1: at least one is "
-            f"over one of them. Exit 2: nothing could be measured (no index under "
-            f"the tree, or a named index could not be read). Example: {RUNNER} "
-            "scripts/check-memory-index.py ~/some/tree/.emrg/memory/MEMORY.md"
+            f"Exit 0: every index is within both numbers and every row link "
+            f"resolves. Exit 1: at least one is over one of them, or points at a "
+            f"file that is not there. Exit 2: nothing could be measured (no index "
+            f"under the tree, or a named index could not be read). Example: "
+            f"{RUNNER} scripts/check-memory-index.py "
+            "~/some/tree/.emrg/memory/MEMORY.md"
         ),
     )
     parser.add_argument(
@@ -389,17 +472,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         for reading in readings
         if reading.lines > MEMORY_INDEX_ROW_CAP
         or reading.over(INDEX_TITLE_MAX_CHARS)
+        or reading.unresolved()
     ]
     if not findings:
         print(
             f"OK: {len(readings)} index(es) within the two numbers the rule names "
-            f"({MEMORY_INDEX_ROW_CAP} lines, {INDEX_TITLE_MAX_CHARS} chars per row)"
+            f"({MEMORY_INDEX_ROW_CAP} lines, {INDEX_TITLE_MAX_CHARS} chars per row), "
+            "and every row link resolves"
         )
         return 0
 
     print(
-        f"{len(findings)} of {len(readings)} index(es) over a number the rule "
-        "names; the rule is compacted in place, by the agent itself"
+        f"{len(findings)} of {len(readings)} index(es) over a number the rule names, "
+        "or carrying a row link that resolves nowhere; the rule is compacted in "
+        "place, by the agent itself, and a stale row is rewritten or dropped when "
+        "the detail file is gone"
     )
     return 1
 
