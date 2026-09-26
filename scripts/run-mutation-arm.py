@@ -51,6 +51,17 @@ The pre-flight is the other half of it: the target is run **before** the mutatio
 an arm whose target does not collect and pass then is refused outright. That is what
 makes a later exit 4 attributable to the mutation rather than to a mistyped node id.
 
+Naming the reason is not enough when the reason is "your `--expect` text is not in the
+output": that verdict costs the caller a second pytest run typed by hand to find a
+fragment that *is*. So an UNJUDGEABLE report also prints the assertion lines the run
+echoed - pytest's `>` source line and its `E` explanation, marker stripped, capped at
+`_ASSERTION_CANDIDATES` - and any of them can be handed straight back as `--expect`.
+Measured 2026-09-26 (`cyc20260926-140150`), the shape that costs the round: an arm whose
+`--expect` was copied from the test's *message*, which pytest never prints because an
+earlier assertion on the same test fires first (it echoed `assert 1 < 0`; that fragment
+killed the arm in one step). The block is printed for this verdict only - for KILLED the
+expectation already matched, and for the refusals there is nothing to search for.
+
 What it does, in order
 ----------------------
 1. snapshot the named file and resolve the mutation anchor (exactly one occurrence);
@@ -138,6 +149,28 @@ EXIT_RESTORE_MISMATCH = 5
 #: `1 passed in 0.02s`, `3 passed, 1 warning in 0.10s` - the count pytest prints.
 _PASSED = re.compile(r"(\d+) passed")
 
+#: pytest's two echoed forms of the assertion that failed: the source line it writes
+#: with `>`, and its explanation, written with `E` - which carries the values
+#: substituted (`E   assert 0 == 1`). Both are text the run really printed, so either
+#: can be handed straight back as `--expect`.
+#:
+#: This exists for one verdict. UNJUDGEABLE means the `--expect` fragment did not
+#: appear in the output, and the caller's next move is to find one that does - which,
+#: without this, is a second pytest run typed by hand. Measured 2026-09-26
+#: (`cyc20260926-140150`): two arms in one cycle came back UNJUDGEABLE on a fragment
+#: copied from the test's *message*, and both were re-run by hand to find the assertion
+#: that fires first.
+#:
+#: The `assert` keyword is required so the explanation lines pytest writes *about* a
+#: failure (`+  where 0 = ...`, `AttributeError: ...`) are not offered as candidates:
+#: they are not assertions, and a caller who pasted one would get UNJUDGEABLE again.
+_ECHOED_ASSERTION = re.compile(r"^[>E]\s+(?P<text>.*\bassert\b.*)$")
+
+#: How many candidates the report prints, and how long each may be: the report is read
+#: from a terminal, and the first few lines of a failure are where its assertion is.
+_ASSERTION_CANDIDATES = 5
+_ASSERTION_MAX_CHARS = 200
+
 
 def _purge_bytecode(target: Path) -> list[str]:
     """Delete the bytecode caches that could answer for the mutated file.
@@ -201,6 +234,30 @@ def _passed_count(out: str) -> int:
     return int(found[-1]) if found else 0
 
 
+def _assertion_lines(out: str) -> list[str]:
+    """The assertion lines pytest echoed, marker stripped - candidates for `--expect`.
+
+    Order is the run's, duplicates are collapsed (a failure reports each assertion
+    once, but a parametrised id can repeat a line in the summary), and the list is
+    capped: this is offered as a fragment to retype, not as a copy of the report.
+
+    Empty is a real answer and is not an error: a run that failed without echoing an
+    assertion - a collection error, a fixture that raised - has nothing to offer, and
+    saying so by printing nothing is better than inventing a candidate.
+    """
+    seen: list[str] = []
+    for line in out.splitlines():
+        match = _ECHOED_ASSERTION.match(line)
+        if match is None:
+            continue
+        text = match.group("text").strip()[:_ASSERTION_MAX_CHARS]
+        if text and text not in seen:
+            seen.append(text)
+        if len(seen) >= _ASSERTION_CANDIDATES:
+            break
+    return seen
+
+
 def _why_unjudgeable(rc: int, expect: str, out: str) -> str:
     if rc == PYTEST_USAGE_ERROR:
         return (
@@ -252,6 +309,10 @@ class Arm:
         #: than trust it.
         self.mutated_rc: int | None = None
         self.mutated_passed: int | None = None
+        #: the assertion lines the post-mutation run echoed, as candidates for
+        #: `--expect` - printed when the verdict is UNJUDGEABLE, which is the one
+        #: state where the caller has to retype the fragment.
+        self.assertions: list[str] = []
 
     def decide(self, verdict: str, why: str, code: int) -> None:
         self.verdict, self.why, self.code = verdict, why, code
@@ -267,6 +328,7 @@ class Arm:
             "failed_node": self.failed_node,
             "mutated_rc": self.mutated_rc,
             "mutated_passed": self.mutated_passed,
+            "assertions": list(self.assertions),
             "restored": self.restored,
             "verdict": self.verdict,
             "why": self.why,
@@ -290,6 +352,13 @@ def _report(arm: Arm, as_json: bool) -> None:
     print(f"failed node: {arm.failed_node or '-'}")
     print(f"restored byte-for-byte: {arm.restored}")
     print(f"verdict: {arm.verdict} - {arm.why}")
+    if arm.verdict == UNJUDGEABLE and arm.assertions:
+        # Printed only for the verdict whose reader has to retype the fragment. For
+        # KILLED the expectation already matched, and for the other states the reason
+        # is a refusal rather than a search - so this stays out of the common report.
+        print("the run did echo these assertion lines, any of which can be --expect:")
+        for text in arm.assertions:
+            print(f"  {text}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -318,7 +387,9 @@ def main(argv: list[str] | None = None) -> int:
             "because pytest always echoes it (e.g. 'assert 2 == 3', or "
             "'assert (tree / \"subject.py\").read_text'). A fragment copied from the "
             "test's *message* can be missed when an earlier assertion in the same test "
-            "fails first"
+            "fails first - and when that happens the verdict is UNJUDGEABLE and the "
+            "report prints the assertion lines the run did echo, so the retry is one "
+            "step rather than a second run typed by hand"
         ),
     )
     parser.add_argument("--label", default="", help="what this arm breaks, for the report")
@@ -395,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
                 arm.mutated_rc = proc.returncode
                 arm.mutated_passed = _passed_count(out)
                 arm.failed_node = _failed_node(out)
+                arm.assertions = _assertion_lines(out)
                 if proc.returncode == PYTEST_OK:
                     arm.decide(
                         SURVIVED,
