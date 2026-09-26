@@ -1,27 +1,26 @@
-"""The issue/PR link reading: both directions, and the states that are not `linked`.
+"""The issue/PR link reading: claims, mentions, and the states that are not `linked`.
 
 Host 2026-09-26T18:52:57 stated the rule (`scripts/check-issue-links.py` quotes it
 verbatim in its docstring): one issue is finished by exactly one PR, each names the
 other, and a rejected or change-requested PR is updated in place. This file is the
 evidence that the reading built for it answers *that* question.
 
-The tests are built around the one mistake the tool can make and still look right
--------------------------------------------------------------------------------
-Both directions of the link are read from GitHub, but **not from the same place**: an
-issue's timeline records the PRs that referenced it, and a PR's timeline records the
-issues that referenced it. Read the wrong map for a side and every one-sided link
-becomes bidirectional — the report says `linked` everywhere and the tool is worthless
-while looking healthy. So the fixtures below are built as three shapes that are
-indistinguishable if the two maps are confused, and each is asked about explicitly:
+The two mistakes the tool can make and still look right
+-------------------------------------------------------
+**Reading a mention as a claim.** The first version of the tool treated any PR
+cross-reference as a claim, and its own pull request proved it wrong: a body that
+*cites* #1553/#1598/#1606 as evidence made all three read as claimed by a PR that
+finishes none of them. A claim is GitHub's closing keyword (the form the platform
+itself auto-closes on), and `test_a_mention_is_not_a_claim` plus
+`test_a_body_that_cites_issues_declares_none_of_them` are what hold that line.
 
-* `test_a_pr_side_mention_does_not_make_an_issue_name_it_back` — the issue names the PR
-  and the PR does not name the issue: the PR's `one-way`, never `linked`;
-* `test_an_issue_naming_a_pr_that_does_not_reply_is_one_way_not_linked` — the mirror
-  case on the issue side (the PR's timeline carries the issue's mention, the issue's
-  timeline carries nothing from the PR);
-* `test_an_issue_reference_is_not_counted_as_a_pr_claim` — an issue whose timeline shows
-  a *cross-reference from another issue* has no claim on it at all: only a source that
-  carries `pull_request` counts.
+**Transposing the two directions.** Both are read from GitHub, but not from the same
+place: an issue's timeline records the PRs that referenced it, and a PR's timeline
+records the issues that referenced it. Read the wrong map for a side and every one-sided
+link becomes bidirectional — the report says `linked` everywhere and the tool is
+worthless while looking healthy. `test_the_two_directions_are_read_from_opposite_sources_and_never_transposed`
+pins that at the unit level, and three report-level tests ask the three shapes that a
+confusion would flatten.
 
 The fakes never touch the network: `_gh` is replaced, and the replacement is a routing
 table that records every call, so a test whose fake was never called cannot pass while
@@ -65,25 +64,32 @@ def _issue(number: int, title: str = "an issue", created: str = "2026-09-24T10:0
     return {"number": number, "title": title, "created_at": created}
 
 
-def _pr(number: int, title: str = "a pr", created: str = "2026-09-26T05:00:00Z") -> dict:
+def _pr(
+    number: int,
+    title: str = "a pr",
+    body: str = "",
+    created: str = "2026-09-26T05:00:00Z",
+) -> dict:
     """An open PR as `/issues` reports it — the discriminator is `pull_request`."""
     return {
         "number": number,
         "title": title,
+        "body": body,
         "created_at": created,
         "pull_request": {"url": f"https://api.github.com/repos/{REPO}/pulls/{number}"},
     }
 
 
-def _refers_to(number: int, *, is_pr: bool, state: str = "open") -> dict:
+def _refers_to(number: int, *, is_pr: bool, state: str = "open", body: str = "") -> dict:
     """A `cross-referenced` event whose source is `number`.
 
-    `is_pr` is the whole test: GitHub records whether the *referrer* was a PR by
-    putting a `pull_request` object on the source. Everything the tool decides is
-    downstream of reading this key correctly, which is why the fixtures build it
-    explicitly rather than deriving it from the number.
+    `is_pr` is one half of the test: GitHub records whether the *referrer* was a PR by
+    putting a `pull_request` object on the source. `body` is the other half — the
+    referrer's own text, which is what decides claim vs mention for a PR source, and it
+    is present on a real event (measured 2026-09-26), so the fixtures carry it rather
+    than fetching it separately.
     """
-    source: dict = {"number": number, "state": state}
+    source: dict = {"number": number, "state": state, "body": body}
     if is_pr:
         source["pull_request"] = {"url": f"https://api.github.com/repos/{REPO}/pulls/{number}"}
     return {"event": "cross-referenced", "source": {"issue": source}}
@@ -92,16 +98,14 @@ def _refers_to(number: int, *, is_pr: bool, state: str = "open") -> dict:
 class FakeGh:
     """`_gh` replaced by a routing table; every call recorded.
 
-    Two payloads are served, both as the JSON *text* `gh` would print, because the
-    tool parses its own output: the open queue (one `/issues` call) and a per-subject
+    Two payloads are served, both as the JSON *text* `gh` would print, because the tool
+    parses its own output: the open queue (one `/issues` call) and a per-subject
     timeline. An unexpected query is an assertion failure rather than an empty answer,
     so a typo in a path cannot read as "no links".
 
-    `pages` reproduces the shape measured on this machine (2026-09-26): with no `--jq`,
-    `gh api --paginate` prints **one merged array on one line**, so N pages are one
-    document with N copies of the rows. That is a fact about gh, not a convenience —
-    the sibling guards' per-line parsing is for a `--jq`-filtered call, which is a
-    different shape (pinned separately below).
+    The shape served is the one measured on this machine (2026-09-26): with no `--jq`,
+    `gh api --paginate` prints **one merged array on one line**. The other measured
+    shape — a filtered call's one-object-per-line — has its own test.
     """
 
     def __init__(
@@ -149,219 +153,127 @@ def _run(mod, capsys, argv: list[str] | None = None):
     return rc, out
 
 
-# --------------------------------------------------------------------------- #
-# The link, as both sides record it
-# --------------------------------------------------------------------------- #
+def _detail(out: str, subject: str) -> str:
+    """The indented detail of one subject's block, and only that subject's.
 
-
-def test_a_linked_pair_exits_zero_and_names_both_directions(mod, monkeypatch, capsys) -> None:
-    """The positive case, and the words it is reported in.
-
-    Issue #10's timeline carries PR #20; PR #20's timeline carries issue #10. Both
-    rows read `linked`, the exit code is 0, and the details name the counterpart
-    rather than merely asserting that something was found.
+    Asserting `"…" in out` over a whole report lets a *different* subject's row satisfy
+    the assertion, and the first version of this file did exactly that: a mutation arm
+    that made issue-to-issue references read as PR claims survived
+    `test_an_issue_reference_is_not_counted_as_a_pr_claim`, because the sibling issue
+    #30's own row carried the words `nothing has been opened for it` while #10's row said
+    the opposite. The arm is the evidence, not the reasoning — so the detail assertions
+    read the block they are about.
     """
-    fake = FakeGh(
+    lines = out.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith(subject):
+            return lines[index + 1].strip()
+    raise AssertionError(f"{subject} is not in the report:\n{out}")
+
+
+def _linked_pair() -> FakeGh:
+    """The positive case: PR 20 declares `Closes #10`, and issue 10 names it back."""
+    return FakeGh(
         [_issue(10, "the problem")],
-        [_pr(20, "the fix")],
-        {10: [_refers_to(20, is_pr=True)], 20: [_refers_to(10, is_pr=False)]},
-    )
-    _install(mod, monkeypatch, fake)
-
-    rc, out = _run(mod, capsys)
-
-    assert rc == 0, out
-    assert "OK:" in out
-    assert "#10 issue ok" in out and "#20 PR ok" in out
-    assert "#20 references it and this issue names #20 back" in out
-    assert "belongs to #10, named back in the issue" in out
-    # The subject comes before any verdict, and both sides were really queried -
-    # a `linked` verdict built without reading a timeline would otherwise pass here.
-    assert out.splitlines()[0].startswith(f"repo: {REPO}, 1 open issue(s), 1 open PR(s)")
-    assert sorted(fake.timeline_calls) == [10, 20]
-
-
-def test_the_queue_is_read_from_the_one_endpoint_that_returns_both(mod, monkeypatch, capsys) -> None:
-    """Issues and PRs are separated by the `pull_request` key, not by a number range.
-
-    A range would be a guess; the key is what the API says. The assertion is on the
-    counts the report prints, so a queue that put the PR in the issue list would be
-    visible.
-    """
-    fake = FakeGh(
-        [_issue(10)],
-        [_pr(20)],
-        {10: [_refers_to(20, is_pr=True)], 20: [_refers_to(10, is_pr=False)]},
-    )
-    _install(mod, monkeypatch, fake)
-
-    rc, out = _run(mod, capsys)
-
-    assert rc == 0
-    assert "1 open issue(s), 1 open PR(s)" in out
-    queue_calls = [c for c in fake.calls if any("/issues?" in a for a in c)]
-    assert len(queue_calls) == 1, "the queue must be one call, not one per subject"
-
-
-def test_both_measured_gh_output_shapes_are_read(mod, monkeypatch, capsys) -> None:
-    """The queue reads correctly in both shapes `gh api --paginate` can print.
-
-    Both were measured on this machine (2026-09-26), and the parser branches on them,
-    so both are asserted rather than one being left to a comment:
-
-    * **unfiltered** — this tool's call — merges every page into **one JSON array on
-      one line**. That is the shape the fake serves everywhere else in this file, and
-      the assertion here is that it reads as exactly the rows it contains (one issue,
-      one PR) with a single queue call.
-    * **`--jq`-filtered** — the shape `check-vote-count.py` records — is one JSON
-      object per line, which is not one document. A call site that adds a filter must
-      not turn the queue into an "unreadable payload" false alarm, so the per-line
-      branch is pinned here.
-    """
-    fake = FakeGh(
-        [_issue(10)],
-        [_pr(20)],
-        {10: [_refers_to(20, is_pr=True)], 20: [_refers_to(10, is_pr=False)]},
-    )
-    _install(mod, monkeypatch, fake)
-
-    rc, out = _run(mod, capsys)
-
-    assert rc == 0, out
-    assert "1 open issue(s), 1 open PR(s)" in out
-    assert len([c for c in fake.calls if any("/issues?" in a for a in c)]) == 1
-
-    # The filtered shape: each line its own JSON value, so the stream is not one
-    # document and the per-line branch is the one that must answer.
-    filtered = FakeGh(
-        [],
-        [],
-        {10: [_refers_to(20, is_pr=True)], 20: [_refers_to(10, is_pr=False)]},
-    )
-
-    def routed(args: list[str]) -> str:
-        target = next(a for a in args if a.startswith("repos/"))
-        if "/issues?" in target:
-            return "\n".join(json.dumps(row) for row in [[_issue(10)], [_pr(20)]])
-        number = int(target.split("/issues/")[1].split("/")[0])
-        return json.dumps(filtered.timelines[number])
-
-    monkeypatch.setattr(mod, "_gh", routed)
-    rc, out = _run(mod, capsys)
-
-    assert rc == 0, out
-    assert "1 open issue(s), 1 open PR(s)" in out
-
-
-# --------------------------------------------------------------------------- #
-# The states that are not `linked`
-# --------------------------------------------------------------------------- #
-
-
-def test_a_pr_side_mention_does_not_make_an_issue_name_it_back(mod, monkeypatch, capsys) -> None:
-    """The PR names no issue, and the issue names the PR: `one-way`, never `linked`.
-
-    This is the transposition trap. The mention is recorded on the **PR's** timeline
-    only, so a tool that answered the PR's question from the issue's map would find
-    the (nonexistent) reverse mention and report `linked`. The assertion is the state
-    *and* the remedy that names the PR body, because that is the half that is missing.
-    """
-    fake = FakeGh(
-        [_issue(10, "the problem")],
-        [_pr(20, "the fix")],
-        {10: [], 20: [_refers_to(10, is_pr=False)]},
-    )
-    _install(mod, monkeypatch, fake)
-
-    rc, out = _run(mod, capsys)
-
-    assert rc == 1, out
-    assert "#10 issue ONE-WAY" in out
-    assert "#20 PR ONE-WAY" in out
-    assert "names it and this PR names no issue" in out
-    assert "`Closes #N` where the PR finishes it" in out
-    assert "#10 issue ok" not in out
-
-
-def test_an_issue_naming_a_pr_that_does_not_reply_is_one_way_not_linked(
-    mod, monkeypatch, capsys
-) -> None:
-    """The mirror: the PR references the issue, the issue never says so.
-
-    Same rule, different reader — a reader of the issue is the one left looking for
-    the work, so the remedy is a comment on the issue.
-    """
-    fake = FakeGh(
-        [_issue(10, "the problem")],
-        [_pr(20, "the fix")],
-        {10: [_refers_to(20, is_pr=True)], 20: []},
-    )
-    _install(mod, monkeypatch, fake)
-
-    rc, out = _run(mod, capsys)
-
-    assert rc == 1, out
-    assert "#10 issue ONE-WAY" in out
-    assert "#20 PR ONE-WAY" in out
-    assert "#20 references it, and this issue never names #20" in out
-    assert "gh issue comment 10" in out
-
-
-def test_an_unclaimed_issue_with_no_references_says_nothing_was_opened(mod, monkeypatch, capsys) -> None:
-    """An open issue nothing claims, and no merged PR ever claimed.
-
-    The detail must not borrow the "landed and never closed" wording: there is no
-    landed work to close it with, and the two remedies are different (open a PR vs
-    close the issue).
-    """
-    fake = FakeGh([_issue(10, "untouched")], [], {10: []})
-    _install(mod, monkeypatch, fake)
-
-    rc, out = _run(mod, capsys)
-
-    assert rc == 1, out
-    assert "#10 issue UNCLAIMED" in out
-    assert "nothing has been opened for it" in out
-    assert "landed and was never closed" not in out
-
-
-def test_an_unclaimed_issue_names_the_merged_prs_that_already_referenced_it(
-    mod, monkeypatch, capsys
-) -> None:
-    """The "landed and never closed" shape, which is the live queue's most common one.
-
-    `#30` and `#40` are *closed* PRs that referenced the issue — the state that reads
-    identically to "nothing was ever done" unless the tool distinguishes the two. It
-    must name them, and the remedy must be the two-sided one.
-    """
-    fake = FakeGh(
-        [_issue(10, "landed but open")],
-        [],
-        {10: [_refers_to(30, is_pr=True, state="closed"), _refers_to(40, is_pr=True, state="merged")]},
-    )
-    _install(mod, monkeypatch, fake)
-
-    rc, out = _run(mod, capsys)
-
-    assert rc == 1, out
-    assert "#30 #40 do(es)" in out
-    assert "landed and was never closed" in out
-    assert "nothing has been opened for it" not in out
-
-
-def test_two_open_prs_on_one_issue_is_reported_as_duplicate(mod, monkeypatch, capsys) -> None:
-    """The shape the host's third clause forbids: a second PR where an update belongs.
-
-    Both PR numbers must appear, because the remedy is to fold one into the other and
-    a reader cannot do that from a count.
-    """
-    fake = FakeGh(
-        [_issue(10, "the problem")],
-        [_pr(20, "one attempt"), _pr(21, "another attempt")],
+        [_pr(20, "the fix", body="Closes #10.")],
         {
-            10: [_refers_to(20, is_pr=True), _refers_to(21, is_pr=True)],
+            10: [_refers_to(20, is_pr=True, body="Closes #10.")],
             20: [_refers_to(10, is_pr=False)],
-            21: [_refers_to(10, is_pr=False)],
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The claim contract: a closing keyword, not a mention
+# --------------------------------------------------------------------------- #
+
+
+def test_declared_claims_reads_githubs_closing_keywords_only(mod) -> None:
+    """Both halves of the contract: every keyword form, and everything that is not one.
+
+    The negative half is the one that matters — it is the shape that made the first
+    version of this tool report three unclaimed issues as claimed. `None` is included
+    because GitHub reports a bodyless PR as JSON `null`, and a caller should not have to
+    remember to coalesce that.
+    """
+    for body in (
+        "Closes #1",
+        "closes #1",
+        "Closed #1.",
+        "Fix #1",
+        "fixes #1",
+        "Fixed: #1",
+        "Resolve #1",
+        "resolves #1",
+        "resolved #1",
+        "This PR closes #1, because the reader needs it.",
+    ):
+        assert mod.declared_claims(body) == {1}, body
+    assert mod.declared_claims("Closes: #7") == {7}
+
+    # The list form: references follow the keyword separated by commas or spaces —
+    # `Closes #1, #2`, `Closes #1, #2, #3`, `Closes #1 #2`.
+    assert mod.declared_claims("Closes #1, #2") == {1, 2}
+    assert mod.declared_claims("Closes #1, #2, #3 and #4") == {1, 2, 3}
+    assert mod.declared_claims("Closes #1 #2") == {1, 2}
+    assert mod.declared_claims("Fixes #1\nCloses #2") == {1, 2}
+
+    # …and a conjunction ends it, so `#4` above is *not* read as a claim. This is the
+    # conservative side on purpose: stopping early costs a false alarm (`UNCLAIMED` on a
+    # PR that does claim it, which a reader sees and fixes by adding the keyword), while
+    # running on costs a false link — a claim asserted where none exists, which is the
+    # silent direction and the one this whole file exists to prevent.
+    assert mod.declared_claims("Closes #1, #2 and #3") == {1, 2}
+    assert mod.declared_claims("Closes #1 and #2") == {1}
+
+
+def test_a_negated_keyword_is_not_a_claim(mod) -> None:
+    """The one place the reading leaves a plain regex, and both of its edges.
+
+    A body that writes `it is not closed: #1 has no handler` carries a keyword *and* a
+    reference, so a regex-only reading claims #1 — a link that does not exist, reported
+    silently. That sentence is not hypothetical for this tool: the prose that motivated
+    it (a docstring explaining what a mention is not) is exactly that shape.
+
+    The bound is asserted too, because a heuristic that quietly covers everything is a
+    different tool: the negation must be in the keyword's own clause and within two
+    words. A comma or a fuller clause ends the window, so the two `True` cases below are
+    the documented limit — they read as claims, and a reader sees them in the report.
+    """
+    assert mod.declared_claims("it is not closed: #1 has no handler") == set()
+    assert mod.declared_claims("This does not close #2.") == set()
+    assert mod.declared_claims("never fixes #3") == set()
+    assert mod.declared_claims("doesn't resolve #4") == set()
+
+    # The window, stated: a new clause after the negation does not reach the keyword.
+    assert mod.declared_claims("it is not this, but it closes #5") == {5}
+    assert mod.declared_claims("does not touch #6, closes #7") == {7}
+
+    for body in (
+        "",
+        None,
+        "the #1 class, in the carrier that matters",  # a citation
+        "See #1 for the measurement.",                # a pointer
+        "closes the loop on #1",                       # a verb, not a keyword + ref
+        "fixes up the #1 path",                        # ditto
+        "it is not closed: #1 has no handler",         # a keyword in prose
+    ):
+        assert mod.declared_claims(body) == set(), body
+
+
+def test_a_mention_is_not_a_claim(mod, monkeypatch, capsys) -> None:
+    """A PR that references an issue without declaring it does not claim it.
+
+    This is the incident, reproduced at report level: the reference is real and GitHub
+    records it, so a mention-counting reading reports the issue as handled. The issue
+    must read `unclaimed`, and the row must say *why* the reference did not count.
+    """
+    fake = FakeGh(
+        [_issue(10, "the problem")],
+        [_pr(20, "cites it", body="See #10 for the measurement.")],
+        {
+            10: [_refers_to(20, is_pr=True, body="See #10 for the measurement.")],
+            20: [],
         },
     )
     _install(mod, monkeypatch, fake)
@@ -369,36 +281,42 @@ def test_two_open_prs_on_one_issue_is_reported_as_duplicate(mod, monkeypatch, ca
     rc, out = _run(mod, capsys)
 
     assert rc == 1, out
-    assert "#10 issue DUPLICATE" in out
-    assert "more than one open PR references it (#20, #21)" in out
-    assert "updated in place, never replaced by a second one" in out
+    assert "#10 issue UNCLAIMED" in out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    assert "#20 referenced it without declaring `Closes #10`" in detail
+    assert "a mention is not a claim" in detail
+    assert "#10 issue ok" not in out
 
 
-def test_a_pr_that_names_no_issue_is_unlinked(mod, monkeypatch, capsys) -> None:
-    """An open PR belonging to no tracked problem, in both directions.
+def test_a_body_that_cites_issues_declares_none_of_them(mod, monkeypatch, capsys) -> None:
+    """The measured incident exactly: one claim among several citations.
 
-    Not `one-way`: there is nothing on either side, so the remedy is to name the issue
-    rather than to answer a mention.
-
-    The fixture carries the measured shape that makes this decidable: a PR's timeline
-    really does hold `cross-referenced` events whose source is **another PR** (PR #1638
-    carried #1633/#1637/#1640). Those are PR-to-PR mentions and say nothing about which
-    issue owns this PR, so the reading must ignore them — a `pull_request` key read as
-    "an issue names it back" would turn every cross-referenced PR into a `one-way` row.
+    PR #1643's body (this tool's own) cites #1551/#1553/#1598/#1606 as evidence and
+    declares only #1642. The three cited issues must stay unclaimed while the declared
+    one is claimed — a count that moved for all four is the defect, and a count that
+    moved for none would mean the declaration is not read at all.
     """
+    cited = "Cited: #11, #12 and #13 are the evidence."
     fake = FakeGh(
-        [],
-        [_pr(20, "an orphan"), _pr(21, "a related PR")],
-        {20: [_refers_to(21, is_pr=True)], 21: []},
+        [_issue(10, "the one it finishes"), _issue(11), _issue(12), _issue(13)],
+        [_pr(20, "the fix", body=f"Closes #10.\n\n{cited}")],
+        {
+            10: [_refers_to(20, is_pr=True, body=f"Closes #10.\n\n{cited}")],
+            11: [_refers_to(20, is_pr=True, body=f"Closes #10.\n\n{cited}")],
+            12: [_refers_to(20, is_pr=True, body=f"Closes #10.\n\n{cited}")],
+            13: [_refers_to(20, is_pr=True, body=f"Closes #10.\n\n{cited}")],
+            20: [],
+        },
     )
     _install(mod, monkeypatch, fake)
 
     rc, out = _run(mod, capsys)
 
     assert rc == 1, out
-    assert "#20 PR UNLINKED" in out
-    assert "belongs to no tracked problem" in out
-    assert "ONE-WAY" not in out
+    assert "#10 issue ONE-WAY" in out or "#10 issue ok" in out  # claimed, one way or both
+    for number in (11, 12, 13):
+        assert f"#{number} issue UNCLAIMED" in out, out
+    assert "#10 issue UNCLAIMED" not in out
 
 
 def test_an_issue_reference_is_not_counted_as_a_pr_claim(mod, monkeypatch, capsys) -> None:
@@ -420,7 +338,173 @@ def test_an_issue_reference_is_not_counted_as_a_pr_claim(mod, monkeypatch, capsy
 
     assert rc == 1, out
     assert "#10 issue UNCLAIMED" in out
-    assert "nothing has been opened for it" in out
+    assert _detail(out, "#10 issue UNCLAIMED") == "nothing has been opened for it"
+    assert "UNLINKED" not in out  # an issue reference is not a PR row either
+
+
+def test_a_merged_declarer_names_the_landed_and_never_closed_shape(
+    mod, monkeypatch, capsys
+) -> None:
+    """A merged PR that declared the issue, with the issue still open.
+
+    The keyword should have closed it when the PR merged, so this is an anomaly worth
+    its own words — and different from a mention, which is why the two details are
+    asserted against a fixture that carries one of each.
+    """
+    fake = FakeGh(
+        [_issue(10, "landed but open")],
+        [],
+        {
+            10: [
+                _refers_to(30, is_pr=True, state="closed", body="Closes #10."),
+                _refers_to(40, is_pr=True, state="open", body="just mentions #10"),
+            ]
+        },
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    assert "#30 declared `Closes #10`" in detail
+    assert "merged or closed" in detail
+    assert "landed and was never closed" in detail
+
+
+def test_a_closed_issue_naming_a_pr_is_not_a_live_link(mod, monkeypatch, capsys) -> None:
+    """The open-queue boundary, and it is stated in the row rather than implied.
+
+    A PR whose only mention is in an issue that has since closed reads `unlinked`: the
+    mention is history, and counting it as "the issue names it back" would invent a live
+    link out of an archived one. The remedy text still tells the reader what to do.
+    """
+    fake = FakeGh([], [_pr(20, "the fix", body="")], {20: [_refers_to(99, is_pr=False)]})
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    assert "#20 PR UNLINKED" in out
+    assert "0 open issue(s), 1 open PR(s)" in out
+    # the remedy, not just the label
+    assert "declare" in _detail(out, "#20 PR UNLINKED")
+
+
+def test_a_declaration_on_a_number_that_is_not_open_is_named(mod, monkeypatch, capsys) -> None:
+    """`Closes #99` where 99 is not among the open issues.
+
+    Two real causes — the issue was already closed, or a PR number was written with the
+    closing form — and the row names the number instead of saying the PR declares
+    nothing, because those are different diagnoses.
+    """
+    fake = FakeGh([], [_pr(20, "the fix", body="Closes #99.")], {20: []})
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    assert "#20 PR UNLINKED" in out
+    detail = _detail(out, "#20 PR UNLINKED")
+    assert "it declares #99" in detail
+    assert "not among the open issues" in detail
+
+
+# --------------------------------------------------------------------------- #
+# The link, as both sides record it
+# --------------------------------------------------------------------------- #
+
+
+def test_a_linked_pair_exits_zero_and_names_both_directions(mod, monkeypatch, capsys) -> None:
+    """The positive case, and the words it is reported in.
+
+    Issue #10's timeline carries PR #20; PR #20's timeline carries issue #10; and #20's
+    body declares `Closes #10`. Both rows read `linked`, the exit code is 0, and the
+    details name the counterpart rather than merely asserting that something was found.
+    """
+    fake = _linked_pair()
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 0, out
+    assert "OK:" in out
+    assert "#10 issue ok" in out and "#20 PR ok" in out
+    assert "#20 declares it and this issue names #20 back" in _detail(out, "#10 issue ok")
+    assert "declares #10, named back in the issue" in _detail(out, "#20 PR ok")
+    # The subject comes before any verdict, and both sides were really queried -
+    # a `linked` verdict built without reading a timeline would otherwise pass here.
+    assert out.splitlines()[0].startswith(f"repo: {REPO}, 1 open issue(s), 1 open PR(s)")
+    assert sorted(fake.timeline_calls) == [10, 20]
+
+
+def test_the_queue_is_read_from_the_one_endpoint_that_returns_both(mod, monkeypatch, capsys) -> None:
+    """Issues and PRs are separated by the `pull_request` key, not by a number range.
+
+    A range would be a guess; the key is what the API says. The assertion is on the
+    counts the report prints, so a queue that put the PR in the issue list would be
+    visible.
+    """
+    fake = _linked_pair()
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 0
+    assert "1 open issue(s), 1 open PR(s)" in out
+    queue_calls = [c for c in fake.calls if any("/issues?" in a for a in c)]
+    assert len(queue_calls) == 1, "the queue must be one call, not one per subject"
+
+
+def test_both_measured_gh_output_shapes_are_read(mod, monkeypatch, capsys) -> None:
+    """The queue reads correctly in both shapes `gh api --paginate` can print.
+
+    Both were measured on this machine (2026-09-26), and the parser branches on them,
+    so both are asserted rather than one being left to a comment:
+
+    * **unfiltered** — this tool's call — merges every page into **one JSON array on one
+      line**. That is the shape the fake serves everywhere else in this file, and the
+      assertion here is that it reads as exactly the rows it contains (one issue, one
+      PR) with a single queue call.
+    * **`--jq`-filtered** — the shape `check-vote-count.py` records — is one JSON object
+      per line, which is not one document. A call site that adds a filter must not turn
+      the queue into an "unreadable payload" false alarm, so the per-line branch is
+      pinned here.
+    """
+    fake = _linked_pair()
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 0, out
+    assert "1 open issue(s), 1 open PR(s)" in out
+    assert len([c for c in fake.calls if any("/issues?" in a for a in c)]) == 1
+
+    # The filtered shape: each line its own JSON value, so the stream is not one
+    # document and the per-line branch is the one that must answer.
+    def routed(args: list[str]) -> str:
+        target = next(a for a in args if a.startswith("repos/"))
+        if "/issues?" in target:
+            return "\n".join(
+                json.dumps(row)
+                for row in [
+                    [_issue(10, "the problem")],
+                    [_pr(20, "the fix", body="Closes #10.")],
+                ]
+            )
+        number = int(target.split("/issues/")[1].split("/")[0])
+        return json.dumps(fake.timelines[number])
+
+    monkeypatch.setattr(mod, "_gh", routed)
+    rc, out = _run(mod, capsys)
+
+    assert rc == 0, out
+    assert "1 open issue(s), 1 open PR(s)" in out
+
+
+# --------------------------------------------------------------------------- #
+# The states that are not `linked`
+# --------------------------------------------------------------------------- #
 
 
 def test_the_two_directions_are_read_from_opposite_sources_and_never_transposed(mod) -> None:
@@ -429,7 +513,7 @@ def test_the_two_directions_are_read_from_opposite_sources_and_never_transposed(
     Both helpers read `cross-referenced` events, and they must agree about which
     *kind* of source each is looking for: a source carrying `pull_request` is a PR
     referencing an issue, and one without it is an issue referencing a PR. Given the
-    same two events, each helper must return exactly one of them - a helper that
+    same two events, each helper must return only the one it is for - a helper that
     returned both would make every one-sided link read as mutual.
 
     `named_by_issue` is asserted separately because it is the inversion, and the
@@ -438,50 +522,154 @@ def test_the_two_directions_are_read_from_opposite_sources_and_never_transposed(
     that returned `{20: {10}}` instead of `{10: {20}}` would answer "does this issue
     name its PR?" from the wrong subject's row.
     """
-    events = [_refers_to(20, is_pr=True, state="open"), _refers_to(10, is_pr=False)]
+    events = [
+        _refers_to(20, is_pr=True, state="open", body="Closes #10."),
+        _refers_to(10, is_pr=False),
+        _refers_to(30, is_pr=True, state="open", body="mentions #10"),
+    ]
 
-    assert mod.referencing_prs(events) == {20: "open"}
-    assert mod.referencing_issues(events) == {10}
+    refs = mod.referencing_prs(events, 10)
+    assert refs.declared_open == {20}
+    assert refs.mentioned == {30}
+    assert refs.declared_closed == set()
+    assert mod.referencing_issues(events, {10}) == {10}
     assert mod.named_by_issue({20: {10}}) == {10: {20}}
-    # A PR that referenced nothing is `{}`, not `{0: ...}` or a row of `None`.
-    assert mod.referencing_prs([]) == {}
-    assert mod.referencing_issues([]) == set()
+
+    # An empty reading is empty, not a row of `None`s.
+    empty = mod.referencing_prs([], 10)
+    assert (empty.declared_open, empty.declared_closed, empty.mentioned) == (set(), set(), set())
+    assert mod.referencing_issues([], {10}) == set()
     assert mod.named_by_issue({}) == {}
+    assert mod.declared_claims(None) == set()
 
 
-def test_a_pr_referenced_by_nothing_reads_unlinked_and_the_queue_is_named(
+def test_a_pr_that_declares_nothing_and_is_named_by_nobody_is_unlinked(
     mod, monkeypatch, capsys
 ) -> None:
-    """The boundary in the tool's docstring, stated as an assertion.
+    """An open PR belonging to no tracked problem, in both directions.
 
-    The subject is the **open** queue: a PR whose only mention was in an issue that
-    has since closed leaves no event on any subject this run reads, so it reads
-    `unlinked` rather than silently counting as linked-by-a-closed-issue. The remedy
-    text is asserted too, because "unlinked" without a next action is just a label.
+    Not `one-way`: there is nothing on either side, so the remedy is to declare the
+    issue rather than to answer a mention.
+
+    The fixture carries the measured shape that makes this decidable: a PR's timeline
+    really does hold `cross-referenced` events whose source is **another PR** (PR #1638
+    carried #1633/#1637/#1640). Those are PR-to-PR mentions and say nothing about which
+    issue owns this PR, so the reading must ignore them — a `pull_request` key read as
+    "an issue names it back" would turn every cross-referenced PR into a `one-way` row.
     """
-    fake = FakeGh([], [_pr(20, "the fix")], {20: []})
+    fake = FakeGh(
+        [],
+        [_pr(20, "an orphan"), _pr(21, "a related PR", body="Closes #20.")],
+        {20: [_refers_to(21, is_pr=True, body="Closes #20.")], 21: []},
+    )
     _install(mod, monkeypatch, fake)
 
     rc, out = _run(mod, capsys)
 
     assert rc == 1, out
     assert "#20 PR UNLINKED" in out
-    assert "0 open issue(s), 1 open PR(s)" in out
-    assert "name the issue it belongs to in the PR body" in out
+    assert "belongs to no tracked problem" in _detail(out, "#20 PR UNLINKED")
+    # #21 declares #20, which is a PR number, not an open issue: the mis-formed case.
+    assert "#21 PR UNLINKED" in out
+    assert "it declares #20" in _detail(out, "#21 PR UNLINKED")
+
+
+def test_two_open_prs_declaring_one_issue_is_reported_as_duplicate(
+    mod, monkeypatch, capsys
+) -> None:
+    """The shape the host's third clause forbids: a second PR where an update belongs.
+
+    Both PR numbers must appear, because the remedy is to fold one into the other and a
+    reader cannot do that from a count. The measured live shape is #1606, declared by
+    #1638 while #1641 names it in prose only — the fixture carries a declarer and a
+    non-declarer to pin that only declarers compose this state.
+    """
+    declaring = "Closes #10."
+    fake = FakeGh(
+        [_issue(10, "the problem")],
+        [_pr(20, "one attempt", body=declaring), _pr(21, "another attempt", body=declaring)],
+        {
+            10: [
+                _refers_to(20, is_pr=True, body=declaring),
+                _refers_to(21, is_pr=True, body=declaring),
+            ],
+            20: [_refers_to(10, is_pr=False)],
+            21: [_refers_to(10, is_pr=False)],
+        },
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    assert "#10 issue DUPLICATE" in out
+    detail = _detail(out, "#10 issue DUPLICATE")
+    assert "more than one open PR declares it (#20, #21)" in detail
+    assert "updated in place, never replaced by a second one" in detail
+
+
+def test_a_pr_that_declares_an_issue_the_issue_never_names_is_one_way(
+    mod, monkeypatch, capsys
+) -> None:
+    """The PR declares the issue; the issue never says so.
+
+    The remedy names the issue's comment, because a reader of the issue is the one left
+    looking for the work.
+    """
+    fake = FakeGh(
+        [_issue(10, "the problem")],
+        [_pr(20, "the fix", body="Closes #10.")],
+        {10: [_refers_to(20, is_pr=True, body="Closes #10.")], 20: []},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    assert "#10 issue ONE-WAY" in out
+    assert "#20 PR ONE-WAY" in out
+    detail = _detail(out, "#10 issue ONE-WAY")
+    assert "#20 declares it, and this issue never names #20" in detail
+    assert "gh issue comment 10" in detail
+
+
+def test_the_issue_naming_a_pr_that_declares_no_issue_is_one_way_not_linked(
+    mod, monkeypatch, capsys
+) -> None:
+    """The mirror: the issue names the PR and the PR declares no issue at all.
+
+    Different reader, different remedy — the declaration belongs in the PR body. This
+    is the live shape of #1641, which names #1606 in prose and declares nothing.
+    """
+    fake = FakeGh(
+        [_issue(10, "the problem")],
+        [_pr(20, "the fix", body="Issue #10: the count cannot fire for it.")],
+        {10: [], 20: [_refers_to(10, is_pr=False)]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    assert "#20 PR ONE-WAY" in out
+    detail = _detail(out, "#20 PR ONE-WAY")
+    assert "#10 names it and this PR declares no issue" in detail
+    assert "`Closes #N` where the PR finishes it" in detail
+    assert "#20 PR ok" not in out
 
 
 def test_an_all_linked_queue_exits_zero_and_says_what_it_read(mod, monkeypatch, capsys) -> None:
-    """Two linked pairs: every row `linked`, and the count of subjects is in the OK line.
+    """Two linked pairs: every row `linked`, and the subject count is in the OK line.
 
-    The count is the evidence that the verdict covered the queue rather than a
-    single pair — a tool that read one subject and stopped would print the same words.
+    The count is the evidence that the verdict covered the queue rather than a single
+    pair — a tool that read one subject and stopped would print the same words.
     """
     fake = FakeGh(
         [_issue(10, "one"), _issue(11, "two")],
-        [_pr(20, "a"), _pr(21, "b")],
+        [_pr(20, "a", body="Closes #10."), _pr(21, "b", body="Closes #11.")],
         {
-            10: [_refers_to(20, is_pr=True)],
-            11: [_refers_to(21, is_pr=True)],
+            10: [_refers_to(20, is_pr=True, body="Closes #10.")],
+            11: [_refers_to(21, is_pr=True, body="Closes #11.")],
             20: [_refers_to(10, is_pr=False)],
             21: [_refers_to(11, is_pr=False)],
         },
@@ -541,7 +729,7 @@ def test_an_unparseable_timeline_is_unmeasurable(mod, monkeypatch, capsys) -> No
     """A truncated timeline is not a timeline with no events.
 
     If the events could not be read, the tool would otherwise answer `unlinked` for a
-    PR that may well name an issue — a confident wrong verdict, which is the failure
+    PR that may well declare an issue — a confident wrong verdict, which is the failure
     mode the exit-2 branch exists for.
     """
 
@@ -568,9 +756,9 @@ def test_an_unparseable_timeline_is_unmeasurable(mod, monkeypatch, capsys) -> No
 def test_the_json_report_is_one_document_naming_the_repo(mod, monkeypatch, capsys) -> None:
     """`--json` stays parseable: one document, the subject in it, the state per row."""
     fake = FakeGh(
-        [_issue(10)],
-        [_pr(20)],
-        {10: [_refers_to(20, is_pr=True)], 20: []},
+        [_issue(10, "the problem")],
+        [_pr(20, "the fix", body="Closes #10.")],
+        {10: [_refers_to(20, is_pr=True, body="Closes #10.")], 20: []},
     )
     _install(mod, monkeypatch, fake)
 
@@ -585,7 +773,7 @@ def test_the_json_report_is_one_document_naming_the_repo(mod, monkeypatch, capsy
     states = {(row["kind"], row["number"]): row["state"] for row in payload["rows"]}
     assert states[("issue", 10)] == "one-way"
     assert states[("pr", 20)] == "one-way"
-    assert payload["rows"][0]["title"] == "an issue"
+    assert payload["rows"][0]["title"] == "the problem"
 
 
 def test_the_summary_lists_the_offenders_in_the_printed_order(mod, monkeypatch, capsys) -> None:
@@ -593,12 +781,12 @@ def test_the_summary_lists_the_offenders_in_the_printed_order(mod, monkeypatch, 
 
     Asserted as a sequence rather than a set: the rows print issues (ascending) then
     PRs, and a summary sorted differently is the small friction that makes a reader
-    re-scan a 13-row report by hand.
+    re-scan a long report by hand.
     """
     fake = FakeGh(
         [_issue(10), _issue(11)],
-        [_pr(20)],
-        {10: [], 11: [_refers_to(20, is_pr=True)], 20: []},
+        [_pr(20, body="Closes #11.")],
+        {10: [], 11: [_refers_to(20, is_pr=True, body="Closes #11.")], 20: []},
     )
     _install(mod, monkeypatch, fake)
 
