@@ -222,7 +222,7 @@ def _sweep() -> tuple[set[str], set[str]]:
 
     needs: set[str] = set()
     have: set[str] = set()
-    for path in sorted(SCRIPTS.glob("check-*.py")):
+    for path in sorted(SCRIPTS.glob("check*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         if not any(emits_tree_line(n) for n in ast.walk(tree)):
             continue
