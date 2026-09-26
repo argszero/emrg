@@ -270,6 +270,13 @@ class Refs:
       that was closed unmerged, and the host's rule of 2026-09-26 names what should
       happen to it (a rejected or change-requested PR is updated in place, never
       replaced).
+
+    Each clause is written for the number of referrers it names (`_agrees`): the first
+    revision of the fix above printed *"#1614 referenced it and are merged, and neither
+    declares"* for one referrer and *"#1565 #1569 #1607 ... and neither declares"* for
+    three, on the row the reader is meant to act on. That is the same failure as the
+    defect it was fixing, one level down - the sentence must say what is actually there,
+    and a reader who trusts a wrong number is where the ambiguity starts.
     """
 
     declared_open: set[int] = field(default_factory=set)
@@ -494,6 +501,22 @@ def _numbers(values) -> str:
     return " ".join(f"#{n}" for n in sorted(values))
 
 
+def _agrees(values) -> tuple[str, str]:
+    """The verb and the "declares nothing" phrase a group of referrers takes.
+
+    Measured on this tool's own output (2026-09-26, the same revision as #1644): a single
+    merged referrer printed *"#1614 referenced it and are merged, and neither declares
+    `Closes #1556`"* - three wrong numbers in one sentence, on a row a reader is meant to
+    act on. `neither` is for exactly two and `none of them` for three or more; the corpus
+    has both (one referrer for #1556, six for #1554).
+    """
+    if len(values) == 1:
+        return "is", "and declares no"
+    if len(values) == 2:
+        return "are", "and neither declares"
+    return "are", "and none of them declares"
+
+
 def _mention_detail(refs: Refs, number: int) -> str:
     """What a reader should do about each class of non-declaring referrer.
 
@@ -516,16 +539,19 @@ def _mention_detail(refs: Refs, number: int) -> str:
     """
     clauses: list[str] = []
     if refs.mentioned_landed:
+        verb, neg = _agrees(refs.mentioned_landed)
         clauses.append(
-            f"{_numbers(refs.mentioned_landed)} referenced it and are merged, and "
-            f"neither declares `Closes #{number}` - work has landed on master carrying "
+            f"{_numbers(refs.mentioned_landed)} referenced it and {verb} merged, {neg} "
+            f"`Closes #{number}` - work has landed on master carrying "
             "this number, so either close this issue with the reading that says that "
             "was the remedy, or state here what it still leaves"
         )
     if refs.mentioned_abandoned:
+        verb, neg = _agrees(refs.mentioned_abandoned)
         clauses.append(
-            f"{_numbers(refs.mentioned_abandoned)} referenced it and were closed "
-            f"without merging and without declaring `Closes #{number}` - an attempt "
+            f"{_numbers(refs.mentioned_abandoned)} referenced it and "
+            f"{'was' if verb == 'is' else 'were'} closed "
+            f"without merging {neg} `Closes #{number}` - an attempt "
             "that ended, which the rule answers in its own PR (a rejected or "
             "change-requested PR is updated in place, never replaced by a second one)"
         )

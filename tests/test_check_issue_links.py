@@ -366,9 +366,37 @@ def test_landed_work_is_not_reported_as_nothing_being_opened(mod, monkeypatch, c
 
     assert rc == 1, out
     detail = _detail(out, "#10 issue UNCLAIMED")
-    assert "#20 #21 referenced it and are merged" in detail
+    assert "#20 #21 referenced it and are merged, and neither declares" in detail
     assert "work has landed on master carrying this number" in detail
     assert "nothing has been opened for it" not in detail
+
+
+def test_the_remedy_agrees_with_how_many_referrers_there_are(mod, monkeypatch, capsys) -> None:
+    """Three referrers take `none of them`, not `neither` (measured 2026-09-26).
+
+    The second revision of #1644's fix printed *"#1614 referenced it and are merged"* for
+    the one-referrer case and *"#1565 #1569 #1607 ... and neither declares"* for the
+    three-referrer one — a sentence with the wrong number in it on a row the reader is
+    meant to act on, which is the same failure mode as the defect it was fixing, one
+    level down: the text a reader acts on must say what is actually there. The corpus
+    carries 1 (#1556), 2 and 6 (#1554) referrers, so all three branches are exercised
+    between this test and the two above it.
+    """
+    fake = FakeGh(
+        [_issue(10, "three landed referrers")],
+        [],
+        {10: [_merged(20), _merged(21), _merged(22)]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    # The absence first: it is the half the previous revision got wrong, so a run that
+    # stops at the first failure must be stopped by the assertion that names the defect.
+    assert "and neither declares" not in detail
+    assert "#20 #21 #22 referenced it and are merged, and none of them declares" in detail
 
 
 def test_an_abandoned_attempt_is_named_as_one(mod, monkeypatch, capsys) -> None:
@@ -391,7 +419,7 @@ def test_an_abandoned_attempt_is_named_as_one(mod, monkeypatch, capsys) -> None:
 
     assert rc == 1, out
     detail = _detail(out, "#10 issue UNCLAIMED")
-    assert "#20 referenced it and were closed without merging" in detail
+    assert "#20 referenced it and was closed without merging and declares no" in detail
     assert "updated in place, never replaced by a second one" in detail
     assert "work has landed on master" not in detail
 
@@ -422,8 +450,8 @@ def test_all_three_referrer_classes_are_named_in_one_row(mod, monkeypatch, capsy
 
     assert rc == 1, out
     detail = _detail(out, "#10 issue UNCLAIMED")
-    assert "#31 referenced it and are merged" in detail
-    assert "#32 referenced it and were closed without merging" in detail
+    assert "#31 referenced it and is merged, and declares no" in detail
+    assert "#32 referenced it and was closed without merging and declares no" in detail
     assert "#30 referenced it without declaring" in detail
     assert (
         detail.index("#31")
