@@ -452,3 +452,105 @@ def test_the_json_report_names_the_same_tree_without_breaking_the_document(
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert payload[0]["tree"] == str(fixture["repo"])
+
+
+#: Run by a subprocess with `stdout` a pipe, so the buffering question is the real one.
+#: `_gh` is replaced rather than `gh` on PATH: the property under test is which stream
+#: ordering the reader gets, and the network boundary is the one thing that must be
+#: stubbed for a test to be hermetic. Nothing below the `_gh` call is reached for an
+#: unresolvable number, so the failure is produced before any git work.
+_PIPED_DRIVER = '''\
+import importlib.util, sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("check_merge_landed_piped", Path(sys.argv[1]))
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+
+def _unreachable(args):
+    raise RuntimeError(
+        "gh failed (rc=1): gh " + " ".join(args) + "\\ngh: Not Found (HTTP 404)"
+    )
+
+
+mod._gh = _unreachable
+raise SystemExit(mod.main(["999999"]))
+'''
+
+#: The remedy as `main()` carries it, spelled exactly as the fault injection removes it:
+#: a copy that failed to lose it would make the negative half below vacuous.
+_REMEDY_BLOCK = """\
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
+"""
+
+
+def _piped_first_lines(script: Path, driver: Path) -> list[str]:
+    """Run `script` under a pipe, the reading mode the ordering promise is made for."""
+    proc = subprocess.run(
+        [sys.executable, str(driver), str(script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return (proc.stdout or "").splitlines()
+
+
+def test_the_tree_line_precedes_a_failure_under_a_pipe(tmp_path):
+    """The `tree: ` line must come before the failure *for the text a reader gets*.
+
+    The two conditions in `main()`'s comment - "before the first verdict" and "before the
+    first failure" - are what a cycle relies on when it reads this report through
+    `2>&1 | cat -n`, and a cycle is the reader this tool was written for. Pinned through
+    a pipe because that is the only mode where the two orders differ: measured on this
+    branch by `cyc20260926-091529`, and reproduced by `cyc20260926-094103` where
+    `PYTHONUNBUFFERED=1` printed the tree line first - the program's own order.
+
+    Both directions, so the assertion is about the remedy and not about something else
+    that happens to be true (#455): with the block `main()` carries, the tree line is
+    first; with that block removed from a copy of the file, the `error:` line is. A
+    remedy-free copy that is really remedy-free is asserted before it is read, or the
+    negative half would pass for the wrong reason.
+    """
+    driver = tmp_path / "piped_driver.py"
+    driver.write_text(_PIPED_DRIVER, encoding="utf-8")
+
+    with_remedy = tmp_path / "with-remedy" / "scripts" / "check-merge-landed.py"
+    with_remedy.parent.mkdir(parents=True)
+    with_remedy.write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+
+    lines = _piped_first_lines(with_remedy, driver)
+    assert lines, "the piped run produced no output at all, so nothing was measured"
+    assert lines[0] == f"tree: {with_remedy.parent.parent}", (
+        f"the first line a piped reader gets is {lines[0]!r}, not the tree line - a "
+        f"verdict still overtakes the line that says which clone answered: {lines!r}"
+    )
+    assert any(line.startswith("error: ") for line in lines[1:]), (
+        f"this test needs a failure *after* the tree line to be about, and none was "
+        f"produced: {lines!r}"
+    )
+
+    stripped = with_remedy.read_text(encoding="utf-8")
+    assert _REMEDY_BLOCK in stripped, (
+        "the fault injection no longer matches the remedy in `main()`, so the negative "
+        "half below would compare a file that still carries it"
+    )
+    without = tmp_path / "without-remedy" / "scripts" / "check-merge-landed.py"
+    without.parent.mkdir(parents=True)
+    without.write_text(stripped.replace(_REMEDY_BLOCK, "", 1), encoding="utf-8")
+
+    control = _piped_first_lines(without, driver)
+    assert control and not control[0].startswith("tree: "), (
+        f"without the remedy the tree line came first anyway ({control!r}), so this test "
+        "is not measuring the remedy"
+    )
+    assert any(line.startswith("error: ") for line in control), (
+        f"the remedy-free control produced no failure to be early: {control!r}"
+    )
