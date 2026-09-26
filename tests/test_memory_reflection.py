@@ -259,6 +259,107 @@ class TestMemoryIndexCompactionPrompt:
 
         asyncio.run(_test())
 
+    def test_the_instance_root_index_is_counted_for_a_session_inside_the_root(
+        self, monkeypatch
+    ):
+        """Issue #1606: the index the cycles write is the root's, not the cwd's.
+
+        `~/.emrg/evolution/` is this instance's workspace and `<root>/emrg` is the
+        checkout a task session runs in, so a cycle's records are indexed at
+        `<root>/.emrg/memory/MEMORY.md` — one directory above the session's cwd, and a
+        file neither of the two subjects above can name. Measured on this host before
+        the subject existed: 195 lines, with no count that could fire on it.
+
+        The root is monkeypatched rather than described by the host's own constant, so
+        the test measures the rule instead of this machine's workspace.
+        """
+        from emrg.server import daemon
+        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                monkeypatch.setattr(daemon, "EVOLUTION_CWD", root)
+                cwd = root / "emrg"
+                cwd.mkdir()
+                session = Session.create_with_id("s_test_cap_root", cwd)
+                root_index = root / ".emrg" / "memory" / "MEMORY.md"
+                self._index(root_index, MEMORY_INDEX_ROW_CAP + 3)
+                server = _make_server({"content": "no new memories"})
+
+                prompt = await _reflect(server, session)
+
+                assert str(root_index) in prompt, (
+                    "the section must name the root's index; without it the index the "
+                    "cycles grow is the one file nothing counts"
+                )
+                assert f"has {MEMORY_INDEX_ROW_CAP + 3} lines" in prompt
+
+        asyncio.run(_test())
+
+    def test_a_session_outside_the_root_does_not_get_the_root_index(self, monkeypatch):
+        """The subject is a property of the session, not of the machine.
+
+        A root index over the cap is not this session's to compact when its cwd lies
+        outside that root: the note would name a file whose writer is some other
+        session, and the two indexes this one does carry are the ones its own writer
+        appends to. Without this half, "count the root too" would be "count every
+        index you can reach".
+        """
+        from emrg.server import daemon
+        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve() / "instance"
+                root.mkdir()
+                monkeypatch.setattr(daemon, "EVOLUTION_CWD", root)
+                cwd = Path(tmp).resolve() / "elsewhere"
+                cwd.mkdir()
+                session = Session.create_with_id("s_test_cap_outside", cwd)
+                self._index(root / ".emrg" / "memory" / "MEMORY.md", MEMORY_INDEX_ROW_CAP + 3)
+                server = _make_server({"content": "no new memories"})
+
+                prompt = await _reflect(server, session)
+
+                assert str(root) not in prompt, (
+                    "a session outside the root must not be asked to compact the "
+                    "root's index — it does not write that file"
+                )
+                assert "Memory index compaction" not in prompt
+
+        asyncio.run(_test())
+
+    def test_a_session_started_in_the_root_counts_that_index_once(self, monkeypatch):
+        """When the cwd *is* the root, the third subject is the first one.
+
+        A session started in the instance root carries `<cwd>/.emrg/memory/MEMORY.md`
+        as its project index, and that is the very file `_instance_root_index` names —
+        so an unde-duplicated list would render the same index's section twice, and
+        the note's contract is one section per index ("an instruction naming the wrong
+        file sends the agent to compact something that is not over the cap"): two
+        sections naming one path read as two files.
+        """
+        from emrg.server import daemon
+        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                monkeypatch.setattr(daemon, "EVOLUTION_CWD", root)
+                session = Session.create_with_id("s_test_cap_inroot", root)
+                self._index(root / ".emrg" / "memory" / "MEMORY.md", MEMORY_INDEX_ROW_CAP + 1)
+                server = _make_server({"content": "no new memories"})
+
+                prompt = await _reflect(server, session)
+
+                assert prompt.count("## Memory index compaction") == 1, (
+                    "one index, one section — a subject named twice asks for the same "
+                    "compaction twice"
+                )
+
+        asyncio.run(_test())
+
     def test_the_targets_in_the_text_come_from_the_constants(self):
         """The numbers the agent is told to reach are the rulers, not a second spelling."""
         from emrg.memory import INDEX_TITLE_MAX_CHARS
