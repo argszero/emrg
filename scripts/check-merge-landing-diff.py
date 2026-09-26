@@ -74,6 +74,33 @@ cases there conflict outright, or are caught by the name-set rule already). It i
 arm that fires on a shape the two-list rule cannot see, not a repair of an observed
 false "clean".
 
+GitHub's rendering of a PR is a third reading, and it can be a superset
+----------------------------------------------------------------------
+Both readings above are local. A reviewer usually starts from a third one: the PR page,
+or `gh pr diff <N>`. That is not `diff(master, head)` either - it is
+`diff(<recorded base.sha>, <head>)`, where `base.sha` is the base branch's tip **as
+GitHub recorded it**, not the merge base. When the head contains commits of master newer
+than that recorded base - exactly the state a cycle creates when it resolves a conflict
+by merging master in and pushing - every change master gained joins the rendering.
+
+Measured 2026-09-26 (`cyc20260926-113347`) over this repo's four open PRs, each row read
+from `repos/<repo>/pulls/<N>` and `.../pulls/<N>/files` and compared with this tool's own
+landing reading:
+
+    PR      GitHub renders        landing change         recorded base   base commits after
+    #1631   9 paths, +1490 -30    3 paths, +244 -13      bda0c18d        4
+    #1633   5 paths               5 paths                60cad23f        2  (head lacks master)
+    #1634   3 paths               3 paths                920d12c3        0
+    #1635   2 paths               2 paths                920d12c3        0
+
+So it is not a GitHub bug to argue with and not a defect in the PR that has it: it is the
+arithmetic of a merge commit in the branch. `--github` prints that rendering beside the
+landing change, names the recorded base and how far behind it is, and lists the paths the
+rendering carries that this change does not. Read the landing change; the rendering is
+what the flag is telling you not to trust *here*. It is a reading, so it moves no exit
+code, and a rendering that could not be read is printed as unreadable rather than left
+out - the same rule the rest of this report follows.
+
 The path names here are the real ones
 -------------------------------------
 Both halves of the measurement need the *name git means*, so the path list is read
@@ -101,6 +128,7 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -492,6 +520,106 @@ def _path_reading(a: str, b: str, path: str) -> str:
     return proc.stdout
 
 
+def _github_rendering(number: int, repo: str) -> tuple[str, int, int, int, list[str]]:
+    """GitHub's own reading of a PR: (recorded base sha, changed_files, +, -, names).
+
+    Two calls, and both counts are kept rather than one being derived from the other:
+    the response carries `changed_files` *and* the file list, so a reader can see the
+    two agree instead of assuming it. Neither is the landing change - see the
+    module docstring's measurement; this returns what GitHub says, not what merges.
+    """
+    proc = _run(["gh", "api", f"repos/{repo}/pulls/{number}"])
+    if proc.returncode != 0:
+        raise MeasurementError(
+            f"gh api pulls/{number} failed: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    try:
+        doc = json.loads(proc.stdout)
+        base_sha = str(doc["base"]["sha"])
+        changed = int(doc["changed_files"])
+        additions = int(doc["additions"])
+        deletions = int(doc["deletions"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise MeasurementError(f"pulls/{number} answered something unreadable: {exc}")
+    listed = _run(
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/pulls/{number}/files",
+            "--paginate",
+            "--jq",
+            ".[].filename",
+        ]
+    )
+    if listed.returncode != 0:
+        raise MeasurementError(
+            f"gh api pulls/{number}/files failed: "
+            f"{listed.stderr.strip() or listed.stdout.strip()}"
+        )
+    names = [line for line in listed.stdout.splitlines() if line.strip()]
+    return base_sha, changed, additions, deletions, names
+
+
+def github_rendering_note(
+    number: int, repo: str, base: str, landed: list[tuple[str, str]]
+) -> list[str]:
+    """The PR page's reading, beside the landing change - or why it could not be read.
+
+    `landed` is `landing_reading`'s second element, i.e. the paths the merge changes.
+    The comparison is by path *name*, which is all this reading can be compared by -
+    GitHub lists names, not hunks - and that limit is what the closing sentence says
+    rather than leaving to be inferred from a silent per-path match.
+    """
+    try:
+        base_sha, changed, additions, deletions, names = _github_rendering(number, repo)
+    except MeasurementError as exc:
+        return [
+            f"  github's rendering: unreadable ({exc}) - not a pass, and the landing "
+            "change above is unaffected"
+        ]
+    landed_paths = [path for _, path in landed]
+    landed_set = set(landed_paths)
+    listed = set(names)
+    extra = [name for name in names if name not in landed_set]
+    missing = [path for path in landed_paths if path not in listed]
+    try:
+        # `_behind_by(a, b)` counts the commits of `a` that `b` does not contain, so the
+        # argument order here is what makes the sentence true: commits the *base* gained
+        # after the recorded base are the ones whose changes the rendering carries.
+        # Measured 2026-09-26 with them the other way round: #1631 printed `0 commit(s)
+        # of the base after it` while its recorded base was 4 commits behind master.
+        behind: str = f"{_behind_by(base, base_sha)} commit(s) of the base after it"
+    except MeasurementError as exc:
+        # Not fatal, and not silent: a count this clone cannot make is stated as
+        # unmeasured rather than replaced by a zero.
+        behind = f"distance from the base not measurable here ({exc})"
+    lines = [
+        f"  github renders this PR as {changed} path(s) (+{additions} -{deletions}) "
+        f"against its recorded base {base_sha[:8]} - {behind}:"
+    ]
+    if not extra and not missing:
+        lines.append("    the same path set as the landing change above")
+        return lines
+    if extra:
+        lines.append(
+            f"    {len(extra)} of that rendering's path(s) are not this change at all:"
+        )
+        lines += [f"      {name}" for name in extra]
+    if missing:
+        lines.append(
+            f"    and {len(missing)} path(s) of this change are not in the rendering:"
+        )
+        lines += [f"      {path}" for path in missing]
+    lines.append(
+        "    Read the landing change above, not the PR page: GitHub diffs from the base "
+        "it recorded when the PR was last updated, so a branch that merged a newer master "
+        "in carries master's own changes into that rendering. Arithmetic, not a defect in "
+        "this PR - which is why this reading moves no exit code, and why the comparison is "
+        "by path name (all the API lists) rather than by hunk."
+    )
+    return lines
+
+
 def landing_reading(base: str, head: str) -> tuple[
     str,
     list[tuple[str, str]],
@@ -544,10 +672,17 @@ def landing_reading(base: str, head: str) -> tuple[
 
 
 
-def check_pr(number: int, base: str) -> tuple[str, str]:
+def check_pr(
+    number: int, base: str, github: bool = False, repo: str = "argszero/emrg"
+) -> tuple[str, str]:
     """One PR's landing change, plus the readings of `diff(base, head)` that are not it.
 
     Returns `(state, report)` with state in `{"clean", "backwards", "conflict"}`.
+
+    `github=True` adds the PR page's reading beside the landing change (module
+    docstring). It is opt-in because it is the only network reading here, and it cannot
+    change the state or the exit code: a rendering that disagrees is not a defect in the
+    PR, and one that could not be read is printed as unreadable.
     """
     head = _fetch_head(number)
     try:
@@ -563,6 +698,10 @@ def check_pr(number: int, base: str) -> tuple[str, str]:
     lines += [f"    {status}\t{path}" for status, path in landed]
     if not landed:
         lines.append("    (nothing: this head adds no change to the base)")
+    if github:
+        # Straight after the change it is compared with, so the two readings of one
+        # subject are adjacent rather than separated by the backwards report.
+        lines += github_rendering_note(number, repo, base, landed)
     if backwards or reversed_inside:
         if backwards:
             lines.append(
@@ -599,6 +738,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--repo", default="argszero/emrg", help="owner/name")
     parser.add_argument("--base", default="origin/master", help="the ref to land on")
+    parser.add_argument(
+        "--github",
+        action="store_true",
+        help=(
+            "also print GitHub's own rendering of each PR (its recorded base and file "
+            "list), which can be a superset of the landing change - the reading a "
+            "reviewer starts from. Changes no exit code"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -617,7 +765,9 @@ def main(argv: list[str] | None = None) -> int:
     states: list[tuple[int, str]] = []
     for number in numbers:
         try:
-            state, report = check_pr(number, base)
+            state, report = check_pr(
+                number, base, github=args.github, repo=args.repo
+            )
         except MeasurementError as exc:
             print(f"  #{number}: could not measure: {exc}", file=sys.stderr)
             return 2

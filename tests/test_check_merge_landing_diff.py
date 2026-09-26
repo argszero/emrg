@@ -1216,3 +1216,187 @@ def test_a_payload_that_is_not_status_path_pairs_is_a_measurement_error(mod, mon
         mod._changed_paths("a" * 40, "b" * 40)
 
     assert "not status/path pairs" in str(excinfo.value)
+
+
+# --- GitHub's rendering: the reading a reviewer usually starts from ---------------
+#
+# Measured 2026-09-26 (`cyc20260926-113347`) over this repo's four open PRs: the PR page
+# for #1631 listed 9 paths (+1490 -30) while the change it would land was 3 (+244 -13),
+# because GitHub diffs from the `base.sha` it recorded and that head contains the 4
+# commits master gained after it. The rendering is not a verdict, so it moves no exit
+# code - what it must do is *say so* instead of letting a reviewer read master's own
+# changes as this PR's, and never go quiet when it cannot be read.
+
+
+def _merged_master_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
+    """A branch that merged an advanced master in - the shape that makes a superset.
+
+    Returns (repo, base, head, recorded): `base` is master's tip, `head` is a branch
+    that contains it, and `recorded` is the commit GitHub would still name as the PR's
+    base - so a rendering measured from `recorded` carries master's own
+    `src/shared.txt` while the landing change is only `src/feature.txt`.
+    """
+    repo = tmp_path / "merged"
+    _init_repo(repo)
+    _write(repo, "src/shared.txt", "one\n")
+    _commit(repo, "the branch point")
+    recorded = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _write(repo, "src/feature.txt", "new\n")
+    _commit(repo, "the PR's own change")
+
+    _git(repo, "checkout", "-q", "master")
+    _write(repo, "src/shared.txt", "one\ntwo\n")
+    _commit(repo, "master moves on after the branch point")
+    base = _git(repo, "rev-parse", "master")
+
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "merge", "-q", "--no-edit", "master")
+    head = _git(repo, "rev-parse", "HEAD")
+    return repo, base, head, recorded
+
+
+def test_the_rendering_is_parsed_from_the_two_api_calls(mod, monkeypatch) -> None:
+    """Both counts are read, and the file list is the second call's own output.
+
+    The stand-in answers the two commands the way `gh` does, so the parsing is measured
+    rather than assumed - a reader that took the counts from the file list, or the names
+    from the summary, would answer about a call nobody made.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(argv, cwd=None, env=None):
+        calls.append(list(argv))
+        if argv[-1].endswith("/pulls/7"):
+            body = (
+                '{"base": {"sha": "bda0c18d00000000000000000000000000000000"},'
+                ' "changed_files": 2, "additions": 11, "deletions": 3}'
+            )
+        else:
+            body = "src/a.txt\nsrc/b.txt\n"
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=body, stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    base_sha, changed, additions, deletions, names = mod._github_rendering(7, "o/r")
+
+    assert base_sha == "bda0c18d" + "0" * 32
+    assert (changed, additions, deletions) == (2, 11, 3)
+    assert names == ["src/a.txt", "src/b.txt"]
+    assert calls[0] == ["gh", "api", "repos/o/r/pulls/7"]
+    assert calls[1][:3] == ["gh", "api", "repos/o/r/pulls/7/files"]
+
+
+def test_a_superset_rendering_names_the_paths_that_are_not_this_change(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """The measured shape: the page carries master's own change, the landing does not.
+
+    Asserted on the report the reviewer gets, not on the helper: the fact under test is
+    that the extra path is *named beside the landing change*, which is the only way a
+    reader can tell the two apart.
+    """
+    repo, base, head, recorded = _merged_master_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(
+        mod,
+        "_github_rendering",
+        lambda number, r: (recorded, 2, 10, 1, ["src/feature.txt", "src/shared.txt"]),
+    )
+
+    state, report = mod.check_pr(1, base, github=True, repo="o/r")
+
+    assert state == "clean"
+    assert "github renders this PR as 2 path(s) (+10 -1)" in report
+    assert "1 of that rendering's path(s) are not this change at all" in report
+    assert "      src/shared.txt" in report
+    # The landing change is stated first and is the one to read.
+    assert report.index("merging it changes 1 path(s)") < report.index("github renders")
+    # And the count that explains it is the base's own later commit.
+    assert "1 commit(s) of the base after it" in report
+
+
+def test_a_rendering_that_agrees_says_so(mod, tmp_path, monkeypatch) -> None:
+    """The other side: agreement is stated, not left as the absence of a warning.
+
+    Without this arm the superset assertion would pass for a note that always printed
+    the warning, whatever GitHub said.
+    """
+    repo, base, head = _fresh_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(
+        mod, "_github_rendering", lambda number, r: (base, 1, 4, 0, ["src/feature.txt"])
+    )
+
+    state, report = mod.check_pr(1, base, github=True, repo="o/r")
+
+    assert state == "clean"
+    assert "the same path set as the landing change above" in report
+    assert "not this change at all" not in report
+
+
+def test_an_unreadable_rendering_is_not_a_pass(mod, tmp_path, monkeypatch) -> None:
+    """A reading nobody could take is printed as unreadable - never omitted.
+
+    The failure mode this guards is the quiet one: a rendering that could not be read
+    and a rendering that agreed both leave the landing change intact, so dropping the
+    line would make `gh` being broken look like agreement.
+    """
+    repo, base, head = _fresh_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    def boom(number, r):
+        raise mod.MeasurementError("gh api pulls/1 failed: not authenticated")
+
+    monkeypatch.setattr(mod, "_github_rendering", boom)
+
+    state, report = mod.check_pr(1, base, github=True, repo="o/r")
+
+    assert state == "clean"
+    assert "unreadable" in report
+    assert "not authenticated" in report
+    assert "not a pass" in report
+
+
+def test_the_network_reading_is_off_unless_asked(mod, tmp_path, monkeypatch) -> None:
+    """The control: no GitHub call unless `--github` was given.
+
+    Pinned by making the call an error if it happens at all - every other test here
+    would still pass if this tool phoned GitHub on every run.
+    """
+    repo, base, head = _fresh_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    def refuse(number, r):
+        raise AssertionError("the GitHub reading was called without --github")
+
+    monkeypatch.setattr(mod, "_github_rendering", refuse)
+
+    state, report = mod.check_pr(1, base)
+
+    assert state == "clean"
+    assert "github renders" not in report
+
+
+def test_main_carries_the_flag_to_the_reading(mod, tmp_path, monkeypatch, capsys) -> None:
+    """`--github` reaches `check_pr`, and the exit code is unmoved (0 = clean)."""
+    repo, base, head, recorded = _merged_master_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(
+        mod,
+        "_github_rendering",
+        lambda number, r: (recorded, 2, 10, 1, ["src/feature.txt", "src/shared.txt"]),
+    )
+
+    rc = mod.main(["1", "--base", base, "--github", "--repo", "o/r"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "github renders this PR as 2 path(s)" in out
+    assert "src/shared.txt" in out
