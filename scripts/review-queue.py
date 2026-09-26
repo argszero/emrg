@@ -815,10 +815,58 @@ def render(reading: Reading, action: Action) -> str:
     return "\n".join(lines)
 
 
+def local_tree() -> tuple[str, str, str]:
+    """(this checkout, the branch it is on, its HEAD) — read, or said unreadable.
+
+    The report is derived from *this* clone: the vote counter's ancestry reading and the
+    freshness reading both come out of it, and every command printed below is meant to be
+    run here. So the clone and its branch are stated before any verdict — a reader who
+    then opens a file with `read`/`grep` is reading *this branch's* content, which is
+    master's only when the branch says so.
+
+    Measured 2026-09-26 (`cyc20260926-110148`): a cycle began with the tree still on the
+    previous cycle's PR branch, and a file read from that working tree showed the
+    *already-fixed* text of an unmerged PR while master still carried the defect the
+    cycle was about to look for. Nothing in this report said which tree had answered, so
+    the only thing that caught it was the content looking wrong — which is luck, not a
+    reading. Naming the branch is what makes it a reading.
+    """
+
+    def git(*args: str) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=SCRIPTS_DIR,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            return None
+        return proc.stdout.strip() if proc.returncode == 0 else None
+
+    branch = git("symbolic-ref", "--short", "-q", "HEAD")
+    if not branch:
+        # `symbolic-ref` exits non-zero for a detached HEAD, which is a state and not a
+        # failure — the same distinction the readings below keep between "not read" and
+        # a value.
+        branch = "(detached HEAD)"
+    head = git("rev-parse", "HEAD") or "????????"
+    return str(SCRIPTS_DIR.parent), branch, head
+
+
 def _as_json(readings: list[tuple[Reading, Action]]) -> str:
+    # The clone and its branch ride as *fields* on each reading, the way
+    # `check-merge-landed.py` states its tree in `--json`: the document's shape is a
+    # list, and a prose line ahead of it would be a second kind of line in a stream a
+    # machine consumer parses.
+    root, branch, _head = local_tree()
     return json.dumps(
         [
             {
+                "tree": root,
+                "branch": branch,
                 "pr": reading.pr,
                 "head": reading.head,
                 "title": reading.title,
@@ -930,6 +978,20 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     unread = [reading.pr for reading, _ in readings if reading.votes is None]
+
+    root, branch, head = local_tree()
+    if not args.json:
+        # The family's convention — a guard that reads a working tree names it before it
+        # gives a verdict — and it applies here for the reason `local_tree` records: the
+        # readings are this clone's, and so is any file the reader opens next.
+        print(f"tree: {root} on {branch} ({head[:8]})")
+        here = [reading.pr for reading, _ in readings if reading.head == head]
+        if here:
+            print(
+                f"note: this working tree is at the head of "
+                f"{', '.join(f'#{pr}' for pr in here)} - an open PR, so a file read from "
+                "here is that PR's content, not master's"
+            )
 
     if args.json:
         print(_as_json(readings))

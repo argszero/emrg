@@ -171,7 +171,27 @@ INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 # at either scope, and the cap's own notice naming the file it cut (#1578) is all
 # that file has. Mechanised for both scopes in
 # `tests/test_memory_index_thresholds.py`.
-INDEX_SIZE_WARN = 50 * 1024
+#
+# The budget is also the constant the *row rule* rests on, and that is what fixes its
+# value. `daemon.MEMORY_INDEX_ROW_CAP` (100 lines, the host's compaction trigger) is
+# safe only while a maximum-width index at that line count still fits here — and
+# `INDEX_TITLE_MAX_CHARS` is a bound on a **line**, so the row's own newline is part of
+# the file: `n` full rows occupy `n * (512 + 1)` chars. The derivation used to be
+# written as `100 x 512 = 51,200`, i.e. exactly this budget, and it was false by the
+# newlines — measured 2026-09-26, 100 maximum-width rows are 51,300 chars, so the cap
+# truncated the index (keeping 50,787 = the first 99 rows, dropping the newest) while
+# the compaction note's trigger, `lines > 100`, stayed silent. That is the one direction
+# the row rule promises cannot happen, and it costs precisely the newest row — the
+# failure class issue #1554 measures, since the cap keeps the head of an index whose
+# rows append newest-last. The row cap is the host's number and stays; this budget is
+# nobody's instruction, so it moves to where the arithmetic puts it: 100 x 513 = 51,300
+# needs at least 51 KiB, and the thousand round up (52,224) leaves 924 chars of slack.
+# That slack is the whole difference between the numbers — measured from the other side,
+# 924 = 1.8 full rows, so the first line count at which the cap could truncate a
+# maximum-width index is **102**, two lines past the trigger — which is the property to
+# keep if this is ever retuned: no truncation without the note having fired. Read from
+# both sides in `tests/test_memory_index_row_cap_fits_the_budget.py`.
+INDEX_SIZE_WARN = 51 * 1024
 
 # Order of the `## type` sections when the index has to be rendered from
 # entries alone (a rebuild, or entries the document never had). The parser

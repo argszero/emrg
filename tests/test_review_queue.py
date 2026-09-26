@@ -577,6 +577,12 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
     votes = FakeVotes(reviews=[_review(cycle="cyc1")])
     fresh = FakeFresh(stale=True, kind="ancestry", behind=1)
     _install(mod, monkeypatch, votes, fresh)
+    # The tree fields are asserted here as literal values, so the reading is substituted:
+    # the branch of the checkout these tests run in is a fact about the runner (CI
+    # checks out a detached HEAD), and an expected dict that varies by runner would be a
+    # test of the environment. `test_the_json_document_keeps_its_shape_and_carries_the_
+    # same_fact` pins the live reading.
+    monkeypatch.setattr(mod, "local_tree", lambda: ("/checkout", "some-branch", "b" * 40))
     # `--prev-cycle` rather than the default cycle-record directory: the shape has to
     # be the same everywhere, and the inferred window is a fact about the host.
     rc = mod.main(
@@ -588,6 +594,8 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
     row = dict(payload[0])
     why = row.pop("why")
     assert row == {
+        "tree": "/checkout",
+        "branch": "some-branch",
         "pr": 1,
         "head": HEAD,
         "title": "pr 1",
@@ -909,9 +917,13 @@ def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
     # And it is printed *ahead* of the rows it weakens (`cyc20260926-120320` moved it
     # there): the tail placement left it at line 39 of a queue a reader pipes through
     # `head`, or reads only as far as the first row whose command they copy.
-    assert out.splitlines()[0].startswith("note: the abstention window could not be widened"), (
-        out.splitlines()[0]
-    )
+    #
+    # The tree line moved in front of it on 2026-09-26 (#1635), so "ahead of the rows"
+    # is now "the line after the tree line" rather than "line 0" - the reading that
+    # matters is the order, and it is asserted as an order.
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert lines[0].startswith("tree: "), lines[0]
+    assert lines[1].startswith("note: the abstention window could not be widened"), lines[:2]
     assert out.index("could not be widened") < out.index("#1 "), out[:300]
 
 
@@ -962,7 +974,6 @@ def test_without_a_cycle_the_report_says_the_clause_was_not_applied(mod, monkeyp
     fresh = FakeFresh()
     _run(mod, monkeypatch, votes, fresh, ["1"])
     out = capsys.readouterr().out
-
     assert "no --cycle was given" in out, (
         "an unflagged run reports `vote` rows and says nothing about the own-window "
         f"clause having been skipped: {out!r}"
@@ -973,12 +984,119 @@ def test_without_a_cycle_the_report_says_the_clause_was_not_applied(mod, monkeyp
     )
     # The placement is the assertion, not a detail of it: a caveat read *after* the row
     # it weakens arrives after the reader has copied the command.
-    assert out.splitlines()[0].startswith("note: no --cycle was given"), out.splitlines()[0]
+    # The placement is the assertion, and the tree line moved in front of it on
+    # 2026-09-26 (#1635): the note must still precede the rows, now as the line after
+    # the tree line rather than as line 0.
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert lines[0].startswith("tree: "), lines[0]
+    assert lines[1].startswith("note: no --cycle was given"), lines[:2]
     assert out.index("no --cycle was given") < out.index("#1 "), (
         "the note is not ahead of the row it qualifies"
     )
 
 
+# --- the tree the readings came from --------------------------------------
+
+
+def test_the_report_names_the_checkout_and_the_branch_it_read(mod, monkeypatch, capsys):
+    """The first line is the clone, the way every `check-merge-*.py` names its base.
+
+    Without it the report is a set of readings with no statement of which checkout
+    produced them — and the reader's next act is to open a file with the `read` tool,
+    which reads *this branch's* content. Asserted against the live checkout rather than
+    a substituted one: the checkout path is what a reader has to recognise, and a
+    hardcoded string would pass while pointing somewhere else. The branch is not
+    asserted (a CI checkout is detached; that state has its own test below).
+    """
+    votes = FakeVotes(reviews=[_review(cycle=f"cyc20260917-1{n}") for n in range(3)])
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1"])
+    lines = capsys.readouterr().out.splitlines()
+
+    assert lines[0].startswith("tree: "), (
+        f"the report's first line is {lines[0]!r}; a reader has to be told which checkout "
+        "and branch the readings below came from before any verdict"
+    )
+    assert str(REPO_ROOT) in lines[0], (
+        f"the tree line names {lines[0]!r}, not the checkout the readings came from "
+        f"({REPO_ROOT})"
+    )
+    assert " on " in lines[0], lines[0]
+
+
+def test_a_detached_head_is_a_state_not_a_failure(mod):
+    """`symbolic-ref` exits non-zero when HEAD is detached, which is how CI checks out.
+
+    A branch reading that treated that as unreadable would print a failure on every CI
+    run; a branch reading that did not read at all would print `master` for a checkout
+    that is not on master, which is the one thing this line exists to prevent.
+    """
+    root, branch, head = mod.local_tree()
+
+    assert root == str(REPO_ROOT)
+    assert branch, "a checkout always has a state to name, detached included"
+    assert len(head) in (8, 40) or head == "????????", head
+
+
+def test_the_tree_line_says_so_when_the_working_tree_is_at_an_open_prs_head(
+    mod, monkeypatch, capsys
+):
+    """The measured incident: a cycle began on the previous cycle's PR branch.
+
+    Stated in `local_tree`'s docstring; pinned here because the signal is only worth
+    having if it is emitted. `local_tree` is replaced rather than the repository moved —
+    the fact under test is that the report compares its own HEAD against the open heads,
+    which is a computation, not a check of this checkout.
+    """
+    monkeypatch.setattr(mod, "local_tree", lambda: (str(REPO_ROOT), "feature/x", HEAD))
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1"])
+    out = capsys.readouterr().out
+    assert "on feature/x" in out, out[:200]
+    assert "at the head of #1" in out, (
+        "the working tree matches an open PR's head and the report did not say so, so a "
+        f"file read from here would answer about an unmerged tree: {out[:400]!r}"
+    )
+    assert "not master's" in out, out[:400]
+def test_the_note_is_absent_when_the_tree_is_not_at_an_open_prs_head(
+    mod, monkeypatch, capsys
+):
+    """The control: the note is about a comparison, not about running at all.
+
+    With a HEAD that matches no open head — the ordinary case, and the one every cycle
+    that has just returned to master is in — the report names the tree and says nothing
+    else. Without this half the test above would pass for a note printed unconditionally.
+    """
+    monkeypatch.setattr(mod, "local_tree", lambda: (str(REPO_ROOT), "master", "b" * 40))
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1"])
+    out = capsys.readouterr().out
+
+    assert "on master" in out
+    assert "at the head of" not in out, (
+        f"this HEAD matches no open head, so the note must not be printed: {out[:400]!r}"
+    )
+def test_the_json_document_keeps_its_shape_and_carries_the_same_fact(
+    mod, monkeypatch, capsys
+):
+    """`--json` is a list, and a prose line ahead of it would break the parse.
+
+    The fact rides as fields on each reading instead — the shape `check-merge-landed.py`
+    uses for its tree in `--json`, and the reason the prose line is suppressed there.
+    """
+    monkeypatch.setattr(mod, "local_tree", lambda: (str(REPO_ROOT), "feature/x", "b" * 40))
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh, ["1", "--json"])
+    out = capsys.readouterr().out
+
+    payload = json.loads(out)  # a prose line here raises, which is the assertion
+    assert isinstance(payload, list), type(payload)
+    assert payload[0]["tree"] == str(REPO_ROOT)
+    assert payload[0]["branch"] == "feature/x"
+    assert "tree: " not in out, "the prose line must not be emitted into the JSON document"
 def test_a_windowed_run_prints_no_such_note(mod, monkeypatch, capsys):
     """The control: with `--cycle` and a previous cycle in hand the clause *is*
     applied in full, and a note printed anyway would be a claim about a gap that is not
@@ -991,9 +1109,11 @@ def test_a_windowed_run_prints_no_such_note(mod, monkeypatch, capsys):
 
     assert "no --cycle was given" not in out, out[:300]
     assert "could not be widened" not in out, out[:300]
-    assert out.splitlines()[0].startswith("#1 "), out.splitlines()[0]
-
-
+    # Same move as above: the row is the first line after the tree line, and no
+    # window note sits between them.
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert lines[0].startswith("tree: "), lines[0]
+    assert lines[1].startswith("#1 "), lines[:2]
 def test_the_absent_cycle_note_stays_out_of_the_json_document(mod, monkeypatch, capsys):
     """`--json` is one document: the gap is carried by the documented
     `vote_window_start: null` / `vote_window_source: ""` pair, and a prose line ahead
