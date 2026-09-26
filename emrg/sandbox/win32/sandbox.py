@@ -221,24 +221,24 @@ class AclSandbox:
             )
             self._token = restricted_token
             # The restricted token's default DACL still names only the user's
-            # ambient SIDs — none of the restricting ones.  Every NEW object the
-            # confined process creates takes its DACL from that default, so the
-            # write check would deny pipe creation and break every piped-stdio
-            # grandchild spawn.  Choosing the temp SID first keeps default-DACL
-            # objects in one session's temp tree from acquiring the shared
-            # workspace capability.
+            # ambient SIDs — none of the restricting ones — and every NEW object
+            # the confined process creates takes its DACL from that default.  A
+            # SID that fails either half of the write-restricted check therefore
+            # denies the object to its own creator, which is what broke pipes and
+            # every captured-stdio grandchild spawn at ``workspace-write``.
             #
-            # Two lists, not one, and the fallback is why the tiers differ: a
-            # restricting-only SID is refused by the enabled-group pass, so the
-            # temp write SID (this branch) fails where EVERYONE (the read-only
-            # fallback, ``world_sid``) passes.  The measured rule and the six rows
-            # behind it are in ``token.set_token_default_dacl_grant``'s docstring
-            # — read it before changing this argument (issue #1560).
-            set_token_default_dacl_grant(
-                bindings,
-                restricted_token,
-                self._temp_write_sid_ptr or self._write_sid_ptr or world_sid.address,
-            )
+            # The logon SID is the narrowest argument that passes both halves: the
+            # token holds it as a normal group *and* as a restrictor, by
+            # construction, and an object granted to it stays inside this logon
+            # session instead of being handed to EVERYONE.  A capability SID looks
+            # narrower and is the wrong choice — it is in the restricting list
+            # alone, so the enabled-group pass never runs in its favour.
+            #
+            # ``token.set_token_default_dacl_grant``'s docstring carries the
+            # measured rule and the six rows behind it (issue #1560); the two SIDs
+            # that also passed are why this argument is the *narrowest* one and
+            # not simply a working one.
+            set_token_default_dacl_grant(bindings, restricted_token, logon_sid.address)
             if int(bindings.kernel32.CloseHandle(ctypes.c_void_p(current_token))) == 0:
                 throw_last_error(bindings, "CloseHandle", "current process token")
             token_open = False

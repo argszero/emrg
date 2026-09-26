@@ -184,14 +184,18 @@ def set_token_default_dacl_grant(api: Win32Bindings, token: int, sid_ptr: int) -
     is the deciding variable rather than a pass the caller can compensate for.
 
     Two consequences a reader of this file needs, because the code does not make
-    them visible.  The read-only branch names EVERYONE
-    (``sandbox.py``: ``self._temp_write_sid_ptr or self._write_sid_ptr or
-    world_sid.address``), which is in both lists — that is why pipes are created
-    at ``read-only`` and denied at ``workspace-write``, the tier *without* a temp
-    capability being the one the shipped grant breaks.  And :func:`find_logon_sid`
-    already runs at that call site, so the second list is reachable without a new
-    probe; whether the fix is the logon SID, EVERYONE-alongside, or a token whose
-    write SID is enabled is a decision for a host that can measure it.
+    them visible.  The read-only branch's fallback names EVERYONE, which is in both
+    lists — that is why pipes were created at ``read-only`` while they were denied
+    at ``workspace-write``, the tier whose grant named the temp write SID.  And
+    :func:`find_logon_sid` already runs at that call site, so the SID the fix needs
+    was already in hand and the change costs no new probe.
+
+    The call site passes the logon session SID: it is in both of the token's lists
+    by construction, and of the arguments the measurement above shows working it is
+    the narrowest — an object granted to it stays inside this logon session rather
+    than being handed to EVERYONE.  A capability SID is the one argument that
+    *looks* narrower than any of them and must not be used, which is the shape the
+    bug had.
 
     What the ACE does *not* widen, in the same measurement: object creation stays
     gated by the parent container's DACL, so a write outside every granted root
