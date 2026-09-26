@@ -498,7 +498,8 @@ def _note(*parts: str) -> str:
 
 def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
             needed: int = 3, mergeability_wait: float = 0.0,
-            window: Window | None = None) -> Reading:
+            window: Window | None = None,
+            cycles_log: str | None = None) -> Reading:
     """Assemble one PR's row from the counter and the freshness tool.
 
     Each half degrades on its own — an unreadable ancestry does not discard a
@@ -509,12 +510,17 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
     The vote half is first because everything else is a decision about its number,
     and because a failure there means no row is worth printing. `mergeability_wait`
     is passed through to the counter, which is the tool that owns the refusal: this
-    one neither softens it nor invents a verdict if the budget runs out.
+    one neither softens it nor invents a verdict if the budget runs out. `cycles_log`
+    goes through for the same reason the flag exists: the counter reads the abstention
+    window out of it, so a corpus named here and not there would have this row's window
+    read from one collection of cycles and its *count* judged against another.
     """
     out = Reading(pr=pr, head="", needed=needed)
 
     try:
-        verdict = vote_counter().check_pr(pr, needed, mergeability_wait=mergeability_wait)
+        verdict = vote_counter().check_pr(
+            pr, needed, mergeability_wait=mergeability_wait, cycles_log=cycles_log
+        )
     except Exception as exc:  # noqa: BLE001 - the point is to report, not to crash
         out.unread = _note(f"vote count unreadable: {type(exc).__name__}: {exc}")
         return out
@@ -969,7 +975,8 @@ def main(argv: list[str] | None = None) -> int:
 
     readings = rows(
         [
-            read_pr(pr, args.repo, args.cycle, needed, args.mergeability_wait, window)
+            read_pr(pr, args.repo, args.cycle, needed, args.mergeability_wait, window,
+                    args.cycles_log)
             for pr in queue
         ],
         args.cycle,
