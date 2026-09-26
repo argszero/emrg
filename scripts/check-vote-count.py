@@ -58,6 +58,40 @@ two approvals it was voiding alongside its own id was recorded as a `NO` by
 mis-attributed vote is worse than a missing one: it can credit distinctness a PR does
 not have. `cast-vote.py` refuses to post a body like that; this is the reading side.
 
+Who may cast one of those votes
+-------------------------------
+The rule counts *different cycles* and never said who is allowed to be one of them.
+The missing half — **a cycle abstains on a head it pushed**, and on the head pushed by
+the cycle immediately before it, because every cycle on a host is the same instance
+running again — is refused at post time by `cast-vote.py` (issue #1408). That refusal
+is not where the count is read, so it left a hole of exactly the shape this file
+exists to close: a vote posted straight with `gh pr review` (the form the template
+tells a Committer to use) was counted by the only authority on whether a vote counted.
+
+So the clause is asked here too, of every vote: **the window belongs to the voting
+cycle**, and the head counts as that cycle's own if it was pushed at or after the
+window's start. Per vote rather than per PR, because each vote names its own cycle —
+which is also why `--cycles-log` exists: the answer is read from the cycle records on
+disk, and a verdict about a vote must not silently depend on which records happen to
+sit on the reading host.
+
+Measured before this clause landed, over the last 30 merged PRs: **0 of 90** counted
+votes fell inside their head's own window. The clause changed no history; what it
+removes is the possibility of one, on the path that never asked.
+
+Two inputs are *not* decided by guessing, and both are named in the void's reason:
+
+* a head with no CI run has a push time that is a lower bound (the commit date), and a
+  lower bound cannot decide a window — the clause is not applied, because the same
+  missing run already makes the PR `BLOCKED`, and reporting its votes as void would
+  name a review deficit that is not the blocker;
+* a cycle id that names no instant leaves no window to apply, and an unresolved window
+  is not reported as a pass — the vote is void, and its cycle is named.
+
+A veto inside its own head's window is reported the same way and still resets the run:
+`valid` is the counter's bookkeeping, not the objection's (this file already refuses to
+let an attribution problem make an objection inert — see the multi-id veto).
+
 Votes are necessary, not sufficient: the mergeable clause
 ---------------------------------------------------------
 The merge rule has three conjuncts - 3 consecutive ✅ from different cycles, the PR
@@ -142,6 +176,7 @@ Usage
     uv run --no-sync python3 scripts/check-vote-count.py <PR> --json
     uv run --no-sync python3 scripts/check-vote-count.py <PR> --min-votes 2
     uv run --no-sync python3 scripts/check-vote-count.py <PR> --mergeability-wait 60
+    uv run --no-sync python3 scripts/check-vote-count.py <PR> --cycles-log DIR
 
 `--mergeability-wait` is for the transient `UNKNOWN`: GitHub computes
 mergeability lazily, so a head pushed a moment ago reports "not answered yet",
@@ -173,14 +208,18 @@ merge is the exact reading it was just fixed for.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 REPO = "argszero/emrg"
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
 
 # GitHub's three-valued mergeability, as `gh pr view --json mergeable` reports it.
 # Named rather than compared inline so an unrecognised value (a new GitHub state)
@@ -297,6 +336,114 @@ def distinct_cycle_ids(body: str) -> list[str]:
     check they had kept passing while the readings diverged.
     """
     return list(dict.fromkeys(_CYCLE_RE.findall(body)))
+
+
+# ── the abstention window: was this head the voting cycle's own? ─────────────
+#
+# The rule's other half. "3 consecutive ✅ from different cycles" says nothing about
+# *who may cast one*, and the clause that carries it — a cycle does not vote on a PR
+# whose head it pushed, nor on the head pushed by the cycle immediately before it —
+# is refused at post time by `cast-vote.py` (issue #1408). This is the reading side
+# of the same clause, which was missing: the count is what a cycle reads when it
+# decides to merge, so a vote that must not have been cast has to read as uncounted.
+# Both halves ask one question — "were the head and the vote cast by the same
+# cycle?" — and neither can read the answer off GitHub, which attributes a push to
+# nobody; the clock is the only witness, and the window is the machinery that reads
+# it (`scripts/review-queue.py`, where the two ends and the narrowed form live).
+#
+# The window belongs to the *voting* cycle, so this is asked per vote rather than
+# once per PR, and the source directory is a parameter: a verdict about a vote may
+# not silently depend on which cycle records happen to sit on the reading host.
+
+_review_queue: object | None = None
+
+
+def review_queue():
+    """The sibling that owns the window: `abstain_window`, `previous_cycle`, `instant`.
+
+    Loaded by path, the way this family loads its siblings — the scripts here are
+    hyphenated and are not importable modules — and registered in `sys.modules`
+    before it is executed, because the loaded file declares dataclasses and
+    dataclasses resolves its annotations through `sys.modules[cls.__module__]`.
+    """
+    global _review_queue
+    if _review_queue is None:
+        spec = importlib.util.spec_from_file_location(
+            "check_vote_count_abstain", _SCRIPTS_DIR / "review-queue.py"
+        )
+        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
+            raise RuntimeError("could not load review-queue.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _review_queue = module
+    return _review_queue
+
+
+def own_head_window(
+    cycle: str,
+    *,
+    push_time: str,
+    push_time_exact: bool,
+    cycles_log: str | None = None,
+) -> tuple[bool, str]:
+    """Is the head inside the window this vote's own cycle treats as its own?
+
+    Answers `(inside, why)`. `inside` means the vote must not count, and `why` is
+    what the reader is told about it; `(False, "")` is the ordinary case.
+
+    Three inputs, and the same rule as the posting side for each of them:
+
+    * **The window.** The previous cycle's start when its record can be found, this
+      cycle's own start when it cannot — `abstain_window`'s narrowed form, and the
+      reason says which of the two was applied, because a window that could not be
+      widened is a strictly weaker reading and must not pass as the stronger one.
+    * **An unresolvable window is not passed.** A cycle id that names no instant
+      leaves nothing to compare, and the direction that costs a delay is preferred
+      to the one that spends a vote (the sibling's rule, `cast-vote.py`'s refusal).
+    * **No CI run for the head means the clause is not applied.** The push time is
+      then the commit date — a lower bound — and a lower bound cannot decide a
+      window. That case is already answered *above* this clause: `blocked` refuses
+      to merge such a head for the same missing run, and reporting the votes as void
+      on top of it would name a review deficit that is not the blocker.
+
+    A veto is reported the same way, and keeps its force: `valid` is the counter's
+    bookkeeping, not the objection's (see the multi-id veto, the same rule).
+    """
+    if not push_time_exact:
+        return False, ""
+    if not cycle:  # a caller error, not a reading: only a resolved cycle is asked about
+        raise ValueError("own_head_window needs the vote's cycle id")
+    queue = review_queue()
+    previous, where = queue.previous_cycle(cycle, queue.resolve_cycle_logs(cycles_log))
+    window = queue.abstain_window(cycle, previous, where)
+    if not window.applied:
+        return True, (
+            "the head's own window cannot be decided from this vote's cycle "
+            f"({window.unresolved or f'{cycle!r} names no instant'}) - an unresolved "
+            "window is not passed, in either tool, and `cast-vote.py` refuses to post "
+            "in this state (issue #1408)"
+        )
+    pushed = queue.instant(push_time)
+    if pushed is None:
+        return True, (
+            f"the head's own window cannot be decided from push time {push_time!r}, "
+            "which is not an instant (issue #1408)"
+        )
+    if pushed < window.start:
+        return False, ""
+    narrowed = (
+        f"; the window could not be widened to the cycle before this one ({window.unresolved})"
+        if window.unresolved
+        else ""
+    )
+    return True, (
+        f"cast inside the window this vote's cycle treats as its own - the head was "
+        f"pushed {push_time}, at or after {window.window_start_text()} ({window.source}"
+        f"{narrowed}); a cycle does not vote on a head it pushed, and the window "
+        "immediately before it counts as its own, so `cast-vote.py` refuses to post "
+        "this vote (issue #1408)"
+    )
 
 
 # A **leading** veto wins over everything on the line: "❌ needs fix" is a request
@@ -966,6 +1113,7 @@ def check_pr(
     needed: int,
     *,
     mergeability_wait: float = 0.0,
+    cycles_log: str | None = None,
 ) -> Verdict:
     view = _view_with_computed_mergeability(number, mergeability_wait)
     head = str(view["headRefOid"])
@@ -1008,6 +1156,10 @@ def check_pr(
     reviews.sort(key=lambda r: str(r.get("at") or ""))
 
     votes: list[Vote] = []
+    # One resolve per cycle, not per vote: the window is read from the cycle records
+    # on disk, and a PR whose votes come from three cycles would otherwise scan that
+    # directory three times over for the same three answers.
+    windows: dict[str, tuple[bool, str]] = {}
     for r in reviews:
         assert isinstance(r, dict)
         # The projection must have applied: without it the fields arrive under
@@ -1064,7 +1216,23 @@ def check_pr(
         elif cycle is None:
             votes.append(Vote(at, kind, cycle, False, "no cycle id in the vote body"))
         else:
-            votes.append(Vote(at, kind, cycle, True, "", tuple(ids)))
+            # The clause `cast-vote.py` refuses on, asked of a vote that is already
+            # posted. It sits *after* the three reasons above so that each vote is
+            # reported for its most basic defect: a body with no cycle id has no
+            # window to ask about, and one that names several has no author to ask
+            # for. `at <= push_time` wins for the same reason - it needs no window.
+            if cycle not in windows:
+                windows[cycle] = own_head_window(
+                    cycle,
+                    push_time=push_time,
+                    push_time_exact=exact,
+                    cycles_log=cycles_log,
+                )
+            inside, why = windows[cycle]
+            if inside:
+                votes.append(Vote(at, kind, cycle, False, why, tuple(ids)))
+            else:
+                votes.append(Vote(at, kind, cycle, True, "", tuple(ids)))
 
     # Walk the votes in order, resetting the run on a veto, and counting each
     # cycle at most once inside the trailing run.
@@ -1120,6 +1288,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
     parser.add_argument(
+        "--cycles-log",
+        default=None,
+        help="directory (or os.pathsep-joined directories) of cycle records the "
+             "abstention window is read from (default: $EMRG_CYCLES_LOG, else both the "
+             "project's and the corpus's .emrg/memory)",
+    )
+    parser.add_argument(
         "--mergeability-wait",
         type=float,
         default=0.0,
@@ -1130,7 +1305,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         verdicts = [
-            check_pr(n, args.min_votes, mergeability_wait=args.mergeability_wait)
+            check_pr(
+                n,
+                args.min_votes,
+                mergeability_wait=args.mergeability_wait,
+                cycles_log=args.cycles_log,
+            )
             for n in args.prs
         ]
     except (RuntimeError, KeyError, ValueError, AssertionError) as exc:
@@ -1237,7 +1417,8 @@ def main(argv: list[str] | None = None) -> int:
     if short:
         print(
             f"\nNot enough votes yet (need {args.min_votes} consecutive, from different "
-            "cycles, none predating the head push). A rebase voids every earlier vote.",
+            "cycles, none predating the head push and none cast inside the voting "
+            "cycle's own head window). A rebase voids every earlier vote.",
             file=sys.stderr,
         )
 
