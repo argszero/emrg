@@ -244,6 +244,16 @@ def main(argv: list[str] | None = None) -> int:
     :param argv: the command line, defaults to `sys.argv[1:]`.
     :returns: the exit code the docstring states.
     """
+    # A merged reader must see the `tree:` line before any verdict - this file's
+    # docstring promises that order. stdout is block-buffered when it is a pipe
+    # (how a cycle reads this report: `2>&1 | tail`) while stderr is not, so
+    # without this every stderr line overtakes the tree line. Behaviour and pin:
+    # tests/test_guard_report.py.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(
         description="A test citation must name the node id pytest would collect."
     )
