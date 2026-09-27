@@ -505,6 +505,13 @@ def test_a_stale_branch_with_no_votes_is_told_the_refresh_is_free(mod, monkeypat
     #1199/#1200 were stale at 0/3. Telling them to measure a landing tree by hand
     instead would be the cautious-but-wrong output - CI on the real merged tree is
     strictly better evidence, and it costs nothing here.
+
+    "Here" is votes *already cast*, and since 2026-09-26 the line says so: the push
+    also forfeits the **uncast** votes the same head would have collected, because
+    the abstention window covers the pushing cycle and the one after it. Measured
+    (`cyc20260926-155041`): that cycle followed this remedy on #1638 and was then
+    refused its own vote by `cast-vote.py` (`own-head-window`), on a head its window
+    had not covered before the push.
     """
     fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
     _votes(mod, monkeypatch, 0)
@@ -514,6 +521,17 @@ def test_a_stale_branch_with_no_votes_is_told_the_refresh_is_free(mod, monkeypat
     assert "0 valid votes - nothing to void" in err
     assert "Re-merge master into the branch" in err
     assert "at risk" not in err
+    remedy = next(
+        line for line in err.splitlines() if "#1:" in line and "nothing to void" in line
+    )
+    # The cost a zero count does not show, and the reason the sentence above no longer
+    # stops at "free". Asserted on the same remedy line, because that is where the
+    # reader who is about to push is: the route that costs no vote
+    # (`check-merge-plan-suite.py`, which measures the landing tree without moving the
+    # head) and the window fact that makes it the alternative.
+    assert "not nothing to *lose*" in remedy, err
+    assert "the cycle after next" in remedy, err
+    assert "check-merge-plan-suite.py <PR>" in remedy, err
     # The other direction of the channel rule: with no vote at risk there is
     # nothing to vote on, so the remedy line must name no channel at all. Asserted
     # on that line rather than on the whole output, and on the concept rather than
@@ -521,9 +539,6 @@ def test_a_stale_branch_with_no_votes_is_told_the_refresh_is_free(mod, monkeypat
     # is a local reading as an alternative to CI on the real merged tree, which is
     # strictly better and free at 0 votes. (A mutant that said "or cast a review"
     # survived the `gh pr review` version of this assertion.)
-    remedy = next(
-        line for line in err.splitlines() if "#1:" in line and "nothing to void" in line
-    )
     assert "review" not in remedy and "comment" not in remedy, remedy
 
 
