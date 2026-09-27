@@ -1,3 +1,3 @@
 """EMRG — a self-evolving AI agent architecture."""
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
