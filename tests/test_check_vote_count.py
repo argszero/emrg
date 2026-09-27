@@ -668,6 +668,52 @@ def test_a_veto_stated_below_a_prose_intro_is_still_a_veto(mod):
     assert mod.classify("Checked all three.\n\n\u2705 LGTM - cycle `c`") == "comment"
 
 
+def test_a_quoted_cycle_id_is_not_a_second_candidate(mod):
+    """The fence rule reaches the ids too, not only the verdict marks.
+
+    One body, one answer to "what does it state" - and until 2026-09-27 it had two:
+    `classify` had fenced regions blanked while `distinct_cycle_ids` read the raw
+    body, so a review that named its own cycle and then *quoted* the tool output
+    naming another was read as naming two candidates - and a body naming two counts
+    for **none**. The loss is silent (the body still reads as an approval) and the
+    shape is the ordinary one: `review-queue.py` prints the previous cycle's id in
+    exactly such a line, so quoting the row a vote was decided from was the way to
+    lose the vote.
+
+    Measured on master `846c232d` before the read was routed through
+    `_decorated_lines`: the body below returned both ids.
+    """
+    own, quoted = "cyc20260927-123036", "cyc20260927-113700"
+    body = (
+        f"\u2705 LGTM - cycle {own}\n\n"
+        "The row it printed:\n\n"
+        "```text\n"
+        f"inside the window this cycle treats as its own (previous cycle {quoted})\n"
+        "```\n"
+    )
+    assert mod.distinct_cycle_ids(body) == [own], "a quotation is not a second candidate"
+    assert mod.classify(body) == "approve"
+
+    # The hole the fix must not close: two ids *stated* still name two candidates,
+    # and the vote is void for exactly that reason.
+    stated_two = f"\u2705 LGTM - cycle {own}\n\nas measured by {quoted}\n"
+    assert mod.distinct_cycle_ids(stated_two) == [own, quoted]
+
+    # A body whose only id is quoted states no cycle at all: a quotation is not a
+    # claim in either direction.
+    only_quoted = f"\u2705 LGTM\n\n```\ncycle {own}\n```\n"
+    assert mod.distinct_cycle_ids(only_quoted) == []
+
+    # ~~~ is a fence here as it is for the verdict.
+    tilde = f"\u2705 LGTM - cycle {own}\n\n~~~\n{quoted}\n~~~\n"
+    assert mod.distinct_cycle_ids(tilde) == [own]
+
+    # And the nested form this repo writes (a fenced example inside a longer fence)
+    # is content, not a fence: the outer fence carries the quoted id away with it.
+    nested = f"\u2705 LGTM - cycle {own}\n\n````text\n```\n{quoted}\n```\n````\n"
+    assert mod.distinct_cycle_ids(nested) == [own]
+
+
 def test_a_quoted_veto_in_a_code_fence_is_not_a_stated_one(mod):
     """The fifth defect: a *quotation* is not a *statement*.
 

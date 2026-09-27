@@ -178,14 +178,20 @@ class _ReadsBodiesLikeTheCounter:
     """The pure half of the counter, which a double must answer and must not invent.
 
     `check_pr` is a *network* reading, so a scripted stand-in is the point of every
-    double here. Classification is a pure function of the body, and the reason
-    `cast-vote.py` asks the counter for it is that one body has to read the same way on
-    both sides — a double answering this with its own lookalike would test the
-    lookalike, and would stay green while the real classifier moved.
+    double here. The two readings that are pure functions of the body — its verdict
+    and its cycle ids — are asked of the real counter instead, because the reason
+    `cast-vote.py` asks it for them is that one body has to read the same way on both
+    sides: a double answering these with its own lookalike would test the lookalike,
+    and would stay green while the real reading moved. Both are on *this* class rather
+    than on one fake so that every double here inherits them, including the ones that
+    only care about `check_pr`.
     """
 
     def classify(self, body: str) -> str:
         return _the_counter().classify(body)
+
+    def distinct_cycle_ids(self, body: str) -> list[str]:
+        return _the_counter().distinct_cycle_ids(body)
 
 
 class FakeCounter(_ReadsBodiesLikeTheCounter):
@@ -213,18 +219,6 @@ class FakeCounter(_ReadsBodiesLikeTheCounter):
         if len(self._verdicts) > 1:
             return self._verdicts.pop(0)
         return self._verdicts[0]
-
-    def classify(self, body: str) -> str:
-        """Delegated to the real counter, and deliberately **not** faked.
-
-        `check_pr` is a *network* reading, so a scripted stand-in is the whole point
-        of this fake. The verdict classification is a pure function of the body, and
-        the reason `cast-vote.py` asks the counter for it at all is that one body
-        must read the same way on both sides — a fake answering this with its own
-        lookalike would test the lookalike, and would stay green while the real
-        classifier moved.
-        """
-        return _the_counter().classify(body)
 
 
 class FakeGh:
@@ -407,6 +401,59 @@ def test_two_cycle_ids_in_one_body_are_refused(mod, monkeypatch, capsys, body_fi
     # "which cycle wrote it cannot be measured, so it counts for none of them").
     assert "count for none of them" in err, "the refusal must state the counter's consequence"
     assert "first match" not in err, "the counter no longer takes the first match"
+
+
+def test_a_quoted_cycle_id_is_not_a_second_one(mod, monkeypatch, capsys, body_file):
+    """The body this was measured on: a vote lost for quoting the row it decided from.
+
+    Measured 2026-09-27 (`cyc20260927-123036`) on master `846c232d`: this tool refused
+    a body that named its own cycle once and then quoted, inside a fence, the line
+    `review-queue.py` had printed. It was an ordinary review of a vote-count PR -
+    reading back the row the vote was decided from is what such a review *is* - and the
+    refusal reported two candidates where the body stated one. The counter had dropped
+    fenced regions from its *verdict* reading since 2026-09-11; the ids were the half it
+    still took out of the raw body, so the two tools disagreed about what a body states
+    and only one of them could be posted to.
+
+    Both halves are asserted, because they are the two ways to get a quotation wrong: it
+    must not *create* a candidate, and it must not *hide* one either - a body whose only
+    id is quoted states no cycle, which is the counter's reading and so must be this
+    tool's refusal rather than a post that counts for nobody.
+    """
+    body = (
+        f"\u2705 LGTM \u2014 cycle {CYCLE}\n\n"
+        "The row it printed:\n\n"
+        "```text\n"
+        f"the head was pushed at 17:59:06Z (previous cycle {OTHER_CYCLE})\n"
+        "```\n"
+    )
+    counter = FakeCounter(
+        verdict_with(),
+        verdict_with([vote()], counted=[True], valid_count=2),
+    )
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", body_file(body)])
+    out = capsys.readouterr().out
+    assert rc == 0, "a quoted id is not a second candidate"
+    assert len(gh.calls) == 1
+    assert gh.calls[0][:3] == ["pr", "review", "1255"]
+    assert out.startswith(f"#1255: review posted as {CYCLE}")
+
+    quoting_counter = FakeCounter(verdict_with())
+    quoting_gh = FakeGh()
+    only_quoted = f"\u2705 LGTM\n\n```text\nmeasured by {CYCLE}\n```\n"
+    rc = _run(
+        mod,
+        monkeypatch,
+        quoting_counter,
+        quoting_gh,
+        ["1255", "--body-file", body_file(only_quoted)],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2, "a body whose only id is quoted names no cycle at all"
+    assert quoting_gh.calls == [], "nothing reaches the network for a body with no cycle id"
+    assert quoting_counter.calls == [], "the count is not worth reading for a refused post"
+    assert "no cycle id" in err
 
 
 # ── the verdict must be where the counter reads it: the first line ─────────
@@ -1145,6 +1192,13 @@ def test_the_two_scripts_read_the_same_id_list_not_just_the_same_presence(mod, c
     that the two scripts answer "which cycles does this body name?" identically,
     including for a body that repeats an id - the shape a review of the vote
     tooling itself has, since it quotes the counter's output.
+
+    The quoted samples are the second half of that admission (2026-09-27,
+    `cyc20260927-123036`): the two tools agreed about every body above while
+    disagreeing about *quotation*, because only the counter dropped fenced regions.
+    A sample set with no fence in it cannot tell the delegated reading from the raw
+    one, so a revert of this side alone would have stayed green - the samples are what
+    makes that revert a killable mutation rather than decoration.
     """
     assert mod._CYCLE_RE.pattern == counter_mod._CYCLE_RE.pattern
     samples = [
@@ -1156,6 +1210,10 @@ def test_the_two_scripts_read_the_same_id_list_not_just_the_same_presence(mod, c
         f"{CYCLE} voided the approval of {OTHER_CYCLE}",
         f"{OTHER_CYCLE} then {CYCLE} then {OTHER_CYCLE}",
         "cyc20260916-02014",
+        f"{CYCLE}\n\n```\nthe row it printed: previous cycle {OTHER_CYCLE}\n```\n",
+        f"~~~\n{CYCLE} written by someone else\n~~~\n",
+        f"{CYCLE}\n\n````text\n```\n{OTHER_CYCLE}\n```\n````\n",
+        f"an odd ``` opener leaves the rest of the body prose, {CYCLE} included",
     ]
     for sample in samples:
         assert mod.cycles_in(sample) == counter_mod.distinct_cycle_ids(sample), sample
