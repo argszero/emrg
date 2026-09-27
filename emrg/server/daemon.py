@@ -569,6 +569,14 @@ class EmrgServer:
         self._session_subscribers: dict[str, dict] = {}  # session_id → {ws: cwd_str}
         self._session_task_cwds: dict[str, str] = {}     # session_id → 运行中任务的 cwd
         self._session_busy: dict[str, bool] = {}        # session_id → active task?
+        # When the session's current turn actually began (epoch), or absent when
+        # none is running. `turn_start` carries this instant, but it is a
+        # *broadcast*: it reaches whoever is subscribed at that moment and is
+        # then forgotten, so a client that opens the session afterwards cannot
+        # see that a turn is running at all, let alone since when (rant
+        # 2026-09-27T18:41:52). The state is kept here for the same lifetime as
+        # `_session_busy` — written where the turn begins, dropped where it ends.
+        self._session_turn_started: dict[str, float] = {}  # session_id → turn start
         # A running turn belongs to its *session*, so the handles that interrupt it do
         # too (rant 2026-09-20T12:50:13): any client subscribed to that session must be
         # able to stop the turn, not only the connection that started it. Mirrors
@@ -3080,6 +3088,23 @@ class EmrgServer:
             })
         return len(pending), ask_injected
 
+    def _session_turn_state(self, session_id: str) -> dict:
+        """The session's current turn, as a snapshot a client can be handed.
+
+        `{"running": bool, "started_at": float | None}` — the daemon's own
+        reading of `_session_turn_started`, never a client's guess about
+        whether the turn is "its own" (rant 2026-09-27T18:41:52): a turn
+        started by another client, or by a scheduled task, is the same fact
+        about the session and must read the same everywhere.
+
+        Only the *instant* travels. Elapsed seconds are derived by the reader
+        against the same clock, because an hour/min/sec count computed here is
+        stale the moment the frame is sent, and two clients that each metered
+        the turn locally is exactly the divergence this replaces.
+        """
+        started_at = self._session_turn_started.get(session_id)
+        return {"running": started_at is not None, "started_at": started_at}
+
     async def _run_tool_loop_locked(
         self, req: TaskRequest, ws, session: Session,
         cancel_event: asyncio.Event | None = None,
@@ -3094,10 +3119,12 @@ class EmrgServer:
         # 实际开始执行时刻（队列等待之后）。TUI/GUI 据此对齐各自计时（排队请求
         # 不再从发送时刻起算）；覆盖所有 turn 来源：TUI/GUI 请求、演化任务
         # （emrg-evolution-*）、upgrade 会话（都经此 locked 包装执行）。
+        started_at = time.time()
+        self._session_turn_started[session_id] = started_at
         await self._broadcast(session_id, {
             "type": "turn_start",
             "session_id": session_id,
-            "started_at": time.time(),
+            "started_at": started_at,
         })
         normal_end = False
         try:
@@ -3105,6 +3132,10 @@ class EmrgServer:
             normal_end = True
         finally:
             self._session_busy[session_id] = False
+            # The turn is over: the snapshot must stop reporting it. Dropped at
+            # the same boundary as the lock, in the same `finally`, so no
+            # snapshot can name a turn that has ended (or miss the end of one).
+            self._session_turn_started.pop(session_id, None)
             # Retract this turn's cancel handles (rant 2026-09-20T12:50:13) — identity-
             # checked so a turn that already replaced this one keeps its own handles.
             if self._session_cancel.get(session_id) is cancel_event:
@@ -5130,6 +5161,13 @@ class EmrgServer:
                 "created_at": session._created_at,
                 "updated_at": session._updated_at,
                 "title": session.title,
+                # A client opening a session learns the session's live state
+                # here, because `turn_start`/`turn_end` are broadcasts — they
+                # are addressed to whoever is subscribed at the time and are
+                # never replayed (rant 2026-09-27T18:41:52). Without this, a
+                # turn started by another client or by a scheduled task is
+                # invisible to the opener, and its elapsed time unshowable.
+                "turn": self._session_turn_state(session_id),
             },
         })
 
