@@ -612,6 +612,18 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
     price in approvals, and - the one that went missing - no approvals but a
     standing veto, where the refresh is not free and "nothing to void" is the one
     claim that is false (#1562).
+
+    "Nothing to void" is a statement about votes already cast, and it was read as
+    "free" - which is a different claim, and false: the push moves the head into the
+    abstention window of the cycle that makes it *and of the cycle after that one*,
+    so the first vote the head can collect comes two cycles later than it otherwise
+    would. Measured 2026-09-26 (`cyc20260926-155041`): that cycle followed this very
+    sentence on #1638 and then could not vote on the head it had pushed -
+    `cast-vote.py` refused it `own-head-window` - when the pre-refresh head was one
+    its window no longer covered. The zero-vote branch therefore names the trade
+    rather than only the reason, and names the no-push route
+    (`check-merge-plan-suite.py <PR>`, which measures the same tree without moving the
+    head) for the cycle that would have cast that first vote.
     """
     if kind == _KIND_ANCESTRY:
         if price.valid_votes is None:
@@ -626,7 +638,15 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
                 "and push the merge (`git fetch origin master`, `git merge FETCH_HEAD`, "
                 "`git push origin <branch>`) so CI judges the real merged tree - the merge, "
                 "not a rebase: a rebase of a pushed branch is refused as non-fast-forward, "
-                "and publishing one needs the force-push this project forbids"
+                "and publishing one needs the force-push this project forbids. Nothing to "
+                "*void* is not nothing to *lose*: the push puts the head inside the "
+                "abstention window of the cycle that makes it and of the cycle after that "
+                "one - a cycle neither votes on nor merges a head it pushed, and the window "
+                "immediately before it counts as its own - so the earliest vote this head "
+                "can collect is from the cycle after next. If this cycle would have cast "
+                "that first vote, do not push: measure the tree this merge would land "
+                "(`scripts/check-merge-plan-suite.py <PR>`) and the head does not move, "
+                "leaving the next cycle free to vote on it"
             )
         if price.valid_votes == 0:
             return (
