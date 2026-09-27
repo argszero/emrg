@@ -66,10 +66,10 @@ Every guard that reads a working tree names it before its verdict; a question it
 ## Releasing
 
 1. **Bump** — `python3 scripts/bump-version.py <x.y.z>` rewrites every version declaration at once; `tests/test_version_sync.py` proves they agree. PR it, take three approvals from different cycles, squash merge — never self-merge a release PR.
-2. **Tag** — `git tag -a v<x.y.z> -m "emrg v<x.y.z>" && git push origin v<x.y.z>`. The tag is the **only** trigger of `build-release.yml`; the Test workflow never runs signing or notarization.
+2. **Tag** — `git tag -a v<x.y.z> -m "emrg v<x.y.z>" && git push origin v<x.y.z>`. The tag is the **only** trigger of `build-release.yml`; Test never signs or notarizes.
 3. **Verify and confirm** — the tagged Build Release run is green across the platform matrix, and the GitHub Release is published as Latest (not draft, not prerelease) with the full asset set.
 
-`bump-version.py --check` is the host-side counterpart of that CI guard: run it before pushing, not after a wasted build.
+`bump-version.py --check` and `scripts/check-release-tag.py v<x.y.z>` are the host-side counterparts: run both before pushing, not after a wasted build.
 
 ## Packaging
 
