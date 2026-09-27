@@ -123,7 +123,7 @@ class FakeVotes:
         #: its dataclasses instead of a lookalike that would agree with a misreading.
         self.real = None
 
-    def check_pr(self, number, needed, *, mergeability_wait=0.0):
+    def check_pr(self, number, needed, *, mergeability_wait=0.0, cycles_log=None):
         self.calls.append((number, needed, mergeability_wait))
         counter = self.real
         votes = [
@@ -503,7 +503,7 @@ def test_an_unreadable_count_is_a_question_mark_not_zero(mod, monkeypatch, capsy
         DEFAULT_MIN_VOTES = 3
         calls: list = []
 
-        def check_pr(self, number, needed, *, mergeability_wait=0.0):
+        def check_pr(self, number, needed, *, mergeability_wait=0.0, cycles_log=None):
             raise RuntimeError("gh failed: mergeable UNKNOWN")
 
     fresh = FakeFresh()

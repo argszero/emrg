@@ -175,12 +175,25 @@ def test_the_tag_check_refuses_a_lightweight_tag(tmp_path) -> None:
         pytest.skip("no POSIX shell is available for the ground-truth run")
     jobs = _jobs()
     steps = (jobs.get("verify-tag") or {}).get("steps") or []
-    bodies = [step.get("run") for step in steps if isinstance(step, dict) and step.get("run")]
-    assert len(bodies) == 1, (
-        f"expected exactly one `run:` step in `verify-tag`, got {len(bodies)} — a job that "
-        "carries no script, or more than one, is not what the two runs below measure"
+    # Which body this arm executes: the one that asks the API for the tag object's type,
+    # selected by *that* rather than by position. The job legitimately answers a second
+    # question now (issue #1652 added the tag/version comparison, pinned by
+    # `tests/test_check_release_tag.py`), and a positional read would have silently
+    # executed whichever step came first — the failure this arm exists to catch, one level
+    # up. The assertion's strength is unchanged: exactly one body may make this call, and
+    # it is the body both runs below measure.
+    asking = [
+        step.get("run")
+        for step in steps
+        if isinstance(step, dict) and "object.type" in str(step.get("run", ""))
+    ]
+    assert len(asking) == 1, (
+        f"expected exactly one `run:` step in `verify-tag` to ask for the tag object's "
+        f"type, got {len(asking)} — a job that carries no such script, or more than one, "
+        "is not what the two runs below measure"
     )
-    assert isinstance(bodies[0], str), f"the step's `run:` is not a script: {bodies[0]!r}"
+    body = asking[0]
+    assert isinstance(body, str), f"the step's `run:` is not a script: {body!r}"
     argv_log = tmp_path / "argv.log"
     argv_log.write_text("", encoding="utf-8")
     stub = rf'gh() {{ printf "%s\n" "$*" >> "{argv_log}"; printf "%s" "$STUB_KIND"; }}' + "\n"
@@ -192,7 +205,7 @@ def test_the_tag_check_refuses_a_lightweight_tag(tmp_path) -> None:
 
     def run(kind: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [shell, "-c", stub + bodies[0]],
+            [shell, "-c", stub + body],
             env={**base_env, "STUB_KIND": kind},
             capture_output=True,
             text=True,

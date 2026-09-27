@@ -13,7 +13,9 @@ The three rules that make the count non-obvious are each pinned below:
 
 * a vote submitted before the head push is void;
 * a ❌ resets the run (three ✅ then ❌ then ✅ is one vote);
-* a repeat cycle inside the run is one vote, so a single cycle cannot carry a PR.
+* a repeat cycle inside the run is one vote, so a single cycle cannot carry a PR;
+* a vote cast inside the **head's own window** — the clause `cast-vote.py` refuses to
+  post on (issue #1408) — is void too, and the counter is the half that reads it.
 
 The four states of the vet. This is a gate, so both sides are pinned (#455): the
 approving state must reach READY, and each of the four ways a vote fails to count
@@ -29,6 +31,7 @@ import importlib.util
 import ast
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -39,6 +42,21 @@ SCRIPT = REPO_ROOT / "scripts" / "check-vote-count.py"
 HEAD = "a" * 40
 T0 = "2026-09-11T00:00:00Z"  # the head push time
 BEFORE = "2026-09-10T00:00:00Z"  # any vote before it
+
+#: The host's own zone, needed wherever a test moves one end of the fixture timeline:
+#: a cycle id is **local** time and a push arrives as UTC, so a bare `...Z` literal sits
+#: at a different side of a window on every runner. (`tests/test_cast_vote.py` and
+#: `tests/test_review_queue.py` build the same two ends the same way.)
+LOCAL = datetime.now().astimezone().tzinfo
+
+
+def _push(year, month, day, hour, minute, second=0):
+    """A push instant named in the host's own zone, as GitHub would report it."""
+    return (
+        datetime(year, month, day, hour, minute, second, tzinfo=LOCAL)
+        .astimezone(timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
 
 
 def _load_module():
@@ -60,6 +78,41 @@ def _load_module():
 @pytest.fixture
 def mod():
     return _load_module()
+
+
+@pytest.fixture(autouse=True)
+def _pinned_cycle_records(mod, tmp_path, monkeypatch):
+    """Point the abstention window at an empty directory, for every test in this file.
+
+    The window is read from cycle records *on disk*, and the default is the host's own
+    corpus (`<repo>/.emrg/memory` and the one beside it). Left alone, whether a vote
+    counts would depend on which cycles this machine happens to have recorded and on
+    the reading host's time zone — a verdict that is green here and red anywhere else,
+    which is the defect class this whole family of guards exists to catch. An empty
+    directory narrows the window to the *voting cycle's own start*: a fact of the
+    fixture, not of the host. A test that wants the wider window writes the previous
+    cycle's record into a directory it names (`--cycles-log`). The environment override
+    is cleared for the same reason — it would otherwise reach the reading too.
+    """
+    monkeypatch.delenv("EMRG_CYCLES_LOG", raising=False)
+    empty = tmp_path / "no-cycle-records"
+    empty.mkdir()
+    monkeypatch.setattr(mod.review_queue(), "DEFAULT_CYCLES_LOGS", (empty,))
+    # The fixture timeline's own premise: every voting cycle in this file starts *after*
+    # the head push, which is what the clause asks of a vote that counts. A cycle id is
+    # local time and `T0` is UTC, so that premise is a claim about the **runner's**
+    # offset rather than about the data, and a host far enough from UTC makes the same
+    # two literals describe the opposite order - every vote below would then be void for
+    # a reason that is about the machine. Checked here so such a host fails with this
+    # sentence instead of re-reading every count in the file.
+    start = mod.review_queue().cycle_start("cyc20260911-090000")
+    pushed = mod.review_queue().instant(T0)
+    assert start is not None and pushed is not None and start > pushed, (
+        "the fixture's cycle ids are local times while its head push is UTC: on this "
+        f"host ({LOCAL}) cyc20260911-090000 starts at {start.isoformat() if start else None}, "
+        f"which is not after the push {T0}"
+    )
+    return empty
 
 
 class FakeGh:
@@ -192,11 +245,11 @@ def test_a_decorated_veto_resets_the_run_instead_of_being_skipped(mod, monkeypat
     Reading the veto as a comment reports READY 3/3 and would merge on a review
     that asked for a fix - the one outcome this tool exists to prevent.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-100000", "2026-09-11T02:00:00Z"),
                    _review("2026-09-11T03:00:00Z",
-                           "**\u274c Needs fix:** cycle `cyc20260911-030000`"),
-                   _approve("cyc20260911-040000", "2026-09-11T04:00:00Z")])
+                           "**\u274c Needs fix:** cycle `cyc20260911-110000`"),
+                   _approve("cyc20260911-120000", "2026-09-11T04:00:00Z")])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert rc == 1, out
@@ -271,10 +324,10 @@ def test_an_approval_mentioning_a_veto_does_not_reset_the_run(mod, monkeypatch, 
     veto it resets the run to 1/3 and the PR looks unready; the reviews that
     approved it are all still there.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-100000", "2026-09-11T02:00:00Z"),
                    _review("2026-09-11T03:00:00Z",
-                           "\u2705 LGTM - cycle `cyc20260911-030000` (0 \u274c at this head)")])
+                           "\u2705 LGTM - cycle `cyc20260911-110000` (0 \u274c at this head)")])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert rc == 0, out
@@ -304,9 +357,9 @@ def test_a_body_that_does_not_open_with_a_mark_but_claims_lgtm_counts(mod):
 
 def _three_votes() -> list[dict]:
     return [
-        _approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-        _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
-        _approve("cyc20260911-030000", "2026-09-11T03:00:00Z"),
+        _approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+        _approve("cyc20260911-100000", "2026-09-11T02:00:00Z"),
+        _approve("cyc20260911-110000", "2026-09-11T03:00:00Z"),
     ]
 
 
@@ -356,7 +409,7 @@ def test_a_pr_that_is_both_short_and_conflicting_is_reported_as_blocked(mod, mon
     anyway - so the shortfall is real but not the thing to act on.
     """
     fake = FakeGh(
-        [_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")],
+        [_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")],
         mergeable="CONFLICTING",
         merge_state="DIRTY",
     )
@@ -385,7 +438,7 @@ def test_a_mergeable_pr_with_three_votes_is_ready(mod, monkeypatch, capsys):
 
 def test_a_mergeable_pr_with_too_few_votes_is_still_short(mod, monkeypatch, capsys):
     """The mergeable clause can only downgrade; it must not upgrade a vote deficit."""
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")],
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")],
                   mergeable="MERGEABLE", merge_state="CLEAN")
     rc = _run(mod, monkeypatch, fake)
     assert rc == 1
@@ -732,11 +785,11 @@ def test_a_prose_intro_then_a_veto_resets_the_run(mod, monkeypatch, capsys):
     comment the run stays at 2/3 - three stale approvals would read as live and
     the tool would call the PR mergeable. As a veto it resets to 0.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-100000", "2026-09-11T02:00:00Z"),
                    _review("2026-09-11T03:00:00Z",
                            "Checked all three fixes.\n\n"
-                           "\u274c Needs fix - cycle `cyc20260911-030000`")])
+                           "\u274c Needs fix - cycle `cyc20260911-110000`")])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert rc == 1, out
@@ -753,7 +806,7 @@ def test_an_unattributable_veto_still_resets_the_run(mod, monkeypatch, capsys):
     to attribute it. Letting an unidentifiable veto be skipped would mean the
     approvals it answered still read as the run.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
                    _review("2026-09-11T02:00:00Z", "\u274c Needs fix, no cycle id given")])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
@@ -776,15 +829,15 @@ def test_an_approval_naming_several_cycle_ids_counts_for_none_of_them(mod, monke
     simply dropped every body mentioning an id twice would pass the second assertion
     and fail the first, so the pair is the test.
     """
-    mine = "cyc20260911-040000"
+    mine = "cyc20260911-120000"
     two_ids = (
-        f"\u2705 LGTM - cycle `{mine}`; the approvals of cyc20260911-010000 and "
-        "cyc20260911-020000 are void at this head"
+        f"\u2705 LGTM - cycle `{mine}`; the approvals of cyc20260911-090000 and "
+        "cyc20260911-100000 are void at this head"
     )
     assert len(mod._CYCLE_RE.findall(two_ids)) == 3  # the shape under test, not a guess
 
-    base = [_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-            _approve("cyc20260911-020000", "2026-09-11T02:00:00Z")]
+    base = [_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+            _approve("cyc20260911-100000", "2026-09-11T02:00:00Z")]
 
     # the one-id body: the same claim without the two names in it counts, as before
     one_id = f"\u2705 LGTM - cycle `{mine}`"
@@ -799,8 +852,8 @@ def test_an_approval_naming_several_cycle_ids_counts_for_none_of_them(mod, monke
         "a body naming three ids has no single author, so it must not be filed under "
         f"the first one the text mentions ({ambiguous.cycle})"
     )
-    assert ambiguous.ids == ("cyc20260911-040000", "cyc20260911-010000",
-                             "cyc20260911-020000")
+    assert ambiguous.ids == ("cyc20260911-120000", "cyc20260911-090000",
+                             "cyc20260911-100000")
     assert not ambiguous.valid and verdict.valid_count == 2
 
     rc = mod.main(["1"])
@@ -812,7 +865,7 @@ def test_an_approval_naming_several_cycle_ids_counts_for_none_of_them(mod, monke
     # The discriminator against the old reading: `_CYCLE_RE.search` found the first id
     # and printed exactly this line. The ids still appear in the *reason* (it has to
     # name them), so the assertion is about the verdict column, not about the text.
-    assert "OK  cyc20260911-040000" not in out, out
+    assert "OK  cyc20260911-120000" not in out, out
     assert "VOID (3 cycle ids)" in out, out
 
 
@@ -831,7 +884,7 @@ def test_an_approval_that_repeats_one_cycle_id_counts_once(mod, monkeypatch, cap
     pair below differs by one clause, so a "dedupe" that also excused a body
     naming two *different* cycles would pass the first half and fail the second.
     """
-    mine = "cyc20260911-040000"
+    mine = "cyc20260911-120000"
     quoted = (
         f"\u2705 LGTM - cycle `{mine}`; the counter printed `VOID (2 cycle ids) - "
         f"the vote body names 2 cycle ids ({mine}, {mine})`"
@@ -841,8 +894,8 @@ def test_an_approval_that_repeats_one_cycle_id_counts_once(mod, monkeypatch, cap
         "occurrence-counting reader read as an ambiguous body"
     )
 
-    base = [_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-            _approve("cyc20260911-020000", "2026-09-11T02:00:00Z")]
+    base = [_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+            _approve("cyc20260911-100000", "2026-09-11T02:00:00Z")]
 
     # (a) one id, three times: one candidate author, so it is a vote - and the
     # third distinct cycle, so the PR is READY rather than SHORT.
@@ -863,7 +916,7 @@ def test_an_approval_that_repeats_one_cycle_id_counts_once(mod, monkeypatch, cap
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "READY 3/3" in out, out
-    assert "cyc20260911-040000 - counts" in out, (
+    assert "cyc20260911-120000 - counts" in out, (
         "the label names the cycle and counts it, rather than reporting an id count"
     )
     assert "cycle ids)" not in out, out
@@ -871,8 +924,8 @@ def test_an_approval_that_repeats_one_cycle_id_counts_once(mod, monkeypatch, cap
     # (b) the same body plus one *other* cycle: two candidates, so the original
     # rule still holds and the vote counts for neither.
     two_ids = (
-        f"\u2705 LGTM - cycle `{mine}`; the approvals of cyc20260911-010000 are "
-        f"void at this head ({mine}, cyc20260911-010000)"
+        f"\u2705 LGTM - cycle `{mine}`; the approvals of cyc20260911-090000 are "
+        f"void at this head ({mine}, cyc20260911-090000)"
     )
     fake = FakeGh(base + [_review("2026-09-11T03:00:00Z", two_ids)])
     monkeypatch.setattr(mod, "_gh_json", fake)
@@ -880,7 +933,7 @@ def test_an_approval_that_repeats_one_cycle_id_counts_once(mod, monkeypatch, cap
     verdict = mod.check_pr(1, mod.DEFAULT_MIN_VOTES)
     ambiguous = verdict.votes[-1]
     assert ambiguous.cycle is None and not ambiguous.valid
-    assert ambiguous.ids == (mine, "cyc20260911-010000"), (
+    assert ambiguous.ids == (mine, "cyc20260911-090000"), (
         "deduping is about repeated ids, not about dropping ids"
     )
     assert verdict.valid_count == 2
@@ -904,8 +957,8 @@ def test_a_multi_id_veto_keeps_its_force_though_it_cannot_be_attributed(
     """
     fake = FakeGh(_three_votes() + [
         _review("2026-09-11T04:00:00Z",
-                "\u274c Needs fix - cycle `cyc20260911-050000`; the \u2705 of "
-                "cyc20260911-010000 predates the head"),
+                "\u274c Needs fix - cycle `cyc20260911-130000`; the \u2705 of "
+                "cyc20260911-090000 predates the head"),
     ])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
@@ -918,9 +971,9 @@ def test_a_multi_id_veto_keeps_its_force_though_it_cannot_be_attributed(
 
 
 def test_three_consecutive_votes_from_distinct_cycles_are_ready(mod, monkeypatch, capsys):
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
-                   _approve("cyc20260911-030000", "2026-09-11T03:00:00Z")])
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-100000", "2026-09-11T02:00:00Z"),
+                   _approve("cyc20260911-110000", "2026-09-11T03:00:00Z")])
     assert _run(mod, monkeypatch, fake) == 0
     out = capsys.readouterr().out
     assert "READY 3/3" in out
@@ -929,9 +982,9 @@ def test_three_consecutive_votes_from_distinct_cycles_are_ready(mod, monkeypatch
 
 def test_a_vote_before_the_head_push_is_void(mod, monkeypatch, capsys):
     """The rebase rule - the one that makes a 6-LGTM PR have zero votes."""
-    fake = FakeGh([_approve("cyc20260911-010000", BEFORE),
-                   _approve("cyc20260911-020000", BEFORE),
-                   _approve("cyc20260911-030000", "2026-09-11T01:00:00Z")])
+    fake = FakeGh([_approve("cyc20260911-090000", BEFORE),
+                   _approve("cyc20260911-100000", BEFORE),
+                   _approve("cyc20260911-110000", "2026-09-11T01:00:00Z")])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert rc == 1
@@ -948,7 +1001,7 @@ def test_a_voided_approval_is_not_labelled_ok(mod, monkeypatch, capsys):
     answers the only question the reader has (does this vote count?), so the two
     can no longer contradict each other.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", BEFORE)])
+    fake = FakeGh([_approve("cyc20260911-090000", BEFORE)])
     _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert "OK" not in out, out
@@ -957,10 +1010,10 @@ def test_a_voided_approval_is_not_labelled_ok(mod, monkeypatch, capsys):
 
 def test_a_veto_resets_the_run(mod, monkeypatch, capsys):
     """Three ✅ then ❌ then ✅ is one vote, not four."""
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
-                   _veto("cyc20260911-030000", "2026-09-11T03:00:00Z"),
-                   _approve("cyc20260911-040000", "2026-09-11T04:00:00Z")])
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-100000", "2026-09-11T02:00:00Z"),
+                   _veto("cyc20260911-110000", "2026-09-11T03:00:00Z"),
+                   _approve("cyc20260911-120000", "2026-09-11T04:00:00Z")])
     rc = _run(mod, monkeypatch, fake)
     assert rc == 1
     assert "SHORT 1/3" in capsys.readouterr().out
@@ -968,9 +1021,9 @@ def test_a_veto_resets_the_run(mod, monkeypatch, capsys):
 
 def test_a_repeat_cycle_inside_the_run_counts_once(mod, monkeypatch, capsys):
     """A cycle cannot carry a PR to the threshold by voting repeatedly."""
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-                   _approve("cyc20260911-010000", "2026-09-11T02:00:00Z"),
-                   _approve("cyc20260911-010000", "2026-09-11T03:00:00Z")])
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-090000", "2026-09-11T02:00:00Z"),
+                   _approve("cyc20260911-090000", "2026-09-11T03:00:00Z")])
     assert _run(mod, monkeypatch, fake) == 1
     assert "SHORT 1/3" in capsys.readouterr().out
 
@@ -989,16 +1042,16 @@ def test_a_repeat_cycle_vote_is_not_labelled_counts(mod, monkeypatch, capsys):
     third assertion is the one that would have caught it - it compares the summary
     against the detail instead of checking either against a literal.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
-                   _approve("cyc20260911-020000", "2026-09-11T03:00:00Z"),
-                   _approve("cyc20260911-030000", "2026-09-11T04:00:00Z")])
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-100000", "2026-09-11T02:00:00Z"),
+                   _approve("cyc20260911-100000", "2026-09-11T03:00:00Z"),
+                   _approve("cyc20260911-110000", "2026-09-11T04:00:00Z")])
     assert _run(mod, monkeypatch, fake) == 0
     out = capsys.readouterr().out
 
     assert "READY 3/3" in out, out
     assert out.count("- counts") == 3, out
-    assert "valid, but cycle cyc20260911-020000 already counted" in out, out
+    assert "valid, but cycle cyc20260911-100000 already counted" in out, out
 
 
 def test_a_cycle_that_voted_before_a_veto_counts_again_after_it(mod, monkeypatch, capsys):
@@ -1006,11 +1059,11 @@ def test_a_cycle_that_voted_before_a_veto_counts_again_after_it(mod, monkeypatch
 
     This is the mirror of the repeat rule: distinctness is per-run, not per-PR.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-                   _veto("cyc20260911-020000", "2026-09-11T02:00:00Z"),
-                   _approve("cyc20260911-010000", "2026-09-11T03:00:00Z"),
-                   _approve("cyc20260911-030000", "2026-09-11T04:00:00Z"),
-                   _approve("cyc20260911-040000", "2026-09-11T05:00:00Z")])
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+                   _veto("cyc20260911-100000", "2026-09-11T02:00:00Z"),
+                   _approve("cyc20260911-090000", "2026-09-11T03:00:00Z"),
+                   _approve("cyc20260911-110000", "2026-09-11T04:00:00Z"),
+                   _approve("cyc20260911-120000", "2026-09-11T05:00:00Z")])
     assert _run(mod, monkeypatch, fake) == 0
     assert "READY 3/3" in capsys.readouterr().out
 
@@ -1018,8 +1071,8 @@ def test_a_cycle_that_voted_before_a_veto_counts_again_after_it(mod, monkeypatch
 def test_a_vote_without_a_cycle_id_is_reported_not_counted(mod, monkeypatch, capsys):
     """Distinctness cannot be shown, so the vote is void rather than counted."""
     fake = FakeGh([_review("2026-09-11T01:00:00Z", "\u2705 LGTM, looks good"),
-                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
-                   _approve("cyc20260911-030000", "2026-09-11T03:00:00Z")])
+                   _approve("cyc20260911-100000", "2026-09-11T02:00:00Z"),
+                   _approve("cyc20260911-110000", "2026-09-11T03:00:00Z")])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert rc == 1
@@ -1040,7 +1093,7 @@ def test_the_push_time_fallback_is_disclosed_not_silently_used(mod, monkeypatch,
     the disclosure is still what tells a reader the count is approximate, and the
     block is what keeps `READY` off a head nothing ever ran on.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")], exact=False)
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")], exact=False)
     _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert "push time approximated by commit date" in out
@@ -1058,7 +1111,7 @@ def test_a_head_with_no_ci_run_is_blocked_even_with_three_votes(mod, monkeypatch
     and therefore printed READY, exit 0, for a head no CI had ever judged.
     """
     fake = FakeGh(
-        [_approve(f"cyc2026091{i}-010000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)],
+        [_approve(f"cyc2026091{i}-090000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)],
         exact=False,
         mergeable="MERGEABLE",
         merge_state="CLEAN",
@@ -1076,7 +1129,7 @@ def test_the_no_ci_block_names_the_missing_run(mod, monkeypatch, capsys):
     `mergeable`/`mergeStateStatus` are both clean here, so a reader who is told
     only "blocked" has nothing to act on - the state looks perfect.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")], exact=False)
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")], exact=False)
     _run(mod, monkeypatch, fake)
     err = capsys.readouterr().err
     assert "no CI run" in err
@@ -1096,7 +1149,7 @@ def test_an_empty_run_answer_is_re_asked_before_it_is_reported_as_no_run(mod, mo
     the note says the empty answer was stale - without it the identical input reaches
     the fallback, which the tests above already pin as blocked.
     """
-    votes = [_approve(f"cyc2026091{i}-010000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)]
+    votes = [_approve(f"cyc2026091{i}-090000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)]
     base = FakeGh(votes, exact=True)
     asked: list[str] = []
 
@@ -1130,7 +1183,7 @@ def test_a_head_that_really_ran_nothing_is_asked_the_bounded_number_of_times(mod
     and not a wait: `review-queue.py` reads this for every open PR, and a head with no
     run at all is exactly the case that pays the asking without a run to find.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")], exact=False)
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")], exact=False)
     rc = _run(mod, monkeypatch, fake)
 
     asked = [c for c in fake.calls if "actions/runs" in " ".join(c)]
@@ -1147,7 +1200,7 @@ def test_a_head_with_a_ci_run_is_not_blocked_for_that_reason(mod, monkeypatch, c
     Without this, a `blocked` that returned True unconditionally would pass every
     test above."""
     fake = FakeGh(
-        [_approve(f"cyc2026091{i}-010000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)],
+        [_approve(f"cyc2026091{i}-090000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)],
         exact=True,
     )
     rc = _run(mod, monkeypatch, fake)
@@ -1158,7 +1211,7 @@ def test_a_head_with_a_ci_run_is_not_blocked_for_that_reason(mod, monkeypatch, c
 def test_json_mode_carries_the_ci_conjunct(mod, monkeypatch, capsys):
     """`ci_ran` is reported separately, so a caller does not have to infer it from
     the verdict (the same reason the merge fields are exposed)."""
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")], exact=False)
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")], exact=False)
     _run(mod, monkeypatch, fake, ["1", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["ci_ran"] is False
@@ -1167,7 +1220,7 @@ def test_json_mode_carries_the_ci_conjunct(mod, monkeypatch, capsys):
 
 
 def test_an_exact_push_time_is_not_flagged(mod, monkeypatch, capsys):
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")], exact=True)
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")], exact=True)
     _run(mod, monkeypatch, fake)
     assert "approximated" not in capsys.readouterr().out
 
@@ -1176,7 +1229,7 @@ def test_an_exact_push_time_is_not_flagged(mod, monkeypatch, capsys):
 
 
 def test_json_mode_reports_the_count_and_readiness(mod, monkeypatch, capsys):
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")])
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")])
     rc = _run(mod, monkeypatch, fake, ["1", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 1
@@ -1186,8 +1239,8 @@ def test_json_mode_reports_the_count_and_readiness(mod, monkeypatch, capsys):
 
 
 def test_min_votes_lowers_the_threshold(mod, monkeypatch, capsys):
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z")])
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-100000", "2026-09-11T02:00:00Z")])
     assert _run(mod, monkeypatch, fake, ["1", "--min-votes", "2"]) == 0
     assert "READY 2/2" in capsys.readouterr().out
 
@@ -1327,7 +1380,7 @@ def test_reviews_are_read_page_by_page(mod, monkeypatch, capsys):
     This is the same defect class pm25coder caught in the sibling freshness tool
     (#1138): querying a bounded window and treating it as the whole set.
     """
-    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")])
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")])
     _run(mod, monkeypatch, fake)
     # The paginated helper is used for reviews; the plain one never sees them.
     assert any("/reviews" in " ".join(c) for c in fake.calls), fake.calls
@@ -1341,9 +1394,9 @@ def test_a_vote_beyond_the_first_page_still_counts(mod, monkeypatch, capsys):
     """
     older = [_approve(f"cyc20260910-{i:06d}", "2026-09-10T10:00:00Z") for i in range(40)]
     newest = [
-        _approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
-        _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
-        _approve("cyc20260911-030000", "2026-09-11T03:00:00Z"),
+        _approve("cyc20260911-090000", "2026-09-11T01:00:00Z"),
+        _approve("cyc20260911-100000", "2026-09-11T02:00:00Z"),
+        _approve("cyc20260911-110000", "2026-09-11T03:00:00Z"),
     ]
     fake = FakeGh(older + newest)
     assert _run(mod, monkeypatch, fake) == 0
@@ -1391,10 +1444,10 @@ def test_reviews_are_ordered_before_the_run_is_walked(mod, monkeypatch, capsys):
     asserting only the verdict would pass either way.
     """
     fake = FakeGh([
-        _approve("cyc20260911-040000", "2026-09-11T03:00:00Z"),
-        _veto("cyc20260911-030000", "2026-09-11T02:00:00Z"),
-        _approve("cyc20260911-020000", "2026-09-11T01:00:00Z"),
-        _approve("cyc20260911-010000", "2026-09-11T00:30:00Z"),
+        _approve("cyc20260911-120000", "2026-09-11T03:00:00Z"),
+        _veto("cyc20260911-110000", "2026-09-11T02:00:00Z"),
+        _approve("cyc20260911-100000", "2026-09-11T01:00:00Z"),
+        _approve("cyc20260911-090000", "2026-09-11T00:30:00Z"),
     ])
     rc = _run(mod, monkeypatch, fake)
     assert rc == 1
@@ -1416,7 +1469,7 @@ def test_a_lost_jq_projection_fails_loud_instead_of_voiding_every_vote(mod, monk
     dicts and never models the jq contract), which is why the check is a runtime
     assertion on the payload's shape rather than a unit-test expectation.
     """
-    bad = [{"submitted_at": "2026-09-11T01:00:00Z", "body": "\u2705 LGTM - cycle `cyc20260911-010000`"}]
+    bad = [{"submitted_at": "2026-09-11T01:00:00Z", "body": "\u2705 LGTM - cycle `cyc20260911-090000`"}]
     fake = FakeGh(bad)
     rc = _run(mod, monkeypatch, fake)
     assert rc == 2, "a missing `at` field must be a could-not-check, not a zero count"
@@ -1523,3 +1576,195 @@ def test_the_default_budget_asks_exactly_once(mod, monkeypatch, capsys):
     assert rc == 2
     assert fake.view_reads == 1
     assert clock.slept == []
+
+
+# --- who may cast a vote: the head's own window ----------------------------
+#
+# The clause `cast-vote.py` refuses to **post** on, read on the counting side (issue
+# #1408: "a cycle abstains on a head it pushed, and on the head pushed by the cycle
+# immediately before it"). The counter is the only instrument a cycle consults before
+# merging, so a vote that must not have been cast has to read as not counting - and a
+# vote posted straight with `gh pr review` (the form the template tells a Committer to
+# use) never passes the poster's refusal at all.
+#
+# Every test below moves one end of the fixture timeline on purpose, and does it
+# through `_push`, in the host's own zone: a cycle id is local time, so a bare `Z`
+# literal would ask a different question on every runner.
+
+
+def _cast_vote():
+    """`scripts/cast-vote.py`, loaded by path the way this family loads its siblings."""
+    spec = importlib.util.spec_from_file_location(
+        "check_vote_count_cast_vote", REPO_ROOT / "scripts" / "cast-vote.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses resolve through sys.modules
+    spec.loader.exec_module(module)
+    return module
+
+
+class _Head:
+    """The three fields the posting side reads off a verdict, and nothing else."""
+
+    def __init__(self, pushed: str, exact: bool = True, sha: str = HEAD):
+        self.head_sha = sha
+        self.push_time = pushed
+        self.push_time_exact = exact
+
+
+def test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count(
+    mod, monkeypatch, capsys
+):
+    """The measured case: a cycle votes on a head its own window covers.
+
+    `cast-vote.py` refuses to post this vote; the counter counted it anyway, because it
+    never asked who pushed the head. The pair below differs in the voting cycle's id by
+    two hours and in nothing else, so a clause that voided every vote - or none - fails
+    one half of it.
+    """
+    pushed = _push(2026, 9, 11, 9, 0)  # 09:00 local, the head's push instant
+    vote_at = _push(2026, 9, 11, 10, 0)
+
+    # (a) the voting cycle started an hour *before* the push: the head is its own
+    inside = FakeGh([_approve("cyc20260911-080000", vote_at)], push_time=pushed)
+    rc = _run(mod, monkeypatch, inside)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 0/3" in out, out
+    assert "VOID cyc20260911-080000 - cast inside the window" in out, out
+
+    # (b) the same vote from a cycle that started after it: nothing else changed
+    outside = FakeGh([_approve("cyc20260911-110000", vote_at)], push_time=pushed)
+    rc = _run(mod, monkeypatch, outside, ["1", "--min-votes", "1"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "READY 1/1" in out, out
+    assert "inside the window" not in out, out
+
+
+def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_path):
+    """The wider end of the same window: the cycle *before* this one is this cycle.
+
+    A head pushed while the previous cycle ran is that cycle's own, because every cycle
+    on a host is the same instance running again. The narrow reading (this cycle's own
+    start, which is all the test above needs) lets the vote through here, and the rule
+    does not - so the previous cycle's record is written into a directory the test names
+    (`--cycles-log`), where the reading is the fixture's and not the host's corpus.
+    """
+    corpus = tmp_path / "cycles"
+    corpus.mkdir()
+    (corpus / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
+    argv = ["1", "--cycles-log", str(corpus)]
+    vote_at = _push(2026, 9, 11, 10, 30)
+
+    # (a) pushed at 09:30: after the previous cycle began, before this one did
+    wide = FakeGh(
+        [_approve("cyc20260911-100000", vote_at)], push_time=_push(2026, 9, 11, 9, 30)
+    )
+    rc = _run(mod, monkeypatch, wide, argv)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "VOID cyc20260911-100000" in out, out
+    assert "cyc20260911-090000" in out, "the reason must name the window it applied"
+
+    # (b) the same corpus, the push moved before the previous cycle's start
+    narrow = FakeGh(
+        [_approve("cyc20260911-100000", vote_at)], push_time=_push(2026, 9, 11, 8, 30)
+    )
+    rc = _run(mod, monkeypatch, narrow, argv)
+    out = capsys.readouterr().out
+    assert "1/3 valid votes" in out, out
+    assert "inside the window" not in out, out
+
+
+def test_a_cycle_id_that_names_no_instant_is_not_passed(mod, monkeypatch, capsys):
+    """An unresolved window is never a pass - the sibling's rule, on the reading side.
+
+    `cyc20261332-999999` has the shape of a cycle id and names no instant (month 13),
+    so no window can be applied at all. `cast-vote.py` refuses to post in this state;
+    counting the vote would count what the poster is not allowed to write, so the
+    direction that costs a delay is taken instead.
+    """
+    fake = FakeGh([_approve("cyc20261332-999999", "2026-09-11T01:00:00Z")])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "VOID cyc20261332-999999" in out, out
+    assert "cannot be decided" in out, out
+
+
+def test_a_head_with_no_ci_run_leaves_the_clause_unapplied(mod, monkeypatch, capsys):
+    """A push time that is a lower bound cannot decide a window, so it is not used as one.
+
+    With no CI run, the push time falls back to the commit date - which can precede the
+    push. That case is already answered above the count: `blocked` refuses to merge such
+    a head for the same missing run. The votes therefore keep their plain reading, and
+    the PR is BLOCKED. Voiding them as well would report a review deficit that is not
+    the blocker. The fixture's votes *are* inside the window (05:00-07:00 local against
+    a 08:00 local push), so a clause applied here would show up as 0/3.
+    """
+    fake = FakeGh(
+        [_approve(f"cyc20260911-0{h}0000", at) for h, at in
+         ((5, "2026-09-11T01:00:00Z"), (6, "2026-09-11T02:00:00Z"),
+          (7, "2026-09-11T03:00:00Z"))],
+        exact=False,
+    )
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "BLOCKED 3/3 valid votes" in out, out
+    assert "inside the window" not in out, out
+
+
+def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_path):
+    """The two halves of one clause, asserted against each other rather than assumed.
+
+    Sharing the machinery is not the claim; sharing the *verdict* is. If a later change
+    reaches one tool and not the other, the hole re-opens on whichever side was left
+    behind - a vote nobody may post, or a vote counted that its own poster refused. So
+    the same (cycle, head) pairs are put to both, and both ends of the boundary are
+    covered: before the window, the previous cycle's end, this cycle's own end, and a
+    cycle further back.
+    """
+    corpus = tmp_path / "cycles"
+    corpus.mkdir()
+    (corpus / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
+    log = str(corpus)
+    counter, cast_vote = mod, _cast_vote()
+
+    cases = (
+        # (push instant, inside the window?)
+        (_push(2026, 9, 11, 9, 0), True),     # exactly the previous cycle's start
+        (_push(2026, 9, 11, 9, 30), True),    # the previous cycle's window
+        (_push(2026, 9, 11, 10, 30), True),   # this cycle's own window
+        (_push(2026, 9, 11, 8, 30), False),   # before both ends of the window
+        (_push(2026, 9, 11, 7, 30), False),   # before the cycle that precedes it
+    )
+    for pushed, inside in cases:
+        refused, _ = cast_vote.own_head_window(
+            "cyc20260911-100000", _Head(pushed), cycles_log=log
+        )
+        counted, why = counter.own_head_window(
+            "cyc20260911-100000",
+            push_time=pushed,
+            push_time_exact=True,
+            cycles_log=log,
+        )
+        assert bool(refused) is inside, (pushed, refused)
+        assert counted is inside, (pushed, why)
+
+    # The one difference, and it is about wording rather than about the merge: with no CI
+    # run neither tool can read the window. The poster refuses, so nothing is posted; the
+    # counter leaves the votes as they read and reports the PR BLOCKED for the same
+    # missing run - the reading that refuses to merge either way (see
+    # `test_a_head_with_no_ci_run_leaves_the_clause_unapplied`).
+    inexact = _Head(_push(2026, 9, 11, 10, 30), exact=False)
+    refused, _ = cast_vote.own_head_window("cyc20260911-100000", inexact, cycles_log=log)
+    assert refused, "the poster refuses a window it cannot decide"
+    counted, why = counter.own_head_window(
+        "cyc20260911-100000",
+        push_time=inexact.push_time,
+        push_time_exact=False,
+        cycles_log=log,
+    )
+    assert not counted and why == ""

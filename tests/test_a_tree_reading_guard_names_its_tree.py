@@ -104,6 +104,16 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "`tests/test_check_merge_landed.py` runs it against a `tmp_path` repository with "
         "a `gh` stand-in and pins the first line"
     ),
+    "check-release-tag.py": (
+        "takes a required release tag, so the bare run this suite performs is not its "
+        "invocation - the tag it is asked about does not exist until the host cuts it, so "
+        "there is nothing for a default to mean. It does read a working tree (the checkout "
+        "its own file lives in, `REPO_ROOT`) and names it before the verdict, and that "
+        "naming IS verified rather than classified: `tests/test_check_release_tag.py` runs "
+        "it against `tmp_path` trees and asserts the resolved tree is printed before the "
+        "verdict, so the rule is measured here even though the member is not in the bare "
+        "loop above"
+    ),
 }
 
 #: Answers about something other than a working tree, so the rule does not apply - each

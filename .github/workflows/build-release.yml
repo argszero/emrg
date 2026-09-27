@@ -52,6 +52,24 @@ jobs:
             echo "::error::${GITHUB_REF_NAME} is a lightweight tag (object.type=${kind}). Create release tags annotated: git tag -a v<x.y.z> -m \"emrg v<x.y.z>\""
             exit 1
           fi
+      # The tag's *agreement with the tree* is the other half of the same claim
+      # the annotated check makes (#1652). Everything the pipeline says about a
+      # release comes from the tag, while the artifacts' `version.txt` comes from
+      # `emrg.__version__` of the built tree (`packaging/build-runtime.sh`) -- so a
+      # tag cut on the wrong commit publishes a release whose name and whose
+      # `version.txt` disagree, and every host that installs it re-triggers the
+      # upgrade session every tick, forever: `UpgradeManager.tick` compares
+      # `version.txt` with `target.lstrip("v")`. The publish check cannot see it
+      # (its expected asset set is derived from the files this run built), so the
+      # comparison has to happen here, in seconds, before any platform builds.
+      # The same command is the host's pre-flight (Agent.md §Releasing step 2).
+      - uses: actions/checkout@v5
+      - name: The tag must name the version the tagged tree declares
+        run: |
+          set -euo pipefail
+          # `set -e` is load-bearing: the guard's exit 2 (not measurable) must fail
+          # this step too, never pass it as "nothing to compare".
+          python3 scripts/check-release-tag.py "${GITHUB_REF_NAME}"
 
   build:
     needs: verify-tag
