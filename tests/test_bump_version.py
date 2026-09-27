@@ -759,3 +759,63 @@ def test_a_directory_with_only_half_the_shape_is_not_a_checkout(
     )
     monkeypatch.chdir(tmp_path)
     assert mod._resolve_root() == SCRIPT.parent.parent.resolve()
+
+
+# --------------------------------------------------------------------------
+# the branch the flow prints — a carrier of the project's convention
+# --------------------------------------------------------------------------
+
+
+def test_the_printed_next_steps_name_the_release_branch_the_flow_creates(
+    mod, fake_repo, monkeypatch, capsys
+):
+    """The tool prints an instruction, so the branch it names must be the real one.
+
+    Measured 2026-09-27 against ``git for-each-ref refs/remotes/origin``: every
+    release branch since v0.3.1 is ``release/vX.Y.Z`` (``release/v0.3.2``,
+    ``release/v0.3.3``, ``release/v0.3.4``), while ``feature/release-vX.Y.Z`` —
+    the spelling this module printed until then — survives only on branches
+    created under the older convention (the newest is ``feature/release-v0.3.0``).
+    A cycle that follows the printed line would cut the next release under a name
+    the project stopped using six releases ago.
+
+    Pinned as the *claim* rather than as the sentence: the branch name and the
+    absence of the old one, so that re-numbering the steps (a check inserted
+    before the tag, say) does not make this red.
+    """
+    monkeypatch.setattr(mod, "REPO_ROOT", fake_repo)
+    assert mod.main([TARGET]) == 0
+    out = capsys.readouterr().out
+    assert mod.RELEASE_BRANCH.format(version=TARGET) in out, out
+    assert "feature/release-" not in out, out
+
+
+def test_the_docstring_names_the_same_branch_as_the_run_does(mod):
+    """Two carriers, one fact — checked against each other, not by eye.
+
+    The module docstring states the release flow for a reader and the run prints
+    it for an operator; the constant is what the run renders. A docstring that
+    drifts is how this disagreement appeared in the first place, so the shape the
+    docstring writes is compared with the constant instead of being trusted.
+
+    ``version`` is substituted rather than matched literally because the docstring
+    writes the flow in ``X.Y.Z`` terms, which is the same string for any version.
+    """
+    from_constant = mod.RELEASE_BRANCH.format(version="X.Y.Z")
+    assert from_constant in mod.__doc__, mod.__doc__
+    assert "feature/release-" not in mod.__doc__
+
+
+def test_the_branch_name_is_named_once_not_spelled_twice(mod):
+    """The run reads the constant: no second literal can drift from it.
+
+    The defect this fixes was a *literal* — the same name written out in two
+    places, one of which was never updated. Counting the occurrences in the
+    source makes "named once" a reading rather than a promise: exactly two
+    mentions (the definition and the one render site), one copy of the name it
+    renders, and no surviving copy of the interpolated form that was printed.
+    """
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert source.count("RELEASE_BRANCH") == 2, source.count("RELEASE_BRANCH")
+    assert source.count("release/v{version}") == 1
+    assert "feature/release-v{" not in source
