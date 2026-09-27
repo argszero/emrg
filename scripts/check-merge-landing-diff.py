@@ -101,6 +101,34 @@ what the flag is telling you not to trust *here*. It is a reading, so it moves n
 code, and a rendering that could not be read is printed as unreadable rather than left
 out - the same rule the rest of this report follows.
 
+What each landed path costs, because a name is not a direction
+--------------------------------------------------------------
+`--name-status` says *that* a path changed, and the same letter carries both
+directions: measured 2026-09-26 (`cyc20260926-201809`) while reviewing #1638, whose
+landing changed four paths. Its `Agent.md` line read
+
+    M   Agent.md
+
+and the landing had in fact added one line to the tool list **and removed** the
+line `` `user message → tool loop (…)`. `` from the Terminology section. Two reviews
+before that one approved the head; nothing in this report, in the PR body, or in
+either commit message named the removal, and the deletion was found by reading the
+landing diff by hand. A landing that deletes a documented fact and one that adds a
+sentence are one status letter apart, and a review acts on the list this tool prints.
+
+So every path of the landing change is printed with its line counts, from
+`git diff --numstat` over the same two trees the path list came from:
+
+    M   Agent.md   (+1 -2)
+
+That is the reading of the change's *shape* - where the review's attention is, before
+any diff is opened - and it stays derived: no count is stored, and a path whose counts
+could not be read (a git failure) is printed without them beside a line saying so,
+rather than with a zero that would read as "changed nothing". A binary path has no
+line counts and says `binary`. The list of paths that read *backwards* carries no
+counts on purpose: those lines are the base's own changes, and a `+N -M` beside them
+would invite exactly the misreading the section above this one exists to prevent.
+
 The path names here are the real ones
 -------------------------------------
 Both halves of the measurement need the *name git means*, so the path list is read
@@ -489,6 +517,60 @@ def _changed_paths(a: str, b: str) -> list[tuple[str, str]]:
     return [(fields[i], fields[i + 1]) for i in range(0, len(fields), 2)]
 
 
+def _line_counts(a: str, b: str) -> dict[str, str]:
+    """How many lines each changed path gains and loses between two commits.
+
+    `_changed_paths` answers *which* paths differ, and that answer is the same for a
+    landing that adds a line to a file and one that removes one: `M Agent.md` is
+    printed either way. Measured 2026-09-26 while reviewing #1638 (cycle
+    `cyc20260926-201809`): its landing changed four paths, the line for `Agent.md` read
+    `M Agent.md`, and the same landing also **deleted** the line
+    `` `user message → tool loop (round 1 … round N; ends at the first round with no
+    tool call)`. `` from the brief - a removal nothing in the report named, which the
+    two reviews before that one had approved and this one found only by diffing the
+    landing by hand. `(+1 -2)` on that line states it in the line a review reads, and
+    it is exactly the difference `git diff --name-status` cannot express.
+
+    The `-z` spelling is `_changed_paths`' and for the same reason: the path is used as
+    it is, never git's quoted form (a path holding a TAB or a non-ASCII byte arrives
+    verbatim, measured in a scratch repo 2026-09-26: `tab\\tname.txt` as
+    `0\\t1\\ttab<tab>name.txt\\0`, so the record splits on the **first two** tabs and
+    the path is whatever follows). `--no-renames` likewise, so this map's keys are that
+    list's paths and a caller may look one up by the path it printed.
+
+    A binary path has no line counts - git prints `-` for both numbers - and the value
+    says `binary` rather than `+0 -0`: zero is a count, and this path was not counted.
+    A record that does not parse is a measurement failure, never a missing entry: the
+    caller prints a count for every path it was given, and a silently absent one would
+    read as a path that changed nothing.
+    """
+    proc = _run(["git", "diff", "--numstat", "--no-renames", "-z", a, b])
+    if proc.returncode != 0:
+        raise MeasurementError(
+            f"could not count the lines of {a[:8]}..{b[:8]}: {_diagnosis(proc)}"
+        )
+    counts: dict[str, str] = {}
+    for record in proc.stdout.split("\0"):
+        if not record:
+            continue
+        added, _, rest = record.partition("\t")
+        deleted, _, path = rest.partition("\t")
+        if not path:
+            raise MeasurementError(
+                f"numstat {a[:8]}..{b[:8]} named a record without a path: {record!r}"
+            )
+        if added == "-" and deleted == "-":
+            counts[path] = "binary"
+        elif added.isdigit() and deleted.isdigit():
+            counts[path] = f"+{added} -{deleted}"
+        else:
+            raise MeasurementError(
+                f"numstat {a[:8]}..{b[:8]} named counts this tool cannot read "
+                f"({added!r}, {deleted!r}) for {path}"
+            )
+    return counts
+
+
 def _behind_by(base: str, head: str) -> int:
     """How many commits of `base` the head does not contain - the reason for all this."""
     proc = _run(["git", "rev-list", "--count", f"{head}..{base}"])
@@ -695,8 +777,26 @@ def check_pr(
         f"  #{number} landing tree {tree[:12]} ({tree}) - merging it changes "
         f"{len(landed)} path(s) on the base:"
     ]
-    lines += [f"    {status}\t{path}" for status, path in landed]
-    if not landed:
+    if landed:
+        # The count beside the path, not only the path (`_line_counts`): a modification
+        # that removes content and one that adds it are one status letter apart in
+        # `--name-status`, and a review reads this list, not a second command.
+        try:
+            # `tree`, not the commit `landing_reading` built around it: git takes a
+            # tree-ish on either side, so the counts are of the same two blobs the path
+            # list came from.
+            counts = _line_counts(base, tree)
+        except MeasurementError as exc:
+            # The change is still measured and printed; only the counts are missing, and
+            # they are named as missing rather than shown as zeros.
+            lines.append(f"    (line counts unmeasurable here: {exc})")
+            counts = {}
+        for status, path in landed:
+            count = counts.get(path)
+            lines.append(
+                f"    {status}\t{path}\t({count})" if count else f"    {status}\t{path}"
+            )
+    else:
         lines.append("    (nothing: this head adds no change to the base)")
     if github:
         # Straight after the change it is compared with, so the two readings of one

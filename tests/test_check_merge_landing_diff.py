@@ -1400,3 +1400,154 @@ def test_main_carries_the_flag_to_the_reading(mod, tmp_path, monkeypatch, capsys
     assert rc == 0
     assert "github renders this PR as 2 path(s)" in out
     assert "src/shared.txt" in out
+
+
+# --- what each landed path costs: the counts beside the names -------------------
+
+
+def _rewriting_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """A head that **removes** lines from one file and **adds** lines to another.
+
+    The two halves of the finding this section is about: both land as `M` in the path
+    list, and only one of them removes content from the base.
+    """
+    repo = tmp_path / "rewriting"
+    _init_repo(repo)
+    _write(repo, "notes.md", "one\ntwo\nthree\n")
+    _write(repo, "src/kept.txt", "kept\n")
+    _commit(repo, "base")
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _write(repo, "notes.md", "one\nthree\n")  # one line removed
+    _write(repo, "notes.md", "one\nthree\n")
+    _write(repo, "src/added.txt", "n1\nn2\n")  # two lines added, in a new file
+    head = _commit(repo, "the PR drops a line and adds a file")
+    base = _git(repo, "rev-parse", "master")
+    return repo, base, head
+
+
+def test_the_landing_change_states_what_each_path_costs(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """`M` is the same letter for a removal and an addition; the count is not.
+
+    Measured 2026-09-26 (`cyc20260926-201809`) on #1638's merge: the landing changed
+    four paths, printed `M   Agent.md`, and had both added a line to a tool list and
+    **removed** a line of the brief's Terminology. Two reviews before that one saw only
+    the letter. Both directions are asserted here, so a tool that printed a count for
+    every path alike - or only for the header line - cannot pass.
+    """
+    repo, base, head = _rewriting_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    state, report = mod.check_pr(1, base)
+
+    assert state == "clean", report
+    change = report.partition("  diff(base, head) lists")[0]
+    assert "M\tnotes.md\t(+0 -1)" in change, change
+    assert "A\tsrc/added.txt\t(+2 -0)" in change, change
+    # The path that changed nothing is not in the change at all, with or without a count.
+    assert "src/kept.txt" not in change
+
+
+def test_a_modified_file_reports_both_numbers_not_only_the_larger(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """One line out, one line in: `(+1 -1)`, not `(+1 -0)` or `(-1)`.
+
+    A count that reported a single number would hide exactly the change this reading
+    exists to surface - a rewrite of a line, which is what the #1638 case was.
+    """
+    repo, base, head = _rewriting_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    _git(repo, "checkout", "-q", "feature")
+    _write(repo, "src/kept.txt", "kept, reworded\n")
+    head = _commit(repo, "and rewords one line")
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    state, report = mod.check_pr(1, base)
+
+    assert state == "clean", report
+    assert "M\tsrc/kept.txt\t(+1 -1)" in report, report
+
+
+def test_a_binary_path_says_binary_rather_than_a_zero(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """A path git cannot count lines for is not a path with zero changes.
+
+    `--numstat` prints `-` for both numbers of a binary file. Rendering that as
+    `(+0 -0)` would state a measurement nobody made, and `binary` is the reading git
+    actually gave.
+    """
+    repo = tmp_path / "binary"
+    _init_repo(repo)
+    # On the base, before the branch point, so the landing modifies it rather than
+    # adding it: an `A` line never carries a count, and the point here is a count git
+    # refuses to give.
+    (repo / "logo.bin").write_bytes(b"\x00\x01\x02base")
+    _write(repo, "notes.md", "one\n")
+    base = _commit(repo, "base")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "logo.bin").write_bytes(b"\x00\x01different")
+    _write(repo, "notes.md", "one\ntwo\n")
+    head = _commit(repo, "the PR changes a binary and a text file")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    state, report = mod.check_pr(1, base)
+
+    assert state == "clean", report
+    assert "M\tlogo.bin\t(binary)" in report, report
+    assert "M\tnotes.md\t(+1 -0)" in report, report
+    assert "(+0 -0)" not in report
+
+
+def test_counts_that_could_not_be_read_are_named_not_zeroed(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """A git failure in one reading does not empty the report or fake a zero.
+
+    The change is still measured - the paths and statuses are printed - and the missing
+    counts say so on their own line. Silently dropping them would make an unreadable
+    subject look like a path that changed nothing.
+    """
+    repo, base, head = _rewriting_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    def boom(a, b):
+        raise mod.MeasurementError("git diff --numstat failed: boom")
+
+    monkeypatch.setattr(mod, "_line_counts", boom)
+
+    state, report = mod.check_pr(1, base)
+
+    assert state == "clean", report
+    assert "line counts unmeasurable here" in report
+    assert "boom" in report
+    assert "M\tnotes.md" in report  # the change itself is still read
+    assert "(+0 -" not in report
+
+
+def test_the_paths_that_read_backwards_carry_no_counts(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """The hazard list stays uncounted, deliberately.
+
+    Those paths are the base's own later changes; a `(+N -M)` beside them would be read
+    as this PR's cost and would invite the very misreading the list is printed to
+    prevent. The landing list is the one with counts.
+    """
+    repo, base, head = _behind_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    state, report = mod.check_pr(1, base)
+
+    assert state == "backwards"
+    change, _, backwards = report.partition("  reads backwards:")
+    assert "(+" in change
+    assert "(+" not in backwards
