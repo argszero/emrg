@@ -28,6 +28,7 @@ environment this repository measured them in.
 import asyncio
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -42,10 +43,12 @@ from emrg.sandbox.policy import SandboxPolicy
 from emrg.tools.bash_tool_v2 import (
     BashToolV2,
     _decode_output,
+    _stream_bytes,
     is_runner_spawn_failure,
     render_result,
     run_command,
 )
+from emrg.tools.pwsh_tool_v2 import _stream_bytes as pwsh_stream_bytes
 
 SEATBELT_AVAILABLE = sys.platform == "darwin" and os.path.exists("/usr/bin/sandbox-exec")
 
@@ -602,6 +605,162 @@ def test_a_timeout_still_reports_the_output_the_command_managed_to_write(boundar
     result = boundary.run("echo before-timeout; sleep 30", timeout=1.0)
     assert result.timed_out is True
     assert "before-timeout" in result.stdout
+
+
+# ── The collector must survive a read nobody can ask ────────────────────────
+#
+# Host P0 rant 2026-09-27T19:41:13.  A bash call whose command left a descendant
+# holding the pipe ended its turn with `turn_end`, no `done`, no error frame and
+# no log line; the scheduled task then wedged for 45 minutes (a restart was the
+# only recovery).  Root cause, two independent defects in this file's subject:
+# the group kill asked `os.getpgid()` about a child that had already been reaped,
+# so nothing was ever signalled; and the collector then read `.result()` off the
+# stream task it had just cancelled, which re-raises `CancelledError` — a
+# `BaseException`, so it passed the `except Exception` around the tool loop.
+#
+# The three tests below are ordered by how directly they pin that: the unit pin
+# is deterministic, the in-group shape is the one that killed the turn, and the
+# out-of-group shape keeps the *cancelled* branch reachable now that a kill that
+# works closes the pipe instead.
+
+
+def test_a_cancelled_stream_task_reads_as_absent_output_not_as_an_exception():
+    """The unit pin: `.result()` re-raises on a cancelled task — a BaseException.
+
+    That is why the collector no longer calls it, and the assertion that
+    `.result()` really does raise is what makes this test evidence rather than a
+    restatement: revert `_stream_bytes` to the old expression and this test goes
+    red on the exception, not on a string.
+    """
+    async def _test():
+        async def _never_returns():
+            await asyncio.sleep(30)
+            return b"unreachable"
+
+        task = asyncio.ensure_future(_never_returns())
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert task.cancelled(), "the read task was not cancelled — nothing is under test"
+        # The old expression, kept here as the reason the helper exists.
+        with pytest.raises(asyncio.CancelledError):
+            task.result()
+        assert _stream_bytes(task) == b""
+        # And the same reading on the Windows twin, which is a literal duplicate
+        # of this collector: a fix in one and not the other is a fix in neither.
+        assert pwsh_stream_bytes(task) == b""
+
+    asyncio.run(_test())
+
+
+def test_stream_bytes_keeps_output_that_really_was_read():
+    """The other half: absence is reported as absence, never as a lost success."""
+    async def _test():
+        async def _writes():
+            return b"kept"
+
+        task = asyncio.ensure_future(_writes())
+        await asyncio.gather(task)
+        assert _stream_bytes(task) == b"kept"
+        assert pwsh_stream_bytes(task) == b"kept"
+
+    asyncio.run(_test())
+
+
+@needs_a_shell
+def test_a_survivor_holding_the_pipe_is_killed_and_does_not_end_the_turn(tmp_path):
+    """The host's shape: the direct child exits, a descendant keeps stdout open.
+
+    Before the fix this raised `CancelledError` out of the collector — the turn
+    died with no `done` frame — and the survivor was never signalled at all,
+    because `os.getpgid()` on the reaped child raised and the fallback
+    `proc.kill()` raised for the same reason.
+
+    The descendant is proven dead by its own pid, read from a file it wrote
+    while it was alive: "the run returned" alone would not distinguish a kill
+    from a survivor nobody looked for.
+    """
+    async def _test():
+        pid_file = tmp_path / "survivor.pid"
+        command = f"(sleep 300 & echo $! > {pid_file}); echo started"
+        result = await run_command(
+            command,
+            policy=SandboxPolicy(mode="danger-full-access", workspace_root=str(tmp_path)),
+            workdir=str(tmp_path),
+            timeout=2.0,
+            platform_name="darwin",
+        )
+        assert "started" in result.stdout, (
+            "the bytes the command really wrote must survive the cleanup: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        survivor = int(pid_file.read_text().strip())
+        # Give the signal a moment to be delivered and reaped, then look for it.
+        for _ in range(40):
+            try:
+                os.kill(survivor, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            os.kill(survivor, signal.SIGKILL)  # do not leave it behind
+            raise AssertionError(
+                f"the descendant (pid {survivor}) survived the run — the group kill "
+                "signalled nobody, which is the defect that wedged the task"
+            )
+
+    asyncio.run(_test())
+
+
+@needs_a_shell
+def test_a_survivor_that_leaves_the_group_still_ends_with_a_result(tmp_path):
+    """The cancelled branch, kept reachable: a descendant in its own session.
+
+    A kill that works is itself a fix for the common shape, so the branch where
+    the streams are *still* open after the grace — and their reads are therefore
+    cancelled — needs a survivor the group signal cannot reach. This one calls
+    `setsid()` itself.
+
+    What is asserted is the contract the host's incident broke: a result is
+    returned, `timed_out` is honest about the output never closing, and nothing
+    raises out of the collector.
+    """
+    async def _test():
+        pid_file = tmp_path / "escapee.pid"
+        escapee = (
+            "python3 -c \"import os,time;os.setsid();"
+            "open(%r,'w').write(str(os.getpid()));time.sleep(60)\" &"
+            % str(pid_file)
+        )
+        result = await run_command(
+            f"({escapee}); echo started",
+            policy=SandboxPolicy(mode="danger-full-access", workspace_root=str(tmp_path)),
+            workdir=str(tmp_path),
+            timeout=2.0,
+            platform_name="darwin",
+        )
+        assert result.timed_out is True, (
+            "a command whose output never closed is a timeout; got "
+            f"timed_out={result.timed_out} exit={result.exit_code}"
+        )
+        try:
+            escapee_pid = int(pid_file.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            pytest.skip("the escapee did not record its pid on this host")
+        finally:
+            # It is outside the group by construction, so the tool cannot have
+            # reaped it — the test owns this process.
+            try:
+                os.kill(escapee_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # The pipe closes with it, and the run's transport needs a beat to
+            # notice before the loop goes away: without this the subprocess
+            # object is collected against a closed loop and pytest reports an
+            # unraisable `RuntimeError`, which is noise in every other run.
+            await asyncio.sleep(0.3)
+
+    asyncio.run(_test())
 
 
 @needs_seatbelt
