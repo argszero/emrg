@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,22 @@ def _load_counter():
 @pytest.fixture(scope="module")
 def counter():
     return _load_counter()
+
+
+@pytest.fixture(autouse=True)
+def _pinned_cycle_records(counter, tmp_path, monkeypatch):
+    """Read the abstention window from an empty directory, never from this host.
+
+    `check-vote-count.py` reads that window out of cycle records on disk, defaulting to
+    the corpus of whichever machine runs the suite. The control below is about the
+    *head push*, so its votes must not also be judged against the cycles this host
+    happens to have recorded: an empty directory narrows the window to the voting
+    cycle's own start, which the fixture above places an hour after the push.
+    """
+    monkeypatch.delenv("EMRG_CYCLES_LOG", raising=False)
+    empty = tmp_path / "no-cycle-records"
+    empty.mkdir()
+    monkeypatch.setattr(counter.review_queue(), "DEFAULT_CYCLES_LOGS", (empty,))
 
 
 @pytest.fixture(scope="module")
@@ -177,9 +194,33 @@ def test_the_submit_section_states_the_clause_too(rendered: str) -> None:
 
 
 HEAD = "b" * 40
-PUSH = "2026-09-19T01:00:00Z"
-AFTER = "2026-09-19T02:00:00Z"
-BEFORE = "2026-09-19T00:00:00Z"
+
+# Every instant here is built from the host's own zone, because a cycle id is **local**
+# time while a push arrives as UTC: two bare literals describe their order differently on
+# every runner, and the order is the whole subject of the control below. (`_push` in
+# `tests/test_cast_vote.py` exists for the same reason.)
+LOCAL = datetime.now().astimezone().tzinfo
+
+
+def _utc(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_PUSH_LOCAL = datetime(2026, 9, 19, 12, 0, 0, tzinfo=LOCAL)
+PUSH = _utc(_PUSH_LOCAL)
+AFTER = _utc(_PUSH_LOCAL + timedelta(hours=2))
+BEFORE = _utc(_PUSH_LOCAL - timedelta(hours=2))
+
+#: The voting cycles: one hour after the head push, and one second apart. Both facts
+#: matter — the second keeps them three *distinct* cycles, and the first keeps them
+#: outside the window `check-vote-count.py` reads (a cycle does not count a vote on a
+#: head pushed inside its own window, and its own window starts when it starts). A
+#: vote cast here is an ordinary vote, which is what this control needs.
+_CYCLE_LOCAL = _PUSH_LOCAL + timedelta(hours=1)
+
+
+def _cycle_id(offset_seconds: int) -> str:
+    return "cyc" + (_CYCLE_LOCAL + timedelta(seconds=offset_seconds)).strftime("%Y%m%d-%H%M%S")
 
 
 class _FakeGh:
@@ -207,7 +248,7 @@ class _FakeGh:
 
 def _counted(counter, monkeypatch, at: str) -> "object":
     reviews = [
-        {"at": at, "body": f"\u2705 LGTM — cycle cyc20260919-00000{i}"} for i in range(1, 4)
+        {"at": at, "body": f"\u2705 LGTM — cycle {_cycle_id(i)}"} for i in range(1, 4)
     ]
     fake = _FakeGh(reviews)
     monkeypatch.setattr(counter, "_gh_json", fake)
