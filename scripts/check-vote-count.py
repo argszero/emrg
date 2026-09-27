@@ -319,7 +319,7 @@ _CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
 
 
 def distinct_cycle_ids(body: str) -> list[str]:
-    """Every *distinct* cycle id in `body`, in order of first appearance.
+    """Every *distinct* cycle id `body` **states**, in order of first appearance.
 
     The one reading of "which cycle(s) does this body name", and distinct rather
     than per occurrence: the question a vote body answers is *which cycle wrote
@@ -331,11 +331,28 @@ def distinct_cycle_ids(body: str) -> list[str]:
     `VOID (2 cycle ids) - the vote body names 2 cycle ids
     (cyc20260917-075555, cyc20260917-075555)`, i.e. one id, twice.
 
+    The same shape one level out, fixed here (measured 2026-09-27, cycle
+    `cyc20260927-123036`, on master `846c232d`): the two readings of a body in this
+    file disagreed about *quotation*. `classify` had fenced regions dropped - "a
+    mark inside a quotation is not the reviewer stating it" (`_fence_flags`) - while
+    this reader took ids out of the raw body, so
+
+        ✅ LGTM — cycle cyc20260927-123036
+        ```
+        the row read: previous cycle cyc20260927-113700 pushed this head
+        ```
+
+    read as **two** ids and counted for none: the vote was lost for quoting the tool
+    output a review is made of, and `review-queue.py` prints exactly such lines. The
+    reading now comes from the same place as the verdict's (`_decorated_lines`), so
+    the body has one answer to "what does it state" rather than two. Inline spans are
+    left as they were - that is a separate question, unchanged for verdicts too.
+
     Named and exported so the two scripts can be *asserted* to agree on this
     axis, not just on the pattern (`_CYCLE_RE`) they share - the presence-only
     check they had kept passing while the readings diverged.
     """
-    return list(dict.fromkeys(_CYCLE_RE.findall(body)))
+    return list(dict.fromkeys(_CYCLE_RE.findall("\n".join(_decorated_lines(body)))))
 
 
 # ── the abstention window: was this head the voting cycle's own? ─────────────

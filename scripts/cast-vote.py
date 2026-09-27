@@ -48,11 +48,13 @@ counter back** rather than assuming the post worked. Exit 1 is reserved for the
 one state the caller cannot detect on its own: posted, and not counted.
 
 The first two clauses are decided by **asking the counter**, not by a second
-reading of its rule: the cycle pattern is its `_CYCLE_RE` pinned equal by a test,
-and the verdict is its own `classify()`, called directly. A lookalike classifier
-here would be a second answer to "is this body a vote", and the two would disagree
-exactly where it matters — this tool would post what the counter skips, which is
-the defect the clause exists to close.
+reading of its rule: the cycle ids come from its `distinct_cycle_ids()`, the verdict
+from its own `classify()`, both called directly. A lookalike reading here would be a
+second answer to "is this body a vote", and the two would disagree exactly where it
+matters — this tool would post what the counter skips, which is the defect the clause
+exists to close. (The ids were the exception until 2026-09-27: this file re-read the
+body itself with a copy of the pattern, so the counter's fence rule — a *quoted* id is
+not a stated one — reached the count and not the preflight. Asking settles it.)
 
 The landing tree, read before the vote is spent
 -----------------------------------------------
@@ -226,11 +228,15 @@ STDIN_BODY = "-"
 # than defaulted on both sides, so a change to the gate has one place to land.
 _VOTES_NEEDED = 3
 
-# The shape `check-vote-count.py` reads a cycle out of a review body with. Kept
-# as its own copy rather than imported so the refusal is decided *before* a
-# subprocess is spawned, and pinned equal to the sibling's by a test - a helper
-# that accepted a different shape than the counter reads would post bodies that
-# are void by construction, which is the defect it exists to prevent.
+# The shape `check-vote-count.py` reads a cycle out of a review body with. Kept here
+# as its own copy, pinned equal to the sibling's by a test, for the question this file
+# decides *itself*: whether `--cycle` is a cycle id at all (`_CYCLE_RE.fullmatch`,
+# below). The *body* reading is not re-derived here — it is asked of the counter
+# (`cycles_in` → `distinct_cycle_ids`), because a body's ids are now read with the
+# fence rule that decides what the body *states*, and a second copy of that rule is
+# how the two tools came to disagree (2026-09-17, and again on 2026-09-27 for quoted
+# ids). A helper that accepted a different shape than the counter reads would post
+# bodies that are void by construction, which is the defect it exists to prevent.
 _CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
 
 # Every `return 2` declares which of these it is, as `# cause: <slug>` on the
@@ -606,13 +612,17 @@ def read_stdin_body() -> str:
 
 
 def cycles_in(body: str) -> list[str]:
-    """Every distinct cycle id in `body`, in order of first appearance."""
-    seen: list[str] = []
-    for match in _CYCLE_RE.finditer(body):
-        found = match.group(0)
-        if found not in seen:
-            seen.append(found)
-    return seen
+    """Every distinct cycle id `body` *states*, in order of first appearance.
+
+    The **counter's** reading, not a second one: it drops fenced regions before
+    looking (a quoted id is not a stated one) and this file must refuse exactly what
+    the counter voids — a preflight that reads the raw body accepts a review the
+    counter then counts for none, which is the silent loss this clause exists to
+    prevent. The sibling is loaded from its path rather than imported by name (the
+    modules here are hyphenated), which needs no subprocess, so the refusal is still
+    decided before `gh` is spawned.
+    """
+    return votes_counter().distinct_cycle_ids(body)
 
 
 def preflight(body: str, cycle: str | None) -> tuple[str | None, str]:
