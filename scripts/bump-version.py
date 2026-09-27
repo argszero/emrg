@@ -41,8 +41,15 @@ After bumping, the release flow is (see Agent.md "Releasing"):
 
     1. ``uv run --no-sync pytest tests/test_version_sync.py -q``  # guard
     2. commit on ``feature/release-vX.Y.Z`` -> PR -> 3 LGTMs -> merge
-    3. ``git tag -a vX.Y.Z -m "emrg vX.Y.Z" && git push origin vX.Y.Z``  # triggers Build Release
-    4. confirm all 4 platform legs green in ``build-release.yml``
+    3. ``python3 scripts/check-release-tag.py vX.Y.Z``  # the tag must name this tree's version
+    4. ``git tag -a vX.Y.Z -m "emrg vX.Y.Z" && git push origin vX.Y.Z``  # triggers Build Release
+    5. confirm all 4 platform legs green in ``build-release.yml``
+
+Step 3 is not a formality: the pipeline takes the release's *name* from the tag and
+the artifacts' ``version.txt`` from this tree, so a tag cut on the wrong commit
+publishes a release whose two halves disagree, and every host that installs it
+re-triggers the upgrade session every tick (issue #1652). ``verify-tag`` runs the
+same guard before any platform builds.
 
 Note: always run the test suite with ``uv run --no-sync`` after a bump so
 ``uv`` does not regenerate ``uv.lock`` against a mirror.
@@ -352,8 +359,9 @@ def main(argv: list[str] | None = None) -> int:
         "\nNext:\n"
         "  1. uv run --no-sync pytest tests/test_version_sync.py -q\n"
         f"  2. commit on feature/release-v{args.version} -> PR -> 3 LGTMs -> merge\n"
-        f"  3. git tag -a v{args.version} -m \"emrg v{args.version}\" && git push origin v{args.version}\n"
-        "  4. confirm all 4 platforms green in build-release.yml\n"
+        f"  3. python3 scripts/check-release-tag.py v{args.version}   # the tag must name this tree's version\n"
+        f"  4. git tag -a v{args.version} -m \"emrg v{args.version}\" && git push origin v{args.version}\n"
+        "  5. confirm all 4 platforms green in build-release.yml\n"
         "\nNote: use `uv run --no-sync` so uv does not regenerate uv.lock."
     )
     return 0
