@@ -158,21 +158,23 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 #: **One root, because the corpus has finished moving.** `SCRIPTS_DIR` is
 #: `<source_dir>/scripts`, so `SCRIPTS_DIR.parent` is the checkout. D9 (PR #1555)
 #: re-based the prompt's memory roots from the evolution root beside the checkout onto
-#: `{{ source_dir }}` inside it, and the records followed — but not at once: measured
-#: 2026-09-25 the corpus (1,354 `cycle-*.md`) still sat beside the checkout while the
-#: template wrote inside it, so this tool searched **both** and took the newest record
-#: across the union, because reading either one alone leaves the abstention window
-#: unresolvable. Both sides have since converged: the delivered template (install
-#: 0.3.4) names the checkout, every record since 2026-09-27 13:24 is inside it, and
-#: the second root has been **archived** (host, 2026-09-28) — so the union is one
-#: directory, and naming the other only made every reading report a directory it could
-#: not read.
+#: `{{ source_dir }}` inside it, and the records followed — but not at once: while the
+#: move was under way the corpus still sat beside the checkout while the template wrote
+#: inside it, so this tool searched **both** and took the newest record across the
+#: union, because reading either one alone leaves the abstention window unresolvable.
 #:
-#: The archive is `<evolution root>/archive/evolution-root-20260928/` (4,601 files,
-#: 262 MB, of which 1,402 `cycle-*.md` predate D9). It is history kept for reference:
-#: nothing reads it, and a window that needs one of those records resolves from the
-#: checkout's own records instead. Recoverable by moving it back, which is the point
-#: of archiving rather than deleting.
+#: One root is enough now, and the reason is a fact about the *writers* rather than
+#: about any one filesystem: D9 stopped every writer of the second root, so the newest
+#: record cannot be there, and the template in this checkout — the one the guard below
+#: ties this tuple to — names the checkout's own root.
+#:
+#: What remains at the old path is **deliberately not stated here**: it is a host-side
+#: matter that differs between hosts, while this script runs on all of them and is not
+#: told which one it is on. A path, a file count or a byte size that is true of one host
+#: and absent on another is the defect class that had this paragraph rewritten — a
+#: derived number no guard measures goes stale in silence (`Agent.md`). A window that
+#: does need one of those older records opens them where they are, by naming the
+#: directory it knows them to be in (see the override below).
 #:
 #: A guard ties this set to the template's path
 #: (`tests/test_review_queue.py::test_the_prompt_writes_its_cycle_records_where_the_queue_reads_them`):
