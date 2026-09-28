@@ -1875,8 +1875,8 @@ def test_cycle_heartbeat_tracks_progress_and_clears(tmp_path):
     import json as _json
 
     handler, captured = _make_cycle_handler(tmp_path, frames=[
-        {"tool_name": "bash", "round": 1},
-        {"tool_name": "read", "round": 2},
+        {"tool_name": "bash"},
+        {"tool_name": "read"},
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
@@ -1886,7 +1886,6 @@ def test_cycle_heartbeat_tracks_progress_and_clears(tmp_path):
     asyncio.run(handler._run_evolution_cycle())
     # in-memory progress tracked from the streamed frames
     assert handler._cycle_progress["tool_count"] == 2
-    assert handler._cycle_progress["round"] == 2
     assert handler._cycle_progress["cycle_started_at"] is None or \
         handler._cycle_progress["cycle_started_at"]
     # heartbeat file was written on the last tool frame (status=running)
@@ -1896,17 +1895,20 @@ def test_cycle_heartbeat_tracks_progress_and_clears(tmp_path):
     assert data["status"] == "running"
     assert data["task"] == "emrg-task"
     assert data["tool_count"] == 2
-    assert data["round"] == 2
     assert data["last_heartbeat_at"], "heartbeat must carry a timestamp"
-    # clean cycle end removes the running marker (run() finally → _clear_heartbeat)
-    handler._clear_heartbeat()
+    assert "round" not in data, (
+        "the round field is gone: no daemon frame carries one, so it could only "
+        "ever be written as 0 (rant 2026-09-27T19:45:54, item 3)"
+    )
+    # clean cycle end removes the running marker (run() finally → _end_heartbeat)
+    handler._end_heartbeat(handler._CLEAN_END)
     assert not hb.exists(), "clean cycle end must remove the heartbeat marker"
 
 
 def test_cycle_heartbeat_interrupted_reported_on_restart(tmp_path, caplog):
     """A heartbeat left with status=running (daemon killed mid-cycle) is
     reported by the next handler start: progress restored into
-    _cycle_progress + a warning naming the interrupting round."""
+    _cycle_progress + a warning naming the ending and the last progress."""
     import json as _json
 
     from emrg.server import scheduler as mod
@@ -1918,7 +1920,7 @@ def test_cycle_heartbeat_interrupted_reported_on_restart(tmp_path, caplog):
             "task": "emrg-task", "status": "running",
             "cycle_started_at": "2026-08-25T00:00:00",
             "last_heartbeat_at": "2026-08-25T00:05:00",
-            "round": 3, "tool_count": 7,
+            "tool_count": 7,
         }), encoding="utf-8")
     orig = mod.config_dir
     try:
@@ -1929,10 +1931,143 @@ def test_cycle_heartbeat_interrupted_reported_on_restart(tmp_path, caplog):
     finally:
         mod.config_dir = orig
     # progress restored (informational; the next cycle resets it at start)
-    assert h._cycle_progress["round"] == 3
     assert h._cycle_progress["tool_count"] == 7
     warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("interrupted at round 3" in m for m in warnings), warnings
+    assert any("previous cycle was killed mid-cycle" in m for m in warnings), warnings
+    assert any("tool_count=7" in m for m in warnings), warnings
+    # reported once: the record is consumed, so a later cycle cannot report it
+    # again or half-overwrite it
+    assert not (hb_dir / "emrg-task.heartbeat.json").exists(), (
+        "the reported record must be consumed"
+    )
+
+
+def test_cycle_cancelled_by_shutdown_leaves_a_record(tmp_path):
+    """A cycle cancelled by shutdown keeps its marker instead of erasing it.
+
+    Rant 2026-09-27T19:45:54 (defect A). `stop_all()` cancels the handler
+    coroutine, and `CancelledError` is not an `Exception`, so the old
+    `except Exception` never saw the ending while the `finally` unlinked the only
+    record of it — measured 2026-09-27: a cycle wedged 45 minutes, a host
+    restart, and no line in emrgd.log saying the previous cycle had ended.
+    """
+    import json as _json
+
+    handler, _ = _make_cycle_handler(tmp_path, frames=[])
+
+    async def cancelled():
+        raise asyncio.CancelledError()
+
+    handler._run_evolution_cycle = cancelled
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(handler._run_cycle_bounded())
+
+    hb = tmp_path / "logs" / "task-runs" / "emrg-task.heartbeat.json"
+    assert hb.exists(), "a cancelled cycle must not erase its progress record"
+    data = _json.loads(hb.read_text(encoding="utf-8"))
+    assert data["status"] == "shutdown-cancelled", data
+    assert data["ended_at"], "the record must say when it ended"
+    assert data["cycle_started_at"], "the record must say when the cycle started"
+    assert handler._cycle_running is False, "the cycle flag must still be released"
+
+
+def test_cycle_crash_leaves_a_record(tmp_path):
+    """A crash is a distinct ending and says so (not a clean end)."""
+    import json as _json
+
+    handler, _ = _make_cycle_handler(tmp_path, frames=[])
+
+    async def boom():
+        raise RuntimeError("the cycle died")
+
+    handler._run_evolution_cycle = boom
+    asyncio.run(handler._run_cycle_bounded())
+
+    hb = tmp_path / "logs" / "task-runs" / "emrg-task.heartbeat.json"
+    assert hb.exists(), "a crashed cycle must leave a record"
+    assert _json.loads(hb.read_text(encoding="utf-8"))["status"] == "crashed"
+    assert handler._cycle_running is False, "the cycle flag must still be released"
+
+
+def test_the_marker_exists_before_the_first_tool_frame(tmp_path):
+    """The marker is written when the cycle starts, not on its first tool frame.
+
+    A cycle can spend minutes in its first LLM round. While the marker was
+    written only on a tool frame, a daemon killed in that window left no marker
+    at all — indistinguishable from a clean end, which is the one state this
+    file exists to tell apart. Driven by a cycle that inspects the file from
+    inside, so the assertion is about the state during the cycle, not after it.
+    """
+    import json as _json
+
+    handler, _ = _make_cycle_handler(tmp_path, frames=[])
+    hb = tmp_path / "logs" / "task-runs" / "emrg-task.heartbeat.json"
+    seen: dict = {}
+
+    async def peek():
+        seen["exists"] = hb.exists()
+        seen["status"] = _json.loads(hb.read_text(encoding="utf-8"))["status"] \
+            if hb.exists() else None
+
+    handler._run_evolution_cycle = peek
+    asyncio.run(handler._run_cycle_bounded())
+    assert seen.get("exists") is True, (
+        "the marker must exist from the first instant of the cycle"
+    )
+    assert seen.get("status") == "running", seen
+
+
+def test_cycle_clean_end_leaves_no_record(tmp_path):
+    """The other direction: a finished cycle leaves nothing to report.
+
+    Without this, "always leave a record" would satisfy the tests above while
+    every ordinary cycle (the overwhelming majority) left a false ending behind
+    for the next start to report.
+    """
+    handler, _ = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ])
+    asyncio.run(handler._run_cycle_bounded())
+    hb = tmp_path / "logs" / "task-runs" / "emrg-task.heartbeat.json"
+    assert not hb.exists(), "a clean end leaves no record"
+
+
+def test_cycle_record_is_reported_once_with_its_reason(tmp_path, caplog):
+    """The record a cancelled cycle left is reported by the next cycle's start.
+
+    A record that only ever reached a restart would be erased by the next cycle
+    of the same process (the marker is rewritten every cycle), so the consumption
+    in `_report_interrupted_cycle` is load-bearing: it turns the file into a
+    one-shot report rather than a slot the next cycle silently overwrites.
+    """
+    import json as _json
+
+    hb_dir = tmp_path / "logs" / "task-runs"
+    hb_dir.mkdir(parents=True)
+    hb = hb_dir / "emrg-task.heartbeat.json"
+    hb.write_text(_json.dumps({
+        "task": "emrg-task", "status": "shutdown-cancelled",
+        "cycle_started_at": "2026-09-27T18:56:22",
+        "ended_at": "2026-09-27T19:41:57",
+        "last_heartbeat_at": "2026-09-27T19:05:55",
+        "tool_count": 159,
+    }), encoding="utf-8")
+
+    handler, _ = _make_cycle_handler(tmp_path, frames=[])
+    with caplog.at_level(logging.WARNING, logger="emrg.server.scheduler"):
+        handler._report_interrupted_cycle()
+
+    warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("was cancelled by shutdown" in m for m in warnings), warnings
+    assert any("tool_count=159" in m for m in warnings), (
+        f"the report must carry the last progress: {warnings}"
+    )
+    assert not hb.exists(), "a reported record must not be left for a second read"
+    with caplog.at_level(logging.WARNING, logger="emrg.server.scheduler"):
+        caplog.clear()
+        handler._report_interrupted_cycle()
+    assert not caplog.records, "a consumed record must not be reported twice"
 
 
 # ── Next-run persistence (rant 2026-08-25T09:25:32 ④) ─────────

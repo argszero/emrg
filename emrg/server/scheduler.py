@@ -345,15 +345,20 @@ class TaskHandler:
 
         # ── Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③) ──
         # While a cycle is running, periodic + event-driven writes to
-        # <task>.heartbeat.json persist how far the cycle got (round /
-        # tool_count / timestamps). A daemon killed mid-cycle leaves the file
-        # with status=running — the next start reports exactly where the
+        # <task>.heartbeat.json persist how far the cycle got (tool_count /
+        # timestamps). A daemon killed mid-cycle leaves the file with
+        # status=running — the next start reports exactly where the
         # previous cycle was interrupted, so silent-death incidents become
         # diagnosable (8-24 20:40 R46 / 8-25 02:00 emrg-task 01:26 lessons).
+        # The `round` field this payload used to carry is gone (rant
+        # 2026-09-27T19:45:54, item 3): measured, no frame the daemon sends has
+        # ever carried a `round` key, so it was written as 0 for every cycle and
+        # the report it fed read "interrupted at round 0" — necessarily false.
+        # `tool_count` is the progress measure that actually moves, because it is
+        # written on each tool frame.
         self._heartbeat_file = self._task_runs_dir / f"{self.name}.heartbeat.json"
         self._cycle_progress: dict = {
             "cycle_started_at": None,
-            "round": 0,
             "tool_count": 0,
         }
         self._report_interrupted_cycle()
@@ -1363,30 +1368,62 @@ class TaskHandler:
     # next handler start logs exactly where the cycle was interrupted.
     _HEARTBEAT_PERIOD = 60  # seconds between periodic heartbeat writes
 
-    def _write_heartbeat(self, status: str) -> None:
+    def _write_heartbeat(self, status: str, **extra: object) -> None:
         """Persist current cycle progress (best-effort, never raises)."""
         try:
             self._task_runs_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "task": self.name,
+                "status": status,
+                "cycle_started_at": self._cycle_progress.get("cycle_started_at"),
+                "last_heartbeat_at": datetime.now().isoformat(timespec="seconds"),
+                "tool_count": self._cycle_progress.get("tool_count", 0),
+            }
+            payload.update(extra)
             self._heartbeat_file.write_text(
-                json.dumps({
-                    "task": self.name,
-                    "status": status,
-                    "cycle_started_at": self._cycle_progress.get("cycle_started_at"),
-                    "last_heartbeat_at": datetime.now().isoformat(timespec="seconds"),
-                    "round": self._cycle_progress.get("round", 0),
-                    "tool_count": self._cycle_progress.get("tool_count", 0),
-                }, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
                 encoding="utf-8",
             )
         except Exception:
             pass  # heartbeat is best-effort; never affects the running cycle
 
-    def _clear_heartbeat(self) -> None:
-        """Remove the running-cycle heartbeat marker (cycle ended cleanly)."""
-        try:
-            self._heartbeat_file.unlink(missing_ok=True)
-        except Exception:
-            pass
+    #: A cycle that ends this way leaves no marker: the cycle finished, so there
+    #: is nothing to report and nothing to diagnose.
+    _CLEAN_END = "done"
+
+    #: How each other ending reads in the restart report, one grep-able phrase.
+    _END_REASONS = {
+        "running": "was killed mid-cycle (left running, no terminal record)",
+        "shutdown-cancelled": "was cancelled by shutdown",
+        "crashed": "crashed",
+    }
+
+    def _end_heartbeat(self, reason: str) -> None:
+        """End the cycle's marker: remove it only when the cycle really finished.
+
+        Rant 2026-09-27T19:45:54 (defect A). This used to unlink the marker on
+        *every* exit, which erased the evidence exactly where it was needed: a
+        graceful shutdown cancels the handler coroutine (`stop_all` →
+        `coro.cancel()`), and a crash is caught one frame up (`except Exception`),
+        so neither ending reached `_report_interrupted_cycle` — it only speaks for
+        a marker still carrying `status=running`, i.e. a hard kill. Measured
+        2026-09-27: a cycle wedged for 45 minutes, then a host restart, and the
+        daemon log contained no line saying the previous cycle had ended at all.
+
+        Any ending other than `_CLEAN_END` therefore writes its reason into the
+        marker and keeps the file; `_report_interrupted_cycle` reads it back on
+        the next start (or the next cycle) and then consumes it, so a record is
+        reported exactly once.
+        """
+        if reason == self._CLEAN_END:
+            try:
+                self._heartbeat_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return
+        self._write_heartbeat(
+            reason, ended_at=datetime.now().isoformat(timespec="seconds")
+        )
 
     async def _heartbeat_loop(self) -> None:
         """Periodically persist cycle progress while a cycle is running."""
@@ -1398,31 +1435,36 @@ class TaskHandler:
             pass
 
     def _report_interrupted_cycle(self) -> None:
-        """Restart-time detection of a daemon killed mid-cycle.
+        """Report — and consume — the marker a previous cycle left behind.
 
-        Rant 2026-08-25T09:25:32 ③: a heartbeat file left with
-        status=running means the previous cycle never finished — restore its
-        progress into _cycle_progress and log "上次中断于 round X" so the
-        silent-death incident becomes diagnosable from emrgd.log alone.
+        Two endings leave one (rant 2026-08-25T09:25:32 ③, extended by rant
+        2026-09-27T19:45:54 defect A): the daemon was killed mid-cycle, so the
+        marker still says `running`, and a cycle that ended by cancellation or by
+        a crash, which now records its own reason instead of being erased. Both
+        are reported with the reason and the last progress on one grep-able line;
+        the marker is then removed, so a record is reported once and a later
+        cycle cannot half-overwrite it.
         """
         try:
             if not self._heartbeat_file.exists():
                 return
             data = json.loads(self._heartbeat_file.read_text(encoding="utf-8"))
-            if data.get("status") != "running":
+            status = str(data.get("status") or "")
+            if status == self._CLEAN_END:
                 return
-            round_n = int(data.get("round") or 0)
             tool_n = int(data.get("tool_count") or 0)
-            self._cycle_progress["round"] = round_n
             self._cycle_progress["tool_count"] = tool_n
             self._cycle_progress["cycle_started_at"] = data.get("cycle_started_at")
             self._logger.warning(
-                "TaskHandler[%s]: previous cycle interrupted at round %s "
-                "(tool_count=%s, started %s, last heartbeat %s) — see %s",
-                self.name, round_n, tool_n,
-                data.get("cycle_started_at"), data.get("last_heartbeat_at"),
-                self._heartbeat_file,
+                "TaskHandler[%s]: previous cycle %s (tool_count=%s, started %s, "
+                "ended %s, last heartbeat %s) — see %s",
+                self.name,
+                self._END_REASONS.get(status, f"ended with status={status!r}"),
+                tool_n,
+                data.get("cycle_started_at"), data.get("ended_at") or "-",
+                data.get("last_heartbeat_at"), self._heartbeat_file,
             )
+            self._heartbeat_file.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -1640,31 +1682,63 @@ class TaskHandler:
             self._cycle_start_time = time.time()  # per-cycle elapsed base (rant 2026-08-22T07:18:35)
             self._next_run_at = None  # running — no next time yet
             self._save_next_run_state()  # clear the persisted slot (cycle starting now)
-            # Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③): a
-            # periodic writer keeps <task>.heartbeat.json fresh while the
-            # cycle runs; if the daemon dies mid-cycle the file survives and
-            # the next start reports where the cycle was interrupted.
-            self._cycle_progress = {
-                "cycle_started_at": datetime.now().isoformat(timespec="seconds"),
-                "round": 0,
-                "tool_count": 0,
-            }
-            heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-            try:
-                await self._run_evolution_cycle()
-            except Exception:
-                self._logger.warning(
-                    "TaskHandler[%s] crashed", self.name, exc_info=True
-                )
-            finally:
-                self._cycle_running = False
-                self._cycle_start_time = None
-                heartbeat_task.cancel()
-                self._clear_heartbeat()  # cycle over — remove the running marker
-                self._trigger_event.clear()  # clear any spurious set during cycle
+            await self._run_cycle_bounded()
 
         await self._write_final_summary()
         self._logger.info("TaskHandler[%s] stopped", self.name)
+
+    async def _run_cycle_bounded(self) -> str:
+        """Run one cycle under its progress marker; return how it ended.
+
+        The marker's whole lifetime lives here — opened before the cycle starts
+        and closed with the reason it ended (rant 2026-09-27T19:45:54, defect A).
+        The reason is decided by catching here rather than by asking the cycle,
+        for the same reason the daemon's turn wrapper decides its own terminal
+        frame (issue #1668): every path passes through this `finally`, and the
+        endings that matter most are exactly the ones that reach no other code —
+        `CancelledError` is not an `Exception`, so the old `except Exception` let
+        a shutdown sail past while the `finally` erased the marker it should have
+        kept.
+
+        `CancelledError` still propagates: this wrapper reports the ending, it
+        does not swallow the cancellation.
+        """
+        # Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③): a
+        # periodic writer keeps <task>.heartbeat.json fresh while the
+        # cycle runs; if the daemon dies mid-cycle the file survives and
+        # the next start reports where the cycle was interrupted.
+        # Anything the previous cycle left is read and consumed first, so an
+        # ending recorded inside this process (a crash, a cancellation) is not
+        # silently overwritten by the marker this cycle is about to write.
+        self._report_interrupted_cycle()
+        self._cycle_progress = {
+            "cycle_started_at": datetime.now().isoformat(timespec="seconds"),
+            "tool_count": 0,
+        }
+        # Written before the cycle starts, not on its first tool frame: a cycle
+        # can spend minutes in its first LLM round, and a daemon killed in that
+        # window used to leave no marker at all — nothing to report, which reads
+        # exactly like a clean end.
+        self._write_heartbeat("running")
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        end_reason = self._CLEAN_END
+        try:
+            await self._run_evolution_cycle()
+        except asyncio.CancelledError:
+            end_reason = "shutdown-cancelled"
+            raise
+        except Exception:
+            end_reason = "crashed"
+            self._logger.warning(
+                "TaskHandler[%s] crashed", self.name, exc_info=True
+            )
+        finally:
+            self._cycle_running = False
+            self._cycle_start_time = None
+            heartbeat_task.cancel()
+            self._end_heartbeat(end_reason)
+            self._trigger_event.clear()  # clear any spurious set during cycle
+        return end_reason
 
     def stop(self) -> None:
         self._running = False
@@ -1932,20 +2006,20 @@ class TaskHandler:
                     tool_count += 1
                     # Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③):
                     # mirror the cumulative count into the heartbeat state —
-                    # the write happens AFTER the round field is applied below
-                    # so the persisted file carries the last frame's round.
+                    # the write happens after the progress count is applied, so
+                    # the persisted file carries the last frame's tool_count.
                     self._cycle_progress["tool_count"] = tool_count
 
-                # Round number (daemon exposes it on tool_start/done frames,
-                # rant 2026-08-25T09:25:32 ③): the heartbeat records the last
-                # round the cycle reached, so a restart can report "上次中断于
-                # round X" precisely.
-                rnd = resp.get("round")
-                if isinstance(rnd, int):
-                    self._cycle_progress["round"] = rnd
+                # The `round` field this loop used to read is gone (rant
+                # 2026-09-27T19:45:54, item 3): measured, the daemon sends no
+                # `round` key on any frame — the comment that claimed otherwise
+                # ("daemon exposes it on tool_start/done frames") was prose, and
+                # the field stayed 0 for every cycle of every task. `tool_count`
+                # above is the progress measure that moves, because it is written
+                # on each tool frame.
 
                 if "tool_name" in resp:
-                    # Write only after both fields are updated — the on-disk
+                    # Write only after progress is updated — the on-disk
                     # heartbeat is then as fresh as the last tool activity
                     # when the daemon dies.
                     self._write_heartbeat("running")
