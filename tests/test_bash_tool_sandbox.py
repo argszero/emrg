@@ -31,6 +31,7 @@ from emrg.tools.bash_tool import (
     _GIT_READ_VERBS,
     _GIT_SHAPE_DECIDED,
 )
+from emrg.tools import file_policy
 from emrg.tools.file_policy import check_workspace_write
 
 
@@ -1578,7 +1579,9 @@ def test_an_escaped_separator_is_not_a_separator(monkeypatch, windows):
       the last operand, and the guard names `2` where the shell passes on the word in
       front of it — the issue #1468 shape, re-opened on Windows by the fix for #1484.
     """
-    monkeypatch.setattr(bash_tool, "_WINDOWS_SHELL", windows, raising=True)
+    # The axis has one home (P7, issue #1675), so the seam is applied there and
+    # every reader follows — `bash_tool` no longer binds a copy of it.
+    monkeypatch.setattr(file_policy, "WINDOWS_SHELL", windows, raising=True)
     single = "cp src dst\\ 2>/dev/null"
     double = "cp src dst\\\\ 2>/dev/null"
 

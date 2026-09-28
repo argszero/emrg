@@ -426,12 +426,12 @@ def test_a_drive_rooted_value_is_placed_on_a_windows_shell(monkeypatch) -> None:
     the backslash one is refused by the same charset for the *separator*, not for
     the drive (issue #1354's second half, measured, and not this change's).
     """
-    # Both readers of the platform axis (P7, issue #1675): the predicates read the
-    # file policy's own constant, the legacy scan reads its alias. Forcing one and not
-    # the other is how this axis fails silently — the seam greens locally and the
-    # platform leg reddens.
+    # The platform axis has one home (P7, issue #1675) and one seam: the predicates,
+    # the legacy scan and the command-scan module all read `file_policy.WINDOWS_SHELL`
+    # live, so forcing it here moves every reader at once. Two seams for this axis is
+    # how it fails silently — a forced reading greens locally and the platform leg
+    # reddens.
     monkeypatch.setattr(_file_policy, "WINDOWS_SHELL", True, raising=True)
-    monkeypatch.setattr(_bash_tool, "_WINDOWS_SHELL", True, raising=True)
     windows_ws = r"C:\Users\x\repo"
     inside = 'T=C:/Users/x/repo/.emrg/tmp && cat > "$T/c.md"'
     outside = 'T=C:/Users/x/other && cat > "$T/c.md"'

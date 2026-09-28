@@ -76,7 +76,10 @@ def test_the_scanners_helpers_are_the_home_s_own_objects():
     assert bash_tool._trusted_write_zones is file_policy.trusted_write_zones
     assert bash_tool._temp_write_roots is file_policy.temp_write_roots
     assert bash_tool._PROTECTED_FILES is file_policy.PROTECTED_FILES
-    assert bash_tool._WINDOWS_SHELL is file_policy.WINDOWS_SHELL
+    # The platform axis is read from the home, never re-bound here: a copy is a
+    # second value with its own lifetime, and it cannot see a seam that moves the
+    # home (the failure `tests/test_windows_path_tokens.py` records).
+    assert not hasattr(bash_tool, "_WINDOWS_SHELL")
 
 
 def test_an_independent_answer_reaches_the_tool(monkeypatch):

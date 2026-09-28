@@ -1517,7 +1517,11 @@ _STDIN_PASSTHROUGH_WRAPPERS = {
 # an escape, so `C:\Users\x` genuinely names the relative file `C:Usersx` and
 # repairing it there would refuse an ordinary in-workspace write (`echo x >
 # my\ file` is the same class of spelling, as issue #1162's cases are).
-_WINDOWS_SHELL = file_policy.WINDOWS_SHELL
+# NOTE (P7, issue #1675): this module binds the platform axis **nowhere**. Its one
+# remaining reader asks `file_policy.WINDOWS_SHELL` directly, so there is a single
+# value with a single lifetime — the lesson `tests/test_windows_path_tokens.py`
+# records, where two seams for one axis made a forced reading green locally and the
+# real `windows-2025` leg red.
 
 # Drive-rooted: `C:\…` / `C:/…`. UNC (`\\server\share`) needs no pattern — it
 # already reads as rooted through the `\` test in `_is_absolute_path`.
@@ -4832,7 +4836,6 @@ def _git_config_write_targets(tokens: list[str], i: int) -> list[str]:
 # re-exported, so `write`/`edit` import them from their home.
 from emrg.tools.file_policy import (
     WINDOWS_DRIVE_RE as _WINDOWS_DRIVE_RE,
-    WINDOWS_SHELL as _WINDOWS_SHELL,
     is_absolute_path as _is_absolute_path,
     is_within as _is_within,
     protected_paths as _protected_paths,
@@ -5418,7 +5421,7 @@ def _separator_is_escaped(cmd: str, start: int) -> bool:
     the one this rule was written against, which is what the forced arm of the row pair
     in `tests/test_bash_tool_sandbox.py` measures.
     """
-    if _WINDOWS_SHELL:
+    if file_policy.WINDOWS_SHELL:
         return False
     if start == 0:
         return False
@@ -5491,7 +5494,7 @@ def _mask_fd_redirect_prefixes(cmd: str) -> str:
     follows it, so the mask blanked the digit and the guard reported ``dst `` for a run
     that really created the file ``dst 2`` (issue #1484). `_separator_is_escaped`
     answers the shell's own rule, which includes *which* shell: escaping is a POSIX
-    reading, and under `_WINDOWS_SHELL` (a `cmd.exe` backslash is a path separator,
+    reading, and under `file_policy.WINDOWS_SHELL` (a `cmd.exe` backslash is a path separator,
     issue #1261) it answers `False`, leaving this function's Windows behaviour exactly
     what it was before the rule. The row is pinned beside `-2>` in
     `tests/test_bash_tool_sandbox.py`, which drives both shells rather than whichever

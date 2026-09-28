@@ -114,13 +114,13 @@ def _pinned_write_roots(monkeypatch):
 def _windows(monkeypatch, value):
     """Force the platform axis — on **both** its readers (P7, issue #1675).
 
-    The axis lives in the file-effect policy's home and the predicates read it
-    there; the legacy scanner reads its own alias. Forcing one and not the other
-    is how this axis has already failed once (a seam that greens locally and
-    reddens the platform leg), so both are named here.
+    The axis lives in the file-effect policy's home and **every** reader asks it
+    there — the predicates, the legacy scanner and the command-scan module. One
+    seam, so a forced reading moves all of them together; two seams is how this
+    axis has already failed once (a seam that greens locally and reddens the
+    platform leg).
     """
     monkeypatch.setattr(fp, "WINDOWS_SHELL", value, raising=True)
-    monkeypatch.setattr(bt, "_WINDOWS_SHELL", value, raising=True)
 
 
 def _verdict(cmd, ws):
@@ -254,5 +254,5 @@ def test_posix_shell_verdicts_are_unchanged(monkeypatch, tmp_path):
 @pytest.mark.parametrize("cmd", OUTSIDE_WINDOWS)
 def test_natural_windows_shell_refuses_without_patching(cmd):
     """The only arm that measures `ntpath` itself: no flag is injected here."""
-    assert bt._WINDOWS_SHELL is True, "the module's own platform read"
+    assert fp.WINDOWS_SHELL is True, "the axis's own platform read"
     assert _verdict(cmd, WINDOWS_WS) == "BLOCK", cmd
