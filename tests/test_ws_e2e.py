@@ -658,6 +658,105 @@ class TestWSProtocol:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_resume_reports_the_turn_the_opener_never_started(self):
+        """Rant 2026-09-27T18:41:52: opening a session reveals its live turn.
+
+        `turn_start`/`turn_end` are broadcasts — addressed to whoever is
+        subscribed at that moment, never replayed. So a client that opens a
+        session while a turn is running (started by another client, or by a
+        scheduled task, which is the rant's own example) used to see nothing at
+        all: no turn, no start instant, nothing to meter.
+
+        The snapshot must be the daemon's reading, not the opener's guess, so
+        the instant it reports has to be the same one `turn_start` broadcast —
+        one source, two channels. A second connection does the opening here
+        precisely because it is the one that cannot know a turn is running.
+
+        The negative half is measured after the turn: a snapshot taken then
+        must report no turn, or "running" would be a constant rather than a
+        fact.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    async def slow_chat_stream(messages, tools=None):
+                        yield {"content": "处理中", "tool_calls": None, "finish_reason": None, "usage": None}
+                        await asyncio.sleep(0.5)
+                        yield {"content": "完成", "tool_calls": None, "finish_reason": "stop", "usage": None}
+                    server.llm.chat_stream = slow_chat_stream
+
+                    async def no_drain(session, messages):
+                        return 0, False
+                    server._inject_pending_messages = no_drain  # type: ignore[assignment]
+
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        session_id = "s_turn_snapshot"
+                        task = {
+                            "type": "task", "id": "t-snap", "session_id": session_id,
+                            "cwd": str(cwd), "prompt": "hi", "stream": True,
+                            "timestamp": "2026-09-27T00:00:00",
+                        }
+                        await ws_a.send(json.dumps(task, ensure_ascii=False))
+                        start = await _recv_until(
+                            ws_a, lambda f: f.get("type") == "turn_start",
+                            what="turn_start")
+                        broadcast_started_at = start.get("started_at")
+                        assert isinstance(broadcast_started_at, (int, float))
+
+                        # B opens the session mid-turn — it never saw the
+                        # broadcast above and has no local state about this turn.
+                        await ws_b.send(json.dumps({
+                            "type": "resume_session",
+                            "session_id": session_id,
+                            "cwd": str(cwd),
+                        }, ensure_ascii=False))
+                        resume = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "resume_result",
+                            what="resume_result mid-turn")
+                        turn = resume.get("meta", {}).get("turn")
+                        assert turn is not None, (
+                            "resume_result carries no turn snapshot — a session "
+                            "opened mid-turn cannot tell that one is running")
+                        assert turn.get("running") is True, turn
+                        assert turn.get("started_at") == broadcast_started_at, (
+                            f"the snapshot's instant {turn.get('started_at')} is "
+                            f"not the one turn_start broadcast "
+                            f"({broadcast_started_at}) — two sources for one fact")
+
+                        await _recv_until(
+                            ws_a,
+                            lambda f: f.get("done") and f.get("request_id") == "t-snap",
+                            what="turn done")
+                        await _recv_until(
+                            ws_a, lambda f: f.get("type") == "turn_end",
+                            what="turn_end")
+
+                        # Same opener, after the turn: the snapshot must say so.
+                        await ws_b.send(json.dumps({
+                            "type": "resume_session",
+                            "session_id": session_id,
+                            "cwd": str(cwd),
+                        }, ensure_ascii=False))
+                        resume2 = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "resume_result",
+                            what="resume_result after the turn")
+                        turn2 = resume2.get("meta", {}).get("turn")
+                        assert turn2 is not None, (
+                            "the post-turn snapshot dropped the key entirely — "
+                            "absent and 'no turn' must not be the same reading")
+                        assert turn2.get("running") is False, turn2
+                        assert turn2.get("started_at") is None, turn2
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_tool_intent_logged_and_ignored_by_execution(self):
         """Rant 2026-08-19T10:35:24: the agent's per-call `intent` is carried
         in the tool_start broadcast and logged, but NOT passed to the tool
