@@ -577,6 +577,15 @@ class EmrgServer:
         # 2026-09-27T18:41:52). The state is kept here for the same lifetime as
         # `_session_busy` — written where the turn begins, dropped where it ends.
         self._session_turn_started: dict[str, float] = {}  # session_id → turn start
+        # Whether this session's running turn has already said how it ended.
+        # Every terminal frame the turn broadcasts (`done`) is recorded here by
+        # `_broadcast`, its single path to a client; the wrapper reads it on the
+        # way out and supplies the frame the loop never reached (rant
+        # 2026-09-27T19:41:13, requirement 4). The clients clear "running" on
+        # `done` and the scheduler waits for it, so a turn that dies without one
+        # reads as running forever: measured 2026-09-28, a task wedged for 64
+        # minutes with no orphan to blame, because the loss was this frame.
+        self._session_terminal_frame: dict[str, bool] = {}  # session_id → done spoken?
         # A running turn belongs to its *session*, so the handles that interrupt it do
         # too (rant 2026-09-20T12:50:13): any client subscribed to that session must be
         # able to stop the turn, not only the connection that started it. Mirrors
@@ -1431,6 +1440,13 @@ class EmrgServer:
 
         Best-effort: a single dead subscriber must not affect the others.
         """
+        if data.get("done"):
+            # Recorded here rather than at each emission site: a `done` frame is
+            # the turn's last word to its client, it is emitted from six places
+            # inside the tool loop, and this is the one path all six take
+            # (rant 2026-09-27T19:41:13, requirement 4: the wrapper must know
+            # whether the turn ended, without trusting each branch to say so).
+            self._session_terminal_frame[session_id] = True
         subs = self._session_subscribers.get(session_id, {})
         task_cwd = self._session_task_cwds.get(session_id)
         if task_cwd:
@@ -3121,16 +3137,76 @@ class EmrgServer:
         # （emrg-evolution-*）、upgrade 会话（都经此 locked 包装执行）。
         started_at = time.time()
         self._session_turn_started[session_id] = started_at
+        # A new turn speaks for itself: the previous turn's terminal frame (or
+        # the absence of one) must not be credited to this one.
+        self._session_terminal_frame.pop(session_id, None)
         await self._broadcast(session_id, {
             "type": "turn_start",
             "session_id": session_id,
             "started_at": started_at,
         })
         normal_end = False
+        # What ended the turn, when nothing below the wrapper did. A `BaseException`
+        # is caught on purpose: the defect this guards (rant 2026-09-27T19:41:13,
+        # requirement 4) was a `CancelledError`, which is one, and it reached
+        # nobody — the loop's caller is a `create_task` that nobody awaits, so an
+        # exception there is not logged, not broadcast and not retrievable. The
+        # turn is over either way; what must not be over is the client's ability
+        # to hear about it.
+        failure: BaseException | None = None
         try:
             await self._run_tool_loop(req, ws, session, cancel_event, allow_tools)
             normal_end = True
+        except asyncio.CancelledError as exc:
+            # Cancellation still propagates (the task really is being cancelled);
+            # the frame is emitted by the `finally` below, which runs first.
+            failure = exc
+            raise
+        except BaseException as exc:  # noqa: BLE001 — see `failure` above
+            failure = exc
+            logger.exception(
+                "turn %s died inside the tool loop (session=%s) — the wrapper "
+                "will emit the terminal frame the loop never reached",
+                req.id, session_id,
+            )
         finally:
+            # Requirement 4 (rant 2026-09-27T19:41:13): a turn ends with exactly
+            # one terminal frame, whatever ended it — the loop's own `done`, or
+            # this fallback. The clients clear "running" on `done` and the
+            # scheduler's read loop waits for it, so a turn that says nothing
+            # wedges both until the daemon is restarted; the guard is here, at the
+            # one exit every turn passes through, rather than in each of the six
+            # branches that are supposed to speak (measured 2026-09-28: a
+            # recurrence with no pipe-holding process left to blame).
+            if not self._session_terminal_frame.pop(session_id, False):
+                reason = "cancelled" if (
+                    isinstance(failure, asyncio.CancelledError)
+                    or (cancel_event is not None and cancel_event.is_set())
+                ) else "failed"
+                logger.error(
+                    "turn %s ended without a terminal frame (%s, session=%s) — "
+                    "emitting it from the wrapper so no client waits forever",
+                    req.id, reason, session_id,
+                )
+                if reason == "failed":
+                    # The loop's own error exit (the LLM-error path) sends the
+                    # reason as its own frame and then the `done`; kept identical
+                    # so a client cannot tell this from that, and neither is
+                    # silent.
+                    await self._broadcast(session_id, {
+                        "error": f"Turn ended without reporting: {type(failure).__name__}: "
+                                 f"{str(failure)[:200]}",
+                    })
+                await self._broadcast(session_id, {
+                    "request_id": req.id,
+                    "content": "",
+                    "done": True,
+                    "cancelled": reason == "cancelled",
+                    "session_id": session_id,
+                })
+                # The frame above is recorded by `_broadcast` like any other; this
+                # turn is over, so the record goes with it.
+                self._session_terminal_frame.pop(session_id, None)
             self._session_busy[session_id] = False
             # The turn is over: the snapshot must stop reporting it. Dropped at
             # the same boundary as the lock, in the same `finally`, so no
