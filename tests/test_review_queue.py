@@ -218,6 +218,19 @@ def _read(mod, monkeypatch, votes, fresh, *, number=1, cycle=None, prs=()):
     argv = [str(pr) for pr in prs] if prs else [str(number)]
     if cycle:
         argv += ["--cycle", cycle]
+        # Pin the previous cycle, so the abstention window is a property of this file
+        # and not of the machine that runs it. Left to itself the tool resolves it from
+        # the host's own cycles log, and the window's start is then whatever record
+        # happens to sort last before this cycle's id: on a corpus that reaches back to
+        # 2026-09-17 that is `PREV_CYCLE` (21:59) and every `PUSH_TIME` row is outside
+        # the window, but a record set with a gap there falls back to `cycle-20260916`
+        # and moves the start *behind* `PUSH_TIME`, which turns each `vote` /
+        # `already-voted` row under test into `abstain`. Measured 2026-09-28: six rows
+        # failed on a host whose newest record before `CYCLE` is 2026-09-16T15:46:18,
+        # while a checkout with no records at all (which is what CI has) passes them.
+        # Callers that exercise the log-reading path pass their own `--cycles-log`.
+        if "--cycles-log" not in argv and "--prev-cycle" not in argv:
+            argv += ["--prev-cycle", PREV_CYCLE]
     return mod.main(argv)
 
 
