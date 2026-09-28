@@ -8,6 +8,14 @@ API that later got squash-merged upstream), so advancing local refs only needs
 the missing *commit* objects - reconstructed byte-exact from the API's
 verification payload + signature, including web-flow GPG-signed squash merges.
 
+An **unsigned** commit has no such payload (GitHub answers `"payload": null`,
+whatever the shape of the walk), so its bytes come from the fields the API does
+keep - tree, parents, both identities, message - with the two losses restored by
+*verification* rather than by assumption: both dates come back normalised to UTC
+and the message comes back trimmed.  See `reconstruct_unsigned_commit`, whose
+every candidate is accepted only if its object name equals the remote sha.  A
+commit that no candidate reproduces is reported unmeasurable and no ref moves.
+
 
 When the head commit's *content* objects (blobs/trees) are also missing locally
 (e.g. a parallel PR introduced files this repo never had - first hit in cycle
@@ -24,7 +32,9 @@ Behavior:
   * resolves repo from --repo or `git remote get-url origin`
   * walks the remote commit chain from <ref> head down to the first commit
     already present locally, writing each missing commit object via
-    `git hash-object -t commit -w` (byte-exact, GPG signature preserved)
+    `git hash-object -t commit -w` (byte-exact, GPG signature preserved; an
+    unsigned commit is rebuilt from the API's fields and accepted only if its
+    object name equals the remote sha, else the run stops as unmeasurable)
   * verifies the root tree sha matches the remote; if content objects are
     missing, fetches missing blobs/trees via the Git Data API (disable with
     --no-fetch-objects) and re-verifies - fail-loud only if still mismatched
@@ -37,12 +47,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import urllib.request
+from datetime import datetime
 
 API = "https://api.github.com"
 
@@ -104,8 +116,12 @@ def reconstruct_commit(payload: str, signature: str | None, message: str) -> byt
     The verification payload is exactly the content that was GPG-signed:
     header block + blank line + message. The raw object additionally embeds
     the `gpgsig` header between the committer line and the blank line, with
-    every continuation line prefixed by a single space. Unsigned commits have
-    no signature — the raw object equals the payload as-is.
+    every continuation line prefixed by a single space. With no signature the
+    payload *is* the raw object - but only a caller that has one may assume
+    that: GitHub returns a null payload for an unsigned commit, so a signature
+    of `None` here does not mean "unsigned, bytes available", it means the
+    caller's payload came from somewhere that had them. The unsigned path from
+    live API fields is `reconstruct_unsigned_commit`.
     """
     if signature:
         idx = payload.index("\n\n")
@@ -121,6 +137,88 @@ def reconstruct_commit(payload: str, signature: str | None, message: str) -> byt
     if message and message.encode("utf-8") not in raw:
         raise ValueError("payload/message mismatch: unsigned payload does not contain the API message")
     return raw
+
+
+def commit_sha(raw: bytes) -> str:
+    """The object name git gives these raw commit bytes. Nothing is written and
+    no process is started: the name is the hash of `commit <len>\\0<bytes>`, which
+    is what makes it usable as an *acceptance test* for a reconstruction - a
+    candidate that hashes to the remote sha is the remote object, because the
+    alternative is a sha1 collision."""
+    header = b"commit " + str(len(raw)).encode("ascii") + b"\0"
+    return hashlib.sha1(header + raw).hexdigest()
+
+
+def _iso_epoch(date: str) -> int:
+    """The unix timestamp of an API date (`2026-09-28T07:30:46Z`)."""
+    return int(datetime.fromisoformat(date.replace("Z", "+00:00")).timestamp())
+
+
+def _plausible_offsets() -> list[str]:
+    """Every UTC offset a modern machine can have, nearest UTC first.
+
+    Git writes `<unix ts> <+HHMM>` on the author and committer lines; the API
+    normalises both dates to UTC, so the offset is the one quantity a rebuild
+    cannot read anywhere and must not invent. The range is the tz database's
+    (-12:00..+14:00) at the granularity every offset in use today has - whole,
+    half and quarter hours. An object written with a second-granularity offset
+    (a pre-1972 LMT) is outside the search; that is a stated limit, and such a
+    commit is reported unmeasurable rather than written with a guessed name."""
+    out = []
+    for minutes in range(0, 14 * 60 + 1, 15):
+        out.append(f"+{minutes // 60:02d}{minutes % 60:02d}")
+        if minutes:
+            out.append(f"-{minutes // 60:02d}{minutes % 60:02d}")
+    return out
+
+
+def reconstruct_unsigned_commit(
+    *,
+    tree: str,
+    parents: list[str],
+    author: tuple[str, str, str],
+    committer: tuple[str, str, str],
+    message: str,
+    want: str,
+) -> bytes:
+    """Rebuild an unsigned commit's exact bytes from the fields the API keeps.
+
+    GitHub answers `"payload": null` for an unsigned commit's verification block,
+    so there are no signed bytes to copy and the fields are lossy in exactly two
+    ways: both dates come back normalised to UTC (the local offset git wrote into
+    the object is gone) and the message comes back without the trailing newline
+    the raw object carries. Neither is assumed: candidates are built over the
+    offsets a machine can have and three message spellings, and each is accepted
+    only when its object name equals `want`. A wrong offset or a wrong trailing
+    newline therefore cannot be accepted - it would take a sha1 collision.
+
+    The offsets normally agree (one machine wrote both lines), so those pairs are
+    tried first and the mixed ones after, because a commit can be re-committed by
+    another machine (a rebase) without its author line changing.
+
+    Raises ValueError when no candidate reproduces `want`, i.e. the object is not
+    reconstructible from the API - the caller reports that instead of writing a
+    commit whose name would not be the remote's.
+    """
+    offsets = _plausible_offsets()
+    agreeing = [(o, o) for o in offsets]
+    mixed = [(a, c) for a in offsets for c in offsets if a != c]
+    a_ts, c_ts = _iso_epoch(author[2]), _iso_epoch(committer[2])
+    header = "\n".join([f"tree {tree}"] + [f"parent {p}" for p in parents])
+    for pairs in (agreeing, mixed):
+        for a_off, c_off in pairs:
+            block = header + "\n" + "\n".join([
+                f"author {author[0]} <{author[1]}> {a_ts} {a_off}",
+                f"committer {committer[0]} <{committer[1]}> {c_ts} {c_off}",
+            ]) + "\n\n"
+            for tail in (message, message + "\n", message + "\n\n"):
+                raw = (block + tail).encode("utf-8")
+                if commit_sha(raw) == want:
+                    return raw
+    raise ValueError(
+        "no author/committer offset (15-minute steps, -12:00..+14:00) and message "
+        "spelling reproduces this object; it is unsigned *and* not reconstructible "
+        "from the API's fields")
 
 
 def write_commit_object(raw: bytes) -> str:
@@ -221,7 +319,28 @@ def main() -> int:
         body = c["commit"]
         payload = body["verification"]["payload"]
         signature = body["verification"]["signature"] or None
-        raw = reconstruct_commit(payload, signature, body["message"])
+        if payload:
+            raw = reconstruct_commit(payload, signature, body["message"])
+        else:
+            # Unsigned: GitHub keeps no payload to copy, so the object is rebuilt
+            # from the fields and verified by its own name (measured 2026-09-28:
+            # `--ref <an unsigned PR head>` used to die here with an AttributeError
+            # on `payload.encode` - a crash where the honest answer was a stated
+            # "unmeasurable", and no way at all to advance a ref during an outage).
+            try:
+                raw = reconstruct_unsigned_commit(
+                    tree=body["tree"]["sha"],
+                    parents=[p["sha"] for p in c["parents"]],
+                    author=(body["author"]["name"], body["author"]["email"],
+                            body["author"]["date"]),
+                    committer=(body["committer"]["name"], body["committer"]["email"],
+                               body["committer"]["date"]),
+                    message=body["message"],
+                    want=sha,
+                )
+            except ValueError as exc:
+                raise SystemExit(f"unmeasurable: {sha[:7]} is unsigned and {exc} "
+                                 "(no refs touched) - retry when https returns")
         got = write_commit_object(raw)
         if got != sha:
             raise RuntimeError(f"reconstruction mismatch: want {sha}, got {got} — aborting (no refs touched)")
