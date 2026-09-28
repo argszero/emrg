@@ -1399,10 +1399,17 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
 ) -> None:
     """The live arm: a pytest-less invocation of the gate measures instead of refusing.
 
-    The shim is `python -S -E`: site-packages are not on the path and neither is the
-    environment's `PYTHONPATH`, which is what a bare host `python3` amounts to. Run
-    through it, the gate must find this checkout's own `.venv` - and say so, because
-    which interpreter judged a tree is part of the reading.
+    Pytest-less has to mean a *different binary*, not the entering interpreter started
+    with flags: the gate re-probes `sys.executable` by starting it, so a shim that
+    re-execs the interpreter it was entered through hands the gate a pytest-capable path
+    however that shim was started - measured 2026-09-28, where a `-S -E` shim of this
+    very test's interpreter left the gate resolving to itself, printing no `suite
+    interpreter:` line and passing `suite OK`: the arm then failed on the note, not on
+    the reading. `sys._base_executable` is what a bare host `python3` amounts to here -
+    the interpreter this checkout's `.venv` was built from, carrying no project packages
+    (measured 2026-09-28: rc 1, `No module named pytest`). Entered through it, the gate
+    must find this checkout's own `.venv` - and say so, because which interpreter judged
+    a tree is part of the reading.
     """
     repo, origin = queue
     _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
@@ -1414,8 +1421,19 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
         f"has nothing to find and this arm would measure the refusal: {candidates}"
     )
 
+    bare = getattr(sys, "_base_executable", "")
+    assert bare and os.path.isfile(bare), (
+        "this environment names no base interpreter to enter the gate through "
+        f"(sys._base_executable={bare!r}), so there is no pytest-less binary here and "
+        "this arm would measure nothing"
+    )
+    assert Path(bare).resolve() != Path(sys.executable).resolve(), (
+        f"this environment's base interpreter is the entering one ({bare}), so entering "
+        "through it proves nothing about the search"
+    )
+
     shim = tmp_path / "python3-without-pytest"
-    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" -S -E "$@"\n', encoding="utf-8")
+    shim.write_text(f'#!/bin/sh\nexec "{bare}" "$@"\n', encoding="utf-8")
     shim.chmod(0o755)
     probe = subprocess.run(
         [str(shim), "-c", "import pytest"],
@@ -1425,7 +1443,7 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
         errors="replace",
     )
     assert probe.returncode != 0, (
-        "the shim can import pytest, so this arm measures nothing: "
+        "the interpreter the shim enters can import pytest, so this arm measures nothing: "
         + (probe.stdout or "")
         + (probe.stderr or "")
     )
