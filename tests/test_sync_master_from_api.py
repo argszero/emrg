@@ -12,6 +12,7 @@ import base64
 import importlib.util
 import os
 import subprocess
+from datetime import datetime, timezone
 
 from pathlib import Path
 
@@ -94,7 +95,10 @@ def test_reconstruct_unsigned_commit_is_byte_exact(tmp_path):
     mod = _load_module()
     repo = _init_repo(tmp_path)
     raw, sha = _make_commit(repo, "unsigned msg")
-    payload = raw.decode("utf-8")  # API payload == raw for unsigned commits
+    # The payload here is hand-supplied: GitHub returns none for an unsigned
+    # commit (see reconstruct_unsigned_commit for that path). This pins the
+    # identity branch only - "no signature, so the payload is the object".
+    payload = raw.decode("utf-8")
     rebuilt = mod.reconstruct_commit(payload, None, "unsigned msg")
     assert rebuilt == raw
     r = subprocess.run(["git", "hash-object", "-t", "commit", "--stdin"],
@@ -145,6 +149,97 @@ def test_reconstruct_commit_mismatch_raises(tmp_path):
 
     with pytest.raises(ValueError):
         mod.reconstruct_commit(raw.decode("utf-8"), None, "different msg")
+
+
+# ------------------------------------------------- unsigned: rebuild + verify
+
+
+def _api_view_of(raw: bytes, repo: Path) -> dict:
+    """The fields the commits API keeps for one commit, i.e. what is *left* of an
+    unsigned object: both dates normalised to UTC, the message trimmed."""
+    import re as _re
+
+    text = raw.decode("utf-8")
+    head, _, message = text.partition("\n\n")
+    fields = dict(
+        _re.match(r"(\w+) (.*)", line).groups() for line in head.splitlines()
+    )
+    author = _re.match(r"(.*) <(.*)> (\d+) ([+-]\d{4})", fields["author"]).groups()
+    committer = _re.match(r"(.*) <(.*)> (\d+) ([+-]\d{4})", fields["committer"]).groups()
+    stamp = datetime.fromtimestamp(int(author[2]), tz=timezone.utc)
+    iso = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert stamp.timestamp() == int(committer[2])  # same instant, spelled twice
+    return {
+        "tree": fields["tree"],
+        "parents": [v for k, v in fields.items() if k == "parent"],
+        "author": (author[0], author[1], iso),
+        "committer": (committer[0], committer[1], iso),
+        "message": message.rstrip("\n"),
+    }
+
+
+def test_unsigned_commit_rebuilt_from_the_api_fields(tmp_path):
+    """GitHub answers `payload: null` for an unsigned commit (measured on a live
+    PR head), so the object has to come from tree/parents/identities/message -
+    and the two losses (the date offsets, the message's trailing newline) are
+    restored by *verification*: only a candidate whose sha equals the remote one
+    is accepted. Byte-exactness is the assertion, not an approximation of it."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    raw, sha = _make_commit(repo, "unsigned msg")
+
+    rebuilt = mod.reconstruct_unsigned_commit(want=sha, **_api_view_of(raw, repo))
+
+    assert rebuilt == raw
+    assert mod.commit_sha(rebuilt) == sha
+
+
+def test_unsigned_commit_with_two_different_offsets_is_rebuilt(tmp_path):
+    """A rebase re-commits with another machine's offset: the author line keeps
+    the original one, so the search must cover the *mixed* pairs and not only the
+    agreeing ones (the offsets it tries first)."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    env = dict(GIT_ENV)
+    env["GIT_AUTHOR_DATE"] = "1700000000 +0530"
+    env["GIT_COMMITTER_DATE"] = "1700000000 -0700"
+    r = _git("commit-tree", EMPTY_TREE, "-m", "mixed offsets", cwd=repo, env=env)
+    assert r.returncode == 0, r.stderr
+    sha = r.stdout.decode().strip()
+    raw = _git("cat-file", "commit", sha, cwd=repo).stdout
+
+    rebuilt = mod.reconstruct_unsigned_commit(want=sha, **_api_view_of(raw, repo))
+
+    assert rebuilt == raw
+    assert mod.commit_sha(rebuilt) == sha
+
+
+def test_an_unreconstructible_unsigned_commit_is_refused(tmp_path):
+    """The search is bounded (offsets in 15-minute steps, three message
+    spellings). When nothing inside it reproduces the remote name, the answer is
+    a named refusal - never a commit written with a guessed offset, whose local
+    history would then diverge from upstream."""
+    import pytest
+
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    raw, _ = _make_commit(repo, "unsigned msg")
+    view = _api_view_of(raw, repo)
+
+    with pytest.raises(ValueError) as exc:
+        mod.reconstruct_unsigned_commit(want="0" * 40, **view)
+    assert "not reconstructible" in str(exc.value)
+
+
+def test_script_rebuilds_an_unsigned_commit_instead_of_crashing(tmp_path):
+    """The walk used to read `verification["payload"]` unconditionally and die
+    with `AttributeError: 'NoneType' object has no attribute 'encode'` - a crash
+    where the honest answer is a stated "unmeasurable" (and no way at all to
+    advance a ref during an outage, which is this script's whole purpose)."""
+    content = SCRIPT.read_text(encoding="utf-8")
+    assert "if payload:" in content                     # the null payload is expected
+    assert "reconstruct_unsigned_commit(" in content    # and has its own path
+    assert "unmeasurable:" in content                   # refusal is stated, not raised raw
 
 
 # ------------------------------------------------- content-object auto-fetch

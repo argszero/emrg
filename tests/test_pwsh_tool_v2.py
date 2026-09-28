@@ -9,7 +9,8 @@ with a *boundary* (the ACL restricted token, P4) and no usable *dialect*.
 Four subjects, and the file is organised by them:
 
 * **the resolution chain** — a pure function of ``(configured, env, platform)``,
-  tested by injection, never by spawning;
+  tested by injection, never by spawning — plus the one ``@needs_windows`` case
+  that spawns what the chain resolved, because a string is not a program;
 * **the argv** — the dialect is the one word in front of the flags, and the
   command is a single element after them;
 * **the environment** — the same overrides as the bash twin *minus* ``TERM``,
@@ -19,16 +20,17 @@ Four subjects, and the file is organised by them:
   actually registered, because a prompt that advertises a dialect the platform
   does not run is what the model then tries to use.
 
-Nothing here spawns ``pwsh``, and nothing touches the daemon lifecycle or the
-upgrade chain (the two standing red lines).  The four candidate paths are
-asserted as *strings*; whether a real Windows resolves them is an acceptance item
-that needs Windows hardware (design §14.7) and is marked unverified in the code
-it describes.
+Nothing here touches the daemon lifecycle or the upgrade chain (the two standing
+red lines).  The candidate paths are asserted as *strings*; whether a real Windows
+resolves them into a runnable executable is design §14.7's acceptance item, and
+the single ``@needs_windows`` case above is where CI's ``windows-2025`` leg pins it.
 """
 
 import asyncio
 import ntpath
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,6 +191,62 @@ def test_both_coordinates_of_the_platform_agree_on_windows():
     """
     assert (os.name == "nt") is (shell_tool_name() == SHELL_TOOL_NAME_WINDOWS) or (
         shell_tool_name() != SHELL_TOOL_NAME_WINDOWS
+    )
+
+
+# ── the resolved executable, spawned for real (Windows only) ──────────────
+
+
+#: Everything above asserts *strings*, and a string is not a program: an explicit
+#: ``[sandbox] pwsh_path`` is trusted without a probe, and both Windows fallbacks
+#: are chosen by ``lexists``, which a Store alias answers through a target no
+#: process can be created from.  Only a spawn separates the two.  CI's
+#: ``windows-2025`` leg is where it runs, and that is the point of writing it now
+#: rather than waiting for a person with the hardware (design §14.7).
+needs_windows = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="the chain's candidates are Windows paths, so resolving them for real needs Windows",
+)
+
+
+@needs_windows
+def test_the_executable_the_chain_resolves_is_one_that_starts():
+    """A path that resolves but cannot start is the outage, not a working tool.
+
+    The premise every argv test in this file assumes, measured rather than
+    declared: the value the chain returns is an executable, which is a fact about
+    a process and cannot be read off the string.
+
+    Nothing about the *dialect* is asserted here - the argv tests own that, and
+    this case passes the flags those tests use so a failure names the executable
+    rather than a quoting difference.
+    """
+    executable = pwsh.resolve_pwsh_path()
+
+    # The bare name is the POSIX rung and the last resort on Windows; reaching it
+    # here would mean a rung went missing rather than that this host is unusual,
+    # because every Windows host has the Windows PowerShell 5.1 fallback.
+    assert ntpath.isabs(executable), (
+        f"the Windows chain fell through to the bare name {executable!r} - every Windows "
+        "host has the Windows PowerShell 5.1 fallback, so a bare name means a rung was lost"
+    )
+
+    try:
+        completed = subprocess.run(
+            [executable, "-NoProfile", "-NonInteractive", "-Command", "exit 0"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            check=False,
+        )
+    except OSError as exc:
+        pytest.fail(f"the chain resolved {executable!r}, which cannot be spawned: {exc}")
+
+    assert completed.returncode == 0, (
+        f"the resolved executable did not run ({executable!r}): exit={completed.returncode} "
+        f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
     )
 
 

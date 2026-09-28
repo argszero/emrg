@@ -600,6 +600,71 @@ def test_the_win32_rule_classifies_the_line_the_runner_really_prints(capsys):
     assert classify_runner_failure(1, printed, provider.RUNNER_FAILURE_RULES) is None
 
 
+def test_an_exit_the_loader_produced_is_read_as_nothing_ran_without_a_signature():
+    """The one reading a signature cannot express: the child never started.
+
+    `LOADER_EXIT_CODES` records the measurements — four on this host, two of them
+    in a single session — and every one has the same shape: a nonzero exit with
+    **empty stdout and empty stderr**.  There is nothing for the rule above to
+    match, so the seam reported the environment's death as the command's own
+    failure (`denied: false`), and the agent spent those turns retrying command
+    *shapes* against a boundary that could not start a process at all.
+
+    The evidence is the status itself, and that is why it needs its own field
+    rather than a wider signature list: these codes come from the loader, before
+    any user code runs, so no line can exist to match — and no text a command can
+    print may stand in for it, which is the false positive the exit gate in the
+    rule above was written to avoid.
+
+    Both directions are asserted, because a reading that cannot say "no" is not a
+    reading: the loader codes classify on the backend that names them, on **both**
+    sides of the seam (this runner's interpreter and the child it mirrors) and in
+    both spellings of the value, while the same codes on a backend that does not
+    name them stay unclassified and a command's own statuses stay untouched.
+    """
+    from emrg.sandbox.contract import never_started_detail
+    from emrg.sandbox.providers.darwin import RUNNER_FAILURE_RULES as DARWIN_RULES
+    from emrg.sandbox.providers.linux import RUNNER_FAILURE_RULES as LINUX_RULES
+    from emrg.tools.bash_tool_v2 import classify_runner_failure as bash_classify
+    from emrg.tools.pwsh_tool_v2 import classify_runner_failure as pwsh_classify
+
+    readers = (bash_classify, pwsh_classify)
+    # The wiring, named: a rule that drops the field fails as this agreement.
+    assert provider.RUNNER_FAILURE_RULES[0].never_started_exit_codes == provider.LOADER_EXIT_CODES
+    # The measured instance is in the family, and the family is the loader's.
+    assert 0xC0000142 in provider.LOADER_EXIT_CODES  # STATUS_DLL_INIT_FAILED
+    assert 0xC0000005 not in provider.LOADER_EXIT_CODES  # a crash a command can cause
+
+    for code in provider.LOADER_EXIT_CODES:
+        for reader in readers:
+            detail = reader(code, "", provider.RUNNER_FAILURE_RULES)
+            assert detail == never_started_detail(code), hex(code)
+            assert str(code) in detail and f"0x{code:08X}" in detail
+        # The two's complement spelling `sys.exit` takes on Windows is the same
+        # status to a parent, so it must be the same reading.
+        signed = code - 0x100000000
+        assert bash_classify(signed, "", provider.RUNNER_FAILURE_RULES) == never_started_detail(code)
+
+    # It is evidence *this backend* names, not a global rule about big numbers.
+    for rules in (DARWIN_RULES, LINUX_RULES):
+        for code in provider.LOADER_EXIT_CODES:
+            for reader in readers:
+                assert reader(code, "", rules) is None
+
+    # And it does not swallow what a command really reports: an ordinary nonzero
+    # exit is unchanged, with or without a line, and exit 0 / signal death are
+    # never evidence.
+    for code in (1, 2, 127, 3221225477):
+        for reader in readers:
+            assert reader(code, "", provider.RUNNER_FAILURE_RULES) is None
+    for reader in readers:
+        assert reader(0, "", provider.RUNNER_FAILURE_RULES) is None
+        assert reader(None, "", provider.RUNNER_FAILURE_RULES) is None
+    line = r"windows-acl-run: no such directory: C:\nope"
+    assert bash_classify(RUNNER_FAILURE_EXIT, line, provider.RUNNER_FAILURE_RULES) == line
+    assert pwsh_classify(1, line, provider.RUNNER_FAILURE_RULES) is None
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is where the backend is loadable")
 def test_the_backend_fails_closed_where_the_api_does_not_exist(capsys):
     """A wrong-platform loader is a runner failure with the same contract.
