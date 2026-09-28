@@ -49,6 +49,34 @@ from emrg.sandbox.win32.sid import (
 #: Landlock's 125): every runner-side failure exits with it.
 RUNNER_FAILURE_EXIT = 127
 
+#: The statuses the Windows loader itself reports when an image cannot be loaded
+#: or initialized, as the unsigned 32-bit values a parent observes.  Nothing here
+#: can be a shell's own result: these are written by ``Ldr`` before any user code
+#: runs, which is why they carry the one thing a signature cannot — a *per-call*
+#: answer to "did the child start?".
+#:
+#: ``STATUS_DLL_INIT_FAILED`` (``0xC0000142``) is the measured one, four times on
+#: this host and twice in one session: at 15:33 a confined run answered five
+#: consecutive commands with exit ``3221225794`` and **empty stdout and stderr**,
+#: and the tool reported each as the command's own failure (``denied: false``),
+#: because a wrapper-level death carries no signature to match.  The agent's own
+#: reading of that turns is the cost: the environment was dead and every command
+#: looked like a bad command.
+#:
+#: The family is named rather than the one code, because these are one event —
+#: the image never initialized — and each is produced by the same loader pass:
+#: ``INVALID_IMAGE_FORMAT`` (``0xC000007B``), ``DLL_NOT_FOUND`` (``0xC0000135``),
+#: ``ENTRYPOINT_NOT_FOUND`` (``0xC0000139``).  A code with a *different* meaning is
+#: deliberately absent: ``STATUS_ACCESS_VIOLATION`` (``0xC0000005``) is a crash a
+#: command can really cause, and reading it as "nothing ran" would be the false
+#: positive this field is shaped to avoid.
+LOADER_EXIT_CODES: tuple[int, ...] = (
+    0xC000007B,  # STATUS_INVALID_IMAGE_FORMAT
+    0xC0000135,  # STATUS_DLL_NOT_FOUND
+    0xC0000139,  # STATUS_ENTRYPOINT_NOT_FOUND
+    0xC0000142,  # STATUS_DLL_INIT_FAILED
+)
+
 #: What this backend can honestly claim: see the module docstring.
 ENFORCEMENT = "partial"
 
@@ -66,10 +94,17 @@ DENIAL_SIGNATURES: tuple[str, ...] = (
 #: command that merely *prints* the signature — or a runner cleanup failure
 #: reported beside a non-zero child exit — is never misread as "the command did
 #: not run".
+#:
+#: The second field is the reading that has no line to match, and it is the
+#: measured one on this backend (:data:`LOADER_EXIT_CODES`).  Both sides of the
+#: seam are covered by it without either side having to agree on a sentence: the
+#: exit status is the loader's own, so whichever process failed to initialize —
+#: this runner's interpreter or the child it mirrors — nothing ran.
 RUNNER_FAILURE_RULES: tuple[RunnerFailureRule, ...] = (
     RunnerFailureRule(
         fatal_signatures=("windows-acl-run: ",),
         allowed_exit_codes=(RUNNER_FAILURE_EXIT,),
+        never_started_exit_codes=LOADER_EXIT_CODES,
     ),
 )
 

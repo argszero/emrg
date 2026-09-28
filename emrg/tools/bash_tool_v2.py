@@ -43,6 +43,7 @@ from emrg.sandbox.contract import (
     RunnerFailureRule,
     SandboxUnavailableError,
     confine,
+    never_started_detail,
     sandbox_denial_marker,
 )
 from emrg.sandbox.policy import SandboxPolicy, resolve_policy
@@ -107,11 +108,16 @@ def classify_runner_failure(
     stderr: str,
     rules: tuple[RunnerFailureRule, ...],
 ) -> str | None:
-    """The fatal stderr line proving the runner failed, or ``None``.
+    """The fatal evidence line proving the runner failed, or ``None``.
 
     Each rule requires a nonzero exit, its optional exit-code gate, and a fatal
     signature on one stderr line after exact informational lines are excluded.
-    Exit status alone never proves runner failure.
+    Exit status alone never proves runner failure — except for the one family of
+    statuses that cannot be a command's own, the loader's
+    (:attr:`RunnerFailureRule.never_started_exit_codes`), which is checked first
+    and independently of the gate because those runs have no stderr to read: the
+    line returned for them is synthesized by
+    :func:`emrg.sandbox.contract.never_started_detail`.
 
     :param exit_code: the process's exit code; ``None`` means signal death.
     :param stderr: collected stderr text, left unchanged.
@@ -121,8 +127,14 @@ def classify_runner_failure(
     """
     if exit_code is None or exit_code == 0:
         return None
+    # The same bits, whatever spelling the platform hands over: a parent sees the
+    # 32-bit status, while the value can arrive as its two's complement (that is
+    # the form ``sys.exit`` takes on Windows).
+    unsigned = exit_code & 0xFFFFFFFF if exit_code < 0 else exit_code
     lines = re.split(r"\r?\n", stderr)
     for rule in rules:
+        if unsigned in rule.never_started_exit_codes:
+            return never_started_detail(unsigned)
         if rule.allowed_exit_codes is not None and exit_code not in rule.allowed_exit_codes:
             continue
         informational = {line.lower() for line in rule.informational_lines}

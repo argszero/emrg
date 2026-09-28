@@ -69,11 +69,43 @@ class RunnerFailureRule:
     :attr:`informational_lines` by case-insensitive exact line equality, then
     matches :attr:`fatal_signatures` case-insensitively within each remaining
     stderr line.  Exit status alone never proves runner failure.
+
+    :attr:`never_started_exit_codes` is the **second** reading and the one that
+    needs no stderr at all: the codes the OS loader itself produces when an image
+    cannot be loaded or initialized — ``STATUS_DLL_INIT_FAILED`` and its siblings.
+    They are evidence because no user code ran to write a line *or* to choose an
+    exit status, so a signature rule can never see them: the whole failure is a
+    process that never started, on either side of the seam (the runner's own
+    interpreter or the child it was about to mirror).  A consumer checks this
+    field **before** the signature walk and independently of
+    :attr:`allowed_exit_codes`, because the code is the evidence — gating it on
+    the runner's *own* failure exit would refuse exactly the case it exists for.
+    Empty by default: a backend that cannot name such a code adds nothing.
     """
 
     fatal_signatures: tuple[str, ...]
     allowed_exit_codes: tuple[int, ...] | None = None
     informational_lines: tuple[str, ...] = ()
+    never_started_exit_codes: tuple[int, ...] = ()
+
+
+def never_started_detail(exit_code: int) -> str:
+    """The line a consumer reports when an exit proves the child never started.
+
+    Synthesized rather than collected, and that is the point: this failure has no
+    stderr to quote, so the reading has to be *stated* — with the number, in both
+    spellings, because the raw code is the only handle a reader can compare
+    against a log or a crash dump.
+
+    :param exit_code: the exit status the loader produced, as the unsigned
+        32-bit value a parent observes.
+    :returns: the detail line, in the vocabulary the seam already speaks.
+    """
+    return (
+        f"the confined child never started: exit {exit_code} (0x{exit_code:08X}) is one the "
+        "OS loader produces when an image cannot be loaded or initialized, so nothing ran "
+        "and the failure belongs to the environment, not to the command"
+    )
 
 
 @dataclass(frozen=True)
