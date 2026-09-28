@@ -1483,10 +1483,19 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
         f"(sys._base_executable={bare!r}), so there is no pytest-less binary here and "
         "this arm would measure nothing"
     )
-    assert Path(bare).resolve() != Path(sys.executable).resolve(), (
-        f"this environment's base interpreter is the entering one ({bare}), so entering "
-        "through it proves nothing about the search"
-    )
+    # Deliberately not `Path(bare).resolve() != Path(sys.executable).resolve()`: on Linux
+    # `.venv/bin/python` *is* the managed interpreter, reached through a symlink, so the
+    # two resolve to one file while naming different environments - and it is the path
+    # that carries the environment (the `.venv` beside it is what puts pytest on the
+    # search path). Measured 2026-09-28 in CI: that comparison failed here and proved
+    # nothing about the search, which is the probe's job, not a path comparison's.
+    #
+    # The project environment reaches this interpreter through the `.venv` beside its
+    # path or not at all: whatever `PYTHONPATH` the harness was launched with is an
+    # artifact of the harness, and a host `python3` is not launched with it. Stripped
+    # for both runs so the premise is a property of the interpreter, not of how this
+    # suite happens to be started - the probe below is what decides it either way.
+    bare_env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
 
     shim = tmp_path / "python3-without-pytest"
     shim.write_text(f'#!/bin/sh\nexec "{bare}" "$@"\n', encoding="utf-8")
@@ -1497,6 +1506,7 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=bare_env,
     )
     assert probe.returncode != 0, (
         "the interpreter the shim enters can import pytest, so this arm measures nothing: "
@@ -1510,6 +1520,7 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=bare_env,
     )
     out = (proc.stdout or "") + (proc.stderr or "")
     assert proc.returncode == 0, out
