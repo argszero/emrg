@@ -39,7 +39,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from emrg.tools.bash_tool import (
+from emrg.sandbox.file_policy import (
     check_read_only_file_write,
     check_workspace_write,
     resolve_file_target,

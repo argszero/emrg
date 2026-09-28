@@ -30,8 +30,8 @@ from emrg.tools.bash_tool import (
     _GIT_CONFIG_VALUE_OPTS,
     _GIT_READ_VERBS,
     _GIT_SHAPE_DECIDED,
-    check_workspace_write,
 )
+from emrg.sandbox.file_policy import check_workspace_write
 
 
 def _run(coro):

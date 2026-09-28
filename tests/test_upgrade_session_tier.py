@@ -50,7 +50,7 @@ from emrg.sandbox.policy import (
 )
 from emrg.sandbox.providers import unconfined_mode
 from emrg.sandbox.roots import writable_roots
-from emrg.tools.bash_tool import check_workspace_write
+from emrg.sandbox.file_policy import check_workspace_write
 from emrg.tools.edit_tool import EditTool
 from emrg.tools.write_tool import WriteTool
 
