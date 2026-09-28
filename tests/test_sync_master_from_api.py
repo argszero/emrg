@@ -419,3 +419,26 @@ def test_stop_lines_name_a_root_as_a_root_not_a_merge():
     # And an absent parent is still named, as before.
     warned = mod._stop_lines("b" * 40, ["c" * 40, "d" * 40], ["d" * 40])
     assert any("NOT present locally" in ln for ln in warned)
+
+
+def test_an_object_name_ref_creates_no_ref():
+    """`--ref <sha>` materializes a commit; it must not write a ref named after it.
+
+    Measured 2026-09-28: materializing a PR head with `--ref <sha>` left
+    `refs/heads/<sha>` and `refs/remotes/origin/<sha>` behind, and `git rev-parse
+    <sha>` then answered ambiguously - `check-merge-plan-suite.py` failed with
+    "merge-tree failed" until those refs were deleted. So the shape of a `--ref`
+    that names an object is pinned here, without a repository.
+    """
+    mod = _load_module()
+
+    assert mod._is_object_name("a" * 40)
+    assert mod._is_object_name("0123456789abcdef0123456789ABCDEF01234567")
+    # Branch names - the default included - are not object names.
+    assert not mod._is_object_name("master")
+    assert not mod._is_object_name("fix/the-walk-names-the-parents-it-trusts")
+    assert not mod._is_object_name("a" * 39)
+    assert not mod._is_object_name("a" * 41)
+    # A short hex string is a branch name, not an object name: it cannot be a full
+    # object name, and refusing it would break a real branch called `deadbeef`.
+    assert not mod._is_object_name("deadbeef")

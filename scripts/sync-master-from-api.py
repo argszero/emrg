@@ -48,7 +48,11 @@ Behavior:
   * verifies the root tree sha matches the remote; if content objects are
     missing, fetches missing blobs/trees via the Git Data API (disable with
     --no-fetch-objects) and re-verifies - fail-loud only if still mismatched
-  * updates refs/heads/<ref> and refs/remotes/origin/<ref>
+  * updates refs/heads/<ref> and refs/remotes/origin/<ref>; a `--ref` that is a
+    full 40-hex object name creates no ref at all - a ref named after a sha
+    shadows it, so `git rev-parse <sha>` answers ambiguously and the tools that
+    ask it break. Such a caller gets the commit materialized, which is what it
+    asked for.
 
 Requirements: git on PATH; api.github.com reachable. Auth: optional for public
 repos (GH_TOKEN or gh CLI used if available, higher rate limit).
@@ -285,6 +289,20 @@ def _stop_lines(sha: str, parents: list[str], absent: list[str]) -> list[str]:
     return lines
 
 
+def _is_object_name(ref: str) -> bool:
+    """True when `--ref` names a commit rather than a branch.
+
+    A full 40-hex value is an **object name**: `--ref <sha>` is how a PR head is
+    materialized during an outage, and such a caller wants the commit, not a
+    branch. Writing `refs/heads/<sha>` for it would create a ref nobody reads and,
+    worse, shadow the object - `git rev-parse <sha>` then answers ambiguously and
+    the tools that ask it break (measured 2026-09-28: `check-merge-plan-suite.py`
+    failed with "merge-tree failed" until those refs were deleted). Recorded as a
+    predicate so the shape is pinned without a repository.
+    """
+    return bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref))
+
+
 def _object_exists(sha: str) -> bool:
     """Any object (blob/tree/commit) present locally by sha."""
     return subprocess.run(["git", "cat-file", "-e", sha],
@@ -427,6 +445,15 @@ def main() -> int:
             raise SystemExit(f"tree mismatch or missing objects for {head[:7]} "
                              f"(want {tree}, got {local_tree.stdout.strip() or 'NONE'}) — "
                              "run `git fetch` when https returns")
+
+    if _is_object_name(args.ref):
+        # The commit is materialized above, which is what a `--ref <sha>` caller
+        # asked for. A ref named after a sha is not a branch anyone reads, and it
+        # shadows the object: `git rev-parse <sha>` then answers ambiguously.
+        print(f"  ({args.ref[:7]} is an object name, not a branch: the commit is "
+              f"materialized and no ref is created - a ref named after a sha would "
+              f"shadow it, so `git rev-parse` would answer ambiguously)")
+        return 0
 
     for ref in (f"refs/heads/{args.ref}", f"refs/remotes/origin/{args.ref}"):
         subprocess.run(["git", "update-ref", ref, head], check=True)
