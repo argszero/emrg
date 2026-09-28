@@ -302,6 +302,29 @@ CONTENT_FILTER_ERROR = (
     "different model."
 )
 
+#: The client-facing text for the *other* way a round can arrive with nothing in
+#: it: a normal completion (``finish_reason=stop``) with no tool calls whose
+#: ``content`` is empty. Sibling of :data:`CONTENT_FILTER_ERROR`, and deliberately
+#: a different sentence — nothing refused this answer, so sending the host to the
+#: ladder's retries or to the session history would name a cause that is not there.
+#:
+#: Why it must be reported rather than passed on: an empty `stop` satisfied the
+#: tool loop's "final text answer" branch, which persisted an empty assistant
+#: record, broadcast `done` with `content: ""`, and stamped the completed-round
+#: marker — the file whose age answers "how long since a COMPLETED round" (issue
+#: #1114). So a round that produced nothing wrote the very evidence the staleness
+#: alarm reads as *a round finished*, and an unattended scheduled cycle that
+#: sampled nothing ended "successfully". Measured before writing this: across
+#: ~19,857 logged rounds (~3.2 days, four daemon log generations) **zero** `stop`
+#: rounds carried an empty `content`, so this is a correctness hole rather than a
+#: field incident, and it is stated as such (issue #1723).
+EMPTY_ANSWER_ERROR = (
+    "the model ended the turn without producing any text "
+    "(finish_reason=stop, no tool calls) — nothing was recorded as this turn's "
+    "answer and the turn is not counted as a completed round: ask again, or use "
+    "a different model."
+)
+
 
 def content_risk_retry(stage: int, original: list[dict]) -> tuple[str, list[dict]] | None:
     """The next rung for a content refusal, or ``None`` when the ladder is spent.
