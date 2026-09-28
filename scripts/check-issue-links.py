@@ -267,7 +267,26 @@ _CLAIMED_BY = re.compile(
 #: reading under-claims, and the symptom is visible on the row rather than hidden. The
 #: masking is length-preserving so the negation window and match offsets keep pointing
 #: at the same characters.
-_FENCED_BLOCK = re.compile(r"^[ \t]*(?:```|~~~).*?(?:^[ \t]*(?:```|~~~)[ \t]*$|\Z)", re.S | re.M)
+#:
+#: The closer's trailing class carries ``\r``, and that is a measured defect rather than
+#: symmetry for its own sake (issue #1697): the closer is anchored with ``$``, which under
+#: ``re.M`` matches before ``\n`` — so in a **CRLF** body the ``\r`` sits between the fence
+#: marker and the position ``$`` accepts, ``[ \t]*`` cannot reach past it, the closer never
+#: fires, and the alternation takes ``\Z``. Every fence then masks to the end of the text,
+#: which for this tool means **blanking every comment appended to the body**: issue #1696's
+#: body is CRLF (written on Windows), so the `Handled by #1688` comment that answers it was
+#: invisible and the row stayed `one-way` with a remedy that could not be followed — the
+#: reading was wrong in the *loud* direction the masking comment above prefers, but it was
+#: wrong about a live row, and it made its own printed instruction unexecutable.
+#:
+#: Measured 2026-09-28 through this module's own pattern: an identical body, LF against
+#: CRLF, masks `13..25` of 45 under LF and `15..52` of 52 under CRLF, and the claim written
+#: after the fence reads `{1234}` in the first and `set()` in the second. Only the closer's
+#: class changed; the opener is unaffected, because ``^`` matches after ``\n`` whether or
+#: not the line it starts ends with ``\r``.
+_FENCED_BLOCK = re.compile(
+    r"^[ \t]*(?:```|~~~).*?(?:^[ \t]*(?:```|~~~)[ \t\r]*$|\Z)", re.S | re.M
+)
 _INLINE_CODE = re.compile(r"`[^`\n]*`|``.*?``", re.S)
 
 
