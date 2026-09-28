@@ -578,7 +578,7 @@ def test_a_real_collection_failure_keeps_the_invocation_hint(monkeypatch) -> Non
     assert "unsynced" not in message
 
 
-# --- which tree was scanned --------------------------------------------------
+# --- which tree was scanned, and which revision of it ------------------------
 
 
 def _fake_checkout(root: Path, count: int) -> Path:
@@ -625,6 +625,101 @@ def test_the_scanned_tree_is_named_in_the_output(mod, monkeypatch, tmp_path, cap
     assert mod.main([]) == 0
     out = capsys.readouterr().out
     assert f"tree: {fake.resolve()}" in out, out
+
+
+def _git_stdout(*argv: str) -> str:
+    """One `git` read in this checkout, on the test's own account."""
+    proc = subprocess.run(
+        ["git", *argv],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def test_the_measure_line_names_the_revision_it_counted(mod, monkeypatch, capsys) -> None:
+    """A count is a number *about a tree*, so it is comparable only at a named revision.
+
+    Measured 2026-09-28 (`cyc20260928-150510`): a cycle compared its own
+    checkout's count with a worktree gate's count, attributed the one-test
+    difference to the harness, and recorded that as a finding — the two runs were
+    of **different trees**, and the reading that would have shown it (their
+    revisions) was on neither line. `tree:` answers *which checkout*; this
+    answers which revision of it, which is the half that moves while a cycle
+    works.
+
+    The count is injected (as everywhere else in this file) so the wiring is
+    measured in milliseconds, but the revision is **not**: it is read from the
+    real repository below and compared with what the line printed, because a
+    revision the tool invented for itself would satisfy exactly this shape.
+    """
+    monkeypatch.setattr(mod, "measured_count", lambda: 1307)
+    assert mod.main(["--measure"]) == 0
+    out = capsys.readouterr().out
+    match = re.search(
+        r"^measured: 1307 collected Python tests at ([0-9a-f]{7,40}) \((.+)\)$",
+        out,
+        re.MULTILINE,
+    )
+    assert match, out
+    head = _git_stdout("rev-parse", "HEAD")
+    assert head, "this suite ran outside a git checkout; the reading is unmeasurable"
+    assert head[: len(match.group(1))] == match.group(1), (
+        f"the line names {match.group(1)}, this checkout is at {head[:8]} — a count "
+        "reported at another tree's revision is the misreading this line prevents"
+    )
+
+
+def test_an_unreadable_revision_is_stated_never_omitted(mod, monkeypatch) -> None:
+    """The absence has a wording, and every one of the three states is its own.
+
+    A revision that silently reads as "unchanged" is exactly the defect the line
+    exists for, so the failure modes are pinned here rather than left to whatever
+    git prints on the host that happens to run this: no `git` on PATH (a
+    `FileNotFoundError`, which is what `subprocess` raises for a missing binary),
+    a directory that is not a repository (a non-zero `rev-parse`), and a detached
+    HEAD — which is a *state*, not a failure, and must not be reported as one.
+    """
+
+    def _raise_file_not_found(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    class _Proc:
+        def __init__(self, stdout: str, returncode: int = 0) -> None:
+            self.stdout = stdout
+            self.returncode = returncode
+            self.stderr = ""
+
+    answers: dict[str, tuple[str, int]] = {}
+
+    def _run(cmd, **kwargs):
+        for key, answer in answers.items():
+            if key in cmd:
+                return _Proc(*answer)
+        raise AssertionError(f"unexpected git call: {cmd}")
+
+    monkeypatch.setattr(mod.subprocess, "run", _run)
+
+    def _asked(case: str) -> str:
+        answers.clear()
+        # A git that answers nothing is the default: both reads non-zero with an
+        # empty stdout, which is what a directory outside any repository gives.
+        answers["rev-parse"] = ("", 128)
+        answers["symbolic-ref"] = ("", 128)
+        if case in ("branch", "detached"):
+            answers["rev-parse"] = (("a" if case == "branch" else "b") * 40, 0)
+        if case == "branch":
+            answers["symbolic-ref"] = ("master", 0)
+        return mod.measured_revision()
+
+    assert _asked("branch") == "at aaaaaaaa (master)"
+    assert _asked("detached") == "at bbbbbbbb (detached HEAD)"
+    assert _asked("not-a-repository") == "revision unreadable (git rev-parse said nothing)"
+    monkeypatch.setattr(mod.subprocess, "run", _raise_file_not_found)
+    assert mod.measured_revision() == "revision unreadable (FileNotFoundError)"
 
 
 def test_a_directory_that_is_not_a_checkout_falls_back_to_the_script_root(
