@@ -44,6 +44,7 @@ no network, no GitHub.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import re
@@ -122,6 +123,53 @@ def _load_module():
 @pytest.fixture
 def mod():
     return _load_module()
+
+
+def _fallback_unmeasurable(mod, root: Path, own: str) -> str | None:
+    """Why the pytest-less fallback arm cannot measure in this tree, or `None`.
+
+    The arm measures the gate's interpreter fallback, and that fallback is a search
+    over `root/.venv` - so *whether the search has anything to find* is a property of
+    the tree the arm is running in, not of the code it measures. Asserting it made
+    every landing-tree measurement of a tree carrying this file report one red row the
+    base does not fail: the gate runs the suite in a freshly added worktree, and a
+    fresh worktree has no populated `.venv` - the gate's own header says so, and it is
+    where the gate does its measuring (measured 2026-09-28 on #1688's own landing tree,
+    reported by `cyc20260928-171322`, reproduced in a worktree of the head: the
+    checkout carries `.venv/Scripts/python.exe`, the worktree carries neither
+    spelling).
+
+    So the premise is asked as a question, of the gate's own search
+    (`_suite_interpreter(own=..., repo_root=...)`) rather than of `REPO_ROOT/.venv` -
+    one implementation of "which interpreter runs the suite", which is also what the
+    arm's assertions are about. A tree where the search finds nothing is reported
+    *unmeasurable* (a skip that names the reason), never as a pass and never as a
+    failure the tree does not own.
+
+    `own` is the interpreter the shim would enter the gate through; the reason checks
+    it in the order the arm depends on them.
+    """
+    if not own or not os.path.isfile(own):
+        return (
+            "this environment names no base interpreter to enter the gate through "
+            f"(sys._base_executable={own!r}), so there is no pytest-less binary here "
+            "and this arm would measure nothing"
+        )
+    if mod._can_import_pytest(own):
+        return (
+            f"the interpreter the shim would enter ({own}) can import pytest, so the "
+            "fallback would never be asked and this arm would measure nothing"
+        )
+    found = mod._suite_interpreter(own=own, repo_root=root)
+    if not mod._can_import_pytest(found):
+        candidates = [(root / relative).as_posix() for relative in mod._VENV_INTERPRETERS]
+        return (
+            "this tree carries no environment the gate's fallback could use (none of "
+            f"{candidates} imports pytest), so the fallback has nothing to find and "
+            "this arm would measure the refusal - it runs where an environment exists, "
+            "which is what CI's `uv sync` provides"
+        )
+    return None
 
 
 def _load_sibling(name: str):
@@ -322,6 +370,61 @@ def test_the_suite_runs_in_a_real_worktree_not_an_extracted_archive(
 
     proc = _run_tool(repo, "1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_the_scratch_root_is_one_canonical_spelling(mod, tmp_path: Path) -> None:
+    """A non-canonical spelling goes in, the one directory comes out.
+
+    `tempfile` builds the harness's scratch out of the environment's `TEMP`, so the
+    worktree's spelling is whatever that carries - on the host this was measured on, an
+    8.3 short name. `Path.resolve()` is the form Python's own path arithmetic produces,
+    so a scratch handed to the child unchanged gives one directory two names, and every
+    row that compares them fails on a healthy tree (measured 2026-09-28,
+    `cyc20260928-153422`: 26 rows, all green once the path was resolved).
+
+    The stand-in for the short name here is `..` - portable, and carrying the property
+    that matters (a spelling that is not the canonical one) - with a control asserting
+    the stand-in really is non-canonical, so a pathlib that collapsed it could not leave
+    this arm passing vacuously.
+    """
+    (tmp_path / "sub").mkdir()
+    rough = str(tmp_path / "sub" / "..")
+    assert str(Path(rough)) != str(Path(rough).resolve()), (
+        "the stand-in is not non-canonical on this host, so this arm proves nothing"
+    )
+    assert mod._scratch_root(rough) == tmp_path.resolve()
+
+
+def test_every_scratch_path_the_child_is_handed_is_canonical() -> None:
+    """The wiring, not the helper: a resolved scratch the call sites ignore is the defect.
+
+    Read with `ast`, not by scanning lines. The arguments are what matter and they wrap
+    across lines, and `_no_suite_verdict(` has `_suite_verdict(` inside it - a reader
+    that went by lines would miss a fixed call and blame an unrelated one. Three call
+    sites decide which tree a child is handed (the plan's own run, the base re-run, and
+    step mode's per-step run); the count is asserted as well as the shape, so a scan that
+    finds nothing cannot pass.
+    """
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"_suite_verdict", "_still_red_on"}
+    ]
+    assert len(calls) >= 3, [ast.unparse(call) for call in calls]
+    offenders = [
+        ast.unparse(call)
+        for call in calls
+        if not any(
+            isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Name)
+            and arg.func.id == "_scratch_root"
+            for arg in call.args
+        )
+    ]
+    assert not offenders, offenders
 
 
 def _worktree_listing(repo: Path) -> str:
@@ -1311,6 +1414,220 @@ def test_a_pytest_missing_from_the_interpreter_names_both_causes(
     assert "pytest is not installed" in err
     assert "uv run --no-sync" in err  # cause 1: the wrong interpreter
     assert "uv sync" in err  # cause 2: a worktree whose `.venv` is empty
+
+
+def test_the_interpreter_is_probed_rather_than_read_off_its_name() -> None:
+    """A path says nothing about what an interpreter can import.
+
+    Both answers are measured: the interpreter running this suite has pytest, and a
+    name that does not exist answers `False` - which is the shape the documented
+    invocation meets on a machine whose `python3` is a host shim.
+    """
+    mod = _load_module()
+    assert mod._can_import_pytest(sys.executable) is True
+    missing = Path(sys.executable).with_name("emrg-no-such-interpreter")
+    assert mod._can_import_pytest(str(missing)) is False
+
+
+def test_a_caller_without_pytest_is_answered_from_the_checkouts_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The fallback measured 2026-09-28: the environment the gate needs is next door.
+
+    Both `.venv` spellings are created, so what this arm says is which candidate the
+    *probe* chose and not which spelling this machine happens to have - Windows first,
+    and the same answer on POSIX, because a candidate that is not there is skipped by
+    `is_file()` rather than by a platform branch.
+    """
+    mod = _load_module()
+    windows = tmp_path / ".venv" / "Scripts" / "python.exe"
+    posix = tmp_path / ".venv" / "bin" / "python"
+    for candidate in (windows, posix):
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: python == str(windows))
+    assert mod._suite_interpreter(own="bare-python3", repo_root=tmp_path) == str(windows)
+
+    # The probe decides, not the file list: with only the POSIX spelling usable - an
+    # unsynced `Scripts/` directory on this side - the answer moves with it.
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: python == str(posix))
+    assert mod._suite_interpreter(own="bare-python3", repo_root=tmp_path) == str(posix)
+
+
+def test_a_caller_that_can_run_the_suite_is_left_alone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No candidate is probed when the invocation itself can import pytest."""
+    mod = _load_module()
+    asked: list[str] = []
+
+    def has_pytest(python: str) -> bool:
+        asked.append(python)
+        return True
+
+    monkeypatch.setattr(mod, "_can_import_pytest", has_pytest)
+    assert (
+        mod._suite_interpreter(own="the-callers-own", repo_root=tmp_path)
+        == "the-callers-own"
+    )
+    assert asked == ["the-callers-own"]
+
+
+def test_neither_interpreter_working_is_still_a_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Nothing to run the suite with is exit 2, and the text names what was tried."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: False)
+    assert mod._suite_interpreter(own="bare-python3", repo_root=tmp_path) == "bare-python3"
+
+    message = mod._no_suite_verdict("No module named pytest\n")
+    assert sys.executable in message
+    for relative in mod._VENV_INTERPRETERS:
+        assert str(mod._checkout_root() / relative) in message
+    assert f"uv run --no-sync python scripts/{SCRIPT.name}" in message
+
+
+def test_a_tree_without_an_environment_is_reported_unmeasurable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The fallback arm's premise is the tree's, so it is asked, not asserted.
+
+    A tree with no `.venv` cannot answer "does the fallback find an interpreter" - the
+    gate's own suite run is a fresh worktree and that is one (measured 2026-09-28 on
+    #1688's landing tree, where the arm failed as a row the base does not fail). The
+    reason travels back so the arm can report it; the assertions that remain in the arm
+    are about the gate's behaviour, which no tree's layout can make untrue.
+
+    The interpreter probe is **pinned** for the same reason, because leaving it real
+    makes the arm ask about `sys._base_executable` - the host's interpreter - rather
+    than about the tree: where that one already imports pytest the helper answers
+    "the interpreter the shim would enter ... can import pytest" and returns before it
+    ever asks the search, so the arm's assertion about the tree's candidates fails on a
+    host whose layout differs from CI's (measured on this file's own landing tree,
+    reported by the veto of `cyc20260928-183205`). The sibling arm below pins the same
+    probe in the opposite direction, and neither pin reaches the gate: it probes the
+    interpreter it hands its own child, in its own process.
+    """
+    mod = _load_module()
+    bare = getattr(sys, "_base_executable", "") or sys.executable
+    empty = tmp_path / "no-environment"
+    empty.mkdir()
+
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: False)
+
+    reason = _fallback_unmeasurable(mod, empty, bare)
+
+    assert reason is not None
+    assert "no environment the gate's fallback could use" in reason
+    for relative in mod._VENV_INTERPRETERS:
+        assert (empty / relative).as_posix() in reason  # the candidates it looked at
+
+
+def test_an_environment_in_the_tree_makes_the_fallback_measurable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """…and the same layout with a pytest-capable interpreter is measurable.
+
+    The search itself is the gate's (`_suite_interpreter`), so this pins the helper
+    against the same rule the gate runs: the candidate is found under the tree being
+    measured, and the probe decides it rather than the file's name.
+    """
+    mod = _load_module()
+    env_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    env_python.parent.mkdir(parents=True)
+    env_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: Path(python) == env_python)
+
+    bare = getattr(sys, "_base_executable", "") or sys.executable
+    assert _fallback_unmeasurable(mod, tmp_path, bare) is None
+
+    # The two other reasons the arm cannot measure, each said instead of asserted:
+    # nothing to enter through, and an interpreter that already has pytest.
+    assert "no base interpreter" in _fallback_unmeasurable(mod, tmp_path, "")
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: True)
+    assert "can import pytest" in _fallback_unmeasurable(mod, tmp_path, bare)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "the shim that reaches an interpreter without pytest is a POSIX shell script - "
+        "and on Windows this host's `uv run --no-sync python3` is the bare one already "
+        "(measured 2026-09-28); the search is covered by the unit arms above"
+    ),
+)
+def test_a_caller_without_pytest_still_gets_a_verdict(
+    queue: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The live arm: a pytest-less invocation of the gate measures instead of refusing.
+
+    Pytest-less has to mean a *different binary*, not the entering interpreter started
+    with flags: the gate re-probes `sys.executable` by starting it, so a shim that
+    re-execs the interpreter it was entered through hands the gate a pytest-capable path
+    however that shim was started - measured 2026-09-28, where a `-S -E` shim of this
+    very test's interpreter left the gate resolving to itself, printing no `suite
+    interpreter:` line and passing `suite OK`: the arm then failed on the note, not on
+    the reading. `sys._base_executable` is what a bare host `python3` amounts to here -
+    the interpreter this checkout's `.venv` was built from, carrying no project packages
+    (measured 2026-09-28: rc 1, `No module named pytest`). Entered through it, the gate
+    must find this checkout's own `.venv` - and say so, because which interpreter judged
+    a tree is part of the reading.
+
+    Where the tree carries no such environment the arm reports *that* and skips, because
+    the gate runs its suites in freshly added worktrees and a fresh worktree has none: the
+    fallback would have nothing to find. Whether it has something to find is asked of the
+    gate's own search (`_fallback_unmeasurable`), not asserted from this file's location -
+    a premise the harness does not provide is unmeasurable, and it belongs to neither the
+    pass nor the fail side of the verdict.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    mod = _load_module()
+
+    # Deliberately not `Path(bare).resolve() != Path(sys.executable).resolve()`: on Linux
+    # `.venv/bin/python` *is* the managed interpreter, reached through a symlink, so the
+    # two resolve to one file while naming different environments - and it is the path
+    # that carries the environment (the `.venv` beside it is what puts pytest on the
+    # search path). Measured 2026-09-28 in CI: that comparison failed here and proved
+    # nothing about the search, which is the probe's job, not a path comparison's.
+    #
+    # The project environment reaches this interpreter through the `.venv` beside its
+    # path or not at all: whatever `PYTHONPATH` the harness was launched with is an
+    # artifact of the harness, and a host `python3` is not launched with it. Stripped
+    # for both runs so the premise is a property of the interpreter, not of how this
+    # suite happens to be started - the probe below is what decides it either way.
+    bare = getattr(sys, "_base_executable", "")
+    reason = _fallback_unmeasurable(mod, REPO_ROOT, bare)
+    if reason:
+        # Unmeasurable *here* is not a verdict about the code: the gate's own suite run
+        # is a fresh worktree, which carries no `.venv`, so this arm is measured where
+        # an environment exists - CI's `uv sync` - and reports the reason everywhere
+        # else instead of failing a tree that cannot answer (measured 2026-09-28 on this
+        # file's own landing tree; see `_fallback_unmeasurable`).
+        pytest.skip(reason)
+
+    bare_env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
+
+    shim = tmp_path / "python3-without-pytest"
+    shim.write_text(f'#!/bin/sh\nexec "{bare}" "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+
+    proc = subprocess.run(
+        [str(shim), str(SCRIPT), "1", "--base", "master"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=bare_env,
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, out
+    assert "suite OK" in (proc.stdout or ""), out
+    assert "No module named pytest" not in out
+    assert "suite interpreter: " in out
 
 
 @pytest.mark.parametrize(

@@ -399,22 +399,29 @@ def _unignored(candidates: list[str]) -> list[str]:
 
 
 def test_every_scratch_root_a_test_creates_in_the_repo_is_gitignored():
-    """The invariant, with the instrument's own liveness asserted first.
+    """The invariant, over whatever sites exist — **none** today, and that is the reading.
 
-    A scan that silently stopped finding sites would pass while measuring nothing, which is
-    the failure mode a guard is supposed to have instead of its callers, so the count is
-    asserted against the five sites the rule was written for rather than trusted.
+    P7 deleted `tests/test_bash_tool_sandbox.py` (issue #1675), which held all five
+    `mkdtemp(dir=…)` sites this rule was written for. So this scan now finds zero
+    in-repo sites and the assertions below are vacuous — correct, not broken: the
+    rule is about any site that creates a scratch directory inside the repository,
+    and there is none to be wrong about.
 
-    The name it asks git about is built from the site's **own** root, and a root this scan
-    cannot resolve is reported rather than passed: asking about `tests/<prefix>x` for every
-    site made the answer depend on a root the site does not have.
+    The liveness instrument is therefore *not* a site count, and the count this
+    function used to carry is deliberately gone: with the corpus deleted a
+    `>= 5` assertion would fail on a clean tree forever, and lowering it to `>= 0`
+    would assert nothing. What keeps the scan honest is
+    `test_the_scan_follows_a_root_to_any_depth_and_reports_what_it_cannot_read`
+    below, which drives the classifier with synthetic sources — one per bucket —
+    so a scan that stopped classifying is caught there rather than here. The
+    reading this function contributes is the tree's own: `0 sites, 0
+    unclassifiable, 0 unignored`, printed in every failure message it can emit.
+
+    The `.gitignore` rule (`/tests/emrg-*`) stays even though nothing matches it
+    today: it is the half that makes a future site safe, and an ignore rule that
+    matches nothing costs nothing.
     """
     sites = _sites()
-    assert len(sites) >= 5, (
-        f"the scan found {len(sites)} in-repo `mkdtemp(dir=…)` site(s) in tests/, fewer than "
-        "the five this rule was measured against — either the sites moved or this scan is "
-        "dead, and a guard that measures nothing passes for the wrong reason"
-    )
 
     unclassifiable = [
         f"{p.relative_to(REPO_ROOT)}:{n} (dir={src})"

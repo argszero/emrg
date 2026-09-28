@@ -25,7 +25,11 @@ import yaml
 
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
-from emrg.tools.bash_tool import SANDBOX_MODES
+# The tier vocabulary, from the module that owns it: the legacy scanner kept its
+# own literal too, and `tests/test_bash_v2_policy.py` pins the two equal until P7
+# deletes that file (issue #1675). Reading it from here is what makes this the
+# last production import of the doomed module go away.
+from emrg.sandbox.policy import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
