@@ -100,6 +100,21 @@ SECURITY_MAX_SID_SIZE = 68
 
 #: STARTUPINFO.dwFlags: the std handles in the struct are meaningful.
 STARTF_USESTDHANDLES = 0x00000100
+#: STARTUPINFO.dwFlags: ``wShowWindow`` is meaningful for the new process.
+#:
+#: The blueprint carries this since its fix for the flashing console (see
+#: :data:`SW_HIDE`); this port was taken before it and had only the std-handle
+#: flag, which is why every confined command flashed a window (rant
+#: 2026-09-28T14:48:39).
+STARTF_USESHOWWINDOW = 0x00000001
+#: ``STARTUPINFO.wShowWindow``: create the child's window hidden.
+#:
+#: The only console suppression that works under a restricted token — the child
+#: is created hidden at the creation point, so it covers every process this
+#: module starts. ``CREATE_NO_WINDOW`` is *not* an option here: the restricted
+#: token's own boundary notes (``win32/token.py``, ``win32/sandbox.py``) record
+#: that its ``CREATE_NO_WINDOW`` child dies with ``STATUS_DLL_INIT_FAILED``.
+SW_HIDE = 0
 #: CreateProcess flag: the environment block is Unicode.
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
 #: CreateProcess flag: start the primary thread suspended.
