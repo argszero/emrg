@@ -151,7 +151,7 @@ def test_reconstruct_commit_mismatch_raises(tmp_path):
         mod.reconstruct_commit(raw.decode("utf-8"), None, "different msg")
 
 
-# ------------------------------------------------- unsigned ⇒ rebuild + verify
+# ------------------------------------------------- unsigned: rebuild + verify
 
 
 def _api_view_of(raw: bytes, repo: Path) -> dict:
