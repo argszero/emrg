@@ -55,8 +55,10 @@ from emrg.sandbox.contract import (
     RunnerFailureRule,
     SandboxUnavailableError,
     confine,
+    never_announced_detail,
     never_started_detail,
     sandbox_denial_marker,
+    without_start_announcements,
 )
 from emrg.sandbox.policy import (
     DANGER_FULL_ACCESS,
@@ -242,6 +244,15 @@ def classify_runner_failure(
     line returned for them is synthesized by
     :func:`emrg.sandbox.contract.never_started_detail`.
 
+    The second of the two readings before the walk is
+    :attr:`RunnerFailureRule.start_line`, and it is the runner's own side of the
+    same question: a backend whose runner is our own code writes an
+    announcement before it mirrors anything, so its **absence** beside a nonzero
+    exit means the runner died before the command could start.  That reading
+    decodes no status at all — it is reported through
+    :func:`emrg.sandbox.contract.never_announced_detail` — and a line equal to
+    it is skipped by the walk, because an announcement is never the failure.
+
     :param exit_code: the process's exit code; ``None`` means signal death.
     :param stderr: collected stderr text, left unchanged.
     :param rules: structured runner-failure rules from the active wrap.
@@ -254,12 +265,20 @@ def classify_runner_failure(
     # the form ``sys.exit`` takes on Windows).
     unsigned = exit_code & 0xFFFFFFFF if exit_code < 0 else exit_code
     lines = re.split(r"\r?\n", stderr)
+    lowered_lines = [line.lower() for line in lines]
     for rule in rules:
         if unsigned in rule.never_started_exit_codes:
             return never_started_detail(unsigned)
+        # The line's absence is the evidence, so this reading needs no signature
+        # and no gate: the runner writes it on the way to the spawn, and a run
+        # without it is a runner that never got there.
+        if rule.start_line is not None and rule.start_line.lower() not in lowered_lines:
+            return never_announced_detail(unsigned)
         if rule.allowed_exit_codes is not None and exit_code not in rule.allowed_exit_codes:
             continue
         informational = {line.lower() for line in rule.informational_lines}
+        if rule.start_line is not None:
+            informational.add(rule.start_line.lower())
         signatures = [sig.lower() for sig in rule.fatal_signatures if sig.strip()]
         for line in lines:
             lowered = line.lower()
@@ -553,6 +572,10 @@ async def run_command(
         failure = classify_runner_failure(result.exit_code, result.stderr, confined.runner_failure_rules)
         if failure is not None:
             raise SandboxUnavailableError(policy.mode, failure)
+        # The runner's start announcement is evidence for this seam, not output
+        # the caller asked for: it is written on every confined run, so the text
+        # the model reads loses it — after the reading above, never before it.
+        result.stderr = without_start_announcements(result.stderr, confined.runner_failure_rules)
         result.sandbox = {
             "mode": policy.mode,
             "denied": matches_signature(result.exit_code, result.stderr, confined.denial_signatures),

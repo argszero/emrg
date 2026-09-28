@@ -90,6 +90,21 @@ DENIAL_SIGNATURES: tuple[str, ...] = (
     "operation not permitted",
 )
 
+#: The line this backend's runner writes the instant it is about to mirror the
+#: command, spelled here as the literal ``runner.py`` writes
+#: (:data:`~emrg.sandbox.win32.runner.START_ANNOUNCEMENT`).  The agreement is
+#: mechanised by a test rather than by an import, exactly as the fatal prefix's
+#: is: the runner is the one part of this backend that must import as little as
+#: possible, because its own import failing is one of the events the line exists
+#: to detect.
+#:
+#: This is the answer to a question the exit status cannot give on this platform
+#: — "did the child ever start?" — and it is the reason the rule carries a
+#: ``start_line`` at all: the rungs whose runner is a third-party binary
+#: (``bwrap``, ``sandbox-exec``) can be asked nothing of the kind and leave the
+#: field ``None``.
+START_ANNOUNCEMENT = "emrg-sandbox-runner: started"
+
 #: ``windows-acl-run: <detail>`` on stderr, exit-gated on 127 so a confined
 #: command that merely *prints* the signature — or a runner cleanup failure
 #: reported beside a non-zero child exit — is never misread as "the command did
@@ -100,11 +115,16 @@ DENIAL_SIGNATURES: tuple[str, ...] = (
 #: seam are covered by it without either side having to agree on a sentence: the
 #: exit status is the loader's own, so whichever process failed to initialize —
 #: this runner's interpreter or the child it mirrors — nothing ran.
+#:
+#: The third is ``start_line``, the runner's own side of the same question and
+#: the half no status can express (see :data:`START_ANNOUNCEMENT` and
+#: :class:`~emrg.sandbox.contract.RunnerFailureRule`).
 RUNNER_FAILURE_RULES: tuple[RunnerFailureRule, ...] = (
     RunnerFailureRule(
         fatal_signatures=("windows-acl-run: ",),
         allowed_exit_codes=(RUNNER_FAILURE_EXIT,),
         never_started_exit_codes=LOADER_EXIT_CODES,
+        start_line=START_ANNOUNCEMENT,
     ),
 )
 

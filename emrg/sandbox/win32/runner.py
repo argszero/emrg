@@ -33,6 +33,12 @@ Failure contract: every runner-side failure (bad args, missing directories,
 token/grant/spawn errors) prints ``windows-acl-run: <detail>`` to stderr and
 exits 127 — the signature the seam's runner-failure rule matches.  The child is
 **never** spawned unrestricted.
+
+Two lines this runner writes are deliberately *outside* that prefix, and for the
+same reason: they are not failures of the boundary.  :data:`START_ANNOUNCEMENT`
+is written on every run that reaches the spawn, so the seam reads its absence as
+"the runner never started"; a cleanup notice is written beside the child's own
+exit code, so it must not be a line the seam classifies as the runner's.
 """
 
 from __future__ import annotations
@@ -54,6 +60,40 @@ RUNNER_SIGNATURE = "windows-acl-run"
 
 #: The runner's documented failure exit, distinct from Landlock's 125.
 RUNNER_FAILURE_EXIT = 127
+
+#: The line this runner writes on its own stderr the instant it is about to
+#: mirror the caller's command, and the string
+#: ``emrg.sandbox.providers.win32`` declares as the rule's ``start_line`` (the
+#: two spellings are separate literals, pinned by a test — nothing imports
+#: across the seam, exactly as with :data:`RUNNER_SIGNATURE`).
+#:
+#: It answers the one question an exit status cannot: **did the child ever
+#: start?**  A status is a per-platform dialect and the same number means
+#: different things on either side of the seam, so the runner reports its own
+#: start on a channel of its own and the seam reads the *absence*, per call.
+#: Measured 2026-09-28: this module's own import failed
+#: (``ModuleNotFoundError: No module named 'emrg.sandbox'``) with exit 1 and
+#: empty stdout, so no signature could exist to match and the seam reported a
+#: dead environment as six consecutive failed commands.
+#:
+#: Deliberately not in the failure prefix's namespace: an announcement that
+#: began ``windows-acl-run: `` would match the seam's fatal signature, and being
+#: written first it would be the line every walk returns — hiding the detail the
+#: failure actually printed.
+START_ANNOUNCEMENT = "emrg-sandbox-runner: started"
+
+
+def announce() -> None:
+    """Write the start announcement on stderr and flush it.
+
+    Called immediately before the child is spawned and nowhere else, so the
+    line's presence means "this runner got as far as the spawn" and its absence
+    means the runner's own process died first.  Flushed rather than left to a
+    buffer: the parent reads this line out of the same pipe the child inherits,
+    and an unflushed line is not evidence.
+    """
+    sys.stderr.write(f"{START_ANNOUNCEMENT}\n")
+    sys.stderr.flush()
 
 #: How ``workspace-write`` names the temp directories it creates for itself.
 OWNED_TEMP_PREFIX = "emrg-"
@@ -265,6 +305,20 @@ def _build_sandbox(parsed: ParsedArgs) -> tuple[AclSandbox, str | None]:
     return sandbox, owned_temp
 
 
+def note_cleanup_failure(error: BaseException) -> None:
+    """Report a disposal failure beside the child's exit code, not above it.
+
+    The spelling is load-bearing: it carries this runner's name but **not** the
+    failure prefix's ``": "``, because this notice is not a failure of the
+    boundary.  It rides next to a code the command itself chose, and a line the
+    seam's rule matches would turn a command that really ran into "nothing ran"
+    the moment that code is also 127.
+
+    :param error: what ``dispose`` raised.
+    """
+    sys.stderr.write(f"{RUNNER_SIGNATURE} cleanup: {error}\n")
+
+
 def run(parsed: ParsedArgs, api: Win32Bindings) -> int:
     """Run the wrapped command under the sandbox and return its exit code.
 
@@ -295,6 +349,10 @@ def run(parsed: ParsedArgs, api: Win32Bindings) -> int:
         # deployer's own elevated process created is refused.
         for name, value in git_safety_env(parsed.workspace, os.environ).items():
             set_environment_variable(api, name, value)
+        # As late as the spawn: everything that could kill this process is behind
+        # the line, so the seam reads its absence as "the runner never got here
+        # and nothing ran" (see ``START_ANNOUNCEMENT``).
+        announce()
         child = sandbox.spawn([parsed.command, *parsed.args])
         try:
             return child.wait()
@@ -306,7 +364,7 @@ def run(parsed: ParsedArgs, api: Win32Bindings) -> int:
             try:
                 sandbox.dispose()
             except BaseException as exc:  # noqa: BLE001 - reported, exit code wins
-                sys.stderr.write(f"{RUNNER_SIGNATURE}: cleanup: {exc}\n")
+                note_cleanup_failure(exc)
         if owned_temp is not None:
             shutil.rmtree(owned_temp, ignore_errors=True)
 
