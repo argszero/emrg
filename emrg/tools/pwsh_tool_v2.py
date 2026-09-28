@@ -244,14 +244,18 @@ def classify_runner_failure(
     line returned for them is synthesized by
     :func:`emrg.sandbox.contract.never_started_detail`.
 
-    The second of the two readings before the walk is
-    :attr:`RunnerFailureRule.start_line`, and it is the runner's own side of the
-    same question: a backend whose runner is our own code writes an
-    announcement before it mirrors anything, so its **absence** beside a nonzero
-    exit means the runner died before the command could start.  That reading
-    decodes no status at all — it is reported through
-    :func:`emrg.sandbox.contract.never_announced_detail` — and a line equal to
-    it is skipped by the walk, because an announcement is never the failure.
+    The walk over the fatal signatures is the other reading, and it is taken
+    *before* the start line.  It is the specific answer: our runner's ``fail()``
+    prints a recognised line for every refusal it raises **before** the spawn
+    (argv parsing, directory validation, ``SetConsoleCtrlHandler``), and not one
+    of those is preceded by an announcement — so reading the silence first would
+    report a deliberate refusal as a death and drop the single line naming the
+    argument or the directory.  Only a run whose stderr the walk recognises
+    *nothing* in is read through the runner's own channel,
+    :attr:`RunnerFailureRule.start_line`: its **absence** beside a nonzero exit
+    means the runner died before it could mirror anything.  That silence reading
+    decodes no status at all and is reported through
+    :func:`emrg.sandbox.contract.never_announced_detail`.
 
     :param exit_code: the process's exit code; ``None`` means signal death.
     :param stderr: collected stderr text, left unchanged.
@@ -269,11 +273,13 @@ def classify_runner_failure(
     for rule in rules:
         if unsigned in rule.never_started_exit_codes:
             return never_started_detail(unsigned)
-        # The line's absence is the evidence, so this reading needs no signature
-        # and no gate: the runner writes it on the way to the spawn, and a run
-        # without it is a runner that never got there.
-        if rule.start_line is not None and rule.start_line.lower() not in lowered_lines:
-            return never_announced_detail(unsigned)
+    # The walk comes next, because a recognised line is the *specific* answer: our
+    # runner's ``fail()`` prints one for every refusal it raises **before** the
+    # spawn — argv parsing, directory validation, ``SetConsoleCtrlHandler`` — and
+    # not one of those is preceded by an announcement.  Answering "the environment
+    # died" to those would discard the one line naming the argument or the
+    # directory. Nothing on this path needs a signature the walk has not seen.
+    for rule in rules:
         if rule.allowed_exit_codes is not None and exit_code not in rule.allowed_exit_codes:
             continue
         informational = {line.lower() for line in rule.informational_lines}
@@ -286,6 +292,15 @@ def classify_runner_failure(
                 continue
             if any(signature in lowered for signature in signatures):
                 return line
+    # Nothing was recognised, so — and only now — the silence is read. The runner
+    # writes its announcement on the way to the spawn, so a run carrying neither a
+    # signature nor an announcement is one that never got there: the measured
+    # import death, which left no signature because no code of ours ran. Outside
+    # the exit-code gate on purpose — the status a loader dies with is not a
+    # dialect this can decode.
+    for rule in rules:
+        if rule.start_line is not None and rule.start_line.lower() not in lowered_lines:
+            return never_announced_detail(unsigned)
     return None
 
 

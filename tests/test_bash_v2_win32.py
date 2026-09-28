@@ -968,15 +968,22 @@ def test_a_run_with_no_announcement_is_refused_rather_than_reported_as_the_comma
     assert "[exit code: 3]" not in tool_result.content, tool_result.content
 
 
-def test_the_announcements_presence_decides_which_reading_a_fatal_line_gets(monkeypatch, tmp_path):
-    """The strip's placement, and the one row where the two new readings order.
+def test_a_matched_fatal_line_outranks_the_missing_announcement(monkeypatch, tmp_path):
+    """The order the two readings take, and why the walk has to be first.
 
-    The announcement is removed **last**, after the readings, and this test is
-    where that matters: the same fatal line is quoted as the refusal's detail
-    when the announcement is present, while a run that never announced is read as
-    the environment's death and the fatal line is *not* what the model is told
-    about.  Nothing about the line changed between the two rows — only whether
-    the runner got as far as saying it had started.
+    The same fatal line is present in two of the three rows and only the
+    announcement moves, so one row isolates the ordering claim:
+
+    * announcement + fatal line -> the fatal line (the run spoke and failed);
+    * fatal line alone -> **still** the fatal line, because ``fail()`` prints one
+      for every refusal it raises before the spawn and none of those is preceded
+      by an announcement.  Reading the silence first answered
+      ``never_announced_detail`` here, which reported a deliberate exit as a
+      death, asserted a cause the case does not have, and discarded the only line
+      naming the argument or the directory (``SandboxUnavailableError`` renders
+      without attaching stderr);
+    * nothing at all -> the death reading, which is the case the reading exists
+      for: no signature could exist to match, so silence is the whole evidence.
     """
     import asyncio
 
@@ -1000,6 +1007,10 @@ def test_the_announcements_presence_decides_which_reading_a_fatal_line_gets(monk
             "import sys;"
             f"sys.stderr.write({fatal!r} + '\\n');"
             "sys.exit(127)",
+            fatal,
+        ),
+        (
+            "import sys; sys.exit(127)",
             never_announced_detail(127),
         ),
     ):
@@ -1016,6 +1027,37 @@ def test_the_announcements_presence_decides_which_reading_a_fatal_line_gets(monk
                     )
                 )
             assert raised.value.detail == expected
+
+
+def test_the_walk_is_first_at_every_status_a_pre_spawn_refusal_can_exit_with():
+    """The ordering claim, stated where it is cheap to state: a pure predicate.
+
+    Every ``fail()`` in ``runner.py`` exits ``RUNNER_FAILURE_EXIT``, and every one
+    of them prints a line the walk recognises; none is preceded by an
+    announcement.  The row that makes the ordering load-bearing rather than
+    cosmetic is the last one: a status the exit-code gate does not admit is a run
+    the walk cannot answer, so the silence reading — deliberately ungated, since
+    the status a loader dies with is not a dialect we decode — is what remains.
+    """
+    from emrg.sandbox.contract import never_announced_detail, never_started_detail
+    from emrg.tools.bash_tool_v2 import classify_runner_failure as bash_classify
+    from emrg.tools.pwsh_tool_v2 import classify_runner_failure as pwsh_classify
+
+    rules = provider.RUNNER_FAILURE_RULES
+    refusal = f"{RUNNER_SIGNATURE}: --workspace is not an existing directory: C:\\nope\n"
+
+    for reader in (bash_classify, pwsh_classify):
+        # The runner's own line, whatever the announcement says — its absence here
+        # is the pre-spawn refusal's normal shape, not evidence of a death.
+        assert reader(RUNNER_FAILURE_EXIT, refusal, rules) == refusal.strip()
+        assert reader(RUNNER_FAILURE_EXIT, f"{START_ANNOUNCEMENT}\n{refusal}", rules) == refusal.strip()
+        # Silence is still the death, and it is read without decoding the status:
+        # the loader's own family keeps its precedence over both.
+        assert reader(RUNNER_FAILURE_EXIT, "", rules) == never_announced_detail(RUNNER_FAILURE_EXIT)
+        assert reader(1, "", rules) == never_announced_detail(1)
+        assert reader(provider.LOADER_EXIT_CODES[0], "", rules) == never_started_detail(
+            provider.LOADER_EXIT_CODES[0]
+        )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is where the backend is loadable")
