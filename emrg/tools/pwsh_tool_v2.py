@@ -523,7 +523,15 @@ async def run_command(
             raise SandboxUnavailableError(policy.mode, str(exc)) from exc
         raise
 
-    result = await _collect(proc, timeout, timeout_ms)
+    # The Windows twin of the same defect, fixed in the same change because the
+    # two files are literal duplicates and a fix in one is a fix in neither: a
+    # cancellation lands on an await inside `_collect`, so the child outlives the
+    # call unless this function cleans up. Host P0 rant 2026-09-28T13:00:38.
+    try:
+        result = await _collect(proc, timeout, timeout_ms)
+    except BaseException:
+        _kill_process_group(proc)
+        raise
     if confined is not None:
         failure = classify_runner_failure(result.exit_code, result.stderr, confined.runner_failure_rules)
         if failure is not None:
