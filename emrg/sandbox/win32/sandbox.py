@@ -238,6 +238,16 @@ class AclSandbox:
             # measured rule and the six rows behind it (issue #1560); the two SIDs
             # that also passed are why this argument is the *narrowest* one and
             # not simply a working one.
+            # This is a deliberate divergence from the blueprint, recorded as one
+            # rather than landed as a silent improvement (issue #1615).  The
+            # blueprint's call is byte-identical in shape and still names the
+            # capability SID at its newest revision — ``src/index.ts:296``
+            # (``ddefc45fbc``, the pin) and ``src/index.ts:303`` (``477b4f4205``,
+            # ``dsh-v0.1.7-rc.2``), with ``setTokenDefaultDaclGrant``
+            # (``src/token.ts:112``) merging that one ACE at both — so the two-pass
+            # failure is inherited rather than a port slip, and the table that
+            # varies only this argument is what justifies leaving the blueprint
+            # here.
             set_token_default_dacl_grant(bindings, restricted_token, logon_sid.address)
             if int(bindings.kernel32.CloseHandle(ctypes.c_void_p(current_token))) == 0:
                 throw_last_error(bindings, "CloseHandle", "current process token")
