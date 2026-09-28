@@ -147,7 +147,16 @@ def spawn_restricted(
     """
     startup = StartupInfoW()
     startup.cb = ctypes.sizeof(StartupInfoW)
-    startup.dwFlags = abi.STARTF_USESTDHANDLES
+    # Both flags: the std handles are meaningful *and* ``wShowWindow`` is read.
+    # Without the second, Windows gives this child a console of its own and shows
+    # it — the runner above was started with ``CREATE_NO_WINDOW`` and so has no
+    # console for the child to inherit, and a confined command runs once per tool
+    # call, which is why a scheduled task flashed a window per command (rant
+    # 2026-09-28T14:48:39). ``wShowWindow`` is the blueprint's fix, and it is
+    # orthogonal to ``CREATE_NO_WINDOW``, which a restricted token cannot use
+    # (see ``sandbox.py``'s boundary notes).
+    startup.dwFlags = abi.STARTF_USESTDHANDLES | abi.STARTF_USESHOWWINDOW
+    startup.wShowWindow = abi.SW_HIDE
     startup.hStdInput = api.kernel32.GetStdHandle(abi.STD_INPUT_HANDLE)
     startup.hStdOutput = api.kernel32.GetStdHandle(abi.STD_OUTPUT_HANDLE)
     startup.hStdError = api.kernel32.GetStdHandle(abi.STD_ERROR_HANDLE)
