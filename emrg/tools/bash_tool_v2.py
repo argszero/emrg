@@ -46,11 +46,16 @@ from emrg.sandbox.contract import (
     never_started_detail,
     sandbox_denial_marker,
 )
-from emrg.sandbox.policy import SandboxPolicy, resolve_policy
+from emrg.sandbox.policy import (
+    DANGER_FULL_ACCESS,
+    SandboxPolicy,
+    resolve_policy,
+)
 from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.sandbox.providers import unconfined_mode
 from emrg.server.git_utils import no_prompt_env
 from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.tools import command_scan
 from emrg.tools.base import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -600,6 +605,16 @@ class BashToolV2(ToolExecutor):
             workspace_root=workdir,
             session_id=arguments.get("session_id"),
         )
+        # The command-text rules a checked tier makes (containment escape, and the
+        # host's daemon-lifecycle red line) are read from the text by
+        # `emrg/tools/command_scan.py`, at the boundary, for both dialects — the
+        # kernel fence below is a *write* fence, so signal- and IPC-shaped acts
+        # reach it as ordinary commands and `emrg server stop` would otherwise
+        # reach the daemon's shutdown frame unchecked (P7, issue #1675).
+        if policy.mode != DANGER_FULL_ACCESS:
+            refusal = command_scan.command_refusal(command)
+            if refusal:
+                return ToolResult(name="bash", content=f"⛔ {refusal}", error=True)
         try:
             result = await run_command(
                 command, policy=policy, workdir=workdir, timeout=timeout
