@@ -1,9 +1,15 @@
 
-## Memory index compaction (MEMORY.md is over {{ cap }} lines)
+## Memory index compaction (MEMORY.md is over a number its rule names)
 
-{{ path }} has {{ lines }} lines. This index is embedded into every system prompt, and past
-{{ cap }} lines it buys nothing: a reader needs the title, and every fact belongs in the
-detail file its row points at. Compact it in this turn.
+{{ path }} has {{ lines }} lines and {{ chars }} chars, over the rule for an index:
+
+{% if over_lines %}- {{ over_lines }} line(s) past the {{ cap }}-line cap
+{% endif %}{% if over_chars %}- {{ over_chars }} char(s) past the {{ size_warn }}-char embed budget, where a prompt stops carrying the file
+{% endif %}{% if over_rows %}- {{ over_rows }} row(s) past {{ row_max }} chars (longest {{ longest_row }})
+{% endif %}
+This index is embedded into every system prompt, and past these numbers it buys
+nothing: a reader needs the title, and every fact belongs in the detail file its row
+points at. Compact it in this turn.
 
 You have `read`, `edit` and `write`. Use them.
 
@@ -20,5 +26,6 @@ How:
 5. Never: delete a detail file, invent a fact, or leave a fact only in a row you
    removed. Never reference an archive file from the index.
 
-Done when: the index is ≤ {{ cap }} lines and no row is longer than {{ row_max }} chars.
+Done when: the index is ≤ {{ cap }} lines, ≤ {{ size_warn }} chars and no row is longer
+than {{ row_max }} chars.
 Then report: lines before → after, and the ids you merged or dropped.

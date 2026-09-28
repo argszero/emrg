@@ -43,8 +43,8 @@ references on one line. Those are rows the rule binds, the prompt pays for, and
 every store mechanism is blind to - so a reading that used the parser's grammar
 would exempt exactly the rows only an agent writes.
 
-Three readings, each from its own source
-----------------------------------------
+Four readings, each from its own source
+---------------------------------------
 The line **cap** is `MEMORY_INDEX_ROW_CAP` and the row **bound** is
 `INDEX_TITLE_MAX_CHARS`, both imported here rather than spelled again: they are
 the two constants the prompt's rule is pinned to
@@ -54,10 +54,28 @@ the daemon's compaction note counts with, so the number printed and the number a
 trigger acts on are one reading. The row bound is counted in **characters**, which
 is the unit the rule names and the unit the embed budget spends (the store's
 *advisory* compares the file's bytes, a deliberately different reading - one CJK
-index fires one and not the other). The row **links** are the third reading, and
+index fires one and not the other). The row **links** are the resolution reading, and
 its source is not this rule's text but the resolution rule three other carriers
 already assert (named under *Scope*): the index's rows are the one carrier none of
 them read.
+
+The **budget** (`memory.INDEX_SIZE_WARN`) is the fourth, and it is the number with
+teeth: past it `_cap_memory_index` cuts the file before it reaches a prompt, keeping the
+head and the tail and **dropping the middle** (issue #1676's decision, stated at that
+method). Counted in **characters**, because characters are what the cap reads - the
+store's *advisory* reads the same constant against the file's bytes, and the two
+disagree on a CJK index. Measured 2026-09-28 on this host: `aitokenpool`'s index is
+50,413 chars / 81,974 bytes / 71 lines, so the advisory fires while the cap would embed
+the file whole. Reading bytes here would report that file as over when nothing is
+dropped, which is a false alarm about the reader's own prompt; so this reading is the
+cap's, and the report says which unit it used.
+
+This reading also answers for an index whose rows this tool cannot see: rows are found
+by shape (`- `) and a Markdown-*table* index has none, so the two row readings (count,
+bound) do not bind it - the budget still does, and so does the line cap. Measured before
+this reading existed, on the same 71-line file: `lines 71 of 100 - within` · `rows 0,
+longest 0 chars, over 512: 0` · rc=0, with the file's size printed nowhere - so nothing
+in that report could tell a reader whether the file would survive the embed at all.
 
 Scope, named rather than implied
 --------------------------------
@@ -105,10 +123,11 @@ derived from that root, so the two lines answer about one tree.
 
 Exit codes
 ----------
-``0``  every index read is within both numbers, and every row link resolves.
-``1``  at least one index is over a number the rule names (the line cap, or a row
-       past the bound), or carries a row link that resolves to no file; each
-       finding is printed with the line it is on.
+``0``  every index read is within every number of the rule, and every row link
+       resolves.
+``1``  at least one index is over a number the rule names (the line cap, the embed
+       budget, or a row past the bound), or carries a row link that resolves to no
+       file; each finding is printed with the line it is on.
 ``2``  nothing could be measured: no index under the tree, or a named index could
        not be read. An unreadable subject makes the reading incomplete, which is
        reported as such even when the other indexes were read - a partial reading
@@ -181,6 +200,7 @@ try:
     import emrg.server.daemon as _daemon_module
 
     INDEX_TITLE_MAX_CHARS = _memory_module.INDEX_TITLE_MAX_CHARS
+    INDEX_SIZE_WARN = _memory_module.INDEX_SIZE_WARN
     MEMORY_INDEX_ROW_CAP = _daemon_module.MEMORY_INDEX_ROW_CAP
     THRESHOLD_SOURCE = str(Path(_memory_module.__file__).resolve())
     if not Path(THRESHOLD_SOURCE).is_relative_to(REPO_ROOT):
@@ -190,6 +210,7 @@ try:
         )
 except Exception as exc:  # noqa: BLE001 - reported by main(), never swallowed
     INDEX_TITLE_MAX_CHARS = 0
+    INDEX_SIZE_WARN = 0
     MEMORY_INDEX_ROW_CAP = 0
     THRESHOLD_ERROR = f"{type(exc).__name__}: {exc}"
 
@@ -224,6 +245,11 @@ class Reading(NamedTuple):
 
     :param path: the index that answered.
     :param lines: its line count, `splitlines()` - the cap's subject.
+    :param chars: its character count, `len(text)` - the third number, and the one the
+        embed cap actually cuts against. Counted in characters and not bytes because
+        that is the unit the cap reads; the store's advisory reads the same constant
+        against the file's **bytes**, which is a deliberately different reading (one CJK
+        index fires one and not the other - `tests/test_memory_index_thresholds.py`).
     :param row_lines: the 1-based file line number of each row.
     :param row_lengths: each row's length in characters, in the same order.
     :param row_targets: every file link a row carries, as
@@ -233,6 +259,7 @@ class Reading(NamedTuple):
 
     path: Path
     lines: int
+    chars: int
     row_lines: tuple[int, ...]
     row_lengths: tuple[int, ...]
     row_targets: tuple[tuple[int, str], ...] = ()
@@ -307,7 +334,8 @@ def measure(path: Path) -> Reading:
                 if not NON_FILE_TARGET.match(target):
                     row_targets.append((number, target))
     return Reading(
-        path, len(lines), tuple(row_lines), tuple(row_lengths), tuple(row_targets)
+        path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
+        tuple(row_targets)
     )
 
 
@@ -343,6 +371,15 @@ def _report(reading: Reading) -> list[str]:
         )
     else:
         out.append(f"  lines {reading.lines} of {MEMORY_INDEX_ROW_CAP} - within")
+    if reading.chars > INDEX_SIZE_WARN:
+        out.append(
+            f"  chars {reading.chars} of {INDEX_SIZE_WARN} - over by "
+            f"{reading.chars - INDEX_SIZE_WARN}: past this the index is cut before it "
+            f"reaches a prompt (the cap keeps its head and its tail, and drops the "
+            f"middle)"
+        )
+    else:
+        out.append(f"  chars {reading.chars} of {INDEX_SIZE_WARN} - within")
     over = reading.over(INDEX_TITLE_MAX_CHARS)
     out.append(
         f"  rows {reading.rows}, longest {reading.longest} chars, "
@@ -387,7 +424,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         description=(
             "Measure a MEMORY.md against the rule for an index: "
             + (
-                f"{MEMORY_INDEX_ROW_CAP} lines, {INDEX_TITLE_MAX_CHARS} chars per row"
+                f"{MEMORY_INDEX_ROW_CAP} lines, {INDEX_SIZE_WARN} chars, "
+                f"{INDEX_TITLE_MAX_CHARS} chars per row"
                 if not THRESHOLD_ERROR
                 else "the rule's numbers are unreadable from this interpreter, so "
                 "every run reports that instead of a count"
@@ -395,7 +433,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             + ", and every row link resolving to a file beside it."
         ),
         epilog=(
-            f"Exit 0: every index is within both numbers and every row link "
+            f"Exit 0: every index is within every number and every row link "
             f"resolves. Exit 1: at least one is over one of them, or points at a "
             f"file that is not there. Exit 2: nothing could be measured (no index "
             f"under the tree, or a named index could not be read). Example: "
@@ -471,14 +509,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         reading
         for reading in readings
         if reading.lines > MEMORY_INDEX_ROW_CAP
+        or reading.chars > INDEX_SIZE_WARN
         or reading.over(INDEX_TITLE_MAX_CHARS)
         or reading.unresolved()
     ]
     if not findings:
         print(
-            f"OK: {len(readings)} index(es) within the two numbers the rule names "
-            f"({MEMORY_INDEX_ROW_CAP} lines, {INDEX_TITLE_MAX_CHARS} chars per row), "
-            "and every row link resolves"
+            f"OK: {len(readings)} index(es) within the three numbers the rule names "
+            f"({MEMORY_INDEX_ROW_CAP} lines, {INDEX_SIZE_WARN} chars, "
+            f"{INDEX_TITLE_MAX_CHARS} chars per row), and every row link resolves"
         )
         return 0
 

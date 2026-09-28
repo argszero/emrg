@@ -496,6 +496,93 @@ def test_a_row_whose_link_resolves_is_not_repaired(mod, tmp_path, capsys) -> Non
     capsys.readouterr()
 
 
+# ── the embed budget, both directions ─────────────────────────────────────────
+
+
+def _table(rows: int, row_chars: int) -> list[str]:
+    """A Markdown-table index's lines.
+
+    The shape that made this reading necessary: no line begins with `- `, so the two
+    row readings (count and bound) bind nothing here while the file's size is exactly
+    what the embed cap acts on.
+    """
+    return ["# Memory Index", "", "| id | note |", "| --- | --- |"] + [
+        "| n | " + "x" * row_chars + " |" for _ in range(rows)
+    ]
+
+
+def test_the_budget_is_the_products_own(mod) -> None:
+    """The third number is imported too, so the tool cannot hold a stale copy."""
+    from emrg.memory import INDEX_SIZE_WARN
+
+    assert mod.INDEX_SIZE_WARN is INDEX_SIZE_WARN
+
+
+def test_a_table_index_over_the_budget_is_reported(mod, tmp_path, capsys) -> None:
+    """The control: an index whose rows this tool cannot see is still measured.
+
+    Rows are found by shape (`- `) and a table has none, so before this reading such a
+    file was reported `rows 0, longest 0 chars` and `within`, with its size printed
+    nowhere, whatever it weighed. Measured 2026-09-28 on this host: `aitokenpool`'s
+    71-line index reads `lines 71 of 100 - within` (issue #1676 holds the reading).
+    """
+    lines = _table(rows=71, row_chars=745)
+    path = _index(tmp_path, "table.md", lines)
+    text = path.read_text(encoding="utf-8")
+    assert len(lines) <= mod.MEMORY_INDEX_ROW_CAP, "under the line cap, on purpose"
+    assert len(text) > mod.INDEX_SIZE_WARN, "and over the budget, which is the point"
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert (
+        f"chars {len(text)} of {mod.INDEX_SIZE_WARN} - over by "
+        f"{len(text) - mod.INDEX_SIZE_WARN}" in out
+    )
+    assert "OK:" not in out
+    assert "rows 0, longest 0 chars" in out, (
+        "the shape predicate cannot see this file's rows — that is why the size reading "
+        "has to answer for it"
+    )
+
+
+def test_a_table_index_within_the_budget_is_within(mod, tmp_path, capsys) -> None:
+    """The other direction, so the reading above is not a check that always fires."""
+    path = _index(tmp_path, "small-table.md", _table(rows=5, row_chars=40))
+    text = path.read_text(encoding="utf-8")
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert f"chars {len(text)} of {mod.INDEX_SIZE_WARN} - within" in out
+    assert "OK:" in out
+
+
+def test_the_budget_is_counted_in_characters_not_bytes(mod, tmp_path, capsys) -> None:
+    """The unit is the cap's, and its divergence from the advisory is deliberate.
+
+    `_cap_memory_index` compares `INDEX_SIZE_WARN` against the text's **characters**,
+    while the store's advisory compares the same constant against the file's **bytes**
+    (`tests/test_memory_index_thresholds.py` measures that pair). A CJK index is where
+    they disagree, and this reading must take the cap's side: measuring bytes would
+    report a file as over when the prompt carries it whole.
+    """
+    lines = ["# 索引", "", "| 编号 | 说明 |", "| --- | --- |"] + [
+        "| n | " + "汉" * 900 + " |" for _ in range(20)
+    ]
+    path = _index(tmp_path, "cjk-table.md", lines)
+    text = path.read_text(encoding="utf-8")
+    assert len(text) <= mod.INDEX_SIZE_WARN < len(path.read_bytes()), (
+        "the fixture must be the case the two units disagree on: within in characters "
+        "(the cap's unit), over in bytes (the advisory's)"
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert f"chars {len(text)} of {mod.INDEX_SIZE_WARN} - within" in out, (
+        "the reading must print the character count — the unit the cap acts on"
+    )
+    assert "OK:" in out
+
+
 # ── measures, never repairs ───────────────────────────────────────────────────
 
 

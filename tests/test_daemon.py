@@ -380,27 +380,39 @@ def test_cap_memory_index_small_file(tmp_path):
 
 
 def test_cap_memory_index_large_file(tmp_path):
-    """Index over the cap is truncated at a line boundary with a notice.
+    """Index over the cap is truncated at line boundaries with a notice.
 
     Rant 2026-08-23T11:00:31: evolution agents append MEMORY.md rows
     directly (bypassing memory_store's write-time guards), so the embedded
     index must be capped at render time — defense in depth.
+
+    Since 2026-09-28 (issue #1676) the cap keeps the head **and** the tail and drops
+    the middle, so "no half-cut row" is a claim about *two* boundaries and is measured
+    as one: what survives before the notice is a prefix of the file and what survives
+    after it is a suffix. A cap that keeps one end fails the second half.
     """
     server = _make_server()
     idx = tmp_path / "MEMORY.md"
     line = "- [cyc00000000-000000](cycle-20260823-000000.md) — " + "x" * 100 + "\n"
     idx.write_text(line * 600, encoding="utf-8")  # ~64KB > the cap
+    original = idx.read_text(encoding="utf-8")
     capped = server._cap_memory_index(idx)
-    head, sep, _ = capped.partition("\n… [truncated")
+    head, sep, rest = capped.partition("\n… [truncated")
     assert sep, "an over-cap index must carry a truncation notice"
     # The cap holds on the *head*, measured rather than approximated. This used
     # to read `len(capped) <= INDEX_SIZE_WARN + 200`, a magic allowance standing
     # in for a notice length the assertion could not know — so it would have
     # passed for any notice up to 200 chars and said nothing about the head.
     assert len(head) <= INDEX_SIZE_WARN
-    # truncation lands on a line boundary (no half-cut index row)
-    last_line = capped.rsplit("\n", 1)[1]
-    assert last_line.startswith("… [truncated")
+    notice, sep, tail = rest.partition("]\n")
+    assert sep and tail, "the tail is kept as well as the head (issue #1676)"
+    # truncation lands on a line boundary at both cuts (no half-cut index row)
+    assert original.startswith(head), "the kept head is not the head of the file"
+    assert original.endswith(tail), "the kept tail is not the end of the file"
+    assert original[len(head)] == "\n", "the head's cut is not at a line boundary"
+    assert original[len(original) - len(tail) - 1] == "\n", (
+        "the tail's cut is not at a line boundary"
+    )
 
 
 def test_the_truncation_notice_names_where_the_cut_text_is(tmp_path):
@@ -434,30 +446,33 @@ def test_the_truncation_notice_names_where_the_cut_text_is(tmp_path):
     )
 
 
-def test_the_truncation_notice_names_which_end_it_cut(tmp_path):
-    """The notice says which end of the index the reader still holds (#1554).
+def test_the_truncation_notice_names_which_parts_it_kept(tmp_path):
+    """The notice says which parts of the index the reader still holds (#1554, #1676).
 
     The two mechanisms had never been read against each other: an index appends
-    newest-last while the cap keeps the **head** — so the rows a reader loses are
-    the newest ones, the rows that exist to stop it re-doing work, and the notice
-    said only how much was cut and where the text is. Measured 2026-09-25 on a
-    project index the cap really truncates: 73,484 chars, 24 of its 163 rows kept
-    out of the prompt (issue #1554 holds that reading and its numbers).
+    newest-last while the cap kept the **head** — so the rows a reader lost were the
+    newest ones, the rows that exist to stop it re-doing work, and the notice said only
+    how much was cut and where the text is. Measured 2026-09-25 on a project index the
+    cap really truncates: 73,484 chars, 24 of its 163 rows kept out of the prompt (issue
+    #1554 holds that reading and its numbers). Which part *should* survive was that
+    issue's open decision; issue #1676 takes it — the head **and** the tail are kept and
+    the **middle** is dropped — and this test is the naming half of it.
 
-    Both halves come from the fixture rather than from the sentence: the notice
-    must name the end it dropped, **and** the fixture must show that this is the end
-    the reader actually lost. An implementation flipped to keeping the tail passes
-    the naming arm and fails the measurement; one that stopped naming the end fails
-    the naming arm alone. The under-cap direction — no notice, so nothing claims an
-    end where nothing was cut — is pinned next door by
-    `test_cap_memory_index_small_file` (an under-cap index is embedded as-is) and
+    Both halves come from the fixture rather than from the sentence: the notice must
+    name the parts it kept, **and** the fixture must show that the rows the reader lost
+    are the middle ones. An implementation flipped back to one end passes the naming
+    arm and fails the measurement — measured on this fixture, a head-only cap keeps rows
+    0..~63 and loses 64..599, so `max(lost) == 599` is not below `max(kept)`, since
+    nothing of the tail survives. The under-cap direction — no notice, so nothing claims
+    a cut where nothing was cut — is pinned next door by `test_cap_memory_index_small_file`
+    (an under-cap index is embedded as-is) and
     `test_the_embed_cap_is_the_number_the_store_warns_by` (the boundary, from both
     sides).
     """
     server = _make_server()
     idx = tmp_path / "MEMORY.md"
-    # Numbered rows, so "which end" is measured rather than described: row0000 is
-    # the head of the index, row0599 the newest row in it.
+    # Numbered rows, so "which parts" is measured rather than described: row0000 is the
+    # head of the index, row0599 the newest row in it.
     idx.write_text(
         "".join(
             f"- [row{i:04d}](cycle-20260823-{i:06d}.md) — " + "x" * 100 + "\n"
@@ -468,18 +483,30 @@ def test_the_truncation_notice_names_which_end_it_cut(tmp_path):
 
     capped = server._cap_memory_index(idx)
     notice = capped[capped.rfind("\n… [truncated") :]
-    assert "head is kept" in notice and "tail dropped" in notice, (
-        "the notice must name the end it cut: without that the reader cannot tell "
-        "whether it is holding the oldest rows or the newest (issue #1554)"
+    assert "head and the tail are kept" in notice and "middle is dropped" in notice, (
+        "the notice must name the parts it kept: without that the reader cannot tell "
+        "whether it is holding the newest rows, the oldest, or both (issues #1554, "
+        "#1676)"
     )
-    assert "newest rows are past this point" in notice, (
-        "naming the end is what makes the loss actionable — the rows the reader "
-        "cannot see are the newest ones"
+    assert "oldest rows are missing" in notice, (
+        "naming the parts is what makes the loss actionable — the rows the reader "
+        "cannot see here are the middle, i.e. the oldest ones"
     )
     assert "row0000" in capped, "the head is what survives"
-    assert "row0599" not in capped, (
-        "the fixture must really lose its newest row, or the naming above is asserted "
-        "about a truncation that did not happen"
+    assert "row0599" in capped, (
+        "the newest row is what the kept tail exists for — a cap keeping only the head "
+        "loses it, which is the failure #1554 measured"
+    )
+    kept = [i for i in range(600) if f"row{i:04d}" in capped]
+    lost = [i for i in range(600) if i not in kept]
+    assert lost, (
+        "the fixture must really lose rows, or the naming above is asserted about a "
+        "truncation that did not happen"
+    )
+    assert min(kept) < min(lost) and max(lost) < max(kept), (
+        f"the rows lost are not the middle (kept {min(kept)}..{max(kept)}, lost "
+        f"{min(lost)}..{max(lost)}): a cap keeping one end drops the end opposite it, "
+        f"and the notice above would then be describing a different cut"
     )
 
 

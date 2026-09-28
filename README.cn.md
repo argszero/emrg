@@ -200,6 +200,19 @@ EMRG 不只是追赶——它自己追上来。
 
 ---
 
+## 代码签名政策
+
+EMRG 的 Windows 代码签名由 [SignPath.io](https://signpath.io) 提供，证书由 [SignPath Foundation](https://signpath.org) 签发。
+
+- 安装包由 GitHub Actions（[`build-release.yml`](.github/workflows/build-release.yml)）从本仓库源码构建，因此签名的安装包必定对应一个公开提交与一次已审核的发布。
+- 只有本仓库 CI 构建的产物会被签名——本地构建或来自 fork 的构建永不签名。
+- 每次签名请求都由维护者（[@argszero](https://github.com/argszero)）人工批准，不存在自动签名，未经批准不会对任何发布签名。
+- 签名私钥由 SignPath Foundation 持有，绝不进入本仓库或其 CI。
+
+首个启用签名的版本尚未发布：此前发布的安装包均未签名，Windows 可能提示 SmartScreen 或杀毒软件误报（见上方提示）。
+
+---
+
 ## 许可证
 
 MIT — 详见 [LICENSE](LICENSE) 了解完整条款，[MANIFESTO.md](MANIFESTO.md) 了解代码背后的设计哲学。

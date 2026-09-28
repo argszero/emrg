@@ -44,6 +44,7 @@ no network, no GitHub.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import re
@@ -322,6 +323,61 @@ def test_the_suite_runs_in_a_real_worktree_not_an_extracted_archive(
 
     proc = _run_tool(repo, "1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_the_scratch_root_is_one_canonical_spelling(mod, tmp_path: Path) -> None:
+    """A non-canonical spelling goes in, the one directory comes out.
+
+    `tempfile` builds the harness's scratch out of the environment's `TEMP`, so the
+    worktree's spelling is whatever that carries - on the host this was measured on, an
+    8.3 short name. `Path.resolve()` is the form Python's own path arithmetic produces,
+    so a scratch handed to the child unchanged gives one directory two names, and every
+    row that compares them fails on a healthy tree (measured 2026-09-28,
+    `cyc20260928-153422`: 26 rows, all green once the path was resolved).
+
+    The stand-in for the short name here is `..` - portable, and carrying the property
+    that matters (a spelling that is not the canonical one) - with a control asserting
+    the stand-in really is non-canonical, so a pathlib that collapsed it could not leave
+    this arm passing vacuously.
+    """
+    (tmp_path / "sub").mkdir()
+    rough = str(tmp_path / "sub" / "..")
+    assert str(Path(rough)) != str(Path(rough).resolve()), (
+        "the stand-in is not non-canonical on this host, so this arm proves nothing"
+    )
+    assert mod._scratch_root(rough) == tmp_path.resolve()
+
+
+def test_every_scratch_path_the_child_is_handed_is_canonical() -> None:
+    """The wiring, not the helper: a resolved scratch the call sites ignore is the defect.
+
+    Read with `ast`, not by scanning lines. The arguments are what matter and they wrap
+    across lines, and `_no_suite_verdict(` has `_suite_verdict(` inside it - a reader
+    that went by lines would miss a fixed call and blame an unrelated one. Three call
+    sites decide which tree a child is handed (the plan's own run, the base re-run, and
+    step mode's per-step run); the count is asserted as well as the shape, so a scan that
+    finds nothing cannot pass.
+    """
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"_suite_verdict", "_still_red_on"}
+    ]
+    assert len(calls) >= 3, [ast.unparse(call) for call in calls]
+    offenders = [
+        ast.unparse(call)
+        for call in calls
+        if not any(
+            isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Name)
+            and arg.func.id == "_scratch_root"
+            for arg in call.args
+        )
+    ]
+    assert not offenders, offenders
 
 
 def _worktree_listing(repo: Path) -> str:

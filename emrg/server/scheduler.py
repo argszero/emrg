@@ -1391,11 +1391,31 @@ class TaskHandler:
     #: is nothing to report and nothing to diagnose.
     _CLEAN_END = "done"
 
+    #: A cycle that never reached the daemon at all. No workspace work happened,
+    #: and the connect-failure warning — escalating to ERROR at
+    #: `_CONNECT_FAIL_ALERT` — already carries everything a marker could say.
+    _NOT_STARTED = "not-started"
+
+    #: The ending of a cycle that returned without ever seeing a terminal frame.
+    #: A fallback rather than an expected value: the frame loop names the concrete
+    #: shape (`connection-closed`) when it can, and this one stands for "nothing
+    #: recorded an ending here", which has to read as *unfinished* — never as
+    #: finished (rant 2026-09-28T13:03:33).
+    _NO_TERMINAL_FRAME = "no-terminal-frame"
+
+    #: Endings that leave no marker behind: the cycle finished, or it never
+    #: started.
+    _SILENT_ENDINGS = frozenset({_CLEAN_END, _NOT_STARTED})
+
     #: How each other ending reads in the restart report, one grep-able phrase.
     _END_REASONS = {
         "running": "was killed mid-cycle (left running, no terminal record)",
         "shutdown-cancelled": "was cancelled by shutdown",
         "crashed": "crashed",
+        "connection-closed": (
+            "ended without a terminal frame (the daemon connection closed first)"
+        ),
+        _NO_TERMINAL_FRAME: "ended without a terminal frame",
     }
 
     def _end_heartbeat(self, reason: str) -> None:
@@ -1410,12 +1430,12 @@ class TaskHandler:
         2026-09-27: a cycle wedged for 45 minutes, then a host restart, and the
         daemon log contained no line saying the previous cycle had ended at all.
 
-        Any ending other than `_CLEAN_END` therefore writes its reason into the
+        Any ending other than a silent one therefore writes its reason into the
         marker and keeps the file; `_report_interrupted_cycle` reads it back on
         the next start (or the next cycle) and then consumes it, so a record is
         reported exactly once.
         """
-        if reason == self._CLEAN_END:
+        if reason in self._SILENT_ENDINGS:
             try:
                 self._heartbeat_file.unlink(missing_ok=True)
             except Exception:
@@ -1702,6 +1722,12 @@ class TaskHandler:
 
         `CancelledError` still propagates: this wrapper reports the ending, it
         does not swallow the cancellation.
+
+        Since rant 2026-09-28T13:03:33 the reason also covers an ending that
+        raises nothing: a cycle whose connection closes before any terminal
+        frame returns normally, and it used to arrive here indistinguishable
+        from a finished one. The cycle returns its own ending now, so this reads
+        as `_NO_TERMINAL_FRAME` unless the cycle says otherwise.
         """
         # Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③): a
         # periodic writer keeps <task>.heartbeat.json fresh while the
@@ -1721,9 +1747,14 @@ class TaskHandler:
         # exactly like a clean end.
         self._write_heartbeat("running")
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        end_reason = self._CLEAN_END
+        # How the cycle ended is the cycle's own word, not a default that a
+        # missing signal can inherit: it returns `done` only when a terminal
+        # frame arrived, and the endings that matter most reach no exception at
+        # all (rant 2026-09-28T13:03:33 — a closed socket used to be read as
+        # "the cycle said it finished").
+        end_reason = self._NO_TERMINAL_FRAME
         try:
-            await self._run_evolution_cycle()
+            end_reason = await self._run_evolution_cycle() or self._NO_TERMINAL_FRAME
         except asyncio.CancelledError:
             end_reason = "shutdown-cancelled"
             raise
@@ -1903,8 +1934,17 @@ class TaskHandler:
             self._logger.debug("TaskHandler[%s]: vibe check failed", self.name, exc_info=True)
         return None
 
-    async def _run_evolution_cycle(self) -> None:
+    async def _run_evolution_cycle(self) -> str:
+        """Run one cycle and return how it ended, in this file's own words.
 
+        The return value is the whole of the completion signal (rant
+        2026-09-28T13:03:33): ``_CLEAN_END`` when the daemon sent a terminal
+        frame, ``connection-closed`` when the connection went first,
+        ``server-error`` when the daemon refused the turn, ``_NOT_STARTED`` when
+        no connection was ever made. `_run_cycle_bounded` reads it to decide
+        whether the progress marker survives, so a cycle that loses its
+        connection keeps a record instead of being erased as a clean end.
+        """
         # Rant 2026-08-19T14:20:52 — workspace self-heal deleted: git workspace
         # management is the agent's job (bash tools). The cycle proceeds
         # directly to prompt build / daemon connection; if the configured
@@ -1941,7 +1981,10 @@ class TaskHandler:
                     "TaskHandler[%s]: cannot connect (%d/%d): %s",
                     self.name, self._connect_failures, self._CONNECT_FAIL_ALERT, e,
                 )
-            return
+            # No cycle ran, so there is no ending for the marker to carry — the
+            # failure is logged and escalated right here, and `_NOT_STARTED` is a
+            # silent ending (see `_end_heartbeat`).
+            return self._NOT_STARTED
 
         task_msg = json.dumps(
             {
@@ -1969,6 +2012,10 @@ class TaskHandler:
         error = None
         truncated = False
         completion_content = ""
+        #: What this cycle reports to `_run_cycle_bounded`. Only a terminal frame
+        #: makes it a completion: the loop's other exits are a closed connection
+        #: and a server error frame (rant 2026-09-28T13:03:33).
+        end_reason = self._NO_TERMINAL_FRAME
 
         try:
             await ws.send(task_msg)
@@ -1977,8 +2024,13 @@ class TaskHandler:
                 try:
                     resp = json.loads(await ws.recv())
                 except ConnectionClosed:
+                    # A closed socket is not the cycle saying it finished. The
+                    # report is decided below, where the missing frame is known;
+                    # the daemon side has the mirror-image contract (exactly one
+                    # terminal frame per turn, issue #1669).
                     break
                 if resp.get("done"):
+                    end_reason = self._CLEAN_END
                     duration = int((datetime.now() - cycle_time).total_seconds())
                     # Distinguish truncation from successful completion: the
                     # daemon's max-tool-rounds frame (daemon.py "Exceeded
@@ -2027,11 +2079,30 @@ class TaskHandler:
                 resp_error = resp.get("error")
                 if isinstance(resp_error, str):
                     error = str(resp_error)
+                    end_reason = "server-error"
                     self._logger.warning(
                         "TaskHandler[%s] server error: %s",
                         self.name, error,
                     )
                     break
+
+            if end_reason == self._NO_TERMINAL_FRAME and not error:
+                # The connection closed while this handler was blocked in `recv`:
+                # no terminal frame ever arrived, so the cycle did not finish.
+                # Measured 2026-09-28 (rant 2026-09-28T13:03:33): a wedged cycle
+                # ended through a graceful daemon shutdown and the record read as
+                # a normal completion — the marker was unlinked, the restart
+                # report had nothing to say, and the cycle was even written into
+                # the task-run record as a finished evolution. Aborted is what it
+                # is: no evolution record, no slowdown signal, and a marker that
+                # survives to be reported.
+                end_reason = "connection-closed"
+                error = "connection-closed"
+                self._logger.warning(
+                    "TaskHandler[%s]: connection closed without a terminal frame "
+                    "(tools=%d) — the cycle is aborted, not finished",
+                    self.name, tool_count,
+                )
 
             # Empty-cycle detection (rant 2026-08-17T11:39:19): after a clean
             # completion, ask the agent via task_vibe_check whether the round
@@ -2096,7 +2167,7 @@ class TaskHandler:
                 "TaskHandler[%s]: cycle aborted (%s) — not counted as evolution",
                 self.name, error[:200],
             )
-            return
+            return end_reason
 
         cycle_ts = cycle_time.isoformat()
         # Rant 2026-08-12T18:03:26: cycle records are now memory entries
@@ -2148,6 +2219,7 @@ class TaskHandler:
         # in-memory self.evolutions list, restored on init.
         self.evolutions.append(log)
         self._append_task_run(log)
+        return end_reason
 
     def _build_evolution_prompt(self) -> str:
         """Build evolution prompt from a Jinja2 template.

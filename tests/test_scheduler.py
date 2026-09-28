@@ -1615,10 +1615,19 @@ def test_ensure_self_evolution_task_other_entries_preserved(tmp_path):
 # this covers EMRG's own evolution task loop).
 
 def _make_cycle_handler(tmp_path, frames):
-    """Build a fully-scripted handler for _run_evolution_cycle tests."""
+    """Build a fully-scripted handler for _run_evolution_cycle tests.
+
+    When the scripted frames run out, `recv` closes the connection the way the
+    daemon does. It used to raise a bare `ConnectionClosed()`, which is not a
+    raiseable instance of that class in websockets 17 (`__init__` needs its
+    close frames), so the TypeError sailed past the loop's
+    `except ConnectionClosed` and landed in its generic `except Exception` —
+    a test double exercising a path the production code never takes.
+    """
     import json as _json
 
     from websockets.exceptions import ConnectionClosed as _Closed
+    from websockets.frames import Close as _Close
 
     from emrg.server import scheduler as mod
 
@@ -1633,7 +1642,7 @@ def _make_cycle_handler(tmp_path, frames):
         async def recv(self):
             if self._frames:
                 return _json.dumps(self._frames.pop(0), ensure_ascii=False)
-            raise _Closed()
+            raise _Closed(_Close(1000, ""), None)
 
         async def close(self):
             pass
@@ -2068,6 +2077,138 @@ def test_cycle_record_is_reported_once_with_its_reason(tmp_path, caplog):
         caplog.clear()
         handler._report_interrupted_cycle()
     assert not caplog.records, "a consumed record must not be reported twice"
+
+
+# ── A cycle that never sees a terminal frame (rant 2026-09-28T13:03:33) ──
+# The connection closing is not the cycle saying it finished. Measured
+# 2026-09-28: a cycle wedged for 31 minutes ended through a graceful daemon
+# shutdown (the handler was blocked in `recv`, the server closed the socket),
+# ran its normal tail, and was recorded as a completed evolution — the marker
+# was unlinked, so the restart report had nothing to say. The three endings the
+# earlier work covered (hard kill, cancellation, crash) all leave a trace; this
+# one, the shape a wedged cycle actually ends in, did not.
+
+def test_connection_closed_without_a_terminal_frame_keeps_its_record(tmp_path):
+    """No terminal frame → the marker survives, naming why the cycle stopped.
+
+    The scripted connection runs out of frames (the `_FakeWS` raises
+    `ConnectionClosed`), which is exactly the shape of a daemon shutting down
+    under a blocked handler: the loop breaks with no `done` frame ever seen.
+    """
+    import json as _json
+
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"tool_name": "bash"},
+        {"tool_name": "bash"},
+    ])
+    reason = asyncio.run(handler._run_cycle_bounded())
+
+    assert reason == "connection-closed", (
+        f"the cycle must report how it ended, got {reason!r}"
+    )
+    hb = tmp_path / "logs" / "task-runs" / "emrg-task.heartbeat.json"
+    assert hb.exists(), (
+        "a cycle that never saw a terminal frame must leave a record — it was "
+        "unlinked here before, which is what made a wedged cycle read as a "
+        "finished one"
+    )
+    data = _json.loads(hb.read_text(encoding="utf-8"))
+    assert data["status"] == "connection-closed", data
+    assert data["ended_at"], "the record must say when it ended"
+    assert data["cycle_started_at"], "the record must say when it started"
+    assert data["tool_count"] == 2, "the record must carry the last progress"
+    assert handler._cycle_running is False, "the flag must still be released"
+
+
+def test_connection_closed_without_a_terminal_frame_is_not_an_evolution(tmp_path):
+    """The other half: a cycle with no terminal frame is not a completed one.
+
+    Writing it would count work that never happened — the same reason an
+    aborted cycle is not counted — and it would advance the task-run record the
+    GUI reads as a finished cycle.
+    """
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"tool_name": "bash"},
+    ])
+    handler._slowdown_active = True
+    asyncio.run(handler._run_evolution_cycle())
+
+    assert "log" not in captured, (
+        "a cycle that never received a terminal frame must not be recorded as "
+        "a finished evolution"
+    )
+    assert handler.evolutions == []
+    assert handler._slowdown_active is True, (
+        "no vibe signal arrived, so the slowdown state must be untouched"
+    )
+
+
+def test_connection_closed_ending_is_reported_by_the_next_start(tmp_path, caplog):
+    """The record the ending leaves is reported on one grep-able line.
+
+    End to end, through the same file: the cycle writes it, the next start
+    reports and consumes it — so a host restart after a wedged cycle says where
+    that cycle stopped instead of saying nothing.
+    """
+    handler, _ = _make_cycle_handler(tmp_path, frames=[{"tool_name": "bash"}])
+    asyncio.run(handler._run_cycle_bounded())
+
+    with caplog.at_level(logging.WARNING, logger="emrg.server.scheduler"):
+        handler._report_interrupted_cycle()
+
+    warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("ended without a terminal frame" in m for m in warnings), warnings
+    assert any("tool_count=1" in m for m in warnings), warnings
+    hb = tmp_path / "logs" / "task-runs" / "emrg-task.heartbeat.json"
+    assert not hb.exists(), "the report consumes the record"
+
+
+def test_a_cycle_that_never_started_leaves_no_record(tmp_path):
+    """A connect failure is not an interrupted cycle and must not look like one.
+
+    Nothing ran, so there is no progress to report; the failure has its own
+    warning and its own escalation. Without this, every tick while the daemon is
+    down would leave a marker for the next cycle to report.
+    """
+    from emrg.server import scheduler as mod
+
+    handler, _ = _make_cycle_handler(tmp_path, frames=[])
+
+    async def _refuse():
+        raise ConnectionRefusedError("no daemon")
+
+    original = mod.connect_to_server
+    mod.connect_to_server = _refuse
+    try:
+        reason = asyncio.run(handler._run_cycle_bounded())
+    finally:
+        mod.connect_to_server = original
+
+    assert reason == "not-started", f"got {reason!r}"
+    hb = tmp_path / "logs" / "task-runs" / "emrg-task.heartbeat.json"
+    assert not hb.exists(), (
+        "a cycle that never reached the daemon leaves no marker: the connect "
+        "failure is already logged and escalated"
+    )
+
+
+def test_a_terminal_frame_still_ends_cleanly(tmp_path):
+    """The discriminating direction: a `done` frame is still a clean end.
+
+    The rule added above is "no terminal frame ⇒ not finished"; a fix that
+    turned every ending into an interrupted one would satisfy the tests over it
+    while reporting a failure for every ordinary cycle.
+    """
+    handler, _ = _make_cycle_handler(tmp_path, frames=[
+        {"tool_name": "bash"},
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ])
+    reason = asyncio.run(handler._run_cycle_bounded())
+
+    assert reason == "done", f"got {reason!r}"
+    hb = tmp_path / "logs" / "task-runs" / "emrg-task.heartbeat.json"
+    assert not hb.exists(), "a finished cycle leaves nothing to report"
 
 
 # ── Next-run persistence (rant 2026-08-25T09:25:32 ④) ─────────

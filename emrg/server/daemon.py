@@ -226,6 +226,30 @@ PROJECT_CONTEXT_MAX_CHARS = 8000
 # at the moment the prompt could not hold the index.
 MEMORY_INDEX_ROW_CAP = 100
 
+# What makes a line a **row** of an index, for the one reading that needs the shape.
+# The line count and the size reading above are format-free on purpose (a hand-written
+# table answers them like a row-per-entry index); the per-row bound cannot be, because
+# the rule it enforces is a bound on a *row*, so this is the predicate by shape —
+# deliberately the whole of it, and the same one `scripts/check-memory-index.py`
+# applies (`ROW_PREFIX` there), so the trigger and the reading count the same lines.
+MEMORY_INDEX_ROW_PREFIX = "- "
+
+# How much of an over-budget index `_cap_memory_index` keeps from its **head**, in
+# characters. The rest of the budget goes to the **end** of the file, and the middle is
+# what is dropped — issue #1676's open decision, taken here and stated at the cap.
+#
+# Keeping one end always throws away one of the two parts of an index a reader needs,
+# and in these files the two parts sit at opposite ends: the durable rows are written
+# at the top (the "read this first" rows and the topic memories every session starts
+# from), and the newest rows are appended at the bottom. The middle is the oldest
+# per-cycle bulk, which is what the compaction rule is aimed at. Measured 2026-09-28 on
+# this host's evolution index (46,190 chars, 103 lines): its first twelve lines — the
+# header and its standing rows — are 4,352 chars, and its last eight are 7,503. A
+# quarter of the budget (12,800) is therefore enough for a head of that shape with room
+# to spare, and the tail keeps the remainder because the newest rows are the ones a
+# session has not read yet. The rejected alternatives are at `_cap_memory_index`.
+MEMORY_INDEX_CAP_HEAD_CHARS = INDEX_SIZE_WARN // 4
+
 # The reloadable fields a connected client *displays*, so a revision that moves one
 # of them must be broadcast rather than only logged (issue #1374).
 # Measured before this existed: `vision = true` edited into `~/.emrg/config.toml`
@@ -320,8 +344,10 @@ def _unreadable_index_notice(path, exc: BaseException, *, where: str) -> str:
     )
 
 
-# The compaction instruction, rendered only for an index over `MEMORY_INDEX_ROW_CAP`
-# and always with the numbers of the reading that fired it — it lives in its own
+# The compaction instruction, rendered only for an index over a number its rule names
+# (a line count past `MEMORY_INDEX_ROW_CAP`, a character count past `INDEX_SIZE_WARN`, or
+# a row past `INDEX_TITLE_MAX_CHARS`) and always with the numbers of the reading that
+# fired it — it lives in its own
 # template, `emrg/server/prompts/memory_compaction.j2`, rendered through the same lazy
 # `_get_jinja_env()` the other prompts use, so the wording is the host's to edit without
 # touching Python (host 2026-09-25T15:10) and without restarting the daemon.
@@ -342,7 +368,14 @@ COMPACTION_TEMPLATE = "memory_compaction.j2"
 
 
 def _memory_index_compaction_note(paths) -> str:
-    """The compaction instruction for each index over ``MEMORY_INDEX_ROW_CAP``.
+    """The compaction instruction for each index over a number its rule names.
+
+    The condition is the *cap's* own, not the line count alone (issue #1676, W): a file
+    over ``INDEX_SIZE_WARN`` characters — the budget `_cap_memory_index` cuts at — draws
+    the note whatever its line count, as does a file with a row past
+    ``INDEX_TITLE_MAX_CHARS`` or more than ``MEMORY_INDEX_ROW_CAP`` lines. The rule names
+    three numbers and this fires on any of them, so every index the cap would cut is one
+    the agent is asked to compact first.
 
     One section per index, because the subjects are separate files with separate
     readers, and an instruction naming the wrong one would send the agent to compact a
@@ -368,16 +401,33 @@ def _memory_index_compaction_note(paths) -> str:
     and `_index_for_prompt`, so the agent is never left believing the index was
     empty (`tests/test_daemon.py::test_an_unreadable_index_costs_the_section_not_the_turn`).
 
-    :param paths: the index files to judge, one section per file over the cap.
-    :returns: the concatenated sections, or ``""`` when none is over the cap.
+    :param paths: the index files to judge, one section per file over a number.
+    :returns: the concatenated sections, or ``""`` when none is over one.
     """
     sections: list[str] = []
     for path in paths:
         try:
-            lines = len(path.read_text(encoding="utf-8").splitlines())
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        if lines <= MEMORY_INDEX_ROW_CAP:
+        lines = len(text.splitlines())
+        rows = [
+            len(line)
+            for line in text.splitlines()
+            if line.startswith(MEMORY_INDEX_ROW_PREFIX)
+        ]
+        # The trigger's condition is the cap's own (issue #1676, W): the cap cuts a file
+        # whose **character** count is past `INDEX_SIZE_WARN`, so a file that large must
+        # draw the note whatever its line count — the two were read against each other
+        # for the first time on 2026-09-26, when 100 maximum-width rows (51,300 chars)
+        # were truncated while `lines > 100` stayed silent. The per-row bound joins it
+        # for the same reason: the rule names two numbers and only one of them had a
+        # trigger at all (measured 2026-09-28: a 71-line index over the cap by 57% drew
+        # no note, and a row of 4,280 chars drew none either).
+        over_lines = max(0, lines - MEMORY_INDEX_ROW_CAP)
+        over_chars = max(0, len(text) - INDEX_SIZE_WARN)
+        over_rows = [length for length in rows if length > INDEX_TITLE_MAX_CHARS]
+        if not (over_lines or over_chars or over_rows):
             continue
         rendered = (
             _get_jinja_env()
@@ -385,6 +435,12 @@ def _memory_index_compaction_note(paths) -> str:
             .render(
                 cap=MEMORY_INDEX_ROW_CAP,
                 lines=lines,
+                chars=len(text),
+                size_warn=INDEX_SIZE_WARN,
+                over_lines=over_lines,
+                over_chars=over_chars,
+                over_rows=len(over_rows),
+                longest_row=max(rows, default=0),
                 path=str(path),
                 row_max=INDEX_TITLE_MAX_CHARS,
             )
@@ -2022,6 +2078,12 @@ class EmrgServer:
         452,972-char prompt (~250K all-miss tokens per request). Cap what
         gets embedded; the full index and cycle-archive-*.md stay readable
         on disk via the read tool.
+
+        An index over the budget keeps its **head and its tail** and loses its **middle**
+        (issue #1676's decision; `MEMORY_INDEX_CAP_HEAD_CHARS` and the comment where the
+        slices are taken state it and what it rejects). The notice says so in the text
+        the prompt carries, because a reader told only that something was dropped cannot
+        tell which rows it may rely on.
         """
         # One knob, two units. This used to spell the cap itself with a comment
         # promising it matched `memory.INDEX_SIZE_WARN` — a promise nothing checked,
@@ -2054,11 +2116,38 @@ class EmrgServer:
         text = path.read_text(encoding="utf-8")
         if len(text) <= limit:
             return text
-        cut = text.rfind("\n", 0, limit)
-        if cut <= 0:
-            cut = limit
-        head = text[:cut]
-        over = len(text) - len(head)
+        # Which end survives, decided rather than left to the first implementation
+        # (issue #1676; the constant above states the reasoning). Both ends are kept
+        # and the **middle** is dropped: the head carries an index's durable rows and
+        # its "read this first" guidance, the tail carries its newest rows — the two
+        # parts a reader needs — while the middle is the oldest per-cycle bulk the
+        # compaction rule exists to remove. The alternatives the decision rejects, with
+        # the reason: **keep the head** (what this did until 2026-09-28) drops the rows
+        # that exist to stop a session re-doing work, which is the failure the notice
+        # had to describe; **keep the tail** drops the standing rows the same reader
+        # starts from, and on this host's indexes those are the host's own rules;
+        # **order the index newest-first** is a convention change for every writer,
+        # including ones this repo does not ship, and a cap cannot read a row's date to
+        # apply it — so the positional split is how the third option ("split durable
+        # rows from cycle rows") is done without parsing a format the rule never fixed.
+        head_cut = text.rfind("\n", 0, MEMORY_INDEX_CAP_HEAD_CHARS)
+        if head_cut <= 0:
+            # One very long head line: cut it at the budget, as the single-end version
+            # did, rather than keeping nothing of the head at all.
+            head_cut = min(MEMORY_INDEX_CAP_HEAD_CHARS, limit)
+        tail_budget = limit - head_cut
+        tail_from = len(text) - tail_budget
+        newline = text.find("\n", tail_from)
+        if newline >= 0:
+            tail_from = newline + 1
+        # No newline past the tail's start (a file of one enormous line, or a tail that
+        # is one): the tail is cut at the budget rather than dropped. Dropping it would
+        # keep the head's share alone — a quarter of what the cap is entitled to keep —
+        # and the file would lose text it had room for. The head's own fallback above is
+        # the same decision on the other side.
+        head = text[:head_cut]
+        tail = text[tail_from:]
+        over = len(text) - len(head) - len(tail)
         # The notice names what was cut (`over` — a runtime measurement), not the
         # size of the cap it was cut against: stating the threshold again here
         # buys nothing and drifts (rant 2026-09-14T13:23:04). The number is the
@@ -2074,21 +2163,25 @@ class EmrgServer:
         # read on every request, so it may not point the reader away from the text
         # it just hid.
         #
-        # It also names which **end** it cut, because the two mechanisms above were
-        # never read against each other: an index appends newest-last while this keeps
-        # the **head**, so the reader holds the oldest part of the file and the rows it
-        # is missing are the newest ones — the rows that exist to stop it re-doing
-        # work. Saying where the text is without saying which end of it is gone leaves
-        # that to be guessed. Measured 2026-09-25 on a project index this cap really
+        # It also names which **parts** of the file it kept, because the two mechanisms
+        # above were never read against each other: an index appends newest-last, so a
+        # cap keeping the head alone left the reader with the oldest part of the file
+        # and hid the newest rows — the rows that exist to stop it re-doing work.
+        # Saying where the text is without saying which part of it is gone leaves that
+        # to be guessed. Measured 2026-09-25 on a project index this cap really
         # truncates (73,484 chars, 24 of its 163 rows kept out of the prompt — issue
-        # #1554 holds that reading and its numbers). Which end *should* survive is that
-        # issue's open decision (keep the tail / order the index newest-first / split
-        # durable rows from cycle rows); this only makes today's mechanism legible, and
-        # each of those options rewrites one word of the sentence below.
+        # #1554 holds that reading and its numbers). *Which* part should survive was
+        # that issue's open decision and is now taken (issue #1676; the constant above
+        # states it): the head and the tail are kept and the **middle** is dropped, so
+        # the sentence below names the middle as what is missing. The reading above it
+        # (`over`) is the dropped middle alone — measured from the two slices, not from
+        # the budget — so the notice's number and the slices cannot disagree.
         return head + (
             f"\n… [truncated {over} chars — this index exceeds the embed cap; the head "
-            "is kept and the tail dropped, so the newest rows are past this point; the "
-            f"whole file, this text included, is {path} — readable via the read tool]"
+            "and the tail are kept and the middle is dropped, so the oldest rows are "
+            f"missing from this point on; the whole file, this text included, is {path} "
+            "— readable via the read tool]\n"
+            + tail
         )
 
     def _collect_memory_data(self, session: Session) -> dict[str, Any] | None:

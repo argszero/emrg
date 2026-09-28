@@ -258,7 +258,12 @@ def test_the_turn_boundary_expires_a_held_receipt():
     block = _block_after('if data.get("type") == "turn_start":', "continue")
 
     assert "cancel_receipt_held = False" in block
-    assert "_request_start = float(started)" in block, (
+    # The alignment reads the frame's instant through `turn_start_instant`, which
+    # is what the timer's own test pins; here it is the control that says the
+    # extraction above found the branch that does the aligning (rant
+    # 2026-09-27T18:41:52 — the `if busy` precondition this line used to carry is
+    # gone, so the assignment is now unconditional and spelled this way).
+    assert "_request_start = started" in block, (
         "the extraction is looking at the right branch"
     )
 
