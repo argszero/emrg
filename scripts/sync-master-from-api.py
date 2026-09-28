@@ -40,7 +40,9 @@ Behavior:
     when it is wrong the graph is incomplete, and a caller measuring a tree is
     not left unanswered but **misled** - `git merge` prints "Already up to date"
     off a parent it cannot read, and `--is-ancestor` exits 128 where it should
-    exit 1 (measured 2026-09-28, `--ref <a PR head>`). Following those parents
+    exit 1 (measured 2026-09-28, `--ref <a PR head>`). A commit with no parents
+    ends the walk as the repository's **root** and is printed as one - it is not
+    reported as a merge whose "0 parent(s)" are trusted. Following those parents
     instead is deliberately not done here: it would re-fetch history this repo
     usually has, and the walk is bounded by exactly that assumption.
   * verifies the root tree sha matches the remote; if content objects are
@@ -261,6 +263,28 @@ def _absent_parents(parents: list[str], present=has_object) -> list[str]:
     return [p for p in parents if not present(p)]
 
 
+def _stop_lines(sha: str, parents: list[str], absent: list[str]) -> list[str]:
+    """The lines the walk prints when it stops at `sha`.
+
+    Two different stops, so two different statements. A commit with no parents is
+    the repository's **root** - reachable on a checkout that has none of the
+    remote's objects, the situation this script repairs - and history simply ends
+    there. A commit with parents left over is a merge, whose remaining parents are
+    *assumed* local. Labelling the root a merge would print a trust statement
+    about an empty list ("trusting its 0 parent(s) to be local"), asserting
+    something that is not a reading.
+    """
+    if not parents:
+        return [f"  (root commit {sha[:7]}: history ends here)"]
+    lines = [f"  (merge commit {sha[:7]}: walk ends here, trusting its "
+             f"{len(parents)} parent(s) to be local)"]
+    if absent:
+        lines.append("  ! parent(s) " + ", ".join(p[:7] for p in absent)
+                     + " are NOT present locally - the commit graph is incomplete, and"
+                     " git reads it as if it were whole")
+    return lines
+
+
 def _object_exists(sha: str) -> bool:
     """Any object (blob/tree/commit) present locally by sha."""
     return subprocess.run(["git", "cat-file", "-e", sha],
@@ -375,16 +399,12 @@ def main() -> int:
         if len(parents) == 1:
             sha = parents[0]
             continue
-        # A merge commit ends the walk: its remaining parents (an older master tip,
-        # the branch's own history) are *assumed* to be local. Say so, and say when
-        # they are not - `_absent_parents` records what leaving that silent costs.
-        absent = _absent_parents(parents)
-        print(f"  (merge commit {sha[:7]}: walk ends here, trusting its "
-              f"{len(parents)} parent(s) to be local)")
-        if absent:
-            print("  ! parent(s) " + ", ".join(p[:7] for p in absent)
-                  + " are NOT present locally - the commit graph is incomplete, and"
-                  " git reads it as if it were whole")
+        # A commit with no parents is the repository's root; one with parents left
+        # over is a merge whose remaining parents are *assumed* to be local. Each
+        # stop is said for what it is - `_stop_lines` records why the root must not
+        # be reported as a merge.
+        for line in _stop_lines(sha, parents, _absent_parents(parents)):
+            print(line)
         sha = None
     if created == 0:
         print(f"  (head already present locally: {sha[:7]})")

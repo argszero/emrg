@@ -392,3 +392,30 @@ def test_absent_parents_names_what_the_merge_stop_trusts():
     # A walk whose parents are all local stays quiet: nothing is reported.
     assert mod._absent_parents(["a" * 40, "c" * 40],
                                present=present.__contains__) == []
+
+
+def test_stop_lines_name_a_root_as_a_root_not_a_merge():
+    """The stop branch catches every parent count but one - the empty list.
+
+    That list is reachable: on a checkout that has none of the remote's objects
+    (the situation this script repairs), `--ref master` walks the whole chain back
+    and terminates at the repository's **root commit**, whose parents list is
+    empty. A merge statement there would print "trusting its 0 parent(s) to be
+    local" - a trust assertion about nothing, the same class of defect this change
+    removes: a line asserting something that is not a reading. So the root is named
+    a root, and a merge is still named a merge.
+    """
+    mod = _load_module()
+
+    root = mod._stop_lines("a" * 40, [], [])
+    assert len(root) == 1
+    assert "root commit" in root[0]
+    assert "merge" not in root[0] and "parent(s)" not in root[0]
+
+    # A genuine merge still reads as a merge, stating how many parents it trusts.
+    merge = mod._stop_lines("b" * 40, ["c" * 40, "d" * 40], [])
+    assert "merge commit" in merge[0] and "2 parent(s)" in merge[0]
+
+    # And an absent parent is still named, as before.
+    warned = mod._stop_lines("b" * 40, ["c" * 40, "d" * 40], ["d" * 40])
+    assert any("NOT present locally" in ln for ln in warned)
