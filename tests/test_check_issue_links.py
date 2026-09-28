@@ -360,6 +360,54 @@ def test_a_quoted_keyword_is_not_a_claim(mod) -> None:
     assert mod.declared_claims("Closes #15.\n\n(the quote above is `Closes #16.`)") == {15}
 
 
+def test_a_crlf_body_closes_its_fence_where_the_fence_closes(mod) -> None:
+    """A CRLF body must not mask to its own end — the live defect of issue #1697.
+
+    The closer is `$`-anchored, and under `re.M` that matches before `\\n`; in a CRLF
+    body a `\\r` sits between the fence marker and the position `$` accepts, so the
+    closer never fired and the alternation fell through to `\\Z`. Every fence then
+    blanked the rest of the text — and for this tool "the rest of the text" is
+    **every comment appended to the body**, because `issue_text` concatenates them.
+
+    Not a constructed input: issue #1696's body is CRLF (written on Windows), so the
+    `Handled by #1688` comment answering it was invisible, and the printed remedy
+    ("post the link in the issue") had already been carried out while the row stayed
+    `one-way`. Measured through this module's own pattern, before the fix: the same
+    body masks `13..25` of 45 under LF and `15..52` of 52 under CRLF.
+
+    Both directions are pinned, because a fix that merely stopped masking would be
+    worse than the defect: an **unterminated** fence must still carry to the end.
+    """
+    lf = "example:\n```\nCloses #11.\n```\nand Closes #12.\n"
+    crlf = lf.replace("\n", "\r\n")
+
+    # The claim the fence encloses declares nothing, and the one after it is read —
+    # under both line endings, which is the whole claim of this test.
+    assert mod.declared_claims(lf) == {12}
+    assert mod.declared_claims(crlf) == {12}
+
+    # The issue side's phrase, so the fix is not proven on one reader only.
+    issues_lf = "example:\n```\nHandled by #11.\n```\nand handled by #12.\n"
+    assert mod.issue_claims(issues_lf) == {12}
+    assert mod.issue_claims(issues_lf.replace("\n", "\r\n")) == {12}
+
+    # The deliberate direction survives: no closer means mask to the end, CRLF too.
+    assert mod.declared_claims("an unterminated fence:\r\n```\r\nCloses #13.") == set()
+
+    # The masking stays length-preserving, which the negation window and every match
+    # offset depend on: a fix that shortened the text would move the characters the
+    # reading points at. Asserted on CRLF, where the fix now consumes the `\r`.
+    assert len(mod._without_code(crlf)) == len(crlf)
+
+    # The shape that broke the live row: a fenced body with the answer appended as a
+    # comment, which is exactly how a handler names its issue back.
+    appended = mod._without_code(crlf + "\r\nHandled by #1234.\r\n")
+    assert "Handled by #1234." in appended, (
+        "the comment appended to a CRLF body was masked away, so the row can never "
+        "read as linked however many times the remedy is carried out"
+    )
+
+
 def test_issue_claims_reads_the_claim_phrase_and_not_a_citation(mod) -> None:
     """The issue side's claim form, in both directions, from the live vocabulary.
 
