@@ -202,6 +202,19 @@ Quick checks: `uv run pytest tests/ -v` · `cd emrg/gui && npm test` (tests: see
 
 ---
 
+## Code signing policy
+
+Windows code signing for EMRG is provided by [SignPath.io](https://signpath.io), using a certificate issued by the [SignPath Foundation](https://signpath.org).
+
+- Installers are built from this repository's source by GitHub Actions ([`build-release.yml`](.github/workflows/build-release.yml)), so a signed installer always corresponds to a public commit and a reviewed release.
+- Only artifacts built by this repository's CI are signed — never a locally built binary or a build taken from a fork.
+- Every signing request is approved manually by a maintainer ([@argszero](https://github.com/argszero)); nothing is signed automatically, and no release is signed without that approval.
+- The signing key is held by the SignPath Foundation and never enters this repository or its CI.
+
+The first release with signing enabled has not shipped yet: installers published so far are unsigned, so Windows may show a SmartScreen prompt or an antivirus false positive (see the notice above).
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for the full terms and [MANIFESTO.md](MANIFESTO.md) for the philosophy behind the code.
