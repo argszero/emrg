@@ -20,10 +20,23 @@ the fact that each entry still calls it. The second half is the one a refactor
 drops in silence — the augmentation would keep passing its own tests while no
 daemon ever ran it.
 
+A named platform must be that platform, on every host
+-----------------------------------------------------
+The behaviour tests name the platform they are about, so they must be able to
+name its *paths* too, and that is what `PurePosixPath` / `PureWindowsPath` are
+for. This file learned it the hard way: its first version passed `platform="linux"`
+with a `tmp_path` home and let `tool_dirs` build the absolute prefixes with
+`Path`, so on `test-windows` the expected spellings were POSIX and the actual
+ones were `\\opt\\homebrew\\bin` — a path that exists on neither platform, and
+which the injected `isdir` therefore never matched. Three tests passed on macOS
+and failed on Windows for that reason alone. `tool_path.path_flavour` is the
+fix, and `test_a_named_platform_spells_its_own_paths` is the guard that keeps it.
+
 ⚠️ Nothing here starts, stops or restarts a daemon (MANIFESTO 第四条附则二), and
 nothing opens `~/.emrg/config.toml` or `~/.emrg/emrgd.log`: the two entry tests
 stub the logging setup, the config load and the server itself, so no process is
-spawned and no host file is written. The directories used are `tmp_path`'s.
+spawned and no host file is written. The directories that must exist on disk are
+made under `tmp_path` and `Path.home` is pointed at them for the duration.
 
 Named limit
 -----------
@@ -38,21 +51,24 @@ tool child actually inherits (`emrg/server/git_utils.py::no_prompt_env`, the env
 from __future__ import annotations
 
 import logging
+import os
 import types
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
 from emrg import tool_path
 
+#: A home in each platform's own flavour. The behaviour tests use these rather
+#: than a real directory because `isdir` is injected: what is under test is the
+#: augmentation's arithmetic, and it must not depend on what this host has
+#: installed (`/opt/homebrew/bin` is here, absent on a Linux box).
+POSIX_HOME = PurePosixPath("/home/host")
+WINDOWS_HOME = PureWindowsPath(r"C:\Users\host")
+
 
 def _isdir_except(missing: set[str]):
-    """An ``isdir`` that says every directory exists except the named ones.
-
-    Which absolute prefixes exist is the *machine's* fact (`/opt/homebrew/bin`
-    is here, absent on a Linux box); naming them explicitly keeps these tests
-    from answering a question about this host.
-    """
+    """An ``isdir`` that says every directory exists except the named ones."""
 
     def exists(path) -> bool:
         return str(path) not in missing
@@ -67,75 +83,103 @@ def _home_with(tmp_path: Path, *names: str) -> Path:
     return home
 
 
-def test_a_tool_dir_is_appended_after_the_inherited_path(tmp_path):
+def test_a_tool_dir_is_appended_after_the_inherited_path():
     """The host's own PATH keeps priority; ours is added behind it."""
-    home = _home_with(tmp_path, ".local/bin")
     env = {"PATH": "/usr/bin:/bin"}
 
     # Only the home directory exists: the absolute prefixes are the machine's fact,
     # and naming them missing keeps this assertion about the augmentation itself.
     added = tool_path.augment_path(
-        env, platform="linux", home=home,
+        env, platform="linux", home=POSIX_HOME,
         isdir=_isdir_except({"/opt/homebrew/bin", "/usr/local/bin"}),
     )
 
-    assert [str(d) for d in added] == [str(home / ".local/bin")]
-    assert env["PATH"] == f"/usr/bin:/bin:{home / '.local/bin'}"
+    assert [str(d) for d in added] == ["/home/host/.local/bin"]
+    assert env["PATH"] == "/usr/bin:/bin:/home/host/.local/bin"
 
 
-def test_a_directory_that_does_not_exist_is_not_added(tmp_path):
+def test_a_directory_that_does_not_exist_is_not_added():
     """A healthy environment is left byte-identical — no empty entries, no invention."""
-    home = _home_with(tmp_path)  # no .local/bin
     env = {"PATH": "/usr/bin:/bin"}
-    every_prefix = {str(d) for d in tool_path.tool_dirs("linux", home)}
+    every_prefix = {str(d) for d in tool_path.tool_dirs("linux", POSIX_HOME)}
 
-    added = tool_path.augment_path(env, platform="linux", home=home, isdir=_isdir_except(every_prefix))
+    added = tool_path.augment_path(
+        env, platform="linux", home=POSIX_HOME, isdir=_isdir_except(every_prefix)
+    )
 
     assert added == []
     assert env["PATH"] == "/usr/bin:/bin"
 
 
-def test_a_directory_already_on_the_path_is_not_added_again(tmp_path):
+def test_a_directory_already_on_the_path_is_not_added_again():
     """A trailing separator is the same directory, not a second one."""
-    home = _home_with(tmp_path, ".local/bin")
-    already = f"{home / '.local/bin'}/"
-    env = {"PATH": f"{already}:/usr/bin"}
+    env = {"PATH": "/home/host/.local/bin/:/usr/bin"}
 
     added = tool_path.augment_path(
-        env, platform="linux", home=home,
+        env, platform="linux", home=POSIX_HOME,
         isdir=_isdir_except({"/opt/homebrew/bin", "/usr/local/bin"}),
     )
 
-    assert str(home / ".local/bin") not in [str(d) for d in added]
-    assert env["PATH"].count(str(home / ".local/bin")) == 1
+    assert added == []
+    assert env["PATH"].count("/home/host/.local/bin") == 1
 
 
-def test_only_the_prefixes_that_exist_are_offered(tmp_path):
+def test_only_the_prefixes_that_exist_are_offered():
     """The absolute prefixes are candidates, not assertions about the machine."""
-    home = _home_with(tmp_path, ".local/bin")
-    offered = {str(d) for d in tool_path.tool_dirs("linux", home)}
-    assert offered == {str(home / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin"}
+    offered = {str(d) for d in tool_path.tool_dirs("linux", POSIX_HOME)}
+    assert offered == {"/home/host/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"}
 
     env = {"PATH": "/usr/bin"}
     added = tool_path.augment_path(
-        env, platform="linux", home=home, isdir=_isdir_except({"/opt/homebrew/bin"})
+        env, platform="linux", home=POSIX_HOME, isdir=_isdir_except({"/opt/homebrew/bin"})
     )
 
-    assert [str(d) for d in added] == [str(home / ".local/bin"), "/usr/local/bin"]
+    assert [str(d) for d in added] == ["/home/host/.local/bin", "/usr/local/bin"]
 
 
-def test_windows_gets_the_windows_list_and_a_semicolon(tmp_path):
+def test_windows_gets_the_windows_list_and_a_semicolon():
     """`emrgd.cmd` needs no second copy of this logic — the entry normalizes it."""
-    home = _home_with(tmp_path, ".local/bin")
-    assert [str(d) for d in tool_path.tool_dirs("win32", home)] == [str(home / ".local/bin")]
+    assert [str(d) for d in tool_path.tool_dirs("win32", WINDOWS_HOME)] == [
+        r"C:\Users\host\.local\bin"
+    ]
 
     inherited = r"C:\Windows\system32"
     env = {"PATH": inherited}
-    added = tool_path.augment_path(env, platform="win32", home=home, isdir=_isdir_except(set()))
+    added = tool_path.augment_path(env, platform="win32", home=WINDOWS_HOME, isdir=lambda _p: True)
 
-    assert [str(d) for d in added] == [str(home / ".local/bin")]
+    assert [str(d) for d in added] == [r"C:\Users\host\.local\bin"]
     # A Windows PATH is joined with ";", even when this host is POSIX.
-    assert env["PATH"] == ";".join([inherited, str(home / ".local/bin")])
+    assert env["PATH"] == r"C:\Windows\system32;C:\Users\host\.local\bin"
+
+    # And the same directory in another spelling is the same directory: an
+    # installer that writes `C:\Users\Host\` where the registry holds
+    # `c:\users\host` must not produce a second entry.
+    env = {"PATH": r"c:\users\host\.local\bin;C:\Windows\system32"}
+    assert tool_path.augment_path(
+        env, platform="win32", home=WINDOWS_HOME, isdir=lambda _p: True
+    ) == []
+
+
+def test_a_named_platform_spells_its_own_paths():
+    """The guard for the defect this file shipped with: flavour follows `platform`.
+
+    Measured on CI 2026-09-28 — the three behaviour tests above passed on macOS
+    and failed on `test-windows`, because `tool_dirs(platform="linux")` built its
+    absolute prefixes with the *running* interpreter's `Path` and answered
+    `\\opt\\homebrew\\bin`. Both spellings below are asserted on every host, which
+    is the only way a cross-platform claim can be checked from one machine.
+    """
+    linux = [str(d) for d in tool_path.tool_dirs("linux", POSIX_HOME)]
+    assert linux == ["/home/host/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+
+    windows = [str(d) for d in tool_path.tool_dirs("win32", WINDOWS_HOME)]
+    assert windows == [r"C:\Users\host\.local\bin"]
+
+    # The separators follow the same argument, so the two halves cannot disagree.
+    assert tool_path.path_separator("linux") == ":"
+    assert tool_path.path_separator("win32") == ";"
+    assert tool_path.path_flavour("linux") is PurePosixPath
+    assert tool_path.path_flavour("win32") is PureWindowsPath
 
 
 def test_the_startup_helper_records_the_effective_path(monkeypatch, caplog, tmp_path):
@@ -147,8 +191,8 @@ def test_the_startup_helper_records_the_effective_path(monkeypatch, caplog, tmp_
     with caplog.at_level(logging.INFO, logger="emrg.tool_path"):
         added = tool_path.ensure_tool_dirs()
 
-    # `.local/bin` is first in the POSIX list, so a directory the host really has
-    # (a Homebrew prefix) may follow it but cannot precede it.
+    # `.local/bin` is first in the list on every platform, so a directory the host
+    # really has (a Homebrew prefix) may follow it but cannot precede it.
     assert str(added[0]) == str(home / ".local/bin")
     records = [r for r in caplog.records if r.name == "emrg.tool_path"]
     assert len(records) == 1
@@ -158,13 +202,15 @@ def test_the_startup_helper_records_the_effective_path(monkeypatch, caplog, tmp_
     assert str(home / ".local/bin") in message
 
 
-def test_the_startup_helper_records_the_path_when_nothing_was_added(monkeypatch, caplog):
+def test_the_startup_helper_records_the_path_when_nothing_was_added(monkeypatch, caplog, tmp_path):
     """'nothing added' is an answer too — that line is what makes a healthy start checkable."""
-    reachable = [str(d) for d in tool_path.tool_dirs() if d.is_dir()]
-    if not reachable:  # pragma: no cover - a machine with none of them
-        pytest.skip("no standard tool dir exists here, so the empty branch is unreachable")
-    sep = tool_path.path_separator()
-    monkeypatch.setenv("PATH", sep.join(reachable))
+    # A home with every directory this platform offers, so the empty branch is
+    # reachable on a machine that has none of them (a bare CI runner).
+    home = _home_with(tmp_path, ".local/bin")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    reachable = [str(d) for d in tool_path.tool_dirs() if os.path.isdir(str(d))]
+    assert reachable, "the fixture home must offer at least one tool dir"
+    monkeypatch.setenv("PATH", tool_path.path_separator().join(reachable))
 
     with caplog.at_level(logging.INFO, logger="emrg.tool_path"):
         added = tool_path.ensure_tool_dirs()
@@ -220,13 +266,15 @@ def test_the_foreground_entry_normalizes_the_path(monkeypatch):
     assert calls == [True], "the foreground daemon entry stopped normalizing the PATH"
 
 
-def test_the_added_directory_is_in_the_environment_a_tool_child_inherits(monkeypatch):
+def test_the_added_directory_is_in_the_environment_a_tool_child_inherits(monkeypatch, tmp_path):
     """The link that would make the rest moot: startup PATH → the tool child's env."""
     from emrg.server.git_utils import no_prompt_env
 
+    home = _home_with(tmp_path, ".local/bin")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
     added = tool_path.ensure_tool_dirs()
-    if not added:  # pragma: no cover - a machine with none of the directories
-        pytest.skip("no standard tool dir exists here, so nothing is added to inherit")
+    assert added, "the fixture home offers a tool dir, so nothing being added is the defect"
 
     assert str(added[0]) in no_prompt_env()["PATH"]

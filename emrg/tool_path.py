@@ -45,7 +45,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import MutableMapping
 
 logger = logging.getLogger(__name__)
@@ -78,20 +78,43 @@ def path_separator(platform: str | None = None) -> str:
     return ";" if _is_windows(platform) else ":"
 
 
+def path_flavour(platform: str | None = None) -> type[PurePath]:
+    """The path flavour of ``platform`` (default: the running one).
+
+    Named rather than left to ``Path``, because the two can disagree and the
+    disagreement is silent: a caller that says ``platform="linux"`` on a Windows
+    host is asking what Linux looks like, but ``Path("/opt/homebrew/bin")``
+    answers with ``\\opt\\homebrew\\bin`` — a spelling that exists on neither
+    platform, and one that a Windows ``isdir`` therefore never finds. Measured
+    on CI 2026-09-28: the three behaviour tests passed on macOS and failed on
+    `test-windows` for exactly this, because their expected spellings came from
+    the named platform and their actual ones from the interpreter.
+    """
+    return PureWindowsPath if _is_windows(platform) else PurePosixPath
+
+
 def tool_dirs(
     platform: str | None = None,
     home: Path | str | None = None,
-) -> list[Path]:
+) -> list[PurePath]:
     """The user-tool directories this platform's daemon must be able to reach.
 
+    Both halves come from ``platform`` — the list, the separator and the path
+    flavour — so a named platform really is that platform, whatever host the
+    caller runs on. With the default (the running platform) this is
+    ``Path.home()`` and the host's own spelling, which is all production sees.
+
     ``home`` exists so a test can name a directory it owns instead of the
-    host's; ``~`` expands against ``Path.home()`` otherwise.
+    host's, and it is read as a string so the caller may pass it in the *named*
+    platform's flavour (a ``PurePosixPath`` for a simulated Linux) rather than
+    in the host's.
     """
     names = WINDOWS_TOOL_DIRS if _is_windows(platform) else POSIX_TOOL_DIRS
-    base = Path(home) if home is not None else Path.home()
-    out: list[Path] = []
+    flavour = path_flavour(platform)
+    base = flavour(str(home) if home is not None else str(Path.home()))
+    out: list[PurePath] = []
     for name in names:
-        out.append(base / name[2:] if name.startswith("~/") else Path(name))
+        out.append(base / name[2:] if name.startswith("~/") else flavour(name))
     return out
 
 
@@ -113,7 +136,7 @@ def augment_path(
     platform: str | None = None,
     home: Path | str | None = None,
     isdir=os.path.isdir,
-) -> list[Path]:
+) -> list[PurePath]:
     """Append every standard tool dir that exists and ``env['PATH']`` lacks.
 
     Returns what was appended, in order (empty when the environment already
@@ -126,7 +149,7 @@ def augment_path(
     current = env.get("PATH") or ""
     present = [entry for entry in current.split(sep) if entry]
 
-    added: list[Path] = []
+    added: list[PurePath] = []
     for directory in tool_dirs(platform, home):
         text = str(directory)
         if not isdir(text):
@@ -141,7 +164,7 @@ def augment_path(
     return added
 
 
-def ensure_tool_dirs(log: logging.Logger | None = None) -> list[Path]:
+def ensure_tool_dirs(log: logging.Logger | None = None) -> list[PurePath]:
     """Normalize the daemon's ``PATH`` and record the result. Runs at startup.
 
     Returns what was added. The INFO line is the daemon's only statement of the
