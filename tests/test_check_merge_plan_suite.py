@@ -1313,6 +1313,137 @@ def test_a_pytest_missing_from_the_interpreter_names_both_causes(
     assert "uv sync" in err  # cause 2: a worktree whose `.venv` is empty
 
 
+def test_the_interpreter_is_probed_rather_than_read_off_its_name() -> None:
+    """A path says nothing about what an interpreter can import.
+
+    Both answers are measured: the interpreter running this suite has pytest, and a
+    name that does not exist answers `False` - which is the shape the documented
+    invocation meets on a machine whose `python3` is a host shim.
+    """
+    mod = _load_module()
+    assert mod._can_import_pytest(sys.executable) is True
+    missing = Path(sys.executable).with_name("emrg-no-such-interpreter")
+    assert mod._can_import_pytest(str(missing)) is False
+
+
+def test_a_caller_without_pytest_is_answered_from_the_checkouts_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The fallback measured 2026-09-28: the environment the gate needs is next door.
+
+    Both `.venv` spellings are created, so what this arm says is which candidate the
+    *probe* chose and not which spelling this machine happens to have - Windows first,
+    and the same answer on POSIX, because a candidate that is not there is skipped by
+    `is_file()` rather than by a platform branch.
+    """
+    mod = _load_module()
+    windows = tmp_path / ".venv" / "Scripts" / "python.exe"
+    posix = tmp_path / ".venv" / "bin" / "python"
+    for candidate in (windows, posix):
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: python == str(windows))
+    assert mod._suite_interpreter(own="bare-python3", repo_root=tmp_path) == str(windows)
+
+    # The probe decides, not the file list: with only the POSIX spelling usable - an
+    # unsynced `Scripts/` directory on this side - the answer moves with it.
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: python == str(posix))
+    assert mod._suite_interpreter(own="bare-python3", repo_root=tmp_path) == str(posix)
+
+
+def test_a_caller_that_can_run_the_suite_is_left_alone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No candidate is probed when the invocation itself can import pytest."""
+    mod = _load_module()
+    asked: list[str] = []
+
+    def has_pytest(python: str) -> bool:
+        asked.append(python)
+        return True
+
+    monkeypatch.setattr(mod, "_can_import_pytest", has_pytest)
+    assert (
+        mod._suite_interpreter(own="the-callers-own", repo_root=tmp_path)
+        == "the-callers-own"
+    )
+    assert asked == ["the-callers-own"]
+
+
+def test_neither_interpreter_working_is_still_a_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Nothing to run the suite with is exit 2, and the text names what was tried."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: False)
+    assert mod._suite_interpreter(own="bare-python3", repo_root=tmp_path) == "bare-python3"
+
+    message = mod._no_suite_verdict("No module named pytest\n")
+    assert sys.executable in message
+    for relative in mod._VENV_INTERPRETERS:
+        assert str(mod._checkout_root() / relative) in message
+    assert f"uv run --no-sync python scripts/{SCRIPT.name}" in message
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "the shim that reaches an interpreter without pytest is a POSIX shell script - "
+        "and on Windows this host's `uv run --no-sync python3` is the bare one already "
+        "(measured 2026-09-28); the search is covered by the unit arms above"
+    ),
+)
+def test_a_caller_without_pytest_still_gets_a_verdict(
+    queue: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The live arm: a pytest-less invocation of the gate measures instead of refusing.
+
+    The shim is `python -S -E`: site-packages are not on the path and neither is the
+    environment's `PYTHONPATH`, which is what a bare host `python3` amounts to. Run
+    through it, the gate must find this checkout's own `.venv` - and say so, because
+    which interpreter judged a tree is part of the reading.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    mod = _load_module()
+    candidates = [REPO_ROOT / relative for relative in mod._VENV_INTERPRETERS]
+    assert any(candidate.is_file() for candidate in candidates), (
+        "this checkout has no environment at either `.venv` spelling, so the fallback "
+        f"has nothing to find and this arm would measure the refusal: {candidates}"
+    )
+
+    shim = tmp_path / "python3-without-pytest"
+    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" -S -E "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    probe = subprocess.run(
+        [str(shim), "-c", "import pytest"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert probe.returncode != 0, (
+        "the shim can import pytest, so this arm measures nothing: "
+        + (probe.stdout or "")
+        + (probe.stderr or "")
+    )
+
+    proc = subprocess.run(
+        [str(shim), str(SCRIPT), "1", "--base", "master"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, out
+    assert "suite OK" in (proc.stdout or ""), out
+    assert "No module named pytest" not in out
+    assert "suite interpreter: " in out
+
+
 @pytest.mark.parametrize(
     "report,quoted",
     [

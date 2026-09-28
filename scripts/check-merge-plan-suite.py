@@ -42,12 +42,22 @@ tree* as well - identical on every input, a device measuring itself instead of t
 plan. A real worktree distinguishes the two states (control 1600 passed, planned
 tree 1643 passed, same harness).
 
-Why the interpreter that is running this script
------------------------------------------------
+Which interpreter runs the suite
+--------------------------------
 A freshly added worktree has no populated `.venv` - `uv run` inside one creates an
-empty environment, measured repeatedly in this repo - so the suite is run with
-`sys.executable`, i.e. the interpreter running this tool (under
-`uv run --no-sync`, the project environment), with the worktree as cwd.
+empty environment, measured repeatedly in this repo - so the suite is run with an
+interpreter resolved once by `_suite_interpreter`: `sys.executable` when it can
+import pytest, else the project's own `.venv` beside this checkout, else
+`sys.executable` again so the refusal that follows names an interpreter that was
+really tried. The worktree is still the cwd; only the interpreter is chosen.
+
+The fallback is not decoration. The invocation these gates document,
+`uv run --no-sync python3 scripts/<gate>.py`, reaches the project environment on
+POSIX but a bare host `python3` on a machine whose `python3` is a shim - measured
+2026-09-28 on Windows, where it resolved to `~/.emrg/install/bin/python3.exe` (no
+pytest) while `uv run --no-sync python` reached this checkout's `.venv`, and the
+tool then refused to measure a tree while the environment that can judge it sat one
+directory away.
 
 The base is fetched, then named
 -------------------------------
@@ -292,6 +302,79 @@ import merge_tree  # noqa: E402  (needs the path above)
 # releases it in the same call. Nothing else may depend on it.
 PLAN_REF_PREFIX = "refs/emrg-plan-suite/pr"
 SUITE = ["-m", "pytest", "tests/", "-q", "--no-header"]
+
+# Where a checkout keeps the environment `uv sync` populated, relative to the checkout
+# root. Both spellings are tried on every platform, Windows first: a candidate that is
+# not there is skipped by `is_file()`, so the order costs nothing and no `sys.platform`
+# branch is needed - which is also why this is testable on either leg.
+_VENV_INTERPRETERS: tuple[Path, ...] = (
+    Path(".venv") / "Scripts" / "python.exe",
+    Path(".venv") / "bin" / "python",
+)
+
+# The answer, once asked: which interpreter runs the suite is a property of this
+# machine and of this run's environment, and finding it spawns a probe process.
+_SUITE_INTERPRETER: str | None = None
+
+
+def _checkout_root() -> Path:
+    """The checkout this gate lives in - the directory that owns `scripts/`.
+
+    One definition, because two readers need the same answer: the interpreter search
+    looks for the project environment under it, and the refusal names the candidates
+    it looked at. A second spelling of `parent.parent` is how the two drift apart.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def _can_import_pytest(python: str) -> bool:
+    """Whether `python` can import pytest - asked, never assumed from its name.
+
+    The suite's first act is `-m pytest`, so the probe runs that import in the
+    interpreter in question and reads the exit code. Measured 2026-09-28 on this host:
+    `uv run --no-sync python3` reaches `~/.emrg/install/bin/python3.exe`, which answers
+    rc 1 with `No module named pytest`, while the checkout's `.venv` python answers
+    rc 0 - two paths whose names tell a reader nothing about which is which.
+
+    An interpreter this machine cannot start at all - a removed path, a `.venv/bin/python`
+    shell script on Windows, a file without the execute bit - answers *no* rather than
+    raising: "this one cannot run the suite" is a fact about the candidate, and a
+    `FileNotFoundError` out of a search is a crash where a fallback was asked for.
+    """
+    try:
+        return _run([python, "-c", "import pytest"]).returncode == 0
+    except OSError:
+        return False
+
+
+def _suite_interpreter(
+    own: str | None = None, repo_root: Path | None = None
+) -> str:
+    """The interpreter the suite runs with: this tool's own, or the project's `.venv`.
+
+    `own` and `repo_root` exist so a test can ask about a layout it owns instead of
+    about this machine's (the same shape `_suite_env`'s caller and `augment_path`'s
+    `isdir` use). An invocation whose interpreter already imports pytest is answered
+    with itself and no candidate is probed, so the documented
+    `uv run --no-sync python scripts/<gate>.py` behaves exactly as it did.
+    """
+    global _SUITE_INTERPRETER
+    cacheable = own is None and repo_root is None
+    if cacheable and _SUITE_INTERPRETER is not None:
+        return _SUITE_INTERPRETER
+    interpreter = sys.executable if own is None else own
+    resolved = interpreter
+    if not _can_import_pytest(interpreter):
+        root = _checkout_root() if repo_root is None else repo_root
+        for relative in _VENV_INTERPRETERS:
+            candidate = root / relative
+            if candidate.is_file() and _can_import_pytest(str(candidate)):
+                resolved = str(candidate)
+                break
+    if cacheable:
+        _SUITE_INTERPRETER = resolved
+    return resolved
+
 
 # The sibling tool that owns the base rule, loaded from its file rather than
 # imported by name: the scripts in this directory are not importable modules
@@ -616,13 +699,22 @@ def _no_suite_verdict(out: str) -> str:
     a remedy that names no invocation leaves the reader where they were. This is
     what the exit code 2 the caller gets already promises - *the question could not
     be answered*.
+
+    Every interpreter that was tried is named, and the remedy is spelled `python`
+    rather than `python3`: on a machine whose `python3` is a host shim the two reach
+    different interpreters (measured 2026-09-28 on Windows - see the header), while
+    `uv run` maps `python` to the project environment on every platform it supports.
     """
-    invocation = f"uv run --no-sync python3 scripts/{Path(__file__).name}"
+    tried = ", ".join(
+        [sys.executable]
+        + [str(_checkout_root() / relative) for relative in _VENV_INTERPRETERS]
+    )
+    invocation = f"uv run --no-sync python scripts/{Path(__file__).name}"
     tail = out[-1000:].strip()
     if "No module named pytest" in out:
         return (
-            "the suite could not be run: pytest is not installed in the interpreter "
-            f"running this tool ({sys.executable}), so nothing judged the tree:\n"
+            "the suite could not be run: pytest is not installed in any interpreter "
+            f"this gate can use, so nothing judged the tree. Tried: {tried}.\n"
             + tail
             + "\n\nRun it with the project environment instead:\n"
             f"    {invocation} <PR> [<PR> ...]\n"
@@ -632,7 +724,7 @@ def _no_suite_verdict(out: str) -> str:
     return (
         "the suite exited 1 without a failure line in its own output, so this is not "
         "a verdict about the tree:\n" + tail + "\n\nCheck the invocation with "
-        f"`{sys.executable} -m pytest --version`, then run this tool with the "
+        f"`{_suite_interpreter()} -m pytest --version`, then run this tool with the "
         f"project environment:\n    {invocation} <PR> [<PR> ...]"
     )
 
@@ -893,8 +985,19 @@ def _suite_verdict(
         if not (worktree / "tests").is_dir():
             raise MeasurementError("the planned tree has no tests/ directory")
         _purge_bytecode(worktree)
+        interpreter = _suite_interpreter()
+        if interpreter != sys.executable:
+            # Said out loud, because which interpreter judged a tree is part of the
+            # reading: a substituted environment is a different set of installed
+            # packages, and a reader comparing this line's count with another run's
+            # has to know the two runs were made by the same interpreter.
+            print(
+                f"suite interpreter: {interpreter} - this tool's own interpreter "
+                f"({sys.executable}) cannot import pytest",
+                file=sys.stderr,
+            )
         proc = _run(
-            [sys.executable, *SUITE, "--junitxml", str(junit), *JUNIT_FAMILY],
+            [interpreter, *SUITE, "--junitxml", str(junit), *JUNIT_FAMILY],
             cwd=str(worktree),
             env=_suite_env(worktree),
         )
@@ -951,10 +1054,14 @@ def _pytest_rows(worktree: Path, rows: list[str], junit: Path) -> tuple[int, str
     really fails gets read as one it does not contain - which is the attribution this
     whole step exists to avoid. Rows are asked for exactly, so the answer is a set
     intersection, not a parse.
+
+    The interpreter is `_suite_interpreter`'s answer rather than `sys.executable`: the
+    comparison is between two runs, and two runs made by different interpreters are not
+    comparable (the same reason `_suite_env` pins `PYTHONPATH`).
     """
     proc = _run(
         [
-            sys.executable,
+            _suite_interpreter(),
             "-m",
             "pytest",
             *rows,
