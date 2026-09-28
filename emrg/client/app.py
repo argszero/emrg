@@ -279,6 +279,48 @@ def the_ending_completes_a_receipt_this_client_holds(
     return receipt_held and turn_ended_cancelled
 
 
+def turn_start_instant(data: dict) -> float | None:
+    """The instant a ``turn_start`` frame says the session's turn began, or None.
+
+    Rant 2026-09-27T18:41:52, requirement 3 ("客户端没有任何逻辑 … 计时由 daemon
+    给"): the timer belongs to the **session's** turn, not to this client's send.
+    The frame was previously honoured only when this client had started the turn
+    (``busy``), so a turn started by a peer client or by a scheduled task ticked
+    only on the machine that started it — the daemon broadcast ``turn_start`` to
+    every subscriber and all of them but one ignored it.
+
+    A missing/zero/non-numeric stamp answers ``None`` rather than zero: an older
+    daemon that does not send ``started_at`` must leave the reader's clock alone
+    instead of parking the timer at the epoch.
+    """
+    started = data.get("started_at")
+    if isinstance(started, (int, float)) and not isinstance(started, bool) and started > 0:
+        return float(started)
+    return None
+
+
+def resume_turn_instant(meta: dict) -> float | None:
+    """The instant of the turn a ``resume_result`` snapshot says is running.
+
+    Requirement 1 gave ``meta["turn"]`` the session's turn state
+    (``{"running": bool, "started_at": epoch | None}``) — the daemon owns the
+    fact, the client renders it. Opening a session whose turn is already running
+    must therefore show the time it has **already** run: the instant travels and
+    the elapsed time is derived here against the same clock, which is why this
+    returns an instant and not a duration.
+
+    ``None`` covers every shape that says nothing to render: no snapshot, a
+    session with no turn, a running flag with no usable instant.
+    """
+    turn = meta.get("turn") if isinstance(meta, dict) else None
+    if not isinstance(turn, dict) or not turn.get("running"):
+        return None
+    started = turn.get("started_at")
+    if isinstance(started, (int, float)) and not isinstance(started, bool) and started > 0:
+        return float(started)
+    return None
+
+
 # ── Clipboard image support (platform-adaptive) ─────────────
 
 # Reading a clipboard *file path* must not go through the console locale codec.
@@ -674,10 +716,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         supposed to read the same statement.
         """
         nonlocal busy, _elapsed_task, _last_center
-        nonlocal turn_ended_cancelled, cancel_receipt_held
+        nonlocal turn_ended_cancelled, cancel_receipt_held, turn_running
         turn_ended_cancelled = False  # spent: nothing later can borrow this ending
         cancel_receipt_held = False
         busy = False
+        turn_running = False  # the turn this narrated is over
         if _elapsed_task:
             _elapsed_task.cancel()
             _elapsed_task = None
@@ -703,6 +746,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     _welcomed = False  # show welcome message once on first connect
     _request_start: float = 0.0  # timestamp when current request started
     _elapsed_task: asyncio.Task | None = None  # background timer task
+    # Whether the **session's** turn is running — the daemon's fact, fed by
+    # `turn_start` / `done` / the resume snapshot, and the lifetime of the elapsed
+    # timer (requirement 3). `busy` keeps its own meaning: this client's send is in
+    # flight, which is what ESC and the queue logic ask about.
+    turn_running: bool = False
     # P1 queue-injection client side (daemon #655): messages sent while the
     # session is busy are queued daemon-side (task_queued). Track them here so
     # `queued_requeue` can re-send with the same request id (without re-adding
@@ -728,9 +776,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     _last_center: str = ""  # last center text set via status.update, for timer overlay
 
     async def _run_elapsed_timer() -> None:
-        """Background task: update status line elapsed time and terminal title every second while busy."""
+        """Background task: update status line elapsed time and terminal title every second.
+
+        Lives as long as the **session's** turn (`turn_running`), not as long as this
+        client's send (`busy`): a peer client's turn, or a scheduled task's, is on
+        screen and is what the host opened the session to watch (requirement 3).
+        """
         nonlocal _request_start
-        while busy:
+        while turn_running:
             try:
                 elapsed = int(time.time() - _request_start)
                 mins, secs = divmod(elapsed, 60)
@@ -741,6 +794,20 @@ async def interactive(init_auto_evolve: bool = False, console=None):
             except Exception as e:
                 logger.error("elapsed timer error: %s", e)
             await asyncio.sleep(1)
+
+    def _ensure_elapsed_timer() -> None:
+        """Start the elapsed timer unless one is already running.
+
+        `done` finishes the timer by cancelling it and clearing the handle, but a
+        turn can also end without this client seeing that frame — a `turn_end`, an
+        error ending, a session switch — and then the task has stopped while the
+        handle still points at it. Asking `is None` alone would read "a timer is
+        running" and start nothing, leaving the new turn untimed; asking `done()`
+        as well is what keeps the handle and the truth together.
+        """
+        nonlocal _elapsed_task
+        if _elapsed_task is None or _elapsed_task.done():
+            _elapsed_task = asyncio.create_task(_run_elapsed_timer())
 
     tool_args: dict[str, dict] = {}  # track tool arguments by tool_call_id for diff rendering
     _tool_start_times: dict[str, float] = {}  # track tool start time by tool_call_id for timing logs
@@ -782,7 +849,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, current_vision
         nonlocal _last_center, _elapsed_task, conn
-        nonlocal _request_start
+        nonlocal _request_start, turn_running
         # /task-session: the daemon's verdict on a task's session decides whether
         # the client moves into that task's project at all (rant 2026-09-17T18:36:08).
         nonlocal cwd, project_name, _task_list_intent, _task_open_pending
@@ -890,9 +957,9 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         turn_ended_cancelled = False  # a new turn is this client's to show
                         cancel_receipt_held = False   # and no earlier receipt is this turn's
                         busy = True; need_new_assistant = True; stream_buffer = ""
+                        turn_running = True  # this turn is on screen from now on
                         _request_start = time.time()
-                        if _elapsed_task is None:
-                            _elapsed_task = asyncio.create_task(_run_elapsed_timer())
+                        _ensure_elapsed_timer()
                         for i, q in enumerate(to_resend):
                             rid = await conn.send_task(
                                 session_id=session_id, cwd=cwd, prompt=q["prompt"],
@@ -1009,7 +1076,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 if data.get("type") == "turn_start":
                     # Rant 2026-09-02T10:36:26：daemon 权威 turn 开始帧——把本地计时
                     # 对齐到实际执行时刻（排队请求目前从发送时刻起算，计时偏大）。
-                    # 仅当本端 busy（该 turn 属于本会话）时对齐；started_at 为 epoch 秒。
+                    # started_at 为 epoch 秒。
+                    #
+                    # Rant 2026-09-27T18:41:52 要求 3：这段曾以 `busy`（本端发起的轮）
+                    # 为前提，于是别人发起的轮——对端客户端、或定时任务——在本端只字不提；
+                    # 现在按 daemon 的帧开始计时（`turn_running`），谁的轮都显示。
                     #
                     # A held receipt expires at this boundary (the peer order above): it
                     # belongs to the turn that just ended, and the daemon broadcasts
@@ -1019,9 +1090,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # broadcasts no receipt of its own — and print an interruption under
                     # that turn instead.
                     cancel_receipt_held = False
-                    started = data.get("started_at")
-                    if busy and isinstance(started, (int, float)) and started > 0:
-                        _request_start = float(started)
+                    started = turn_start_instant(data)
+                    if started is not None:
+                        _request_start = started
+                        turn_running = True
+                        _ensure_elapsed_timer()
                         logger.info("turn_start aligned: _request_start=%.3f", _request_start)
                     continue
 
@@ -1057,6 +1130,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # receipt cannot borrow this turn's ending.
                     turn_ended_cancelled = data.get("cancelled") is True
                     busy = False
+                    turn_running = False  # the session's turn is over, whoever started it
                     # Cancel elapsed timer
                     if _elapsed_task:
                         _elapsed_task.cancel()
@@ -1177,9 +1251,9 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         )
                     # Rant 2026-09-02T10:31:11：auto-compact 可在 tool loop round 之间
                     # 触发（turn 未结束）——此时 compact_result 是旁路事件，绝不能把
-                    # busy 置 False（否则 _run_elapsed_timer 的 while busy 退出，计时器
-                    # 死亡、状态栏 elapsed 被清空、终端标题残留停住）。仅当 turn 空闲
-                    # （手动 /compact）时才按终态处理。msg_count 两种情况下都应减去。
+                    # busy 置 False（否则 _run_elapsed_timer 的 while turn_running 退出，
+                    # 计时器死亡、状态栏 elapsed 被清空、终端标题残留停住）。仅当 turn
+                    # 空闲（手动 /compact）时才按终态处理。msg_count 两种情况下都应减去。
                     if not busy:
                         busy = False
                         status.elapsed = ""
@@ -1482,6 +1556,23 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     new_sid = data.get("session_id", "")
                     meta = data.get("meta", {})
 
+                    # Requirement 2: a session whose turn is **already** running —
+                    # a scheduled task's cycle, a peer client's turn — must show the
+                    # time it has run, not start from zero and not stay blank. The
+                    # daemon's snapshot carries the instant; the elapsed time is
+                    # derived against this reader's clock, the same way `turn_start`
+                    # does it, so both channels say one thing.
+                    resumed = resume_turn_instant(meta)
+                    if resumed is not None:
+                        _request_start = resumed
+                        turn_running = True
+                        _ensure_elapsed_timer()
+                    else:
+                        # No turn running: nothing to time, and a timer left over
+                        # from the previous session must not keep ticking here.
+                        turn_running = False
+                        status.elapsed = ""
+
                     # Switch session
                     session_id = new_sid
 
@@ -1735,6 +1826,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task, _pending_images
+        nonlocal turn_running
         nonlocal _skills_confirm
         if len(data) == 0: return True
         if data == b"\x1b[200~": paste_mode = True; return True
@@ -2581,11 +2673,12 @@ Streaming
                 turn_ended_cancelled = False  # a new turn is this client's to show
                 cancel_receipt_held = False   # and no earlier receipt is this turn's
                 busy = True; need_new_assistant = True  # rant #32: force new StreamingMarkdown per response
+                turn_running = True  # this turn is on screen from now on
                 _request_start = time.time()
-                # Cancel any stale timer and start a new one
-                if _elapsed_task:
-                    _elapsed_task.cancel()
-                _elapsed_task = asyncio.create_task(_run_elapsed_timer())
+                # The timer reads `_request_start` every second, so a running one
+                # needs no restart to re-align — only one that has stopped needs
+                # starting (issue: a stale finished task blocked the restart).
+                _ensure_elapsed_timer()
                 logger.debug("SUBMIT: text=%r", text)
                 chat.add("user", inp.text)
                 history.append(text); stream_buffer = ""
