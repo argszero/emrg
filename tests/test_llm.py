@@ -17,10 +17,15 @@ from emrg.server.llm import (
     CONTENT_RISK,
     CONTENT_RISK_ERROR,
     CONTENT_RISK_HINT,
+    CONTENT_RISK_LADDER,
+    CONTENT_RISK_RUNG_DESCRIPTION,
     CONTEXT_TOO_LONG,
     OTHER_ERROR,
     LlmClient,
     classify_llm_error,
+    content_risk_retry,
+    escape_astral_messages,
+    escape_astral_text,
     is_overlong_error,
     space_out_messages,
     space_out_text,
@@ -815,6 +820,63 @@ def test_the_respelling_scan_is_not_blind(tmp_path):
     assert _respelled_overlong_sites(tmp_path) == [("somewhere_else.py", "length limit")]
 
 
+# ── escape_astral_messages ───────────────────────────────────────
+
+
+def test_escape_astral_text_writes_astral_codepoints_as_notation():
+    """The one transform a filter that strips `isspace()` can actually see.
+
+    Measured (rant 2026-09-28T15:57:31): the provider normalises away every
+    character `str.isspace()` accepts *before* matching, so a spaced payload is
+    the same bytes to it. Asserted on the result — the notation the filter is
+    handed — not on the shape of the loop that produced it (L4b).
+    """
+    assert escape_astral_text("abc") == "abc"          # identity below the plane
+    assert escape_astral_text("") == ""
+    assert escape_astral_text("\U0001F1E6") == "<U+1F1E6>"
+    # Mixed text keeps its non-astral characters byte-for-byte, so a session
+    # whose only astral content is one emoji pays +0.27% and loses nothing else.
+    assert escape_astral_text("a\U0001F1E6b") == "a<U+1F1E6>b"
+    # A BMP private-use character is *not* astral: ord() is the whole test.
+    assert escape_astral_text("\uE000") == "\uE000"
+
+
+def test_escape_astral_messages_shares_the_traversal_and_the_pairing_rule():
+    """Same scope as the spacing rung, because it is the same traversal.
+
+    Every role's ``content`` and every multimodal ``text`` part is transformed;
+    identifiers and ``tool_calls`` are copied untouched (``function.arguments``
+    is JSON, and an assistant message must stay paired with its tool result);
+    and the caller's messages are never mutated. Running this on the escaping
+    rung is the point: a rung that rewrote a tool call would corrupt the pair
+    it is trying to save.
+    """
+    messages = [
+        {"role": "system", "content": "s\U0001F1E6"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "\U0001F1E7b"},
+            {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+        ]},
+        {"role": "assistant", "content": "ok", "tool_calls": [{
+            "id": "call_\U0001F1E8",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"cmd": "echo \U0001F1E9"}'},
+        }]},
+        {"role": "tool", "tool_call_id": "call_\U0001F1E8", "content": "out"},
+    ]
+    before = copy.deepcopy(messages)
+    out = escape_astral_messages(messages)
+
+    assert out[0]["content"] == "s<U+1F1E6>"
+    assert out[1]["content"][0]["text"] == "<U+1F1E7>b"
+    assert out[1]["content"][1] == messages[1]["content"][1]
+    assert out[2]["content"] == "ok"
+    assert out[2]["tool_calls"] == messages[2]["tool_calls"]
+    assert out[2]["tool_calls"][0]["id"] == "call_\U0001F1E8"
+    assert out[3]["tool_call_id"] == "call_\U0001F1E8"
+    assert messages == before, "the transform must be a copy"
+
+
 # ── space_out_messages ───────────────────────────────────────────
 
 
@@ -901,9 +963,79 @@ _CONTENT_RISK_BODY = (
 )
 
 
-def test_chat_retries_once_with_spaced_messages_on_content_risk(monkeypatch, client):
-    """A refusal is answered by re-sending once with the text spaced out —
-    the transform the host verified by hand."""
+class _RecordingStreamClient(_FakeStreamClient):
+    """`_FakeStreamClient` that also records each payload it was asked to send."""
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.payloads: list[dict] = []
+
+    def stream(self, method, url, headers=None, json=None):
+        self.payloads.append(copy.deepcopy(json))
+        return super().stream(method, url, headers=headers, json=json)
+
+
+class _RefusingStream:
+    """A non-200 on the streaming path, where the body is read with `aread()`."""
+
+    def __init__(self, body: bytes):
+        self.status_code = 400
+        self.headers = {}
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def aread(self):
+        return self._body
+
+
+def test_stream_retries_on_the_same_ladder_as_chat(monkeypatch, client, caplog):
+    """The streaming twin walks the same ladder — and it had no test before this.
+
+    `chat()` and `chat_stream()` spell the retry twice, so the rung order is
+    pinned on both paths: a fix applied to one of them is not a fix. The
+    assertion is on the payload that was sent, because a branch that logged the
+    right warning and re-sent the *unfixed* body would read identically in the
+    log.
+    """
+    import asyncio
+    import logging
+    _patch_fast_sleep(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="emrg.server.llm")
+
+    fake = _RecordingStreamClient([
+        _RefusingStream(_CONTENT_RISK_BODY),
+        _make_stream(
+            {"choices": [{"delta": {"content": "hi"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ),
+    ])
+    client._client = fake
+
+    async def _run():
+        return [
+            chunk["content"]
+            async for chunk in client.chat_stream(
+                [{"role": "user", "content": "hi \U0001F1E6"}]
+            )
+            if chunk.get("content")
+        ]
+
+    parts = asyncio.run(_run())
+    assert parts == ["hi"]
+    assert fake.calls == 2
+    assert fake.payloads[0]["messages"] == [{"role": "user", "content": "hi \U0001F1E6"}]
+    assert fake.payloads[1]["messages"] == [{"role": "user", "content": "hi <U+1F1E6>"}]
+    assert "astral-plane codepoints written as <U+XXXX>" in caplog.text
+
+
+def test_chat_retries_with_escaped_astral_codepoints_first(monkeypatch, client):
+    """A refusal is answered by writing the astral codepoints out — the rung that
+    recovers, measured 400 -> 200 where the spaced form stayed 400."""
     import asyncio
     good = b'{"choices": [{"message": {"content": "recovered"}}]}'
     fake = _RecordingHttpClient([
@@ -911,25 +1043,139 @@ def test_chat_retries_once_with_spaced_messages_on_content_risk(monkeypatch, cli
         _FakeResponse(200, good),
     ])
     client._client = fake
-    msg = asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    trigger = "\U0001F1E6"
+    msg = asyncio.run(client.chat([{"role": "user", "content": f"hi {trigger}"}]))
     assert msg == {"content": "recovered"}
     assert len(fake.payloads) == 2
-    assert fake.payloads[0]["messages"] == [{"role": "user", "content": "hi"}]
-    assert fake.payloads[1]["messages"] == [{"role": "user", "content": "h i"}]
+    assert fake.payloads[0]["messages"] == [{"role": "user", "content": f"hi {trigger}"}]
+    assert fake.payloads[1]["messages"] == [{"role": "user", "content": "hi <U+1F1E6>"}]
     # The retried payload is what llm.jsonl records (it is what was sent).
-    assert client.last_payload["messages"] == [{"role": "user", "content": "h i"}]
+    assert client.last_payload["messages"] == [{"role": "user", "content": "hi <U+1F1E6>"}]
 
 
-def test_chat_content_risk_twice_reports_honestly(monkeypatch, client):
-    """Exactly one retry: a second refusal is raised with the host-facing
-    hint, and the error still classifies as content_risk so no caller can
-    hand it to the chunked compactor."""
+def test_chat_spaces_out_only_after_the_escape_rung_failed(monkeypatch, client):
+    """The second rung is built from the **original** payload, never from the
+    escaped one.
+
+    This is the ladder's invariant, and it is asserted on the payload that is
+    actually sent: a payload that had been escaped *and then* spaced would be
+    neither transform, would carry `< U + 1 F 1 E 6 >`, and would make the
+    fallback's cost depend on the first rung's — which is what the requirement
+    forbids ("不得叠加成「替换+插空格」同一包").
+
+    The payload carries an astral codepoint on purpose. Measured while writing
+    this: the first version of this test used an ASCII body, where
+    ``space_out(original)`` and ``space_out(escape(original))`` are the *same
+    string* — the mutation arm that builds rung 2 on rung 1's output survived
+    it, so the assertion was about nothing.
+    """
     import asyncio
-    fake = _RecordingHttpClient([_FakeResponse(400, _CONTENT_RISK_BODY)] * 2)
+    good = b'{"choices": [{"message": {"content": "recovered"}}]}'
+    fake = _RecordingHttpClient([
+        _FakeResponse(400, _CONTENT_RISK_BODY),
+        _FakeResponse(400, _CONTENT_RISK_BODY),
+        _FakeResponse(200, good),
+    ])
+    client._client = fake
+    trigger = "\U0001F1E6"
+    original = f"A {trigger} x"
+    msg = asyncio.run(client.chat([{"role": "user", "content": original}]))
+    assert msg == {"content": "recovered"}
+    assert len(fake.payloads) == 3
+    assert fake.payloads[0]["messages"] == [{"role": "user", "content": original}]
+    # Rung 1: the astral codepoint written out.
+    assert fake.payloads[1]["messages"] == [{"role": "user", "content": "A <U+1F1E6> x"}]
+    # Rung 2: spaced from the ORIGINAL, so the trigger is still a codepoint here
+    # — no notation anywhere in the body that was sent.
+    assert fake.payloads[2]["messages"] == [{"role": "user", "content": f"A   {trigger}   x"}]
+    assert "<" not in fake.payloads[2]["messages"][0]["content"], (
+        "rung 2 was built on rung 1's output: the payload carries both transforms"
+    )
+    assert client.last_payload["messages"] == [{"role": "user", "content": f"A   {trigger}   x"}]
+
+
+def test_chat_spends_the_escape_rung_even_when_it_is_the_identity_transform(
+    monkeypatch, client
+):
+    """A body with no astral codepoint is still sent on rung 1, unchanged.
+
+    Pinned because it is a choice, not an accident: the escaping rung is the
+    identity transform for such a body, so that request cannot succeed where the
+    first failed — and it is still spent. The ladder is defined as the retries a
+    refusal is answered with, not as the retries that might help, and deciding
+    "would this transform change anything?" at the call site is how the two call
+    sites would drift. A refusal costs two extra requests at most.
+    """
+    import asyncio
+    good = b'{"choices": [{"message": {"content": "recovered"}}]}'
+    fake = _RecordingHttpClient([
+        _FakeResponse(400, _CONTENT_RISK_BODY),
+        _FakeResponse(400, _CONTENT_RISK_BODY),
+        _FakeResponse(200, good),
+    ])
+    client._client = fake
+    msg = asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert msg == {"content": "recovered"}
+    assert len(fake.payloads) == 3
+    assert fake.payloads[0]["messages"] == [{"role": "user", "content": "hi"}]
+    assert fake.payloads[1]["messages"] == [{"role": "user", "content": "hi"}]
+    assert fake.payloads[2]["messages"] == [{"role": "user", "content": "h i"}]
+
+
+def test_the_host_facing_hint_names_every_rung_of_the_ladder():
+    """The hint the host reads must describe the ladder the code walks.
+
+    This is the one place the ladder is spelled twice — once as the rungs the
+    retry runs, once as the sentence explaining what was tried — so it is
+    checked mechanically rather than by review: rename, reorder or add a rung
+    without touching the hint and this fails. Without it, the host is told a
+    retry shape that no longer exists, which is where this whole defect came
+    from (the old hint promised "re-sent once with the text spaced out" while
+    the measurement said that retry had never once worked).
+    """
+    for rung in CONTENT_RISK_LADDER:
+        assert CONTENT_RISK_RUNG_DESCRIPTION[rung] in CONTENT_RISK_HINT, (
+            f"rung {rung!r} is in the ladder but not in the host-facing hint"
+        )
+    assert CONTENT_RISK_ERROR in CONTENT_RISK_HINT
+    assert "start a new session" in CONTENT_RISK_HINT
+
+
+def test_content_risk_retry_ladder_is_one_shot_per_rung_then_spent():
+    """The ladder's own reading: two rungs, in order, then nothing.
+
+    Asked directly, so the caller's `content_risk_stage` and the ladder cannot
+    drift apart, and so a third rung added later is visible here rather than
+    silently doubling what a refusal costs.
+    """
+    original = [{"role": "user", "content": "\U0001F1E6 x"}]
+    first = content_risk_retry(0, original)
+    second = content_risk_retry(1, original)
+    assert first is not None and second is not None
+    rung1, messages1 = first
+    rung2, messages2 = second
+    assert (rung1, rung2) == ("escape", "space_out")
+    assert messages1 == [{"role": "user", "content": "<U+1F1E6> x"}]
+    assert messages2 == [{"role": "user", "content": "\U0001F1E6   x"}]
+    assert messages2 != [{"role": "user", "content": "< U + 1 F 1 E 6 >   x"}]
+    assert content_risk_retry(2, original) is None, "the ladder must end"
+    assert list(CONTENT_RISK_LADDER) == ["escape", "space_out"], CONTENT_RISK_LADDER
+
+
+def test_chat_content_risk_after_the_whole_ladder_reports_honestly(monkeypatch, client):
+    """Exactly one retry per rung: a refusal after both is raised with the
+    host-facing hint, and the error still classifies as content_risk so no
+    caller can hand it to the chunked compactor."""
+    import asyncio
+    fake = _RecordingHttpClient([
+        _FakeResponse(400, _CONTENT_RISK_BODY),
+        _FakeResponse(400, _CONTENT_RISK_BODY),
+        _FakeResponse(400, _CONTENT_RISK_BODY),
+    ])
     client._client = fake
     with pytest.raises(RuntimeError) as excinfo:
         asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
-    assert len(fake.payloads) == 2  # one retry, not a loop
+    assert len(fake.payloads) == 3  # two rungs, not a loop
     assert classify_llm_error(excinfo.value) == CONTENT_RISK
     assert CONTENT_RISK_ERROR in str(excinfo.value)
     assert "start a new session" in str(excinfo.value)

@@ -92,7 +92,8 @@ CONTENT_RISK_ERROR = "Content Exists Risk"
 #: here and not in a log line the host never reads.
 CONTENT_RISK_HINT = (
     " — the provider's content filter refused this request's text "
-    f"({CONTENT_RISK_ERROR}); it was re-sent once with the text spaced out. "
+    f"({CONTENT_RISK_ERROR}); it was re-sent once with astral-plane codepoints "
+    "written as <U+XXXX> and, still refused, once with the text spaced out. "
     "If this persists the session context contains a fragment the provider "
     "refuses: inspect/clean the session history or start a new session."
 )
@@ -178,10 +179,32 @@ def space_out_text(text: str) -> str:
     return " ".join(text)
 
 
-def space_out_messages(messages: list[dict]) -> list[dict]:
-    """A copy of ``messages`` with every message's text payload spaced out.
+def escape_astral_text(text: str) -> str:
+    """Write every astral-plane codepoint in ``text`` as its ``<U+XXXX>`` notation.
 
-    Scope is deliberate:
+    The transform that actually works (rant 2026-09-28T15:57:31, measured over
+    22 points against the live provider): the content filter strips every
+    character for which ``str.isspace()`` is true *before* it matches, so
+    inserting spaces — which is all :func:`space_out_text` does — hands it a
+    byte sequence identical to the refused one. 101 spaced retries were refused
+    101 times while costing +100% of a 2.6 MB body. Replacing a codepoint is a
+    change the filter can see, and it costs +0.27% on a payload that contains
+    one: the astral planes are the class of refusal the host measured.
+
+    An identity transform for text with no astral codepoint, deliberately — a
+    healthy session pays nothing (no byte differs, no prompt cache dies), and
+    the caller does not have to ask first.
+    """
+    return "".join(
+        f"<U+{ord(ch):04X}>" if ord(ch) > 0xFFFF else ch for ch in text
+    )
+
+
+def _map_message_text(messages: list[dict], transform) -> list[dict]:
+    """A copy of ``messages`` with ``transform`` applied to every text payload.
+
+    Scope is deliberate and shared by every transform in this ladder, because a
+    refusal can hide in any of them and a pairing must survive all of them:
       * ``content`` on every role (system / user / assistant / tool) — a
         tool_result body is message content like any other, and the poisoned
         fragment can sit in any of them;
@@ -198,16 +221,72 @@ def space_out_messages(messages: list[dict]) -> list[dict]:
         new = dict(message)
         content = new.get("content")
         if isinstance(content, str):
-            new["content"] = space_out_text(content)
+            new["content"] = transform(content)
         elif isinstance(content, list):
             new["content"] = [
-                {**part, "text": space_out_text(part["text"])}
+                {**part, "text": transform(part["text"])}
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
                 else part
                 for part in content
             ]
         out.append(new)
     return out
+
+
+def escape_astral_messages(messages: list[dict]) -> list[dict]:
+    """``_map_message_text`` with :func:`escape_astral_text`.
+
+    The first rung of the content-refusal ladder; see :data:`CONTENT_RISK_LADDER`.
+    """
+    return _map_message_text(messages, escape_astral_text)
+
+
+def space_out_messages(messages: list[dict]) -> list[dict]:
+    """``_map_message_text`` with :func:`space_out_text`.
+
+    The rung of last resort: the answer the 2026-09-17 change adopted (rant
+    2026-09-17T17:55:42), kept because the ladder is defined to end with it —
+    not because it is expected to recover from the refusal measured in
+    :func:`escape_astral_text`, which the measurement there says it cannot.
+    """
+    return _map_message_text(messages, space_out_text)
+
+
+#: The content-refusal ladder, in the order the rungs are tried (rant
+#: 2026-09-28T15:57:31). Each rung is **one-shot**, and the ladder is not a
+#: budget: a refusal by the last rung is reported, never retried again, and no
+#: retry ever sends a payload two rungs made between them — the second rung is
+#: applied to the *original* messages, never to the escaped ones.
+CONTENT_RISK_LADDER = ("escape", "space_out")
+
+#: What each rung does, in the words the warning and the host-facing hint print.
+CONTENT_RISK_RUNG_DESCRIPTION = {
+    "escape": "astral-plane codepoints written as <U+XXXX>",
+    "space_out": "the text spaced out",
+}
+
+
+def content_risk_retry(stage: int, original: list[dict]) -> tuple[str, list[dict]] | None:
+    """The next rung for a content refusal, or ``None`` when the ladder is spent.
+
+    Returns ``(rung, messages)`` — the messages to send on this rung, built from
+    ``original`` (the payload as the caller wrote it, captured before any rung
+    ran). Building each rung from ``original`` is the whole point of the
+    signature: rung 2 must not be applied on top of rung 1's output, which would
+    send a payload neither transform alone describes, and would make the second
+    retry's cost depend on the first's.
+
+    ``stage`` is how many rungs have already been spent, so the caller's state is
+    one integer and the ladder has exactly one implementation — the two call
+    sites in this module (``chat`` and the streaming path) are literals of each
+    other, and a rule spelled twice is a rule that drifts.
+    """
+    if stage < 0 or stage >= len(CONTENT_RISK_LADDER):
+        return None
+    rung = CONTENT_RISK_LADDER[stage]
+    if rung == "escape":
+        return rung, escape_astral_messages(original)
+    return rung, space_out_messages(original)
 
 
 def with_content_risk_hint(message: str) -> str:
@@ -289,11 +368,17 @@ class LlmClient:
         self.last_response_headers = {}
 
         last_error = None
-        # One-shot: after a content-filter refusal the request is re-sent with
-        # the text spaced out (see space_out_messages). A second refusal is
-        # reported honestly — never retried again, never handed to the
-        # chunked compactor (rant 2026-09-17T17:55:42).
-        content_risk_retried = False
+        # One-shot per rung: after a content-filter refusal the request is re-sent
+        # once with the astral-plane codepoints written out, and — still refused —
+        # once more with the text spaced out (`CONTENT_RISK_LADDER`). A refusal
+        # after both is reported honestly: never retried again, never handed to
+        # the chunked compactor (rant 2026-09-17T17:55:42, rant 2026-09-28T15:57:31).
+        #
+        # `original` is the payload as the caller wrote it, captured here and never
+        # reassigned: every rung is built from it, so no retry sends a payload two
+        # transforms made between them (`content_risk_retry`).
+        original_messages = list(payload["messages"])
+        content_risk_stage = 0
         for attempt in range(MAX_RETRIES + 1):
             # First attempt is the normal path — log nothing (rant
             # 2026-08-17T14:27:39: 1/4 on every request is noise); retries
@@ -340,18 +425,22 @@ class LlmClient:
             # misreading is the self-lock of rant 2026-09-17T17:55:42).
             refusal = f"LLM request failed: {resp.status_code} - {_redact_text(text)}"
             if classify_llm_error(RuntimeError(refusal)) == CONTENT_RISK:
-                if not content_risk_retried:
-                    content_risk_retried = True
+                nxt = content_risk_retry(content_risk_stage, original_messages)
+                if nxt is not None:
+                    rung, messages = nxt
+                    content_risk_stage += 1
                     logger.warning(
-                        "LLM content-filter refusal %d — re-sending once with the "
-                        "text spaced out: %s", resp.status_code, _redact_text(text[:200]),
+                        "LLM content-filter refusal %d — re-sending (%s of %d) with %s: %s",
+                        resp.status_code, content_risk_stage, len(CONTENT_RISK_LADDER),
+                        CONTENT_RISK_RUNG_DESCRIPTION[rung], _redact_text(text[:200]),
                     )
-                    payload["messages"] = space_out_messages(payload["messages"])
+                    payload["messages"] = messages
                     self.last_payload = dict(payload)
                     continue
                 logger.error(
-                    "LLM content-filter refusal again after the spaced retry "
-                    "(status=%d): %s", resp.status_code, _redact_text(text[:500]),
+                    "LLM content-filter refusal again after %d retries "
+                    "(status=%d): %s", len(CONTENT_RISK_LADDER), resp.status_code,
+                    _redact_text(text[:500]),
                 )
             if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
@@ -427,7 +516,10 @@ class LlmClient:
         tc_by_index: dict[int, dict] = {}
 
         last_error = None
-        content_risk_retried = False
+        # Same ladder as `chat()` — one-shot per rung, each built from the payload
+        # as the caller wrote it (rant 2026-09-28T15:57:31).
+        original_messages = list(payload["messages"])
+        content_risk_stage = 0
         for attempt in range(MAX_RETRIES + 1):
             # First attempt silent (rant 2026-08-17T14:27:39) — the retrying
             # warning already logs the retry; this adds the attempt counter.
@@ -447,28 +539,33 @@ class LlmClient:
                 async with client.stream("POST", url, headers=headers, json=payload) as resp:
                     if resp.status_code != 200:
                         text = await resp.aread()
-                        # Content-filter refusal: same one-shot spaced retry as
-                        # chat() (rant 2026-09-17T17:55:42). This branch runs
-                        # before any delta is yielded, so retrying here cannot
-                        # duplicate streamed content.
+                        # Content-filter refusal: the same one-shot-per-rung ladder
+                        # as chat() (rant 2026-09-17T17:55:42, rant
+                        # 2026-09-28T15:57:31). This branch runs before any delta is
+                        # yielded, so retrying here cannot duplicate streamed content.
                         refusal = (
                             f"LLM stream request failed: {resp.status_code} - "
                             f"{_redact_text(text[:500])}"
                         )
                         if classify_llm_error(RuntimeError(refusal)) == CONTENT_RISK:
-                            if not content_risk_retried:
-                                content_risk_retried = True
+                            nxt = content_risk_retry(content_risk_stage, original_messages)
+                            if nxt is not None:
+                                rung, messages = nxt
+                                content_risk_stage += 1
                                 logger.warning(
-                                    "LLM stream content-filter refusal %d — re-sending once "
-                                    "with the text spaced out: %s",
-                                    resp.status_code, _redact_text(text[:200]),
+                                    "LLM stream content-filter refusal %d — re-sending "
+                                    "(%s of %d) with %s: %s",
+                                    resp.status_code, content_risk_stage,
+                                    len(CONTENT_RISK_LADDER),
+                                    CONTENT_RISK_RUNG_DESCRIPTION[rung],
+                                    _redact_text(text[:200]),
                                 )
-                                payload["messages"] = space_out_messages(payload["messages"])
+                                payload["messages"] = messages
                                 self.last_payload = dict(payload)
                                 continue
                             logger.error(
-                                "LLM stream content-filter refusal again after the spaced "
-                                "retry (status=%d): %s",
+                                "LLM stream content-filter refusal again after %d "
+                                "retries (status=%d): %s", len(CONTENT_RISK_LADDER),
                                 resp.status_code, _redact_text(text[:500]),
                             )
                         if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
