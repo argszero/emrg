@@ -49,15 +49,21 @@ makes "one-way" measurable rather than guessed:
   that PR referenced N; the event carries the referrer's full body, so whether it
   *declared* the claim is decided from the same event with no extra call;
 * on **PR P's** timeline, a `cross-referenced` event whose source **is not a PR** means
-  that issue referenced P in its own text (body or comment).
+  that issue referenced P in its own text (body or comment) — and, as on the PR side, a
+  reference is the link's second half only when that text **claims** P (`issue_claims`),
+  because the citation/claim ambiguity is symmetric (issue #1660).
 
 So a link that exists in one direction only is visible as exactly that. The measurement
 that separated the two directions, before this tool existed: PR **#1607**'s timeline
 carries a cross-reference from issue **#1553** (written in a comment on the issue, not
 in its body), while PR **#1616**'s carries none although #1616's body names #1551 — a
-one-way link. That pair is also what settles the first question a reader asks: a mention
-in an issue **comment** counts, so "handled by #N" written under the issue is a real
-second half and not something the tool is blind to.
+one-way link. That pair is also what settles the first question a reader asks: an issue's
+**comment** is read, not only its body, so "handled by #N" written under the issue is a
+real second half and not something the tool is blind to. The comment is *fetched* rather
+than read off the event, because a `cross-referenced` event carries its source's **body**
+and never the comment that made the reference (measured 2026-09-27, issue #1660: #1655's
+timeline carries a reference from #1654 whose source body is #1654's body, while the claim
+`Taken by **#1655**` is a comment) — see `issue_text`.
 
 The two shapes the rule itself produces, both in the live queue on the day it was read:
 an issue whose work **landed and was never closed** (#1553, #1554, #1556, #1560, #1598,
@@ -69,11 +75,15 @@ What it reads, and the boundary of that reading
 -----------------------------------------------
 One call lists the open issues and the open PRs together (`/issues` returns both, and
 the `pull_request` key is the discriminator), then one timeline call per open issue and
-per open PR. Boundary facts, stated rather than implied:
+per open PR, and one comments call per issue that some open PR references (the claim text
+costs a call — see `issue_text`). Boundary facts, stated rather than implied:
 
 * the subject is the **open** queue. A PR that references only a *closed* issue reads
   `unlinked`, and an issue naming a *closed* PR is not counted as naming a live one —
   both say so in the row rather than claiming the number is absent;
+* a claim phrase is read from an issue's body **and** its comments, with code spans and
+  fenced blocks blanked out first, so an issue that *quotes* `handled by #N` is not read
+  as making that claim — the same direction, for the same reason, as the PR side;
 * a timeline is read to 100 events per page, paginated, and truncation is not silently
   treated as the whole history. What `--paginate` actually prints was measured rather
   than assumed (see `_paged_json`);
@@ -138,6 +148,32 @@ it, so the input is the family's normal case. The masking stops early, the same 
 as the list and negation bounds: a missed claim is a loud row a reader can fix, an
 invented one is silent.
 
+The issue side has no closing keyword, so it reads a claim **phrase**
+--------------------------------------------------------------------
+GitHub defines no syntax an issue can use to declare that a PR finishes it, and the first
+version of this tool therefore counted *any* reference from an issue as the issue naming
+its handler. Measured 2026-09-27 (issue #1660, cycle `cyc20260927-194212`, master
+`d177c982`), on this tool's own live queue: issue **#1650**'s reopen comment cited
+**#1653** — pointing at the branch a new guard lived on — and the reading reported #1650
+as naming #1653, printing a `one-way` row whose remedy asked an unrelated PR to declare
+the issue.
+
+So the issue side reads a **claim phrase**: a closing verb in the passive voice (`closed
+by`, `fixed by`, `resolved by`) or one of the two verbs this project actually writes under
+an issue (`handled by`, `taken by`), followed by the reference. The vocabulary is measured
+rather than invented — the live rows that must keep reading `ok` are #1658/#1661/#1663/
+#1665 (`Handled by #N`, all four in a **comment**) and #1654 (`Taken by **#1655**`,
+with the emphasis between the verb and the number) — and `handled by` is in it for a
+second reason: it is the phrase *this tool prints as its remedy*, so a reader who follows
+the printed instruction is read back the same way.
+
+The direction of error is the PR side's, and it is why the list stays short: a claim
+phrased some other way leaves a **loud** `one-way` row a reader can fix by writing the
+phrase the remedy names, while reading a citation as a claim **invents** a link in silence.
+A claim is also read *for* a particular PR — an issue claiming `#20` does not make `#30`
+claimed — which is the second way a citation can leak into a row, and `claiming_issues` is
+where both are closed.
+
 A note on this docstring
 ------------------------
 It quotes the host verbatim, so it is not ASCII. That is safe only because the script
@@ -189,6 +225,28 @@ _CLOSING_KEYWORD = re.compile(
 _NEGATED_KEYWORD = re.compile(
     r"(?i)(?:\bnot\b|\bnever\b|\bno\b|\bwithout\b|\bcannot\b|\bcan't\b|\bwon't\b"
     r"|\bdon't\b|\bdoesn't\b|\bisn't\b|\baren't\b)\s+(?:\w+\s+){0,2}$"
+)
+
+#: The issue side's claim form, and the mirror of `_CLOSING_KEYWORD`: a closing verb in
+#: the **passive** voice — the form an issue can write about a PR — plus the two verbs
+#: this project actually writes under an issue. Measured 2026-09-27 against the live
+#: queue rather than invented, because the vocabulary decides which live rows stay `ok`:
+#: `Handled by #1659` (#1658), `Handled by #1662` (#1661), `Handled by #1664` (#1663),
+#: `Handled by #1666` (#1665) — all four in a **comment**, which is why the claim
+#: text is fetched rather than read off the cross-reference event — and
+#: `Taken by **#1655**` (#1654) / `Taken by #1653` (#1652), with the emphasis between the
+#: verb and the number, which is what the separator class is for.
+#:
+#: `handled by` is in the list for a second reason beyond measurement: it is the phrase
+#: this tool prints as its own remedy (`judge_issues`), so a reader who follows the
+#: printed instruction is read back the same way. The list is deliberately short — see
+#: the module docstring on which direction an omission errs in.
+#:
+#: Only the **participles** are matched. `\b` keeps `unhandled by` / `unfixed by` out
+#: without a separate clause, since there is no word boundary between `un` and `handled`.
+_CLAIMED_BY = re.compile(
+    r"(?i)\b(?:closed|fixed|resolved|handled|taken)\s+by\b[\s:*_]*"
+    r"((?:#[0-9]+[\s,]*)+)"
 )
 
 #: Code spans and fenced blocks are masked out before a claim is read, because a body
@@ -331,6 +389,31 @@ def declared_claims(body: str | None) -> set[int]:
     return claims
 
 
+def issue_claims(text: str | None) -> set[int]:
+    """The PR numbers an issue's own text says it is **finished by**.
+
+    The mirror of `declared_claims`, and deliberately the same machinery: code spans and
+    fenced blocks are blanked out first (`_without_code`), a claim the clause negates is
+    not one (`_NEGATED_KEYWORD`), and `None` declares nothing. What differs is the
+    vocabulary, because GitHub defines none on this side — the closing verbs in the
+    passive voice, plus the two this project writes (`_CLAIMED_BY`, whose comment carries
+    the measurement).
+
+    Public for the same reason its counterpart is: this is the reading the whole tool
+    agrees on, and the tests drive it directly so that "a citation is not a claim" is
+    pinned at the unit level and not only through a whole report. The live case it was
+    written for is issue #1660: #1650's reopen comment cites `#1653`, and a bare citation
+    must not read as #1650 naming its handler.
+    """
+    masked = _without_code(text or "")
+    claims: set[int] = set()
+    for match in _CLAIMED_BY.finditer(masked):
+        if _NEGATED_KEYWORD.search(masked[: match.start()]):
+            continue
+        claims.update(int(n) for n in re.findall(r"#(\d+)", match.group(1)))
+    return claims
+
+
 def _paged_json(args: list[str]) -> list[dict]:
     """Parse `gh api --paginate` output.
 
@@ -397,6 +480,27 @@ def timeline(repo: str, number: int) -> list[dict]:
     )
 
 
+def issue_text(repo: str, number: int, body: str | None) -> str:
+    """An issue's body **and** every one of its comments, as one text.
+
+    Why the comments cost a call of their own: a `cross-referenced` event carries its
+    source's **body**, so on a PR's timeline a reference from issue N hands back N's body
+    and never the comment that made it — measured 2026-09-27, `issues/1655/timeline`
+    carries a reference from #1654 whose source body is #1654's body (2,356 chars) while
+    the claim `Taken by **#1655**` is a comment. A comment is where the claim normally
+    lives — the remedy this tool prints is `gh issue comment … 'handled by #N'` — so the
+    text has to be fetched rather than read off the event.
+
+    `body` is passed in rather than fetched, because `/issues` already returned it.
+    """
+    comments = _paged_json(
+        ["api", f"repos/{repo}/issues/{number}/comments?per_page={_TIMELINE_PER_PAGE}"]
+    )
+    bodies = [body or ""]
+    bodies.extend(str(row.get("body") or "") for row in comments)
+    return "\n\n".join(bodies)
+
+
 def referencing_prs(events: list[dict], issue_number: int) -> Refs:
     """The PRs that referenced this issue, split into claims and the three mentions.
 
@@ -455,6 +559,13 @@ def referencing_issues(events: list[dict], open_issues: set[int]) -> set[int]:
     history: reporting it as "the issue names it back" would invent a live link out of
     an archived one, and reporting its absence as a fault would ask a reader to edit an
     issue that is already closed.
+
+    This is the **reference** reading and deliberately not the verdict: a reference is
+    not a claim on this side either (issue #1660), so the set is filtered by
+    `claiming_issues` before it is used as the link's second half. The two steps are kept
+    apart because both answers are needed — `collect` reads the claim text only for the
+    issues that appear here, so the reference set is what keeps that call proportional to
+    the question.
     """
     found: set[int] = set()
     for event in events:
@@ -467,6 +578,26 @@ def referencing_issues(events: list[dict], open_issues: set[int]) -> set[int]:
         if number is not None and int(number) in open_issues:
             found.add(int(number))
     return found
+
+
+def claiming_issues(
+    referenced: set[int], claims_by_issue: dict[int, set[int]], pr_number: int
+) -> set[int]:
+    """Of the issues that referenced PR `pr_number`, the ones whose text **claims** it.
+
+    A reference is evidence of attention; a claim is ownership, and only the second is
+    the rule's second half. This is the issue-side half of the distinction the PR side
+    already draws with closing keywords, and it is a named step rather than an inline
+    comprehension because getting it wrong is silent: issue #1660's defect was that a
+    bare citation in a comment — #1650 pointing at #1653's branch — was read as #1650
+    naming its handler, which manufactured a `one-way` row asking an unrelated PR to
+    declare the issue.
+
+    An issue with no text read at all is not a claim: an unreadable referrer must not be
+    able to claim a PR, which is the same rule `referencing_prs` applies to a PR source
+    with no body.
+    """
+    return {number for number in referenced if pr_number in claims_by_issue.get(number, set())}
 
 
 def age_days(created_at: str, now: dt.datetime | None = None) -> float | None:
@@ -753,18 +884,35 @@ def collect(repo: str) -> tuple[Queue, dict[int, Refs], dict[int, set[int]]]:
     The PR-side "which open issues name this PR" is read from each PR's **own** timeline
     (that is the direction in which GitHub records it), so the two maps come from
     complementary reads rather than from one read interpreted two ways.
+
+    That direction is then filtered through the claim text, which costs one comments call
+    per **referencing** issue — not per open issue. A claim is what GitHub cross-references,
+    so an issue that claims a PR is always in some PR's reference set and the filter cannot
+    miss one; an issue nobody references is not read for text at all, and its own row is
+    decided by the issue timeline alone.
     """
     queue = load_queue(repo)
     refs_by_issue: dict[int, Refs] = {}
     for issue in queue.issues:
         number = int(issue["number"])
         refs_by_issue[number] = referencing_prs(timeline(repo, number), number)
-    stated_by_pr: dict[int, set[int]] = {}
+    referencing_by_pr: dict[int, set[int]] = {}
     for pr in queue.prs:
         number = int(pr["number"])
-        stated_by_pr[number] = referencing_issues(
+        referencing_by_pr[number] = referencing_issues(
             timeline(repo, number), queue.issue_numbers
         )
+    bodies = {int(issue["number"]): issue.get("body") for issue in queue.issues}
+    referenced = (
+        set().union(*referencing_by_pr.values()) if referencing_by_pr else set()
+    )
+    claims_by_issue = {
+        number: issue_claims(issue_text(repo, number, bodies[number]))
+        for number in sorted(referenced)
+    }
+    stated_by_pr: dict[int, set[int]] = {}
+    for number, referenced_issues in referencing_by_pr.items():
+        stated_by_pr[number] = claiming_issues(referenced_issues, claims_by_issue, number)
     return queue, refs_by_issue, stated_by_pr
 
 

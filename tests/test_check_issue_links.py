@@ -60,8 +60,24 @@ def mod():
     return _load_module()
 
 
-def _issue(number: int, title: str = "an issue", created: str = "2026-09-24T10:00:00Z") -> dict:
-    return {"number": number, "title": title, "created_at": created}
+def _issue(
+    number: int, title: str = "an issue", created: str = "2026-09-24T10:00:00Z",
+    body: str = "",
+) -> dict:
+    return {"number": number, "title": title, "created_at": created, "body": body}
+
+
+def _comment(text: str) -> dict:
+    """One issue comment, as `/issues/N/comments` reports it.
+
+    The claim normally lives here rather than in the issue body: every `ok` row on the
+    live queue is a comment (`Handled by #1666` on #1665, `Taken by **#1655**` on #1654)
+    and the remedy this tool prints is a comment too. A cross-reference event does **not**
+    carry it — its source body is the issue's body (measured 2026-09-27 on
+    `issues/1655/timeline`) — which is why `issue_text` fetches the comments and why the
+    fixtures serve the two separately.
+    """
+    return {"body": text}
 
 
 def _pr(
@@ -102,6 +118,12 @@ def _refers_to(
     source carries nothing). A merged PR is `state: closed` **with** this set — which is
     why the reading keys on it and not on the state, and why the fixture can express the
     two separately.
+
+    For an **issue** source this `body` is the issue's *body* and never the comment that
+    made the reference (measured 2026-09-27: `issues/1655/timeline` carries an event from
+    #1654 whose source body is #1654's body, while the claim is a comment) — so an issue's
+    claim is read from `issue_text`, not from here. The fixtures keep the two apart
+    deliberately: passing the claim in this field would pin a shape the API does not send.
     """
     source: dict = {"number": number, "state": state, "body": body}
     if is_pr:
@@ -120,10 +142,12 @@ def _merged(number: int, *, body: str = "", merged_at: str = "2026-09-25T00:00:0
 class FakeGh:
     """`_gh` replaced by a routing table; every call recorded.
 
-    Two payloads are served, both as the JSON *text* `gh` would print, because the tool
-    parses its own output: the open queue (one `/issues` call) and a per-subject
-    timeline. An unexpected query is an assertion failure rather than an empty answer,
-    so a typo in a path cannot read as "no links".
+    Three payloads are served, all as the JSON *text* `gh` would print, because the tool
+    parses its own output: the open queue (one `/issues` call), a per-subject timeline,
+    and a per-issue comment list. An unexpected query is an assertion failure rather than
+    an empty answer, so a typo in a path cannot read as "no links" — and a comments call
+    for an issue that is not in the queue is such a typo, since no claiming issue can be
+    outside it.
 
     The shape served is the one measured on this machine (2026-09-26): with no `--jq`,
     `gh api --paginate` prints **one merged array on one line**. The other measured
@@ -135,10 +159,12 @@ class FakeGh:
         issues: list[dict],
         prs: list[dict],
         timelines: dict[int, list[dict]],
+        comments: dict[int, list[dict]] | None = None,
     ):
         self.issues = issues
         self.prs = prs
         self.timelines = timelines
+        self.comments = comments or {}
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> str:
@@ -150,6 +176,11 @@ class FakeGh:
         assert target, args
         if "/issues?" in target:
             return json.dumps([*self.issues, *self.prs])
+        if "/comments?" in target:
+            number = int(target.split("/issues/")[1].split("/")[0])
+            known = {int(row["number"]) for row in self.issues}
+            assert number in known, f"comments for an issue outside the queue: {args}"
+            return json.dumps(self.comments.get(number, []))
         for number, events in self.timelines.items():
             if target.startswith(f"repos/{REPO}/issues/{number}/timeline?"):
                 return json.dumps(events)
@@ -162,6 +193,15 @@ class FakeGh:
             for c in self.calls
             for a in c
             if "/issues/" in a and "/timeline?" in a
+        ]
+
+    @property
+    def comments_calls(self) -> list[int]:
+        return [
+            int(a.split("/issues/")[1].split("/")[0])
+            for c in self.calls
+            for a in c
+            if "/issues/" in a and "/comments?" in a
         ]
 
 
@@ -194,7 +234,13 @@ def _detail(out: str, subject: str) -> str:
 
 
 def _linked_pair() -> FakeGh:
-    """The positive case: PR 20 declares `Closes #10`, and issue 10 names it back."""
+    """The positive case: PR 20 declares `Closes #10`, and issue 10 names it back.
+
+    Issue 10's half is a **comment**, which is the shape the live queue carries and the
+    reason the claim text is fetched at all: the cross-reference event on #20's timeline
+    carries issue 10's *body* (here empty), while the claim sits in a comment — the shape
+    `Handled by #1666` (#1665) and `Taken by **#1655**` (#1654) really have.
+    """
     return FakeGh(
         [_issue(10, "the problem")],
         [_pr(20, "the fix", body="Closes #10.")],
@@ -202,6 +248,7 @@ def _linked_pair() -> FakeGh:
             10: [_refers_to(20, is_pr=True, body="Closes #10.")],
             20: [_refers_to(10, is_pr=False)],
         },
+        comments={10: [_comment("Handled by #20 — the daemon half, updated in the PR.")]},
     )
 
 
@@ -313,6 +360,65 @@ def test_a_quoted_keyword_is_not_a_claim(mod) -> None:
     assert mod.declared_claims("Closes #15.\n\n(the quote above is `Closes #16.`)") == {15}
 
 
+def test_issue_claims_reads_the_claim_phrase_and_not_a_citation(mod) -> None:
+    """The issue side's claim form, in both directions, from the live vocabulary.
+
+    Issue #1660 is the defect this pins: the reading counted *any* reference from an
+    issue as the issue naming its handler, so #1650's reopen comment — which cited
+    **#1653** as the branch a new guard lived on — manufactured a `one-way` row whose
+    remedy asked an unrelated PR to declare the issue.
+
+    The surviving forms are the ones the live queue actually carries, quoted from it
+    (`Handled by #1659` on #1658, `Taken by **#1655**` on #1654 — the emphasis between the
+    verb and the number is why the separator is what it is). The non-claims are the two
+    shapes #1650 really writes: a bare citation, and a bare designation with no claim
+    verb at all. Both must read as nothing, and the second is the one a reader would
+    most expect to count — which is why it is asserted rather than left to judgment.
+    """
+    # The claims: the measured queue, verbatim, plus the closing verbs' passive voice.
+    assert mod.issue_claims("Handled by #1659 (`emrg: a session snapshot`)") == {1659}
+    assert mod.issue_claims("Handled by: #1666 — the separator may be a colon") == {1666}
+    assert mod.issue_claims("Taken by **#1655** — the branch name becomes one constant") == {1655}
+    assert mod.issue_claims("Taken by #1653 — `scripts/check-release-tag.py`") == {1653}
+    assert mod.issue_claims("Closed by #7, fixed by #8 and resolved by #9") == {7, 8, 9}
+    assert mod.issue_claims("Handled by #1, #2") == {1, 2}
+
+    # A citation is not a claim — the live #1650 text, both halves of it.
+    assert mod.issue_claims(
+        "run `scripts/check-release-tag.py v0.3.4` … it exists only on #1653's branch"
+    ) == set()
+    assert mod.issue_claims(
+        "The release PR for this is **#1651** (`emrg: release v0.3.4`, branch "
+        "`release/v0.3.4`), and its body declares `Closes #1650`"
+    ) == set()
+
+    # The same two bounds the PR side applies: a negated phrase declares nothing, and a
+    # quoted one declares nothing. `unhandled by` is the third form — the `\b` before the
+    # verb is what keeps it out, since there is no boundary inside `unhandled`.
+    assert mod.issue_claims("This is not handled by #1653") == set()
+    assert mod.issue_claims("unhandled by #7, and unfixed by #8") == set()
+    assert mod.issue_claims("it is not this, but handled by #5") == {5}
+    assert mod.issue_claims("a quoted `Handled by #13` span") == set()
+    assert mod.issue_claims("example:\n```\nHandled by #11.\n```\nand handled by #12.") == {12}
+    assert mod.issue_claims("an unterminated fence:\n```\nHandled by #14.") == set()
+    assert mod.issue_claims(None) == set()
+    assert mod.issue_claims("nothing to see here") == set()
+
+
+def test_claiming_issues_keeps_only_the_claimants(mod) -> None:
+    """The filter between "referenced it" and "claims it", asserted as a set operation.
+
+    Three issues reference one PR; only two claim it, and one of those claims a
+    *different* PR — which must not transfer. An issue with no text read at all is not a
+    claimant either, the same rule the PR side applies to a source with no body.
+    """
+    claims = {10: {20, 30}, 11: {20}, 12: {99}}
+    assert mod.claiming_issues({10, 11, 12}, claims, 20) == {10, 11}
+    assert mod.claiming_issues({10, 11, 12}, claims, 30) == {10}
+    assert mod.claiming_issues({10, 11, 12}, claims, 42) == set()
+    assert mod.claiming_issues({13}, claims, 20) == set()
+
+
 def test_a_quoted_keyword_does_not_claim_anything(mod, monkeypatch, capsys) -> None:
     """The incident at report level: the quotation must not reach the issue's state.
 
@@ -331,6 +437,7 @@ def test_a_quoted_keyword_does_not_claim_anything(mod, monkeypatch, capsys) -> N
             11: [_refers_to(20, is_pr=True, body=quoting)],
             20: [_refers_to(10, is_pr=False)],
         },
+        comments={10: [_comment("Handled by #20")]},
     )
     _install(mod, monkeypatch, fake)
 
@@ -720,6 +827,8 @@ def test_both_measured_gh_output_shapes_are_read(mod, monkeypatch, capsys) -> No
                 ]
             )
         number = int(target.split("/issues/")[1].split("/")[0])
+        if "/comments?" in target:
+            return json.dumps(fake.comments.get(number, []))
         return json.dumps(fake.timelines[number])
 
     monkeypatch.setattr(mod, "_gh", routed)
@@ -880,6 +989,7 @@ def test_the_issue_naming_a_pr_that_declares_no_issue_is_one_way_not_linked(
         [_issue(10, "the problem")],
         [_pr(20, "the fix", body="Issue #10: the count cannot fire for it.")],
         {10: [], 20: [_refers_to(10, is_pr=False)]},
+        comments={10: [_comment("Handled by #20 — it declares nothing, which is the row.")]},
     )
     _install(mod, monkeypatch, fake)
 
@@ -891,6 +1001,101 @@ def test_the_issue_naming_a_pr_that_declares_no_issue_is_one_way_not_linked(
     assert "#10 names it and this PR declares no issue" in detail
     assert "`Closes #N` where the PR finishes it" in detail
     assert "#20 PR ok" not in out
+
+
+def test_a_citation_of_a_pr_does_not_read_as_that_issue_naming_it(
+    mod, monkeypatch, capsys
+) -> None:
+    """Issue #1660's defect, at report level: a citation must not manufacture a row.
+
+    The live shape, measured 2026-09-27 on the real API and reproduced here: issue #1650's
+    reopen comment cites **#1653** because a guard it wants run lives on that branch. The
+    reference is real — GitHub records it, and `referencing_issues` still returns #1650
+    for #1653's timeline (re-measured on the live API while writing this) — so a reading
+    that counts references says the issue names #1653 as its handler and prints a
+    `one-way` row asking an unrelated PR to declare #1650.
+
+    Both rows are asserted, because the defect was visible on both: the PR row must read
+    `unlinked` (nothing claims it, so "it belongs to no tracked problem" is the remedy)
+    and the issue row `unclaimed` (nothing declares it). Neither may read `one-way`, and
+    the words that would say a citation counted must appear nowhere.
+    """
+    citation = (
+        "The reopen comment pointed at the branch carrying a new guard: run "
+        "`scripts/check-release-tag.py v0.3.4` … it exists only on #20's branch"
+    )
+    fake = FakeGh(
+        [_issue(10, "master is past the last release")],
+        [_pr(20, "a guard, belonging to another issue", body="")],
+        {10: [], 20: [_refers_to(10, is_pr=False, body="master is past the last release")]},
+        comments={10: [_comment(citation)]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    assert "#20 PR UNLINKED" in out
+    assert "belongs to no tracked problem" in _detail(out, "#20 PR UNLINKED")
+    assert "#10 issue UNCLAIMED" in out
+    assert _detail(out, "#10 issue UNCLAIMED") == "nothing has been opened for it"
+    assert "names it and this PR declares no issue" not in out
+    assert "this issue names #20" not in out
+    # The citation's own number is still read — it is the *claim* that is filtered, not
+    # the reference, so a row that vanished because nothing was fetched would pass the
+    # assertions above for the wrong reason.
+    assert fake.comments_calls == [10]
+
+
+def test_an_issue_that_claims_in_its_body_is_read_too(mod, monkeypatch, capsys) -> None:
+    """The claim is read from the body as well as the comments.
+
+    `issue_text` joins the two, and the live vocabulary does both (`Taken by #1653` is a
+    comment on #1652; an issue body naming its handler is the same act). A reading that
+    only fetched comments would report `one-way` here, and the reverse — a body read that
+    skipped the comments — is what `_linked_pair` pins.
+    """
+    fake = FakeGh(
+        [_issue(10, "the problem", body="Handled by #20 once it lands.")],
+        [_pr(20, "the fix", body="Closes #10.")],
+        {
+            10: [_refers_to(20, is_pr=True, body="Closes #10.")],
+            20: [_refers_to(10, is_pr=False, body="Handled by #20 once it lands.")],
+        },
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 0, out
+    assert "#10 issue ok" in out and "#20 PR ok" in out
+    assert fake.comments_calls == [10]
+
+
+def test_the_claim_text_is_read_only_for_issues_that_reference_a_pr(
+    mod, monkeypatch, capsys
+) -> None:
+    """The cost of the reading, pinned: one comments call per **referencing** issue.
+
+    A claim is what GitHub cross-references, so an issue that claims a PR is always in
+    some PR's reference set and the filter cannot miss one — while an issue nobody
+    references is not read for text at all. That is what keeps the guard's calls
+    proportional to the question rather than to the queue, and a later refactor that
+    looped over every open issue would double the run and break nothing else, which is
+    exactly why the count is asserted here.
+    """
+    fake = FakeGh(
+        [_issue(10, "referenced"), _issue(11, "untouched"), _issue(12, "untouched")],
+        [_pr(20, "the fix", body="")],
+        {10: [], 11: [], 12: [], 20: [_refers_to(10, is_pr=False)]},
+        comments={10: [_comment("Handled by #20")]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    _run(mod, capsys)
+
+    assert sorted(fake.timeline_calls) == [10, 11, 12, 20]
+    assert fake.comments_calls == [10]
 
 
 def test_an_all_linked_queue_exits_zero_and_says_what_it_read(mod, monkeypatch, capsys) -> None:
@@ -908,6 +1113,7 @@ def test_an_all_linked_queue_exits_zero_and_says_what_it_read(mod, monkeypatch, 
             20: [_refers_to(10, is_pr=False)],
             21: [_refers_to(11, is_pr=False)],
         },
+        comments={10: [_comment("Handled by #20")], 11: [_comment("Taken by #21")]},
     )
     _install(mod, monkeypatch, fake)
 
