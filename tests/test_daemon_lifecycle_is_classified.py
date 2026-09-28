@@ -8,11 +8,22 @@ shell command passes through, which is the shape the host actually hit: on
 subprocess signalled the daemon, the TUI answered `server connection lost`, and
 the host asked *"你怎么验证的，怎么把 emrg server重启了？"*.
 
-Every test here asks the **pure predicate** (`_check_sandbox`) or the classifier
-directly. Nothing in this file drives `BashTool.execute` with a lifecycle
-command: a test that really reached the daemon would be the incident, not a
-proof — and a test's safety must not depend on the code it is testing. The
-argv-side reader of the same act (`tests/conftest.py::_spawns_a_daemon_stop_or_restart`)
+Every test here asks the **rule itself** — `command_scan.command_refusal`, which
+is the one place both guards are asked, or the classifier directly. Nothing in
+this file drives `BashToolV2.execute` with a lifecycle command: a test that really
+reached the daemon would be the incident, not a proof — and a test's safety must
+not depend on the code it is testing. (The live executor *is* driven, with its
+spawn boundary replaced by a recorder, in the section at the bottom: that is what
+makes the ordering a proof instead of an incident.)
+
+Until P7 this file read the rules through `bash_tool`'s private aliases, because
+that is where they lived and where the legacy fence asked them. They moved to
+`emrg/tools/command_scan.py` and the tiers they were asked at stopped being a
+property of the *rule*: whether a command is read at all is the executor's
+`DANGER_FULL_ACCESS` exemption, so the tier-shaped assertions below ask the
+executor (bottom section) and the rule assertions ask the rule.
+
+The argv-side reader of the same act (`tests/conftest.py::_spawns_a_daemon_stop_or_restart`)
 has its own corpus in `tests/test_hermeticity_guard.py`, which asks for the
 refusal *before* anything is signalled or spawned.
 """
@@ -24,11 +35,11 @@ from pathlib import Path
 
 import pytest
 
-from emrg.tools.bash_tool import (
-    _check_sandbox,
+from emrg.tools import command_scan
+from emrg.tools.command_scan import (
     _nested_command_texts,
-    _stops_or_restarts_the_daemon,
     _tokenize_command,
+    stops_or_restarts_the_daemon as _stops_or_restarts_the_daemon,
 )
 
 
@@ -126,31 +137,27 @@ NOT_THE_ACT = [
 
 
 @pytest.mark.parametrize("cmd", THE_ACT)
-def test_the_act_is_refused_at_both_checked_tiers(cmd):
-    for mode in ("read-only", "workspace-write"):
-        allowed, reason, _enforcement = _check_sandbox(cmd, mode, "/tmp")
-        assert allowed is False, f"{cmd!r} was allowed at {mode}"
-        assert "emrg" in (reason or "")
+def test_the_act_is_refused(cmd):
+    """The rule answers about the text; *which* tiers ask it is the executor's line.
+
+    Asked through `command_refusal`, which is the call the executors make, so this
+    covers both rules and their order rather than this one alone.
+    """
+    reason = command_scan.command_refusal(cmd)
+    assert reason is not None, f"{cmd!r} was allowed"
+    assert "emrg" in reason
 
 
 @pytest.mark.parametrize("cmd", NOT_THE_ACT)
 def test_a_mention_is_not_the_act(cmd):
-    for mode in ("read-only", "workspace-write"):
-        allowed, reason, _enforcement = _check_sandbox(cmd, mode, "/tmp")
-        assert allowed is True, f"{cmd!r} was refused at {mode}: {reason}"
+    reason = command_scan.command_refusal(cmd)
+    assert reason is None, f"{cmd!r} was refused: {reason}"
     assert _stops_or_restarts_the_daemon(cmd) is None
 
 
-def test_full_access_is_untouched():
-    """The tier that checks nothing still checks nothing — the host's rule there."""
-    allowed, _reason, enforcement = _check_sandbox("emrg server stop", "danger-full-access")
-    assert allowed is True
-    assert enforcement == "full"
-
-
 def test_the_refusal_names_the_rule_and_a_way_out():
-    allowed, reason, _enforcement = _check_sandbox("emrg server restart", "workspace-write")
-    assert allowed is False
+    reason = command_scan.command_refusal("emrg server restart")
+    assert reason is not None
     assert "red line" in reason
     assert "#1324" in reason
     assert "emrg resume" in reason
@@ -246,9 +253,7 @@ def test_the_env_string_handover_is_read_by_the_act_and_not_by_the_write_walk():
     """
     act = 'env -S "emrg server stop"'
     assert _stops_or_restarts_the_daemon(act) == "emrg server stop"
-    for mode in ("read-only", "workspace-write"):
-        allowed, _reason, _enforcement = _check_sandbox(act, mode, "/tmp")
-        assert allowed is False
+    assert command_scan.command_refusal(act) is not None
 
     # the argv side reads the same spelling (a list argv was the gap there)
     assert _argv_side_reader()(["env", "-S", "emrg server stop"], shell_parsed=False)
@@ -257,9 +262,7 @@ def test_the_env_string_handover_is_read_by_the_act_and_not_by_the_write_walk():
     # `>` in it harmless: no nested text, no redirect target, no refusal
     write_like = "env -S 'printf %s RAN > /tmp/emrg-1324-marker'"
     assert _nested_command_texts(_tokenize_command(write_like)) == []
-    for mode in ("read-only", "workspace-write"):
-        allowed, reason, _enforcement = _check_sandbox(write_like, mode, "/tmp")
-        assert allowed is True, f"{write_like!r} was refused at {mode}: {reason}"
+    assert command_scan.command_refusal(write_like) is None, write_like
 
 
 # ── the live path asks the rule (P7, issue #1675) ─────────────────────────────
