@@ -170,17 +170,30 @@ def test_write_no_sandbox_unchanged(temp_dir):
 
 
 def test_write_workspace_write_blocks_outside_workspace(temp_dir, monkeypatch):
-    """Rant 2026-09-01T15:10:23: a workspace-write session must not write to
-    an absolute path outside the session cwd — the same block the bash tool
-    applies, closing the hole where write/edit were the permissive side. The
-    boundary is the bash tool's except for one extra root,
-    `_trusted_write_zones()` (issue #1553)."""
+    """Rant 2026-09-01T15:10:23: a workspace-write session must not write to an
+    absolute path outside the session cwd — the same block the shell tool
+    applies, and now the same *policy*: the boundary is
+    ``emrg/sandbox/roots.writable_roots``, read through the fence.
+
+    Both ambient temp sources are withheld, and the second one is the whole
+    point: ``gettempdir()`` and the host ``/tmp`` are separate grants, pytest's
+    temp base *is* ``/tmp/...`` on a Linux runner, and with only the probe
+    patched this test wrote the sibling it calls "outside" — measured red on the
+    ubuntu leg (CI run 36432808100) and reproduced here by putting the temp base
+    under ``/tmp``. One reader pinned while another stays ambient is the defect
+    class ``tests/test_windows_path_tokens.py`` recorded; the workspace root is
+    still granted, so the target is outside the session cwd and outside every
+    temp root on every platform.
+    """
     import tempfile as _tf
 
-    # The test workspace + target live in the OS temp dir, which is always
-    # allowed — patch gettempdir to a distinct sentinel so the target is not
-    # treated as an OS-temp write root.
+    from emrg.sandbox import roots as sandbox_roots
+
+    # The test workspace + target live in the OS temp dir, which is normally
+    # allowed — withhold that grant so the target is judged on the boundary
+    # alone.
     monkeypatch.setattr(_tf, "gettempdir", lambda: "/fake-os-temp")
+    monkeypatch.setattr(sandbox_roots, "_host_temp_spellings", lambda: [])
     tool = WriteTool()
     workspace = temp_dir / "ws"
     workspace.mkdir()
@@ -231,19 +244,39 @@ def test_write_workspace_write_allows_os_temp(temp_dir):
     assert not target.exists()
 
 
-def test_write_workspace_write_allows_evolution_memory(tmp_path, monkeypatch):
-    """Issue #1093 self-regression: the evolution module writes its cycle records
-    to ~/.emrg/evolution/.emrg/memory/, which is OUTSIDE the repo checkout
-    workspace. The workspace-write boundary must trust that data root so the
-    evolution module can still record its own history (positive state)."""
+def test_write_workspace_write_refuses_the_retired_deployer_root(tmp_path, monkeypatch):
+    """Issue #1093's extra root is retired, so this target is now refused (D5, #1703).
+
+    The file tools used to grant ``~/.emrg/evolution/.emrg/`` aside from the
+    workspace, because the evolution module writes its cycle records there and
+    that tree sits outside every checkout (the positive state issue #1093
+    recorded). Host decision D5 deleted that root from the derivation, issue
+    #1703 archived it, and the fence asks the derivation and nothing else — so
+    the same target is refused. That is this test's discriminating half: a fence
+    that still carried the exception would answer ``allow`` here.
+
+    ``~`` is pinned to scratch and every ambient temp source is withheld, so the
+    target is provably outside all of them on every platform and nothing of the
+    host's is reachable. The previous version of this test asserted the retired
+    behaviour; it passed on ubuntu only because the pinned home happened to sit
+    under ``/tmp``, and on Windows ``expanduser`` reads ``USERPROFILE``, which it
+    did not pin (CI run 36432808100: ``assert not True``).
+    """
     import os
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    import tempfile as _tf
+
+    from emrg.sandbox import roots as sandbox_roots
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    # expanduser reads USERPROFILE first on Windows, so pin the one that decides.
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setattr(_tf, "gettempdir", lambda: "/fake-os-temp")
+    monkeypatch.setattr(sandbox_roots, "_host_temp_spellings", lambda: [])
     evo_data = Path(os.path.realpath(os.path.expanduser("~/.emrg/evolution/.emrg")))
-    evo_data.mkdir(parents=True, exist_ok=True)
     ws = tmp_path / "ws"
     ws.mkdir()
     target = evo_data / "memory" / "cycle-20260901-000000.md"
-    target.parent.mkdir(parents=True, exist_ok=True)
     tool = WriteTool()
     result = _run(tool.execute({
         "file_path": str(target),
@@ -251,9 +284,9 @@ def test_write_workspace_write_allows_evolution_memory(tmp_path, monkeypatch):
         "sandbox": "workspace-write",
         "workspace": str(ws),
     }))
-    assert not result.error
-    assert target.exists()
-    assert target.read_text() == "cycle record"
+    assert result.error
+    assert "workspace-write sandbox" in result.content
+    assert not target.exists()
 
 
 def test_write_workspace_write_blocks_a_protected_daemon_file(tmp_path, monkeypatch):

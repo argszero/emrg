@@ -39,6 +39,16 @@ from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import DANGER_FULL_ACCESS, resolve_policy
 from emrg.tools import edit_tool, file_policy, write_tool
 
+#: An absolute path on **every** platform, and outside every temp root it grants.
+#: ``"/tmp"`` is neither: ``resolve_policy`` refuses a workspace root that is not
+#: absolute in the execution world (`policy.py`), ``os.path.isabs("/tmp")`` is
+#: False on Windows, and pytest's temp base *is* ``/tmp/...`` on a Linux runner,
+#: i.e. a root ``workspace-write`` grants. Three tests in this file spelled
+#: ``/tmp/...`` and the Windows leg reported all three (CI run 36432808100:
+#: ``ValueError: … workspace_root must be an absolute execution-world path``) —
+#: the same constant ``tests/test_bash_v2_policy.py`` uses, for the same reason.
+ABSOLUTE_ELSEWHERE = os.path.join(os.path.abspath(os.sep), "emrg-not-granted")
+
 #: The helpers the *mechanics* keep in ``emrg/tools/file_policy.py``: where a
 #: relative spelling resolves, what "inside" means, and the host's protected
 #: files. The policy itself is no longer one of them.
@@ -132,9 +142,10 @@ def test_the_fence_has_one_input_the_shared_derivation(monkeypatch):
     with tempfile.TemporaryDirectory() as granted_dir:
         granted = os.path.realpath(granted_dir)
         monkeypatch.setattr(fence, "writable_roots", lambda policy: [granted])
-        policy = resolve_policy(mode="workspace-write", workspace_root="/tmp/emrg-not-granted")
+        not_granted = ABSOLUTE_ELSEWHERE
+        policy = resolve_policy(mode="workspace-write", workspace_root=not_granted)
         assert file_refusal(os.path.join(granted, "f.txt"), policy) is None
-        refusal = file_refusal("/tmp/emrg-not-granted/f.txt", policy)
+        refusal = file_refusal(os.path.join(not_granted, "f.txt"), policy)
         assert refusal is not None, "the fence honoured the workspace root on its own"
 
 
@@ -235,10 +246,12 @@ def test_the_fence_is_never_looser_than_the_derivation():
     asserted here so the exception cannot quietly become the other kind.
     """
     for mode in ("read-only", "workspace-write"):
-        policy = resolve_policy(mode=mode, workspace_root="/tmp/emrg-invariant-ws")
+        workspace = ABSOLUTE_ELSEWHERE
+        outside = f"{ABSOLUTE_ELSEWHERE}-outside"
+        policy = resolve_policy(mode=mode, workspace_root=workspace)
         for target in (
-            "/tmp/emrg-invariant-ws/f.txt",
-            "/tmp/emrg-invariant-outside.txt",
+            os.path.join(workspace, "f.txt"),
+            os.path.join(outside, "f.txt"),
             os.path.expanduser("~/.emrg/config.toml"),
             "/etc/hosts",
         ):
@@ -261,7 +274,7 @@ def test_the_silence_keeps_its_meaning():
     that arrives with silence; mapping it to ``read-only`` would confiscate a
     session nobody asked to confine (``emrg/sandbox/policy.py``).
     """
-    policy = resolve_policy(mode=None, workspace_root="/tmp/emrg-silence")
+    policy = resolve_policy(mode=None, workspace_root=ABSOLUTE_ELSEWHERE)
     assert policy.mode == DANGER_FULL_ACCESS
     assert file_refusal("/etc/hosts", policy) is None
 

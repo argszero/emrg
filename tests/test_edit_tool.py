@@ -175,19 +175,28 @@ def test_edit_no_sandbox_unchanged(temp_file):
 
 def test_edit_workspace_write_blocks_outside_workspace(temp_file, monkeypatch):
     """Rant 2026-09-01T15:10:23: a workspace-write session must not edit an
-    absolute path outside the session cwd — the same block the bash tool
-    applies, closing the hole where write/edit were the permissive side. The
-    boundary is the bash tool's except for one extra root,
-    `_trusted_write_zones()` (issue #1553)."""
+    absolute path outside the session cwd — the same block the shell tool
+    applies, and now the same *policy*: the boundary is
+    ``emrg/sandbox/roots.writable_roots``, read through the fence.
+
+    Both ambient temp sources are withheld, not just the ``gettempdir()`` probe:
+    the host ``/tmp`` is a grant of its own and pytest's temp base is ``/tmp/...``
+    on a Linux runner, which is how this test's sibling stopped being "outside"
+    there (CI run 36432808100, red on ubuntu and green locally). See the write
+    tool's twin for the measurement; the two are one rule with two callers.
+    """
     import tempfile as _tf
 
+    from emrg.sandbox import roots as sandbox_roots
+
     # Build the sibling scratch dir first (TemporaryDirectory needs the real
-    # OS temp), then patch gettempdir so the tool's check doesn't treat the
-    # sibling as an OS-temp write root.
+    # OS temp), then withhold the temp grants so the sibling is judged on the
+    # workspace boundary alone.
     with _tf.TemporaryDirectory() as d:
         sibling = Path(d) / "outside.txt"
         sibling.write_text("dangerous line\n", encoding="utf-8")
         monkeypatch.setattr(_tf, "gettempdir", lambda: "/fake-os-temp")
+        monkeypatch.setattr(sandbox_roots, "_host_temp_spellings", lambda: [])
         tool = EditTool()
         result = _run(tool.execute({
             "file_path": str(sibling),

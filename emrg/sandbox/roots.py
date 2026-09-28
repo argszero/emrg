@@ -84,7 +84,7 @@ def writable_roots(policy: SandboxPolicy) -> list[str]:
     """
     if policy.mode != "workspace-write":
         return []
-    spellings = [policy.workspace_root, "/tmp"]
+    spellings = [policy.workspace_root, *_host_temp_spellings()]
     spellings.extend(_platform_temp_sources())
     out: list[str] = []
     seen: set[str] = set()
@@ -94,6 +94,36 @@ def writable_roots(policy: SandboxPolicy) -> list[str]:
             seen.add(canonical)
             out.append(canonical)
     return out
+
+
+#: The shared POSIX temp root — one spelling, named once, read through
+#: :func:`_host_temp_spellings` so it can be withheld as the ambient input it is.
+_HOST_TEMP = "/tmp"
+
+
+def _host_temp_spellings() -> list[str]:
+    """The host's shared temp spelling — the one source that is not the probe.
+
+    ``/tmp`` and ``tempfile.gettempdir()`` are two sources, not two names for
+    one: the shared POSIX temp root is what a bare ``mkstemp`` writes to, while
+    ``gettempdir()`` follows ``TMPDIR`` and is per-user (on darwin they are not
+    even on the same filesystem).  Both are granted, and the docstring above
+    says so.
+
+    They are separated here because each is an **ambient** input, and a test
+    that pins one while the other stays ambient is the defect class
+    ``tests/test_windows_path_tokens.py`` recorded.  Measured: with only
+    ``tempfile.gettempdir`` patched, ``test_write_workspace_write_blocks_outside_workspace``
+    wrote the sibling it expected to be refused on the ubuntu leg (CI run
+    36432808100) — pytest's temp base is ``/tmp/...`` there and
+    ``/var/folders/...`` here, so this source granted exactly the target the
+    test called "outside".  A literal in the caller's list could not be withheld.
+
+    :returns: the spellings to grant — one, and the same one as before this
+        function existed: the behaviour is unchanged, the input is now
+        addressable.
+    """
+    return [_HOST_TEMP]
 
 
 def _platform_temp_sources() -> list[str]:
