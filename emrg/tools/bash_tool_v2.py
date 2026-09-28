@@ -417,7 +417,19 @@ async def run_command(
             raise SandboxUnavailableError(policy.mode, str(exc)) from exc
         raise
 
-    result = await _collect(proc, timeout, timeout_ms)
+    # A cancellation — the host's ESC, a turn replaced by a new message, a
+    # shutdown — lands on an await *inside* `_collect`, so control leaves this
+    # function with the child and its descendants still running. Measured
+    # 2026-09-28 (host P0 rant): the command survived as an orphan in its own
+    # session, which even a daemon restart could not reach. The kill is the same
+    # one the timeout path uses, on the same group id, and the cancellation is
+    # re-raised unchanged: a cancelled run is not a result, and turning it into
+    # one would be a second defect in the same line.
+    try:
+        result = await _collect(proc, timeout, timeout_ms)
+    except BaseException:
+        _kill_process_group(proc)
+        raise
     if confined is not None:
         # Runner failure outranks denial: the command did not run, so calling
         # this a refusal by the policy would name the wrong event.
