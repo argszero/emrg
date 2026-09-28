@@ -123,7 +123,8 @@ answered?" is the defect this family exists to remove.
 The tree answers, and its sources are the only copy that answers
 ---------------------------------------------------------------
 A worktree run must be an answer about the tree under test, so the run is pinned in
-the two ways a second copy of that tree can creep in - both measured, not assumed:
+the ways a second copy of that tree can creep in, and in the spelling of the path it is
+handed - all measured, not assumed:
 
 * *another tree on `sys.path`.* This machine's environment exports
   `PYTHONPATH=/Users/argszero/.emrg/install/source:...`, i.e. a second, installed
@@ -141,6 +142,16 @@ the two ways a second copy of that tree can creep in - both measured, not assume
   a verdict about a copy: the caches under the worktree are removed before the run,
   and `PYTHONDONTWRITEBYTECODE=1` is set for it (and for anything it spawns) so the
   measurement leaves none behind.
+* *a second spelling of one path.* `tempfile` builds its directory from the
+  environment's `TEMP`, and on this host that is an 8.3 short name
+  (`C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\2`), so the worktree - and the `cwd` and
+  `PYTHONPATH` the child is handed - carried the short form while Python's own path
+  arithmetic resolves the same directory to the long one. The child then sees two names
+  for one tree, and every row that compares them (`Path.resolve()` against a
+  `__file__`-derived root) fails on a healthy tree. Measured 2026-09-28
+  (`cyc20260928-153422`), same interpreter and flags, the spelling the only difference:
+  26 rows red under the short form, all green under the resolved one. The scratch root
+  is canonicalised once now (`_scratch_root`); `--keep` already resolved its own path.
 
 Which rows the run blames, and why it is asked twice
 ----------------------------------------------------
@@ -816,6 +827,34 @@ def _purge_bytecode(root: Path) -> list[str]:
     return removed
 
 
+def _scratch_root(tmp: str) -> Path:
+    """The scratch directory under one canonical spelling of its path.
+
+    `tempfile` builds its directory out of the environment's `TEMP`, so the worktree
+    inherits whatever form that carries - and on this host it is an 8.3 short name
+    (`C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\2`). Python's own path arithmetic
+    resolves that same directory to the long form, so a child handed the short
+    spelling sees two names for one tree: the `__file__` pytest collects keeps the form
+    it was given, while `Path.resolve()` - which is how the tools under test read their
+    own location - answers with the other one, and every assertion comparing the two
+    fails on a tree that is perfectly healthy.
+
+    Measured 2026-09-28 (`cyc20260928-153422`, master `824ef9a5`), same interpreter,
+    same flags, bytecode purged, `PYTHONPATH` pinned to the tree, the spelling the only
+    difference between the two runs: the scratch as `tempfile` gave it -> 24
+    `tests/test_check_memory_index.py` rows and 2 `tests/test_bash_v2_boundary.py` rows
+    FAILED; the same scratch through `Path.resolve()` -> 51 passed, 21 skipped, rc 0.
+    Those 26 rows failed identically on the base tree the tool re-runs, so the tool
+    exonerated every PR for them and told the caller to fix the base - advice about a
+    base with nothing wrong with it.
+
+    `--keep` already resolves the path it is given, and this makes the two rules one:
+    the path the harness hands to `git worktree add`, to the child's `cwd` and to the
+    pinned `PYTHONPATH` is canonical, whatever the environment's `TEMP` says.
+    """
+    return Path(tmp).resolve()
+
+
 def _suite_env(worktree: Path) -> dict[str, str]:
     """The environment the suite runs with: the tree under test, and no caches.
 
@@ -1190,7 +1229,9 @@ def _judge_every_step(base: str, heads: list[tuple[int, str]]) -> int:
     for step, number, commit in steps:
         try:
             with tempfile.TemporaryDirectory(prefix="emrg-plan-step-") as tmp:
-                passed, summary, tree_sha, _rows = _suite_verdict(commit, Path(tmp))
+                passed, summary, tree_sha, _rows = _suite_verdict(
+                    commit, _scratch_root(tmp)
+                )
         except MeasurementError as exc:
             print(f"could not measure step {step} (#{number}): {exc}", file=sys.stderr)
             return 2
@@ -1319,7 +1360,9 @@ def main(argv: list[str] | None = None) -> int:
         inherited: set[str] = set()
         try:
             with tempfile.TemporaryDirectory(prefix="emrg-plan-suite-") as tmp:
-                passed, summary, tree_sha, failing = _suite_verdict(tip, Path(tmp), keep)
+                passed, summary, tree_sha, failing = _suite_verdict(
+                    tip, _scratch_root(tmp), keep
+                )
                 if not passed and failing:
                     # The same question asked of the other tree, before the verdict is
                     # attributed: see `_still_red_on` for why the plan's own run cannot
@@ -1328,7 +1371,7 @@ def main(argv: list[str] | None = None) -> int:
                     # as a verdict that names the wrong owner.
                     try:
                         base_tree = _tree_of(base, "the base tree")
-                        inherited = _still_red_on(base, failing, Path(tmp))
+                        inherited = _still_red_on(base, failing, _scratch_root(tmp))
                     except MeasurementError as exc:
                         print(f"could not measure the base: {exc}", file=sys.stderr)
                         if keep is not None:
