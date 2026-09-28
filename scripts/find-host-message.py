@@ -68,6 +68,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 #: Where the daemon writes its received-message record, and where it keeps the index
@@ -117,8 +118,54 @@ def normalise_ts(ts: str) -> str:
     One spelling for both sources, because the alternative is two parsers that can
     disagree about which messages a window contains. Fixed-width, so the comparison
     is lexical and needs no timezone handling: both sources write host-local time.
+
+    This is for timestamps the sources produced, which are always canonical. A
+    value a caller typed goes through `parse_since` instead: truncating an
+    arbitrary string here is what made `--since 2026-9-28` answer "NOT FOUND".
     """
     return ts.replace("T", " ")[:19]
+
+
+#: The one spelling `--since` accepts: a zero-padded ISO date, optionally with a
+#: time (space or `T`, seconds optional). Everything else is refused rather than
+#: coerced — see `parse_since`.
+SINCE_FORMS = (
+    ("%Y-%m-%d %H:%M:%S", 19),
+    ("%Y-%m-%d %H:%M", 16),
+    ("%Y-%m-%d", 10),
+)
+
+
+def parse_since(value: str) -> str | None:
+    """The window start a caller typed, in the sources' spelling, or ``None``.
+
+    The comparison this feeds is **lexical** (`message.ts < since`), which is only
+    sound while both sides are the fixed-width canonical spelling. A caller's
+    string was passed through `normalise_ts` untested until 2026-09-28, and the
+    non-padded `--since 2026-9-28` sorts *after* every canonical timestamp of that
+    day ('9' > '0' at the month position), so every message was skipped and the run
+    answered "NOT FOUND: no message in the searched span contains ..." about a
+    message the host had sent that morning — measured: the same phrase with
+    `--since 2026-09-28` finds 4 matches, with `--since 2026-9-28` finds none.
+
+    That is the failure this script exists to prevent (its own author's first
+    search was cut off by a timeout and read as "no such message"), so an
+    unparsable or non-canonical value is refused by the caller of this function
+    with exit code 2 — unmeasurable — rather than quietly redefining the window.
+    Padding `2026-9-28` for the caller was the alternative and is worse: it accepts
+    one near-miss and still cannot say what `28/09/2026` or `yesterday` meant.
+
+    :param value: whatever the caller passed to `--since`.
+    :returns: `YYYY-MM-DD HH:MM:SS`, or None when the value is not that form.
+    """
+    text = value.strip().replace("T", " ")
+    for form, width in SINCE_FORMS:
+        if len(text) == width:
+            try:
+                return datetime.strptime(text, form).strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+    return None
 
 
 def parse_log_line(line: str) -> Message | None:
@@ -314,7 +361,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="print every host message in the window instead of a verdict")
     args = parser.parse_args(argv)
 
-    since = normalise_ts(args.since) if args.since else None
+    since = None
+    if args.since:
+        since = parse_since(args.since)
+        if since is None:
+            # Never a verdict: a window this tool cannot read is not evidence that
+            # the host said nothing in it (measured 2026-09-28 — `--since 2026-9-28`
+            # used to answer NOT FOUND about a message sent that morning).
+            print(f"unmeasurable: --since {args.since!r} is not a date this reads; "
+                  "use YYYY-MM-DD (or YYYY-MM-DD HH:MM[:SS]), zero-padded",
+                  file=sys.stderr)
+            return 2
     log_dir = Path(args.log_dir)
     log_messages, log_files, log_oldest, log_newest = read_log(log_dir)
 

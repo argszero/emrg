@@ -184,6 +184,60 @@ class TestTheThreeStates:
         assert done.returncode == 2
         assert "--pattern is required" in done.stderr
 
+    def test_a_non_padded_window_is_refused_not_answered(self, sources):
+        """The window start is compared **lexically**, so a form that is not the
+        fixed-width canonical spelling defuses the comparison rather than failing
+        it loudly: `2026-9-28` sorts *after* every canonical timestamp of that day
+        ('9' > '0' at the month position), so every message is skipped and the run
+        answers "no message in the searched span contains ..." about a message the
+        host really did send.
+
+        Measured on this host 2026-09-28, on the live records rather than a fixture:
+        the phrase 「禁止跑后台任务」 finds 4 matches with `--since 2026-09-28` and found
+        none with `--since 2026-9-28`. That is this script's whole reason for
+        existing — an absence read out of search that never happened — so the
+        near-miss is refused (2) instead of being padded into the window the caller
+        probably meant.
+        """
+        done = run(["--pattern", "the first thing the host said",
+                    "--since", "2026-9-15", *both(sources)])
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "unmeasurable" in done.stderr
+        assert "NOT FOUND" not in done.stdout, (
+            "a window the tool cannot read must not be answered as absence"
+        )
+        # The padded spelling of the very same instant does find it — which is what
+        # makes this a parser defect and not a claim about the fixture.
+        ok = run(["--pattern", "the first thing the host said",
+                  "--since", "2026-09-15", *both(sources)])
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+
+    def test_a_window_that_is_not_a_date_is_refused(self, sources):
+        """`yesterday` cannot be resolved against records, and guessing it would
+        silently choose a window — the same failure as the non-padded spelling."""
+        done = run(["--pattern", "anything", "--since", "yesterday", *both(sources)])
+        assert done.returncode == 2
+        assert "unmeasurable" in done.stderr
+        assert "YYYY-MM-DD" in done.stderr
+
+    def test_a_window_without_seconds_is_accepted(self, sources):
+        """The accepted forms are enumerated, so the refusals above are about the
+        spelling and not about being strict for its own sake: a date, a date with
+        `T` and minutes, and a full instant all read."""
+        for spelling in ("2026-09-15", "2026-09-15T10:00", "2026-09-15 10:00:00"):
+            done = run(["--pattern", "the first thing the host said",
+                        "--since", spelling, *both(sources)])
+            assert done.returncode == 0, f"{spelling}: {done.stdout}{done.stderr}"
+
+    def test_a_window_start_after_the_message_excludes_it(self, sources):
+        """The control for the parser work: a readable window must still *narrow*,
+        or "refuse what it cannot read" would have been bought by ignoring `--since`
+        altogether and answering about the whole span."""
+        done = run(["--pattern", "the first thing the host said",
+                    "--since", "2026-09-16", *both(sources)])
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "NOT FOUND" in done.stdout
+
 
 class TestTheInventory:
     def test_measure_lists_host_messages_and_not_prompts(self, sources):
