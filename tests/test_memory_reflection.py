@@ -259,16 +259,24 @@ class TestMemoryIndexCompactionPrompt:
 
         asyncio.run(_test())
 
-    def test_the_instance_root_index_is_counted_for_a_session_inside_the_root(
+    def test_a_session_inside_the_instance_root_is_not_asked_about_the_root_index(
         self, monkeypatch
     ):
-        """Issue #1606: the index the cycles write is the root's, not the cwd's.
+        """The instance root's index is not a subject, and the removal is pinned here.
 
-        `~/.emrg/evolution/` is this instance's workspace and `<root>/emrg` is the
-        checkout a task session runs in, so a cycle's records are indexed at
-        `<root>/.emrg/memory/MEMORY.md` — one directory above the session's cwd, and a
-        file neither of the two subjects above can name. Measured on this host before
-        the subject existed: 195 lines, with no count that could fire on it.
+        Issue #1606 added a third subject - `<root>/.emrg/memory/MEMORY.md` - for a
+        session whose cwd is `<root>/emrg`: the cycles wrote their records into the
+        root's index, one directory *above* the cwd, so neither of the two subjects
+        named the file they grew. D9 then re-based the template's record path onto
+        `{{ source_dir }}/.emrg/memory/`, which for such a session *is* the project
+        subject; every record since 2026-09-27T13:24 landed there, and on 2026-09-28
+        the host ruled the root's directory should not exist, and it was archived.
+
+        The third subject's premise is therefore gone twice over: no writer of this
+        session appends to that file, and naming it asks the agent to compact an index
+        nobody maintains. Both directions are asserted on one prompt - the root's index
+        is over the cap and is not named, the session's own is over it and is - so the
+        test fails if the subject comes back and also if the note stops firing at all.
 
         The root is monkeypatched rather than described by the host's own constant, so
         the test measures the rule instead of this machine's workspace.
@@ -285,80 +293,24 @@ class TestMemoryIndexCompactionPrompt:
                 session = Session.create_with_id("s_test_cap_root", cwd)
                 root_index = root / ".emrg" / "memory" / "MEMORY.md"
                 self._index(root_index, MEMORY_INDEX_ROW_CAP + 3)
+                self._index(session.memory_dir / "MEMORY.md", MEMORY_INDEX_ROW_CAP + 1)
                 server = _make_server({"content": "no new memories"})
 
                 prompt = await _reflect(server, session)
 
-                assert str(root_index) in prompt, (
-                    "the section must name the root's index; without it the index the "
-                    "cycles grow is the one file nothing counts"
+                assert str(root_index) not in prompt, (
+                    "the instance root's index has no writer in this session - the "
+                    "records moved onto `{{ source_dir }}` and that directory was "
+                    "archived, so naming it asks for a compaction nobody owns"
                 )
-                assert f"has {MEMORY_INDEX_ROW_CAP + 3} lines" in prompt
-
-        asyncio.run(_test())
-
-    def test_a_session_outside_the_root_does_not_get_the_root_index(self, monkeypatch):
-        """The subject is a property of the session, not of the machine.
-
-        A root index over the cap is not this session's to compact when its cwd lies
-        outside that root: the note would name a file whose writer is some other
-        session, and the two indexes this one does carry are the ones its own writer
-        appends to. Without this half, "count the root too" would be "count every
-        index you can reach".
-        """
-        from emrg.server import daemon
-        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
-
-        async def _test():
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp).resolve() / "instance"
-                root.mkdir()
-                monkeypatch.setattr(daemon, "EVOLUTION_CWD", root)
-                cwd = Path(tmp).resolve() / "elsewhere"
-                cwd.mkdir()
-                session = Session.create_with_id("s_test_cap_outside", cwd)
-                self._index(root / ".emrg" / "memory" / "MEMORY.md", MEMORY_INDEX_ROW_CAP + 3)
-                server = _make_server({"content": "no new memories"})
-
-                prompt = await _reflect(server, session)
-
-                assert str(root) not in prompt, (
-                    "a session outside the root must not be asked to compact the "
-                    "root's index — it does not write that file"
-                )
-                assert "Memory index compaction" not in prompt
-
-        asyncio.run(_test())
-
-    def test_a_session_started_in_the_root_counts_that_index_once(self, monkeypatch):
-        """When the cwd *is* the root, the third subject is the first one.
-
-        A session started in the instance root carries `<cwd>/.emrg/memory/MEMORY.md`
-        as its project index, and that is the very file `_instance_root_index` names —
-        so an unde-duplicated list would render the same index's section twice, and
-        the note's contract is one section per index ("an instruction naming the wrong
-        file sends the agent to compact something that is not over the cap"): two
-        sections naming one path read as two files.
-        """
-        from emrg.server import daemon
-        from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
-
-        async def _test():
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp).resolve()
-                monkeypatch.setattr(daemon, "EVOLUTION_CWD", root)
-                session = Session.create_with_id("s_test_cap_inroot", root)
-                self._index(root / ".emrg" / "memory" / "MEMORY.md", MEMORY_INDEX_ROW_CAP + 1)
-                server = _make_server({"content": "no new memories"})
-
-                prompt = await _reflect(server, session)
-
                 assert prompt.count("## Memory index compaction") == 1, (
-                    "one index, one section — a subject named twice asks for the same "
-                    "compaction twice"
+                    "the session's own index is still a subject: dropping the root's "
+                    "must not drop the count the agent acts on"
                 )
+                assert f"has {MEMORY_INDEX_ROW_CAP + 1} lines" in prompt
 
         asyncio.run(_test())
+
 
     def test_the_targets_in_the_text_come_from_the_constants(self):
         """The numbers the agent is told to reach are the rulers, not a second spelling."""

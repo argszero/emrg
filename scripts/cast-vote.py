@@ -129,8 +129,8 @@ window, and the sibling reported `abstain` for it minutes later.
 So the clause is applied here too, from the same reading, and refuses to post. The
 window is the previous cycle's start when it can be found (`--prev-cycle`, else the
 newest cycle record that sorts before this cycle's id in `--cycles-log`, default
-`$EMRG_CYCLES_LOG`, else both directories the evolution template may name a record in:
-the project memory root inside this checkout and the evolution root beside it) and this
+`$EMRG_CYCLES_LOG`, else the directory the evolution template names: the project memory
+root inside this checkout) and this
 cycle's own start
 when it cannot — narrowed and said so, never abandoned and never widened by a guess.
 A head whose push time fell back to the commit date is **refused rather than judged**:
@@ -832,8 +832,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="directory (or several, joined by `os.pathsep`) holding the "
         "`cycle-<date>-<time>.md` records the previous cycle is read from when "
-        "--prev-cycle is not given (default: $EMRG_CYCLES_LOG, else both the project "
-        "memory root inside this checkout and the evolution root beside it)",
+        "--prev-cycle is not given (default: $EMRG_CYCLES_LOG, else the project "
+        "memory root inside this checkout)",
     )
     parser.add_argument("--repo", default=REPO, help="owner/name the PR lives in")
     parser.add_argument(
