@@ -142,7 +142,6 @@ def _redact(value):
     return value
 
 from emrg.tools import ToolRegistry
-from emrg.tools.bash_tool import BashTool
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
 from emrg.tools.shell_dialects import (
@@ -499,30 +498,22 @@ def build_shell_tool(
     *which class to build* is this daemon's decision, and it stays where the
     registry is built.
 
-    Three cases, and the third is the rollback the documentation promises:
+    Two cases, and no third: the switch that used to answer "the frozen tool
+    instead" (``bash_tool_v2``, design D10) was retired at P7 with its loser.
 
-    * **Windows, v2 family on** (the default) → :class:`PwshToolV2`, the
-      PowerShell dialect with its own executable-resolution chain.
-    * **POSIX, v2 on** → :class:`BashToolV2`, the bash dialect at the same
-      boundary.
-    * **v2 off** → :class:`BashTool`, the frozen tool, on every platform.  On
-      Windows it runs ``cmd.exe`` via ``COMSPEC`` (``bash_tool.py:33``), which
-      is why it still works there and why ``bash_tool_v2 = false`` remains a
-      working rollback until P7 deletes it.  After P7 the Windows roster is the
-      blueprint's: ``pwsh`` and nothing else.
+    * **Windows** → :class:`PwshToolV2`, the PowerShell dialect with its own
+      executable-resolution chain.
+    * **POSIX** → :class:`BashToolV2`, the bash dialect at the same boundary.
 
     Only one is ever built: the registry indexes by name, so two shell tools
-    would be two behaviours for one intent — the drift the parallel period
-    exists to prevent.
+    would be two behaviours for one intent.
 
     :param sandbox_config: the ``[sandbox]`` section; a missing one means the
-        defaults (v2 on, no configured PowerShell path).
+        defaults (no configured PowerShell path).
     :param platform_name: the platform to decide for; defaults to the host's.
     :returns: the tool executor to register.
     """
     config = sandbox_config or SandboxConfig()
-    if not config.bash_tool_v2:
-        return BashTool()
     if shell_tool_name(platform_name) == SHELL_TOOL_NAME_WINDOWS:
         return PwshToolV2(pwsh_path=config.pwsh_path or None)
     return BashToolV2()
@@ -1995,9 +1986,8 @@ class EmrgServer:
         # tool" while the tool it meant spawned an executable that is not
         # there (design §14.5 item 6, the accident itself). Read from the
         # registry rather than re-derived from the platform, because the two
-        # can legitimately differ: `[sandbox] bash_tool_v2 = false` on Windows
-        # mounts the old cmd.exe tool, whose name is `bash`, and the prompt
-        # must say what is mounted, not what the gate would have chosen.
+        # can legitimately differ — a test mounts the other dialect, and the
+        # prompt must say what is mounted, not what the gate would have chosen.
         ctx["shell_tool"] = self._mounted_shell_tool_name()
         # Global config dir (~/.emrg) — injected so system.j2 can reference the
         # cross-project sessions index and other global data files by path.

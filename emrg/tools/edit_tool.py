@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
+from emrg.sandbox.fence import file_refusal
+from emrg.sandbox.policy import resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
-from emrg.tools.bash_tool import (
-    check_read_only_file_write,
-    check_workspace_write,
-    resolve_file_target,
-)
+from emrg.tools.file_policy import resolve_file_target
 
 logger = logging.getLogger(__name__)
 
@@ -87,33 +86,19 @@ class EditTool(ToolExecutor):
         target = resolve_file_target(file_path, arguments.get("workspace"))
         path = Path(target).resolve()
 
-        # Read-only sandbox (community issue #979): the edit tool must not
-        # modify the host's uncommitted work in the task source tree when the
-        # dirty-tree guard forced read-only. Workspace boundary injected by the
-        # daemon (session cwd); None in non-daemon use → fail-open.
-        # The joined `target` is handed to both gates, so the file they judge is
-        # the file edited below (before #1558 the spelling was passed on and
-        # resolved elsewhere).
-        # This is the legacy predicate, not the v2 fence: at `read-only` it
-        # refuses only paths inside the workspace and allows everything outside
-        # it, while the process-boundary tool grants nothing at that tier — the
-        # divergence, measured, is in `check_read_only_file_write`'s docstring
-        # (issue #1553 is the decision that would align them).
-        if arguments.get("sandbox") == "read-only":
-            reason = check_read_only_file_write(target, arguments.get("workspace"))
-            if reason:
-                return ToolResult(name="edit", content=reason, error=True)
-
-        # workspace-write sandbox (rant 2026-09-01T15:10:23): the same boundary
-        # the bash tool enforces — a workspace-write session must not edit
-        # outside the session cwd (or OS temp / protected daemon state) — with
-        # one root the fence does not grant: `_trusted_write_zones()`
-        # (`~/.emrg/evolution/.emrg`, issue #1093). Close, not identical; see
-        # `check_workspace_write`'s docstring and issue #1553.
-        if arguments.get("sandbox") == "workspace-write":
-            reason = check_workspace_write(target, arguments.get("workspace"))
-            if reason:
-                return ToolResult(name="edit", content=reason, error=True)
+        # One policy for both tools — the same call the write tool makes, so the
+        # two cannot drift (host ruling 2026-09-28T21:50, issue #1553;
+        # `emrg/sandbox/fence.py` carries the reading and its consequences).
+        # The workspace boundary is injected by the daemon (session cwd); silence
+        # resolves to `danger-full-access` and stays unconfined, as before.
+        policy = resolve_policy(
+            mode=arguments.get("sandbox"),
+            workspace_root=str(arguments.get("workspace") or os.getcwd()),
+            session_id=arguments.get("session_id"),
+        )
+        reason = file_refusal(target, policy)
+        if reason:
+            return ToolResult(name="edit", content=reason, error=True)
 
         if not path.exists():
             return ToolResult(
