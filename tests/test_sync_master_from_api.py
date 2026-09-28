@@ -371,3 +371,74 @@ def test_fetch_missing_objects_idempotent(tmp_path, monkeypatch):
     mod._fetch_tree("owner/repo", root)
     assert calls["n"] == n1
     assert _git("cat-file", "-e", blob, cwd=target).returncode == 0
+
+
+def test_absent_parents_names_what_the_merge_stop_trusts():
+    """The merge-stop assumption is read, not left silent.
+
+    `--ref <a PR head>` on 2026-09-28 stopped the walk at that branch's merge
+    commit and left parent `2456e72d` missing. With the gap unmentioned git
+    answered *as if the graph were whole*: `git merge` printed "Already up to
+    date" off a commit it could not read, and `--is-ancestor` exited 128 where
+    it should have exited 1 - a wrong answer, never a missing one, which is the
+    failure mode this reading exists to remove. The predicate is a parameter so
+    the answer about a layout can be asked without a repository.
+    """
+    mod = _load_module()
+
+    present = {"a" * 40, "c" * 40}
+    assert mod._absent_parents(["a" * 40, "b" * 40, "c" * 40],
+                               present=present.__contains__) == ["b" * 40]
+    # A walk whose parents are all local stays quiet: nothing is reported.
+    assert mod._absent_parents(["a" * 40, "c" * 40],
+                               present=present.__contains__) == []
+
+
+def test_stop_lines_name_a_root_as_a_root_not_a_merge():
+    """The stop branch catches every parent count but one - the empty list.
+
+    That list is reachable: on a checkout that has none of the remote's objects
+    (the situation this script repairs), `--ref master` walks the whole chain back
+    and terminates at the repository's **root commit**, whose parents list is
+    empty. A merge statement there would print "trusting its 0 parent(s) to be
+    local" - a trust assertion about nothing, the same class of defect this change
+    removes: a line asserting something that is not a reading. So the root is named
+    a root, and a merge is still named a merge.
+    """
+    mod = _load_module()
+
+    root = mod._stop_lines("a" * 40, [], [])
+    assert len(root) == 1
+    assert "root commit" in root[0]
+    assert "merge" not in root[0] and "parent(s)" not in root[0]
+
+    # A genuine merge still reads as a merge, stating how many parents it trusts.
+    merge = mod._stop_lines("b" * 40, ["c" * 40, "d" * 40], [])
+    assert "merge commit" in merge[0] and "2 parent(s)" in merge[0]
+
+    # And an absent parent is still named, as before.
+    warned = mod._stop_lines("b" * 40, ["c" * 40, "d" * 40], ["d" * 40])
+    assert any("NOT present locally" in ln for ln in warned)
+
+
+def test_an_object_name_ref_creates_no_ref():
+    """`--ref <sha>` materializes a commit; it must not write a ref named after it.
+
+    Measured 2026-09-28: materializing a PR head with `--ref <sha>` left
+    `refs/heads/<sha>` and `refs/remotes/origin/<sha>` behind, and `git rev-parse
+    <sha>` then answered ambiguously - `check-merge-plan-suite.py` failed with
+    "merge-tree failed" until those refs were deleted. So the shape of a `--ref`
+    that names an object is pinned here, without a repository.
+    """
+    mod = _load_module()
+
+    assert mod._is_object_name("a" * 40)
+    assert mod._is_object_name("0123456789abcdef0123456789ABCDEF01234567")
+    # Branch names - the default included - are not object names.
+    assert not mod._is_object_name("master")
+    assert not mod._is_object_name("fix/the-walk-names-the-parents-it-trusts")
+    assert not mod._is_object_name("a" * 39)
+    assert not mod._is_object_name("a" * 41)
+    # A short hex string is a branch name, not an object name: it cannot be a full
+    # object name, and refusing it would break a real branch called `deadbeef`.
+    assert not mod._is_object_name("deadbeef")
