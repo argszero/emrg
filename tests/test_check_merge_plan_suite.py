@@ -1490,7 +1490,7 @@ def test_neither_interpreter_working_is_still_a_refusal(
 
 
 def test_a_tree_without_an_environment_is_reported_unmeasurable(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     """The fallback arm's premise is the tree's, so it is asked, not asserted.
 
@@ -1499,11 +1499,23 @@ def test_a_tree_without_an_environment_is_reported_unmeasurable(
     #1688's landing tree, where the arm failed as a row the base does not fail). The
     reason travels back so the arm can report it; the assertions that remain in the arm
     are about the gate's behaviour, which no tree's layout can make untrue.
+
+    The interpreter probe is **pinned** for the same reason, because leaving it real
+    makes the arm ask about `sys._base_executable` - the host's interpreter - rather
+    than about the tree: where that one already imports pytest the helper answers
+    "the interpreter the shim would enter ... can import pytest" and returns before it
+    ever asks the search, so the arm's assertion about the tree's candidates fails on a
+    host whose layout differs from CI's (measured on this file's own landing tree,
+    reported by the veto of `cyc20260928-183205`). The sibling arm below pins the same
+    probe in the opposite direction, and neither pin reaches the gate: it probes the
+    interpreter it hands its own child, in its own process.
     """
     mod = _load_module()
     bare = getattr(sys, "_base_executable", "") or sys.executable
     empty = tmp_path / "no-environment"
     empty.mkdir()
+
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: False)
 
     reason = _fallback_unmeasurable(mod, empty, bare)
 
