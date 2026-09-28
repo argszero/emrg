@@ -978,6 +978,47 @@ def test_a_confined_childs_stdio_reaches_the_seam(tmp_path):
 
 
 @needs_windows
+def test_a_workspace_write_child_can_capture_a_grandchilds_output(tmp_path):
+    """The tier a workload can actually run in: its child creates a pipe.
+
+    Every real workload captures output — ``uv``, ``pytest`` and ``node`` all read
+    a child's stdout through a pipe — and under ``workspace-write`` both of these
+    calls were refused with ``[WinError 5]`` while the same child ran them fine
+    under ``read-only``.  The cause was the one ACE the sandbox merges into the
+    restricted token's *default* DACL, which every new object takes its own DACL
+    from: it named a capability SID, and a capability SID exists only in the
+    token's restricting list, so the first half of the two-pass check denied the
+    object to its own creator.  ``read-only`` escaped by accident — its fallback
+    names Everyone, which is in both sets.
+
+    The child reports each step as a marker, so a failure names the step rather
+    than the boundary: the pipe and the captured grandchild are separate facts,
+    and the second cannot be reached without the first.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    api = ffi.win32()
+    _grant_caller(api, workspace)
+    _grant_caller(api, tmp_path)
+    script = (
+        "import os, subprocess, sys;"
+        "os.pipe(); print('pipe-ok');"
+        "done = subprocess.run([sys.executable, '-c', 'print(42)'], capture_output=True, text=True);"
+        "print('capture-ok', done.stdout.strip())"
+    )
+
+    completed = _confined([sys.executable, "-c", script], workspace, tmp_path, "workspace-write")
+
+    assert completed.returncode == 0, _evidence(completed)
+    assert "pipe-ok" in completed.stdout, (
+        f"a confined child could not create its own pipe ({_evidence(completed)})"
+    )
+    assert "capture-ok 42" in completed.stdout, (
+        f"a confined child could not capture a grandchild's output ({_evidence(completed)})"
+    )
+
+
+@needs_windows
 def test_a_workspace_write_run_inherits_the_capability_and_nothing_outside_it(tmp_path):
     """The capability, measured where it exists: the workspace ACE and nothing else.
 
@@ -1283,7 +1324,9 @@ def test_init_owns_every_sid_the_restricted_token_is_pointed_at(tmp_path, monkey
         "the restricting list must point inside buffers init kept"
     )
     assert [ctypes.string_at(address, 8) for address in owners] == [b"SIDBLOB!"] * len(owners)
-    assert granted_to == [api.restricting_sids[1]], "the default DACL takes the Everyone SID"
+    assert granted_to == [api.restricting_sids[0]], (
+        "the default DACL takes the logon SID — the one SID the token holds both normally and as a restrictor"
+    )
     assert api.restricted_flags & 0x8, "WRITE_RESTRICTED is what makes the list mean anything"
 
     sandbox.dispose()
