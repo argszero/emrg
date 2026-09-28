@@ -23,6 +23,9 @@ from emrg.tools import file_policy
 # their home and are *not* re-exported under the public spellings, so a caller that
 # wants a guard asks the module that owns it.
 from emrg.tools.command_scan import (
+    _SHELL_EVALUATORS as _SHELL_EVALUATORS,
+    _SHELL_WRAPPERS as _SHELL_WRAPPERS,
+    _UNRESOLVED_VAR_RE as _UNRESOLVED_VAR_RE,
     _basename as _basename,
     _daemon_lifecycle_verb_after as _daemon_lifecycle_verb_after,
     _env_split_string_texts as _env_split_string_texts,

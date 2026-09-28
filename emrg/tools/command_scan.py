@@ -43,10 +43,19 @@ import shlex
 
 from emrg.tools import file_policy
 
-#: ``os.name == "nt"`` — the axis the backslash rules are gated on. Read from the
-#: file-effect policy so this module and the file tools answer one question one
-#: way; the legacy scanner keeps its own alias to the same value.
-_WINDOWS_SHELL = file_policy.WINDOWS_SHELL
+def _windows_shell() -> bool:
+    """``os.name == "nt"`` — the axis the backslash rules are gated on.
+
+    Read from its **home** (`file_policy`, which is where the file tools read it
+    too) on every call, rather than bound into a module constant here.  A bound
+    copy is a second value with its own lifetime, and it cannot see the seam a
+    test or an override moves — the failure the legacy scanner's alias has
+    already produced once, when a forced axis greened locally and reddened the
+    platform leg.  One reading, asked each time.
+
+    :returns: whether the dialect being scanned is a Windows one.
+    """
+    return file_policy.WINDOWS_SHELL
 
 
 _SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
@@ -408,13 +417,13 @@ _WINDOWS_BACKSLASH = "\x00"
 
 def _protect_windows_backslashes(cmd: str) -> str:
     """Make backslashes survive the POSIX split — Windows shells only (#1261)."""
-    if not _WINDOWS_SHELL or "\\" not in cmd:
+    if not _windows_shell() or "\\" not in cmd:
         return cmd
     return cmd.replace("\\", _WINDOWS_BACKSLASH)
 
 def _restore_windows_backslashes(tokens: list[str]) -> list[str]:
     """Undo `_protect_windows_backslashes`, so the guard reads the real spelling."""
-    if not _WINDOWS_SHELL:
+    if not _windows_shell():
         return tokens
     return [t.replace(_WINDOWS_BACKSLASH, "\\") for t in tokens]
 
