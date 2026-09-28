@@ -125,6 +125,53 @@ def mod():
     return _load_module()
 
 
+def _fallback_unmeasurable(mod, root: Path, own: str) -> str | None:
+    """Why the pytest-less fallback arm cannot measure in this tree, or `None`.
+
+    The arm measures the gate's interpreter fallback, and that fallback is a search
+    over `root/.venv` - so *whether the search has anything to find* is a property of
+    the tree the arm is running in, not of the code it measures. Asserting it made
+    every landing-tree measurement of a tree carrying this file report one red row the
+    base does not fail: the gate runs the suite in a freshly added worktree, and a
+    fresh worktree has no populated `.venv` - the gate's own header says so, and it is
+    where the gate does its measuring (measured 2026-09-28 on #1688's own landing tree,
+    reported by `cyc20260928-171322`, reproduced in a worktree of the head: the
+    checkout carries `.venv/Scripts/python.exe`, the worktree carries neither
+    spelling).
+
+    So the premise is asked as a question, of the gate's own search
+    (`_suite_interpreter(own=..., repo_root=...)`) rather than of `REPO_ROOT/.venv` -
+    one implementation of "which interpreter runs the suite", which is also what the
+    arm's assertions are about. A tree where the search finds nothing is reported
+    *unmeasurable* (a skip that names the reason), never as a pass and never as a
+    failure the tree does not own.
+
+    `own` is the interpreter the shim would enter the gate through; the reason checks
+    it in the order the arm depends on them.
+    """
+    if not own or not os.path.isfile(own):
+        return (
+            "this environment names no base interpreter to enter the gate through "
+            f"(sys._base_executable={own!r}), so there is no pytest-less binary here "
+            "and this arm would measure nothing"
+        )
+    if mod._can_import_pytest(own):
+        return (
+            f"the interpreter the shim would enter ({own}) can import pytest, so the "
+            "fallback would never be asked and this arm would measure nothing"
+        )
+    found = mod._suite_interpreter(own=own, repo_root=root)
+    if not mod._can_import_pytest(found):
+        candidates = [(root / relative).as_posix() for relative in mod._VENV_INTERPRETERS]
+        return (
+            "this tree carries no environment the gate's fallback could use (none of "
+            f"{candidates} imports pytest), so the fallback has nothing to find and "
+            "this arm would measure the refusal - it runs where an environment exists, "
+            "which is what CI's `uv sync` provides"
+        )
+    return None
+
+
 def _load_sibling(name: str):
     """A sibling gate, loaded from its own file so its constant is the one it runs.
 
@@ -1442,6 +1489,55 @@ def test_neither_interpreter_working_is_still_a_refusal(
     assert f"uv run --no-sync python scripts/{SCRIPT.name}" in message
 
 
+def test_a_tree_without_an_environment_is_reported_unmeasurable(
+    tmp_path: Path,
+) -> None:
+    """The fallback arm's premise is the tree's, so it is asked, not asserted.
+
+    A tree with no `.venv` cannot answer "does the fallback find an interpreter" - the
+    gate's own suite run is a fresh worktree and that is one (measured 2026-09-28 on
+    #1688's landing tree, where the arm failed as a row the base does not fail). The
+    reason travels back so the arm can report it; the assertions that remain in the arm
+    are about the gate's behaviour, which no tree's layout can make untrue.
+    """
+    mod = _load_module()
+    bare = getattr(sys, "_base_executable", "") or sys.executable
+    empty = tmp_path / "no-environment"
+    empty.mkdir()
+
+    reason = _fallback_unmeasurable(mod, empty, bare)
+
+    assert reason is not None
+    assert "no environment the gate's fallback could use" in reason
+    for relative in mod._VENV_INTERPRETERS:
+        assert (empty / relative).as_posix() in reason  # the candidates it looked at
+
+
+def test_an_environment_in_the_tree_makes_the_fallback_measurable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """…and the same layout with a pytest-capable interpreter is measurable.
+
+    The search itself is the gate's (`_suite_interpreter`), so this pins the helper
+    against the same rule the gate runs: the candidate is found under the tree being
+    measured, and the probe decides it rather than the file's name.
+    """
+    mod = _load_module()
+    env_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    env_python.parent.mkdir(parents=True)
+    env_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: Path(python) == env_python)
+
+    bare = getattr(sys, "_base_executable", "") or sys.executable
+    assert _fallback_unmeasurable(mod, tmp_path, bare) is None
+
+    # The two other reasons the arm cannot measure, each said instead of asserted:
+    # nothing to enter through, and an interpreter that already has pytest.
+    assert "no base interpreter" in _fallback_unmeasurable(mod, tmp_path, "")
+    monkeypatch.setattr(mod, "_can_import_pytest", lambda python: True)
+    assert "can import pytest" in _fallback_unmeasurable(mod, tmp_path, bare)
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason=(
@@ -1466,23 +1562,19 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
     (measured 2026-09-28: rc 1, `No module named pytest`). Entered through it, the gate
     must find this checkout's own `.venv` - and say so, because which interpreter judged
     a tree is part of the reading.
+
+    Where the tree carries no such environment the arm reports *that* and skips, because
+    the gate runs its suites in freshly added worktrees and a fresh worktree has none: the
+    fallback would have nothing to find. Whether it has something to find is asked of the
+    gate's own search (`_fallback_unmeasurable`), not asserted from this file's location -
+    a premise the harness does not provide is unmeasurable, and it belongs to neither the
+    pass nor the fail side of the verdict.
     """
     repo, origin = queue
     _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
     _publish(repo, origin, 1, "fine")
     mod = _load_module()
-    candidates = [REPO_ROOT / relative for relative in mod._VENV_INTERPRETERS]
-    assert any(candidate.is_file() for candidate in candidates), (
-        "this checkout has no environment at either `.venv` spelling, so the fallback "
-        f"has nothing to find and this arm would measure the refusal: {candidates}"
-    )
 
-    bare = getattr(sys, "_base_executable", "")
-    assert bare and os.path.isfile(bare), (
-        "this environment names no base interpreter to enter the gate through "
-        f"(sys._base_executable={bare!r}), so there is no pytest-less binary here and "
-        "this arm would measure nothing"
-    )
     # Deliberately not `Path(bare).resolve() != Path(sys.executable).resolve()`: on Linux
     # `.venv/bin/python` *is* the managed interpreter, reached through a symlink, so the
     # two resolve to one file while naming different environments - and it is the path
@@ -1495,24 +1587,21 @@ def test_a_caller_without_pytest_still_gets_a_verdict(
     # artifact of the harness, and a host `python3` is not launched with it. Stripped
     # for both runs so the premise is a property of the interpreter, not of how this
     # suite happens to be started - the probe below is what decides it either way.
+    bare = getattr(sys, "_base_executable", "")
+    reason = _fallback_unmeasurable(mod, REPO_ROOT, bare)
+    if reason:
+        # Unmeasurable *here* is not a verdict about the code: the gate's own suite run
+        # is a fresh worktree, which carries no `.venv`, so this arm is measured where
+        # an environment exists - CI's `uv sync` - and reports the reason everywhere
+        # else instead of failing a tree that cannot answer (measured 2026-09-28 on this
+        # file's own landing tree; see `_fallback_unmeasurable`).
+        pytest.skip(reason)
+
     bare_env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
 
     shim = tmp_path / "python3-without-pytest"
     shim.write_text(f'#!/bin/sh\nexec "{bare}" "$@"\n', encoding="utf-8")
     shim.chmod(0o755)
-    probe = subprocess.run(
-        [str(shim), "-c", "import pytest"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=bare_env,
-    )
-    assert probe.returncode != 0, (
-        "the interpreter the shim enters can import pytest, so this arm measures nothing: "
-        + (probe.stdout or "")
-        + (probe.stderr or "")
-    )
 
     proc = subprocess.run(
         [str(shim), str(SCRIPT), "1", "--base", "master"],
