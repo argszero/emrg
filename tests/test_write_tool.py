@@ -127,9 +127,18 @@ def test_write_read_only_blocks_inside_workspace(temp_dir):
     assert not target.exists()
 
 
-def test_write_read_only_allows_outside_workspace(temp_dir):
-    """Writes outside the workspace (memory dir, logs) stay allowed — a
-    read-only cycle still records state and writes its own artifacts."""
+def test_write_read_only_refuses_outside_the_workspace_too(temp_dir):
+    """``read-only`` grants nothing, outside the workspace exactly as inside it.
+
+    This row used to assert the opposite ("writes outside the workspace stay
+    allowed — a read-only cycle still records state"), which was the file tools'
+    own answer and the divergence from the kernel fence: a `read-only` bash
+    command could write nowhere while this tool could write anywhere outside the
+    workspace. Host ruling 2026-09-28T21:50 (issue #1553) chose one policy for
+    both families, so the row is inverted here rather than deleted — the tier
+    now means one thing, and the consequence (a read-only cycle writes no record)
+    is written down in `emrg/sandbox/fence.py`.
+    """
     tool = WriteTool()
     workspace = temp_dir / "ws"
     workspace.mkdir()
@@ -140,8 +149,9 @@ def test_write_read_only_allows_outside_workspace(temp_dir):
         "sandbox": "read-only",
         "workspace": str(workspace),
     }))
-    assert not result.error
-    assert target.exists()
+    assert result.error, result.content
+    assert "read-only sandbox" in result.content
+    assert not target.exists(), "the tool refused after writing"
 
 
 def test_write_no_sandbox_unchanged(temp_dir):

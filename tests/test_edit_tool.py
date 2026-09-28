@@ -133,9 +133,13 @@ def test_edit_read_only_blocks_inside_workspace(temp_file):
     assert temp_file.read_text() == original  # untouched
 
 
-def test_edit_read_only_allows_outside_workspace(temp_file):
-    """Writes outside the workspace (memory dir, logs) stay allowed — a
-    read-only cycle still records state and writes its own artifacts."""
+def test_edit_read_only_refuses_outside_the_workspace_too(temp_file):
+    """``read-only`` grants nothing — the edit twin of the write tool's row.
+
+    Inverted with the host ruling of 2026-09-28T21:50 (issue #1553): the file
+    tools share the kernel fence's policy, so a tier that lets a spawned command
+    write nowhere lets these tools write nowhere either.
+    """
     import tempfile as _tf
 
     with _tf.TemporaryDirectory() as d:
@@ -149,8 +153,9 @@ def test_edit_read_only_allows_outside_workspace(temp_file):
             "sandbox": "read-only",
             "workspace": str(temp_file.parent),  # different boundary
         }))
-        assert not result.error
-        assert "edited" in target.read_text()
+        assert result.error, result.content
+        assert "read-only sandbox" in result.content
+        assert "keep this line" in target.read_text(), "the tool edited after refusing"
 
 
 def test_edit_no_sandbox_unchanged(temp_file):

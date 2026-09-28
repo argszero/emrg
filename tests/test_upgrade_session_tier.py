@@ -30,7 +30,7 @@ Two things are pinned here, and they are separate claims:
 The safety rule this file obeys (host 2026-09-17T11:38:16): a real write is only
 ever attempted under a directory the test itself creates. The upgrade's actual
 targets live under ``$HOME``, so they are passed **only** to pure predicates
-(``check_workspace_write``, ``writable_roots``), which resolve paths and open
+(``file_refusal``, ``writable_roots``), which resolve paths and open
 nothing — a test whose safety depends on the fence working would become a real
 ``$HOME`` write the moment that fence were the thing under test.
 """
@@ -50,7 +50,7 @@ from emrg.sandbox.policy import (
 )
 from emrg.sandbox.providers import unconfined_mode
 from emrg.sandbox.roots import writable_roots
-from emrg.tools.file_policy import check_workspace_write
+from emrg.sandbox.fence import file_refusal
 from emrg.tools.edit_tool import EditTool
 from emrg.tools.write_tool import WriteTool
 
@@ -204,10 +204,15 @@ def test_the_workspace_write_fence_refuses_every_upgrade_target() -> None:
     """The predicate that actually refused them, called the way the tool calls it.
 
     Pure: a path in, a reason-or-None out. No write is attempted, so a broken
-    fence cannot turn this test into a real ``$HOME`` write.
+    fence cannot turn this test into a real ``$HOME`` write. Asked through the
+    *shared* fence (host ruling 2026-09-28T21:50, issue #1553) — the same
+    function the write/edit tools call, which is why this is now the tool-side
+    reading too and not only the kernel profile's.
     """
+    workspace = os.path.join(os.path.expanduser("~"), ".emrg", "upgrade-work", "emrg")
+    policy = resolve_policy(mode="workspace-write", workspace_root=workspace)
     for name, target in _upgrade_targets().items():
-        assert check_workspace_write(target, None), (
+        assert file_refusal(target, policy), (
             f"{name} ({target}) is no longer refused under workspace-write — "
             "either the tier's reach grew or the target moved"
         )

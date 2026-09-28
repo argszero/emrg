@@ -31,12 +31,30 @@ from emrg.tools.bash_tool import (
     _GIT_READ_VERBS,
     _GIT_SHAPE_DECIDED,
 )
+from emrg.sandbox.fence import file_refusal
+from emrg.sandbox.policy import resolve_policy
 from emrg.tools import file_policy
-from emrg.tools.file_policy import check_workspace_write
+from emrg.tools.file_policy import resolve_file_target
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _fence(file_path: str, workspace: str | None, mode: str | None = "workspace-write"):
+    """The file tools' gate, asked the way the tools ask it (issue #1553).
+
+    The tools join the spelling onto the injected workspace and resolve the
+    policy from the injected tier, then call the shared fence — so a row here
+    measures the same call the tools make, not a predicate that has an opinion of
+    its own. The old ``check_workspace_write`` is deleted: it was the file tools'
+    *own* answer, and the host ruling of 2026-09-28T21:50 made the two families
+    share one policy.
+    """
+    return file_refusal(
+        resolve_file_target(file_path, workspace),
+        resolve_policy(mode=mode, workspace_root=str(workspace or os.getcwd())),
+    )
 
 
 # ── constant ──────────────────────────────────────────────────────────────
@@ -302,7 +320,7 @@ def test_check_read_only_allows_git_reads():
         assert allowed is True, f"{cmd!r} should be allowed (got {reason!r})"
 
 
-def test_check_workspace_write_allows_git_mutators():
+def test_check_sandbox_workspace_write_allows_git_mutators():
     """workspace-write is the normal working tier — tasks must still be able
     to commit/push there. Only read-only blocks git mutation."""
     for cmd in ("git stash", "git checkout .", "git reset --hard",
@@ -313,7 +331,7 @@ def test_check_workspace_write_allows_git_mutators():
 
 # ── _check_sandbox — workspace-write ──────────────────────────────────────
 
-def test_check_workspace_write_allows_relative_writes():
+def test_check_sandbox_workspace_write_allows_relative_writes():
     # Relative targets are assumed in-workspace (cwd = workspace root).
     allowed, _, _ = _check_sandbox("echo x > out.txt", "workspace-write")
     assert allowed is True
@@ -321,7 +339,7 @@ def test_check_workspace_write_allows_relative_writes():
     assert allowed is True
 
 
-def test_check_workspace_write_allows_temp_and_workspace_abs():
+def test_check_sandbox_workspace_write_allows_temp_and_workspace_abs():
     allowed, _, _ = _check_sandbox(f"echo x > {tempfile.gettempdir()}/y", "workspace-write")
     assert allowed is True
     allowed, _, _ = _check_sandbox(
@@ -330,7 +348,7 @@ def test_check_workspace_write_allows_temp_and_workspace_abs():
     assert allowed is True
 
 
-def test_check_workspace_write_blocks_protected_daemon_file():
+def test_check_sandbox_workspace_write_blocks_protected_daemon_file():
     allowed, reason, enforcement = _check_sandbox(
         "echo x > ~/.emrg/config.toml", "workspace-write"
     )
@@ -339,13 +357,13 @@ def test_check_workspace_write_blocks_protected_daemon_file():
     assert enforcement == "partial"
 
 
-def test_check_workspace_write_blocks_emrg_home_rm():
+def test_check_sandbox_workspace_write_blocks_emrg_home_rm():
     allowed, reason, _ = _check_sandbox("rm -rf ~/.emrg", "workspace-write")
     assert allowed is False
     assert "daemon's data directory" in reason
 
 
-def test_check_workspace_write_blocks_outside_workspace():
+def test_check_sandbox_workspace_write_blocks_outside_workspace():
     allowed, _, _ = _check_sandbox(
         "rm -rf /etc/hosts", "workspace-write", workdir="/workspace"
     )
@@ -730,50 +748,42 @@ def test_only_a_config_invocation_names_a_git_config_file():
 # and negative states must be verified.
 
 
-def test_workspace_write_allows_evolution_memory(monkeypatch, tmp_path):
-    """write/edit/bash may target ~/.emrg/evolution/.emrg/memory (the evolution
-    module's own data root) even though it is outside the repo workspace."""
-    import emrg.tools.bash_tool as bt
-    # Pin the user home + evolution data root so the test is hermetic and does
-    # not depend on this host's real ~/.emrg layout.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    # Recompute the trusted zone against the pinned HOME.
-    evo_data = os.path.realpath(os.path.expanduser("~/.emrg/evolution/.emrg"))
-    ws = str(tmp_path / "ws")
-    # check_workspace_write (write/edit tools)
-    meta = evo_data + "/memory/cycle-20260901-000000.md"
-    assert check_workspace_write(meta, ws) is None
-    # bash _check_sandbox (redirect to memory index)
-    allowed, reason, _ = _check_sandbox(
-        f"echo x > {evo_data}/memory/MEMORY.md", "workspace-write", ws
-    )
-    assert allowed is True, f"should allow evolution memory write (got {reason!r})"
+def test_workspace_write_grants_the_temp_root_not_a_deployer_root(monkeypatch, tmp_path):
+    """The file tools grant **no** deployer root — two rows, one subject.
 
+    These were `test_workspace_write_allows_evolution_memory` and
+    `..._allows_evolution_session_scratch`: PR #1092's file-tool gate blocked the
+    evolution module's own record writes, and the fix (issue #1093) trusted
+    `~/.emrg/evolution/.emrg` alongside the workspace. Both halves of that have
+    since gone — host decision D5 deleted the grant, the root itself was archived
+    (issue #1703), and the host ruling of 2026-09-28T21:50 (#1553) made the file
+    tools read the *kernel profile's* derivation, whose allow-list is the
+    workspace plus the platform temp areas and nothing else.
 
-def test_workspace_write_allows_evolution_session_scratch(monkeypatch, tmp_path):
-    """The trusted evolution-data zone covers session scratch (sessions/) too,
-    per the _trusted_write_zones() docstring — lock it in so a future narrowing
-    of the zone to memory/ alone cannot silently break session writes."""
+    The rows are kept, re-aimed, and merged because the property is still worth
+    pinning and it is now a two-directional one: a scratch tree is writable
+    because `tmp_path` lives under the OS temp root (not because of how it is
+    named), and the same shape outside that root is refused.
+    """
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     evo_data = os.path.realpath(os.path.expanduser("~/.emrg/evolution/.emrg"))
     ws = str(tmp_path / "ws")
-    # check_workspace_write (write/edit tools)
-    session = evo_data + "/sessions/emrg-evolution-emrg-task/history.jsonl"
-    assert check_workspace_write(session, ws) is None
-    # bash _check_sandbox (redirect to a session scratch file)
-    allowed, reason, _ = _check_sandbox(
-        f"echo x > {evo_data}/sessions/emrg-evolution-emrg-task/notes.txt",
-        "workspace-write", ws,
-    )
-    assert allowed is True, f"should allow evolution session-scratch write (got {reason!r})"
+    for relative in ("memory/cycle-20260901-000000.md", "sessions/task/notes.txt"):
+        assert _fence(os.path.join(evo_data, relative), ws) is None, relative
+    outside = os.path.join(os.sep, "emrg-1093-does-not-exist", "notes.txt")
+    assert _fence(outside, ws) is not None
 
 
 def test_workspace_write_still_blocks_emrg_home(monkeypatch, tmp_path):
     """Even with the trusted evolution-data zone, ~/.emrg itself is still
     blocked from destructive write (the guard is not widened)."""
-    check = check_workspace_write("~/.emrg", str(tmp_path / "ws"))
+    # The file tools refuse it by containment now — every granted root is the
+    # workspace or a temp area, and `~/.emrg` is neither. The legacy scanner's
+    # own rule (and its wording) is the row below, unchanged: it is a different
+    # implementation, and it dies with the legacy tool (P7, issue #1675).
+    check = _fence("~/.emrg", str(tmp_path / "ws"))
     assert check is not None
-    assert "daemon's data directory" in check
+    assert "outside every root" in check
     allowed, reason, _ = _check_sandbox("rm -rf ~/.emrg", "workspace-write", str(tmp_path / "ws"))
     assert allowed is False
     assert "daemon's data directory" in reason
@@ -782,7 +792,7 @@ def test_workspace_write_still_blocks_emrg_home(monkeypatch, tmp_path):
 def test_workspace_write_still_blocks_protected_file():
     """Protected daemon state files remain blocked regardless of the trusted
     evolution-data zone."""
-    check = check_workspace_write("~/.emrg/config.toml", "/workspace")
+    check = _fence("~/.emrg/config.toml", "/workspace")
     assert check is not None
     assert "protected daemon file" in check
 
@@ -801,7 +811,7 @@ def test_workspace_write_temp_root_normalized(monkeypatch):
     assert any(r == os.path.realpath(fake_suffix) for r in roots)
     assert any(r == os.path.realpath(fake_parent) for r in roots)
     # A write to the parent Temp root is not blocked.
-    check = check_workspace_write("/fake/Temp/emrg_probe.py", "/workspace")
+    check = _fence("/fake/Temp/emrg_probe.py", "/workspace")
     assert check is None
 
 

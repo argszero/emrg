@@ -1,60 +1,32 @@
-"""The in-process file-effect policy: what ``write``/``edit`` may touch, per tier.
+"""The path-shaping helpers the in-process file policy is stated in.
 
-**Where this module is not.** It is deliberately *not* under ``emrg/sandbox/``, which is
-the **fence** side — the writable roots the kernel-boundary tool runs under, plus the
-providers that express them. Two reasons, and the second is mechanical: the divergent
-question this module answers ("what may an in-process ``open()`` touch") is a tool-side
-gate, not a fence, so filing it with the fence would imply it takes part in a policy it
-measurably does not; and the guard that pins host decision D5
-(``tests/test_prompt_templates.py::_sandbox_defines``) reads every ``ast`` function name
-under ``emrg/sandbox/`` and refuses one that mentions a ``trusted_write_zone`` — measured
-by this move: filing this file there turned that guard red with
-``file_policy.py:trusted_write_zones``, i.e. it read the *move* as D5's mechanism coming
-back. The grant is real and is named below; where it lives is what keeps the fence's
-statement true.
+**What this module holds now.** The *mechanics* of judging a file target — where
+a relative spelling resolves (:func:`resolve_file_target`), what "inside" means
+(:func:`is_within`), the platform's absolute-path rule
+(:func:`is_absolute_path`), and the host's protected daemon files
+(:func:`protected_paths`) — and no policy. The policy is ``emrg/sandbox/``: the
+fence (:func:`emrg.sandbox.fence.file_refusal`) asks the same
+:func:`emrg.sandbox.roots.writable_roots` the Seatbelt/bwrap profiles are built
+from, so ``write``/``edit`` and the shell tools cannot answer differently at one
+tier (host ruling 2026-09-28T21:50, answering issue #1553's decision half).
 
-**Why this module exists.** The two tool families enforce a file-effect policy
-through two different mechanisms, and until now only one of them had a home:
+**What it no longer holds.** Two gates, ``check_read_only_file_write`` and
+``check_workspace_write``, which were the file tools' own answer and disagreed
+with the fence in **both** directions at ``read-only`` (bash could write nowhere
+while the file tools could write anywhere outside the workspace) and by one root
+at ``workspace-write`` (:func:`trusted_write_zones`). The ruling chose one
+policy for both families, so both gates are **deleted** rather than moved a
+second time: the two tools now ask the fence directly. Deleting them here is
+what keeps a third answer from growing back in the file the move came from.
 
-* the process-boundary tool (``bash_tool_v2`` / ``pwsh_tool_v2``) is confined by
-  the kernel — its writable roots come from :func:`emrg.sandbox.roots.writable_roots`
-  and become a Seatbelt profile / bwrap bind set / Windows restricted token;
-* the file tools run **inside** the daemon: they call ``open()`` in-process, where
-  no kernel boundary can be applied, so their only gate is a predicate. That
-  predicate lived in ``emrg/tools/bash_tool.py`` — the legacy shell tool, which
-  P7 (issue #1675) deletes. Deleting the legacy file without moving the predicate
-  would have deleted the only gate the file tools have.
-
-This module is that predicate's home. It is the reason the legacy file's last
-non-test importer can go away.
-
-**What this module is not.** It is *not* the fence's policy, and the two answer
-differently at ``read-only`` — measured, both halves with pure predicates
-(2026-09-25, unchanged here):
-
-============================  ==========================  =======================
-target                        these predicates             v2 fence
-============================  ==========================  =======================
-inside the workspace          BLOCK                        no root granted
-outside the workspace         allow                        no root granted
-============================  ==========================  =======================
-
-At ``workspace-write`` the two also differ by exactly one root: the trusted zone
-:func:`trusted_write_zones` names, which
-:func:`emrg.sandbox.roots.writable_roots` does not grant.
-
-**Which side should change is an open decision**, owned by issue #1553 and carried
-by #1675: (A) one policy for both families, so a tier means one thing for every
-tool — which requires re-taking the extra-root decision — or (B) two written
-policies, this one included, with their divergence stated instead of implied. The
-predicates below are moved **verbatim**, behaviour unchanged, so that decision is
-taken against a working module rather than a plan.
-
-**Callers.** ``emrg/tools/write_tool.py`` and ``emrg/tools/edit_tool.py`` at every
-tier other than ``danger-full-access``; the legacy command scanner imports
-:func:`protected_paths`, :func:`trusted_write_zones`, :func:`temp_write_roots`,
-:func:`is_absolute_path` and :func:`is_within` for its own target walks, and those
-usages retire with it.
+**The extra deployer root.** :func:`trusted_write_zones` is kept *as moved* —
+host decision D5 deleted it and the root itself was archived (issue #1703) — and
+no production path reads it: the fence grants the workspace and the platform
+temp areas and nothing else. It stays because dropping a grant is a behaviour
+change with its own review, and because the guard that pins D5
+(``tests/test_prompt_templates.py::_sandbox_defines``) reads every function name
+under ``emrg/sandbox/`` and refuses one mentioning it as a *name*: filing this
+module with the fence would read its survival as the mechanism coming back.
 """
 
 from __future__ import annotations
@@ -227,131 +199,3 @@ def is_within(path: str, root: str) -> bool:
         return False
 
 
-def check_read_only_file_write(file_path: str, workspace: str | None = None) -> str | None:
-    """Read-only sandbox check for the write/edit tools (community issue #979).
-
-    Returns a block reason when the target file is inside the task's workspace
-    (the host's working tree — protected by the structural dirty-tree guard) or
-    is a protected daemon state file; returns None when allowed.
-
-    Writes OUTSIDE the workspace (memory dir, logs, OS temp) stay allowed so a
-    read-only cycle can still record state and write its own artifacts — the
-    guard protects the host's uncommitted work, not the agent's own scratch
-    space.
-
-    This does **not** mirror the bash tool's read-only semantics, and the
-    sentence that said it did was the only statement anywhere of what the file
-    tools are supposed to do at this tier (issue #1553). Measured on this tree
-    (2026-09-25), both halves with pure predicates, nothing spawned or written:
-
-    ============================  =========================  ================
-    target                        this function              v2 fence
-    ============================  =========================  ================
-    inside the workspace          BLOCK                      (no root granted)
-    outside the workspace         allow                      (no root granted)
-    ============================  =========================  ================
-
-    The fence's allow-list is :func:`emrg.sandbox.roots.writable_roots` —
-    empty for every mode but ``workspace-write`` — and the process-boundary tool
-    derives its profile from it, so at ``read-only`` bash can write nowhere at
-    all while these tools may write anywhere outside the workspace. The two
-    layers disagree in both directions at once, and which semantics the file
-    tools should have is the open decision P7 carries (#1553): replacing this
-    function with the fence would deny a read-only cycle the very write named
-    above, its own cycle record.
-
-    A relative target is joined onto ``workspace`` first (issue #1558): this used
-    to realpath the spelling as given, i.e. against the **daemon's cwd** — a base
-    the caller never designated — so the containment answer was about a path
-    outside the workspace the caller declared, and one file's two spellings split
-    their verdict (the relative spelling allowed at a tier where the absolute
-    spelling of that same file was blocked). The write followed the same base, so
-    it landed outside the declared workspace rather than inside it: what was wrong
-    is *which* file was judged, not a write this function never saw. The judgement
-    and the write now name the file the caller named.
-    See :func:`resolve_file_target`.
-    """
-    path = os.path.realpath(resolve_file_target(file_path, workspace))
-    if workspace:
-        ws = os.path.realpath(os.path.expanduser(workspace))
-        if is_within(path, ws):
-            return (
-                f"read-only sandbox: blocked file write inside workspace {path!r} "
-                "(dirty-tree guard, community issue #979)"
-            )
-    if path in protected_paths():
-        return (
-            f"read-only sandbox: blocked write to protected daemon file {path!r}"
-        )
-    return None
-
-
-def check_workspace_write(file_path: str, workspace: str | None = None) -> str | None:
-    """workspace-write sandbox check for the write/edit tools (rant 2026-09-01T15:10:23).
-
-    Returns a block reason when the target file is a protected daemon state file,
-    is ``~/.emrg`` itself, or is an absolute path outside the workspace root, the
-    OS-temp roots and the trusted zones named below; returns None when allowed.
-
-    The allowed list is the workspace root, the OS-temp roots, and **one root the
-    blueprint's derivation does not have**: :func:`trusted_write_zones` —
-    ``~/.emrg/evolution/.emrg``, the evolution module's own data root, trusted
-    because the task runs at this tier and its cycle records land outside the
-    workspace (issue #1093, a self-regression from PR #1092). So this is not
-    exactly dsh's workspace + temp allow-list, and it is not identical to the v2
-    fence either: ``emrg.sandbox.roots.writable_roots`` grants the workspace and
-    the temp areas and nothing else, so at this tier the process-boundary tool
-    cannot write the evolution root these tools may. The divergence is measured
-    in :func:`check_read_only_file_write`'s docstring; which side should change is
-    the decision P7 carries (issue #1553).
-
-    Relative paths are joined onto ``workspace`` and then judged exactly like
-    absolute ones (issue #1558) — they used to return early on the assumption
-    "cwd = the workspace root", which is not where a write resolves when the
-    caller passes the spelling the model gave it. That asymmetry inside one
-    function was the hole: the absolute branch below realpaths both sides and
-    requires containment, and the relative branch reached none of it. A relative
-    target with no declared workspace still has no base to join onto, so it keeps
-    the old reading — and both tools pass the joined target, so in daemon use
-    (``workspace`` always injected) the base is never in doubt.
-
-    Without this check the write/edit tools let ``workspace-write`` sessions write
-    anywhere outside the session cwd, while the bash tool is correctly blocked —
-    the asymmetric hole this function closes.
-    """
-    if not file_path:
-        return None
-    expanded = resolve_file_target(file_path, workspace)
-    if not is_absolute_path(expanded):
-        # No workspace was declared, so there is no base to join onto and no
-        # boundary to require containment against (non-daemon use; the tools are
-        # fail-open there by construction).
-        return None
-    real = os.path.realpath(expanded)
-    if real in protected_paths():
-        return (
-            f"workspace-write sandbox: blocked write to protected daemon file {file_path!r}"
-        )
-    emrg_home = os.path.realpath(os.path.expanduser("~/.emrg"))
-    if real == emrg_home:
-        return (
-            f"workspace-write sandbox: blocked destructive write to {file_path!r} "
-            "(would erase the daemon's data directory)"
-        )
-    workspace_real = (
-        os.path.realpath(os.path.expanduser(workspace)) if workspace else None
-    )
-    # Allow: inside workspace, inside the OS-temp roots (normalized), or inside
-    # a trusted zone (~/.emrg/evolution/.emrg — the evolution module's own data
-    # root, issue #1093 self-regression). Everything else is blocked.
-    allowed_srcs = [workspace_real] if workspace_real else []
-    allowed_srcs += list(trusted_write_zones())
-    allowed_srcs += list(temp_write_roots())
-    if not any(
-        src and (is_within(real, src) or real == src) for src in allowed_srcs
-    ):
-        return (
-            f"workspace-write sandbox: blocked write outside workspace {file_path!r}"
-            + (f" (resolves to {real!r})" if real != os.path.expanduser(file_path) else "")
-        )
-    return None
