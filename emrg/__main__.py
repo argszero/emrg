@@ -386,6 +386,12 @@ def _run_daemon() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     from emrg.config import load_config
+    from emrg.tool_path import ensure_tool_dirs
+
+    # Rant 2026-09-27T19:45:54 defect B — the same normalization the `emrgd`
+    # launcher's entry does, so `emrg server` (foreground) and a GUI-started
+    # daemon see the same tool directories.
+    ensure_tool_dirs()
 
     try:
         config = load_config()

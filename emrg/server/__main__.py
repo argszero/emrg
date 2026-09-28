@@ -8,6 +8,7 @@ from pathlib import Path
 
 from emrg.server.daemon import DaemonExit, run_server
 from emrg.server.logcontext import session_label
+from emrg.tool_path import ensure_tool_dirs
 
 
 class _TaskColumnFormatter(logging.Formatter):
@@ -105,6 +106,13 @@ def main() -> None:
 
     _configure_logging()
     _redirect_std_streams()
+    # Rant 2026-09-27T19:45:54 defect B: the PATH this daemon was started with is
+    # not the PATH its tools need. A daemon launched from the GUI inherits the
+    # Dock's minimal environment, so every scheduled task's uv/gh/homebrew tool
+    # vanished with it. Normalizing here — the one process all three launch paths
+    # end in — also records the effective PATH in emrgd.log, where the next
+    # occurrence is one grep away.
+    ensure_tool_dirs()
     config = load_config()
     try:
         result = asyncio.run(run_server(config.llm))
