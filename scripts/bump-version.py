@@ -40,7 +40,7 @@ before pushing, instead of discovering drift after a wasted build round.
 After bumping, the release flow is (see Agent.md "Releasing"):
 
     1. ``uv run --no-sync pytest tests/test_version_sync.py -q``  # guard
-    2. commit on ``feature/release-vX.Y.Z`` -> PR -> 3 LGTMs -> merge
+    2. commit on ``release/vX.Y.Z`` -> PR -> 3 LGTMs -> merge
     3. ``python3 scripts/check-release-tag.py vX.Y.Z``  # the tag must name this tree's version
     4. ``git tag -a vX.Y.Z -m "emrg vX.Y.Z" && git push origin vX.Y.Z``  # triggers Build Release
     5. confirm all 4 platform legs green in ``build-release.yml``
@@ -65,8 +65,17 @@ from pathlib import Path
 # The single source of truth: emrg/__init__.py's __version__.
 BASE_FILE = "emrg/__init__.py"
 BASE_PATTERN = re.compile(r'__version__\s*=\s*"(\d+\.\d+\.\d+)"')
-
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+
+#: The branch a release bump is committed on, as a name and not as prose: this
+#: module used to print ``feature/release-vX.Y.Z`` and no release has been cut
+#: on a branch spelled that way since v0.3.0 (measured 2026-09-27 against
+#: ``git for-each-ref refs/remotes/origin``: ``release/v0.3.2``, ``release/v0.3.3``
+#: and ``release/v0.3.4`` are what the flow creates now, while the older spelling
+#: survives only on branches that were created back then). A tool that prints an
+#: instruction is a carrier of the project's rules, so the spelling is named once
+#: here and read by both the run's next-steps and the test that pins it.
+RELEASE_BRANCH = "release/v{version}"
 
 
 def _resolve_root() -> Path:
@@ -358,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "\nNext:\n"
         "  1. uv run --no-sync pytest tests/test_version_sync.py -q\n"
-        f"  2. commit on feature/release-v{args.version} -> PR -> 3 LGTMs -> merge\n"
+        f"  2. commit on {RELEASE_BRANCH.format(version=args.version)} -> PR -> 3 LGTMs -> merge\n"
         f"  3. python3 scripts/check-release-tag.py v{args.version}   # the tag must name this tree's version\n"
         f"  4. git tag -a v{args.version} -m \"emrg v{args.version}\" && git push origin v{args.version}\n"
         "  5. confirm all 4 platforms green in build-release.yml\n"
