@@ -162,7 +162,7 @@ So the issue side reads a **claim phrase**: a closing verb in the passive voice 
 by`, `fixed by`, `resolved by`) or one of the two verbs this project actually writes under
 an issue (`handled by`, `taken by`), followed by the reference. The vocabulary is measured
 rather than invented — the live rows that must keep reading `ok` are #1658/#1661/#1663/
-#1665 (`Handled by #N`, the first three in a **comment**) and #1654 (`Taken by **#1655**`,
+#1665 (`Handled by #N`, all four in a **comment**) and #1654 (`Taken by **#1655**`,
 with the emphasis between the verb and the number) — and `handled by` is in it for a
 second reason: it is the phrase *this tool prints as its remedy*, so a reader who follows
 the printed instruction is read back the same way.
@@ -232,7 +232,7 @@ _NEGATED_KEYWORD = re.compile(
 #: this project actually writes under an issue. Measured 2026-09-27 against the live
 #: queue rather than invented, because the vocabulary decides which live rows stay `ok`:
 #: `Handled by #1659` (#1658), `Handled by #1662` (#1661), `Handled by #1664` (#1663),
-#: `Handled by #1666` (#1665) — the first three in a **comment**, which is why the claim
+#: `Handled by #1666` (#1665) — all four in a **comment**, which is why the claim
 #: text is fetched rather than read off the cross-reference event — and
 #: `Taken by **#1655**` (#1654) / `Taken by #1653` (#1652), with the emphasis between the
 #: verb and the number, which is what the separator class is for.
