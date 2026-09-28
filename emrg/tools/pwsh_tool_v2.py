@@ -572,15 +572,17 @@ async def run_command(
         failure = classify_runner_failure(result.exit_code, result.stderr, confined.runner_failure_rules)
         if failure is not None:
             raise SandboxUnavailableError(policy.mode, failure)
-        # The runner's start announcement is evidence for this seam, not output
-        # the caller asked for: it is written on every confined run, so the text
-        # the model reads loses it — after the reading above, never before it.
-        result.stderr = without_start_announcements(result.stderr, confined.runner_failure_rules)
         result.sandbox = {
             "mode": policy.mode,
             "denied": matches_signature(result.exit_code, result.stderr, confined.denial_signatures),
             "enforcement": confined.enforcement,
         }
+        # Last, after every reading: the runner's start announcement is evidence
+        # for this seam, not output the caller asked for, and it is written on
+        # every confined run — so the text the model reads loses it.  Placed last
+        # on purpose: a strip that ran before the readings could only ever be
+        # one's business by accident, and this line is presentational alone.
+        result.stderr = without_start_announcements(result.stderr, confined.runner_failure_rules)
     else:
         result.sandbox = {"mode": effective_mode, "denied": False}
     return result

@@ -793,6 +793,231 @@ def test_a_cleanup_notice_beside_the_childs_own_exit_is_not_a_runner_failure(cap
     )
 
 
+def _stub_runner(script: str):
+    """A ``Runner`` whose program is a two-line interpreter script, not a boundary.
+
+    The rules are the real ones for this rung — it is the only backend that
+    declares a ``start_line`` — while the *program* is stubbed, because what the
+    tests below measure is the consumer's wiring rather than the ACL boundary
+    (which the Windows-only tests in this file already measure for real).  The
+    stub is what makes them run on every platform, and what lets them drive the
+    path that no other test reaches: ``run_command``, where the readings and the
+    strip that follows them live.
+
+    :param script: the stub program's source.
+    :returns: a runner that spawns it in place of a confinement tool.
+    """
+    from emrg.sandbox.contract import Runner
+
+    return Runner(
+        name="stub",
+        enforcement="full",
+        denial_signatures=provider.DENIAL_SIGNATURES,
+        runner_failure_rules=provider.RUNNER_FAILURE_RULES,
+        runner_argv=lambda policy: [sys.executable, "-c", script],
+    )
+
+
+def _stub_confined(monkeypatch, script: str):
+    """Point the seam at a stubbed runner for one test.
+
+    Patched on the providers module, not on ``emrg.sandbox.contract``: ``confine``
+    imports ``select_runner`` from there at call time, which is exactly the seam
+    the patch has to reach.
+
+    :param monkeypatch: the pytest fixture.
+    :param script: the stub program's source.
+    """
+    from emrg.sandbox import providers as providers_module
+
+    monkeypatch.setattr(
+        providers_module,
+        "select_runner",
+        lambda mode, *, platform_name=None: _stub_runner(script),
+    )
+
+
+def test_the_announcement_is_stripped_from_what_the_model_reads(monkeypatch, tmp_path):
+    """The consumer's half of the start line, driven through the real seam.
+
+    Two production lines implement this and nothing reached them before: the
+    announcement is removed from the run's stderr in ``run_command``, after the
+    readings that need it and before anything is rendered.  It has to be removed
+    rather than tolerated — the runner writes it on **every** confined run, so
+    leaving it would put a ``[stderr]`` section on every successful command the
+    model reads, and an announcement is not the command's output.
+
+    The stub reports the announcement on stderr and markers on both streams, so
+    one row says all three facts at once: the child's output survives, the
+    announcement does not, and the run is still read as confined (``enforcement``
+    present) rather than as a runner failure.
+    """
+    import asyncio
+
+    from emrg.sandbox.policy import SandboxPolicy
+    from emrg.tools.bash_tool_v2 import render_result as bash_render
+    from emrg.tools.bash_tool_v2 import run_command as bash_run_command
+    from emrg.tools.pwsh_tool_v2 import render_result as pwsh_render
+    from emrg.tools.pwsh_tool_v2 import run_command as pwsh_run_command
+
+    _stub_confined(
+        monkeypatch,
+        "import sys;"
+        f"sys.stderr.write({START_ANNOUNCEMENT!r} + '\\n');"
+        "sys.stderr.flush();"
+        "sys.stdout.write('out-marker');"
+        "sys.stderr.write('err-marker')",
+    )
+    policy = SandboxPolicy(mode="read-only", workspace_root=str(tmp_path))
+
+    for run_command, render in ((bash_run_command, bash_render), (pwsh_run_command, pwsh_render)):
+        result = asyncio.run(
+            run_command(
+                "ignored (the stub never reads it)",
+                policy=policy,
+                workdir=str(tmp_path),
+                timeout=30,
+                platform_name="win32",
+            )
+        )
+        text = render(result)
+        assert "out-marker" in text, text
+        assert "err-marker" in text, text
+        assert START_ANNOUNCEMENT not in text, text
+        assert result.stderr == "err-marker", repr(result.stderr)
+        assert result.sandbox == {
+            "mode": "read-only",
+            "denied": False,
+            "enforcement": "full",
+        }, result.sandbox
+
+    # The row above is only worth having if it can fail, so the strip is
+    # neutralised and the same run repeated: the announcement reappears as
+    # `[stderr]` output the model would read.  Without this, a future edit that
+    # stopped calling the strip would leave the assertions above green while the
+    # leak came back — the "reading that cannot say no" failure mode.
+    import emrg.tools.bash_tool_v2 as bash_module
+
+    monkeypatch.setattr(
+        bash_module, "without_start_announcements", lambda stderr, rules: stderr
+    )
+    unstripped = asyncio.run(
+        bash_module.run_command(
+            "ignored",
+            policy=policy,
+            workdir=str(tmp_path),
+            timeout=30,
+            platform_name="win32",
+        )
+    )
+    assert START_ANNOUNCEMENT in bash_render(unstripped)
+
+
+def test_a_run_with_no_announcement_is_refused_rather_than_reported_as_the_commands(monkeypatch, tmp_path):
+    """The reading's readable end: a dead environment is not a failed command.
+
+    This is the shape the rant measured — the runner's own process dies with a
+    status a command could also have chosen, and nothing on either stream — and
+    what the model must see is a refusal naming the environment, not
+    ``[exit code: 3]`` as though the command had run and returned 3.
+
+    Both the seam (``run_command`` raises) and the tool (what the model reads)
+    are asserted, because the second is the one the rant's three readers asked
+    about and only it shows the sentence that reaches the transcript.
+    """
+    import asyncio
+
+    from emrg.sandbox.contract import SANDBOX_UNAVAILABLE, SandboxUnavailableError, never_announced_detail
+    from emrg.sandbox.policy import SandboxPolicy
+    from emrg.tools.bash_tool_v2 import BashToolV2
+    from emrg.tools.bash_tool_v2 import run_command as bash_run_command
+    from emrg.tools.pwsh_tool_v2 import run_command as pwsh_run_command
+
+    _stub_confined(monkeypatch, "import sys; sys.exit(3)")
+    policy = SandboxPolicy(mode="read-only", workspace_root=str(tmp_path))
+
+    for run_command in (bash_run_command, pwsh_run_command):
+        with pytest.raises(SandboxUnavailableError) as raised:
+            asyncio.run(
+                run_command(
+                    "ignored",
+                    policy=policy,
+                    workdir=str(tmp_path),
+                    timeout=30,
+                    platform_name="win32",
+                )
+            )
+        assert raised.value.code == SANDBOX_UNAVAILABLE
+        assert raised.value.detail == never_announced_detail(3)
+
+    # And the tool's own surface: the refusal, with the environment named.
+    tool_result = asyncio.run(
+        BashToolV2().execute(
+            {
+                "command": "ignored",
+                "intent": "probe",
+                "sandbox": "read-only",
+                "workspace": str(tmp_path),
+                "workdir": str(tmp_path),
+            }
+        )
+    )
+    assert tool_result.error is True, tool_result
+    assert 'sandbox mode "read-only" is requested' in tool_result.content, tool_result.content
+    assert never_announced_detail(3) in tool_result.content, tool_result.content
+    assert "[exit code: 3]" not in tool_result.content, tool_result.content
+
+
+def test_the_announcements_presence_decides_which_reading_a_fatal_line_gets(monkeypatch, tmp_path):
+    """The strip's placement, and the one row where the two new readings order.
+
+    The announcement is removed **last**, after the readings, and this test is
+    where that matters: the same fatal line is quoted as the refusal's detail
+    when the announcement is present, while a run that never announced is read as
+    the environment's death and the fatal line is *not* what the model is told
+    about.  Nothing about the line changed between the two rows — only whether
+    the runner got as far as saying it had started.
+    """
+    import asyncio
+
+    from emrg.sandbox.contract import SandboxUnavailableError, never_announced_detail
+    from emrg.sandbox.policy import SandboxPolicy
+    from emrg.tools.bash_tool_v2 import run_command as bash_run_command
+    from emrg.tools.pwsh_tool_v2 import run_command as pwsh_run_command
+
+    fatal = r"windows-acl-run: no such directory: C:\nope"
+    policy = SandboxPolicy(mode="read-only", workspace_root=str(tmp_path))
+
+    for script, expected in (
+        (
+            "import sys;"
+            f"sys.stderr.write({START_ANNOUNCEMENT!r} + '\\n');"
+            f"sys.stderr.write({fatal!r} + '\\n');"
+            "sys.exit(127)",
+            fatal,
+        ),
+        (
+            "import sys;"
+            f"sys.stderr.write({fatal!r} + '\\n');"
+            "sys.exit(127)",
+            never_announced_detail(127),
+        ),
+    ):
+        _stub_confined(monkeypatch, script)
+        for run_command in (bash_run_command, pwsh_run_command):
+            with pytest.raises(SandboxUnavailableError) as raised:
+                asyncio.run(
+                    run_command(
+                        "ignored",
+                        policy=policy,
+                        workdir=str(tmp_path),
+                        timeout=30,
+                        platform_name="win32",
+                    )
+                )
+            assert raised.value.detail == expected
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is where the backend is loadable")
 def test_the_backend_fails_closed_where_the_api_does_not_exist(capsys):
     """A wrong-platform loader is a runner failure with the same contract.
