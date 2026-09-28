@@ -98,6 +98,19 @@ CONTENT_RISK_HINT = (
     "refuses: inspect/clean the session history or start a new session."
 )
 
+#: The ``finish_reason`` a provider reports when **its own** content filter
+#: blocked the model's output. The request succeeded (HTTP 200); the answer did
+#: not. Measured on this host over 2026-09-26..28: 34 such responses, every one
+#: of them carrying a non-empty ``reasoning`` and an empty ``content`` — the
+#: filter fires during thinking, so not one visible character was ever produced
+#: (rant 2026-09-28T16:58:08).
+#:
+#: It is a **third** outcome alongside ``stop`` and ``tool_calls``, and the
+#: reason it needed a name is that the tool loop read it as ``stop``: the turn
+#: was called done, an empty assistant record was persisted, and the host saw
+#: nothing at all — 34 times, silently.
+CONTENT_FILTER_FINISH = "content_filter"
+
 #: HTTP statuses that mean "the request body did not fit".
 _OVERLONG_STATUSES = ("400", "413")
 
@@ -265,6 +278,30 @@ CONTENT_RISK_RUNG_DESCRIPTION = {
     "space_out": "the text spaced out",
 }
 
+#: The error raised when the filter blocked the model's **output** and the retry
+#: ladder is spent. One sentence, raised by both call sites, so the client-facing
+#: text cannot differ by which code path hit it.
+#:
+#: Its rungs are read from :data:`CONTENT_RISK_RUNG_DESCRIPTION` rather than
+#: spelled again, because the host reads this to decide whether to retry by hand:
+#: an error naming a rung the code no longer walks is the same defect that made
+#: the old hint promise a spaced retry that had never once worked.
+#:
+#: Deliberately NOT :data:`CONTENT_RISK_HINT`: that one is about the *request's*
+#: text and sends the host to the session history — the right place for a request
+#: the provider refused, and the wrong one here, where the trigger was in the
+#: model's own generation and the payload that arrived was never at fault.
+CONTENT_FILTER_ERROR = (
+    "LLM answer blocked by the provider's content filter: the model produced no "
+    f"usable text (finish_reason={CONTENT_FILTER_FINISH}) — it was re-sent with "
+    + " and then ".join(
+        CONTENT_RISK_RUNG_DESCRIPTION[rung] for rung in CONTENT_RISK_LADDER
+    )
+    + ", each asking for less output, and the filter blocked every attempt. "
+    "Nothing of that answer exists to show: ask a narrower question, or use a "
+    "different model."
+)
+
 
 def content_risk_retry(stage: int, original: list[dict]) -> tuple[str, list[dict]] | None:
     """The next rung for a content refusal, or ``None`` when the ladder is spent.
@@ -287,6 +324,41 @@ def content_risk_retry(stage: int, original: list[dict]) -> tuple[str, list[dict
     if rung == "escape":
         return rung, escape_astral_messages(original)
     return rung, space_out_messages(original)
+
+
+#: The instruction appended to every content-filter retry, on the request side
+#: of a refusal whose trigger is on the *response* side (host, 2026-09-28; rant
+#: 2026-09-28T16:58:08).
+#:
+#: A transform alone cannot be enough here, and the measurement says why: the
+#: recorded refusals all carried a non-empty ``reasoning`` and an empty
+#: ``content``, so the filter had already decided before one visible character
+#: existed. Re-sending the same payload asks the same model for the same sample.
+#: Asking for less output — and for a different wording — is the lever that can
+#: change what is sampled, which is why the host asked for this in addition to
+#: the ladder rather than instead of it.
+CONTENT_FILTER_RETRY_INSTRUCTION = (
+    "Your previous answer to this conversation was blocked by the provider's "
+    "content filter (finish_reason=content_filter) before any of it reached the "
+    "user, so nothing of it was seen. Answer again, and make this attempt "
+    "different:\n"
+    "- give the conclusion, not the process: no restating the question, no "
+    "working notes, no repeating earlier turns;\n"
+    "- do not reproduce or paraphrase the text that was blocked;\n"
+    "- keep it as short as the task allows, and prefer neutral wording."
+)
+
+
+def content_filter_retry_messages(messages: list[dict]) -> list[dict]:
+    """``messages`` plus :data:`CONTENT_FILTER_RETRY_INSTRUCTION` as a final turn.
+
+    A copy, and that is the requirement rather than a detail: the instruction is
+    in force for **this retry only** and must never be written into the session
+    history, or every later turn would carry an explanation of an event the
+    conversation already moved past (rant 2026-09-28T16:58:08, requirement C).
+    The caller owns the history; this function cannot reach it.
+    """
+    return [*messages, {"role": "user", "content": CONTENT_FILTER_RETRY_INSTRUCTION}]
 
 
 def with_content_risk_hint(message: str) -> str:
@@ -344,6 +416,57 @@ class LlmClient:
             "Content-Type": "application/json",
             "User-Agent": f"emrg/{__version__}",
         }
+
+    def _advance_content_filter_ladder(
+        self,
+        payload: dict,
+        original_messages: list[dict],
+        stage: int,
+        *,
+        streaming: bool,
+        already_streamed: int = 0,
+    ) -> int:
+        """Answer a filter-blocked answer with the next rung — or report honestly.
+
+        Called when the provider returned HTTP 200 and then refused the model's
+        own output (``finish_reason=content_filter``). Rewrites
+        ``payload["messages"]`` in place with the next rung *plus* the
+        shorter-output instruction, and returns the new ``stage`` so the caller
+        can re-send.
+
+        Raises :data:`CONTENT_FILTER_ERROR` when the ladder is spent. One
+        implementation for both call sites, and that is the point: ``chat`` and
+        ``chat_stream`` already spell the refusal ladder twice, and the whole
+        reason :func:`content_risk_retry` exists is to keep the two from
+        drifting apart. A refusal that no longer has a retry must never become
+        an empty answer — that is the defect this path was written for.
+
+        ``already_streamed`` is how much text of the *blocked* attempt had
+        reached the caller; it is reported, never acted on, because deciding
+        "may this attempt be retried?" belongs at the call site, where the fact
+        is (the streaming path refuses to retry once anything visible has been
+        yielded).
+        """
+        nxt = content_risk_retry(stage, original_messages)
+        if nxt is None:
+            logger.error(
+                "LLM%s content filter blocked the answer again after %d retries "
+                "(finish_reason=%s, %d character(s) already sent) — reporting it: "
+                "an empty answer is not a finished turn",
+                " stream" if streaming else "", len(CONTENT_RISK_LADDER),
+                CONTENT_FILTER_FINISH, already_streamed,
+            )
+            raise RuntimeError(CONTENT_FILTER_ERROR)
+        rung, rung_messages = nxt
+        logger.warning(
+            "LLM%s content filter blocked the answer (finish_reason=%s) — "
+            "re-sending (%d of %d) with %s and the shorter-output instruction",
+            " stream" if streaming else "", CONTENT_FILTER_FINISH,
+            stage + 1, len(CONTENT_RISK_LADDER), CONTENT_RISK_RUNG_DESCRIPTION[rung],
+        )
+        payload["messages"] = content_filter_retry_messages(rung_messages)
+        self.last_payload = dict(payload)
+        return stage + 1
 
     async def chat(
         self,
@@ -416,7 +539,31 @@ class LlmClient:
                         f"LLM response body unparseable: {type(exc).__name__}"
                     ) from exc
                 choice = data["choices"][0]
-                return choice.get("message", {})
+                message = choice.get("message", {})
+                # ── The provider refused the model's OWN output ───────
+                # A 200 whose finish_reason is content_filter carries an empty
+                # content, and every caller of this method (compact summary,
+                # session title, memory reflection, task vibe check) would have
+                # stored that empty string as the answer — the compact path
+                # silently flattened the context (rant 2026-09-28T16:58:08).
+                # Same one-shot ladder as the 400 path above, plus the
+                # shorter-output instruction; then report.
+                if choice.get("finish_reason") == CONTENT_FILTER_FINISH:
+                    content_risk_stage = self._advance_content_filter_ladder(
+                        payload, original_messages, content_risk_stage,
+                        streaming=False,
+                    )
+                    continue
+                # Nothing came back and nothing was asked for: refuse, rather
+                # than hand an empty string to a caller that treats it as text.
+                if not message.get("content") and not message.get("tool_calls"):
+                    raise RuntimeError(
+                        "LLM request returned no answer at all "
+                        f"(finish_reason={choice.get('finish_reason')!r}, "
+                        "empty content and no tool calls) — an empty string is "
+                        "not a summary, a title or a reflection"
+                    )
+                return message
 
             text = resp.text[:500]
             # ── The provider refused the text itself ──────────────
@@ -594,6 +741,11 @@ class LlmClient:
                     self.last_response_status = resp.status_code
                     self.last_response_headers = dict(resp.headers)
 
+                    # True when this attempt's verdict was the provider's content
+                    # filter rather than an answer; decided inside the loop, acted
+                    # on after it (rant 2026-09-28T16:58:08).
+                    blocked = False
+
                     async for line in resp.aiter_lines():
                         line = line.strip()
                         if not line or line == "[DONE]" or not line.startswith("data: "):
@@ -683,6 +835,22 @@ class LlmClient:
                             if cache_hit_tokens is not None:
                                 usage_out["cache_hit_tokens"] = cache_hit_tokens
 
+                        # The provider refused the model's own output (rant
+                        # 2026-09-28T16:58:08), decided BEFORE the yield so no
+                        # finish_reason=content_filter ever reaches a caller that
+                        # would read it as this round's verdict. Retried only
+                        # while this attempt produced nothing usable: an attempt
+                        # whose text or tool calls were already streamed cannot be
+                        # re-sent without duplicating them (the same rule the
+                        # transport retry below obeys through `yielded_delta`).
+                        if (
+                            finish == CONTENT_FILTER_FINISH
+                            and not content_parts
+                            and not tc_by_index
+                        ):
+                            blocked = True
+                            break
+
                         # Any yield = the caller has seen (and likely broadcast)
                         # this delta — no retry past this point.
                         yielded_delta = True
@@ -699,6 +867,13 @@ class LlmClient:
                         # On finish, we're done with this stream
                         if finish:
                             return
+
+                    if blocked:
+                        content_risk_stage = self._advance_content_filter_ladder(
+                            payload, original_messages, content_risk_stage,
+                            streaming=True,
+                        )
+                        continue
             except httpx.TransportError as exc:
                 # Transient transport failure while streaming — httpx.ReadTimeout
                 # (no data block for the 120s read timeout), ConnectError,

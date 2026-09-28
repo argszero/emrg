@@ -14,6 +14,9 @@ import pytest
 
 from emrg.config import LlmConfig
 from emrg.server.llm import (
+    CONTENT_FILTER_ERROR,
+    CONTENT_FILTER_FINISH,
+    CONTENT_FILTER_RETRY_INSTRUCTION,
     CONTENT_RISK,
     CONTENT_RISK_ERROR,
     CONTENT_RISK_HINT,
@@ -23,6 +26,7 @@ from emrg.server.llm import (
     OTHER_ERROR,
     LlmClient,
     classify_llm_error,
+    content_filter_retry_messages,
     content_risk_retry,
     escape_astral_messages,
     escape_astral_text,
@@ -1194,3 +1198,274 @@ def test_chat_plain_400_is_not_spaced(monkeypatch, client):
     assert fake.payloads[0]["messages"] == [{"role": "user", "content": "hi"}]
     assert classify_llm_error(excinfo.value) == CONTEXT_TOO_LONG
     assert CONTENT_RISK_HINT not in str(excinfo.value)
+
+
+# ── the provider refuses the model's OWN output (finish_reason=content_filter) ─
+#
+# Rant 2026-09-28T16:58:08. The request succeeds and the answer does not, so the
+# refusal arrives as an HTTP 200 with `content: ""` — measured on this host: 34
+# such responses over two days, every one carrying a non-empty `reasoning` and
+# an empty `content`, i.e. the filter fired during thinking and not one visible
+# character ever existed. Two things follow, and both are asserted below: the
+# ladder runs for this shape too, and every retry asks the model for *less*
+# output (a transform alone re-samples the same prompt and gets the same
+# refusal). Assertions are on the payload that was sent — a branch that logged
+# the right warning and re-sent the unfixed body reads identically in the log.
+
+_CONTENT_FILTER_BODY = (
+    b'{"choices":[{"message":{"content":""},"finish_reason":"content_filter"}]}'
+)
+_CONTENT_FILTER_CHUNK = {"choices": [{"delta": {}, "finish_reason": "content_filter"}]}
+
+
+def test_chat_content_filter_finish_walks_the_ladder_with_the_instruction(
+    monkeypatch, client
+):
+    """A 200 + finish_reason=content_filter walks the same one-shot ladder as a
+    400 refusal, and every retry carries the shorter-output instruction."""
+    import asyncio
+    trigger = "\U0001F1E6"
+    original = [{"role": "user", "content": f"hi {trigger}"}]
+    fake = _RecordingHttpClient([_FakeResponse(200, _CONTENT_FILTER_BODY)] * 3)
+    client._client = fake
+
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(client.chat(list(original)))
+
+    assert len(fake.payloads) == 3, "the ladder is one shot per rung, not a loop"
+    # The first attempt is the caller's payload, verbatim — no instruction.
+    assert fake.payloads[0]["messages"] == original
+    assert original == [{"role": "user", "content": f"hi {trigger}"}], (
+        "the caller's messages were mutated — the instruction is this retry's only"
+    )
+    # Rung 1: escaped, then the instruction as the final turn.
+    assert fake.payloads[1]["messages"][0] == {
+        "role": "user", "content": "hi <U+1F1E6>",
+    }
+    assert fake.payloads[1]["messages"][-1] == {
+        "role": "user", "content": CONTENT_FILTER_RETRY_INSTRUCTION,
+    }
+    # Rung 2: built from the ORIGINAL (the trigger is still a codepoint, no
+    # notation anywhere), plus the same instruction.
+    assert fake.payloads[2]["messages"][0] == {
+        "role": "user", "content": f"h i   {trigger}",
+    }
+    assert "<" not in fake.payloads[2]["messages"][0]["content"]
+    assert fake.payloads[2]["messages"][-1] == {
+        "role": "user", "content": CONTENT_FILTER_RETRY_INSTRUCTION,
+    }
+    assert str(excinfo.value) == CONTENT_FILTER_ERROR
+
+
+def test_chat_content_filter_finish_recovers_on_the_next_rung(monkeypatch, client):
+    """The refusal is answered, not propagated, while rungs remain."""
+    import asyncio
+    good = b'{"choices":[{"message":{"content":"recovered"},"finish_reason":"stop"}]}'
+    fake = _RecordingHttpClient([_FakeResponse(200, _CONTENT_FILTER_BODY),
+                                 _FakeResponse(200, good)])
+    client._client = fake
+
+    msg = asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+
+    assert msg == {"content": "recovered"}
+    assert len(fake.payloads) == 2
+    assert fake.payloads[1]["messages"][-1]["content"] == CONTENT_FILTER_RETRY_INSTRUCTION
+    # The retried payload is what llm.jsonl records (it is what was sent).
+    assert client.last_payload["messages"][-1]["content"] == (
+        CONTENT_FILTER_RETRY_INSTRUCTION
+    )
+
+
+def test_the_content_filter_error_is_not_the_credential_free_advice(monkeypatch, client):
+    """The two refusals are different failures and must not share a hint.
+
+    `CONTENT_RISK_HINT` sends the host to the session history, which is the
+    right place for a *request* the provider refused and the wrong place for an
+    answer the provider refused: here the trigger was in the model's own
+    generation, so nothing in the history is at fault. Pinned because reusing
+    the hint is the tempting shortcut (rant 2026-09-28T16:58:08, and the
+    `with_content_risk_hint` helper makes it a one-liner).
+    """
+    assert CONTENT_RISK_HINT not in CONTENT_FILTER_ERROR
+    assert "start a new session" not in CONTENT_FILTER_ERROR
+    assert CONTENT_FILTER_FINISH in CONTENT_FILTER_ERROR
+    for rung in CONTENT_RISK_LADDER:
+        assert CONTENT_RISK_RUNG_DESCRIPTION[rung] in CONTENT_FILTER_ERROR, (
+            f"the error does not name the {rung!r} rung it claims to have tried"
+        )
+
+
+def test_chat_refuses_an_altogether_empty_answer(monkeypatch, client):
+    """`chat()`'s callers are all "give me text" — a summary, a title, a
+    reflection. An empty 200 must be an error, never a stored empty string:
+    that is what flattened a compact summary in the measured incident."""
+    import asyncio
+    empty = b'{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}'
+    fake = _RecordingHttpClient([_FakeResponse(200, empty)])
+    client._client = fake
+
+    with pytest.raises(RuntimeError, match="no answer at all") as excinfo:
+        asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+
+    assert len(fake.payloads) == 1, "an empty answer is not retried — it is reported"
+    assert classify_llm_error(excinfo.value) == OTHER_ERROR, (
+        "an empty answer must not classify as content_risk: the chunker would "
+        "re-send the same text into every depth of the recursion"
+    )
+
+
+def test_chat_keeps_a_tool_call_that_carries_no_text(monkeypatch, client):
+    """Negative control for the empty-answer guard: `content: null` with tool
+    calls is a legitimate response, and the guard keys on *both* facts."""
+    import asyncio
+    body = (b'{"choices":[{"message":{"content":null,'
+            b'"tool_calls":[{"id":"c1","type":"function",'
+            b'"function":{"name":"bash","arguments":"{}"}}]},'
+            b'"finish_reason":"tool_calls"}]}')
+    fake = _RecordingHttpClient([_FakeResponse(200, body)])
+    client._client = fake
+
+    msg = asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+
+    assert msg["tool_calls"][0]["id"] == "c1"
+
+
+def test_content_filter_retry_messages_appends_without_touching_the_caller():
+    """The instruction is a *request-side* append on a copy.
+
+    Nothing else may do: it must never reach the session history, or every
+    later turn of the conversation would carry an explanation of an event the
+    conversation has moved past.
+    """
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}]
+    out = content_filter_retry_messages(messages)
+
+    assert messages == [{"role": "system", "content": "s"},
+                        {"role": "user", "content": "hi"}]
+    assert out[:2] == messages
+    assert out[2] == {"role": "user", "content": CONTENT_FILTER_RETRY_INSTRUCTION}
+    assert len(out) == len(messages) + 1
+
+
+def test_stream_content_filter_finish_walks_the_ladder_with_the_instruction(
+    monkeypatch, client, caplog
+):
+    """The streaming twin, which is where the defect was actually seen."""
+    import asyncio
+    import logging
+    caplog.set_level(logging.WARNING, logger="emrg.server.llm")
+    trigger = "\U0001F1E6"
+    original = [{"role": "user", "content": f"hi {trigger}"}]
+    fake = _RecordingStreamClient([_make_stream(_CONTENT_FILTER_CHUNK)] * 3)
+    client._client = fake
+
+    async def _run():
+        return [chunk async for chunk in client.chat_stream(list(original))]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(_run())
+
+    assert len(fake.payloads) == 3, "the ladder is one shot per rung, not a loop"
+    assert fake.payloads[0]["messages"] == original
+    assert original == [{"role": "user", "content": f"hi {trigger}"}]
+    assert fake.payloads[1]["messages"][-1]["content"] == CONTENT_FILTER_RETRY_INSTRUCTION
+    assert fake.payloads[2]["messages"][-1]["content"] == CONTENT_FILTER_RETRY_INSTRUCTION
+    assert fake.payloads[2]["messages"][0] == {"role": "user", "content": f"h i   {trigger}"}
+    assert str(excinfo.value) == CONTENT_FILTER_ERROR
+    # Requirement E: the reason is visible, with the rung and the verdict.
+    assert CONTENT_FILTER_FINISH in caplog.text
+    assert "shorter-output instruction" in caplog.text
+    assert "again after 2 retries" in caplog.text, (
+        "the terminal refusal was not reported: a spent ladder must be visible"
+    )
+
+
+def test_stream_content_filter_finish_recovers_and_never_yields_the_refusal(
+    monkeypatch, client
+):
+    """A refused attempt is invisible to the caller: no chunk carrying
+    finish_reason=content_filter ever reaches it, because the tool loop reads a
+    finish_reason as the round's verdict."""
+    import asyncio
+    fake = _RecordingStreamClient([
+        _make_stream(_CONTENT_FILTER_CHUNK),
+        _make_stream(
+            {"choices": [{"delta": {"content": "hi"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ),
+    ])
+    client._client = fake
+
+    async def _run():
+        return [chunk async for chunk in client.chat_stream(
+            [{"role": "user", "content": "hi"}]
+        )]
+
+    chunks = asyncio.run(_run())
+
+    assert [c["content"] for c in chunks if c.get("content")] == ["hi"]
+    assert [c["finish_reason"] for c in chunks] == [None, "stop"], (
+        "the caller saw the refusal's finish_reason, which the tool loop would "
+        "read as this round's verdict"
+    )
+    assert fake.calls == 2
+    assert fake.payloads[1]["messages"][-1]["content"] == CONTENT_FILTER_RETRY_INSTRUCTION
+
+
+def test_stream_does_not_retry_a_filter_once_text_has_been_streamed(monkeypatch, client):
+    """Requirement B, and the guard the tool loop depends on.
+
+    Measured shape: the answer streams, then the filter fires — the client is
+    already showing that text, so a retry would print the answer twice. The
+    refusal is handed on as the round's finish_reason instead, and the count of
+    requests is the assertion (a guard removed here is invisible in the log —
+    both runs log "content filter blocked the answer").
+    """
+    import asyncio
+    fake = _RecordingStreamClient([
+        _make_stream(
+            {"choices": [{"delta": {"content": "partial answer"}}]},
+            _CONTENT_FILTER_CHUNK,
+        ),
+    ])
+    client._client = fake
+
+    async def _run():
+        return [chunk async for chunk in client.chat_stream(
+            [{"role": "user", "content": "hi"}]
+        )]
+
+    chunks = asyncio.run(_run())
+
+    assert [c["content"] for c in chunks if c.get("content")] == ["partial answer"]
+    assert chunks[-1]["finish_reason"] == CONTENT_FILTER_FINISH
+    assert fake.calls == 1, "a refusal after visible text was re-sent"
+    assert len(fake.payloads) == 1
+
+
+def test_stream_does_not_retry_a_filter_once_a_tool_call_has_been_streamed(
+    monkeypatch, client
+):
+    """The same guard for the other half of "produced something": a tool call
+    that already reached the caller must not be asked for again."""
+    import asyncio
+    fake = _RecordingStreamClient([
+        _make_stream(
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "c1", "function": {"name": "bash", "arguments": "{}"}},
+            ]}}]},
+            _CONTENT_FILTER_CHUNK,
+        ),
+    ])
+    client._client = fake
+
+    async def _run():
+        return [chunk async for chunk in client.chat_stream(
+            [{"role": "user", "content": "hi"}]
+        )]
+
+    chunks = asyncio.run(_run())
+
+    assert chunks[-1]["finish_reason"] == CONTENT_FILTER_FINISH
+    assert chunks[-1]["tool_calls"][0]["id"] == "c1"
+    assert fake.calls == 1, "a refusal after a streamed tool call was re-sent"

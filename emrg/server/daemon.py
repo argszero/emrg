@@ -53,6 +53,8 @@ from emrg.server.config_reload import (
     describe,
 )
 from emrg.server.llm import (
+    CONTENT_FILTER_ERROR,
+    CONTENT_FILTER_FINISH,
     CONTENT_RISK,
     CONTEXT_TOO_LONG,
     LlmClient,
@@ -3650,8 +3652,16 @@ class EmrgServer:
                             "auto": True,
                         })
                         continue
+                # A content-filter refusal is not a configuration problem, so the
+                # generic frame's "Check config at ~/.emrg/config.toml" sends the
+                # host after the wrong thing. The refusal travels as its own
+                # sentence, which names what happened and which retries were
+                # already spent (rant 2026-09-28T16:58:08, requirement D).
+                error_text = str(e)
+                if CONTENT_FILTER_ERROR not in error_text:
+                    error_text = f"LLM error: {e}. Check config at ~/.emrg/config.toml"
                 await self._broadcast(session.session_id, {
-                    "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
+                    "error": error_text,
                 })
                 # Send done so the client knows the stream is over.
                 # Without this, the client stays in its read loop → deadlock.
@@ -3682,6 +3692,44 @@ class EmrgServer:
             logger.debug("round %d finish: %s, tool_calls=%d, content_len=%d%s",
                          round_num, final_finish, len(tc_by_index), len(full_content),
                          self._format_cache_pct(final_usage))
+
+            # Case 0: the provider's content filter blocked the model's OWN
+            # output (rant 2026-09-28T16:58:08). This is not an answer, and it
+            # must never be a silent finish. `llm.py` has already walked the
+            # retry ladder, so reaching here means either the ladder is spent or
+            # the attempt had already streamed text and could not be re-sent —
+            # both are things to report. The branch that used to take this case
+            # is the "final text answer" one below, which persisted an empty
+            # assistant record and called the turn done: the host saw the turn
+            # end and not one character of why (34 such responses over two days,
+            # every one of them with an empty `content`).
+            if final_finish == CONTENT_FILTER_FINISH:
+                self._log_llm_exchange(
+                    session, [dict(m) for m in messages], tools_openai,
+                    full_content, final_finish, final_usage,
+                    reasoning=full_reasoning,
+                )
+                logger.error(
+                    "round %d: the provider's content filter blocked the answer "
+                    "(finish_reason=%s); %d character(s) had already reached the "
+                    "client and the retry ladder is spent — reporting it",
+                    round_num, CONTENT_FILTER_FINISH, len(full_content),
+                )
+                await self._broadcast(session.session_id, {
+                    "request_id": req.id,
+                    "error": CONTENT_FILTER_ERROR,
+                    "session_id": session.session_id,
+                })
+                # A terminal frame, for the same reason every other error path
+                # sends one: the client's busy flag and the scheduler's recv loop
+                # both wait for `done`, and a turn that ends without it wedges
+                # them (PR #1669).
+                await self._broadcast(session.session_id, {
+                    "done": True,
+                    "request_id": req.id,
+                    "session_id": session.session_id,
+                })
+                return
 
             # Case 1: Final text answer — no more tool calls
             if final_finish == "stop" or (final_finish and not tc_by_index):
