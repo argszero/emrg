@@ -418,17 +418,36 @@ def _decode_output(data: bytes, os_name: str | None = None) -> str:
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """Terminate a spawned run's whole group, then the process itself.
 
+    The early ``return`` this used to carry when ``proc.returncode`` was already
+    set made the cleanup a no-op in precisely the shape it exists for: when a
+    descendant holds the pipe open, the direct child has *exited*, so its
+    returncode is set and nobody was ever signalled.
+
+    On POSIX the group id is the **pid recorded at spawn** — ``preexec_fn=os.setsid``
+    made the child a session leader, so it leads a group of its own.
+    ``os.getpgid(proc.pid)`` is what this asked instead, and it raises
+    ``ProcessLookupError`` once that child has been reaped. Measured 2026-09-27
+    (host P0 rant): this cleanup failed silently while a survivor kept the pipe
+    open, and a turn died with no log line at all.
+
+    ``ESRCH`` means the group is already gone — the wanted end state, recorded at
+    debug — while any other failure is real and must be visible.
+
     :param proc: the spawned process.
     """
-    if proc.returncode is not None:
+    if os.name == "nt":
+        # There is no group of our own on Windows; the child is the only handle.
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError) as exc:
+            logger.warning("pwsh v2: cannot kill process %s: %s", proc.pid, exc)
         return
     try:
-        if os.name != "nt":
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        else:
-            proc.kill()
-    except (ProcessLookupError, PermissionError, OSError):
-        logger.debug("killing the run's process group failed", exc_info=True)
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        logger.debug("pwsh v2: process group %s is already gone", proc.pid)
+    except (PermissionError, OSError) as exc:
+        logger.warning("pwsh v2: cannot signal process group %s: %s", proc.pid, exc)
 
 
 async def run_command(
@@ -519,6 +538,26 @@ async def run_command(
     return result
 
 
+def _stream_bytes(task: "asyncio.Task[bytes]") -> bytes:
+    """The bytes a stream read produced, or ``b""`` when it produced none.
+
+    ``.result()`` re-raises on a cancelled task, and ``CancelledError`` is a
+    ``BaseException``: it escapes the ``except Exception`` around the tool loop
+    and ends the turn with no error frame and no log. This is the Windows twin of
+    the same defect measured on 2026-09-27 (host P0 rant), fixed in both because
+    the two collectors are literal duplicates and a fix in one is a fix in
+    neither.
+
+    Absence of output is reported as absence; output that exists is kept.
+    """
+    if not task.done() or task.cancelled():
+        return b""
+    if task.exception() is not None:
+        return b""
+    value = task.result()
+    return value if isinstance(value, bytes) else b""
+
+
 async def _collect(
     proc: asyncio.subprocess.Process, timeout: float, timeout_ms: int
 ) -> ShellRunResult:
@@ -553,8 +592,8 @@ async def _collect(
             exit_code = returncode
 
     return ShellRunResult(
-        stdout=_decode_output(stdout_task.result() if stdout_task.done() else b"").rstrip(),
-        stderr=_decode_output(stderr_task.result() if stderr_task.done() else b"").rstrip(),
+        stdout=_decode_output(_stream_bytes(stdout_task)).rstrip(),
+        stderr=_decode_output(_stream_bytes(stderr_task)).rstrip(),
         exit_code=exit_code,
         signal=signal_number,
         timed_out=timed_out,

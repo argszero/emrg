@@ -323,18 +323,35 @@ def _decode_output(data: bytes, os_name: str | None = None) -> str:
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """Kill the whole process group so no descendant outlives the run.
 
+    The group id is the **pid recorded at spawn**: ``preexec_fn=os.setsid`` made
+    the child a session leader, so it leads a group of its own and its number is
+    the group's. Asking the OS instead — ``os.getpgid(proc.pid)``, which is what
+    this did — fails in exactly the case the kill exists for: when a descendant
+    holds the pipe open, the direct child has already been reaped, and
+    ``os.getpgid`` on a reaped pid raises ``ProcessLookupError``. The fallback
+    ``proc.kill()`` raises too (same reason), and the whole cleanup became a
+    silent no-op while the survivor kept stdout open (measured 2026-09-27, host
+    P0 rant: a turn died with no log line and the task wedged for 45 minutes).
+
+    A group that is already gone is the end state we wanted, so ``ESRCH`` is
+    recorded at debug; anything else is a real failure and says so, because a
+    cleanup that cannot clean up must not be invisible.
+
     :param proc: the running process.
     """
-    try:
-        if os.name != "nt":
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        else:
-            proc.kill()
-    except (ProcessLookupError, OSError):
+    if os.name == "nt":
+        # No session/group of our own on Windows: the child is the only handle.
         try:
             proc.kill()
-        except ProcessLookupError:
-            pass
+        except (ProcessLookupError, OSError) as exc:
+            logger.warning("bash v2: cannot kill process %s: %s", proc.pid, exc)
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        logger.debug("bash v2: process group %s is already gone", proc.pid)
+    except OSError as exc:
+        logger.warning("bash v2: cannot signal process group %s: %s", proc.pid, exc)
 
 
 async def run_command(
@@ -419,6 +436,29 @@ async def run_command(
     return result
 
 
+def _stream_bytes(task: "asyncio.Task[bytes]") -> bytes:
+    """The bytes a stream read produced, or ``b""`` when it produced none.
+
+    ``.result()`` is not safe to call on a task that was cancelled: it
+    re-raises, and ``CancelledError`` is a ``BaseException``, so it slips past
+    the ``except Exception`` guarding the tool loop and ends the turn with no
+    error frame and no log (measured 2026-09-27, host P0 rant — the exact
+    expression below this function killed a scheduler-driven turn silently and
+    left the task wedged for 45 minutes). A read that raised is the same shape.
+
+    Absence of output is therefore reported as absence. What the streams did
+    produce is kept — the drain before this call exists so a timed-out command
+    still reports what it wrote — but a read nobody can ask is not a reason to
+    raise out of a collector.
+    """
+    if not task.done() or task.cancelled():
+        return b""
+    if task.exception() is not None:
+        return b""
+    value = task.result()
+    return value if isinstance(value, bytes) else b""
+
+
 async def _collect(
     proc: asyncio.subprocess.Process, timeout: float, timeout_ms: int
 ) -> ShellRunResult:
@@ -427,9 +467,17 @@ async def _collect(
     Reading is not left to a cancelled ``communicate()``: measured on this host,
     a cancelled read loses the bytes already buffered, so the shape here waits on
     the three tasks together and drains them **after** the kill instead — a
-    timed-out command still reports the output it managed to write.  A command
-    that leaves a descendant holding the pipe open is cut the same way the old
-    tool cut it, and reported as a timeout, because its output never closed.
+    timed-out command still reports the output it managed to write.
+
+    A command that leaves a descendant holding the pipe open is cut the same way
+    the old tool cut it — the group is signalled, which closes the pipe with the
+    survivor. What the caller sees then depends on whether that worked, and the
+    two readings are kept distinct: the output closes within the grace, so the
+    command is reported as the run it was; or it does not, and the run is
+    reported as a timeout because its output never closed, with whatever the
+    streams gave up before their reads were cancelled. (Before 2026-09-27 the
+    first outcome was unreachable — the kill signalled nobody and the second
+    outcome raised ``CancelledError`` out of this function, ending the turn.)
 
     :param proc: the spawned process.
     :param timeout: seconds to wait before killing the group.
@@ -463,8 +511,8 @@ async def _collect(
             exit_code = returncode
 
     return ShellRunResult(
-        stdout=_decode_output(stdout_task.result() if stdout_task.done() else b"").rstrip(),
-        stderr=_decode_output(stderr_task.result() if stderr_task.done() else b"").rstrip(),
+        stdout=_decode_output(_stream_bytes(stdout_task)).rstrip(),
+        stderr=_decode_output(_stream_bytes(stderr_task)).rstrip(),
         exit_code=exit_code,
         signal=signal_number,
         timed_out=timed_out,
