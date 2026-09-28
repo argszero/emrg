@@ -17,6 +17,8 @@ Two subjects, both of which are about *who decides*:
   sandbox took its authorization root from the agent it was confining.
 """
 
+import importlib
+import importlib.util
 import inspect
 import tempfile
 from pathlib import Path
@@ -28,7 +30,6 @@ from emrg.config import load_sandbox_config
 from emrg.protocol import TaskRequest
 from emrg.server.daemon import EmrgServer
 from emrg.tools import ToolRegistry
-from emrg.tools.bash_tool import BashTool
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
 from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
@@ -75,7 +76,6 @@ def test_both_executors_answer_to_the_same_tool_name():
     frozen/parallel executors are what share the name ``bash``; ``pwsh`` is a peer
     dialect, not a second name for the same one (``tests/test_pwsh_tool_v2.py``).
     """
-    assert BashTool().definition().name == "bash"
     assert BashToolV2().definition().name == "bash"
     registry = ToolRegistry()
     registry.register(BashToolV2())
@@ -95,7 +95,6 @@ def test_the_daemon_mounts_the_dialects_executor():
     name, tool = _mounted_shell(server)
     assert name in SHELL_TOOL_NAMES
     assert isinstance(tool, (BashToolV2, PwshToolV2))
-    assert not isinstance(tool, BashTool)
 
 
 def test_the_retired_key_in_a_config_file_cannot_bring_the_frozen_tool_back(tmp_path):
@@ -112,7 +111,6 @@ def test_the_retired_key_in_a_config_file_cannot_bring_the_frozen_tool_back(tmp_
     assert not hasattr(cfg, "bash_tool_v2"), "the field came back"
     _, tool = _mounted_shell(_instantiate())
     assert isinstance(tool, (BashToolV2, PwshToolV2))
-    assert not isinstance(tool, BashTool)
 
 
 def test_the_retired_environment_variable_is_inert(monkeypatch):
@@ -126,7 +124,6 @@ def test_the_retired_environment_variable_is_inert(monkeypatch):
         monkeypatch.setenv("EMRG_BASH_TOOL_V2", spelling)
         _, tool = _mounted_shell(_instantiate())
         assert isinstance(tool, (BashToolV2, PwshToolV2)), spelling
-        assert not isinstance(tool, BashTool), spelling
 
 
 def test_a_populated_registry_still_answers_every_other_tool():
@@ -204,16 +201,29 @@ def test_a_call_with_no_configured_tier_is_left_unconfined(injected):
     assert "workspace" not in injected("write", {"path": "x"})
 
 
-def test_the_old_executor_ignores_the_new_key(injected, tmp_path):
-    """D10: the injection reaches v2 without moving the frozen tool's behaviour.
+def test_the_injection_reaches_the_live_executor(injected):
+    """D10's surviving half: the injection is what gives the executor its boundary.
 
-    ``BashTool`` reads ``command``/``timeout``/``workdir``/``sandbox`` only, so an
-    extra ``workspace`` key is invisible to it — which is what lets one injection
-    site serve both executors during the parallel period.
+    The row this replaces asserted the *frozen* tool ignored the extra key, which
+    is why one injection site could serve both executors through the parallel
+    period. That period is over — the frozen tool is deleted (issue #1675) — so
+    what is left to assert is the half that still has a subject: the injected
+    ``workspace`` is the resolved ``workdir``, i.e. the executor is handed the
+    same directory the walk uses.
     """
-    assert 'arguments.get("workspace")' not in inspect.getsource(BashTool.execute)
     args = injected("bash", {"command": "ls"}, sandbox="workspace-write")
     assert args["workspace"] == str(Path(args["workdir"]))
+
+
+def test_the_frozen_executor_is_gone():
+    """The other half of issue #1675, stated where the mount is decided.
+
+    The mount tests above used to name the frozen class in a negative assertion
+    (``not isinstance(tool, BashTool)``). With the module deleted that assertion
+    is unstateable, and the property it protected — that no code path can bring
+    the static command scan back — is the one worth keeping.
+    """
+    assert importlib.util.find_spec("emrg.tools.bash_tool") is None
 
 
 def test_an_unknown_tool_receives_nothing(injected):

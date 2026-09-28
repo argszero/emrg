@@ -26,7 +26,8 @@ i.e. that a divergence would be visible here rather than silent.
 from __future__ import annotations
 
 import asyncio
-import inspect
+import importlib
+import importlib.util
 import os
 import tempfile
 from pathlib import Path
@@ -36,7 +37,7 @@ import pytest
 from emrg.sandbox import fence
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import DANGER_FULL_ACCESS, resolve_policy
-from emrg.tools import bash_tool, edit_tool, file_policy, write_tool
+from emrg.tools import edit_tool, file_policy, write_tool
 
 #: The helpers the *mechanics* keep in ``emrg/tools/file_policy.py``: where a
 #: relative spelling resolves, what "inside" means, and the host's protected
@@ -53,17 +54,49 @@ def test_the_home_defines_the_helper(name):
     assert callable(getattr(file_policy, name))
 
 
-@pytest.mark.parametrize("name", (*MECHANICS, "file_refusal"))
-def test_the_legacy_file_does_not_define_or_re_export_it(name):
-    """No definition site and no re-export in the file #1675 deletes.
+@pytest.mark.parametrize(
+    "name", ("resolve_file_target", "is_within", "is_absolute_path")
+)
+def test_the_legacy_scan_is_gone_rather_than_re_exported(name):
+    """The file #1675 deletes is deleted, and its scan did not move to the fence.
 
-    Both halves matter: a **definition** here would be a second implementation,
-    and a re-export would let an importer keep naming the legacy module and go
-    unnoticed when that module is deleted.
+    This used to assert *about* the legacy module — that it neither defined nor
+    re-exported these names. Deleting the module makes that assertion
+    unstateable, and the property it protected is the one worth keeping: the
+    legacy scanner (``_check_sandbox`` and its static word lists) must not come
+    back, which is the negative guard the v2 design asks for (§7, row 20). A
+    re-export or a re-creation is the shape a later change reaches for, so both
+    are refused here — the module by the filesystem and the finder, the
+    mechanics by the module that is supposed to be their only home.
+
+    The two names the fence legitimately carries are excluded, each for its own
+    reason: ``file_refusal`` is the fence's own entry point and the subject of
+    this whole file, and ``protected_paths`` is *imported* from the home rather
+    than copied (asserted below), which is the one-spelling rule rather than a
+    violation of it. Importing a mechanic is likewise legitimate and is asserted
+    to be the home's own object, so a copy cannot pass as an import.
     """
-    source = inspect.getsource(bash_tool)
-    assert f"def {name}(" not in source, f"bash_tool.py grew its own {name}"
-    assert not hasattr(bash_tool, name), f"bash_tool.py re-exports {name}"
+    module_file = Path(file_policy.__file__).with_name("bash_tool.py")
+    assert not module_file.exists(), f"the legacy scan came back: {module_file}"
+    assert importlib.util.find_spec("emrg.tools.bash_tool") is None
+    for module in (edit_tool, write_tool):
+        if hasattr(module, name):
+            assert getattr(module, name) is getattr(file_policy, name), (
+                f"{module.__name__} has its own {name}, not the home's"
+            )
+
+
+@pytest.mark.parametrize("name", ("check_read_only_file_write", "check_workspace_write",
+                                  "_check_sandbox", "_extract_write_targets"))
+def test_the_legacy_predicates_are_gone_everywhere(name):
+    """The names the deletion removed must not reappear under any module."""
+    for module in (file_policy, fence, edit_tool, write_tool):
+        assert not hasattr(module, name), f"{module.__name__} re-binds {name}"
+
+
+def test_the_fence_imports_the_home_s_protected_paths():
+    """The fence names the host's protected files through the home, not around it."""
+    assert fence.protected_paths is file_policy.protected_paths
 
 
 @pytest.mark.parametrize(
@@ -233,20 +266,20 @@ def test_the_silence_keeps_its_meaning():
     assert file_refusal("/etc/hosts", policy) is None
 
 
-def test_the_scanners_helpers_are_the_home_s_own_objects():
-    """The legacy scan and the file tools cannot drift: one implementation.
+def test_the_mechanics_have_no_second_spelling():
+    """The legacy scan's private aliases die with it; the home keeps the only copies.
 
-    The scanner keeps private aliases (it had the public names) so its ~30 call
-    sites did not have to move in this step; an alias rebound to a *copy* would
-    be exactly the drift the move removes.
+    ``emrg/tools/bash_tool.py`` held private aliases of these helpers
+    (``_is_within``, ``_protected_paths``, …) so its ~30 call sites could stay
+    put through the move. Those call sites are gone, so an alias anywhere is now
+    a second name for the same value — exactly the drift the single home exists
+    to remove. The platform axis is the sharpest case: it was re-bound in the
+    scanner as a module constant, which is a second value with its own lifetime
+    and cannot see a seam that moves the home (the failure
+    ``tests/test_windows_path_tokens.py`` recorded before its own deletion).
     """
-    assert bash_tool._is_within is file_policy.is_within
-    assert bash_tool._is_absolute_path is file_policy.is_absolute_path
-    assert bash_tool._protected_paths is file_policy.protected_paths
-    assert bash_tool._trusted_write_zones is file_policy.trusted_write_zones
-    assert bash_tool._temp_write_roots is file_policy.temp_write_roots
-    assert bash_tool._PROTECTED_FILES is file_policy.PROTECTED_FILES
-    # The platform axis is read from the home, never re-bound here: a copy is a
-    # second value with its own lifetime, and it cannot see a seam that moves the
-    # home (the failure `tests/test_windows_path_tokens.py` records).
-    assert not hasattr(bash_tool, "_WINDOWS_SHELL")
+    assert file_policy.WINDOWS_SHELL is (os.name == "nt")
+    for module in (file_policy, fence, write_tool, edit_tool):
+        for alias in ("_is_within", "_is_absolute_path", "_protected_paths",
+                      "_trusted_write_zones", "_temp_write_roots", "_WINDOWS_SHELL"):
+            assert not hasattr(module, alias), f"{module.__name__} re-binds {alias}"

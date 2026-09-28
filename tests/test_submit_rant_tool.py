@@ -170,14 +170,14 @@ def test_submit_rant_definition_exposes_consent_contract():
 def test_all_tools_require_intent():
     """Rant 2026-08-19T10:35:24: every registered tool requires the per-call
     `intent` parameter (agent writes why it is calling); static purpose gone."""
-    from emrg.tools.bash_tool import BashTool
+    from emrg.tools.bash_tool_v2 import BashToolV2
     from emrg.tools.read_tool import ReadTool
     from emrg.tools.write_tool import WriteTool
     from emrg.tools.edit_tool import EditTool
     from emrg.tools.glob_tool import GlobTool
     from emrg.tools.grep_tool import GrepTool
 
-    for tool in (BashTool(), ReadTool(), WriteTool(), EditTool(),
+    for tool in (BashToolV2(), ReadTool(), WriteTool(), EditTool(),
                  GlobTool(), GrepTool(), SubmitRantTool()):
         d = tool.definition()
         assert d.name, "tool name missing"

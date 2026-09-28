@@ -337,7 +337,7 @@ def resume_turn_instant(meta: dict) -> float | None:
 #   not ASCII either mislabels it or silently reports "no image on the clipboard".
 #
 # Pinning UTF-8 is correct here in a way it is NOT for console output: these tools
-# emit bytes, and the byte source is a path, not the console. `emrg/tools/bash_tool.py`
+# emit bytes, and the byte source is a path, not the console. `emrg/tools/bash_tool_v2.py`
 #   keeps the opposite policy (locale first, then UTF-8) for exactly that reason -
 # it reads *console* output, which on Windows really does use the console code page.
 _PATH_DECODE = {"encoding": "utf-8", "errors": "replace"}

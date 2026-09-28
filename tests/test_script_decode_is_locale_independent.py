@@ -44,8 +44,8 @@ Scope boundary — corrected, because the first version of this paragraph was wr
 --------------------------------------------------------------------------------
 The first version of this module read `scripts/` only, and justified it by saying
 `emrg/` was already handled: `emrg/server/git_utils.py` pins `encoding="utf-8"`,
-and `emrg/tools/bash_tool.py` deliberately tries the locale codec then UTF-8 for
-console output. **That reasoning is true of those two files and false of the rest
+and the shell tool deliberately tries the locale codec then UTF-8 for console
+output. **That reasoning was true of those two files and false of the rest
 of `emrg/`** — it was a claim about the package drawn from two of its files, which
 is exactly the "stated scope wider than what it reads" failure this module exists
 to prevent (measured the cycle after: `emrg/client/app.py`'s clipboard reader and
@@ -150,14 +150,6 @@ def _locale_codec_lines(source: str) -> list[int]:
 # exemption for the explicit `locale.getpreferredencoding()` spelling only; the
 # text-mode rule below exempts by child program, which is the narrower axis.
 _CONSOLE_DECODE_ALLOWED = {
-    "emrg/tools/bash_tool.py": (
-        "`_decode_output` reads commands the user runs: cmd.exe/dir output is the "
-        "Windows console code page, git/gh output is UTF-8, so it tries the locale "
-        "codec strictly and then UTF-8 (rant 2026-08-08T09:35:30). It makes no "
-        "text-mode subprocess call - the child is an asyncio subprocess - so this "
-        "exemption is live through the locale-codec rule, not the text-mode rule; "
-        "covered by tests/test_bash_tool.py"
-    ),
     "emrg/tools/bash_tool_v2.py": (
         "The parallel successor, with the same subject and therefore the same "
         "reason: it runs commands the user asks for, and a Windows console program "

@@ -14,7 +14,7 @@ fence the process-boundary tool runs under:
   emrg.server` reached every scan as ordinary commands.
 
 **Why they were not where they were.** Both were written inside
-``emrg/tools/bash_tool.py`` — the legacy tool P7 (issue #1675) deletes — and both
+``emrg/tools/bash_tool.py`` — the legacy tool P7 (issue #1675) deleted — and both
 were consulted only by that tool's ``_check_sandbox``. Since P6 the executor a
 session actually gets is the v2 one (``emrg/tools/bash_tool_v2.py``, or
 ``pwsh_tool_v2.py`` on Windows), so neither rule was reachable from a real

@@ -14,11 +14,12 @@ renders), translated one for one:
 * the model-facing text is rendered from that result, never by appending prose
   to stderr.
 
-The old ``emrg/tools/bash_tool.py`` is frozen while this is built beside it
-(delivery rules R1/R2, design §1.6): nothing here imports it, and it keeps
-serving until the switch is flipped (D10) and the file is deleted (P7).  That is
-why the output framing and decoding below are this module's own copy rather than
-calls into the old one — the copy is what survives P7.
+The old ``emrg/tools/bash_tool.py`` was frozen while this was built beside it
+(delivery rules R1/R2, design §1.6), and P7 (issue #1675) has now deleted it:
+this module and ``pwsh_tool_v2.py`` are the whole shell-tool layer, and nothing
+anywhere imports the old file.  The output framing and decoding below are this
+module's own copy rather than calls into it — which is why the copy is what
+survived.
 
 Two behaviours are deliberately NOT the blueprint's, and both are registered in
 the design rather than quietly assumed: Linux runs unconfined until P3

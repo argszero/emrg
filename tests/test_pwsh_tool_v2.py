@@ -38,7 +38,6 @@ import pytest
 from emrg.config import LlmConfig, SandboxConfig
 from emrg.server.daemon import EmrgServer, _get_jinja_env, build_shell_tool
 from emrg.tools import ToolRegistry
-from emrg.tools.bash_tool import BashTool
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools import pwsh_tool_v2 as pwsh
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
