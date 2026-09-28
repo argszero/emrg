@@ -35,6 +35,14 @@ Behavior:
     `git hash-object -t commit -w` (byte-exact, GPG signature preserved; an
     unsigned commit is rebuilt from the API's fields and accepted only if its
     object name equals the remote sha, else the run stops as unmeasurable)
+    A merge commit ends the walk, and its remaining parents are then assumed to
+    be local. That assumption is checked and printed rather than left implicit:
+    when it is wrong the graph is incomplete, and a caller measuring a tree is
+    not left unanswered but **misled** - `git merge` prints "Already up to date"
+    off a parent it cannot read, and `--is-ancestor` exits 128 where it should
+    exit 1 (measured 2026-09-28, `--ref <a PR head>`). Following those parents
+    instead is deliberately not done here: it would re-fetch history this repo
+    usually has, and the walk is bounded by exactly that assumption.
   * verifies the root tree sha matches the remote; if content objects are
     missing, fetches missing blobs/trees via the Git Data API (disable with
     --no-fetch-objects) and re-verifies - fail-loud only if still mismatched
@@ -236,6 +244,23 @@ def has_object(sha: str) -> bool:
 
 
 
+def _absent_parents(parents: list[str], present=has_object) -> list[str]:
+    """The listed commits this repo does NOT have.
+
+    The walk stops at a merge commit and trusts the rest of its parents to be
+    present already. When that assumption is wrong the gap is **silent**, and the
+    caller is misled rather than unanswered: `git merge-base --is-ancestor` exits
+    128 where it should exit 1, and `git merge` prints "Already up to date" for a
+    parent it cannot read. Measured 2026-09-28 (`--ref <a PR head>`,
+    `d7452a1b`): the walk stopped at its merge commit and left `2456e72d`
+    missing, so the head looked like it contained master while it did not.
+
+    `present` is a parameter so the answer about a layout can be asked without a
+    repository: the caller passes the predicate, this decides nothing else.
+    """
+    return [p for p in parents if not present(p)]
+
+
 def _object_exists(sha: str) -> bool:
     """Any object (blob/tree/commit) present locally by sha."""
     return subprocess.run(["git", "cat-file", "-e", sha],
@@ -347,7 +372,20 @@ def main() -> int:
         created += 1
         print(f"  + {sha[:7]} ({body['author']['name']}, {body['message'].splitlines()[0][:60]})")
         parents = [p["sha"] for p in c["parents"]]
-        sha = parents[0] if len(parents) == 1 else None  # merge commits: stop, local must have them
+        if len(parents) == 1:
+            sha = parents[0]
+            continue
+        # A merge commit ends the walk: its remaining parents (an older master tip,
+        # the branch's own history) are *assumed* to be local. Say so, and say when
+        # they are not - `_absent_parents` records what leaving that silent costs.
+        absent = _absent_parents(parents)
+        print(f"  (merge commit {sha[:7]}: walk ends here, trusting its "
+              f"{len(parents)} parent(s) to be local)")
+        if absent:
+            print("  ! parent(s) " + ", ".join(p[:7] for p in absent)
+                  + " are NOT present locally - the commit graph is incomplete, and"
+                  " git reads it as if it were whole")
+        sha = None
     if created == 0:
         print(f"  (head already present locally: {sha[:7]})")
 

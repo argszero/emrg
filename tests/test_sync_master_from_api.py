@@ -371,3 +371,24 @@ def test_fetch_missing_objects_idempotent(tmp_path, monkeypatch):
     mod._fetch_tree("owner/repo", root)
     assert calls["n"] == n1
     assert _git("cat-file", "-e", blob, cwd=target).returncode == 0
+
+
+def test_absent_parents_names_what_the_merge_stop_trusts():
+    """The merge-stop assumption is read, not left silent.
+
+    `--ref <a PR head>` on 2026-09-28 stopped the walk at that branch's merge
+    commit and left parent `2456e72d` missing. With the gap unmentioned git
+    answered *as if the graph were whole*: `git merge` printed "Already up to
+    date" off a commit it could not read, and `--is-ancestor` exited 128 where
+    it should have exited 1 - a wrong answer, never a missing one, which is the
+    failure mode this reading exists to remove. The predicate is a parameter so
+    the answer about a layout can be asked without a repository.
+    """
+    mod = _load_module()
+
+    present = {"a" * 40, "c" * 40}
+    assert mod._absent_parents(["a" * 40, "b" * 40, "c" * 40],
+                               present=present.__contains__) == ["b" * 40]
+    # A walk whose parents are all local stays quiet: nothing is reported.
+    assert mod._absent_parents(["a" * 40, "c" * 40],
+                               present=present.__contains__) == []
