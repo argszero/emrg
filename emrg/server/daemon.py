@@ -381,8 +381,13 @@ def _memory_index_compaction_note(paths) -> str:
     file that is not over the cap. The caller's list is the same set as the two indexes
     `_collect_memory_data` embeds: the session's own and the project's. Until 2026-09-28
     it also carried the instance root's index (issue #1606) for a session running inside
-    the root; D9 moved the cycle records onto `{{ source_dir }}`, that directory was
-    archived, and the mechanism went with it.
+    the root; D9 moved the cycle records onto `{{ source_dir }}`, so that index is a file
+    no writer of this session appends to, and the mechanism went with it.
+
+    What remains at the old path is **deliberately not described here**, and the reason is
+    the same one `review-queue.py` gives for its own paragraph: this function runs on every
+    host and is not told which one it is on, so a directory listing, a file count or a byte
+    size that is true of one host and absent on another is a claim the code cannot keep.
 
     The file is read *here* rather than handed a precomputed size, so the number the
     text prints is the number it counted: a caller passing one reading and the text

@@ -269,8 +269,13 @@ class TestMemoryIndexCompactionPrompt:
         root's index, one directory *above* the cwd, so neither of the two subjects
         named the file they grew. D9 then re-based the template's record path onto
         `{{ source_dir }}/.emrg/memory/`, which for such a session *is* the project
-        subject; every record since 2026-09-27T13:24 landed there, and on 2026-09-28
-        the host ruled the root's directory should not exist, and it was archived.
+        subject, and every record since 2026-09-27T13:24 landed there.
+
+        What the removal rests on is the **writer**, not any host's disk: with the
+        records on `{{ source_dir }}`, no writer of this session appends to the root's
+        index, so naming it asks the agent to compact an index nobody maintains. The
+        state of the old directory is a host-side matter this file deliberately does not
+        describe - the same reason `review-queue.py` states none for its own paragraph.
 
         The third subject's premise is therefore gone twice over: no writer of this
         session appends to that file, and naming it asks the agent to compact an index
@@ -300,8 +305,8 @@ class TestMemoryIndexCompactionPrompt:
 
                 assert str(root_index) not in prompt, (
                     "the instance root's index has no writer in this session - the "
-                    "records moved onto `{{ source_dir }}` and that directory was "
-                    "archived, so naming it asks for a compaction nobody owns"
+                    "records moved onto `{{ source_dir }}`, so naming it asks for a "
+                    "compaction nobody owns"
                 )
                 assert prompt.count("## Memory index compaction") == 1, (
                     "the session's own index is still a subject: dropping the root's "
