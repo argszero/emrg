@@ -127,26 +127,18 @@ export function Shell() {
   // 同一版本，不重复弹）；restarting 防重复点击（relaunch 后进程即退出）。
   const [dismissedUpgrade, setDismissedUpgrade] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
-  // 会话信息行（rant 2026-09-01T20:16:55：对齐 TUI 状态栏——id/name/project/消息数/busy 计时）
-  const [elapsed, setElapsed] = useState(0);
-  const busyStartRef = useRef<number | null>(null);
-  const activeBusy = activeSid ? (appState.busyBySid[activeSid] ?? false) : false;
-  useEffect(() => {
-    if (activeBusy) {
-      busyStartRef.current = Date.now();
-      setElapsed(0);
-      const iv = setInterval(() => {
-        const base = busyStartRef.current ?? Date.now();
-        setElapsed(Math.floor((Date.now() - base) / 1000));
-      }, 500);
-      return () => clearInterval(iv);
-    }
-    busyStartRef.current = null;
-    setElapsed(0);
-  }, [activeBusy]);
+  // 会话信息行（rant 2026-09-01T20:16:55：对齐 TUI 状态栏——id/name/project/消息数/轮计时）
+  //
+  // 计时基准是 **daemon 的轮开始时刻**（`turnStartBySid`，由 `turn_start` 帧、或打开会话时的
+  // `resume_result` 快照 `meta.turn` 写入），不是本客户端见到 busy 的那一刻（rant
+  // 2026-09-27T18:41:52，requirement 2「计时由 daemon 给」）：中途打开一个已经跑了 5 分钟的轮
+  // ——别的客户端起的，或定时任务起的——必须显示 05:00 并继续每秒 +1，而不是从 00:00 起算。
+  // 基准与 TUI 状态栏、侧边栏的 `[m:ss]` 同一来源（同一个 `started_at`），三处不可能对不上。
+  const activeTurnStart = activeSid ? appState.turnStartBySid[activeSid] : undefined;
 
-  // Rant 2026-09-02T10:36:26：侧边栏每个运行会话的 [m:ss] 计时——任意会话 busy 时
-  // 共享一个 1s tick 触发重渲染（Sidebar 读 Date.now() 计算 elapsed；多会话复用同一定时器）。
+  // Rant 2026-09-02T10:36:26：每个运行会话的 [m:ss] 计时——任意会话有轮在跑时共享一个 1s
+  // tick 触发重渲染（Sidebar 与上面的会话信息行都在渲染时读 Date.now() 自行推导 elapsed，
+  // 所以多会话复用同一定时器，没有第二个只服务一处的 interval）。
   const [, setSidebarTick] = useState(0);
   const hasRunningSessions = Object.keys(appState.turnStartBySid).length > 0;
   useEffect(() => {
@@ -159,6 +151,10 @@ export function Shell() {
   const activeTitle = activeSessionEntry?.title || activeKnown?.title || t("app.unnamed");
   const activeProject = activeSessionEntry?.projectName || "";
   const activeMsgCount = (activeKnown as { message_count?: number } | undefined)?.message_count ?? 0;
+  const elapsed =
+    activeTurnStart === undefined
+      ? 0
+      : Math.max(0, Math.floor(Date.now() / 1000 - activeTurnStart / 1000));
   const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
 
   // open_sessions 广播到达且尚无激活会话 → 自动选第一个（vanilla 同语义）
@@ -655,7 +651,7 @@ export function Shell() {
             {activeProject ? ` · ${activeProject}` : ""}
             {" · "}
             {t("app.msgCount", { count: activeMsgCount })}
-            {activeBusy ? ` [${mmss}]` : ""}
+            {activeTurnStart !== undefined ? ` [${mmss}]` : ""}
           </span>
         ) : null}
         <span className="react-shell-conn" data-testid="conn-status" title={t("sidebar.statusTitle")}>
