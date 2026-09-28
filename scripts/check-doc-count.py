@@ -170,6 +170,55 @@ class DocCountError(Exception):
     """The tree is not in a shape this tool can act on."""
 
 
+def measured_revision() -> str:
+    """The revision this tree is at, in the words the report prints.
+
+    Printed beside the count, because a count is a number *about a tree* and the
+    two are only comparable together: measured 2026-09-28 (`cyc20260928-150510`),
+    a cycle compared its own checkout's count with a worktree gate's count,
+    attributed the one-test difference to the harness, and recorded that as a
+    finding - the two runs were of **different trees**, and the reading that
+    would have shown it (their revisions) was on neither line. The tree line
+    already answers "which checkout"; this answers "which revision of it", which
+    is the half that moves while a cycle works.
+
+    Degrades to a stated absence rather than a guess: a checkout that is not a
+    git repository, or has no `git` on PATH, says so on the line, because a
+    revision that silently reads as "same as last time" is the defect this
+    exists to prevent.
+    """
+    try:
+        branch = _git("symbolic-ref", "--short", "-q", "HEAD")
+        head = _git("rev-parse", "HEAD")
+    except OSError as exc:
+        return f"revision unreadable ({exc.__class__.__name__})"
+    if not head:
+        return "revision unreadable (git rev-parse said nothing)"
+    # `symbolic-ref` exits non-zero for a detached HEAD, which is a state, not a
+    # failure - the same distinction the merge gates keep when they name a tree.
+    where = branch or "detached HEAD"
+    return f"at {head[:8]} ({where})"
+
+
+def _git(*argv: str) -> str:
+    """One `git` read in this tree, or `""` when it did not answer.
+
+    `""` rather than an exception for a non-zero exit: the caller's whole use of
+    this is the report line, and a tree without git still has a countable suite.
+    An `OSError` (no `git` binary) is left to the caller, because that is a
+    different absence from "this is not a repository".
+    """
+    proc = subprocess.run(
+        ["git", *argv],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
 def measured_count() -> int:
     """How many tests pytest actually collects in this tree.
 
@@ -424,7 +473,7 @@ def _measure_mode() -> int:
     except DocCountError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    print(f"measured: {count} collected Python tests")
+    print(f"measured: {count} collected Python tests {measured_revision()}")
     return 0
 
 

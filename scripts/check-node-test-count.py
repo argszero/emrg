@@ -93,6 +93,47 @@ DOC = REPO_ROOT / "Agent.md"
 GUI_ROOT = REPO_ROOT / "emrg" / "gui"
 RENDERER_ROOT = GUI_ROOT / "renderer"
 
+
+def _git(*argv: str) -> str:
+    """One `git` read in this tree, or `""` when it did not answer.
+
+    `""` rather than an exception for a non-zero exit: the only caller uses this
+    for the report line, and a tree without git still has countable suites. An
+    `OSError` (no `git` binary) is left to the caller, because that is a
+    different absence from "this is not a repository".
+    """
+    proc = subprocess.run(
+        ["git", *argv],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def measured_revision() -> str:
+    """The revision this tree is at, in the words the report prints.
+
+    The sibling guard's rationale, and it holds here for a sharper reason: this
+    tool's numbers are *written into* `Agent.md` by `--write`, so a reader
+    comparing two runs - or deciding whether a stored number is stale - needs to
+    know which revision each run was about. The tree line answers "which
+    checkout", the revision answers "which state of it".
+    """
+    try:
+        branch = _git("symbolic-ref", "--short", "-q", "HEAD")
+        head = _git("rev-parse", "HEAD")
+    except OSError as exc:
+        return f"revision unreadable ({exc.__class__.__name__})"
+    if not head:
+        return "revision unreadable (git rev-parse said nothing)"
+    # `symbolic-ref` exits non-zero for a detached HEAD, which is a state, not a
+    # failure - the same distinction the merge gates keep when they name a tree.
+    return f"at {head[:8]} ({branch or 'detached HEAD'})"
+
+
 # The one spelling of "run this tool" that every hint in this repo prints.
 # Measured 2026-09-10 (main clone): this form exits 0, while the bare `python3`
 # form exits 2 without measuring anything - the host's `python3` has no pytest.
@@ -332,15 +373,19 @@ def main(argv: list[str] | None = None) -> int:
     if gui_doc != gui_real:
         drift.append(f"GUI: documents {gui_doc}, runner executed {gui_real}")
 
+    # Read the revision once, not per line: it is one fact about the tree, and a
+    # verdict that reported two of them could report two different ones.
+    revision = measured_revision()
+
     if not drift:
         print(
             f"OK: {DOC.name} documents {renderer_real} renderer + {gui_real} GUI tests "
-            "(both runners agree)"
+            f"(both runners agree) {revision}"
         )
         return 0
 
     for line in drift:
-        print(f"FAIL: {line}")
+        print(f"FAIL: {line} {revision}")
     if not (args.write or args.dry_run):
         print(f"\nFix with: {INVOCATION} --write")
         return 1

@@ -190,6 +190,45 @@ def test_drift_is_reported_with_the_measured_values(mod, tmp_path, monkeypatch, 
     assert doc.read_text() == before, "a reporting run must never write"
 
 
+def test_the_verdict_names_the_revision_it_measured(mod, tmp_path, monkeypatch, capsys) -> None:
+    """A total is a number *about a tree*; `--write` makes it a stored number too.
+
+    Measured 2026-09-28 (`cyc20260928-150510`): a cycle compared its own
+    checkout's count with a worktree gate's count, attributed the one-test
+    difference to the harness, and recorded that as a finding — the two runs were
+    of different trees, and the reading that would have shown it was on neither
+    line. `tree:` says *which checkout*; the revision says which state of it, and
+    this is the tool whose numbers get written down, so a reader deciding whether
+    a stored number is stale has to be able to ask which revision produced it.
+
+    Both verdicts carry it, and the reading is the tool's real one — stubbing
+    `measured_revision` here would pin the wiring against a placeholder that the
+    line could then print forever without anyone noticing.
+    """
+    expected = mod.measured_revision()
+    assert re.match(r"^at [0-9a-f]{7,40} \((.+)\)$", expected), (
+        f"this checkout's revision did not read cleanly ({expected!r}); the assertion "
+        "below compares the printed line against this reading, so it is unmeasurable here"
+    )
+
+    mod.DOC = _doc(tmp_path, 514, 100)
+    monkeypatch.setattr(mod, "measured_renderer", lambda: 514)
+    monkeypatch.setattr(mod, "measured_gui", lambda: 100)
+    assert mod.main([]) == 0
+    out = capsys.readouterr().out
+    assert out.strip().endswith(expected), out
+
+    mod.DOC = _doc(tmp_path, 510, 96)
+    monkeypatch.setattr(mod, "measured_renderer", lambda: 514)
+    monkeypatch.setattr(mod, "measured_gui", lambda: 100)
+    assert mod.main([]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    drift_lines = [line for line in lines if line.startswith("FAIL: ")]
+    assert drift_lines, lines
+    for line in drift_lines:
+        assert line.endswith(expected), lines
+
+
 def test_write_repairs_only_the_two_numbers(mod, tmp_path, monkeypatch, capsys) -> None:
     doc = _doc(tmp_path, 510, 100)
     mod.DOC = doc
