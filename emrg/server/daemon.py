@@ -378,11 +378,16 @@ def _memory_index_compaction_note(paths) -> str:
 
     One section per index, because the subjects are separate files with separate
     readers, and an instruction naming the wrong one would send the agent to compact a
-    file that is not over the cap. The caller's list is not the same set as the two
-    indexes `_collect_memory_data` embeds: for a session that runs inside the instance
-    root it also carries the root's own index (`_instance_root_index`, issue #1606) —
-    the file those sessions write, and one this function asks about but the prompt does
-    not embed, which is exactly why the count has to ask for it here.
+    file that is not over the cap. The caller's list is the same set as the two indexes
+    `_collect_memory_data` embeds: the session's own and the project's. Until 2026-09-28
+    it also carried the instance root's index (issue #1606) for a session running inside
+    the root; D9 moved the cycle records onto `{{ source_dir }}`, so that index is a file
+    no writer of this session appends to, and the mechanism went with it.
+
+    What remains at the old path is **deliberately not described here**, and the reason is
+    the same one `review-queue.py` gives for its own paragraph: this function runs on every
+    host and is not told which one it is on, so a directory listing, a file count or a byte
+    size that is true of one host and absent on another is a claim the code cannot keep.
 
     The file is read *here* rather than handed a precomputed size, so the number the
     text prints is the number it counted: a caller passing one reading and the text
@@ -450,40 +455,6 @@ def _memory_index_compaction_note(paths) -> str:
         # here instead of resting on the template file's last byte.
         sections.append(rendered + "\n")
     return "".join(sections)
-
-
-def _instance_root_index(cwd: Path | str, root: Path | None = None) -> Path | None:
-    """The instance root's own memory index, for a session that runs inside the root.
-
-    `~/.emrg/evolution/` is this instance's workspace, and a task session's cwd is the
-    *checkout* inside it (`<root>/emrg`). The records those sessions write are indexed
-    at `<root>/.emrg/memory/MEMORY.md` — one directory **above** the cwd — so both
-    files a session carries are the wrong ones for it: `<cwd>/.emrg/memory/MEMORY.md`
-    is the checkout's own project index and `session.memory_dir/MEMORY.md` is the
-    session's. The index the evolution cycles actually grow was therefore read by
-    nothing, which is issue #1606: it was measured at 195 lines with no count that
-    could fire on it, and it was compacted overnight only because an agent read the
-    rule in its own prompt and decided to.
-
-    `None` rather than a path for a session outside the root, because a file no writer
-    of *this* session appends to is not a subject: the note would send the agent to
-    compact an index this session never grows. That is the one behaviour the caller
-    depends on, so it is the one the tests measure from both sides.
-
-    `root` is a parameter so a test can hand it a temporary root instead of the host's,
-    and its default is read from the module constant **at call time** — a test patches
-    `EVOLUTION_CWD`, and a default bound at import time would ignore that patch.
-
-    Both sides are resolved before the comparison, because the question is about the
-    directories rather than their spellings: `/var/...` and `/private/var/...` are one
-    directory on macOS (`tempfile` hands out the first spelling), and a root may itself
-    be a symlink.
-    """
-    resolved_root = (EVOLUTION_CWD if root is None else Path(root)).resolve()
-    here = Path(cwd).resolve()
-    if here != resolved_root and resolved_root not in here.parents:
-        return None
-    return resolved_root / ".emrg" / "memory" / "MEMORY.md"
 
 
 def build_shell_tool(
@@ -5729,23 +5700,18 @@ class EmrgServer:
                 # memory/` in every session's cwd — including sessions whose project
                 # has no memory at all — would be a reading with a side effect.
                 #
-                # Plus the instance root's own index, for a session that runs inside
-                # it (issue #1606, `_instance_root_index`): a task session whose cwd
-                # is `<root>/emrg` writes its records into `<root>/.emrg/memory/
-                # MEMORY.md`, which is neither of the two files above — so the index
-                # the cycles actually grow was the one file the trigger never read.
-                #
-                # The de-duplication is not decoration: a session started *in* the
-                # root carries that same file as its project index, and the note's
-                # contract is one section per index — two sections naming one file
-                # would ask the agent to compact it twice, which reads as two files.
+                # Two subjects, and only these. A third — the instance root's own
+                # index, added for issue #1606 — was removed on 2026-09-28 together
+                # with that directory (host: the root should not exist): D9 had
+                # already moved the cycle records onto `{{ source_dir }}`, so the
+                # root's index was a file no writer of this session grows, and naming
+                # it sent the agent to compact an index nobody maintains. The
+                # de-duplication that existed only to keep it from being named twice
+                # went with it.
                 subjects = [
                     session.cwd / ".emrg" / "memory" / "MEMORY.md",
                     store.index_path,
                 ]
-                root_index = _instance_root_index(session.cwd)
-                if root_index is not None and root_index not in subjects:
-                    subjects.append(root_index)
                 hygiene_note += _memory_index_compaction_note(subjects)
 
                 prompt = (

@@ -104,10 +104,10 @@ the clock, and a cycle id **is** its start time in the host's local zone
 (`cyc20260917-221117` began at 22:11:17 local). So the window is decidable from two
 datums this tool already has — the push time (the counter prints it) and the cycle's
 id — plus one it does not: **the previous cycle**, which `--prev-cycle` supplies and
-which is otherwise read from the cycle records in either directory the evolution
-template may name them in (`--cycles-log`, default `DEFAULT_CYCLES_LOGS` — the
-project memory root inside the checkout, which D9 made the template's path, and
-the evolution root beside it, which holds the corpus). A head pushed inside
+which is otherwise read from the cycle records in the directory the evolution
+template names them in (`--cycles-log`, default `DEFAULT_CYCLES_LOGS` — the project
+memory root inside the checkout, which D9 made the template's path and where the
+corpus now lives). A head pushed inside
 `[previous cycle's start, now)` is reported `abstain` instead of `vote` or `merge`.
 
 When the previous cycle cannot be found, `--cycle` is not silently ignored: the
@@ -155,22 +155,28 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 #: per cycle, the cycle's id without its `cyc` prefix in the filename, which is why
 #: the id is rebuilt rather than read off.
 #:
-#: **Two roots, because the template's path has moved and the corpus has not.**
-#: `SCRIPTS_DIR` is `<source_dir>/scripts`, so `SCRIPTS_DIR.parent` is the checkout and
-#: `SCRIPTS_DIR.parent.parent` is the evolution root beside it. The template **in this
-#: tree** names `{{ source_dir }}/.emrg/memory/cycle-{{ timestamp }}.md` — the checkout,
-#: where D9 (PR #1555) re-based the memory roots onto the project root the daemon loads.
-#: The template an installed daemon **delivers** still names the other one
-#: (`{{ evolution_cwd }}/.emrg/memory/...`), because the daemon renders the *installed*
-#: template and the hosts have not reinstalled since D9. So the corpus sits on one side
-#: and the next records will land on the other — measured 2026-09-25: 1,354 `cycle-*.md`
-#: beside the checkout, 0 inside it.
+#: **One root, because the corpus has finished moving.** `SCRIPTS_DIR` is
+#: `<source_dir>/scripts`, so `SCRIPTS_DIR.parent` is the checkout. D9 (PR #1555)
+#: re-based the prompt's memory roots from the evolution root beside the checkout onto
+#: `{{ source_dir }}` inside it, and the records followed — but not at once: while the
+#: move was under way the corpus still sat beside the checkout while the template wrote
+#: inside it, so this tool searched **both** and took the newest record across the
+#: union, because reading either one alone leaves the abstention window unresolvable.
 #:
-#: Both roots are searched and the newest record that sorts before this cycle's id
-#: **across the union** is the answer. Reading only the checkout root leaves the window
-#: unresolvable for every cycle until records accumulate there; reading only the
-#: evolution root pins it, after the reinstall, to the last cycle before the reinstall —
-#: a window that never advances. A guard ties this set to a template's path
+#: One root is enough now, and the reason is a fact about the *writers* rather than
+#: about any one filesystem: D9 stopped every writer of the second root, so the newest
+#: record cannot be there, and the template in this checkout — the one the guard below
+#: ties this tuple to — names the checkout's own root.
+#:
+#: What remains at the old path is **deliberately not stated here**: it is a host-side
+#: matter that differs between hosts, while this script runs on all of them and is not
+#: told which one it is on. A path, a file count or a byte size that is true of one host
+#: and absent on another is the defect class that had this paragraph rewritten — a
+#: derived number no guard measures goes stale in silence (`Agent.md`). A window that
+#: does need one of those older records opens them where they are, by naming the
+#: directory it knows them to be in (see the override below).
+#:
+#: A guard ties this set to the template's path
 #: (`tests/test_review_queue.py::test_the_prompt_writes_its_cycle_records_where_the_queue_reads_them`):
 #: it renders this tree's `evolution_prompt.md` and requires every cycle-record path in
 #: it to be one of these roots, so reader and template cannot drift apart silently again.
@@ -179,16 +185,16 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 #: `os.pathsep`); a directory that is not there is reported as unreadable, never guessed at.
 DEFAULT_CYCLES_LOGS: tuple[Path, ...] = (
     SCRIPTS_DIR.parent / ".emrg" / "memory",          # this tree's template, and D9's root
-    SCRIPTS_DIR.parent.parent / ".emrg" / "memory",   # the installed template's root, and the corpus
 )
 
 
 def resolve_cycle_logs(override: str | None = None) -> tuple[Path, ...]:
-    """The cycle-record directories to search: the override, else both defaults.
+    """The cycle-record directories to search: the override, else the default.
 
-    `--cycles-log` and `EMRG_CYCLES_LOG` keep their old meaning for a single directory
-    and accept several joined by `os.pathsep`, so a caller can name the pair
-    explicitly instead of relying on the defaults.
+    `--cycles-log` / `EMRG_CYCLES_LOG` still accept several directories joined by
+    `os.pathsep` — the shape the tool carried while the corpus was split across two
+    roots — so a caller can name a corpus of its own without the default changing
+    meaning.
     """
     raw = override or os.environ.get("EMRG_CYCLES_LOG")
     if raw:
@@ -242,10 +248,11 @@ def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str]:
 
     The newest cycle record whose id sorts before this cycle's; ids are fixed width,
     so string order is time order, and a file's `<date>-<time>` stem is turned back
-    into an id here because the filename does not carry the `cyc` prefix. Several
-    directories are searched (`DEFAULT_CYCLES_LOGS`), and the newest record wins
-    *across* them, so a corpus that spans two roots — the state after the prompt's
-    record path moved — is read whole rather than half.
+    into an id here because the filename does not carry the `cyc` prefix. The default
+    is one directory (`DEFAULT_CYCLES_LOGS`); a caller may name several, and the newest
+    record then wins *across* them — the shape this tool carried while the prompt's
+    record path moved and the corpus was split over two roots, kept because a caller
+    with its own corpus still needs it.
 
     `("", reason)` when there is none — an unresolvable window is the one input this
     reading must not invent, because inventing it spends a vote. A directory that
