@@ -493,6 +493,86 @@ def test_daemon_upgrade_session_runner(monkeypatch, tmp_path):
     assert server._session_busy.get("emrg-upgrade") is False, "busy lock released"
 
 
+def test_daemon_upgrade_session_is_reachable_by_a_clients_cancel(monkeypatch, tmp_path):
+    """Rant 2026-09-27T18:41:52 requirement 5: a client's Esc must reach this turn.
+
+    `_run_upgrade_session` is the one caller that never passes through the read
+    loop — the loop is where a turn's cancel **event** is published under its
+    session — so before this it published none, and the cancel path's
+    `self._session_cancel.get(cancel_sid) or _cancel_event` fell through to the
+    *asking client's own* connection locals. A client pressing Esc on the
+    `emrg-upgrade` session therefore stopped nothing, which is the shape the rant
+    names as the one gap in cancel coverage: the session that once spun for 132
+    minutes with no output was the one an Esc could not reach.
+
+    The claim pinned here is the publication and its identity — the event the
+    cancel path will find is the same object handed to the loop, so setting it is
+    what the running turn reads at its next checkpoint. What the loop does with a
+    set event is a separate reading, taken with a real loop by
+    `tests/test_ws_e2e.py::TestWSProtocol::test_a_peer_clients_cancel_interrupts_the_sessions_turn`.
+    """
+    from tests.test_daemon import _make_server
+
+    server = _make_server()
+    monkeypatch.setattr(server, "_get_or_create_session", lambda sid, cwd: object())
+    seen: dict[str, object] = {}
+
+    async def fake_loop(req, ws, session, cancel_event, allow_tools=True):
+        # What the cancel path would find *while the turn is running*.
+        seen["published"] = server._session_cancel.get(req.session_id)
+        seen["handed_to_loop"] = cancel_event
+        seen["event"] = cancel_event
+        server._session_busy[req.session_id] = False
+
+    monkeypatch.setattr(server, "_run_tool_loop_locked", fake_loop)
+
+    asyncio.run(server._run_upgrade_session("emrg-upgrade", str(tmp_path), "PROMPT"))
+
+    assert seen.get("published") is not None, (
+        "the upgrade session published no cancel event, so a client's Esc resolves "
+        "to the asking connection's own locals and stops nothing"
+    )
+    assert seen["published"] is seen["handed_to_loop"], (
+        "the published event is not the one the loop watches: setting it would "
+        "interrupt nothing"
+    )
+
+
+def test_daemon_upgrade_session_publishes_no_turn_task(monkeypatch, tmp_path):
+    """The other half of the same wiring, and the half that must stay absent.
+
+    The cancel path reads the event and a task together
+    (`cancel_task = self._session_turn_task.get(sid) or _tool_task`) and then calls
+    `cancel_task.cancel()`. This session's loop is awaited **inline** by the upgrade
+    tick, so the only task this method could publish is the tick's own — and
+    cancelling that kills `_upgrade_tick_loop`, which is the auto-upgrade mechanism
+    itself: dead until the daemon restarts, with nothing logged. Completing this fix
+    by publishing a handle is therefore the tempting mistake, and this test is what
+    fails when someone makes it.
+    """
+    from tests.test_daemon import _make_server
+
+    server = _make_server()
+    monkeypatch.setattr(server, "_get_or_create_session", lambda sid, cwd: object())
+    seen: dict[str, object] = {}
+
+    async def fake_loop(req, ws, session, cancel_event, allow_tools=True):
+        seen["task"] = server._session_turn_task.get(req.session_id)
+        seen["cancellable"] = not server._session_turn_task.get(req.session_id)
+        server._session_busy[req.session_id] = False
+
+    monkeypatch.setattr(server, "_run_tool_loop_locked", fake_loop)
+
+    asyncio.run(server._run_upgrade_session("emrg-upgrade", str(tmp_path), "PROMPT"))
+
+    assert seen.get("task") is None, (
+        "the upgrade session published a turn task: the cancel path would call "
+        "`cancel_task.cancel()` on it, and since this loop is awaited inline by the "
+        "upgrade tick, that task is the tick's own — cancelling it ends auto-upgrade "
+        "for the life of the daemon"
+    )
+
+
 def test_upgrade_chain_hermeticity_guards():
     """⛔ Red line (host 2026-08-21T10:35:57): the conftest autouse guard must
     block the real auto-upgrade chain by default — no real GitHub releases

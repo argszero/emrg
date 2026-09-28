@@ -1181,6 +1181,23 @@ class EmrgServer:
         session = self._get_or_create_session(session_id, Path(cwd))
         self._session_busy[session_id] = True
         cancel_event = asyncio.Event()
+        # Publish the turn's cancel **event** under its session, exactly as the read
+        # loop does for a client's or a scheduled task's turn (rant 2026-09-27T18:41:52
+        # requirement 5): this is the one caller that never goes through that loop, and
+        # it registered nothing, so a client's Esc for `emrg-upgrade` resolved to the
+        # *asking client's own* connection locals and stopped nothing. With the event
+        # published, the cancel path sets it and the loop leaves at its next checkpoint
+        # (`cancel_event.is_set()`), ending the turn the way any cancelled turn ends.
+        #
+        # Only the event, deliberately — **not** `_session_turn_task`. The cancel path
+        # reads the two together: `cancel_task = self._session_turn_task.get(sid) or
+        # _tool_task`, then `cancel_task.cancel()`. This session's loop is awaited
+        # inline by the upgrade tick, so the only task it could publish here is the
+        # tick's own — and cancelling that would take `_upgrade_tick_loop` down with it,
+        # which silently ends auto-upgrade for the life of the daemon. A turn that
+        # cannot be reached by a handle is a turn the client stops by event alone; the
+        # wrapper's `finally` retracts the entry by identity, so this needs no teardown.
+        self._session_cancel[session_id] = cancel_event
         try:
             await self._run_tool_loop_locked(req, None, session, cancel_event, allow_tools=True)
         except Exception:
