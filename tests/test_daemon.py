@@ -4004,3 +4004,98 @@ def test_pong_carries_the_effective_vision(tmp_path, monkeypatch):
     after = _FakeWriter()
     asyncio.run(server._process_message({"type": "ping"}, after))
     assert _last_frame(after)["vision"] is False
+
+
+# ── the tool loop: the provider refuses the model's OWN output ──────────────
+#
+# Rant 2026-09-28T16:58:08. `finish_reason=content_filter` satisfied the "final
+# text answer" branch below, so the round persisted an empty assistant record and
+# broadcast `done` with an empty string — the host saw the turn end and not one
+# character of why. Measured on this host: 34 such responses over two days, every
+# one with a non-empty `reasoning` and an empty `content`.
+
+
+def _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream):
+    """Run one tool loop over a stubbed stream, returning `(session, frames)`.
+
+    `stream` is the async generator the loop consumes. Both planted-fire markers
+    are redirected at `tmp_path` (issue #1337), as in `_drive_tool_loop`.
+    """
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH",
+                        tmp_path / "planted-fire-heartbeat")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
+    server = _make_server()
+    session = Session.create_with_id("content-filter-test", tmp_path)
+    frames: list[dict] = []
+
+    async def fake_chat(messages, tools=None):
+        return {"content": "a compacted summary of the earlier turns"}
+
+    async def fake_broadcast(session_id, payload):
+        frames.append(payload)
+
+    server.llm.chat_stream = stream
+    server.llm.chat = fake_chat
+    server._broadcast = fake_broadcast
+    req = TaskRequest(id="req-filter", session_id=session.session_id, prompt="hello")
+    asyncio.run(server._run_tool_loop(req, None, session))
+    return session, frames
+
+
+def test_a_content_filter_finish_is_reported_not_read_as_the_answer(tmp_path, monkeypatch):
+    """The round must not end with an empty answer.
+
+    The shape is the measured one: text reaches the client, then the filter
+    fires — so the refusal is handed on as the round's finish_reason rather than
+    retried (the client is already showing that text).
+    """
+    async def stream(messages, tools=None):
+        yield {"content": "partial answer", "tool_calls": None,
+               "finish_reason": None, "usage": None}
+        yield {"content": None, "tool_calls": None,
+               "finish_reason": "content_filter", "usage": None}
+
+    session, frames = _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream)
+
+    errors = [f for f in frames if "error" in f]
+    assert len(errors) == 1, frames
+    assert "content filter" in errors[0]["error"], errors[0]["error"]
+    assert "Check config" not in errors[0]["error"], (
+        "the host was sent to the config file for a provider-side refusal"
+    )
+    assert any(f.get("done") for f in frames), "the turn ended without a terminal frame"
+    # The answer never existed, so no answer may be recorded.
+    persisted = session._read_history()
+    assert not [m for m in persisted if m.get("role") == "assistant"], (
+        "an assistant record was persisted for an answer the provider refused"
+    )
+
+
+def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame(
+    tmp_path, monkeypatch
+):
+    """`llm.py` raises once the ladder is spent; the loop must not swallow it.
+
+    Requirement D: exactly one visible error and exactly one terminal frame —
+    the client's busy flag and the scheduler's recv loop both wait for `done`,
+    so a turn that ends silently wedges them (PR #1669).
+    """
+    async def stream(messages, tools=None):
+        from emrg.server.llm import CONTENT_FILTER_ERROR
+        raise RuntimeError(CONTENT_FILTER_ERROR)
+        yield  # pragma: no cover - makes this an async generator
+
+    session, frames = _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream)
+
+    errors = [f for f in frames if "error" in f]
+    dones = [f for f in frames if f.get("done")]
+    assert len(errors) == 1, frames
+    assert len(dones) == 1, frames
+    assert "content filter" in errors[0]["error"]
+    assert "spaced out" in errors[0]["error"], (
+        "the error must say which retries were already spent"
+    )
+    assert not [m for m in session._read_history() if m.get("role") == "assistant"], (
+        "a turn whose answer the provider refused recorded an assistant message"
+    )
