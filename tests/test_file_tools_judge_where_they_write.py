@@ -11,7 +11,8 @@ and ``write_text`` touches another, with nothing between them (an in-process
 write is not kernel-confined by the Seatbelt/bwrap profile the way a bash child
 is, and ``emrg/sandbox/fence.py`` does not exist yet).
 
-``check_read_only_file_write`` had the mirror-image slip: it realpath'd the
+``check_read_only_file_write`` (deleted at issue #1553's ruling — the fence in
+``emrg/sandbox/fence.py`` answers for both families now) had the mirror-image slip: it realpath'd the
 spelling as given — i.e. against the daemon's cwd, a base the caller never
 designated — so its containment answer was about a path outside the workspace the
 caller declared, and one file's two spellings split their verdict (the relative
@@ -39,11 +40,9 @@ import asyncio
 import os
 from pathlib import Path
 
-from emrg.tools.bash_tool import (
-    check_read_only_file_write,
-    check_workspace_write,
-    resolve_file_target,
-)
+from emrg.sandbox.fence import file_refusal
+from emrg.sandbox.policy import resolve_policy
+from emrg.tools.file_policy import resolve_file_target
 from emrg.tools.edit_tool import EditTool
 from emrg.tools.write_tool import WriteTool
 
@@ -58,6 +57,20 @@ def _workspace(tmp_path: Path) -> Path:
     ws.mkdir()
     return ws
 
+
+
+def _fence(file_path: str, workspace: str | None, mode: str | None) -> str | None:
+    """One target judged the way both tools now judge it (host ruling, #1553).
+
+    The tools resolve the policy from the tier the daemon injected and the
+    workspace it injected, then ask ``emrg.sandbox.fence.file_refusal`` — the
+    same derivation the kernel profile is built from. This helper is that call
+    with the join made explicit, so a row can name a target and a boundary.
+    """
+    return file_refusal(
+        resolve_file_target(file_path, workspace),
+        resolve_policy(mode=mode, workspace_root=str(workspace or os.getcwd())),
+    )
 
 def test_a_relative_target_is_joined_onto_the_workspace_not_the_cwd(tmp_path, monkeypatch):
     """The one decision, stated: the base is the declared workspace.
@@ -124,9 +137,9 @@ def test_a_relative_escape_is_judged_like_its_absolute_spelling(tmp_path, monkey
     spelling = os.path.relpath(outside, ws)
     assert ".." in spelling, f"the fixture must actually leave the workspace: {spelling!r}"
 
-    absolute_verdict = check_workspace_write(str(outside), str(ws))
+    absolute_verdict = _fence(str(outside), str(ws), "workspace-write")
     assert absolute_verdict, "the fixture is not outside the boundary to begin with"
-    relative_verdict = check_workspace_write(spelling, str(ws))
+    relative_verdict = _fence(spelling, str(ws), "workspace-write")
     assert relative_verdict, (
         f"{spelling!r} is still exempt from the workspace boundary — the relative "
         "branch returned before any realpath ran (issue #1558)"
@@ -145,8 +158,8 @@ def test_a_relative_escape_is_judged_like_its_absolute_spelling(tmp_path, monkey
     assert repr(os.path.realpath(str(outside))) in relative_verdict, relative_verdict
     # The control: inside the workspace both spellings are allowed.
     inside = ws / "f.txt"
-    assert check_workspace_write(str(inside), str(ws)) is None
-    assert check_workspace_write(os.path.relpath(inside, ws), str(ws)) is None
+    assert _fence(str(inside), str(ws), "workspace-write") is None
+    assert _fence(os.path.relpath(inside, ws), str(ws), "workspace-write") is None
 
 
 def test_a_relative_escape_never_reaches_the_disk(tmp_path, monkeypatch):
@@ -201,7 +214,7 @@ def test_a_relative_edit_inside_the_workspace_is_allowed_and_a_relative_escape_i
         "sandbox": "workspace-write",
         "workspace": str(ws),
     }))
-    assert escaped.error and "outside workspace" in escaped.content, escaped.content
+    assert escaped.error and "outside every root" in escaped.content, escaped.content
 
 
 def test_a_relative_path_is_not_a_way_past_the_read_only_fence(tmp_path, monkeypatch):
@@ -218,7 +231,7 @@ def test_a_relative_path_is_not_a_way_past_the_read_only_fence(tmp_path, monkeyp
     """
     monkeypatch.chdir(tmp_path)
     ws = _workspace(tmp_path)
-    reason = check_read_only_file_write("rel.txt", str(ws))
+    reason = _fence("rel.txt", str(ws), "read-only")
     assert reason and "read-only sandbox" in reason, reason
     result = _run(WriteTool().execute({
         "file_path": "rel.txt",
@@ -239,8 +252,10 @@ def test_the_no_workspace_reading_is_unchanged(tmp_path, monkeypatch):
     there is no boundary the caller asked for.
     """
     monkeypatch.chdir(tmp_path)
-    assert check_workspace_write("rel.txt", None) is None
-    assert check_read_only_file_write("rel.txt", None) is None
+    # No tier and no boundary: the call resolves to ``DEFAULT_MODE``
+    # (``danger-full-access``), so the fence is not asked at all — the same
+    # silence the shell tools read, which is one policy rather than two.
+    assert _fence("rel.txt", None, None) is None
     result = _run(WriteTool().execute({"file_path": "rel.txt", "content": "x\n"}))
     assert not result.error, result.content
     assert (tmp_path / "rel.txt").read_text() == "x\n"

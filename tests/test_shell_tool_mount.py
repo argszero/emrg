@@ -1,17 +1,24 @@
-"""The bash-tool-v2 switch (design D10) and the argument injection the boundary needs.
+"""Which shell tool the daemon mounts, and which arguments the model may choose.
 
-Rant ``2026-09-21T18:50:03`` ("bash tool v2").
+Rant ``2026-09-21T18:50:03`` ("bash tool v2").  The file was ``test_bash_v2_switch.py``
+and its first subject was the switch; P7 retired the switch with the executor it
+selected, so what is left is the decision itself and the file is named for it.
 
 Two subjects, both of which are about *who decides*:
 
-* which executor the daemon builds — one switch, read once at startup, defaulting
-  to v2 and keeping the frozen tool reachable as the rollback;
+* which executor the daemon builds — now the **dialect's**, with no key, no
+  environment override and no rollback to answer it (``shell_dialects.py`` says
+  which dialect a platform gets).  Three tests still pin the negative half,
+  because a host's ``config.toml`` or environment may carry the retired name:
+  neither may change what is mounted, and neither may break the daemon;
 * which parts of a tool call the model may choose — the D1 root fix.  Before it,
   ``workdir`` was injected only when the model had not supplied one, so the model
   could name the very root it was trusted in (``workdir=/Users/<host>``), and the
   sandbox took its authorization root from the agent it was confining.
 """
 
+import importlib
+import importlib.util
 import inspect
 import tempfile
 from pathlib import Path
@@ -19,11 +26,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from emrg.config import ENV_BASH_TOOL_V2, EmrgConfig, SandboxConfig, load_config, load_sandbox_config
+from emrg.config import load_sandbox_config
 from emrg.protocol import TaskRequest
 from emrg.server.daemon import EmrgServer
 from emrg.tools import ToolRegistry
-from emrg.tools.bash_tool import BashTool
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
 from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
@@ -43,73 +49,6 @@ def _instantiate() -> EmrgServer:
     server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
     server._projects_log = Path(tempfile.mkdtemp()) / "projects.yml"
     return server
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_switch(monkeypatch):
-    """The shell must not decide what a test here measures.
-
-    ``EMRG_BASH_TOOL_V2`` is the documented one-launch rollback, so a host
-    starting pytest with it set is doing the normal thing and would otherwise see
-    every default-reading test below fail while the product is correct.  The tests
-    that are *about* the variable set it themselves, after this fixture runs.
-    """
-    monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
-
-
-# ── the config seam ───────────────────────────────────────────────────────
-
-
-def test_the_switch_defaults_to_v2():
-    """The boundary is the default now: a boundary switched off is not the one measured.
-
-    P6 of the programme (design §D7).  The frozen tool stays reachable — that is
-    the rollback asserted at the bottom of this file — but an instance that has
-    said nothing gets the OS boundary, on every platform whose chain has a rung.
-    """
-    assert SandboxConfig().bash_tool_v2 is True
-    assert EmrgConfig().sandbox.bash_tool_v2 is True
-
-
-def test_a_missing_config_file_keeps_the_default(tmp_path):
-    assert load_sandbox_config().bash_tool_v2 is True
-
-
-def test_the_section_is_read_from_the_file(tmp_path):
-    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = false\n")
-    assert load_sandbox_config().bash_tool_v2 is False
-
-
-def test_a_malformed_sandbox_section_falls_back_to_the_default(tmp_path):
-    """A config file the daemon cannot parse must not decide which tool runs."""
-    _write_config(tmp_path, 'sandbox = "not a table"\n')
-    assert load_sandbox_config().bash_tool_v2 is True
-
-
-def test_the_environment_overrides_the_file_in_both_directions(tmp_path, monkeypatch):
-    """The host can overrule ``config.toml`` in a session without editing it."""
-    monkeypatch.setenv(ENV_BASH_TOOL_V2, "0")
-    assert load_sandbox_config().bash_tool_v2 is False
-    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = false\n")
-    monkeypatch.setenv(ENV_BASH_TOOL_V2, "1")
-    assert load_sandbox_config().bash_tool_v2 is True
-
-
-def test_an_unparseable_environment_value_keeps_the_files_answer(tmp_path, monkeypatch):
-    _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = false\n")
-    monkeypatch.setenv(ENV_BASH_TOOL_V2, "maybe")
-    assert load_sandbox_config().bash_tool_v2 is False
-
-
-def test_the_rest_of_the_config_is_unaffected_by_the_new_section(tmp_path):
-    """The section is additive: ``load_config`` still resolves the old ones."""
-    _write_config(
-        tmp_path,
-        "[llm]\nbase_url = \"http://x\"\napi_key = \"k\"\nmodel = \"m\"\n[sandbox]\nbash_tool_v2 = true\n",
-    )
-    cfg = load_config()
-    assert cfg.llm.model == "m"
-    assert cfg.sandbox.bash_tool_v2 is True
 
 
 # ── the daemon's choice ───────────────────────────────────────────────────
@@ -137,66 +76,58 @@ def test_both_executors_answer_to_the_same_tool_name():
     frozen/parallel executors are what share the name ``bash``; ``pwsh`` is a peer
     dialect, not a second name for the same one (``tests/test_pwsh_tool_v2.py``).
     """
-    assert BashTool().definition().name == "bash"
     assert BashToolV2().definition().name == "bash"
     registry = ToolRegistry()
     registry.register(BashToolV2())
     assert isinstance(registry.get("bash"), BashToolV2)
 
 
-def test_the_daemon_builds_v2_by_default(monkeypatch, tmp_path):
-    """The switch is on by default, and "on" means *some* v2 dialect.
+def test_the_daemon_mounts_the_dialects_executor():
+    """One executor, chosen by the platform's dialect — there is nothing else to ask.
 
-    ``BashToolV2`` specifically would be an assertion about the platform, not
-    about the switch: Windows mounts ``PwshToolV2`` (P8), so a test that named the
-    bash class passed here and failed there while the product was correct. What
-    the switch decides is the *family* — a process-boundary executor rather than
-    the frozen scan — and that is what this asserts.
+    ``BashToolV2`` specifically would be an assertion about the platform rather
+    than about the rule: Windows mounts ``PwshToolV2`` (P8), so a test naming the
+    bash class would pass here and fail there while the product was correct. What
+    the daemon decides is "the dialect's own executor, at the process boundary",
+    and ``SHELL_TOOL_NAMES`` is that roster read from the module that owns it.
     """
-    monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
     server = _instantiate()
     name, tool = _mounted_shell(server)
     assert name in SHELL_TOOL_NAMES
     assert isinstance(tool, (BashToolV2, PwshToolV2))
-    assert not isinstance(tool, BashTool)
 
 
-def test_the_file_switch_rolls_back_to_the_frozen_tool(tmp_path, monkeypatch):
-    """The rollback is a supported path, not an accident: one line, no code change.
+def test_the_retired_key_in_a_config_file_cannot_bring_the_frozen_tool_back(tmp_path):
+    """A host whose ``config.toml`` still carries ``bash_tool_v2`` keeps working.
 
-    A boundary that cannot be turned off in the field is not deployable, so this
-    pins the way back as firmly as the way forward. The frozen tool is mounted
-    under its own name on every platform — including Windows, where it runs
-    ``cmd.exe`` — which is why this is the rollback P8 had to preserve rather than
-    replace.
+    Both halves are the point. The mount must not change — the key no longer
+    selects anything, and the one value it used to carry as a rollback is exactly
+    what P7 deleted. And the daemon must not fail on the stale line: a config file
+    the loader chokes on would take the whole tool registry with it, so the section
+    reads as before with the unknown key ignored.
     """
-    monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
     _write_config(tmp_path, "[sandbox]\nbash_tool_v2 = false\n")
-    server = _instantiate()
-    name, tool = _mounted_shell(server)
-    assert isinstance(tool, BashTool)
-    assert not isinstance(tool, BashToolV2)
-    assert name == "bash"
-
-
-def test_the_environment_rolls_back_without_a_config_edit(monkeypatch):
-    monkeypatch.setenv(ENV_BASH_TOOL_V2, "0")
-    server = _instantiate()
-    _, tool = _mounted_shell(server)
-    assert isinstance(tool, BashTool)
-
-
-def test_the_environment_switch_builds_v2_without_a_config_edit(monkeypatch):
-    monkeypatch.setenv(ENV_BASH_TOOL_V2, "1")
-    server = _instantiate()
-    _, tool = _mounted_shell(server)
+    cfg = load_sandbox_config()
+    assert not hasattr(cfg, "bash_tool_v2"), "the field came back"
+    _, tool = _mounted_shell(_instantiate())
     assert isinstance(tool, (BashToolV2, PwshToolV2))
-    assert not isinstance(tool, BashTool)
 
 
-def test_a_populated_registry_still_answers_every_other_tool(monkeypatch):
-    """The switch chooses one executor; it must not disturb the rest."""
-    monkeypatch.setenv(ENV_BASH_TOOL_V2, "1")
+def test_the_retired_environment_variable_is_inert(monkeypatch):
+    """The one-launch rollback is gone with the rollback.
+
+    Asserted rather than left implicit because this is the shape a reader is most
+    likely to assume still works: an environment override that quietly did nothing
+    would send a host looking for a boundary that changed when it did not.
+    """
+    for spelling in ("0", "false", "1", "true"):
+        monkeypatch.setenv("EMRG_BASH_TOOL_V2", spelling)
+        _, tool = _mounted_shell(_instantiate())
+        assert isinstance(tool, (BashToolV2, PwshToolV2)), spelling
+
+
+def test_a_populated_registry_still_answers_every_other_tool():
+    """The mount chooses one executor; it must not disturb the rest."""
     server = _instantiate()
     for name in ("read", "write", "edit", "glob", "grep"):
         assert server.tools.get(name) is not None
@@ -270,16 +201,29 @@ def test_a_call_with_no_configured_tier_is_left_unconfined(injected):
     assert "workspace" not in injected("write", {"path": "x"})
 
 
-def test_the_old_executor_ignores_the_new_key(injected, tmp_path):
-    """D10: the injection reaches v2 without moving the frozen tool's behaviour.
+def test_the_injection_reaches_the_live_executor(injected):
+    """D10's surviving half: the injection is what gives the executor its boundary.
 
-    ``BashTool`` reads ``command``/``timeout``/``workdir``/``sandbox`` only, so an
-    extra ``workspace`` key is invisible to it — which is what lets one injection
-    site serve both executors during the parallel period.
+    The row this replaces asserted the *frozen* tool ignored the extra key, which
+    is why one injection site could serve both executors through the parallel
+    period. That period is over — the frozen tool is deleted (issue #1675) — so
+    what is left to assert is the half that still has a subject: the injected
+    ``workspace`` is the resolved ``workdir``, i.e. the executor is handed the
+    same directory the walk uses.
     """
-    assert 'arguments.get("workspace")' not in inspect.getsource(BashTool.execute)
     args = injected("bash", {"command": "ls"}, sandbox="workspace-write")
     assert args["workspace"] == str(Path(args["workdir"]))
+
+
+def test_the_frozen_executor_is_gone():
+    """The other half of issue #1675, stated where the mount is decided.
+
+    The mount tests above used to name the frozen class in a negative assertion
+    (``not isinstance(tool, BashTool)``). With the module deleted that assertion
+    is unstateable, and the property it protected — that no code path can bring
+    the static command scan back — is the one worth keeping.
+    """
+    assert importlib.util.find_spec("emrg.tools.bash_tool") is None
 
 
 def test_an_unknown_tool_receives_nothing(injected):

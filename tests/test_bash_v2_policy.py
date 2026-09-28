@@ -38,7 +38,6 @@ from emrg.sandbox.providers import (
 from emrg.sandbox.providers.darwin import SEATBELT_EXEC, sbpl_string, seatbelt_profile_args
 from emrg.sandbox.providers.linux import bwrap_profile_args
 from emrg.sandbox.roots import canonical_path, writable_roots
-from emrg.tools import bash_tool
 
 #: An absolute path on **every** platform.  ``"/tmp"`` is not one: the policy
 #: layer asserts absoluteness, and ``os.path.isabs("/tmp")`` is False on Windows
@@ -76,15 +75,22 @@ def _grants(profile_args: list[str]) -> list[str]:
 # ── vocabulary ────────────────────────────────────────────────────────────
 
 
-def test_mode_vocabulary_is_pinned_to_the_frozen_tool():
-    """The two tools must speak one mode list while they run in parallel.
+def test_the_mode_vocabulary_has_exactly_one_home():
+    """The word list is the policy layer's, and neither executor keeps a copy.
 
-    The parallel period's whole hazard is drift: one word list, two
-    implementations, and a model-visible contract that quietly means different
-    things depending on which executor the switch built.  The old definition
-    disappears with its file at P7; until then this pins them equal.
+    While the two executors ran in parallel this pinned the frozen tool's list
+    equal to the policy's, because drift was the period's whole hazard: one word
+    list, two implementations, a model-visible contract that quietly meant
+    different things depending on which executor the switch built. The frozen
+    tool is deleted (issue #1675), so the pin has one side and the property worth
+    keeping is that no *second* side can appear — an executor with its own list is
+    the shape the drift came back through.
     """
-    assert SANDBOX_MODES == bash_tool.SANDBOX_MODES
+    from emrg.tools import bash_tool_v2, pwsh_tool_v2
+
+    assert SANDBOX_MODES == (DANGER_FULL_ACCESS, "read-only", "workspace-write")
+    for module in (bash_tool_v2, pwsh_tool_v2):
+        assert not hasattr(module, "SANDBOX_MODES"), f"{module.__name__} keeps a list"
 
 
 def test_bare_call_keeps_the_mode_a_host_session_already_had():

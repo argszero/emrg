@@ -14,11 +14,12 @@ renders), translated one for one:
 * the model-facing text is rendered from that result, never by appending prose
   to stderr.
 
-The old ``emrg/tools/bash_tool.py`` is frozen while this is built beside it
-(delivery rules R1/R2, design §1.6): nothing here imports it, and it keeps
-serving until the switch is flipped (D10) and the file is deleted (P7).  That is
-why the output framing and decoding below are this module's own copy rather than
-calls into the old one — the copy is what survives P7.
+The old ``emrg/tools/bash_tool.py`` was frozen while this was built beside it
+(delivery rules R1/R2, design §1.6), and P7 (issue #1675) has now deleted it:
+this module and ``pwsh_tool_v2.py`` are the whole shell-tool layer, and nothing
+anywhere imports the old file.  The output framing and decoding below are this
+module's own copy rather than calls into it — which is why the copy is what
+survived.
 
 Two behaviours are deliberately NOT the blueprint's, and both are registered in
 the design rather than quietly assumed: Linux runs unconfined until P3
@@ -46,11 +47,16 @@ from emrg.sandbox.contract import (
     never_started_detail,
     sandbox_denial_marker,
 )
-from emrg.sandbox.policy import SandboxPolicy, resolve_policy
+from emrg.sandbox.policy import (
+    DANGER_FULL_ACCESS,
+    SandboxPolicy,
+    resolve_policy,
+)
 from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.sandbox.providers import unconfined_mode
 from emrg.server.git_utils import no_prompt_env
 from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.tools import command_scan
 from emrg.tools.base import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -600,6 +606,16 @@ class BashToolV2(ToolExecutor):
             workspace_root=workdir,
             session_id=arguments.get("session_id"),
         )
+        # The command-text rules a checked tier makes (containment escape, and the
+        # host's daemon-lifecycle red line) are read from the text by
+        # `emrg/tools/command_scan.py`, at the boundary, for both dialects — the
+        # kernel fence below is a *write* fence, so signal- and IPC-shaped acts
+        # reach it as ordinary commands and `emrg server stop` would otherwise
+        # reach the daemon's shutdown frame unchecked (P7, issue #1675).
+        if policy.mode != DANGER_FULL_ACCESS:
+            refusal = command_scan.command_refusal(command)
+            if refusal:
+                return ToolResult(name="bash", content=f"⛔ {refusal}", error=True)
         try:
             result = await run_command(
                 command, policy=policy, workdir=workdir, timeout=timeout

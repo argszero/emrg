@@ -14,7 +14,8 @@ blueprint named in ``.emrg/designs/bash-tool-v2-design.md`` §5.1:
 Splitting the boundary out of one 6,600-line tool file is not a convenience: it
 is the blueprint's own packaging, and the reason each layer can be tested alone.
 
-Nothing in this package imports ``emrg.tools.bash_tool``.  The old tool file is
-frozen while v2 is built beside it (delivery rules R1/R2) and disappears at P7;
-until then the two share no line, and a test asserts they share no import.
+Nothing in this package imports ``emrg.tools.bash_tool``, and it never did: the
+old tool file was frozen while v2 was built beside it (delivery rules R1/R2) and
+P7 (issue #1675) has deleted it, so the two never shared a line.  A test asserts
+the file is gone rather than that the import is absent.
 """

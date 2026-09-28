@@ -8,11 +8,22 @@ shell command passes through, which is the shape the host actually hit: on
 subprocess signalled the daemon, the TUI answered `server connection lost`, and
 the host asked *"你怎么验证的，怎么把 emrg server重启了？"*.
 
-Every test here asks the **pure predicate** (`_check_sandbox`) or the classifier
-directly. Nothing in this file drives `BashTool.execute` with a lifecycle
-command: a test that really reached the daemon would be the incident, not a
-proof — and a test's safety must not depend on the code it is testing. The
-argv-side reader of the same act (`tests/conftest.py::_spawns_a_daemon_stop_or_restart`)
+Every test here asks the **rule itself** — `command_scan.command_refusal`, which
+is the one place both guards are asked, or the classifier directly. Nothing in
+this file drives `BashToolV2.execute` with a lifecycle command: a test that really
+reached the daemon would be the incident, not a proof — and a test's safety must
+not depend on the code it is testing. (The live executor *is* driven, with its
+spawn boundary replaced by a recorder, in the section at the bottom: that is what
+makes the ordering a proof instead of an incident.)
+
+Until P7 this file read the rules through `bash_tool`'s private aliases, because
+that is where they lived and where the legacy fence asked them. They moved to
+`emrg/tools/command_scan.py` and the tiers they were asked at stopped being a
+property of the *rule*: whether a command is read at all is the executor's
+`DANGER_FULL_ACCESS` exemption, so the tier-shaped assertions below ask the
+executor (bottom section) and the rule assertions ask the rule.
+
+The argv-side reader of the same act (`tests/conftest.py::_spawns_a_daemon_stop_or_restart`)
 has its own corpus in `tests/test_hermeticity_guard.py`, which asks for the
 refusal *before* anything is signalled or spawned.
 """
@@ -24,11 +35,11 @@ from pathlib import Path
 
 import pytest
 
-from emrg.tools.bash_tool import (
-    _check_sandbox,
+from emrg.tools import command_scan
+from emrg.tools.command_scan import (
     _nested_command_texts,
-    _stops_or_restarts_the_daemon,
     _tokenize_command,
+    stops_or_restarts_the_daemon as _stops_or_restarts_the_daemon,
 )
 
 
@@ -126,31 +137,27 @@ NOT_THE_ACT = [
 
 
 @pytest.mark.parametrize("cmd", THE_ACT)
-def test_the_act_is_refused_at_both_checked_tiers(cmd):
-    for mode in ("read-only", "workspace-write"):
-        allowed, reason, _enforcement = _check_sandbox(cmd, mode, "/tmp")
-        assert allowed is False, f"{cmd!r} was allowed at {mode}"
-        assert "emrg" in (reason or "")
+def test_the_act_is_refused(cmd):
+    """The rule answers about the text; *which* tiers ask it is the executor's line.
+
+    Asked through `command_refusal`, which is the call the executors make, so this
+    covers both rules and their order rather than this one alone.
+    """
+    reason = command_scan.command_refusal(cmd)
+    assert reason is not None, f"{cmd!r} was allowed"
+    assert "emrg" in reason
 
 
 @pytest.mark.parametrize("cmd", NOT_THE_ACT)
 def test_a_mention_is_not_the_act(cmd):
-    for mode in ("read-only", "workspace-write"):
-        allowed, reason, _enforcement = _check_sandbox(cmd, mode, "/tmp")
-        assert allowed is True, f"{cmd!r} was refused at {mode}: {reason}"
+    reason = command_scan.command_refusal(cmd)
+    assert reason is None, f"{cmd!r} was refused: {reason}"
     assert _stops_or_restarts_the_daemon(cmd) is None
 
 
-def test_full_access_is_untouched():
-    """The tier that checks nothing still checks nothing — the host's rule there."""
-    allowed, _reason, enforcement = _check_sandbox("emrg server stop", "danger-full-access")
-    assert allowed is True
-    assert enforcement == "full"
-
-
 def test_the_refusal_names_the_rule_and_a_way_out():
-    allowed, reason, _enforcement = _check_sandbox("emrg server restart", "workspace-write")
-    assert allowed is False
+    reason = command_scan.command_refusal("emrg server restart")
+    assert reason is not None
     assert "red line" in reason
     assert "#1324" in reason
     assert "emrg resume" in reason
@@ -246,9 +253,7 @@ def test_the_env_string_handover_is_read_by_the_act_and_not_by_the_write_walk():
     """
     act = 'env -S "emrg server stop"'
     assert _stops_or_restarts_the_daemon(act) == "emrg server stop"
-    for mode in ("read-only", "workspace-write"):
-        allowed, _reason, _enforcement = _check_sandbox(act, mode, "/tmp")
-        assert allowed is False
+    assert command_scan.command_refusal(act) is not None
 
     # the argv side reads the same spelling (a list argv was the gap there)
     assert _argv_side_reader()(["env", "-S", "emrg server stop"], shell_parsed=False)
@@ -257,6 +262,145 @@ def test_the_env_string_handover_is_read_by_the_act_and_not_by_the_write_walk():
     # `>` in it harmless: no nested text, no redirect target, no refusal
     write_like = "env -S 'printf %s RAN > /tmp/emrg-1324-marker'"
     assert _nested_command_texts(_tokenize_command(write_like)) == []
-    for mode in ("read-only", "workspace-write"):
-        allowed, reason, _enforcement = _check_sandbox(write_like, mode, "/tmp")
-        assert allowed is True, f"{write_like!r} was refused at {mode}: {reason}"
+    assert command_scan.command_refusal(write_like) is None, write_like
+
+
+# ── the live path asks the rule (P7, issue #1675) ─────────────────────────────
+#
+# Every test above reads the predicate or the legacy fence.  That is exactly the
+# surface the rule had until P7, and it is not the surface a command travels:
+# since P6 a session's `bash` call is the v2 executor (`config.py`'s
+# `bash_tool_v2`, default `True`), whose fence is a *write* fence — signals and
+# IPC pass it.  Measured on `aac28fb9`, `_stops_or_restarts_the_daemon` had one
+# call site, inside the legacy tool the switch retired, so `emrg server stop`
+# reached the daemon's shutdown frame with no check at all.  A rule no live path
+# asks is a comment.
+#
+# The seam below is what makes the live path testable **without the incident this
+# file's header refuses**: the executor's `run_command` is replaced before the
+# call, so a green test means the refusal happened *before* any spawn, and a red
+# one means the command would have been spawned — recorded, never run.  Nothing
+# here can signal the daemon, whatever the code under test does.
+
+
+class _Boundary(Exception):
+    """Raised by the recorder: the command reached the spawn boundary."""
+
+
+@pytest.fixture
+def boundary(monkeypatch):
+    """Replace both v2 executors' spawn boundary with a recorder.
+
+    :returns: the list of command texts that reached it, in order.
+    """
+    from emrg.tools import bash_tool_v2, pwsh_tool_v2
+
+    reached: list[str] = []
+
+    async def record(command, **kwargs):
+        reached.append(command)
+        raise _Boundary(command)
+
+    monkeypatch.setattr(bash_tool_v2, "run_command", record)
+    monkeypatch.setattr(pwsh_tool_v2, "run_command", record)
+    return reached
+
+
+def _run(tool, command, mode):
+    """Drive one executor's `execute` with a stub boundary, and report what it said.
+
+    :param tool: the instance under test.
+    :param command: the text to hand it.
+    :param mode: the tier to declare — the only thing that decides whether the
+        text is read at all.
+    :returns: ``(refusal, reached)`` — the content the model would have seen
+        (``""`` when the call got past the read), and whether it reached the
+        boundary.
+    """
+    import asyncio
+
+    from emrg.tools import bash_tool_v2, pwsh_tool_v2
+
+    try:
+        result = asyncio.run(
+            tool.execute({"command": command, "intent": "probe", "sandbox": mode})
+        )
+    except _Boundary as exc:
+        assert str(exc) == command
+        return "", True
+    assert result.error is True, result.content
+    return result.content, False
+
+
+@pytest.mark.parametrize("mode", ["read-only", "workspace-write"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "emrg server stop",
+        "emrg server restart",
+        "pkill -f emrg.server",
+        "sh -c 'emrg server restart'",
+        "curl http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+    ],
+)
+def test_the_live_executor_refuses_the_act_before_the_spawn_boundary(
+    boundary, command, mode
+):
+    """The refusal is the executor's, and it happens before anything is spawned.
+
+    Both halves matter.  That the text is refused is the rule; that the boundary
+    was never reached is why the refusal is *protection* rather than a message
+    printed next to a running command — the ordering the legacy fence also had,
+    and the property the write fence cannot supply on its own.
+    """
+    from emrg.tools.bash_tool_v2 import BashToolV2
+
+    content, reached = _run(BashToolV2(), command, mode)
+
+    assert reached is False, f"{command!r} reached the spawn boundary at {mode}"
+    assert content.startswith("⛔")
+    assert "⛔" in content and content
+
+
+def test_both_dialects_read_the_same_text(boundary):
+    """The PowerShell executor asks the same module, at the same point.
+
+    Windows is a platform leg with its own executor (`pwsh_tool_v2`), so a rule
+    wired into one dialect is half a rule.  This drives that executor directly
+    rather than reading its source, because a source check passes on a call that
+    is unreachable.
+    """
+    from emrg.tools.pwsh_tool_v2 import PwshToolV2
+
+    content, reached = _run(PwshToolV2(), "emrg server stop", "workspace-write")
+
+    assert reached is False
+    assert "emrg server stop" in content
+
+
+def test_an_ordinary_command_still_reaches_the_boundary(boundary):
+    """The read is a fence, not a wall: what it does not recognise runs.
+
+    Without this half, `command_refusal` returning a refusal for everything would
+    satisfy the tests above — and a fence that refuses everything is not a
+    stronger version of this one, it is a different and useless tool.
+    """
+    from emrg.tools.bash_tool_v2 import BashToolV2
+
+    content, reached = _run(BashToolV2(), "echo hi", "workspace-write")
+
+    assert reached is True, f"an ordinary command was refused: {content!r}"
+
+
+def test_full_access_is_exempt_on_the_live_path(boundary):
+    """`danger-full-access` never reaches the read — the legacy exemption, kept.
+
+    The mode the host session runs under is the host's own instruction, and the
+    legacy fence returned above these rules for it.  P7 moves the rules; it does
+    not change which tiers are checked, and this is the test that says so.
+    """
+    from emrg.tools.bash_tool_v2 import BashToolV2
+
+    for command in ("emrg server stop", "pkill -f emrg.server"):
+        content, reached = _run(BashToolV2(), command, "danger-full-access")
+        assert reached is True, f"{command!r} was read at full access: {content!r}"

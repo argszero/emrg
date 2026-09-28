@@ -128,22 +128,16 @@ class UpdateConfig:
 
 @dataclass
 class SandboxConfig:
-    """The ``[sandbox]`` section — which bash tool this instance runs.
+    """The ``[sandbox]`` section — which shell tool this instance mounts.
 
-    ``bash_tool_v2`` chooses between the two executors that answer to the tool
-    name ``bash`` (design ``bash-tool-v2-design.md`` D10).  Its default is now
-    **the new one**: the boundary it enforces is the OS process boundary rather
-    than a static scan of the command text, which is the whole point of the
-    programme, and a boundary that is off by default is not the one being
-    measured in production.  ``False`` keeps the frozen tool and remains the
-    rollback: one line here, or ``EMRG_BASH_TOOL_V2=0`` for a single launch.
-
-    Read **once at startup** by the daemon — unlike ``[llm]`` and ``[update]``
-    this key is not hot-reloaded, because it decides which executor is *built*
-    into the tool registry, and the registry is constructed once and read-only
-    after that (``emrg/tools/registry.py``).  The environment variable
-    ``EMRG_BASH_TOOL_V2`` overrides the file in both directions, so the host can
-    try either executor in a session without editing ``config.toml``.
+    It mounted a choice until P7: ``bash_tool_v2`` (design D10) selected between
+    a process-boundary executor and a frozen one that scanned the command text,
+    defaulting to the boundary.  The programme's destination is the boundary, and
+    a switch whose loser is about to be deleted is not a choice — so the key, its
+    environment override (``EMRG_BASH_TOOL_V2``) and its rollback are gone, and
+    the dialect's executor is what gets built (``emrg/tools/shell_dialects.py``
+    decides which dialect).  A ``config.toml`` that still carries the key is read
+    as before: unknown keys in the section are ignored.
 
     ``pwsh_path`` names the PowerShell executable the Windows roster mounts
     (design §14.5 item 3).  Empty means the resolution chain decides
@@ -153,7 +147,6 @@ class SandboxConfig:
     here is trusted as-is, exactly as the blueprint trusts its own ``pwshPath``.
     """
 
-    bash_tool_v2: bool = True
     pwsh_path: str = ""
 
 
@@ -163,9 +156,6 @@ class EmrgConfig:
     update: UpdateConfig = field(default_factory=UpdateConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
-
-#: Environment override for :attr:`SandboxConfig.bash_tool_v2`.
-ENV_BASH_TOOL_V2 = "EMRG_BASH_TOOL_V2"
 
 
 def _as_bool(raw: str, default: bool) -> bool:
@@ -268,19 +258,17 @@ def _sandbox_from(data: dict) -> SandboxConfig:
         return SandboxConfig()
     pwsh_path = section.get("pwsh_path", "")
     return SandboxConfig(
-        bash_tool_v2=bool(section.get("bash_tool_v2", True)),
         pwsh_path=pwsh_path if isinstance(pwsh_path, str) else "",
     )
 
 
 def load_sandbox_config() -> SandboxConfig:
-    """Load only the ``[sandbox]`` section (design D10).
+    """Load only the ``[sandbox]`` section.
 
     The daemon constructs its tool registry from this. Missing config file or
-    missing section → the default (the new bash tool), exactly as
-    :func:`load_update_config` tolerates both. The environment override is
-    applied **last**, so it wins over the file in both directions — including
-    the rollback to the frozen tool without editing ``config.toml``.
+    missing section → the defaults (the ``pwsh_path`` chain decides), exactly as
+    :func:`load_update_config` tolerates both. There is no environment override:
+    the one that existed named a rollback P7 retired.
     """
     cfg = SandboxConfig()
     cfg_path = config_path()
@@ -290,15 +278,6 @@ def load_sandbox_config() -> SandboxConfig:
         except (OSError, tomllib.TOMLDecodeError):
             data = {}
         cfg = _sandbox_from(data)
-    raw = os.environ.get(ENV_BASH_TOOL_V2)
-    if raw is not None:
-        # Rebuild rather than mutate: the dataclass is frozen by convention, and
-        # every other field has to survive the override (a `SandboxConfig(...)`
-        # that named only this one silently dropped `pwsh_path`).
-        cfg = SandboxConfig(
-            bash_tool_v2=_as_bool(raw, cfg.bash_tool_v2),
-            pwsh_path=cfg.pwsh_path,
-        )
     return cfg
 
 

@@ -37,10 +37,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from emrg.config import ENV_BASH_TOOL_V2, LlmConfig, SandboxConfig
+from emrg.config import LlmConfig, SandboxConfig
 from emrg.server.daemon import EmrgServer, _get_jinja_env, build_shell_tool
 from emrg.tools import ToolRegistry
-from emrg.tools.bash_tool import BashTool
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools import pwsh_tool_v2 as pwsh
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
@@ -56,14 +55,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.fixture(autouse=True)
 def _no_ambient_switch(monkeypatch):
-    """The shell must not decide what a test here measures.
+    """A host's environment must not decide what a test here measures.
 
-    ``EMRG_BASH_TOOL_V2`` is the documented one-launch rollback, so a host
-    starting pytest with it set is doing the normal thing; without this, the
-    roster tests below would read the ambient choice and fail while the product
-    is correct (the defect class P6 shipped and then fixed in its own tests).
+    ``EMRG_BASH_TOOL_V2`` was the documented one-launch rollback, so a host
+    starting pytest with it set was doing the normal thing; the variable is
+    retired (P7) and now inert, but "inert" is a claim about the product, and a
+    test that silently depended on the variable being absent would stop measuring
+    that claim the day someone set it.  Deleted rather than assumed.
     """
-    monkeypatch.delenv(ENV_BASH_TOOL_V2, raising=False)
+    monkeypatch.delenv("EMRG_BASH_TOOL_V2", raising=False)
 
 
 def _instantiate() -> EmrgServer:
@@ -434,16 +434,18 @@ def test_the_configured_pwsh_path_reaches_the_tool():
     assert tool._pwsh_path == "D:\\pwsh.exe"
 
 
-def test_the_rollback_still_works_on_windows():
-    """``bash_tool_v2 = false`` on Windows mounts the frozen tool, which runs cmd.exe.
+def test_windows_mounts_pwsh_and_nothing_else():
+    """The Windows roster is ``pwsh`` alone — the rollback it needed is gone.
 
-    This is why P8 had to land *before* P7: the frozen tool is the only working
-    shell a Windows host has until ``pwsh`` is real, and deleting it first would
-    leave Windows with nothing.  After P7 the Windows roster is ``pwsh`` alone.
+    P8 had to land *before* P7 for this row's predecessor: the frozen tool was the
+    only working shell a Windows host had until ``pwsh`` was real, so deleting it
+    first would have left Windows with nothing.  Now that it is real, what is left
+    to pin is the destination — a Windows host gets the PowerShell dialect, and
+    there is no key or environment variable that can put ``cmd.exe`` back.
     """
-    tool = build_shell_tool(SandboxConfig(bash_tool_v2=False), platform_name="win32")
-    assert isinstance(tool, BashTool)
-    assert tool.definition().name == "bash"
+    tool = build_shell_tool(SandboxConfig(), platform_name="win32")
+    assert isinstance(tool, PwshToolV2)
+    assert tool.definition().name != "bash"
 
 
 def test_the_hosts_own_answer_is_the_real_one():
@@ -503,11 +505,9 @@ def test_the_prompt_follows_the_registry_not_the_platform():
     """The strongest form: mount the other dialect and the prompt changes with it.
 
     A prompt rendered from the *platform* would pass the test above and still be
-    wrong in the one configuration that admits two answers — Windows with
-    ``bash_tool_v2 = false``, where the mounted tool is the cmd.exe one and its
-    name is ``bash``.  So the registry here holds exactly one shell tool, mounted
-    as the host would *not* have mounted it, and the prompt must follow the
-    registry.
+    wrong wherever the mounted tool and the platform's default disagree.  The
+    registry here holds exactly one shell tool, mounted as the host would *not*
+    have mounted it, and the prompt must follow the registry.
 
     Registering a second dialect into the daemon's own registry would not do:
     the registry indexes by name, so adding ``pwsh`` beside ``bash`` produces two
