@@ -12,7 +12,7 @@ import signal
 import tempfile
 
 from emrg._win import win32_no_window_kwargs
-from emrg.sandbox import file_policy
+from emrg.tools import file_policy
 from emrg.server.git_utils import no_prompt_env
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
@@ -5154,12 +5154,12 @@ def _git_config_write_targets(tokens: list[str], i: int) -> list[str]:
 
 # The in-process file-effect policy — the predicates the write/edit tools call
 # and the target/containment helpers this module's own scan walks with — has its
-# home in `emrg/sandbox/file_policy.py` (P7, issue #1675): the file tools are not
+# home in `emrg/tools/file_policy.py` (P7, issue #1675): the file tools are not
 # kernel-confined, so their only gate is that predicate, and it used to live here,
 # in the legacy shell tool this issue deletes. The private names below are the
 # aliases this module's scan keeps reading; the three public predicates are *not*
 # re-exported, so `write`/`edit` import them from their home.
-from emrg.sandbox.file_policy import (
+from emrg.tools.file_policy import (
     WINDOWS_DRIVE_RE as _WINDOWS_DRIVE_RE,
     WINDOWS_SHELL as _WINDOWS_SHELL,
     is_absolute_path as _is_absolute_path,

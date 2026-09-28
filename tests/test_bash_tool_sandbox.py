@@ -31,7 +31,7 @@ from emrg.tools.bash_tool import (
     _GIT_READ_VERBS,
     _GIT_SHAPE_DECIDED,
 )
-from emrg.sandbox.file_policy import check_workspace_write
+from emrg.tools.file_policy import check_workspace_write
 
 
 def _run(coro):

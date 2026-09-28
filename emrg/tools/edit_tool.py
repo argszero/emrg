@@ -7,7 +7,7 @@ from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
-from emrg.sandbox.file_policy import (
+from emrg.tools.file_policy import (
     check_read_only_file_write,
     check_workspace_write,
     resolve_file_target,
@@ -94,7 +94,7 @@ class EditTool(ToolExecutor):
         # The joined `target` is handed to both gates, so the file they judge is
         # the file edited below (before #1558 the spelling was passed on and
         # resolved elsewhere).
-        # This is the in-process file policy (`emrg/sandbox/file_policy.py`), not
+        # This is the in-process file policy (`emrg/tools/file_policy.py`), not
         # the v2 fence: at `read-only` it refuses only paths inside the workspace
         # and allows everything outside it, while the process-boundary tool grants
         # nothing at that tier — the divergence, measured, is in

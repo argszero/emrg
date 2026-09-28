@@ -1,5 +1,18 @@
 """The in-process file-effect policy: what ``write``/``edit`` may touch, per tier.
 
+**Where this module is not.** It is deliberately *not* under ``emrg/sandbox/``, which is
+the **fence** side — the writable roots the kernel-boundary tool runs under, plus the
+providers that express them. Two reasons, and the second is mechanical: the divergent
+question this module answers ("what may an in-process ``open()`` touch") is a tool-side
+gate, not a fence, so filing it with the fence would imply it takes part in a policy it
+measurably does not; and the guard that pins host decision D5
+(``tests/test_prompt_templates.py::_sandbox_defines``) reads every ``ast`` function name
+under ``emrg/sandbox/`` and refuses one that mentions a ``trusted_write_zone`` — measured
+by this move: filing this file there turned that guard red with
+``file_policy.py:trusted_write_zones``, i.e. it read the *move* as D5's mechanism coming
+back. The grant is real and is named below; where it lives is what keeps the fence's
+statement true.
+
 **Why this module exists.** The two tool families enforce a file-effect policy
 through two different mechanisms, and until now only one of them had a home:
 

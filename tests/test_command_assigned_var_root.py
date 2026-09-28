@@ -78,6 +78,7 @@ from pathlib import Path
 import pytest
 
 from emrg.tools import bash_tool as _bash_tool
+from emrg.tools import file_policy as _file_policy
 from emrg.tools.bash_tool import (
     _assigned_value_is_decidable,
     _check_sandbox,
@@ -425,6 +426,11 @@ def test_a_drive_rooted_value_is_placed_on_a_windows_shell(monkeypatch) -> None:
     the backslash one is refused by the same charset for the *separator*, not for
     the drive (issue #1354's second half, measured, and not this change's).
     """
+    # Both readers of the platform axis (P7, issue #1675): the predicates read the
+    # file policy's own constant, the legacy scan reads its alias. Forcing one and not
+    # the other is how this axis fails silently — the seam greens locally and the
+    # platform leg reddens.
+    monkeypatch.setattr(_file_policy, "WINDOWS_SHELL", True, raising=True)
     monkeypatch.setattr(_bash_tool, "_WINDOWS_SHELL", True, raising=True)
     windows_ws = r"C:\Users\x\repo"
     inside = 'T=C:/Users/x/repo/.emrg/tmp && cat > "$T/c.md"'

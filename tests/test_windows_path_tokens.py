@@ -39,7 +39,7 @@ import os
 
 import pytest
 
-from emrg.sandbox import file_policy as fp
+from emrg.tools import file_policy as fp
 from emrg.tools import bash_tool as bt
 
 WINDOWS_WS = r"C:\Users\x\repo"
@@ -100,7 +100,7 @@ def _pinned_write_roots(monkeypatch):
     just the temp one, because the trusted zone is cwd-dependent the same way.
     """
     # Both names the pins must reach: the policy has **one home**
-    # (`emrg/sandbox/file_policy.py`) and the legacy scanner keeps an alias to it,
+    # (`emrg/tools/file_policy.py`) and the legacy scanner keeps an alias to it,
     # so the predicates read the home while the scan reads the alias. Patching one
     # and not the other is the defect this fixture exists to prevent in the other
     # direction — a seam that sets one layer and leaves the other ambient (P7,

@@ -4,7 +4,7 @@ The two tool families answer "may this write happen?" through two mechanisms: th
 process-boundary tool through the kernel fence, the ``write``/``edit`` tools
 through in-process predicates. The predicates used to live in
 ``emrg/tools/bash_tool.py`` — the legacy shell tool #1675 deletes — and the point
-of moving them to ``emrg/sandbox/file_policy.py`` is that the home is **not** the
+of moving them to ``emrg/tools/file_policy.py`` is that the home is **not** the
 file being deleted.
 
 A move is easy to undo by accident: a later change can re-add a copy in the
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from emrg.sandbox import file_policy
+from emrg.tools import file_policy
 from emrg.tools import bash_tool, edit_tool, write_tool
 
 PREDICATES = ("check_read_only_file_write", "check_workspace_write", "resolve_file_target")
