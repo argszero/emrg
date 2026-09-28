@@ -225,10 +225,26 @@ def test_write_workspace_write_allows_evolution_memory(tmp_path, monkeypatch):
     """Issue #1093 self-regression: the evolution module writes its cycle records
     to ~/.emrg/evolution/.emrg/memory/, which is OUTSIDE the repo checkout
     workspace. The workspace-write boundary must trust that data root so the
-    evolution module can still record its own history (positive state)."""
+    evolution module can still record its own history (positive state).
+
+    Both spellings of the home are pinned, because ``os.path.expanduser("~")``
+    reads ``USERPROFILE`` on Windows and ``HOME`` elsewhere: with only ``HOME``
+    set the resolved root stayed this host's real one, so this test — the one of
+    the three that *executes* the write instead of handing the path to a pure
+    predicate — wrote a fixture file into the host's
+    ``~/.emrg/evolution/.emrg/memory/`` on every suite run. Measured
+    2026-09-28: it was the single file under that 230-file root whose mtime
+    moved. The assertion below makes the fixture home a premise the test checks
+    rather than one it assumes.
+    """
     import os
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     evo_data = Path(os.path.realpath(os.path.expanduser("~/.emrg/evolution/.emrg")))
+    assert evo_data.is_relative_to(Path(os.path.realpath(str(tmp_path)))), (
+        "the fixture home did not take: this test would write into the reading "
+        f"host's real data root ({evo_data})"
+    )
     evo_data.mkdir(parents=True, exist_ok=True)
     ws = tmp_path / "ws"
     ws.mkdir()

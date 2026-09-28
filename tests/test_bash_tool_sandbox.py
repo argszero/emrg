@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -734,10 +735,18 @@ def test_workspace_write_allows_evolution_memory(monkeypatch, tmp_path):
     module's own data root) even though it is outside the repo workspace."""
     import emrg.tools.bash_tool as bt
     # Pin the user home + evolution data root so the test is hermetic and does
-    # not depend on this host's real ~/.emrg layout.
+    # not depend on this host's real ~/.emrg layout. Pin both spellings:
+    # expanduser reads USERPROFILE on Windows and HOME elsewhere, so HOME alone
+    # left the path resolving to the reading host's real root — a pure predicate
+    # here, a real write in tests/test_write_tool.py's sibling test.
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    # Recompute the trusted zone against the pinned HOME.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    # Recompute the trusted zone against the pinned home.
     evo_data = os.path.realpath(os.path.expanduser("~/.emrg/evolution/.emrg"))
+    assert Path(evo_data).is_relative_to(Path(os.path.realpath(str(tmp_path)))), (
+        "the fixture home did not take: this test would measure the reading "
+        f"host's real data root ({evo_data})"
+    )
     ws = str(tmp_path / "ws")
     # check_workspace_write (write/edit tools)
     meta = evo_data + "/memory/cycle-20260901-000000.md"
@@ -754,7 +763,12 @@ def test_workspace_write_allows_evolution_session_scratch(monkeypatch, tmp_path)
     per the _trusted_write_zones() docstring — lock it in so a future narrowing
     of the zone to memory/ alone cannot silently break session writes."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     evo_data = os.path.realpath(os.path.expanduser("~/.emrg/evolution/.emrg"))
+    assert Path(evo_data).is_relative_to(Path(os.path.realpath(str(tmp_path)))), (
+        "the fixture home did not take: this test would measure the reading "
+        f"host's real data root ({evo_data})"
+    )
     ws = str(tmp_path / "ws")
     # check_workspace_write (write/edit tools)
     session = evo_data + "/sessions/emrg-evolution-emrg-task/history.jsonl"
