@@ -41,6 +41,13 @@ What is asserted, and the two legs that keep it from being decoration
   reports the caller's cwd dies), while the citation guard must name the tree it was
   *given* — a tmp root, and explicitly **not** this repository (so a line hardcoded to
   the repository root dies).
+* **each runnable guard must come back clean on this checkout** — rc 0. Naming the
+  tree is not the same as watching the answer, and the gap between the two is what
+  shipped v0.3.6: `check_nonlocal.py` printed `rc=1` about this very checkout on
+  v0.3.6's commit (the `_approval_pending` crash the host reported, issue #1759) while
+  every test in this file passed, because nothing here read an exit code. The leg is on
+  the *family* rather than on each guard's own test file so that the next guard to join
+  `RUN_HERE` cannot arrive without its verdict being asserted.
 
 Named limits. The middle bucket is **classified, not verified**: its guards read a
 working tree and name it, but cannot be run here (one needs the Node runners, which the
@@ -53,6 +60,14 @@ verified **here**" for that member rather than "not verified". The first line is
 subject rather than "anywhere in the output" because that is what the convention says
 and what a reader's eye reaches first — a line printed after a verdict has already been
 given answers a question the reader did not ask.
+
+The verdict leg has a limit of its own, measured rather than assumed: one member's
+subject is a tree a bare checkout does not have. `check-memory-index.py` reads the
+`.emrg/memory/` indexes, which are gitignored, so in a checkout without them it reports
+`could not measure: no memory index under …` and exits 0 — its leg therefore bites on a
+host checkout and is a no-op in CI (measured 2026-09-30 in a pristine worktree: rc 0,
+that message). It is kept in the loop rather than exempted, because "could not measure"
+is a value this repository insists on seeing, and the message is printed either way.
 """
 
 from __future__ import annotations
@@ -205,6 +220,29 @@ def test_every_guard_in_the_family_is_classified() -> None:
         f"these are classified above and no longer exist: {sorted(classified - on_disk)} "
         "- a stale entry would keep the rule looking wider than it is"
     )
+
+
+def test_every_runnable_guard_comes_back_clean_on_this_checkout() -> None:
+    """The leg that was missing when a released client crashed on every Enter.
+
+    `check_nonlocal.py` exists for exactly one defect class, was correct, and printed
+    `rc=1` about this checkout on v0.3.6's commit — the `_approval_pending` read that
+    made the TUI unusable (issue #1759). Nothing failed: no workflow ran the guard, and
+    no test read its exit code. Naming the tree (the assertions above) would not have
+    caught it either — the guard named its tree *correctly* while reporting the defect.
+
+    So this asks every runnable member for its verdict on the tree being tested, which
+    is the one question a guard exists to answer. A member whose subject a bare checkout
+    lacks reports `could not measure` and exits 0 rather than failing (the file's
+    docstring says which, and why it is kept in the loop anyway).
+    """
+    for name in RUN_HERE:
+        proc = _run([str(SCRIPTS_DIR / name)], cwd=REPO_ROOT)
+        assert proc.returncode == 0, (
+            f"{name} reports a defect on this checkout (rc={proc.returncode}) — a rule "
+            "this family enforces is violated by the tree under test:\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
 
 
 def test_a_tree_reading_guard_names_its_own_checkout_whatever_the_cwd(tmp_path) -> None:
