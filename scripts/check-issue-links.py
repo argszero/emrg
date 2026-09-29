@@ -666,6 +666,16 @@ def judge_origins(
       two indistinguishable from a duplicate claim — which is the reading `--json` and a
       reviewer both need before they can tell deliberate from accidental.
 
+      The subject is counted by **issue, not by occurrence**: one issue that writes its
+      origin line twice (a body carrying the line at the top and again in a provenance
+      section, or an edit that appends rather than replaces) has declared one origin, and
+      the rule it is measured against speaks of "two or more open issues". Grouping by
+      occurrence reported that as a duplicate of itself, in a row whose own detail read
+      *"#N name the same rant origin ... and #N #N carry no `Part: n/N`"* — three wrong
+      numbers in a sentence a reader is meant to act on, the same defect class the `_agrees`
+      helper above exists to avoid. The list is therefore of distinct numbers, which is also
+      what makes its `len` the issue count the threshold means.
+
     The pruned-store limit, stated rather than implied: `submit_rant cleanup` keeps all
     pending and in-progress rants plus the ten most recent completed ones, so an issue
     whose rant completed and was then pruned reads `origin-unresolved` exactly like one
@@ -674,14 +684,14 @@ def judge_origins(
     is what keeps the row actionable.
     """
     faults: dict[int, tuple[str, str]] = {}
-    by_ts: dict[str, list[int]] = {}
+    by_ts: dict[str, set[int]] = {}
     labelled: dict[int, bool] = {}
     for issue in issues:
         number = int(issue["number"])
         body = issue.get("body") or ""
         labelled[number] = bool(_PART.search(_without_code(body)))
         for ts in _origin_lines(body):
-            by_ts.setdefault(ts, []).append(number)
+            by_ts.setdefault(ts, set()).add(number)
             if ts in store:
                 continue
             near = sorted(t for t in store if _same_instant_spelling(t, ts))
@@ -707,7 +717,7 @@ def judge_origins(
         for number in unlabelled:
             faults[number] = (
                 "origin-duplicate",
-                f"{_numbers(sorted(set(numbers)))} name the same rant origin `{ts}` and "
+                f"{_numbers(numbers)} name the same rant origin `{ts}` and "
                 f"{_numbers(unlabelled)} carry no `Part: n/N` - one rant is one issue by "
                 "default, so either fold these into the one issue that finishes the rant, "
                 "or label each with the part it is (`Part: 1/2`) so a reader can tell a "

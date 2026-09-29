@@ -1552,6 +1552,37 @@ def test_two_unlabelled_issues_on_one_origin_are_a_duplicate(
         assert RANT_TS in detail and "Part:" in detail, detail
 
 
+def test_one_issue_writing_its_origin_twice_is_not_a_duplicate(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The duplicate state counts **issues**, not occurrences of the origin line.
+
+    A body can spell its origin line more than once — at the top and again in a provenance
+    section, or because an edit appended where it meant to replace — and that is one issue
+    declaring one origin. The rule it is measured against says "two or more open issues", so
+    a single issue can never be a duplicate of itself; grouping by occurrence made this queue
+    fail with a row reading *"#10 name the same rant origin ... and #10 #10 carry no
+    `Part: n/N`"*, three wrong numbers in the sentence a reader acts on.
+
+    The queue is otherwise clean (`_linked_issues` holds every link `ok` and the ledger holds
+    the timestamp), so `OK` here is the whole verdict: nothing but the origin reading can
+    make it fail.
+    """
+    _install(
+        mod,
+        monkeypatch,
+        _linked_issues(
+            [_issue_with_origin(10, RANT_TS, body=f"Origin: rant {RANT_TS}")]
+        ),
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, RANT_TS))])
+
+    assert rc == 0, out
+    assert "OK" in out, out
+    assert "DUPLICATE" not in out, out
+
+
 def test_a_labelled_split_of_one_rant_is_allowed(mod, monkeypatch, capsys, tmp_path) -> None:
     """R5's escape hatch: a rant carried by two issues, each saying which part it is.
 
