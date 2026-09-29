@@ -3276,3 +3276,277 @@ def test_clean_tree_keeps_configured_sandbox(tmp_path):
                           identity=InstanceIdentity())
     assert asyncio.run(handler._effective_sandbox()) == "workspace-write"
     assert _git_out(repo, "stash", "list") == "", "a clean tree is never asked about loss"
+
+
+# ── No-progress watchdog (rant 2026-09-29T15:52:43, requirement 5) ──────
+# A cycle that stops producing frames must not hold its slot. The wedge this
+# closes was measured 2026-09-27: a command put in the background killed the
+# whole turn, nothing was ever written to the socket again, and the handler sat
+# in `recv` for the life of the daemon — `_cycle_running` true, `_next_run_at`
+# None, the heartbeat file still ticking. The heartbeat is why the signal here
+# is a *frame*: it is this handler's own timer and says nothing about the cycle.
+
+def _silence_frames(handler, tmp_path, monkeypatch, frames, *, delays=None):
+    """A handler whose connection delivers `frames`, then goes silent forever.
+
+    Silence — not a close — is the subject: `ConnectionClosed` already had an
+    answer (`connection-closed`), and it is the open-but-silent socket that had
+    none. `delays` maps a frame index to how long the socket stays silent before
+    that frame arrives, which is how a test puts a pause *inside* a step rather
+    than at the end of the script.
+    """
+    import json as _json
+
+    from emrg.server import scheduler as mod
+    delays = delays or {}
+
+    class _SilentWS:
+        def __init__(self):
+            self._frames = list(frames)
+            self.sent = []
+            self._index = 0
+
+        async def send(self, msg):
+            self.sent.append(msg)
+
+        async def recv(self):
+            if self._frames:
+                pause = delays.get(self._index)
+                if pause:
+                    await asyncio.sleep(pause)
+                self._index += 1
+                return _json.dumps(self._frames.pop(0), ensure_ascii=False)
+            await asyncio.sleep(3600)  # open, and never another frame
+
+        async def close(self):
+            pass
+
+    async def _fake_connect():
+        return _SilentWS()
+
+    handler._build_evolution_prompt = lambda: "test prompt"
+    monkeypatch.setattr(mod, "connect_to_server", _fake_connect)
+    return handler
+
+
+def test_a_silent_turn_ends_as_a_stall_not_as_a_completion(tmp_path, monkeypatch, caplog):
+    """Requirement 5.2: silence past the bound is an error, not a wait.
+
+    The bound is shrunk so the test is fast; what the assertions are about is
+    the shape, not the number: the cycle returns (rather than blocking forever),
+    it says *why* it returned, and it is not counted as an evolution.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"request_id": "r1", "content": "thinking", "done": False,
+         "delta": True, "session_id": "s"},
+    ])
+
+    with caplog.at_level(logging.ERROR):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._STALLED, (
+        "a turn that stops reporting must end as `stalled`, not as a completion "
+        f"or as a closed connection — got {reason!r}"
+    )
+    assert handler.evolutions == [], (
+        "an aborted cycle is not an evolution: counting it would inflate the "
+        "growth card and the task-run record with work that never happened"
+    )
+    assert any("stalled: no frame for" in r.getMessage() for r in caplog.records), (
+        "the abort must be logged at ERROR with the silence it measured: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+
+
+def test_a_tool_call_is_bounded_by_its_own_declared_timeout(tmp_path, monkeypatch):
+    """Requirement 5.1: the bound follows the *step*, so a long command survives.
+
+    This is the assertion that keeps the watchdog from being a fixed recv
+    timeout: the round bound is 50 ms here, and the call declares 3700s of its
+    own. Only a watchdog that reads the call's own bound lets it finish — a flat
+    bound kills every command longer than itself, which is exactly the failure
+    the rant forbids.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    monkeypatch.setattr(mod, "_TOOL_SILENCE_GRACE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "tool_start", "tool_name": "bash",
+         "arguments": {"command": "sleep 3000", "timeout": 3700}},
+        {"type": "tool_end", "tool_name": "bash", "content": "ok", "error": False},
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ], delays={1: 0.3})
+
+    reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._CLEAN_END, (
+        "a 3700s command is silent for longer than the round bound by design — "
+        f"the cycle must not be torn down for it, got {reason!r}"
+    )
+    assert len(handler.evolutions) == 1, "the cycle ran to completion"
+
+
+def test_the_watchdog_bounds_are_read_from_the_call_and_never_less(tmp_path):
+    """The arithmetic, stated directly, including the values that must not bound less.
+
+    A tool call that declares no usable `timeout` still may not silence the
+    socket for longer than the tool layer's own default — otherwise omitting the
+    field would be a way to disable the watchdog.
+    """
+    from emrg.server import scheduler as mod
+
+    declared = mod._tool_silence_seconds({"timeout": 3700})
+    missing = mod._tool_silence_seconds({})
+    bogus = mod._tool_silence_seconds({"timeout": object()})
+    boolean = mod._tool_silence_seconds({"timeout": True})
+    negative = mod._tool_silence_seconds({"timeout": -5})
+
+    assert declared == 3700 + mod._TOOL_SILENCE_GRACE_SECONDS
+    assert missing == mod._TOOL_SILENCE_DEFAULT_SECONDS + mod._TOOL_SILENCE_GRACE_SECONDS
+    assert bogus == missing, "an unparsable value must fall back, not crash or unbind"
+    assert boolean == missing, "`True` is not a timeout in seconds"
+    assert negative == missing, (
+        "a non-positive timeout is as unusable as an absent one — clamping it to "
+        "the grace alone would fire the watchdog instantly on every such call"
+    )
+    assert mod._tool_silence_seconds({"timeout": "600"}) == (
+        600 + mod._TOOL_SILENCE_GRACE_SECONDS
+    ), "the tool layer reads a numeric string, so the watchdog must too"
+
+    # The later bound wins, in both phases.
+    assert mod._silence_deadline(0.0, 0.0, None) == mod._ROUND_SILENCE_SECONDS
+    assert mod._silence_deadline(0.0, 0.0, 3700.0) == 3700.0
+    assert mod._silence_deadline(0.0, 0.0, 1.0) == mod._ROUND_SILENCE_SECONDS
+
+
+def test_a_stalled_cycle_frees_the_slot_and_records_why(tmp_path, monkeypatch, caplog):
+    """Requirement 5.2: reset the handler, and leave the reason behind.
+
+    `_run_cycle_bounded` is where the reset happens (`_cycle_running` back to
+    False, marker closed with the ending). Driving it rather than the inner
+    method is deliberate: the reset is not something the cycle does for itself.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"request_id": "r1", "content": "thinking", "done": False,
+         "delta": True, "session_id": "s"},
+    ])
+    handler._cycle_running = True
+
+    reason = asyncio.run(handler._run_cycle_bounded())
+
+    assert reason == handler._STALLED
+    assert handler._cycle_running is False, (
+        "the slot must come back: it is `_cycle_running` that decides whether the "
+        "handler may start another cycle"
+    )
+    hb = handler._task_runs_dir / "emrg-task.heartbeat.json"
+    data = json.loads(hb.read_text(encoding="utf-8"))
+    assert data["status"] == "stalled", (
+        "the ending is written into the marker rather than erased, so the next "
+        f"wake can report it — got {data['status']!r}"
+    )
+
+    # A later wake reports it, once, in one grep-able phrase.
+    with caplog.at_level(logging.WARNING):
+        handler._report_interrupted_cycle()
+    assert any("stalled (no frame past the bound" in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
+    assert not hb.exists(), "a reported marker is consumed, so it is reported once"
+
+
+def test_a_stalled_cycle_does_not_hold_the_task_slot_forever(tmp_path, monkeypatch):
+    """Requirement 5.2, end to end: the next run is scheduled again.
+
+    Only the run loop writes the next-run slot, and it writes one only after a
+    cycle returns — so a next-run file that appears *after* a stalled cycle is
+    the deadlock being closed, measured rather than argued.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+    mod.write_table(
+        [{"name": "emrg-task", "type": "evolution", "config": {},
+          "interval": 60, "enabled": True}],
+        tmp_path / "tasks.yml",
+    )
+    handler = make_handler(name="emrg-task", config={}, interval=60)
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[])
+    # `_silence_frames` replaces the connect call; the prompt builder must not
+    # reach a template file that this record's type has no reason to resolve.
+    handler._build_evolution_prompt = lambda: "test prompt"
+
+    async def _drive():
+        task = asyncio.create_task(handler.run())
+        next_run = tmp_path / "next-run" / "emrg-task.json"
+        try:
+            # The slot is written *before* the loop waits, so it appears as soon
+            # as the stalled cycle has returned — the wait itself is never entered.
+            for _ in range(200):  # ≤ 4s: the cycle stalls in 50 ms
+                await asyncio.sleep(0.02)
+                if next_run.exists():
+                    return json.loads(next_run.read_text(encoding="utf-8"))
+            return None
+        finally:
+            handler.stop()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    scheduled = asyncio.run(_drive())
+
+    assert scheduled is not None, (
+        "after a stalled cycle the handler must schedule another run — a task "
+        "whose next-run slot is never written is the wedge this requirement closes"
+    )
+    assert scheduled["next_run_at"] > 0
+
+
+def test_a_silent_daemon_after_the_terminal_frame_does_not_wedge_the_handler(
+    tmp_path, monkeypatch, caplog,
+):
+    """The same wedge, one step later: the vibe check had no bound at all.
+
+    Its recv loop carried no timeout on purpose (rant 2026-08-20T20:19:31), and
+    an open, silent socket is not `ConnectionClosed` — so the one failure the
+    watchdog exists for stayed reachable *after* the cycle had already looked
+    finished, holding the slot just as long.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._CLEAN_END, (
+        "the terminal frame did arrive, so this cycle did finish — an unhelpful "
+        f"vibe check must not turn it into an abort, got {reason!r}"
+    )
+    assert any("vibe check got no answer" in r.getMessage() for r in caplog.records), (
+        [r.getMessage() for r in caplog.records]
+    )
+    assert len(handler.evolutions) == 1
+    assert handler.evolutions[0].work == "", (
+        "an unanswered vibe check leaves the work field empty — no fallback to "
+        "the completion text, and no slowdown state is invented from silence"
+    )
+    assert handler._slowdown_active is False, "silence is not a slowdown signal"
