@@ -3646,6 +3646,13 @@ class EmrgServer:
         # tool set for it.
         force_ask = False
         round_num = 1
+        # Bound before the loop, not only at the end of each round: the
+        # round-budget guard at the top of the loop reflects on `full_content`
+        # and can be reached before any round has run (a `max_tool_rounds`
+        # configured below 1), and a name first assigned inside the loop body is
+        # a local read before its binding there — UnboundLocalError, not an
+        # empty string. Same class as issue #1759 in the TUI.
+        full_content = ""
         # Issue #1336 (item 2), rant 2026-09-17T18:19:45: a round the provider
         # rejected for *body length* — a proxy 413 the local estimate never
         # predicted — used to surface as `LLM error: ...` and end the turn, so a

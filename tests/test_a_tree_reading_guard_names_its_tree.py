@@ -77,6 +77,7 @@ RUN_HERE = (
     "check-memory-index.py",
     "check-rant-citations.py",
     "check_nonlocal.py",
+    "check_unbound_reads.py",
 )
 
 #: The one guard run here that names a *given* tree rather than its own checkout, so it

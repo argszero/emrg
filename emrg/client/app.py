@@ -2433,6 +2433,13 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     _last_center = "thinking..."
                     status.update(center=_last_center)
                     term.render()
+                    # Capture the pre-send busy state here, as the main submit
+                    # path does before ITS send: `was_busy` is this function's
+                    # own local (the assignment further down is what binds it),
+                    # so a read that does not follow one raises
+                    # UnboundLocalError — the /rant-with-project path crashed
+                    # on every Enter (issue #1759).
+                    was_busy = busy
                     rid = await conn.send_task(session_id=session_id, cwd=cwd,
                                                prompt=hint)
                     if was_busy:
@@ -2765,6 +2772,10 @@ Streaming
                     _last_center = "thinking..."
                     status.update(center=_last_center)
                     term.render()
+                    # Same capture as the other two send sites — `was_busy` is a
+                    # local of this function, so the read below needs a
+                    # preceding binding (issue #1759).
+                    was_busy = busy
                     rid = await conn.send_task(session_id=session_id, cwd=cwd,
                                                prompt=hint)
                     if was_busy:
