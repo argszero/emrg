@@ -283,16 +283,16 @@ class TestMemoryIndexCompactionPrompt:
         is over the cap and is not named, the session's own is over it and is - so the
         test fails if the subject comes back and also if the note stops firing at all.
 
-        The root is monkeypatched rather than described by the host's own constant, so
-        the test measures the rule instead of this machine's workspace.
+        The root is a temp directory named by this test's own cwd rather than by any
+        constant of the host's workspace, so the test measures the rule and not this
+        machine's disk (`EVOLUTION_CWD` used to stand in for it; that constant was
+        deleted, rant 2026-09-29T10:06:33, and nothing here needed it).
         """
-        from emrg.server import daemon
         from emrg.server.daemon import MEMORY_INDEX_ROW_CAP
 
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp).resolve()
-                monkeypatch.setattr(daemon, "EVOLUTION_CWD", root)
                 cwd = root / "emrg"
                 cwd.mkdir()
                 session = Session.create_with_id("s_test_cap_root", cwd)

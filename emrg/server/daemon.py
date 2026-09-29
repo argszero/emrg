@@ -184,8 +184,6 @@ def _get_jinja_env() -> "jinja2.Environment":
 
 
 # ── Module-level constants ──
-EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
-
 # Which files `_collect_project_context` reads out of a session's cwd into the prompt,
 # in precedence order. Named rather than inline for the same reason the cap below is:
 # a guard that reads this list — that the files it embeds name paths this repository
@@ -1520,10 +1518,6 @@ class EmrgServer:
         owner/repo is detected at runtime from git remote, not stored.
         """
         cwd = os.path.realpath(cwd)
-        # Don't track the evolution engine's own workspace as a project
-        evolution_cwd = str(EVOLUTION_CWD.resolve())
-        if cwd == evolution_cwd or cwd.startswith(evolution_cwd + os.sep):
-            return
         # Don't track the home directory as a project
         home = os.path.expanduser("~")
         if cwd == home:
@@ -5108,9 +5102,7 @@ class EmrgServer:
         No evolution-workspace filter (rant 2026-08-07T10:48:00): projects.yml
         only contains explicitly registered entries, and on packaged installs
         the emrg project's only path IS ~/.emrg/evolution/emrg — filtering it
-        hid emrg from /rant entirely. _touch_project still skips evolution
-        subdirs so evolution cycles' cwd is never auto-tracked as a user
-        project.
+        hid emrg from /rant entirely.
         """
         projects: list[dict] = []
         try:

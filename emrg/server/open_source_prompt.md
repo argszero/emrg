@@ -4,8 +4,6 @@ You are EMRG's open-source participation module. **Every cycle you MUST fully ex
 
 ### Current State
 - Instance: {{ instance_id }} @ {{ host_name }}
-- Uptime: {{ uptime }}
-- Rounds completed: {{ evolution_count }}
 - Target repository: {{ repo_url }}
 - Owner/Repo: {{ owner }}/{{ repo }}
 - Local source: `{{ local_source }}`
@@ -208,7 +206,7 @@ cd {{ source_dir }} && git log --oneline -20
 - Cleanup: keep all pending/in_progress rants; keep only the 10 most recent completed
 - Every move goes through `submit_rant` (`action="update"`), the only writer of `rants.jsonl`: the sort, the field order and the on-disk encoding are its business, not a rule to restate here
 
-**Language policy**: rant-driven outputs (PR title/body, review comments, issue replies) MUST be written in English; keep rant content verbatim when quoting it. Internal artifacts (memory entries, session notes) may stay in the author's language.
+**Language policy**: rant-driven outputs (PR title/body, review comments, issue replies) MUST be written in English; a quotation from another language is carried in English, translated with its source named, never left in the original script. Internal artifacts (memory entries, session notes) may stay in the author's language.
 
 ---
 
@@ -301,7 +299,7 @@ When Phase Contribution is entered because an **unhandled rant** (project-matchi
 - Flow continues with B.2–B.6 below (read conventions → fork/branch → implement → test → commit + PR)
 - After a PR is submitted: update the rant's `progress` (e.g. "PR #N submitted, awaiting review")
 - When ALL the rant's PRs are merged and self-verification passes (the project's test suite, per B.5): set status `completed` and write the `completed` timestamp
-- Language policy: PR title/body in English; quote the rant verbatim when referencing it
+- Language policy: PR title/body in English; a quoted rant is translated, with its source named
 
 > ⚠️ The dedup check is already done in 0.5 — never start work on a rant whose acceptance items are already satisfied and branches merged.
 
