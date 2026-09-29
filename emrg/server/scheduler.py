@@ -1,14 +1,17 @@
 """Task-based scheduler — replaces BackgroundThread with independent coroutines.
 
-Each task in ~/.emrg/tasks.yml gets its own asyncio.create_task() coroutine.
-The scheduler only manages lifecycle (start/stop/monitor); handlers are self-contained.
+The file ~/.emrg/tasks.yml is the whole truth: `read_table` is its only reader and
+`write_table` its only writer, and a handler reads its own record at every wake
+instead of holding a copy. `reconcile()` starts a handler for an enabled record
+that has none and can do nothing else, so a write cannot disturb a running cycle
+(rant 2026-09-28T09:54:10).
 
 projects.yml remains for project tracking (_touch_project only).
-tasks.yml controls what gets auto-evolved.
 
 Task config schema:
-  name, type, enabled, interval, last_run — common base fields.
+  name, type, enabled, interval — common base fields.
   config — type-specific config. For evolution: config.project links to projects.yml name.
+  sandbox / description / extra_prompt — optional; anything else is ignored.
 """
 
 from __future__ import annotations
