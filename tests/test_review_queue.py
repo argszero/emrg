@@ -856,56 +856,50 @@ def test_the_cli_reads_both_roots_named_by_the_override(mod, monkeypatch, capsys
     assert str(project) in out
 
 
-def test_the_prompt_writes_its_cycle_records_where_the_queue_reads_them(mod):
-    """The template's record path lands in a directory this tool searches.
+def test_the_records_land_where_the_queue_reads_them(mod):
+    """The record root the memory system writes is the one this tool searches.
 
-    *Which directory holds the cycle records* is a fact about the template, not about
-    this tool — and it moved once already: D9 (PR #1555, in every build from v0.3.2)
-    re-based the prompt's memory roots from `{{ evolution_cwd }}` onto
-    `{{ source_dir }}`, i.e. from the root beside the checkout to the project memory
-    root inside it, while the corpus stayed where it was. Repairing the reader once
-    would not have caught that, and would not catch the next move; so the template is
-    rendered here, with the two variables the daemon supplies for the evolution task
-    (`scheduler._build_evolution_prompt`), and every directory its `cycle-<ts>.md`
-    path names is required to be one of the roots this tool reads. A record written
-    anywhere else is a record no window reads.
+    This guard used to scan the rendered template for its `cycle-<ts>.md` path and
+    require it to land in `DEFAULT_CYCLES_LOGS`. On 2026-09-29 the host ruled that the
+    prompt stops naming *where* a record goes — 「不需要指定什么东西记录到什么地方」, since a
+    session has a memory system and only needs telling *what* to record — so the path left
+    the template and the prose-level claim became unmeasurable. The invariant it protected
+    is still real and still worth a reading, so it is now measured where the writer
+    actually is: the daemon's project-memory root for a session whose cwd is this checkout
+    (`_collect_memory_data`, the loader that embeds the index a cycle appends to).
+
+    That is a strictly stronger claim than the scan it replaces: the old one compared two
+    pieces of text in one repository, while this one compares the directory a session is
+    told it has memory in against the directory the queue searches, so a move of either
+    side fails here. A record written anywhere else is a record no window reads — and the
+    abstention window is read from these files.
     """
-    import re
+    from types import SimpleNamespace
 
-    import jinja2
+    from emrg.server.daemon import EmrgServer
 
-    template = (
-        REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
-    ).read_text(encoding="utf-8")
-    rendered = (
-        jinja2.Environment(undefined=jinja2.Undefined)
-        .from_string(template)
-        .render(
-            source_dir=str(REPO_ROOT),
-            evolution_cwd=str(REPO_ROOT.parent),
-            timestamp="20260925-101010",
-            # The two mappings the template iterates over; every other name it uses is
-            # a display field, and the daemon's `Undefined` renders those empty here as
-            # it would there. The claim below is about a *path*, built from the three
-            # names set above, which the daemon supplies from
-            # `_source_dir`, `EVOLUTION_CWD` and the render clock.
-            task={},
-            project={},
-        )
+    repo_root = REPO_ROOT
+    memory_root = repo_root / ".emrg" / "memory"
+    assert (memory_root / "MEMORY.md").is_file(), (
+        f"{memory_root} carries no index, so the reading below would be about nothing"
     )
-    written = [
-        Path(match) for match in re.findall(r"`([^`]*/cycle-[^`]*\.md)`", rendered)
-    ]
-    assert written, (
-        "the template no longer names a cycle-record path this guard can read - "
-        "update the guard with it rather than deleting the claim"
+
+    # The same shape `tests/test_prompt_templates.py` uses: an uninitialised instance is
+    # enough, because the loader touches only `session.cwd` / `session.memory_dir`.
+    daemon = EmrgServer.__new__(EmrgServer)
+    data = daemon._collect_memory_data(
+        SimpleNamespace(cwd=repo_root, memory_dir=repo_root / ".emrg" / "sessions" / "x" / "memory")
     )
+    assert data, (
+        "the daemon embedded no project index for a session in this checkout — the "
+        "comparison below would be against nothing"
+    )
+    loaded = Path(data["project_memory_dir"]).resolve()
     roots = {root.resolve() for root in mod.DEFAULT_CYCLES_LOGS}
-    elsewhere = [path for path in written if path.parent.resolve() not in roots]
-    assert not elsewhere, (
-        "these cycle-record paths land outside the roots review-queue searches "
-        f"({', '.join(str(root) for root in mod.DEFAULT_CYCLES_LOGS)}): "
-        + ", ".join(str(path) for path in elsewhere)
+    assert loaded in roots, (
+        f"a cycle running in this checkout records under {loaded}, and review-queue "
+        f"searches {sorted(str(r) for r in roots)} — the abstention window is read from "
+        "the records, so a cycle writing somewhere else is one no window can see"
     )
 
 

@@ -803,9 +803,17 @@ def test_no_template_names_a_memory_root_other_than_the_two() -> None:
     # to be deliberate and it has to be this line that is edited. A template absent from the
     # map is still covered by the scan; a *renamed* one lands here as 0 and cannot shed its
     # floor silently.
+    #
+    # `evolution_prompt.md` was lowered 3 → 1 by the 2026-09-29 restructure
+    # (`cyc20260929-110933`), and it is the one deliberate removal this floor has carried:
+    # the prompt stopped naming *where* a cycle records (the host's 2026-09-29T10:29:39
+    # instruction 「不需要指定什么东西记录到什么地方」), so the record step and the identity
+    # step no longer spell a path, and the one that remains is R9's — the memory index is
+    # the rule whose subject *is* the file the daemon embeds, and the test below measures
+    # that the path it names is the path `_collect_memory_data` loads.
     floor = {
         "competition_prompt.md": 1,
-        "evolution_prompt.md": 3,
+        "evolution_prompt.md": 1,
         "journal_prompt.md": 2,
         "open_source_prompt.md": 3,
         "paper_prompt.md": 1,

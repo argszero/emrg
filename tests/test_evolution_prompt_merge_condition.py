@@ -72,14 +72,22 @@ CLAUSE = "before the head push is void"
 #: that destroys the votes it was meant to preserve.
 STALE_ROUTE = "voids every vote standing on it"
 
-#: The two places the condition is read: deciding whether to vote (§1.1) and deciding
-#: whether the merge may proceed (§5). Each is delimited rather than searched globally,
-#: because the question is *where the sentence sits*: a clause in a section nobody
-#: reads before voting does not answer the question the reader has.
-STEP1_START = "- Check merge conditions"
-STEP1_END = "**Issue management**"
-SUBMIT_START = "**Merge condition**"
-SUBMIT_END = "**Not pushing = not done**"
+#: The rule's home after the 2026-09-29 restructure (`cyc20260929-110933`): the condition
+#: is stated once, in rulebook R3. Before that it was stated twice — §1.1's "Check merge
+#: conditions" and §5's "Merge condition" — and this file pinned both, because a rule the
+#: voter reads nowhere is a rule the voter does not apply. One home plus a citation from
+#: each place that acts on it is the stronger shape: the count is now answerable.
+REGION_START = "#### R3. Merging"
+REGION_END = "#### R4. CI: three states, three actions"
+
+#: The two sections a reader arrives from — deciding whether to vote (§1.1) and deciding
+#: whether the merge may proceed (§5). Each must cite R3, or the rule is stated somewhere
+#: the reader is never sent.
+CITING_SECTIONS = {
+    "#### 1.1 Repo management": "#### 1.2 Follow up on your own PRs",
+    "### 5. Submit": "### 6. Record",
+}
+CITATION = "R3"
 
 
 def _load_counter():
@@ -153,43 +161,47 @@ def _region(text: str, start: str, end: str, what: str) -> str:
     return text[i:j]
 
 
-def test_the_condition_names_the_instrument_that_reads_it(rendered: str) -> None:
-    """Both sites name the counter, so a cycle asks it instead of counting by eye."""
-    for start, end, what in (
-        (STEP1_START, STEP1_END, "§1.1 review"),
-        (SUBMIT_START, SUBMIT_END, "§5 submit"),
-    ):
-        region = _region(rendered, start, end, what)
-        assert COUNTER_SCRIPT in region, (
-            f"{what}: the merge condition is stated without naming {COUNTER_SCRIPT}, "
-            "the instrument whose reading of it is the one this repo's gates use — so "
-            "a reader has only the comment history, which the counter was written "
-            "because that misleads"
+def test_the_rule_names_the_instruments_that_answer_it(rendered: str) -> None:
+    """R3 names the counter and the two freshness readings, not just the sentence.
+
+    A condition stated without its instrument leaves the reader the comment history,
+    which the counter was written because it misleads: on 2026-09-11 four PRs showed
+    four to six "✅ LGTM" lines each and had zero valid votes between them.
+    """
+    region = _region(rendered, REGION_START, REGION_END, "rulebook R3")
+    for term in (COUNTER_SCRIPT, FRESHNESS_SCRIPT, PLAN_SUITE_SCRIPT, CLAUSE, STALE_ROUTE):
+        assert term in region, (
+            f"R3 no longer states {term!r}. It is the merge condition's one home, and "
+            "the clause it must keep is the one the counter enforces: a vote submitted "
+            "before the head push is void — so a stale head is measured on the tree it "
+            "would land rather than refreshed, because a push voids the votes it was "
+            "meant to preserve"
         )
 
 
-def test_the_stale_head_route_is_stated_where_a_voter_decides(rendered: str) -> None:
-    """§1.1 must carry the clause, the freshness question and the route to take."""
-    region = _region(rendered, STEP1_START, STEP1_END, "§1.1 review")
-    for term in (CLAUSE, FRESHNESS_SCRIPT, PLAN_SUITE_SCRIPT, STALE_ROUTE):
-        assert term in region, (
-            f"§1.1 no longer states {term!r} beside the merge condition. This is the "
-            "section a cycle reads when it decides whether to vote, and the fact it "
-            "decides on is whether its vote will count: a vote submitted before the "
-            "head push is void, so a stale head is measured on the tree it would land "
-            "rather than refreshed (a push voids the votes it was meant to preserve)"
-        )
+def test_the_rule_is_stated_once(rendered: str) -> None:
+    """One statement — the count the duplicated shape made unanswerable."""
+    found = rendered.count(CLAUSE)
+    assert found == 1, (
+        f"the merge condition's clause is stated {found} times in the rendered prompt; "
+        "it lives in R3 alone, and a second copy is a copy free to drift from the one "
+        "the counter enforces"
+    )
 
 
-def test_the_submit_section_states_the_clause_too(rendered: str) -> None:
-    """§5's one-line condition must carry the clause its sentence used to omit."""
-    region = _region(rendered, SUBMIT_START, SUBMIT_END, "§5 submit")
-    for term in (CLAUSE, FRESHNESS_SCRIPT):
-        assert term in region, (
-            f"§5's Merge condition no longer carries {term!r}. The sentence alone reads "
-            "as 'three ✅ in the comment history', which is the narrower rule the "
-            "counter's docstring measures four PRs against (4-6 approvals, 0 valid "
-            "votes each)"
+def test_each_section_that_acts_on_the_rule_cites_it(rendered: str) -> None:
+    """The voter's section and the merger's section both reach R3.
+
+    The property a rulebook stands on: a rule stated once is only *read* if the places
+    that act on it send the reader there. Both directions are checked, because each is a
+    different reader with a different question — whether to vote, and whether to merge.
+    """
+    for start, end in CITING_SECTIONS.items():
+        region = _region(rendered, start, end, start)
+        assert CITATION in region, (
+            f"{start} does not cite {CITATION}; the merge condition lives in the "
+            "rulebook, and a section that acts on it without naming its home leaves the "
+            "reader to reconstruct the rule from memory"
         )
 
 

@@ -10,16 +10,19 @@ back to a PR once its run has concluded.
 Two habits carried the old behaviour, one per side of the loop, and both were stated
 in prose only:
 
-* the submitter's — ``then wait for the run to complete before LGTMing`` in §1.1, and
+* the reviewer's — ``then wait for the run to complete before LGTMing`` in §1.1, and
   ``Not satisfied → keep waiting`` further down the review list;
 * the submitter's in §5 — nothing said what to do after ``gh pr create``, so a cycle
   that had just pushed sat on the run it had started.
 
 The window a cycle spends blocking is the failure: the head it just pushed is one it
 may neither vote on nor merge, so the verdict it waits ~10 minutes for is unusable by
-that window, and the window itself is gone. The replacement rule is stated where each
-reader looks — §1.1 (the `gh pr checks` bullet) and §5 (just after `gh pr create`) —
-and this module pins it there, so a later prompt edit cannot drop it in silence.
+that window, and the window itself is gone. After the 2026-09-29 restructure (`cyc20260929-110933`) the rule has **one home** —
+rulebook §R4 — and the two sections a reader arrives from cite it: §1.1 takes the action
+`scripts/review-queue.py` names for a row, and §5 states the post-`gh pr create` rule. That
+is what makes the negative scan below possible: while the rule was copied into three
+sections, no section-wide (let alone file-wide) scan could tell the rule's own words from a
+duplicate of them — this module's own docstring used to record exactly that limit.
 
 Named limit
 -----------
@@ -41,22 +44,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
 
-#: Verbatim substrings of the shipped wording, per section a reader looks in. The
-#: reviewer-side section is where `gh pr checks` is explained; the submit section is
-#: where a cycle has just pushed and is tempted to watch the run conclude.
+#: Verbatim substrings of the shipped wording, per section a reader arrives from. R4 is
+#: the rule's home; §5 is where a cycle has just pushed and is tempted to watch the run
+#: conclude; §1.1 is where the queue is worked.
 REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
-    "#### 1.1 Repo Management": (
+    "#### R4. CI: three states, three actions": (
         "A run that has not concluded is a `park`, never a `wait`",  # the rule
         "park this PR and move on",                                  # the action
         "read it again next cycle",                                  # when it comes back
-        # The merge-conditions bullet, which the PR rewrote into "park it …" — the third
-        # site the rule is stated at. Pinned verbatim because a mutation arm re-spelled it
-        # back to "keep waiting" and *survived* the first version of this table (issue
-        # #1572): the old spelling is only caught for the two phrases in `REMOVED_TERMS`,
-        # and this site has its own. A section-wide negative scan is not available - §1.1
-        # legitimately contains the rule's own words ("never a `wait`", "not a row to
-        # block on") - so the site is pinned by what it must say.
-        "Not satisfied → **park it and go do other work in this cycle**",
     ),
     "### 5. Submit": (
         "Submitting ends at `gh pr create`",  # the rule
@@ -65,11 +60,25 @@ REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: Where a reader arrives from, and the citation that must send them to the rule. The
+#: section a reader is in is the section they act in, so a rule stated only in a rulebook
+#: nobody is pointed at is a rule the reader never reaches.
+POINTER_TERMS: dict[str, str] = {
+    "#### 1.1 Repo management": "R4",
+    "#### R3. Merging": "R4",
+}
+
+#: The rule's own opening words. Stated once, in R4: a second copy is a copy free to
+#: drift, which is the defect this file's negative scan was written for.
+RULE_SENTENCE = "A run that has not concluded is a `park`, never a `wait`"
+
 #: The two habits the rant removed, verbatim. Their return is the regression this file
 #: exists to catch, wherever in the template it happens.
 REMOVED_TERMS = (
     "then wait for the run to complete before LGTMing",
     "Not satisfied → keep waiting",
+    "keep waiting",
+    "wait for the run to complete",
 )
 
 
@@ -122,7 +131,12 @@ def test_the_checks_can_report_absence() -> None:
     feeds it a template carrying both headings and none of the terms, and requires
     every term to come back missing.
     """
-    stub = "#### 1.1 Repo Management\n\n- something else\n\n### 5. Submit\n\n- something else\n"
+    stub = (
+        "#### 1.1 Repo Management\n\n- something else\n"
+        "### 5. Submit\n\n- something else\n"
+        "#### R3. Merging\n\n- something else\n"
+        "#### R4. CI: three states, three actions\n\n- something else\n"
+    )
     missing = {
         heading: _missing_terms(_section(stub, heading), terms)
         for heading, terms in REQUIRED_TERMS.items()
@@ -134,3 +148,55 @@ def test_a_template_without_the_review_section_is_not_silently_healthy() -> None
     """A missing section is a failure to measure, never a pass."""
     with pytest.raises(AssertionError):
         _section("# A template with no review section", "#### 1.1 Repo Management")
+
+
+def test_each_section_a_reader_arrives_from_points_at_the_rule() -> None:
+    """The rule has one home; the sections that act on it must name that home.
+
+    Without this the rewrite would be the opposite failure: the rule stated once, in a
+    place the reader working the queue is never sent to. `scripts/review-queue.py` prints
+    the action word on the row, and this is the prompt side of the same instruction.
+    """
+    text = TEMPLATE.read_text(encoding="utf-8")
+    missing = [
+        f"{heading} does not cite {term}"
+        for heading, term in POINTER_TERMS.items()
+        if term not in _section(text, heading)
+    ]
+    assert not missing, (
+        "the parking rule lives in rulebook R4, so every section that acts on it must "
+        f"cite R4 rather than restate it; {missing}"
+    )
+
+
+def test_the_rule_is_stated_once() -> None:
+    """One statement, in the rulebook — the property the restructure exists to gain.
+
+    While the rule lived in three sections, no scan could separate the rule's own words
+    from a duplicate of them: this module's docstring recorded that limit, and a mutation
+    arm that re-spelled one copy back to `keep waiting` survived the first version of the
+    table here (issue #1572). With one home, "how many times is it stated" is answerable.
+    """
+    text = TEMPLATE.read_text(encoding="utf-8")
+    found = text.count(RULE_SENTENCE)
+    assert found == 1, (
+        f"the parking rule is stated {found} times in emrg/server/evolution_prompt.md; "
+        "it lives in R4 alone, and a second copy is a copy free to drift from it"
+    )
+
+
+def test_the_retired_wait_spellings_are_absent_everywhere() -> None:
+    """The global negative scan the duplicated rule made impossible.
+
+    The question is not "is the rule still in its section" but "does the template tell a
+    cycle to wait anywhere at all" — a file-wide question, and one only answerable once
+    each spelling has a single legal home. It covers the wording the rule replaced, in
+    every form the corpus has carried it.
+    """
+    text = TEMPLATE.read_text(encoding="utf-8")
+    found = [term for term in REMOVED_TERMS if term in text]
+    assert not found, (
+        "the template tells a cycle to wait for a run to conclude: " + repr(found) + ". "
+        "A window that blocks is a window not spent — the head it waits on is one it can "
+        "neither vote on nor merge."
+    )
