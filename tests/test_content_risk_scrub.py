@@ -373,9 +373,18 @@ def test_the_scrub_happens_once_per_turn(tmp_path, monkeypatch):
     """The budget is per turn: a second refusal reports, it does not loop.
 
     A retry that also fails has to report — the same reasoning the overlong
-    retry's single budget carries, and the reason a budget exists at all.
+    retry's single budget carries, and the reason a budget exists at all. The
+    session here carries the trigger in **every** record, so a second scrub
+    would succeed too: what stops the third attempt is the budget and nothing
+    else. Mutation arm 4 widens it to 3 and this test goes red at `sends == 4`.
     """
-    session = _history_session(tmp_path, 8, trigger_at=2)
+    session = Session.create_with_id("content-risk-budget", tmp_path)
+    session._write_history([
+        {"type": "message", "role": "user" if i % 2 == 0 else "assistant",
+         "content": f"record {i} mentions {TRIGGER} too"}
+        for i in range(8)
+    ])
+    session._message_count = 8
     server = _make_server()
     sends = 0
 
@@ -391,6 +400,9 @@ def test_the_scrub_happens_once_per_turn(tmp_path, monkeypatch):
 
     assert sends == 2, "one refusal, one scrub, one re-send"
     assert any("error" in f for f in frames), "then the refusal is reported"
+    assert len(session._read_history()) == 8, (
+        "exactly one record removed, the other seven left for the host to keep"
+    )
 
 
 def test_a_scrub_does_not_touch_a_healthier_session(tmp_path, monkeypatch):
