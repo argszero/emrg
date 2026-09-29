@@ -548,3 +548,108 @@ def test_a_tool_the_tier_does_not_reach_cannot_escalate(tmp_path, monkeypatch):
     )
     assert not [f for f in ws.sent if f.get("type") == "approval_request"]
     assert stub.calls, "the tool did not run"
+
+
+# ── requirement 5: the hint line ────────────────────────────────────────────
+
+
+def _denied(mode: str):
+    """A run the policy refused, shaped the way the tool shapes one."""
+    from emrg.tools.bash_tool_v2 import ShellRunResult
+
+    return ShellRunResult(
+        stderr="bash: x: Operation not permitted",
+        exit_code=1,
+        sandbox={"mode": mode, "denied": True, "enforcement": "full"},
+    )
+
+
+def test_the_denial_a_confined_run_gets_teaches_it_how_to_ask():
+    """The blueprint's hint (``render.ts:43-51``), reached through the renderer
+    rather than the helper — the seam is the thing requirement 5 names."""
+    from emrg.tools.bash_tool_v2 import render_result
+
+    text = render_result(_denied("read-only"), escalation_modes=("workspace-write",))
+    assert escalation.RETRY_HINT in text
+    assert "sandbox_permissions" in text and "justification" in text
+
+
+def test_a_tier_with_nowhere_wider_is_not_told_to_retry():
+    """`danger-full-access` has no hop, so the composition advertises none and
+    the hint would be an instruction that can only fail."""
+    from emrg.tools.bash_tool_v2 import render_result
+
+    text = render_result(_denied(DANGER_FULL_ACCESS), escalation_modes=())
+    assert escalation.RETRY_HINT not in text
+    assert "sandbox_permissions" not in text
+
+
+def test_an_unconfined_denial_still_carries_no_hint():
+    """A denial is the only place the hint belongs; a run that was not denied
+    must read exactly as it always did."""
+    from emrg.tools.bash_tool_v2 import ShellRunResult, render_result
+
+    text = render_result(
+        ShellRunResult(stdout="hi", exit_code=0, sandbox={"mode": "read-only", "denied": False}),
+        escalation_modes=("workspace-write",),
+    )
+    assert text == "hi"
+
+
+# ── requirement 4: the widening does not stick ──────────────────────────────
+
+
+def test_the_widening_belongs_to_one_call_and_not_to_the_next(tmp_path, monkeypatch):
+    """`retry this exact command once` — so the call after it stands where the
+    session always stood. A tier written back to the session would make the
+    approval a promotion, which is the one thing the phase must not become."""
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH",
+                        tmp_path / "planted-fire-heartbeat")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
+    server = _server()
+    session = Session.create_with_id("esc-once", tmp_path)
+    ws = _subscribe(server, session)
+    stub = _StubTool("bash")
+    server.tools._tools["bash"] = stub
+
+    rounds = [
+        [{"command": "npm install", "sandbox_permissions": "danger-full-access",
+          "justification": "the registry lives outside the workspace"}],
+        # The next call asks for nothing — and must therefore run at the
+        # session's own tier, not at the one the previous call was granted.
+        [{"command": "ls"}],
+    ]
+    calls: list[list[dict]] = []
+
+    async def fake_stream(messages, tools=None):
+        calls.append(list(messages))
+        if len(calls) <= len(rounds):
+            n = len(calls) - 1
+            yield {
+                "content": "", "finish_reason": "tool_calls",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+                "tool_calls": [{
+                    "index": 0, "id": f"call_{n}", "type": "function",
+                    "function": {"name": "bash", "arguments": json.dumps(rounds[n][0])},
+                }],
+            }
+        else:
+            yield {"content": "done", "tool_calls": None, "finish_reason": "stop",
+                   "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+
+    server.llm.chat_stream = fake_stream
+    req = TaskRequest(id="req-once", session_id=session.session_id, prompt="go",
+                      sandbox="read-only")
+
+    async def scenario():
+        task = asyncio.create_task(server._run_tool_loop(req, None, session))
+        await _answer_next_question(server, ws, True)
+        await asyncio.wait_for(task, 10)
+
+    asyncio.run(scenario())
+    assert len(stub.calls) == 2, stub.calls
+    assert stub.calls[0]["sandbox"] == DANGER_FULL_ACCESS, "the approved hop did not run"
+    assert stub.calls[1]["sandbox"] == "read-only", (
+        "the widening outlived the call it was granted for"
+    )
