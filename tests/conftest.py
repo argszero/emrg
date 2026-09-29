@@ -56,6 +56,26 @@ def _guard_real_config_files(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _redirect_abort_run_state(monkeypatch, tmp_path):
+    """Redirect the abort-run counter's state file to a per-test tmp path.
+
+    ``emrg/server/abort_runs.py`` writes its state the first time a turn aborts
+    (rant 2026-09-28T15:57:31, requirement L3), so any test that drives a
+    content-filter failure would otherwise count aborts in the HOST's
+    ``~/.emrg/logs/abort-runs.json`` — the same class of leak
+    ``_guard_real_config_files`` above closes for the config files. Autouse
+    rather than opted into, because the test that would leak is the one written
+    three commits from now, which will not remember this paragraph exists.
+    """
+    import emrg.server.abort_runs as abort_runs_mod
+
+    monkeypatch.setattr(
+        abort_runs_mod, "default_path",
+        lambda: tmp_path / "abort-runs.json",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _redirect_sessions_index(monkeypatch, tmp_path):
     """Redirect the global session index to a per-test tmp file.
 
