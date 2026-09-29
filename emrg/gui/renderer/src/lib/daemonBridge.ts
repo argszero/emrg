@@ -114,8 +114,6 @@ export interface DaemonAppState {
   busyBySid: Record<string, boolean>;
   /** 每会话 turn 开始时刻（epoch ms；rant 2026-09-02T10:36:26 daemon turn_start 权威广播） */
   turnStartBySid: Record<string, number>;
-  /** 每会话 own stream request id（决定"来自其他客户端"标签） */
-  ownStreamRidBySid: Record<string, string | null>;
   /** 每会话断线标记（P3 finalize：后台会话断线不触发全局 UI） */
   disconnectedBySid: Record<string, boolean>;
   /** upgrade 事件（心跳检测 installed ≠ current → "重启生效"横幅；null=无待重启提示） */
@@ -169,7 +167,6 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     openSessions: [],
     busyBySid: {},
     turnStartBySid: {},
-    ownStreamRidBySid: {},
     disconnectedBySid: {},
     upgradeBanner: null,
   });
@@ -250,9 +247,20 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       }));
     }
   }
-  function sidOwnRid(sid: string | null, rid: string | null): void {
-    const k = KEY(sid);
-    store.update((s) => ({ ...s, ownStreamRidBySid: { ...s.ownStreamRidBySid, [k]: rid } }));
+  /**
+   * Per-session request id **this connection** has in flight (the requeue path).
+   *
+   * Connection-local on purpose, and not part of `DaemonAppState` (rant 2026-09-29T15:52:49
+   * requirement 3). It answers "when does this connection's stream end", which the lock
+   * needs; it does not answer "whose message is this", which no client may decide. The
+   * table used to live in the store, where the renderer read it to tag a message as
+   * "from another client" — a per-client view of a session, when the daemon is the only
+   * state source and a client is only a renderer. Nothing renders it now.
+   */
+  const inflightRidBySid = new Map<string, string | null>();
+
+  function setInflightRid(sid: string | null, rid: string | null): void {
+    inflightRidBySid.set(KEY(sid), rid);
   }
   function sidDisconnected(sid: string | null, v: boolean): void {
     const k = KEY(sid);
@@ -261,12 +269,10 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
 
   /** done/cancelled 释放该事件所属会话的锁（vanilla：仅当 request 匹配或 timeout） */
   function releaseOwnStream(sid: string | null, requestId?: string | null, force = false): void {
-    const k = KEY(sid);
-    const cur = store.get();
-    const rid = cur.ownStreamRidBySid[k];
+    const rid = inflightRidBySid.get(KEY(sid)) ?? null;
     if (force || (requestId && (rid === requestId))) {
       sidBusy(sid, false);
-      sidOwnRid(sid, null);
+      setInflightRid(sid, null);
     }
   }
 
@@ -282,7 +288,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       for (let i = 0; i < toResend.length; i++) {
         const item = toResend[i];
         sidBusy(sid, true);
-        sidOwnRid(sid, item.requestId);
+        setInflightRid(sid, item.requestId);
         try {
           const res = await emrg.sendMessage({
             sessionId: sid,
@@ -291,10 +297,10 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
             sandbox: item.sandbox,
             ...(item.images ? { images: item.images } : {}),
           });
-          sidOwnRid(sid, res?.requestId ?? item.requestId);
+          setInflightRid(sid, res?.requestId ?? item.requestId);
         } catch {
           sidBusy(sid, false);
-          sidOwnRid(sid, null);
+          setInflightRid(sid, null);
         }
         if (wasBusy || i > 0) {
           remaining.push(item);
@@ -459,7 +465,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       }
       case "disconnected": {
         sidBusy(sid, false);
-        sidOwnRid(sid, null);
+        setInflightRid(sid, null);
         sidDisconnected(sid, true);
         clearTurnTimer(sid);
         queuedSends.delete(KEY(sid));

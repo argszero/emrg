@@ -45,6 +45,7 @@ from emrg.config import (
     resolve_model_vision,
 )
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
+from emrg.server.abort_runs import AbortRuns
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.config_reload import (
     POLL_INTERVAL_SECONDS,
@@ -70,6 +71,7 @@ from emrg.server.git_utils import (
     parse_gh_auth_user,
     resolve_git_gh,
 )
+from emrg.server import content_risk_probe
 from emrg.server.tool_types import ToolResult
 from emrg.memory import (
     INDEX_COUNT_WARN,
@@ -84,7 +86,7 @@ from emrg.protocol import (
     ServerPong,
     TaskRequest,
 )
-from emrg.session import Session, last_n_messages
+from emrg.session import Session, last_n_messages, records_to_messages
 
 # ── 日志脱敏（rant 2026-08-06T10:21:26）────────────────────────────
 # tool call 参数可能含 api_key/token/authorization/password 等敏感字段，
@@ -458,6 +460,24 @@ def _memory_index_compaction_note(paths) -> str:
     return "".join(sections)
 
 
+def _abort_run_sentence(record: dict, round_num: int) -> str:
+    """One abort, said as *which abort of which run* (rant 2026-09-28T15:57:31, L3).
+
+    The measurement behind it: 53 aborted cycles over two days, one cause, and
+    every line about them said the same thing as the first — so the run was
+    invisible to anyone who was not counting by hand. ``record`` is what
+    :meth:`emrg.server.abort_runs.AbortRuns.note` returns (``count``,
+    ``first_at``, ``last_at``); the sentence is built here rather than in the
+    counter so both sites that report an abort say it the same way.
+    """
+    return (
+        f"round {round_num}: the provider's content filter blocked the answer "
+        f"(finish_reason={record.get('cause')}) — this is abort {record.get('count')} "
+        f"of a run that began {record.get('first_at')} "
+        f"(previous abort {record.get('last_at')})"
+    )
+
+
 def build_shell_tool(
     sandbox_config: Optional[SandboxConfig] = None,
     platform_name: str | None = None,
@@ -532,6 +552,14 @@ class EmrgServer:
         # tool, which keeps receiving the parallel bash-word fixes while v2 is
         # built beside it.
         self._sandbox_config = load_sandbox_config()
+        # A run of aborts by one cause, counted rather than merely repeated
+        # (rant 2026-09-28T15:57:31, requirement L3). Constructed here so a
+        # server that never entered `_run()` — every unit test drives one
+        # revision — counts aborts through the same object as a live one. The
+        # state file is not touched until an abort happens: `_read` treats an
+        # absent file as "no run open", so a daemon that never aborts writes
+        # nothing.
+        self._abort_runs = AbortRuns()
         # Hot-reload state + policy (rant 2026-09-17T16:52:57). Constructed
         # here so `_reload_config_once()` has its decision object even in a
         # server that never entered `_run()` (tests drive single revisions);
@@ -3458,6 +3486,15 @@ class EmrgServer:
         # SAME round once. Bounded deliberately — a retry that also fails has to
         # report, not loop.
         overlong_retries_left = 1
+        # Content-risk L2 (rant 2026-09-29T15:55:44.643795+08:00): the L1 ladder
+        # inside the LLM client replaces codepoints and spaces the text out — a
+        # cure for one *class* of trigger, and the rant that measured it says so
+        # in its own words (a word or a phrase is not a codepoint). When the
+        # ladder is spent and the refusal survives, the only cure left is to take
+        # the offending record out of the history and re-send the round. One
+        # budget for the whole turn, like the shrink above, and for the same
+        # reason: a retry that also fails has to report, not loop.
+        content_risk_scrubs_left = 1
         while True:
             if round_num > self._max_tool_rounds:
                 # P1 (rant 21:55:37): round budget exhausted but messages
@@ -3647,6 +3684,55 @@ class EmrgServer:
                 #     text already reached the client would show that text twice,
                 #     and a half-executed tool call is worse than a retry;
                 #   * the budget is per turn, so the retry cannot loop.
+                # Content-risk L2 (rant 2026-09-29T15:55:44.643795+08:00). The
+                # refusal reaches here only after the client's own ladder
+                # (`CONTENT_RISK_LADDER`) has spent every rung: escape the astral
+                # codepoints, then space the text out. Both are cures for one
+                # class of trigger, and the rant that measured them says so — a
+                # word or a phrase is neither, so the refused payload comes back
+                # unchanged. The one remedy that works for a word is to find the
+                # record that carries it and take it out of the history, which is
+                # what `content_risk_probe` does: a bisection (log2(n) provider
+                # questions, out of band) names the record, the record and its
+                # tool round are dropped, and the round is re-sent once against
+                # the scrubbed history.
+                #
+                # The conditions are the same two the shrink above uses, and for
+                # the same reasons: a partial answer already reached the client,
+                # and the budget is per turn.
+                if (
+                    content_risk_scrubs_left > 0
+                    and not content_parts
+                    and not tc_by_index
+                    and classify_llm_error(e) == CONTENT_RISK
+                ):
+                    content_risk_scrubs_left -= 1
+                    scrub = await self._scrub_content_risk_record(
+                        session, system_prompt,
+                    )
+                    if scrub is not None:
+                        rebuilt, result = scrub
+                        logger.warning(
+                            "round %d: the provider refused the request's text; "
+                            "located record %s (%d probe(s)) and removed %d "
+                            "record(s) — re-sending the round",
+                            round_num, result.index, result.probes, result.removed,
+                        )
+                        messages = rebuilt
+                        await self._broadcast(session.session_id, {
+                            "type": "compact_result",
+                            "session_id": session.session_id,
+                            "messages_compacted": result.removed,
+                            "summary": (
+                                "The provider's content filter refused this "
+                                "session's history. The offending record was "
+                                f"located ({result.probes} probe(s)) and removed "
+                                f"({result.removed} record(s)); the round is "
+                                "being sent again."
+                            ),
+                            "auto": True,
+                        })
+                        continue
                 if (
                     overlong_retries_left > 0
                     and not content_parts
@@ -3681,6 +3767,23 @@ class EmrgServer:
                 error_text = str(e)
                 if CONTENT_FILTER_ERROR not in error_text:
                     error_text = f"LLM error: {e}. Check config at ~/.emrg/config.toml"
+                else:
+                    # The ladder being spent is one abort, and *a run* of them is
+                    # the fact worth reporting (rant 2026-09-28T15:57:31,
+                    # requirement L3): the generic `logger.exception` above names
+                    # the sentence, but only a count tells a host whether they are
+                    # looking at one unlucky turn or at a trigger that has been
+                    # firing for two days. The session is already the logger's
+                    # own column, so the run is keyed on it too.
+                    logger.error(
+                        "round %d: %s — the retry ladder is spent, reporting it",
+                        round_num,
+                        _abort_run_sentence(
+                            self._abort_runs.note(
+                                CONTENT_FILTER_FINISH, session.session_id),
+                            round_num,
+                        ),
+                    )
                 await self._broadcast(session.session_id, {
                     "error": error_text,
                 })
@@ -3731,10 +3834,14 @@ class EmrgServer:
                     reasoning=full_reasoning,
                 )
                 logger.error(
-                    "round %d: the provider's content filter blocked the answer "
-                    "(finish_reason=%s); %d character(s) had already reached the "
-                    "client and the retry ladder is spent — reporting it",
-                    round_num, CONTENT_FILTER_FINISH, len(full_content),
+                    "%s; %d character(s) had already reached the client and the "
+                    "retry ladder is spent — reporting it",
+                    _abort_run_sentence(
+                        self._abort_runs.note(
+                            CONTENT_FILTER_FINISH, session.session_id),
+                        round_num,
+                    ),
+                    len(full_content),
                 )
                 await self._broadcast(session.session_id, {
                     "request_id": req.id,
@@ -3751,6 +3858,14 @@ class EmrgServer:
                     "session_id": session.session_id,
                 })
                 return
+
+            # A round the filter did not block ends any run of aborts by this
+            # cause (rant 2026-09-28T15:57:31, requirement L3). The count answers
+            # "how many in a row", so a turn that got through makes the next
+            # abort the first of a new run rather than the eleventh of an old
+            # one. Reached only on the rounds that survive Case 0 above, and
+            # `clear` writes nothing when no run is open.
+            self._abort_runs.clear(CONTENT_FILTER_FINISH, session.session_id)
 
             # Case 1: Final text answer — no more tool calls
             if final_finish == "stop" or (final_finish and not tc_by_index):
@@ -4935,6 +5050,102 @@ class EmrgServer:
                 raise
             logger.warning("%s: normal compact too long, trying chunked: %s", source, e)
             return await self._chunked_compact(records)
+
+    async def _scrub_content_risk_record(
+        self, session: Session, system_prompt: str,
+    ) -> tuple[list[dict], object] | None:
+        """Take the record a content filter refuses out of a session's history.
+
+        Rant 2026-09-29T15:55:44.643795+08:00, requirement L2. The client's own
+        ladder already ruled out the codepoint class (it escapes astral planes,
+        then spaces the text out, and the refusal came back each time), so what
+        is left is a record whose *text* the provider refuses. Nothing can be
+        read off the wire to say which one — the refusal is one sentence and no
+        index — so the answer is measured: ask the provider about subsets of the
+        history and halve the candidates, which is `ceil(log2(n))` questions for
+        an `n`-record session instead of `n` (the measured session this was filed
+        on held 131 messages / ~738k prompt tokens, so a linear scan is hundreds
+        of requests).
+
+        Two things are deliberately awkward here, and both are the requirement:
+
+        * **The question is the live request's question.** The candidates go
+          through `records_to_messages`, the very conversion `get_messages_for_llm`
+          uses, so a subset that is refused is refused for the same reason its
+          parent was. A probe with its own payload builder would answer a
+          question nobody asked.
+        * **Nothing about the trigger is ever echoed.** The probe's reports carry
+          a position, a byte length, a digest and a record kind — never text.
+          That is not politeness: the incident behind this rant was a verification
+          probe that printed the trigger into the session history, and every
+          session that read it back was killed by the same filter again.
+
+        Returns ``(messages, ScrubResult)`` with the round's message list rebuilt
+        from the scrubbed history, or ``None`` when no single record could be
+        blamed — in which case **nothing is removed** and the caller reports the
+        provider's own error. An unresolved search is an honest answer
+        ("I could not find it"), and deleting a record on a guess would cost the
+        host their conversation.
+        """
+        loop = asyncio.get_running_loop()
+
+        def is_refused(candidates: list[dict]) -> bool:
+            """Ask the provider about `candidates`, out of band.
+
+            Runs on the worker thread `scrub_session` is given; the request
+            itself belongs to the loop, so it is submitted there and waited for.
+            """
+            payload = [
+                {"role": "system", "content": system_prompt},
+                *records_to_messages(list(candidates)),
+            ]
+            future = asyncio.run_coroutine_threadsafe(
+                self._content_risk_refused(payload), loop,
+            )
+            return future.result()
+
+        try:
+            result = await asyncio.to_thread(
+                content_risk_probe.scrub_session, session, is_refused,
+            )
+        except content_risk_probe.ProbeBudgetExceeded as e:
+            # A search that lost its bound is a search whose answer is not worth
+            # acting on; acting on it means editing a host's conversation.
+            logger.error("content-risk scrub: %s", e)
+            return None
+        except Exception:
+            logger.exception(
+                "content-risk scrub: the probe could not answer — nothing removed",
+            )
+            return None
+        if not result.resolved:
+            return None
+
+        messages: list[dict] = [
+            {"role": "system", "content": system_prompt},
+            *session.get_messages_for_llm(),
+        ]
+        self._inject_context_message(session, messages)
+        return messages, result
+
+    async def _content_risk_refused(self, messages: list[dict]) -> bool:
+        """Whether the provider refuses a payload, asked on a side channel.
+
+        `chat()` already walks the refusal ladder internally and raises
+        `CONTENT_RISK` once it is spent, so one call answers exactly the question
+        the probe needs: refused / not refused. Any *other* failure (a timeout, a
+        spent quota, a body the provider rejects for length) is not an answer —
+        it is raised, the bisection stops, and nothing is removed, because a
+        "not refused" read off a transport error would point the search at the
+        wrong half.
+        """
+        try:
+            await self.llm.chat(messages=messages)
+        except Exception as e:
+            if classify_llm_error(e) == CONTENT_RISK:
+                return True
+            raise
+        return False
 
     async def _shrink_for_overlong_retry(
         self, session: Session, system_prompt: str, *, source: str

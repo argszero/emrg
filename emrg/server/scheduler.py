@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -190,6 +191,87 @@ TABLE_POLL_SECONDS = 2.0
 #: `config_reload.POLL_INTERVAL_SECONDS`'s order of magnitude, and for the same
 #: product reason: this is "how long may a hand edit take to matter", not a new knob.
 TABLE_RETRY_SECONDS = 30
+
+# ── The stall watchdog (rant 2026-09-29T15:52:43, requirement 5) ──
+#
+# A cycle that stops producing frames must not hold its slot forever. Measured
+# 2026-09-27: a backgrounded bash call killed the whole turn, nothing was ever
+# written to the socket again, and the handler sat in `recv` until the host
+# restarted the daemon — `_cycle_running` stayed true, `_next_run_at` stayed
+# None, and the heartbeat file kept ticking, so *nothing* about the task read as
+# stuck. That is why the signal below is a frame and not the heartbeat: the
+# heartbeat is this handler's own timer, written whether or not the cycle is
+# alive.
+#
+# What is bounded here is a **stall** — how long the cycle has gone without a
+# frame — never its **runtime**. A cycle may legitimately run for an hour; what
+# it may not do is go silent for longer than the step it is in can justify.
+# Two steps go silent by nature and their bounds differ by two orders of
+# magnitude, which is why a single flat number cannot work:
+#
+#   * a streaming LLM round emits a `delta` frame every few hundred
+#     milliseconds (`daemon.py`, `chat_stream` → `_broadcast`), so silence here
+#     is already abnormal, and the prefill that precedes the first token is
+#     minutes at worst — `_ROUND_SILENCE_SECONDS`;
+#   * a tool call is silent for exactly as long as it runs, and the cycle
+#     itself declares that bound in the `tool_start` frame's `timeout`
+#     argument. Measured over this task's own history (all `timeout` values in
+#     `history_2609*.jsonl` + `llm.jsonl`): the most common are 60s, 120s, 180s,
+#     300s, 600s and 1800s, and the longest ever asked for is **3700s**. A flat
+#     bound would therefore either fire during a legitimate 40-minute command or
+#     be so high that it detects nothing an hour late.
+#: Silence a cycle may produce with no tool call in flight.
+_ROUND_SILENCE_SECONDS = 600.0
+#: Added to a tool call's own declared `timeout`, so the bound fires on a stall
+#: rather than on the tool merely finishing a moment late.
+_TOOL_SILENCE_GRACE_SECONDS = 120.0
+#: The `timeout` a tool call runs under when it declares none — `_as_timeout`'s
+#: own default in `bash_tool_v2.py`, so the watchdog and the tool agree on what
+#: "no timeout given" means.
+_TOOL_SILENCE_DEFAULT_SECONDS = 30.0
+
+
+def _tool_silence_seconds(arguments: object) -> float:
+    """How long a tool call may legitimately silence the socket.
+
+    Read from the call's own `timeout` argument, because the cycle has already
+    said how long it expects this command to take; the watchdog only adds the
+    grace that separates "still running" from "stopped reporting". A tool with
+    no `timeout` argument is bounded by the tool layer's own default, so a
+    non-bash call cannot buy an unbounded silence by omitting the field.
+    """
+    declared = None
+    if isinstance(arguments, dict):
+        declared = arguments.get("timeout")
+    if isinstance(declared, bool) or declared is None:
+        declared = _TOOL_SILENCE_DEFAULT_SECONDS
+    try:
+        # `_as_timeout` in the shell tool also reads a numeric string, so this
+        # must not reject one the tool would honour.
+        timeout = float(declared)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        timeout = _TOOL_SILENCE_DEFAULT_SECONDS
+    if not (math.isfinite(timeout) and timeout > 0):
+        # Not a bound at all — zero and below make the tool return at once, and
+        # an infinite one would disable the watchdog while the tool waited just
+        # as long. Falling back keeps the rule one sentence long ("a positive
+        # declared value, else the default") and always yields a finite bound.
+        timeout = _TOOL_SILENCE_DEFAULT_SECONDS
+    return timeout + _TOOL_SILENCE_GRACE_SECONDS
+
+
+def _silence_deadline(now: float, last_frame_at: float, tool_deadline: float | None) -> float:
+    """The instant this cycle's silence stops being expected.
+
+    `tool_deadline` is when an in-flight tool call's own declared `timeout`
+    expires (`None` when no tool is running). The later of the two bounds wins,
+    so a tool call that legitimately outlasts the round bound is not mistaken
+    for a stall — and the caller subtracts `now` to get its wait, which is
+    negative exactly when the bound has already passed.
+    """
+    return max(last_frame_at + _ROUND_SILENCE_SECONDS,
+               tool_deadline if tool_deadline is not None else 0.0)
+
 
 #: The table seeded when the file does not exist. `interval` is 600, not the 60 the
 #: old self-heal hardcoded — 600 is what this host actually ran (`~/.emrg/tasks.yml`),
@@ -1625,6 +1707,14 @@ class TaskHandler:
     #: finished (rant 2026-09-28T13:03:33).
     _NO_TERMINAL_FRAME = "no-terminal-frame"
 
+    #: The ending of a cycle that went silent past the bound the step it was in
+    #: justifies (rant 2026-09-29T15:52:43, requirement 5). Distinct from
+    #: `connection-closed` because the socket is still open — the turn, not the
+    #: transport, stopped producing frames — and distinct from `running` because
+    #: the handler is done with the cycle and has moved on; only the record of
+    #: *why* it moved on would otherwise be lost to a log line nobody reads.
+    _STALLED = "stalled"
+
     #: Endings that leave no marker behind: the cycle finished, or it never
     #: started.
     _SILENT_ENDINGS = frozenset({_CLEAN_END, _NOT_STARTED})
@@ -1636,6 +1726,9 @@ class TaskHandler:
         "crashed": "crashed",
         "connection-closed": (
             "ended without a terminal frame (the daemon connection closed first)"
+        ),
+        _STALLED: (
+            "stalled (no frame past the bound for the step it was in)"
         ),
         _NO_TERMINAL_FRAME: "ended without a terminal frame",
     }
@@ -2196,13 +2289,21 @@ class TaskHandler:
         """Ask the daemon for a structured vibe check on the SAME connection.
 
         Sends ``task_vibe_check`` and waits for ``vibe_check_result``. Rant
-        2026-08-20T20:19:31: no timeout — the vibe check is the completion
-        judgment right after a finished cycle; when concurrent tasks hold the
-        LLM a single call can exceed 20s, and waiting longer for an accurate
-        work/reason beats dropping the data (the daemon's LLM call has its own
+        2026-08-20T20:19:31: the wait was unbounded so that a single call
+        exceeding 20s would not drop the data — waiting longer for an accurate
+        work/reason beats losing it (the daemon's LLM call has its own
         retry/timeout, and a dead daemon raises ConnectionClosed).
         Fully defensive — any failure/connection-close returns None; the
         caller conservatively leaves the slowdown state unchanged.
+
+        The one failure that remainder did not survive is the one requirement 5
+        exists for (rant 2026-09-29T15:52:43): a socket that stays *open* and
+        never speaks again. `ConnectionClosed` was handled, silence was not, so
+        the handler could still wedge on this exact line while the cycle looked
+        finished. The bound is the round bound and not a new number, because this
+        is a round — one request, one reply — and the daemon's own LLM call behind
+        it is what the wait has to cover; timing out returns the conservative
+        answer the docstring above already promised.
         """
         try:
             await ws.send(json.dumps({
@@ -2215,7 +2316,16 @@ class TaskHandler:
             }, ensure_ascii=False))
             while True:
                 try:
-                    frame = json.loads(await ws.recv())
+                    frame = json.loads(await asyncio.wait_for(
+                        ws.recv(), timeout=_ROUND_SILENCE_SECONDS,
+                    ))
+                except asyncio.TimeoutError:
+                    self._logger.warning(
+                        "TaskHandler[%s]: vibe check got no answer in %ds — "
+                        "treating it as unavailable (slowdown state unchanged)",
+                        self.name, int(_ROUND_SILENCE_SECONDS),
+                    )
+                    return None
                 except ConnectionClosed:
                     break
                 if frame.get("type") != "vibe_check_result":
@@ -2318,19 +2428,64 @@ class TaskHandler:
         #: makes it a completion: the loop's other exits are a closed connection
         #: and a server error frame (rant 2026-09-28T13:03:33).
         end_reason = self._NO_TERMINAL_FRAME
+        #: The stall watchdog's two clocks (rant 2026-09-29T15:52:43). Both are
+        #: `monotonic`, so a wall-clock adjustment mid-cycle cannot make a live
+        #: cycle look stalled nor a stalled one look alive. `last_frame_at` is
+        #: this cycle's own liveness and moves only when a frame arrives — which
+        #: is precisely what a wedged turn stops doing; `tool_deadline` is the
+        #: instants an in-flight tool call said it expected to still be running.
+        last_frame_at = time.monotonic()
+        tool_deadline: float | None = None
 
         try:
             await ws.send(task_msg)
 
             while True:
+                now = time.monotonic()
+                deadline = _silence_deadline(now, last_frame_at, tool_deadline)
                 try:
-                    resp = json.loads(await ws.recv())
+                    if deadline <= now:
+                        # The bound had already passed when the previous frame
+                        # landed. Raising the same exception the wait would is
+                        # deliberate: `asyncio.wait_for` documents nothing for a
+                        # non-positive timeout, and a wait that never returns is
+                        # the very failure this watchdog exists to end.
+                        raise asyncio.TimeoutError
+                    resp = json.loads(await asyncio.wait_for(
+                        ws.recv(), timeout=deadline - now,
+                    ))
+                except asyncio.TimeoutError:
+                    # The socket is still open — the turn stopped producing
+                    # frames. Measured 2026-09-27: a backgrounded command killed
+                    # the turn, nothing was ever written to the socket again, and
+                    # this handler sat in `recv` until the host restarted the
+                    # daemon, holding `_cycle_running` and leaving `_next_run_at`
+                    # unset for the whole task. Breaking here is what returns the
+                    # slot to the scheduler; the heartbeat loop kept ticking
+                    # throughout, so it could never have been the signal.
+                    end_reason = self._STALLED
+                    error = (
+                        f"stalled: no frame for {int(now - last_frame_at)}s "
+                        f"(bound {int(deadline - last_frame_at)}s, "
+                        f"tools={tool_count})"
+                    )
+                    self._logger.error(
+                        "TaskHandler[%s]: %s — the turn stopped reporting without "
+                        "closing the socket; the cycle is aborted, not finished",
+                        self.name, error,
+                    )
+                    break
                 except ConnectionClosed:
                     # A closed socket is not the cycle saying it finished. The
                     # report is decided below, where the missing frame is known;
                     # the daemon side has the mirror-image contract (exactly one
                     # terminal frame per turn, issue #1669).
                     break
+                last_frame_at = time.monotonic()
+                # Cleared on every frame, then re-armed below: a `tool_end` is a
+                # frame like any other, so the round bound covers the gap after a
+                # tool returns until the next round's first token.
+                tool_deadline = None
                 if resp.get("done"):
                     end_reason = self._CLEAN_END
                     duration = int((datetime.now() - cycle_time).total_seconds())
@@ -2377,6 +2532,22 @@ class TaskHandler:
                     # heartbeat is then as fresh as the last tool activity
                     # when the daemon dies.
                     self._write_heartbeat("running")
+                    if resp.get("type") == "tool_start":
+                        # The cycle has just said how long this command should
+                        # take; the watchdog only holds it to that. The frame
+                        # carries `arguments` as sent by the model — the daemon
+                        # injects `workspace`/`sandbox`, never a `timeout`
+                        # (`_inject_tool_arguments`) — so when the field is absent
+                        # the tool layer's own default is what applies, which is
+                        # what `_tool_silence_seconds` falls back to.
+                        tool_deadline = last_frame_at + _tool_silence_seconds(
+                            resp.get("arguments")
+                        )
+                        self._logger.debug(
+                            "TaskHandler[%s]: %s armed the stall watchdog for %ds",
+                            self.name, resp.get("tool_name"),
+                            int(tool_deadline - last_frame_at),
+                        )
 
                 resp_error = resp.get("error")
                 if isinstance(resp_error, str):

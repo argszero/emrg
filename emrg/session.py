@@ -20,6 +20,7 @@ import os
 import secrets
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 
 from emrg.memory import SessionMemoryStore
 from emrg.sessions_index import remove_session_index, upsert_session_index
@@ -51,6 +52,124 @@ def generate_session_id(cwd: Path) -> str:
     suffix = secrets.token_hex(4)
     return prefix + suffix
 
+
+def records_to_messages(records: list[dict]) -> list[dict]:
+    """Convert stored history records to OpenAI-compatible messages.
+
+    Handles:
+    - message entries -> role/content messages
+    - Embedded tool_calls in assistant message (current format)
+    - Separate tool_call + tool_result records (legacy interleaved format)
+    - summary entries -> user message with context prefix
+
+    A pure function of `records` on purpose: `Session.get_messages_for_llm`
+    is its history, and the content-risk probe asks the provider about a
+    candidate record list that was never written anywhere — the question has
+    to be the one the refusal answered, so both go through here.
+    """
+    messages: list[dict] = []
+    i = 0
+    while i < len(records):
+        r = records[i]
+
+        if r.get("type") == "message":
+            msg: dict = {"role": r["role"], "content": r.get("content")}
+
+            # Check for embedded tool_calls (current format)
+            embedded_tc = r.get("tool_calls")
+            if embedded_tc and r["role"] == "assistant":
+                tool_calls = [
+                    {
+                        "id": tc["id"],
+                        "type": tc.get("type", "function"),
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        },
+                    }
+                    for tc in embedded_tc
+                ]
+                # Collect tool results from subsequent records.
+                # Skip any tool_call records (redundant with embedded
+                # tool_calls in current format, or interleaved legacy).
+                j = i + 1
+                tool_msgs: list[dict] = []
+                while j < len(records) and records[j].get("type") in (
+                    "tool_call", "tool_result",
+                ):
+                    tr = records[j]
+                    if tr.get("type") == "tool_result":
+                        tool_msgs.append({
+                            "role": "tool",
+                            "tool_call_id": tr["tool_call_id"],
+                            "content": tr["content"],
+                        })
+                    j += 1
+
+                result_ids = {tm["tool_call_id"] for tm in tool_msgs}
+                valid_tc = [tc for tc in tool_calls if tc["id"] in result_ids]
+                if valid_tc:
+                    msg["tool_calls"] = valid_tc
+                    msg["content"] = msg.get("content") or None
+                    messages.append(msg)
+                    messages.extend(tool_msgs)
+                else:
+                    messages.append(msg)
+                i = j
+            else:
+                # Legacy format: look ahead for tool_call + tool_result records
+                # Handles both aggregated (all calls then all results) and
+                # interleaved (call, result, call, result) patterns.
+                j = i + 1
+                tool_calls: list[dict] = []
+                tool_msgs: list[dict] = []
+                while j < len(records) and records[j].get("type") in ("tool_call", "tool_result"):
+                    tc_or_tr = records[j]
+                    if tc_or_tr.get("type") == "tool_call":
+                        tool_calls.append({
+                            "id": tc_or_tr["tool_call_id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc_or_tr["tool_name"],
+                                "arguments": json.dumps(
+                                    tc_or_tr.get("arguments", {}), ensure_ascii=False
+                                ),
+                            },
+                        })
+                    else:
+                        tool_msgs.append({
+                            "role": "tool",
+                            "tool_call_id": tc_or_tr["tool_call_id"],
+                            "content": tc_or_tr["content"],
+                        })
+                    j += 1
+
+                if tool_calls:
+                    result_ids = {tm["tool_call_id"] for tm in tool_msgs}
+                    valid_tc = [tc for tc in tool_calls if tc["id"] in result_ids]
+                    if valid_tc:
+                        msg["tool_calls"] = valid_tc
+                        msg["content"] = msg.get("content") or None
+                        messages.append(msg)
+                        messages.extend(tool_msgs)
+                    else:
+                        messages.append(msg)
+                    i = j
+                else:
+                    messages.append(msg)
+                    i += 1
+
+        elif r.get("type") == "summary":
+            messages.append({
+                "role": "user",
+                "content": f"[Previous conversation summary]\n{r['content']}",
+            })
+            i += 1
+
+        else:
+            i += 1
+
+    return _validate_tool_messages(messages)
 
 class Session:
     """Manages a single conversation session on disk."""
@@ -311,118 +430,17 @@ class Session:
         return records
 
     def get_messages_for_llm(self) -> list[dict]:
-        """Load history and convert to OpenAI-compatible messages format.
+        """This session's history, converted to OpenAI-compatible messages.
 
-        Handles:
-        - message entries → role/content messages
-        - Embedded tool_calls in assistant message (current format)
-        - Separate tool_call + tool_result records (legacy interleaved format)
-        - summary entries → user message with context prefix
+        The conversion itself is :func:`records_to_messages`, which is a function
+        of the record list and nothing else — the content-risk probe (rant
+        2026-09-29T15:55:44.643795+08:00) has to ask the provider about a
+        *candidate* record list it has not written anywhere, and asking with a
+        different conversion than the live request uses would be asking a
+        different question than the refusal answered.
         """
-        records = self._read_history()
-        messages: list[dict] = []
-        i = 0
-        while i < len(records):
-            r = records[i]
+        return records_to_messages(self._read_history())
 
-            if r.get("type") == "message":
-                msg: dict = {"role": r["role"], "content": r.get("content")}
-
-                # Check for embedded tool_calls (current format)
-                embedded_tc = r.get("tool_calls")
-                if embedded_tc and r["role"] == "assistant":
-                    tool_calls = [
-                        {
-                            "id": tc["id"],
-                            "type": tc.get("type", "function"),
-                            "function": {
-                                "name": tc["function"]["name"],
-                                "arguments": tc["function"]["arguments"],
-                            },
-                        }
-                        for tc in embedded_tc
-                    ]
-                    # Collect tool results from subsequent records.
-                    # Skip any tool_call records (redundant with embedded
-                    # tool_calls in current format, or interleaved legacy).
-                    j = i + 1
-                    tool_msgs: list[dict] = []
-                    while j < len(records) and records[j].get("type") in (
-                        "tool_call", "tool_result",
-                    ):
-                        tr = records[j]
-                        if tr.get("type") == "tool_result":
-                            tool_msgs.append({
-                                "role": "tool",
-                                "tool_call_id": tr["tool_call_id"],
-                                "content": tr["content"],
-                            })
-                        j += 1
-
-                    result_ids = {tm["tool_call_id"] for tm in tool_msgs}
-                    valid_tc = [tc for tc in tool_calls if tc["id"] in result_ids]
-                    if valid_tc:
-                        msg["tool_calls"] = valid_tc
-                        msg["content"] = msg.get("content") or None
-                        messages.append(msg)
-                        messages.extend(tool_msgs)
-                    else:
-                        messages.append(msg)
-                    i = j
-                else:
-                    # Legacy format: look ahead for tool_call + tool_result records
-                    # Handles both aggregated (all calls then all results) and
-                    # interleaved (call, result, call, result) patterns.
-                    j = i + 1
-                    tool_calls: list[dict] = []
-                    tool_msgs: list[dict] = []
-                    while j < len(records) and records[j].get("type") in ("tool_call", "tool_result"):
-                        tc_or_tr = records[j]
-                        if tc_or_tr.get("type") == "tool_call":
-                            tool_calls.append({
-                                "id": tc_or_tr["tool_call_id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tc_or_tr["tool_name"],
-                                    "arguments": json.dumps(
-                                        tc_or_tr.get("arguments", {}), ensure_ascii=False
-                                    ),
-                                },
-                            })
-                        else:
-                            tool_msgs.append({
-                                "role": "tool",
-                                "tool_call_id": tc_or_tr["tool_call_id"],
-                                "content": tc_or_tr["content"],
-                            })
-                        j += 1
-
-                    if tool_calls:
-                        result_ids = {tm["tool_call_id"] for tm in tool_msgs}
-                        valid_tc = [tc for tc in tool_calls if tc["id"] in result_ids]
-                        if valid_tc:
-                            msg["tool_calls"] = valid_tc
-                            msg["content"] = msg.get("content") or None
-                            messages.append(msg)
-                            messages.extend(tool_msgs)
-                        else:
-                            messages.append(msg)
-                        i = j
-                    else:
-                        messages.append(msg)
-                        i += 1
-
-            elif r.get("type") == "summary":
-                messages.append({
-                    "role": "user",
-                    "content": f"[Previous conversation summary]\n{r['content']}",
-                })
-                i += 1
-
-            else:
-                i += 1
-
-        return _validate_tool_messages(messages)
 
     # ── Compact ───────────────────────────────────────────────
 
@@ -471,6 +489,41 @@ class Session:
 
         logger.info("compact: %d messages → summary (kept %d)", len(compacted), len(recent))
         return len(compacted)
+
+    def drop_history_records(self, positions: Iterable[int]) -> int:
+        """Remove records at the given positions from history.jsonl.
+
+        Rant 2026-09-29T15:55:44.643795+08:00 (content-risk L2): the only cure for
+        a trigger that is a word rather than a replaceable codepoint is taking the
+        offending record out of the history, and this is that write. Positions are
+        absolute record indexes, the same handle `list_history include_records`
+        hands out, so a caller that located a record by reading can name it here.
+
+        The message count is recomputed the way `compact` recomputes it
+        (message-type records only) rather than decremented: the caller may hand
+        in a tool round's worth of records, and a count derived from the surviving
+        records is the one that cannot drift from disk. Out-of-range positions are
+        ignored, so a stale index removes nothing instead of removing a neighbour.
+
+        Returns the number of records actually removed.
+        """
+        records = self._read_history()
+        doomed = {p for p in positions if isinstance(p, int) and 0 <= p < len(records)}
+        if not doomed:
+            return 0
+        kept = [r for i, r in enumerate(records) if i not in doomed]
+        self._write_history(kept)
+        removed = len(records) - len(kept)
+        self._message_count = sum(
+            1 for r in kept if r.get("type", "message") == "message"
+        )
+        self._updated_at = datetime.now().isoformat()
+        self._save_meta()
+        logger.warning(
+            "history: dropped %d record(s) at %s (%d left, %d message(s))",
+            removed, sorted(doomed), len(kept), self._message_count,
+        )
+        return removed
 
     def _write_history(self, records: list[dict]) -> None:
         """Overwrite history.jsonl with new records."""

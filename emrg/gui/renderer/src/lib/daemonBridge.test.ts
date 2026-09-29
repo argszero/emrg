@@ -50,14 +50,19 @@ describe("createDaemonBridge", () => {
     expect(txt.some((x) => x === "a:Hello")).toBe(true);
   });
 
-  it("done → transcript.handleDone + 释放 own stream 锁（request 匹配）", () => {
+  it("done → transcript.handleDone + 该会话的 busy 收敛（daemon 的回合终局为准）", () => {
     const { emit, bridge } = setup();
-    bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, s1: true }, ownStreamRidBySid: { ...s.ownStreamRidBySid, s1: "r1" } }));
+    bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, s1: true } }));
     bridge.handleFrame({ type: "message_delta", data: { chunks: [{ request_id: "r1", content: "x" }] }, sid: "s1" });
     bridge.handleFrame({ type: "done", data: { request_id: "r1" }, sid: "s1" });
-    const st = bridge.store.get();
-    expect(st.busyBySid["s1"]).toBe(false);
-    expect(st.ownStreamRidBySid["s1"] ?? null).toBeNull();
+    expect(bridge.store.get().busyBySid["s1"]).toBe(false);
+  });
+
+  it("渲染状态里没有「谁的消息」这张表（rant 2026-09-29T15:52:49 要求 3）", () => {
+    // 本连接在途的 request id 是连接内簿记，不是可渲染状态：它一旦回到 store，
+    // 渲染器就能再据此给消息打「来自其他客户端」标——正是本条要求要拆掉的东西。
+    const { bridge } = setup();
+    expect("ownStreamRidBySid" in bridge.store.get()).toBe(false);
   });
 
   it("tool_started / tool_finished → 工具行状态", () => {
@@ -236,7 +241,7 @@ describe("createDaemonBridge", () => {
   it("disconnected → 按 sid 标记 + 清锁 + 清队列；无 sid → 全局 connected=false", () => {
     const { emit, bridge } = setup();
     emit({ type: "status", data: { connected: true }, sid: null });
-    bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, s1: true }, ownStreamRidBySid: { ...s.ownStreamRidBySid, s1: "r1" } }));
+    bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, s1: true } }));
     emit({ type: "disconnected", data: {}, sid: "s1" });
     let st = bridge.store.get();
     expect(st.disconnectedBySid["s1"]).toBe(true);
@@ -254,15 +259,14 @@ describe("createDaemonBridge", () => {
 
   it("sid 隔离：s1 的 done 不释放 s2 的锁", () => {
     const { emit, bridge } = setup();
-    // 模拟 s1 流式 + s2 流式（P3：每会话独立 ownStreamRid）
-    bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, s1: true, s2: true }, ownStreamRidBySid: { ...s.ownStreamRidBySid, s1: "r1", s2: "r2" } }));
+    // 模拟 s1 流式 + s2 流式（P3：每会话独立 busy 锁）
+    bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, s1: true, s2: true } }));
     bridge.handleFrame({ type: "message_delta", data: { chunks: [{ request_id: "r1", content: "a" }] }, sid: "s1" });
     bridge.handleFrame({ type: "message_delta", data: { chunks: [{ request_id: "r2", content: "b" }] }, sid: "s2" });
     bridge.handleFrame({ type: "done", data: { request_id: "r1" }, sid: "s1" });
     const st = bridge.store.get();
     expect(st.busyBySid["s1"]).toBe(false);
     expect(st.busyBySid["s2"]).toBe(true); // s2 锁保留
-    expect(st.ownStreamRidBySid["s2"]).toBe("r2"); // s2 的 rid 未被误清
   });
 
   it("applyInit 融合 init 返回 → store（connected/会话/model，vanilla boot 语义）", () => {
