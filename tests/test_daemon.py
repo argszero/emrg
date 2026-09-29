@@ -25,6 +25,7 @@ from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.llm import CONTENT_RISK, classify_llm_error
 from emrg.server.scheduler import TaskHandler, TaskScheduler
+from tests.task_handler_factory import make_handler
 from emrg.session import Session, _validate_tool_messages
 
 
@@ -33,7 +34,7 @@ from emrg.session import Session, _validate_tool_messages
 
 def test_build_prompt_emrg_self():
     """Builds prompt for emrg self-evolution."""
-    handler = TaskHandler(
+    handler = make_handler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -51,15 +52,18 @@ def test_build_prompt_emrg_self():
 
 
 def test_build_prompt_with_project():
-    """Builds prompt for a custom project — derives owner/repo via git remote."""
-    handler = TaskHandler(
-        name="myproject", config={"path": "/home/user/src/myproject"}, interval=1800,
+    """Builds prompt for a custom project — owner/repo come from the record's config.
+
+    They used to be assigned after construction (`handler._owner = ...`); the handler
+    now derives them from the record it is handed (design §2), so the test states them
+    the way a task does.
+    """
+    handler = make_handler(
+        name="myproject",
+        config={"path": "/home/user/src/myproject", "owner": "user", "repo": "myproject"},
+        interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
-    # Override owner/repo for project testing
-    handler._owner = "user"
-    handler._repo = "myproject"
-    handler._repo_url = "https://github.com/user/myproject.git"
     prompt = handler._build_evolution_prompt()
 
     assert "/home/user/src/myproject" in prompt
@@ -73,7 +77,7 @@ def test_build_prompt_all_variables_substituted():
     """No raw template placeholders ({var}) should remain in output."""
     import re
 
-    handler = TaskHandler(
+    handler = make_handler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -90,7 +94,7 @@ def test_build_prompt_step22_uses_fetch_head():
     stripped `remote.origin.fetch`), where `git log origin/master` fails
     with "unknown revision" (observed 2026-08-08, cycles 09:15 & 09:30).
     """
-    handler = TaskHandler(
+    handler = make_handler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -104,116 +108,41 @@ def test_build_prompt_step22_uses_fetch_head():
     assert "git merge origin/master" not in prompt
 
 
-# ── TaskScheduler._load_tasks ────────────────────────────────────
+# ── read_table: what a hand-edited file means ────────────────────
+
+# The reader's other outcomes (seeding a missing file, refusing a file it cannot
+# parse, refusing a non-list root) are covered in `tests/test_scheduler.py` beside
+# the reader itself. The two here are the ones that file does not state: an
+# explicitly empty table is *not* re-seeded, and a disabled record is handed on
+# unchanged. `_load_tasks` / `_save_tasks` are gone — `read_table` / `write_table`
+# are the only reader and the only writer (design §3).
 
 
-def test_scheduler_load_no_file():
-    """Returns empty list when tasks.yml doesn't exist."""
-    sched = TaskScheduler(InstanceIdentity())
-    sched._tasks_file = Path("/nonexistent/path/tasks_test.yml")
-    assert sched._load_tasks() == []
+def test_read_table_keeps_an_explicitly_empty_table_empty(tmp_path):
+    """`[]` is a decision, not an absence — only a *missing file* is re-seeded."""
+    from emrg.server.scheduler import read_table
 
-
-def test_scheduler_load_empty_list():
-    """Returns empty list for an empty YAML list."""
-    sched = TaskScheduler(InstanceIdentity())
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write("[]\n")
-        tmp = f.name
-    try:
-        sched._tasks_file = Path(tmp)
-        assert sched._load_tasks() == []
-    finally:
-        Path(tmp).unlink(missing_ok=True)
-
-
-def test_scheduler_load_enabled_tasks():
-    """Loads task entries correctly."""
-    sched = TaskScheduler(InstanceIdentity())
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(
-            "- name: auto1\n  type: evolution\n  path: /tmp/a1\n  interval: 600\n  enabled: true\n"
-            "- name: disabled\n  type: evolution\n  path: /tmp/a2\n  interval: 1800\n  enabled: false\n"
-        )
-        tmp = f.name
-    try:
-        sched._tasks_file = Path(tmp)
-        result = sched._load_tasks()
-        assert len(result) == 2
-        assert result[0]["name"] == "auto1"
-        assert result[0]["enabled"] is True
-        assert result[1]["name"] == "disabled"
-        assert result[1]["enabled"] is False
-    finally:
-        Path(tmp).unlink(missing_ok=True)
-
-
-def test_scheduler_load_invalid_yaml():
-    """Returns empty list for garbage YAML (doesn't crash)."""
-    sched = TaskScheduler(InstanceIdentity())
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(": not valid yaml {[[\n")
-        tmp = f.name
-    try:
-        sched._tasks_file = Path(tmp)
-        assert sched._load_tasks() == []
-    finally:
-        Path(tmp).unlink(missing_ok=True)
-
-
-def test_scheduler_load_non_list():
-    """Returns empty list when YAML root is not a list."""
-    sched = TaskScheduler(InstanceIdentity())
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write("key: value\n")
-        tmp = f.name
-    try:
-        sched._tasks_file = Path(tmp)
-        assert sched._load_tasks() == []
-    finally:
-        Path(tmp).unlink(missing_ok=True)
-
-
-# ── TaskScheduler._migrate_from_projects ─────────────────────────
-
-
-def test_migrate_auto_evolve_entries(tmp_path):
-    """Migrates auto_evolve=True entries from projects.yml to tasks.yml."""
-    from unittest.mock import patch
-
-    sched = TaskScheduler(InstanceIdentity())
-    # Use tmp_path for both files
-    projects_yml = tmp_path / "projects.yml"
     tasks_yml = tmp_path / "tasks.yml"
-    sched._tasks_file = tasks_yml
+    tasks_yml.write_text("[]\n")
 
-    projects_yml.write_text(
-        "- name: manual\n  path: /tmp/m\n  auto_evolve: false\n"
-        "- name: auto1\n  path: /tmp/a1\n  auto_evolve: true\n  interval: 600\n"
-        "- name: auto2\n  path: /tmp/a2\n  auto_evolve: true\n"
+    assert read_table(tasks_yml) == []
+    assert tasks_yml.read_text() == "[]\n", "the reader does not rewrite what it read"
+
+
+def test_read_table_returns_records_as_written(tmp_path):
+    """Disabled records are returned too, and nothing is filled in or reordered."""
+    from emrg.server.scheduler import read_table
+
+    tasks_yml = tmp_path / "tasks.yml"
+    tasks_yml.write_text(
+        "- name: auto1\n  type: evolution\n  path: /tmp/a1\n  interval: 600\n  enabled: true\n"
+        "- name: disabled\n  type: evolution\n  path: /tmp/a2\n  interval: 1800\n  enabled: false\n"
     )
 
-    with patch.object(sched, "_save_tasks") as mock_save:
-        # Patch _load_tasks to return empty (simulates fresh tasks.yml)
-        # and point at the test projects.yml
-        real_load = sched._load_tasks
-        def _fake_load():
-            return []
-        sched._load_tasks = _fake_load
-
-        # Override projects_file path
-        orig_migrate = sched._migrate_from_projects
-        def _migrate_wrapper():
-            sched._tasks_file = tasks_yml
-            sched._migrate_from_projects = orig_migrate
-            orig_migrate()
-        sched._migrate_from_projects = _migrate_wrapper
-
-        # Can't easily redirect config_dir() in this test without patching —
-        # for now, verify the load/migrate logic works structurally
-        sched._load_tasks = real_load
-
-    assert sched._load_tasks() == []
+    result = read_table(tasks_yml)
+    assert [r["name"] for r in result] == ["auto1", "disabled"]
+    assert result[0]["enabled"] is True
+    assert result[1]["enabled"] is False
 
 
 # ── _collect_project_context ───────────────────────────────

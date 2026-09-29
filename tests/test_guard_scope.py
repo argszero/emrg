@@ -32,6 +32,7 @@ import pytest
 from emrg.protocol import InstanceIdentity
 from emrg.server.git_utils import ensure_local_exclude, repo_scope, runtime_exclude_entry
 from emrg.server.scheduler import TaskHandler
+from tests.task_handler_factory import make_handler
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -73,7 +74,7 @@ def _parent_and_task(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _handler(path: Path) -> TaskHandler:
-    return TaskHandler(
+    return make_handler(
         name="emrg-task", config={"path": str(path)}, interval=60,
         identity=InstanceIdentity(),
     )

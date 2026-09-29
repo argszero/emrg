@@ -25,6 +25,7 @@ import pytest
 from emrg.protocol import InstanceIdentity
 from emrg.server.git_utils import EXCLUDE_ENTRY, ensure_local_exclude
 from emrg.server.scheduler import TaskHandler
+from tests.task_handler_factory import make_handler
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -209,7 +210,7 @@ def test_the_task_handler_excludes_before_it_judges(tmp_path):
     repo = _repo(tmp_path / "clone")
     _runtime_dir(repo)
 
-    handler = TaskHandler(
+    handler = make_handler(
         name="emrg-task", config={"path": str(repo)}, interval=60,
         identity=InstanceIdentity(),
     )
@@ -237,7 +238,7 @@ def test_real_dirt_still_triggers_the_guard(tmp_path):
     _runtime_dir(repo)
     (repo / "notes.txt").write_text("work that exists nowhere else", encoding="utf-8")
 
-    handler = TaskHandler(
+    handler = make_handler(
         name="emrg-task", config={"path": str(repo)}, interval=60,
         identity=InstanceIdentity(),
     )
