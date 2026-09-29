@@ -163,10 +163,12 @@ def test_no_prompt_names_a_placeholder_the_builder_does_not_provide(
 
     # Self-test of the device: if the capture silently stopped working, the strict
     # render below would pass for the wrong reason (nothing to check).
-    assert len(captured) >= 15, (
-        f"captured only {len(captured)} context keys from the builder — the "
-        f"recording environment is not in the render path, so this test would "
-        f"prove nothing"
+    # Self-test of the device: the capture must hold keys the templates really use, or
+    # the strict render below would pass for the wrong reason (nothing to check).
+    missing = {"instance_id", "source_dir", "timestamp", "task", "project"} - set(captured)
+    assert not missing, (
+        f"the recording environment captured no {sorted(missing)} — it is not in the "
+        f"render path, so this test would prove nothing"
     )
     assert "task" in captured and "project" in captured
 
@@ -317,6 +319,191 @@ def test_the_journal_prompt_takes_its_identity_from_the_task_config(
         "a journal task with no `config.author_id` must be told to stop: every journal action "
         "writes the identity into a durable, cross-machine record, and a name invented to fill "
         "the blank is worse than a missed cycle"
+    )
+
+
+# ── The retired placeholders and the context/template contract ──────────────────
+#
+# Both directions of the wiring are defects, and the strict-render test above only
+# covers one of them:
+#
+#   * a template that names a key the builder does not provide (covered above), and
+#   * a **key the builder provides that no built-in template reads** — dead weight,
+#     and worse than dead weight: a value nothing consumes is free to become a lie in
+#     the reader's hands, because nothing is measuring it any more.
+#
+# The second direction is why this block exists (host ruling 2026-09-29, prompt-variable
+# cleanup rants 2026-09-29T09:23:55 / 09:29:21 / 10:06:33). Each retired name was a real
+# one, not a tidy-up:
+#
+#   * `uptime` — `scheduler.py` computed it from `TaskHandler._start_time`, the
+#     *handler's* lifetime, formatted `Xh Ym` and printed next to the task's identity, so
+#     it read as the instance's uptime while resetting on every tasks.yml edit. Nothing
+#     consumed it: the six template lines were its only readers, and the daemon's real
+#     uptime reaches clients through a different field (`pong.uptime_seconds`).
+#   * `evolution_count` — `len(self.evolutions)`, a list restored from a JSONL file that
+#     a `_TASK_RUNS_MAX = 50` cap rewrote, so the value was pinned at 50 (plus whatever
+#     the current daemon had run) and reset on every restart — printed as
+#     "Evolutions completed" / "Rounds completed". `promote_prompt.md` was the one
+#     template that acted on it ("every 3-5 rounds"), and 50 is divisible by 5, so the
+#     rule fired every round.
+#   * `evolution_cwd` — the definition `~/.emrg/evolution`, which `_ensure_self_evolution_task`
+#     and `_touch_project` now spell out at their own call sites.
+#
+# `_placeholder_names` reads the two shapes a template can name a context key in: an
+# expression (`{{ x }}`, filters and attribute access included — only the root name is
+# taken) and a block tag (`{% if x %}` / `{% for x in y %}` / `{% set x = ... %}`).
+_PLACEHOLDER_NAME = re.compile(
+    r"\{\{-?\s*([A-Za-z_]\w*)"
+    # The loop's iterable comes first: `{% for row in rows %}` names `rows`, and a
+    # bare `for\s+<name>` alternative placed before this one matches the loop
+    # *variable* instead — which is the template's own binding, not a context key.
+    r"|\{%-?\s*for\s+[A-Za-z_]\w*\s+in\s+([A-Za-z_]\w*)"
+    r"|\{%-?\s*(?:if|elif|set)\s+([A-Za-z_]\w*)"
+)
+
+RETIRED_PLACEHOLDERS = ("uptime", "evolution_count", "evolution_cwd")
+
+# The one exemption from the reverse direction below, and it is temporary: PR #1729
+# (issue #1732) deletes the `- Instance: {{ instance_id }} @ {{ host_name }}` line
+# from the five built-in templates that carry it. Until that lands those two keys
+# still have a reader, so this module must not report them; the cycle that merges
+# #1729 deletes this tuple, and the guard then reports the keys by itself. Nothing
+# else belongs here — a key whose last template was deleted should be deleted too.
+KEYS_AWAITING_THEIR_TEMPLATE_LINE = ("instance_id", "host_name")
+
+
+def _placeholder_names(text: str) -> set[str]:
+    found: set[str] = set()
+    for match in _PLACEHOLDER_NAME.finditer(text):
+        name = match.group(1) or match.group(2) or match.group(3)  # type: ignore[assignment]
+        if name:
+            found.add(name)
+    return found
+
+
+def _captured_context(tmp_path, monkeypatch) -> dict:
+    """The render context the real builder produces, captured off the real render.
+
+    Same device as ``test_no_prompt_names_a_placeholder_the_builder_does_not_provide``:
+    the environment is wrapped so the kwargs handed to ``render`` are observed, so this
+    reads the context rather than a second copy of it written here.
+    """
+    real_env = jinja2.Environment
+    captured: dict = {}
+
+    class _RecordingTemplate:
+        def __init__(self, inner: jinja2.Template) -> None:
+            self._inner = inner
+
+        def render(self, *args, **kwargs) -> str:
+            captured.update(kwargs)
+            return self._inner.render(*args, **kwargs)
+
+    class _RecordingEnvironment(real_env):  # type: ignore[misc,valid-type]
+        def from_string(self, source, *args, **kwargs):
+            inner = real_env.from_string(self, source, *args, **kwargs)
+            return _RecordingTemplate(inner)
+
+    monkeypatch.setattr(jinja2, "Environment", _RecordingEnvironment)
+    _make_handler(
+        tmp_path,
+        monkeypatch,
+        "evolution_prompt.md",
+        dict(FULL_TASK_CONFIG),
+        dict(FULL_PROJECT_ENTRY),
+    )._build_evolution_prompt()
+    monkeypatch.setattr(jinja2, "Environment", real_env)
+    return captured
+
+
+def test_the_placeholder_scan_reads_both_shapes_a_template_names_a_key_in() -> None:
+    """The instrument's controls, before its verdict is believed.
+
+    A scan that matched nothing would make the two guards below pass by finding
+    nothing to check — the failure mode this whole module is about.
+    """
+    assert _placeholder_names("{{ alpha }}") == {"alpha"}
+    assert _placeholder_names("{{ alpha.beta | default('x') }}") == {"alpha"}
+    assert _placeholder_names("{% if gamma %}x{% endif %}") == {"gamma"}
+    # The loop's *iterable* is the context name; the loop variable is the template's
+    # own binding. The scan cannot tell the two apart inside the body — `{{ row }}` is
+    # an expression naming `row` like any other — so the control asserts the tag, and
+    # the second case records what the body contributes. Extra names on the `used`
+    # side only make the guard below more permissive, never less.
+    assert _placeholder_names("{% for row in rows %}{% endfor %}") == {"rows"}
+    assert _placeholder_names("{% for row in rows %}{{ row.name }}{% endfor %}") == {
+        "row",
+        "rows",
+    }
+    assert _placeholder_names("{% set delta = 1 %}") == {"delta"}
+    assert _placeholder_names("no tags at all") == set()
+
+
+def test_every_context_key_has_a_consumer(tmp_path, monkeypatch) -> None:
+    """The builder's context and the built-in templates are the same set of names.
+
+    The forward direction (a name used but not provided) already has its own test above;
+    this is the reverse, and it is the one that keeps a value from quietly becoming
+    fiction. Adding a key the templates do not read is not harmless: it ships a number
+    nobody checks, and the numbers retired on 2026-09-29 (`uptime`, `evolution_count`)
+    were each wrong in a way that no test could see, precisely because the only thing
+    reading them was a template line nobody measured.
+
+    Adding a context key is therefore a two-file change (builder + template) — or a
+    deliberate exception named here.
+    """
+    captured = _captured_context(tmp_path, monkeypatch)
+    missing = {"instance_id", "source_dir", "timestamp", "task", "project"} - set(captured)
+    assert not missing, (
+        f"the recording environment captured no {sorted(missing)} — it is not in the "
+        f"render path, so this test would compare against nothing"
+    )
+
+    used: set[str] = set()
+    for _, filename in _builtin_templates():
+        used |= _placeholder_names((PROMPTS_DIR / filename).read_text(encoding="utf-8"))
+
+    unread = sorted(set(captured) - used - set(RETIRED_PLACEHOLDERS)
+                    - set(KEYS_AWAITING_THEIR_TEMPLATE_LINE))
+    assert not unread, (
+        f"the builder provides {unread}, which no built-in template reads. Either the "
+        f"template that consumed it was deleted (then drop the key, as the 2026-09-29 "
+        f"cleanup did for uptime/evolution_count/evolution_cwd) or the key is new and "
+        f"inert. A value nothing consumes is a value nothing measures."
+    )
+    assert set(RETIRED_PLACEHOLDERS).isdisjoint(captured), (
+        f"a retired placeholder is back in the render context: "
+        f"{sorted(set(RETIRED_PLACEHOLDERS) & set(captured))}"
+    )
+
+
+def test_no_template_names_a_retired_placeholder() -> None:
+    """A deleted placeholder must not come back by a template edit.
+
+    The strict-render test above cannot see this on its own: re-adding a line to a
+    template *and* the key to the builder would render fine and freeze the old lie back
+    in place. This guard names the specific retirements, so the reason travels with the
+    rule — each of the three was wrong in the direction a reader would not suspect.
+    """
+    planted = "### Current State\n- Uptime: {{ uptime }}\n"
+    assert _placeholder_names(planted) & set(RETIRED_PLACEHOLDERS), (
+        "the scan no longer detects the shape it exists for"
+    )
+
+    offenders: list[str] = []
+    for _, filename in _builtin_templates():
+        hits = _placeholder_names(
+            (PROMPTS_DIR / filename).read_text(encoding="utf-8")
+        ) & set(RETIRED_PLACEHOLDERS)
+        if hits:
+            offenders.append(f"{filename}: {sorted(hits)}")
+    assert not offenders, (
+        f"these templates name a placeholder deleted on 2026-09-29: {offenders}. "
+        f"`uptime` was the handler's lifetime, `evolution_count` was a 50-record window "
+        f"reset by every restart, `evolution_cwd` is spelled out at the call sites that "
+        f"need it. If a new value is genuinely wanted, add it to the builder under a "
+        f"name that says what it is — and expect the guard above to ask what reads it."
     )
 
 
@@ -861,7 +1048,11 @@ def test_every_memory_root_a_template_names_is_writable() -> None:
         f"({roots}) — the memory root the templates name is one the tool layer refuses"
     )
 
-    old_root = Path(mod.EVOLUTION_CWD) / ".emrg" / "memory"
+    # Literal, not read off a constant: `EVOLUTION_CWD` was deleted with the
+    # `{{ evolution_cwd }}` placeholder (rant 2026-09-29T10:06:33). What this line
+    # must name is the *retired* root, and a live constant could be moved to a new
+    # value without the test noticing it had stopped naming the old one.
+    old_root = Path.home() / ".emrg" / "evolution" / ".emrg" / "memory"
     if _inside(old_root, str(REPO_ROOT)):
         raise AssertionError(
             f"this checkout is placed such that {old_root} IS inside the workspace "

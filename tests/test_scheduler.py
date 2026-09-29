@@ -630,9 +630,7 @@ def test_journal_template_renders_with_context():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     ctx = dict(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        owner="x", repo="y", source_dir="/tmp/j", evolution_cwd="/tmp/evo",
-        evolution_count=0, timestamp="20260824-182903",
+        instance_id="test", host_name="host", owner="x", repo="y", source_dir="/tmp/j", timestamp="20260824-182903",
         current_time_human="2026-08-24 18:29",
         task={"role": "author", "project": "j", "author_id": "author-a"},
     )
@@ -854,8 +852,16 @@ def test_task_handler_task_runs_persist_across_restart(tmp_path):
         mod.config_dir = orig
 
 
-def test_task_handler_task_runs_capped_at_fifty(tmp_path):
-    """JSONL keeps only the most recent 50 records (bounded append)."""
+def test_task_handler_task_runs_are_never_truncated(tmp_path):
+    """Appending never rewrites the file, and a restart restores every record.
+
+    The reverse of what this test asserted until rant 2026-09-29T09:29:21: a
+    `_TASK_RUNS_MAX = 50` cap trimmed both the file and the restored list, which
+    made the restored list a window rather than a history — and, because the
+    daemon printed `len(self.evolutions)` as `{{ evolution_count }}`, a window
+    that was read as a total. Mutation: putting the trim block back must fail
+    the `== 60` / `run-0` assertions below.
+    """
     from emrg.protocol import EvolutionLog
     from emrg.server import scheduler as mod
     orig = mod.config_dir
@@ -872,12 +878,12 @@ def test_task_handler_task_runs_capped_at_fifty(tmp_path):
 
         f = tmp_path / "logs" / "task-runs" / "emrg-task.jsonl"
         lines = f.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 50, "file trimmed to the last 50 records"
-        # fresh handler restores the most recent 50
+        assert len(lines) == 60, "every appended record is still in the file"
+        # a fresh handler restores all 60, oldest first
         h2 = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
-        assert len(h2.evolutions) == 50
+        assert len(h2.evolutions) == 60
         assert h2.evolutions[-1].work == "run-59"
-        assert h2.evolutions[0].work == "run-10"
+        assert h2.evolutions[0].work == "run-0"
     finally:
         mod.config_dir = orig
 
@@ -1005,10 +1011,8 @@ def test_paper_template_renders_with_context():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        source_dir="/tmp/paper", session_id="s1", timestamp="20260806",
-        task={}, project={}, evolution_count=0,
-    )
+        instance_id="test", host_name="host", source_dir="/tmp/paper", session_id="s1", timestamp="20260806",
+        task={}, project={}, )
     # The per-round `paper_state.md` was retired (rant 2026-09-14T14:35:47): the
     # session is the state now, so the template must render the continuity contract
     # and the closing summary that replaces the file — and must not name the file.
@@ -1030,11 +1034,9 @@ def test_journal_template_renders_the_continuity_contract():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        source_dir="/tmp/journal", session_id="s1", timestamp="20260919-100129",
-        current_time_human="2026-09-19 10:01", evolution_cwd="/tmp/evo",
-        task={"role": "editor", "project": "silicon-science-cs"},
-        project={}, evolution_count=0, owner="argszero", repo="silicon-science-cs",
+        instance_id="test", host_name="host", source_dir="/tmp/journal", session_id="s1", timestamp="20260919-100129",
+        current_time_human="2026-09-19 10:01", task={"role": "editor", "project": "silicon-science-cs"},
+        project={}, owner="argszero", repo="silicon-science-cs",
     )
     # The state and reflection files were retired (rant 2026-09-14T14:35:47): the
     # session is the state now, so the template must render the continuity contract
@@ -1059,12 +1061,11 @@ def test_open_source_template_renders_with_context():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260813",
+        timestamp="20260813",
         task={"role": "committer", "project": "aitokenpool"},
-        project={}, evolution_count=0, git_path="git", gh_path="gh",
+        project={}, git_path="git", gh_path="gh",
     )
     assert "0.5 Rant scan" in out, "rant-scan 0.5 节应渲染"
     assert "rants.jsonl" in out, "rant 扫描命令应渲染"
@@ -1104,11 +1105,10 @@ def test_open_source_template_allow_self_merge_conditional():
     template = env.from_string(template_path.read_text(encoding="utf-8"))
 
     base = dict(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260814",
-        project={}, evolution_count=0, git_path="git", gh_path="gh",
+        timestamp="20260814",
+        project={}, git_path="git", gh_path="gh",
     )
 
     # default (allow_self_merge absent) → rule stands, no override
@@ -1144,13 +1144,11 @@ def test_task_extra_prompt_conditional_all_templates():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     server_dir = Path(__file__).resolve().parent.parent / "emrg" / "server"
     base = dict(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260824",
+        timestamp="20260824",
         current_time_human="2026-08-24 22:00",
-        project={"name": "x"}, evolution_count=0,
-        git_path="git", gh_path="gh",
+        project={"name": "x"}, git_path="git", gh_path="gh",
     )
     extra = "插件开发（plugin）也是对本项目的合法贡献，不应被排除在贡献范围之外"
     heading = "Task-specific Instructions (extra_prompt from tasks.yml)"
@@ -1180,12 +1178,11 @@ def test_open_source_template_never_stashes_host_work():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260820",
+        timestamp="20260820",
         task={"role": "committer", "project": "aitokenpool"},
-        project={}, evolution_count=0, git_path="git", gh_path="gh",
+        project={}, git_path="git", gh_path="gh",
     )
     # the old data-losing instruction is gone
     assert "→ `git stash`" not in out, "no more 'git stash' action instruction"
@@ -1213,12 +1210,11 @@ def test_open_source_template_full_code_study_b2b():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260814",
+        timestamp="20260814",
         task={"role": "committer", "project": "aitokenpool"},
-        project={}, evolution_count=0, git_path="git", gh_path="gh",
+        project={}, git_path="git", gh_path="gh",
     )
     # 1) the new section exists (positive discrimination: absent section → red)
     assert "B.2b Read the full codebase" in out, "B.2b 全代码研读节应渲染"
@@ -1245,12 +1241,11 @@ def test_open_source_template_parallel_recon_c15():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260824",
+        timestamp="20260824",
         task={"role": "committer", "project": "aitokenpool"},
-        project={}, evolution_count=0, git_path="git", gh_path="gh",
+        project={}, git_path="git", gh_path="gh",
     )
     # 1) the new section exists
     assert "C.1.5 Parallel Recon" in out, "C.1.5 并行 Recon 节应渲染"
@@ -1281,13 +1276,12 @@ def test_promote_template_learn_latest_state_04():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260814",
+        timestamp="20260814",
         task={"project": "aitokenpool"},
         project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
-        evolution_count=0, git_path="git", gh_path="gh",
+        git_path="git", gh_path="gh",
     )
     # 1) the new section exists (positive discrimination: absent section → red)
     assert "0.4 Learn the project's latest state" in out, "0.4 节应渲染"
@@ -1318,13 +1312,12 @@ def test_promote_template_homework_first_dehardening():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260815",
+        timestamp="20260815",
         task={"project": "aitokenpool"},
         project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
-        evolution_count=0, git_path="git", gh_path="gh",
+        git_path="git", gh_path="gh",
     )
     # A. homework-before-participating section exists (positive discrimination)
     assert "Do your homework before participating (MUST — host mandate)" in out, "§2 功课先行节应渲染"
@@ -1359,13 +1352,12 @@ def test_promote_template_direct_cdp_rule():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260825",
+        timestamp="20260825",
         task={"project": "aitokenpool"},
         project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
-        evolution_count=0, git_path="git", gh_path="gh",
+        git_path="git", gh_path="gh",
     )
     # A. direct CDP endpoint mandated (positive discrimination)
     assert "127.0.0.1:57000" in out, "直连 CDP 端点应渲染"
@@ -1388,13 +1380,12 @@ def test_promote_template_registration_blog_sections():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        instance_id="test", host_name="host", repo_url="https://github.com/x/y.git", owner="x", repo="y",
         local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
-        evolution_cwd="/tmp/evo", timestamp="20260815",
+        timestamp="20260815",
         task={"project": "aitokenpool"},
         project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
-        evolution_count=0, git_path="git", gh_path="gh",
+        git_path="git", gh_path="gh",
     )
     # A. Account Registration (host-authorized) section with 3 preconditions
     assert "Account Registration (host-authorized)" in out, "账号注册授权节应渲染"
@@ -1502,7 +1493,7 @@ def test_ensure_self_evolution_task_idempotent_when_present(tmp_path):
 def test_ensure_self_evolution_task_adds_project_entry_when_missing(tmp_path):
     """Missing projects.yml emrg entry gets added (fixed path, no network)."""
     from emrg.server import scheduler as mod
-    from emrg.server.scheduler import EVOLUTION_CWD, TaskScheduler
+    from emrg.server.scheduler import TaskScheduler
 
     sched = TaskScheduler(InstanceIdentity())
 
@@ -1519,7 +1510,7 @@ def test_ensure_self_evolution_task_adds_project_entry_when_missing(tmp_path):
     data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
     assert isinstance(data, list)
     emrg = next(e for e in data if e.get("name") == "emrg")
-    assert emrg["path"] == str(EVOLUTION_CWD / "emrg")
+    assert emrg["path"] == str(Path.home() / ".emrg" / "evolution" / "emrg")
     assert len([e for e in data if e.get("name") == "emrg"]) == 1  # no dup
 
 
@@ -1558,7 +1549,7 @@ def test_ensure_self_evolution_task_repairs_stale_project_entry(tmp_path):
     the real ~/.emrg/projects.yml; the dir is gone after the suite, leaving a
     dangling entry that list_projects/GUI pickers would show forever)."""
     from emrg.server import scheduler as mod
-    from emrg.server.scheduler import EVOLUTION_CWD, TaskScheduler
+    from emrg.server.scheduler import TaskScheduler
 
     stale = tmp_path / "gone" / "emrg"  # never created → dead path
     projects_yml = tmp_path / "projects.yml"
@@ -1579,7 +1570,9 @@ def test_ensure_self_evolution_task_repairs_stale_project_entry(tmp_path):
 
     data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
     by_name = {e["name"]: e for e in data}
-    assert by_name["emrg"]["path"] == str(EVOLUTION_CWD / "emrg")  # repaired
+    assert by_name["emrg"]["path"] == (
+        str(Path.home() / ".emrg" / "evolution" / "emrg")
+    )  # repaired
     assert by_name["other"]["path"] == str(tmp_path / "other")  # untouched
     assert len(data) == 2
 
@@ -2874,12 +2867,11 @@ def test_evolution_template_renders_dual_project_match():
     env = jinja2.Environment(undefined=jinja2.Undefined)
     template = env.from_string(template_path.read_text(encoding="utf-8"))
     out = template.render(
-        instance_id="test", host_name="host", uptime="0h 0m",
-        repo_url="https://github.com/argszero/emrg.git", owner="argszero",
+        instance_id="test", host_name="host", repo_url="https://github.com/argszero/emrg.git", owner="argszero",
         repo="emrg", local_source="/tmp/evo", source_dir="/tmp/evo",
-        session_id="s1", evolution_cwd="/tmp/evo", timestamp="20260817",
+        session_id="s1", timestamp="20260817",
         task={"role": "committer", "project": "emrg"},
-        project={}, evolution_count=0, git_path="git", gh_path="gh",
+        project={}, git_path="git", gh_path="gh",
     )
     assert "emrg" in out, "task.project 值应渲染"
     assert "argszero/emrg" in out, "owner/repo 形式应渲染"

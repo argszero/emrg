@@ -3067,21 +3067,19 @@ def _async_value(v):
 
 
 def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
-    """A registered project under the evolution workspace is NOT filtered from /rant.
+    """A registered project under the evolution workspace IS listed from /rant.
 
-    Discriminating-power fix (review cycle 190846): the registered path must
-    actually live under the monkeypatched EVOLUTION_CWD — otherwise a restored
-    filter would keep the entry and the test would pass anyway (false
-    confidence). Here the emrg entry's path is under tmp_path (= EVOLUTION_CWD),
-    so re-adding the old filter would exclude it and fail the assertion.
+    The filter that used to exclude it was deleted with the `EVOLUTION_CWD`
+    constant (rant 2026-09-29T10:06:33 item 4): what /rant lists is
+    projects.yml, and a path under `~/.emrg/evolution/` is a project like any
+    other. The entry is written in the real evolution-root spelling on purpose —
+    re-adding a workspace filter would drop it and fail the assertion, which is
+    the only reason this test exists.
     """
     import asyncio
 
-    from emrg.server import daemon as dmod
-
     server = _make_server()
-    evolution_cwd = str(tmp_path.resolve())
-    emrg_path = f"{evolution_cwd}/emrg"  # under EVOLUTION_CWD on purpose
+    emrg_path = str(Path.home() / ".emrg" / "evolution" / "emrg")
     projects_file = tmp_path / "projects.yml"
     projects_file.write_text(
         f"- name: emrg\n  path: {emrg_path}\n"
@@ -3089,7 +3087,6 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(server, "_projects_log", projects_file)
-    monkeypatch.setattr(dmod, "EVOLUTION_CWD", tmp_path)
 
     writer = _FakeWriter()
     asyncio.run(server._handle_list_projects(writer))
@@ -3098,7 +3095,7 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
     reply = json.loads(writer._frames[0])
     assert reply["type"] == "projects_list"
     paths = [p["path"] for p in reply["projects"]]
-    assert emrg_path in paths  # emrg visible even though under evolution cwd
+    assert emrg_path in paths  # a project under the evolution root is still a project
     assert "/home/u/work/other" in paths
 
 
@@ -4105,4 +4102,65 @@ def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame
     )
     assert not [m for m in session._read_history() if m.get("role") == "assistant"], (
         "a turn whose answer the provider refused recorded an assistant message"
+    )
+
+
+# ── the same shape, from the other direction: nothing refused the answer,
+#    there simply was none (issue #1723) ──────────────────────────────────────
+#
+# `finish_reason=stop` satisfied the "final text answer" branch with `content`
+# empty, so the round persisted an empty assistant record, broadcast `done` with
+# `content: ""`, and stamped the completed-round marker — the file whose age
+# answers "how long since a COMPLETED round" (#1114). A round that produced
+# nothing thus wrote the evidence the staleness alarm reads as a finished round.
+# Measured before the fix: zero such rounds in ~19,857 logged over ~3.2 days, so
+# this is a correctness hole and the tests below are the only witness it has.
+
+
+def test_an_empty_answer_is_reported_and_is_not_a_completed_round(tmp_path, monkeypatch):
+    """Issue #1723: a `stop` carrying no text is not an answer.
+
+    The round must not be handed on as a finished turn: no assistant record, one
+    explanation, one terminal frame — and above all no completed-round stamp.
+    """
+    async def stream(messages, tools=None):
+        yield {"content": None, "tool_calls": None,
+               "finish_reason": "stop", "usage": None}
+
+    session, frames = _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream)
+
+    errors = [f for f in frames if "error" in f]
+    dones = [f for f in frames if f.get("done")]
+    assert len(errors) == 1, frames
+    assert len(dones) == 1, frames
+    assert "without producing any text" in errors[0]["error"], errors[0]["error"]
+    assert not [m for m in session._read_history() if m.get("role") == "assistant"], (
+        "an answer that never existed was persisted as one"
+    )
+    assert not (tmp_path / "planted-fire-round-complete").exists(), (
+        "a round that produced nothing stamped the completed-round marker, which "
+        "is the evidence the #1114 staleness alarm reads as 'a round finished'"
+    )
+
+
+def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkeypatch):
+    """The control for the guard above, and the only test of this stamp.
+
+    Without it, "the empty round did not stamp the marker" would pass just as well
+    if the loop had stopped stamping it at all — which is the defect the guard is
+    supposed to *stop* rather than cause.
+    """
+    async def stream(messages, tools=None):
+        yield {"content": "here is the answer", "tool_calls": None,
+               "finish_reason": "stop", "usage": None}
+
+    session, frames = _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream)
+
+    assert not [f for f in frames if "error" in f], frames
+    assert [m for m in session._read_history() if m.get("role") == "assistant"], (
+        "a real answer was not persisted"
+    )
+    assert (tmp_path / "planted-fire-round-complete").exists(), (
+        "a genuinely completed round no longer stamps the marker the #1114 alarm "
+        "measures — the empty-answer guard must not have swallowed it"
     )

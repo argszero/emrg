@@ -882,13 +882,12 @@ def test_the_prompt_writes_its_cycle_records_where_the_queue_reads_them(mod):
         .from_string(template)
         .render(
             source_dir=str(REPO_ROOT),
-            evolution_cwd=str(REPO_ROOT.parent),
             timestamp="20260925-101010",
             # The two mappings the template iterates over; every other name it uses is
             # a display field, and the daemon's `Undefined` renders those empty here as
             # it would there. The claim below is about a *path*, built from the three
-            # names set above, which the daemon supplies from
-            # `_source_dir`, `EVOLUTION_CWD` and the render clock.
+            # names set above, which the daemon supplies from `_source_dir`
+            # and the render clock.
             task={},
             project={},
         )

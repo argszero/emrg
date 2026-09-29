@@ -360,6 +360,41 @@ def test_a_quoted_keyword_is_not_a_claim(mod) -> None:
     assert mod.declared_claims("Closes #15.\n\n(the quote above is `Closes #16.`)") == {15}
 
 
+def test_a_masked_claim_is_named_as_quoted_rather_than_counted(mod) -> None:
+    """The mirror of the masking: the same keyword, read a second way, names itself.
+
+    Masking is right — a quoted keyword is not a claim — but a report that says "this PR
+    declares no issue" while the body visibly carries `Closes #N` sends its reader to look
+    for a sentence that is already there. Measured 2026-09-29 on PR #1715: its Tracking
+    section read ``"`Closes #1718`."`` in backticks, the row said the PR declares nothing,
+    and the author's own sentence — that the tool read the pair `ok` — was the only wrong
+    thing in a body that had made the declaration being asked for.
+
+    The two readings are complements over every shape the masker knows, and that is what
+    is pinned here rather than three examples: inline, fenced, unterminated fence and a
+    double-backtick span all read as quoted; a bare mention reads as neither; a real
+    declaration beside a quotation is still declared and not quoted.
+    """
+    assert mod.quoted_claims("The `Closes #1718` line sits in a code span.") == {1718}
+    assert mod.quoted_claims("example:\n```\nCloses #11.\n```\n") == {11}
+    assert mod.quoted_claims("an unterminated fence:\n```\nCloses #13.") == {13}
+    assert mod.quoted_claims("a ``double `Closes #14.` `` span") == {14}
+    # Neither reading claims a bare mention, and neither loses a real declaration.
+    assert mod.quoted_claims("see #1718 for the evidence") == set()
+    assert mod.quoted_claims("Closes #99.\n\n(the quote above is `Closes #16.`)") == {16}
+    assert mod.declared_claims("Closes #99.\n\n(the quote above is `Closes #16.`)") == {99}
+    # A body GitHub reports as null reads as nothing in both directions.
+    assert mod.quoted_claims(None) == set()
+
+    # The negation window has to survive the reading, and it is why this one blanks the
+    # marks rather than keeping the text as written: a backtick is not a word, and left in
+    # place it breaks the pattern's end anchor, so "does not `close #1718`" would read as a
+    # quotation of a claim. It is a quotation of a *denial*, and neither reading counts it.
+    assert mod.quoted_claims("This does not `close #1718`.") == set()
+    assert mod.quoted_claims("never `closes #1718`") == set()
+    assert mod.quoted_claims("prose\n```\nnever closes #1718\n```\n") == set()
+
+
 def test_a_crlf_body_closes_its_fence_where_the_fence_closes(mod) -> None:
     """A CRLF body must not mask to its own end — the live defect of issue #1697.
 
@@ -1048,7 +1083,50 @@ def test_the_issue_naming_a_pr_that_declares_no_issue_is_one_way_not_linked(
     detail = _detail(out, "#20 PR ONE-WAY")
     assert "#10 names it and this PR declares no issue" in detail
     assert "`Closes #N` where the PR finishes it" in detail
+    # …and nothing about a code span: this body declares nothing anywhere, so the sentence
+    # that names the mask would be a claim about evidence this body does not have.
+    assert "inside a code span" not in detail
     assert "#20 PR ok" not in out
+
+
+def test_a_masked_declaration_is_named_on_the_one_way_row(mod, monkeypatch, capsys) -> None:
+    """#1715's live shape, 2026-09-29: the declaration is in the body, in backticks.
+
+    Its Tracking section read ``"`Closes #1718`."`` — a real closing keyword for the issue
+    that names it, invisible to `declared_claims` because the masking is right that a quoted
+    keyword is not a claim — and the row answered with the generic remedy, "state it in the
+    PR body", for a body that had already stated it. The author read that, concluded the tool
+    was wrong, and wrote *that* in the body. The remedy now names the mask, so the reader is
+    handed the one thing that fixes the row: move the keyword out of the span.
+
+    The claim is still not counted, and that is asserted too — the state stays `one-way` and
+    the row stays red. A friendlier sentence must not be bought with a weaker reading.
+    """
+    fake = FakeGh(
+        [_issue(1718, "a confined runner announces its own start")],
+        [
+            _pr(
+                1715,
+                "the runner announces its own start",
+                body="## Tracking\n\n`Closes #1718`. The tool reads both directions ok.",
+            )
+        ],
+        {1718: [], 1715: [_refers_to(1718, is_pr=False)]},
+        comments={1718: [_comment("Handled by #1715 — the pair is born together.")]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    assert "#1715 PR ONE-WAY" in out
+    detail = _detail(out, "#1715 PR ONE-WAY")
+    assert "#1718 names it and this PR declares no issue" in detail
+    assert "inside a code span" in detail
+    assert "#1715 PR ok" not in out
+    # A body whose declaration is *not* masked gets no such sentence: the note is evidence
+    # about this body, not decoration on the row.
+    assert mod.quoted_claims("Closes #1718.") == set()
 
 
 def test_a_citation_of_a_pr_does_not_read_as_that_issue_naming_it(

@@ -57,6 +57,7 @@ from emrg.server.llm import (
     CONTENT_FILTER_FINISH,
     CONTENT_RISK,
     CONTEXT_TOO_LONG,
+    EMPTY_ANSWER_ERROR,
     LlmClient,
     classify_llm_error,
     is_overlong_error,
@@ -183,8 +184,6 @@ def _get_jinja_env() -> "jinja2.Environment":
 
 
 # ── Module-level constants ──
-EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
-
 # Which files `_collect_project_context` reads out of a session's cwd into the prompt,
 # in precedence order. Named rather than inline for the same reason the cap below is:
 # a guard that reads this list — that the files it embeds name paths this repository
@@ -1519,10 +1518,6 @@ class EmrgServer:
         owner/repo is detected at runtime from git remote, not stored.
         """
         cwd = os.path.realpath(cwd)
-        # Don't track the evolution engine's own workspace as a project
-        evolution_cwd = str(EVOLUTION_CWD.resolve())
-        if cwd == evolution_cwd or cwd.startswith(evolution_cwd + os.sep):
-            return
         # Don't track the home directory as a project
         home = os.path.expanduser("~")
         if cwd == home:
@@ -3740,6 +3735,40 @@ class EmrgServer:
                     reasoning=full_reasoning,
                 )
 
+                # Case 1a: the round arrived with nothing in it (issue #1723).
+                # The branch is entered on the finish reason alone, so an empty
+                # `stop` used to be persisted as an assistant record, broadcast as
+                # `done` with `content: ""`, and stamped into the completed-round
+                # marker — i.e. a round that produced nothing wrote the evidence
+                # the #1114 staleness alarm reads as *a round finished*. Report it
+                # instead: the same two frames Case 0 sends (the explanation, then
+                # the one terminal frame the client's busy flag and the
+                # scheduler's recv loop both wait for), and no round-complete
+                # stamp, so a silent model can still be told from a working one.
+                # `reasoning` may be non-empty here — a model that produced only a
+                # think block has still answered with nothing — and its length is
+                # named in the log so the two shapes stay distinguishable without
+                # ever copying a think block into a log line.
+                if not full_content:
+                    logger.error(
+                        "round %d: the model produced no text "
+                        "(finish_reason=%s, no tool calls, %d character(s) of "
+                        "reasoning) — reporting it instead of counting the round "
+                        "as answered",
+                        round_num, final_finish, len(full_reasoning or ""),
+                    )
+                    await self._broadcast(session.session_id, {
+                        "request_id": req.id,
+                        "error": EMPTY_ANSWER_ERROR,
+                        "session_id": session.session_id,
+                    })
+                    await self._broadcast(session.session_id, {
+                        "done": True,
+                        "request_id": req.id,
+                        "session_id": session.session_id,
+                    })
+                    return
+
                 # Persist assistant message
                 session.append_message({
                     "type": "message",
@@ -5073,9 +5102,7 @@ class EmrgServer:
         No evolution-workspace filter (rant 2026-08-07T10:48:00): projects.yml
         only contains explicitly registered entries, and on packaged installs
         the emrg project's only path IS ~/.emrg/evolution/emrg — filtering it
-        hid emrg from /rant entirely. _touch_project still skips evolution
-        subdirs so evolution cycles' cwd is never auto-tracked as a user
-        project.
+        hid emrg from /rant entirely.
         """
         projects: list[dict] = []
         try:
