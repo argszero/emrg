@@ -79,8 +79,8 @@ describe("词典完整性守卫（防漂移）", () => {
   it("zh/en 各 399 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(399);
-    expect(enKeys.length).toBe(399);
+    expect(zhKeys.length).toBe(403);
+    expect(enKeys.length).toBe(403);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

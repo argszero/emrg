@@ -23,6 +23,9 @@ const api = {
   setModel: (payload) => ipcRenderer.invoke("emrg:setModel", payload),
   clearSession: (payload) => ipcRenderer.invoke("emrg:clearSession", payload),
   compactSession: (payload) => ipcRenderer.invoke("emrg:compactSession", payload),
+  // Approval channel (rant 2026-09-29T15:52:38.987951+08:00, requirement 1):
+  // the daemon holds a confined call open until a client answers.
+  respondApproval: (payload) => ipcRenderer.invoke("emrg:respondApproval", payload),
   listHistory: (payload) => ipcRenderer.invoke("emrg:listHistory", payload),
   rewindSession: (payload) => ipcRenderer.invoke("emrg:rewindSession", payload),
   listMemories: (payload) => ipcRenderer.invoke("emrg:listMemories", payload),

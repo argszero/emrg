@@ -600,6 +600,22 @@ vision = false
       return { ok: true };
     });
 
+    ipcMain.handle("emrg:respondApproval", async (_e, { sessionId, requestId, approved } = {}) => {
+      // The GUI's half of the approval channel (rant
+      // 2026-09-29T15:52:38.987951+08:00, requirement 1). Written through the
+      // session's own connection so the answer reaches the daemon on the
+      // session whose call is waiting; a bare boolean is sent, because the
+      // daemon's reader treats anything it cannot map as a refusal.
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      if (!requestId) throw new Error("invalid request_id");
+      await requireConn().sendCommand("approval_response", {
+        session_id: sessionId,
+        request_id: String(requestId),
+        approved: approved === true,
+      });
+      return { ok: true };
+    });
+
     ipcMain.handle("emrg:listHistory", async (_e, { sessionId, limit, offset, includeAssistant, includeRecords, beforeIndex } = {}) => {
       // GUI / 指令 P2：/rewind + rant 14:15:12 历史按需加载（limit/offset 可选）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");

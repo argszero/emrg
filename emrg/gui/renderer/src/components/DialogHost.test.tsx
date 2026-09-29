@@ -34,6 +34,7 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     turnStartBySid: {},
     disconnectedBySid: {},
     upgradeBanner: null,
+    pendingApproval: null,
     ...over,
   };
 }

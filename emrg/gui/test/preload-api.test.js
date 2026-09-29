@@ -39,6 +39,7 @@ const EXPECTED_INVOKE_METHODS = [
   "setModel",
   "clearSession",
   "compactSession",
+  "respondApproval",
   "listHistory",
   "rewindSession",
   "listMemories",
