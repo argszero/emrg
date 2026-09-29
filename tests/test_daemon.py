@@ -4099,3 +4099,64 @@ def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame
     assert not [m for m in session._read_history() if m.get("role") == "assistant"], (
         "a turn whose answer the provider refused recorded an assistant message"
     )
+
+
+# ── the same shape, from the other direction: nothing refused the answer,
+#    there simply was none (issue #1723) ──────────────────────────────────────
+#
+# `finish_reason=stop` satisfied the "final text answer" branch with `content`
+# empty, so the round persisted an empty assistant record, broadcast `done` with
+# `content: ""`, and stamped the completed-round marker — the file whose age
+# answers "how long since a COMPLETED round" (#1114). A round that produced
+# nothing thus wrote the evidence the staleness alarm reads as a finished round.
+# Measured before the fix: zero such rounds in ~19,857 logged over ~3.2 days, so
+# this is a correctness hole and the tests below are the only witness it has.
+
+
+def test_an_empty_answer_is_reported_and_is_not_a_completed_round(tmp_path, monkeypatch):
+    """Issue #1723: a `stop` carrying no text is not an answer.
+
+    The round must not be handed on as a finished turn: no assistant record, one
+    explanation, one terminal frame — and above all no completed-round stamp.
+    """
+    async def stream(messages, tools=None):
+        yield {"content": None, "tool_calls": None,
+               "finish_reason": "stop", "usage": None}
+
+    session, frames = _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream)
+
+    errors = [f for f in frames if "error" in f]
+    dones = [f for f in frames if f.get("done")]
+    assert len(errors) == 1, frames
+    assert len(dones) == 1, frames
+    assert "without producing any text" in errors[0]["error"], errors[0]["error"]
+    assert not [m for m in session._read_history() if m.get("role") == "assistant"], (
+        "an answer that never existed was persisted as one"
+    )
+    assert not (tmp_path / "planted-fire-round-complete").exists(), (
+        "a round that produced nothing stamped the completed-round marker, which "
+        "is the evidence the #1114 staleness alarm reads as 'a round finished'"
+    )
+
+
+def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkeypatch):
+    """The control for the guard above, and the only test of this stamp.
+
+    Without it, "the empty round did not stamp the marker" would pass just as well
+    if the loop had stopped stamping it at all — which is the defect the guard is
+    supposed to *stop* rather than cause.
+    """
+    async def stream(messages, tools=None):
+        yield {"content": "here is the answer", "tool_calls": None,
+               "finish_reason": "stop", "usage": None}
+
+    session, frames = _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream)
+
+    assert not [f for f in frames if "error" in f], frames
+    assert [m for m in session._read_history() if m.get("role") == "assistant"], (
+        "a real answer was not persisted"
+    )
+    assert (tmp_path / "planted-fire-round-complete").exists(), (
+        "a genuinely completed round no longer stamps the marker the #1114 alarm "
+        "measures — the empty-answer guard must not have swallowed it"
+    )

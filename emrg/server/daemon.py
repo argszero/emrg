@@ -57,6 +57,7 @@ from emrg.server.llm import (
     CONTENT_FILTER_FINISH,
     CONTENT_RISK,
     CONTEXT_TOO_LONG,
+    EMPTY_ANSWER_ERROR,
     LlmClient,
     classify_llm_error,
     is_overlong_error,
@@ -3739,6 +3740,40 @@ class EmrgServer:
                     full_content, final_finish, final_usage,
                     reasoning=full_reasoning,
                 )
+
+                # Case 1a: the round arrived with nothing in it (issue #1723).
+                # The branch is entered on the finish reason alone, so an empty
+                # `stop` used to be persisted as an assistant record, broadcast as
+                # `done` with `content: ""`, and stamped into the completed-round
+                # marker — i.e. a round that produced nothing wrote the evidence
+                # the #1114 staleness alarm reads as *a round finished*. Report it
+                # instead: the same two frames Case 0 sends (the explanation, then
+                # the one terminal frame the client's busy flag and the
+                # scheduler's recv loop both wait for), and no round-complete
+                # stamp, so a silent model can still be told from a working one.
+                # `reasoning` may be non-empty here — a model that produced only a
+                # think block has still answered with nothing — and its length is
+                # named in the log so the two shapes stay distinguishable without
+                # ever copying a think block into a log line.
+                if not full_content:
+                    logger.error(
+                        "round %d: the model produced no text "
+                        "(finish_reason=%s, no tool calls, %d character(s) of "
+                        "reasoning) — reporting it instead of counting the round "
+                        "as answered",
+                        round_num, final_finish, len(full_reasoning or ""),
+                    )
+                    await self._broadcast(session.session_id, {
+                        "request_id": req.id,
+                        "error": EMPTY_ANSWER_ERROR,
+                        "session_id": session.session_id,
+                    })
+                    await self._broadcast(session.session_id, {
+                        "done": True,
+                        "request_id": req.id,
+                        "session_id": session.session_id,
+                    })
+                    return
 
                 # Persist assistant message
                 session.append_message({
