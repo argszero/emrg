@@ -215,16 +215,37 @@ test("_findPython: 树里没有 .venv 就回退 PATH 的 python3，不算失败"
 test("approval_request / approval_resolved：两帧都直达渲染层（rant 2026-09-29T15:52:38 后续）", async () => {
   // 提问帧与解析帧都不是 `command_result`：没人发过命令，`_resolvePending` 不得吞掉。
   // 解析帧若在这里被丢掉，renderer 的对话框就永远不关——提问早已结束，窗还开着。
+  //
+  // **载荷也必须整帧到达**，不只是「类型到达」：`timeout_seconds` 是 renderer 那条
+  // 自有期限的唯一来源（它读不了 Python 的常量），而它从 daemon 到 renderer 要过这一跳。
+  // 这一跳若把载荷重建——字段照抄、新字段漏掉——GUI 就回到「帧不来就永远持有死提问」，
+  // 而两个套件都不变红：按下面两条命令各跑一次即可复现，所以这条断言不是装饰。
+  //   cd emrg/gui && npm test
+  //   cd emrg/gui/renderer && npx vitest run
   const client = new DaemonClient();
   const ws = await connectClient(client);
   const seen = [];
   client.onEvent((type, data) => seen.push([type, data]));
   const send = (obj) => ws.emit("message", Buffer.from(JSON.stringify(obj)));
-  send({ type: "approval_request", session_id: "s1", request_id: "appr-1", question: "widen?" });
+  send({
+    type: "approval_request",
+    session_id: "s1",
+    request_id: "appr-1",
+    question: "widen?",
+    // 故意用一个不会是客户端默认值的数：断言的就是「daemon 声明的那个数原样到达」，
+    // 若某处自己造了一个期限，这个断言会红。
+    timeout_seconds: 137,
+  });
   send({ type: "approval_resolved", session_id: "s1", request_id: "appr-1", outcome: "timed_out" });
   assert.deepStrictEqual(
     seen.map(([t]) => t), ["approval_request", "approval_resolved"],
     "both frames must reach the renderer",
+  );
+  assert.strictEqual(seen[0][1].request_id, "appr-1");
+  assert.strictEqual(seen[0][1].question, "widen?");
+  assert.strictEqual(
+    seen[0][1].timeout_seconds, 137,
+    "the question frame must arrive whole: the renderer's own bound is read from this field",
   );
   assert.strictEqual(seen[1][1].request_id, "appr-1");
   assert.strictEqual(seen[1][1].outcome, "timed_out");
