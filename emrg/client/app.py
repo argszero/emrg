@@ -355,6 +355,27 @@ def the_ending_completes_a_receipt_this_client_holds(
     return receipt_held and turn_ended_cancelled
 
 
+def approval_question_is_still_live(*, now: float, deadline: float) -> bool:
+    """Whether a line typed at ``now`` is still the answer to a pending question.
+
+    Rant 2026-09-29T15:52:38.987951+08:00 follow-up (issue #1757). The daemon
+    gives a question `APPROVAL_TIMEOUT_SECONDS` and then refuses the call, so a
+    line typed after that instant answers nothing. The TUI held the question
+    until the host typed and took whatever they typed as the answer, so a
+    *prompt* typed after the daemon had already given up was consumed as an
+    answer and never sent. The client now carries its own deadline — stamped
+    when the request frame arrives — and this is the one decision between the
+    two readings: inside it the line is the answer, outside it the line is the
+    host typing.
+
+    The client's stamp is set when the frame *arrives*, so its deadline falls
+    later than the daemon's by the frame's flight time. The direction is the
+    safe one: the two clocks disagree only in a window the daemon has already
+    stopped waiting in, never the other way round.
+    """
+    return now < deadline
+
+
 def turn_start_instant(data: dict) -> float | None:
     """The instant a ``turn_start`` frame says the session's turn began, or None.
 
@@ -2483,27 +2504,33 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 if _approval_pending is not None:
                     request_id, _question, _deadline = _approval_pending
                     _approval_pending = None
-                    if time.monotonic() >= _deadline:
+                    if not approval_question_is_still_live(
+                        now=time.monotonic(), deadline=_deadline,
+                    ):
                         # Expired: the daemon already refused the call, so this
-                        # line is the host typing, not an answer to anything.
+                        # line is the host typing, not an answer to anything —
+                        # and it is left to the ordinary prompt path below
+                        # rather than consumed and erased here. Consuming it was
+                        # the swallow the deadline exists to prevent: the host's
+                        # prompt vanished along with the question.
                         chat.add("system",
                             "The approval question expired unanswered — that call "
                             "stays at its default tier.")
                         status.update(center=server_id or "emrg")
+                        term.render()
+                    else:
+                        approved = text.strip().lower() in ("y", "yes", "approve", "ok")
+                        await conn.send_command(
+                            "approval_response",
+                            request_id=request_id,
+                            approved=approved,
+                        )
+                        chat.add("system",
+                            "Approved for this one call." if approved
+                            else "Refused — the command stays at its default tier.")
+                        status.update(center=server_id or "emrg")
                         inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                         return True
-                    approved = text.strip().lower() in ("y", "yes", "approve", "ok")
-                    await conn.send_command(
-                        "approval_response",
-                        request_id=request_id,
-                        approved=approved,
-                    )
-                    chat.add("system",
-                        "Approved for this one call." if approved
-                        else "Refused — the command stays at its default tier.")
-                    status.update(center=server_id or "emrg")
-                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
-                    return True
 
                 # Pending /skills install confirmation — next line is the answer
                 if _skills_confirm is not None:
