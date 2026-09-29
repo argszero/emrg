@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import tempfile
@@ -21,6 +22,7 @@ import yaml
 from emrg.config import LlmConfig
 from emrg.memory import INDEX_SIZE_WARN, ProjectMemoryStore
 from emrg.protocol import InstanceIdentity, TaskRequest
+from emrg.server import abort_runs as mod_abort_runs
 from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.llm import CONTENT_RISK, classify_llm_error
@@ -3948,17 +3950,23 @@ def test_pong_carries_the_effective_vision(tmp_path, monkeypatch):
 # one with a non-empty `reasoning` and an empty `content`.
 
 
-def _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream):
+def _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream, abort_runs=None):
     """Run one tool loop over a stubbed stream, returning `(session, frames)`.
 
     `stream` is the async generator the loop consumes. Both planted-fire markers
     are redirected at `tmp_path` (issue #1337), as in `_drive_tool_loop`.
+
+    `abort_runs` is the counter the server counts through; the default is the
+    server's own (whose state file `tests/conftest.py` redirects per test), and
+    a test that needs to seed or read a run passes one over `tmp_path`.
     """
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH",
                         tmp_path / "planted-fire-heartbeat")
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
                         tmp_path / "planted-fire-round-complete")
     server = _make_server()
+    if abort_runs is not None:
+        server._abort_runs = abort_runs
     session = Session.create_with_id("content-filter-test", tmp_path)
     frames: list[dict] = []
 
@@ -4032,6 +4040,78 @@ def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame
     assert not [m for m in session._read_history() if m.get("role") == "assistant"], (
         "a turn whose answer the provider refused recorded an assistant message"
     )
+
+
+# ── requirement L3: a run of aborts must be visible AS a run ────────────────
+#
+# Rant 2026-09-28T15:57:31. Measured there: 53 aborted cycles over two days, one
+# cause, and every log line about them said what the first one said — so the run
+# was legible only to a reader counting lines by hand. The two tests below are
+# the two halves of the count: an abort extends the run, and a round the filter
+# let through ends it.
+
+
+def _aborting_stream():
+    async def stream(messages, tools=None):
+        from emrg.server.llm import CONTENT_FILTER_ERROR
+        raise RuntimeError(CONTENT_FILTER_ERROR)
+        yield  # pragma: no cover - makes this an async generator
+
+    return stream
+
+
+def _answering_stream():
+    async def stream(messages, tools=None):
+        yield {"content": "an answer the filter allowed", "tool_calls": None,
+               "finish_reason": "stop", "usage": None}
+
+    return stream
+
+
+def test_consecutive_aborts_are_counted_as_one_run(tmp_path, monkeypatch, caplog):
+    """The 53-cycle shape: the second abort must say it is the second."""
+    runs = mod_abort_runs.AbortRuns(tmp_path / "abort-runs.json")
+
+    with caplog.at_level(logging.ERROR, logger="emrg.server.daemon"):
+        _drive_tool_loop_with_stream(
+            tmp_path, monkeypatch, _aborting_stream(), abort_runs=runs)
+        _drive_tool_loop_with_stream(
+            tmp_path, monkeypatch, _aborting_stream(), abort_runs=runs)
+
+    run = runs.run("content_filter", "content-filter-test")
+    assert run is not None, "an abort by a named cause must open a run"
+    assert run["count"] == 2, runs.snapshot()
+    assert run["first_at"] <= run["last_at"]
+
+    aborts = [r.getMessage() for r in caplog.records if "abort 2 of a run" in r.getMessage()]
+    assert len(aborts) == 1, (
+        "the second abort must name itself as the second of a run, not repeat "
+        f"the first one: {[r.getMessage() for r in caplog.records]}"
+    )
+    assert "of a run that began" in aborts[0]
+
+
+def test_a_round_the_filter_allowed_ends_the_run(tmp_path, monkeypatch):
+    """A success in between makes the next abort a new run, not a longer one.
+
+    The count answers "how many in a row"; keeping it across a turn that got
+    through would report a trigger that has already been survived as one that is
+    still firing.
+    """
+    runs = mod_abort_runs.AbortRuns(tmp_path / "abort-runs.json")
+    _drive_tool_loop_with_stream(
+        tmp_path, monkeypatch, _aborting_stream(), abort_runs=runs)
+    assert runs.run("content_filter", "content-filter-test")["count"] == 1
+
+    _drive_tool_loop_with_stream(
+        tmp_path, monkeypatch, _answering_stream(), abort_runs=runs)
+    assert runs.run("content_filter", "content-filter-test") is None, (
+        "a round the filter allowed left the previous run standing"
+    )
+
+    _drive_tool_loop_with_stream(
+        tmp_path, monkeypatch, _aborting_stream(), abort_runs=runs)
+    assert runs.run("content_filter", "content-filter-test")["count"] == 1
 
 
 # ── the same shape, from the other direction: nothing refused the answer,
