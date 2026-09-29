@@ -1386,11 +1386,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     _render_throttled()
                     continue
 
-                # The question is over — answered, refused, or expired (rant
-                # 2026-09-29T15:52:38.987951+08:00 follow-up). Without this the
-                # TUI held the question until the host typed something, and a
-                # *prompt* typed after the timeout was swallowed as the answer
-                # while the daemon had already refused the call.
+                # The question is over — answered, refused, expired, or cancelled
+                # under the turn (rant 2026-09-29T15:52:38.987951+08:00
+                # follow-up). Without this the TUI held the question until the
+                # host typed something, and a *prompt* typed after the timeout was
+                # swallowed as the answer while the daemon had already refused the
+                # call. An outcome the host's own answer produced needs no line —
+                # the line above it already said what they chose — so only the two
+                # endings they did *not* cause are reported here.
                 if data.get("type") == "approval_resolved":
                     request_id = str(data.get("request_id", ""))
                     if _approval_pending is not None and _approval_pending[0] == request_id:
@@ -1400,6 +1403,10 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             chat.add("system",
                                 "The approval question expired unanswered — that "
                                 "call stays at its default tier.")
+                        elif outcome == "cancelled":
+                            chat.add("system",
+                                "The approval question was cancelled with the turn "
+                                "— no answer was needed.")
                         status.update(center=server_id or "emrg")
                         _render_throttled()
                     continue

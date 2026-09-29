@@ -340,4 +340,16 @@ describe("createDaemonBridge", () => {
     emit({ type: "approval_resolved", data: { request_id: "appr-3", outcome: "refused" }, sid: "s1" });
     expect(bridge.store.get().pendingApproval).toBeNull();
   });
+
+  it("approval_resolved 的第三种结局（随轮取消）同样关窗——结局名不参与判定", () => {
+    // The daemon announces a `cancelled` ending too, because ESC cancels the
+    // handle waiting on the answer. Which word a resolution carries must not
+    // decide whether the dialog closes: the two clients only need to know that
+    // the question the frame names is over. A future outcome therefore cannot
+    // reintroduce the stuck dialog this fix removes.
+    const { emit, bridge } = setup();
+    emit({ type: "approval_request", data: { request_id: "appr-4", question: "widen?" }, sid: "s1" });
+    emit({ type: "approval_resolved", data: { request_id: "appr-4", outcome: "cancelled" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval).toBeNull();
+  });
 });

@@ -456,6 +456,41 @@ def test_the_resolution_names_the_outcome_a_client_must_render(tmp_path):
     assert refused is False and resolved_no["outcome"] == "refused"
 
 
+def test_a_question_cancelled_mid_wait_is_announced_too(tmp_path):
+    """A third exit a subscriber can observe: the turn is cancelled under it.
+
+    ESC on a turn cancels the task that is waiting for the answer
+    (`_session_turn_task`, the handle `daemon.py:1344` cancels), so the wait
+    dies with `CancelledError` — a `BaseException` that the timeout branch does
+    not catch and cannot be made to catch by widening it to `Exception`. Without
+    this the question stays live on every client exactly as it did in the
+    timeout case: the GUI's dialog never closes, and the TUI's own deadline is
+    the only thing that eventually stops it swallowing a prompt.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-cancelled", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def scenario():
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        for _ in range(500):
+            if any(f.get("type") == "approval_request" for f in ws.sent):
+                break
+            await asyncio.sleep(0.002)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return dict(server._pending_approvals)
+
+    pending = asyncio.run(scenario())
+    assert pending == {}, "a cancelled question must not leave its future behind"
+    assert [f.get("type") for f in ws.sent] == ["approval_request", "approval_resolved"]
+    resolved = ws.sent[-1]
+    assert resolved["outcome"] == "cancelled"
+    assert resolved["request_id"] == ws.sent[0]["request_id"]
+    assert resolved["session_id"] == session.session_id
+
+
 # ── the loop's call site ────────────────────────────────────────────────────
 
 
