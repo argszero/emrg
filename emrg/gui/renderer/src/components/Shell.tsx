@@ -5,6 +5,7 @@ import { useDaemonBridge } from "./DaemonBridgeProvider";
 import { createProdMarkdownRenderer } from "../lib/vendorMarkdown";
 import { dialogReducer, initialDialogState } from "../lib/dialog";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { ApprovalDialog } from "./ApprovalDialog";
 import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
 import { RantDialog } from "./RantDialog";
 import type { ProjectRec, RantRec, TaskRec } from "../lib/workspaceView";
@@ -743,6 +744,15 @@ export function Shell() {
           onSwitchSession={selectSession}
         />
         <ConfirmDialog request={dialogState.confirm} onDismiss={() => dispatch({ type: "close-confirm" })} />
+        {/*
+          daemon 的提权提问（rant 2026-09-29T15:52:38）。它渲染在 DialogHost 之外、
+          与 ConfirmDialog 并列：提问属于**连接**而不属于某个对话框状态机，daemon
+          正在阻塞等它，任何一层「稍后打开」都会把答复推到一个已超时的提问上。
+        */}
+        <ApprovalDialog
+          request={appState.pendingApproval}
+          onAnswer={(approved) => void bridge.respondApproval(approved)}
+        />
         <TaskFormDialog
           request={taskForm}
           types={taskTypes}

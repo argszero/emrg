@@ -71,6 +71,8 @@ from emrg.server.git_utils import (
     parse_gh_auth_user,
     resolve_git_gh,
 )
+from emrg.sandbox import escalation
+from emrg.sandbox.policy import DEFAULT_MODE as DEFAULT_SANDBOX_MODE
 from emrg.server import content_risk_probe
 from emrg.server.tool_types import ToolResult
 from emrg.memory import (
@@ -614,6 +616,12 @@ class EmrgServer:
         # → 错误 cwd 的客户端（GUI 幽灵连接）与真实连接同组，实时消息串线。改为
         # session_id → {ws: cwd}，广播时按运行中任务的 cwd 过滤（见 _session_task_cwds）。
         self._session_subscribers: dict[str, dict] = {}  # session_id → {ws: cwd_str}
+        # In-flight approval questions, `request_id → (Future, session_id)`. The
+        # daemon asks, a client answers, and the answer resolves the future the
+        # asker is awaiting (rant 2026-09-29T15:52:38.987951+08:00, requirement 1:
+        # EMRG had no approval channel at all, so a confined session's only exit
+        # from a refusal was to give up on the command).
+        self._pending_approvals: dict[str, tuple[asyncio.Future, str]] = {}
         self._session_task_cwds: dict[str, str] = {}     # session_id → 运行中任务的 cwd
         self._session_busy: dict[str, bool] = {}        # session_id → active task?
         # When the session's current turn actually began (epoch), or absent when
@@ -1315,6 +1323,14 @@ class EmrgServer:
                     self._touch_project(last_cwd)
 
                 # ── Cancel: interrupt running tool loop ──────────
+                if data.get("type") == "approval_response":
+                    # The mirror of `approval_request` (rant
+                    # 2026-09-29T15:52:38.987951+08:00). Handled before anything
+                    # else can consume the frame: the answer resolves the future
+                    # the asking turn is blocked on, and a turn blocked on an
+                    # approval is not reading its own inbox.
+                    self._resolve_approval(data)
+                    continue
                 if data.get("type") == "cancel":
                     # A cancel names a session, not a connection (rant 2026-09-20T12:50:13).
                     # Resolve the turn from the session's own registration, so a peer
@@ -1522,6 +1538,100 @@ class EmrgServer:
                 await self._send(w, data)
             except Exception:
                 pass  # individual subscriber failure is non-fatal
+
+    async def request_approval(self, session_id: str, question: str) -> bool | None:
+        """Ask this session's clients a yes/no question and wait for an answer.
+
+        Rant 2026-09-29T15:52:38.987951+08:00, requirement 1: the escalation of
+        P5 has no meaning without a channel, and EMRG had none — ``approval`` and
+        ``approve`` appeared nowhere in ``emrg/server`` or ``protocol.py``.
+
+        The question goes to the session's subscribers (the same set a turn's
+        frames reach), each answer resolves one future, and **the first answer
+        wins**: a second client's later reply is dropped rather than racing the
+        first, because a command already running at a wider tier cannot be
+        un-widened by a contrary answer.
+
+        Every failure resolves to a refusal rather than hanging or guessing:
+        nobody subscribed, nobody answered inside `APPROVAL_TIMEOUT_SECONDS`, or
+        an answer that is not a boolean/known word — all of them return ``None``
+        or ``False`` and the caller keeps the narrower tier. That is the
+        blueprint's fail-closed order and the only direction that can be safe: a
+        host who walked away has not approved anything.
+
+        :returns: ``True`` approved, ``False`` refused, ``None`` nothing readable
+            came back (the caller maps all three to "do not widen").
+        """
+        subs = self._session_subscribers.get(session_id, {})
+        if not subs:
+            logger.warning(
+                "approval requested for session %s with no client subscribed — "
+                "refusing (fail closed)", session_id,
+            )
+            return None
+
+        request_id = f"appr-{secrets.token_hex(8)}"
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_approvals[request_id] = (future, session_id)
+        try:
+            await self._broadcast(session_id, {
+                "type": "approval_request",
+                "session_id": session_id,
+                "request_id": request_id,
+                "question": question,
+            })
+            try:
+                return await asyncio.wait_for(
+                    future, timeout=escalation.APPROVAL_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "approval %s for session %s timed out after %.0fs — refusing",
+                    request_id, session_id, escalation.APPROVAL_TIMEOUT_SECONDS,
+                )
+                return None
+        finally:
+            self._pending_approvals.pop(request_id, None)
+
+    def _resolve_approval(self, data: dict) -> bool:
+        """Route a client's answer to the question that is waiting for it.
+
+        :returns: whether a live question was answered. An answer naming a
+            request nobody is waiting for is reported (a client answering the
+            wrong session, or a stale window) rather than silently dropped, and
+            it changes nothing — the pending future is what decides.
+        """
+        request_id = str(data.get("request_id") or "")
+        pending = self._pending_approvals.get(request_id)
+        if pending is None:
+            logger.info(
+                "approval answer for unknown request %r — ignored", request_id,
+            )
+            return False
+        future, _session_id = pending
+        if future.done():
+            logger.info(
+                "approval answer for %s arrived after the first — ignored", request_id,
+            )
+            return True
+        answer = escalation._read_answer(
+            data.get("approved", data.get("answer"))
+        )
+        future.set_result(answer)
+        return True
+
+    async def _approval_channel(self, session_id: str):
+        """The `ask` callable `approve_escalation` takes, bound to a session.
+
+        A factory rather than a method reference because the target session is
+        fixed per turn while the channel itself is generic: escalation is the
+        first caller, not the only possible one.
+        """
+
+        async def ask(question: str) -> object:
+            return await self.request_approval(session_id, question)
+
+        return ask
 
     async def _broadcast_all(self, data: dict, exclude=None) -> None:
         """Send data to ALL authenticated connections (global state, e.g. model_set)."""
@@ -3425,6 +3535,65 @@ class EmrgServer:
             args["sandbox"] = req.sandbox
             args["workspace"] = cwd
 
+    async def _apply_escalation(
+        self, tc_name: str, args: dict, session, req: TaskRequest,
+    ) -> str | None:
+        """Widen this one call's tier, if the host approves and the table allows.
+
+        Rant 2026-09-29T15:52:38.987951+08:00, phase P5 (design §D3). The
+        decision is taken **here** rather than inside the tool, and that is the
+        requirement rather than a placement preference: the tier a call runs
+        under is a per-call fact the daemon injects (``_inject_tool_arguments``
+        is its one home), while a tool's schema is a registry-global declaration
+        — which is exactly why the blueprint validates the hop at execution and
+        advertises the target set in the schema.
+
+        What the tier *means* is untouched. The task's configured tier is still
+        this session's default, and a granted escalation changes the tier for
+        **this call alone**: nothing is written back to the session, to
+        ``tasks.yml``, or to the next call. A refused, unanswerable or timed-out
+        approval leaves the call at its default tier, and the refusal says which
+        of those happened.
+
+        :returns: ``None`` to run the call, or the refusal text to report instead.
+        """
+        if tc_name not in SHELL_TOOL_NAMES:
+            return None
+        raw_target = args.get("sandbox_permissions")
+        raw_reason = args.get("justification")
+        if raw_target is None and raw_reason is None:
+            return None
+        try:
+            target, justification = escalation.validate_pairing(raw_target, raw_reason)
+        except escalation.EscalationRefused as e:
+            return f"⛔ escalation refused: {e}"
+        current = args.get("sandbox") or DEFAULT_SANDBOX_MODE
+        try:
+            hop = escalation.validate_hop(current, str(target))
+        except escalation.EscalationRefused as e:
+            return f"⛔ escalation refused: {e}"
+        outcome = await escalation.approve_escalation(
+            current_mode=hop.from_mode,
+            target=hop.to_mode,
+            justification=justification or "",
+            ask=await self._approval_channel(session.session_id),
+            session_id=session.session_id,
+        )
+        if not outcome.approved:
+            # The command does NOT run at the wider tier, and saying so is the
+            # whole point: a silent "no" reads as a broken command.
+            return (
+                f"⛔ escalation refused ({outcome.reason}): this command runs at "
+                f"{hop.from_mode!r}. Nothing was widened, and the session's "
+                "default tier is unchanged."
+            )
+        args["sandbox"] = hop.to_mode
+        logger.warning(
+            "escalation granted for one call: %s (session %s)", hop.describe(),
+            session.session_id,
+        )
+        return None
+
     async def _run_tool_loop(
         self, req: TaskRequest, ws, session: Session,
         cancel_event: asyncio.Event | None = None,
@@ -4036,8 +4205,21 @@ class EmrgServer:
                     self._inject_tool_arguments(tc_name, args, session, req)
 
                     # Execute
+                    refusal = await self._apply_escalation(
+                        tc_name, args, session, req,
+                    )
                     tool = self.tools.get(tc_name)
-                    if tool:
+                    if refusal is not None:
+                        # A refused escalation is the call's outcome, and the
+                        # command does not run at all: a hop that was not granted
+                        # must not be granted by accident.
+                        result = ToolResult(
+                            tool_call_id=tc_id,
+                            name=tc_name,
+                            content=refusal,
+                            error=True,
+                        )
+                    elif tool:
                         try:
                             result = await tool.execute(args)
                             result.tool_call_id = tc_id

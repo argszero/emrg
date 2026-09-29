@@ -896,6 +896,10 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     task_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
     _skills_confirm: tuple | None = None  # (skill_name, install_cmd) — next Enter answers the prompt
+    # (request_id, question) while the daemon is waiting on this client's answer
+    # to an escalation request — the next line typed is the answer (rant
+    # 2026-09-29T15:52:38.987951+08:00, requirement 1).
+    _approval_pending: tuple | None = None
     # /task-session (rant 2026-09-17T18:36:08). `_task_list_intent` is set by the
     # command that asked for the list, so the picker can be built with the right
     # intent; `_task_open_pending` holds the (cwd, session_id) a confirmed pick
@@ -1350,6 +1354,24 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     msg_count = max(0, msg_count - compacted)
                     _update_left_extra()
                     term.render()
+                    continue
+
+                # An escalation approval question (rant
+                # 2026-09-29T15:52:38.987951+08:00, requirement 1): the daemon
+                # blocks the confined call until this client answers, and a
+                # client that never answers is a refusal, so the question is
+                # shown where the host is already typing rather than in a modal
+                # the TUI does not have.
+                if data.get("type") == "approval_request":
+                    nonlocal _approval_pending
+                    question = str(data.get("question", ""))
+                    _approval_pending = (str(data.get("request_id", "")), question)
+                    chat.add("system",
+                        f"⚠️ The daemon asks for approval — {question}\n"
+                        f"Type `yes` to allow it for this one call, or anything "
+                        f"else to refuse.")
+                    status.update(center="approval needed — yes/no")
+                    _render_throttled()
                     continue
 
                 # Sessions list
@@ -2410,6 +2432,26 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     if was_busy:
                         _queued_sends.append({"id": rid, "prompt": hint, "images": None})
                     _rant_project = None
+                    status.update(center=server_id or "emrg")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
+                # Pending escalation approval — the next line is the answer.
+                # Handled before every other command: the daemon is holding a
+                # call open on this answer, and a line meant as "yes" must not
+                # be read as a prompt to send.
+                if _approval_pending is not None:
+                    request_id, _question = _approval_pending
+                    _approval_pending = None
+                    approved = text.strip().lower() in ("y", "yes", "approve", "ok")
+                    await conn.send_command(
+                        "approval_response",
+                        request_id=request_id,
+                        approved=approved,
+                    )
+                    chat.add("system",
+                        "Approved for this one call." if approved
+                        else "Refused — the command stays at its default tier.")
                     status.update(center=server_id or "emrg")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True

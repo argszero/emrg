@@ -398,6 +398,13 @@ export const ZH_DICT: Record<string, string> = {
   "app.unknownResult": "结果未知——连接中断",
   "app.error": "出了点问题：{msg}",
   "app.unknownError": "未知错误",
+  // 沙箱提权提问（rant 2026-09-29T15:52:38）。daemon 正阻塞在这句提问上：不回答
+  // 按 fail-closed 就是拒绝，所以按钮之外还要把这句话说出来 —— 一个不知道自己
+  // 一走了之等于拒绝的宿主，会把「超时」读成「它自己取消了」。
+  "approval.title": "这条命令请求更宽的沙箱权限",
+  "approval.allow": "批准（仅此一次）",
+  "approval.deny": "拒绝",
+  "approval.silenceIsDenial": "不回答、关掉窗口或超时都按拒绝处理——只有点「批准」才是同意。",
   "app.unknown": "未知",
   "app.authFailed": "认证失败了，请检查设置里的 API Key。",
   "app.daemonStopped": "daemon 启动失败（已停止自动重试）。请在终端运行 `emrg server` 排查；\n{msg}",
@@ -801,6 +808,14 @@ export const EN_DICT: Record<string, string> = {
   "app.unknownResult": "Result unknown — connection lost",
   "app.error": "Something went wrong: {msg}",
   "app.unknownError": "Unknown error",
+  // A sandbox escalation question (rant 2026-09-29T15:52:38). The daemon is
+  // blocked on it, and silence is a refusal — so the dialog says so: a host who
+  // walks away believing the question expired would have read a timeout as a
+  // decision it made itself.
+  "approval.title": "This command asks for a wider sandbox tier",
+  "approval.allow": "Approve (this once)",
+  "approval.deny": "Deny",
+  "approval.silenceIsDenial": "No answer, a closed window or a timeout all count as a denial — only Approve is consent.",
   "app.unknown": "unknown",
   "app.authFailed": "Authentication failed — check your API Key in Settings.",
   "app.daemonStopped": "daemon failed to start (auto-retry stopped). Run `emrg server` in a terminal to debug;\n{msg}",

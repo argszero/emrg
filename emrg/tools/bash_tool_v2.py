@@ -59,6 +59,8 @@ from emrg.sandbox.providers import unconfined_mode
 from emrg.server.git_utils import no_prompt_env
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools import command_scan
+from emrg.sandbox.escalation import ESCALATION_TARGETS
+from emrg.sandbox.escalation import hops_from as escalation_hops
 from emrg.tools.base import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -252,10 +254,13 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
     reported, not errored — the model decides how to react.
 
     :param result: the completed run.
-    :param escalation_modes: the escalation targets this composition advertises;
-        non-empty would add the same-turn hint after a denial marker.  Empty
-        here: EMRG does not advertise escalation yet (design §1.5 A5, phase P5),
-        and the blueprint adds that line only when a composition advertises it.
+    :param escalation_modes: the escalation targets the composition advertises
+        for the tier this run used (design §1.5 A5, phase P5 —
+        ``emrg/sandbox/escalation.py``).  The blueprint adds the hint line only
+        when a composition advertises the field (``tool-bash/src/render.ts:43-51``),
+        and that condition is carried here as the tier's own hop set: a run at
+        ``danger-full-access`` has nowhere wider to go, so it passes none and the
+        refusal is reported exactly as it always was.
     :returns: the model-facing text.
     """
     stdout, stderr = _fit_streams(result.stdout, result.stderr)
@@ -270,9 +275,16 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
 
     markers: list[str] = []
     if result.sandbox.get("denied"):
-        markers.append(sandbox_denial_marker(str(result.sandbox.get("mode", ""))))
-        for _mode in escalation_modes:  # pragma: no cover - no composition advertises yet
-            raise NotImplementedError("escalation is phase P5")
+        from emrg.sandbox.escalation import with_retry_hint
+
+        marker = sandbox_denial_marker(str(result.sandbox.get("mode", "")))
+        markers.append(
+            with_retry_hint(
+                marker,
+                mode=str(result.sandbox.get("mode", "")),
+                advertised=escalation_modes,
+            )
+        )
     if result.timed_out:
         markers.append(f"[timed out after {result.timeout_ms}ms]")
     if result.signal is not None:
@@ -623,6 +635,22 @@ class BashToolV2(ToolExecutor):
                         "supplies the session's working directory, which is also the "
                         "writable boundary; passing another value does not widen it.",
                     },
+                    "sandbox_permissions": {
+                        "type": "string",
+                        "enum": list(ESCALATION_TARGETS),
+                        "description": "Ask for a one-hop wider sandbox tier for THIS "
+                        "call only. Must be sent together with `justification`, and it "
+                        "is refused unless the host approves: it never changes the "
+                        "session's default tier, and it reaches only the tiers the "
+                        "call's current one lists (from `read-only`: `workspace-write` "
+                        "or `danger-full-access`).",
+                    },
+                    "justification": {
+                        "type": "string",
+                        "description": "Why this call needs the wider tier — a non-empty "
+                        "sentence the host reads before approving. Required with "
+                        "`sandbox_permissions`.",
+                    },
                     "intent": {
                         "type": "string",
                         "description": "The purpose of this call: why you are invoking it and what you want to achieve. "
@@ -666,7 +694,13 @@ class BashToolV2(ToolExecutor):
         except OSError as exc:
             logger.warning("bash v2: %s", exc)
             return ToolResult(name="bash", content=f"Error: {exc}", error=True)
-        return ToolResult(name="bash", content=render_result(result), error=False)
+        return ToolResult(
+            name="bash",
+            content=render_result(
+                result, escalation_modes=escalation_hops(policy.mode),
+            ),
+            error=False,
+        )
 
 
 def _as_timeout(value: object) -> float:

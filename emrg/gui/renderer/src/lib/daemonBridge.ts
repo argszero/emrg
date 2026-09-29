@@ -118,6 +118,24 @@ export interface DaemonAppState {
   disconnectedBySid: Record<string, boolean>;
   /** upgrade 事件（心跳检测 installed ≠ current → "重启生效"横幅；null=无待重启提示） */
   upgradeBanner: { current: string; installed: string } | null;
+  /**
+   * The daemon's open approval question, or null when it is not asking one.
+   *
+   * The daemon is *blocked* on this: a confined command it was asked to run
+   * waits for an answer, and no answer at all is a refusal (rant
+   * 2026-09-29T15:52:38.987951+08:00, requirement 1). So the frame is not a
+   * notification to decorate the transcript with — it is a state the GUI has to
+   * surface, which is why it lives in the store rather than in a local ref.
+   */
+  pendingApproval: PendingApproval | null;
+}
+
+/** `approval_request` 帧的载荷（daemon `request_approval`）。 */
+export interface PendingApproval {
+  requestId: string;
+  question: string;
+  /** 发出提问的会话；回答要写回同一条连接。 */
+  sessionId: string | null;
 }
 
 const SID_NULL = "__emrg_null_sid__";
@@ -169,6 +187,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     turnStartBySid: {},
     disconnectedBySid: {},
     upgradeBanner: null,
+    pendingApproval: null,
   });
 }
 
@@ -205,6 +224,12 @@ export interface DaemonBridgeDeps {
   emrg: {
     sendMessage(p: SendMessagePayload): Promise<{ requestId?: string }>;
     init?(): Promise<InitResult>;
+    /** 回答 daemon 的提权提问（preload.respondApproval；未接线时为 undefined） */
+    respondApproval?(p: {
+      sessionId: string;
+      requestId: string;
+      approved: boolean;
+    }): Promise<{ ok?: boolean }>;
   };
   transcript: TranscriptStore;
   t?: TranslateFn;
@@ -219,6 +244,16 @@ export interface DaemonBridge {
   handleFrame(frame: DaemonEventFrame): void;
   /** 把 window.emrg.init() 返回值融合进 store（对齐 vanilla boot 语义） */
   applyInit(result: InitResult): void;
+  /**
+   * Answer the daemon's open approval question, or do nothing when it is not
+   * asking one.
+   *
+   * Clearing the store entry **first** is deliberate: a question that has been
+   * answered must disappear even if the send itself fails, because a prompt that
+   * stays on screen is one the host will answer twice — and the daemon's channel
+   * takes the first answer only.
+   */
+  respondApproval(approved: boolean): Promise<boolean>;
 }
 
 export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
@@ -474,6 +509,26 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         }
         break;
       }
+      case "approval_request": {
+        // Rant 2026-09-29T15:52:38.987951+08:00, requirement 1: the daemon asks a
+        // client before it widens a confined call, and a client that stays silent
+        // is a refusal. The frame carries the question, so it is stored whole —
+        // and `sid` is kept beside it because the answer has to travel back on the
+        // same session's connection.
+        const ap = data as { request_id?: string; question?: string };
+        const requestId = String(ap?.request_id || "");
+        if (requestId) {
+          store.update((s) => ({
+            ...s,
+            pendingApproval: {
+              requestId,
+              question: String(ap?.question || ""),
+              sessionId: sid,
+            },
+          }));
+        }
+        break;
+      }
       case "upgrade": {
         // 心跳每 15s 检测到 installed ≠ current 都会重发；同一 installed 版本只
         // 写一次 store（vanilla lastKnownVersion 语义：不重复弹，dismiss 后不再出现）。
@@ -511,5 +566,26 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     }));
   }
 
-  return { store, dispose, handleFrame, applyInit };
+  async function respondApproval(approved: boolean): Promise<boolean> {
+    const pending = store.get().pendingApproval;
+    store.update((s) => ({ ...s, pendingApproval: null }));
+    if (!pending) return false;
+    const responder = emrg.respondApproval;
+    if (!responder) return false;
+    try {
+      await responder({
+        sessionId: pending.sessionId || "",
+        requestId: pending.requestId,
+        approved,
+      });
+    } catch {
+      // The answer did not reach the daemon. It is not retried: the daemon's
+      // channel is fail-closed and its timeout is the fallback, so a silent
+      // command is reported by the daemon, not guessed at here.
+      return false;
+    }
+    return true;
+  }
+
+  return { store, dispose, handleFrame, applyInit, respondApproval };
 }

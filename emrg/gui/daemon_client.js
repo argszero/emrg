@@ -910,6 +910,14 @@ class DaemonClient {
     // 命令响应优先（pending 配对）
     if (this._resolvePending(frame)) return;
 
+    if (frame.type === "approval_request") {
+      // The daemon is holding a confined call open until a client answers
+      // (rant 2026-09-29T15:52:38.987951+08:00, requirement 1). Not a
+      // `command_result`: nobody asked a command, so `_resolvePending` must not
+      // swallow it — it goes straight to the renderer's prompt.
+      this._emit("approval_request", frame);
+      return;
+    }
     if (frame.type === "tool_start") {
       this._onToolStart(frame);
       this._emit("tool_started", frame);
