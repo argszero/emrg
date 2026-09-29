@@ -21,16 +21,19 @@ Two properties are the whole point and neither is a detail.
 **It fails closed.** No client to ask, a timeout, an answer that cannot be
 parsed, a channel that raised: every one of those is a *refusal*. The order is
 what makes that true rather than hopeful — the table is checked before the
-channel is consulted (a request to cross two hops never becomes a question a
-confused host could say yes to), and the answer is mapped to a boolean before it
-is acted on.
+channel is consulted (a target the current tier's row does not list never
+becomes a question a confused host could say yes to), and the answer is mapped
+to a boolean before it is acted on.
 
 **The field is validated at execution, not by the schema.** A tool schema is
 registry-global and an effective mode is a per-call fact, so the tool advertises
 ``ESCALATION_TARGETS`` while :func:`validate_hop` is what decides whether *this*
-call may go there. A model that asks to escalate from ``read-only`` straight to
-``danger-full-access`` is asking for two hops and is refused — the schema would
-have accepted the same string.
+call may go there. A model whose call stands at ``workspace-write`` and asks for
+``read-only`` is refused — and the schema would have accepted the same string,
+because a schema validates a tier's name and not the call's position. What is
+reachable is exactly the current tier's own row, and it is a **strictly wider**
+table rather than a ladder: ``read-only`` reaches ``danger-full-access`` in one
+hop, since the blueprint's row (``escalation.ts:28-31``) lists it.
 """
 
 from __future__ import annotations
@@ -178,11 +181,11 @@ def validate_pairing(
 
 
 def validate_hop(current_mode: str, target: str) -> Hop:
-    """Check that `target` is exactly one hop wider than `current_mode`.
+    """Check that `target` is a tier `current_mode` may widen to in one hop.
 
     :raises EscalationRefused: when the target is unknown, is the current tier,
-        or is wider than one hop — the case the schema cannot see, because the
-        schema validates the string and not the call's position.
+        or is not in the current tier's row — the case the schema cannot see,
+        because the schema validates the string and not the call's position.
     """
     if target not in SANDBOX_MODES:
         raise EscalationRefused(
@@ -194,7 +197,8 @@ def validate_hop(current_mode: str, target: str) -> Hop:
         reachable = ", ".join(allowed) if allowed else "nothing"
         raise EscalationRefused(
             f"this call runs at {current_mode!r} and may escalate to {reachable} in "
-            f"one hop; {target!r} is not one of them — escalation never crosses a hop"
+            f"one hop; {target!r} is not one of them — a hop reaches only the tiers "
+            f"this call's row lists"
         )
     return Hop(from_mode=current_mode, to_mode=target)
 

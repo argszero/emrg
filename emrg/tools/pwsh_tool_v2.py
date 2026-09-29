@@ -744,7 +744,9 @@ class PwshToolV2(ToolExecutor):
                         "description": "Ask for a one-hop wider sandbox tier for THIS "
                         "call only. Must be sent together with `justification`, and it "
                         "is refused unless the host approves: it never changes the "
-                        "session's default tier, and it cannot cross two hops.",
+                        "session's default tier, and it reaches only the tiers the "
+                        "call's current one lists (from `read-only`: `workspace-write` "
+                        "or `danger-full-access`).",
                     },
                     "justification": {
                         "type": "string",
