@@ -491,6 +491,106 @@ def test_a_question_cancelled_mid_wait_is_announced_too(tmp_path):
     assert resolved["session_id"] == session.session_id
 
 
+class _WsHoldingTheFrame(_FakeWs):
+    """A subscriber that records a frame and then holds its send open.
+
+    `holds` names the type whose *delivery* is the window this client opens: the
+    request (the question has reached the client and the daemon has not yet begun
+    to wait) or the resolution (the ending is already on the wire and the turn
+    dies while that frame is being written). Both are awaits inside
+    `request_approval`, and neither is the wait the older cancellation test
+    cancels.
+    """
+
+    def __init__(self, holds: str) -> None:
+        super().__init__()
+        self.holds = holds
+        self.seen = asyncio.Event()
+        self.hold = asyncio.Event()  # never released: the cancel is the exit
+        self._held = False  # the hold is one-shot, so a repeat cannot deadlock
+
+    async def send(self, data) -> None:
+        frame = json.loads(data)
+        self.sent.append(frame)
+        if frame.get("type") == self.holds and not self._held:
+            self._held = True
+            self.seen.set()
+            await self.hold.wait()
+
+
+def test_a_cancel_while_the_question_is_told_is_announced_too(tmp_path):
+    """The wait is not the only place a question can die.
+
+    `request_approval` broadcasts the question *before* it waits for the answer,
+    and `_broadcast` awaits one send per subscriber — so a cancel (ESC on the
+    turn, `_session_turn_task`, `daemon.py:1344`) that lands inside that
+    broadcast kills the call at a point the timeout branch and the wait branch
+    both sit after. The client that already received the question then holds it
+    dead, which is the whole defect this feature exists to remove: the frame is
+    the only thing that tells a client the question is over.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-cancel-broadcast", tmp_path)
+    ws = _WsHoldingTheFrame("approval_request")
+    server._session_subscribers[session.session_id] = {ws: str(session.cwd)}
+
+    async def scenario():
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        await asyncio.wait_for(ws.seen.wait(), 5)
+        # The question reached this client before the cancel — not an assumption:
+        # `seen` is set from the frame the client was handed.
+        assert [f.get("type") for f in ws.sent] == ["approval_request"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        return list(ws.sent), dict(server._pending_approvals)
+
+    sent, pending = asyncio.run(scenario())
+    assert [f.get("type") for f in sent] == ["approval_request", "approval_resolved"]
+    resolved = sent[-1]
+    assert resolved["outcome"] == "cancelled"
+    assert resolved["request_id"] == sent[0]["request_id"]
+    assert resolved["session_id"] == session.session_id
+    assert pending == {}, "a cancelled question must not leave its future behind"
+
+
+def test_a_cancel_while_the_ending_is_told_does_not_say_two_endings(tmp_path):
+    """One question, one resolution — whichever await the cancel interrupts.
+
+    The ending is decided before it is delivered, so a cancel that lands while
+    the answering frame is being written must not add a second word for the same
+    question: the client would be told both that the host approved and that the
+    turn cancelled the question, and the last one would be false about how the
+    question itself ended (the turn's own `done{cancelled}` is where the death of
+    the *turn* is told). This is the guard on the one-shot flag the broadcast
+    window needs: without it the flag is a comment.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-cancel-announce", tmp_path)
+    ws = _WsHoldingTheFrame("approval_resolved")
+    server._session_subscribers[session.session_id] = {ws: str(session.cwd)}
+
+    async def scenario():
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        for _ in range(500):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.002)
+        server._resolve_approval({"request_id": ws.sent[0]["request_id"], "approved": True})
+        await asyncio.wait_for(ws.seen.wait(), 5)
+        # The verdict is already on the wire when the cancel arrives.
+        assert [f.get("type") for f in ws.sent] == ["approval_request", "approval_resolved"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        return list(ws.sent)
+
+    sent = asyncio.run(scenario())
+    assert [f.get("type") for f in sent] == ["approval_request", "approval_resolved"]
+    assert sent[-1]["outcome"] == "approved"
+    assert sent[-1]["request_id"] == sent[0]["request_id"]
+
+
 # ── the loop's call site ────────────────────────────────────────────────────
 
 
