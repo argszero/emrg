@@ -153,20 +153,20 @@ def test_a_write_keeps_multiline_strings_as_literal_blocks(tmp_path):
 
     tasks_yml = tmp_path / "tasks.yml"
     tasks_yml.write_text(
-        "name: a\n"
-        "type: evolution\n"
-        "config:\n"
-        "  project: emrg\n"
-        "extra_prompt: |\n"
-        "  first line\n"
-        "  second line\n"
+        "- name: a\n"
+        "  type: evolution\n"
+        "  config:\n"
+        "    project: emrg\n"
+        "  extra_prompt: |\n"
+        "    first line\n"
+        "    second line\n"
     )
 
     write_table(read_table(tasks_yml), tasks_yml)
 
     text = tasks_yml.read_text()
     assert "extra_prompt: |" in text, text
-    assert "first line\n  second line" in text, text
+    assert "first line\n    second line" in text, text
 
 
 def test_read_table_seeds_the_default_when_the_file_is_missing(tmp_path):
@@ -282,90 +282,80 @@ def test_task_delete_and_update_do_not_touch_other_records(tmp_path, monkeypatch
 # ── TaskScheduler.load_and_start ──────────────────────────────────
 
 
-def test_load_and_start_no_file(tmp_path):
-    """No tasks.yml → self-heal creates emrg-task and starts it (rant 20:42 方案 C).
+async def _boot(tmp_path, tasks=None):
+    """`load_and_start` in a temp config dir; returns a snapshot of what it started.
 
-    Previously returned an empty list; now a packaged install without
-    tasks.yml gets the emrg self-evolution task bootstrapped automatically.
+    The snapshot is taken *inside* the loop on purpose: a handler removes itself when
+    its coroutine finishes (the done-callback `_forget`), and `asyncio.run` cancels
+    every pending task on its way out — so reading the live set after the call returns
+    reads an empty set, which is correct and tells the test nothing.
     """
     from emrg.server import scheduler as mod
-
-    async def _run():
-        sched = TaskScheduler(InstanceIdentity())
-        sched._tasks_file = tmp_path / "tasks.yml"
-        return sched.load_and_start(), sched
-
-    orig_config = mod.config_dir
-    try:
-        mod.config_dir = lambda: tmp_path
-        (coros, sched) = asyncio.run(_run())
-    finally:
-        mod.config_dir = orig_config
-
-    assert len(coros) == 2, "the handler plus the reconcile loop"
-    assert list(sched._live.values())[0].name == "emrg-task"
-    assert list(sched._live.values())[0].interval == 600  # the seeded default
-    sched.stop_all()
-    for c in coros:
-        c.cancel()
-
-
-def test_load_and_start_enabled_task(tmp_path):
-    """Starts a coroutine for each enabled task."""
-    from emrg.server import scheduler as mod
-    tasks_yml = tmp_path / "tasks.yml"
-    tasks_yml.write_text(yaml.safe_dump([
-        {"name": "emrg", "type": "evolution", "config": {"project": "emrg"}, "interval": 99, "enabled": True},
-    ]))
-
-    async def _run():
-        sched = TaskScheduler(InstanceIdentity())
-        sched._tasks_file = tasks_yml
-        return sched.load_and_start(), sched
 
     orig_config = mod.config_dir
     mod.config_dir = lambda: tmp_path
     try:
-        (coros, sched) = asyncio.run(_run())
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        if tasks is not None:
+            sched._tasks_file.write_text(yaml.safe_dump(tasks))
+        coros = sched.load_and_start()
+        # A handler derives its record at its first wake, in a worker thread — so
+        # "what template did this type resolve to" is only answerable once that read
+        # has landed. Bounded wait, and the loop is the scheduler's, not a sleep.
+        for _ in range(200):
+            if all(h._derived for h in sched._live.values()):
+                break
+            await asyncio.sleep(0.01)
+        snapshot = {
+            "coros": len(coros),
+            "names": sorted(sched._live),
+            "intervals": {h.name: h.interval for h in sched._live.values()},
+            "templates": {h.name: h._template_path.name for h in sched._live.values()},
+        }
+        sched.stop_all()
+        return snapshot
     finally:
         mod.config_dir = orig_config
 
-    assert len(coros) == 2  # the handler plus the reconcile loop
-    assert len(sched._live) == 1, "the record names a task, and the seed does not add one"
-    assert list(sched._live.values())[0].name == "emrg"
-    assert list(sched._live.values())[0].interval == 99
-    # Clean up: stop handler + cancel coros
-    sched.stop_all()
-    for c in coros:
-        c.cancel()
+
+def test_load_and_start_no_file_seeds_the_default_table(tmp_path):
+    """A missing tasks.yml is seeded from `read_table` and the seeded task starts.
+
+    The seed is a property of the file (host principle: a file that is missing is
+    written, whatever the install story is), which is why this no longer needs a
+    self-heal step to run first — and why deleting the file brings `emrg-task` back.
+    """
+    snapshot = asyncio.run(_boot(tmp_path))
+
+    assert snapshot["coros"] == 2, "the handler plus the reconcile loop"
+    assert snapshot["names"] == ["emrg-task"]
+    assert snapshot["intervals"] == {"emrg-task": 600}, "the seeded default, not 60"
+
+
+def test_load_and_start_enabled_task(tmp_path):
+    """Starts a coroutine for each enabled task, and the interval is the record's."""
+    snapshot = asyncio.run(_boot(tmp_path, [
+        {"name": "emrg", "type": "evolution", "config": {"project": "emrg"},
+         "interval": 99, "enabled": True},
+    ]))
+
+    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
+    assert snapshot["names"] == ["emrg"], (
+        "the file exists, so nothing is seeded on top of it (D2)"
+    )
+    assert snapshot["intervals"] == {"emrg": 99}
 
 
 def test_load_and_start_skips_disabled(tmp_path):
     """Disabled tasks are not started."""
-    tasks_yml = tmp_path / "tasks.yml"
-    tasks_yml.write_text(yaml.safe_dump([
+    snapshot = asyncio.run(_boot(tmp_path, [
         {"name": "enabled", "type": "evolution", "config": {"project": "emrg"}, "enabled": True},
         {"name": "disabled", "type": "evolution", "config": {"path": "/tmp"}, "enabled": False},
     ]))
 
-    async def _run():
-        sched = TaskScheduler(InstanceIdentity())
-        sched._tasks_file = tasks_yml
-        return sched.load_and_start(), sched
-
-    from emrg.server import scheduler as mod
-    orig_config = mod.config_dir
-    mod.config_dir = lambda: tmp_path
-    try:
-        (coros, sched) = asyncio.run(_run())
-    finally:
-        mod.config_dir = orig_config
-
-    assert len(coros) == 2  # the handler plus the reconcile loop
-    assert list(sched._live.values())[0].name == "enabled"
-    sched.stop_all()
-    for c in coros:
-        c.cancel()
+    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
+    assert snapshot["names"] == ["enabled"]
 
 
 def test_load_and_start_skips_an_unknown_type_and_says_so(tmp_path, caplog):
@@ -376,123 +366,62 @@ def test_load_and_start_skips_an_unknown_type_and_says_so(tmp_path, caplog):
     and nothing said so. The IPC-side validator always rejected it — so the two paths
     disagreed, and the hand-edited file was the one that took the silent route.
     """
-    tasks_yml = tmp_path / "tasks.yml"
-    tasks_yml.write_text(yaml.safe_dump([
-        {"name": "bad", "type": "nonexistent_handler", "config": {}, "enabled": True},
-    ]))
+    with caplog.at_level(logging.ERROR):
+        snapshot = asyncio.run(_boot(tmp_path, [
+            {"name": "bad", "type": "nonexistent_handler", "config": {}, "enabled": True},
+        ]))
 
-    async def _run():
-        sched = TaskScheduler(InstanceIdentity())
-        sched._tasks_file = tasks_yml
-        return sched.load_and_start(), sched
-
-    from emrg.server import scheduler as mod
-    orig_config = mod.config_dir
-    try:
-        mod.config_dir = lambda: tmp_path
-        (coros, sched) = asyncio.run(_run())
-    finally:
-        mod.config_dir = orig_config
-
-    assert dict(sched._live) == {}, "an unknown type is not started"
+    assert snapshot["names"] == [], "an unknown type is not started"
     assert "unknown type" in caplog.text
-    sched.stop_all()
-    for c in coros:
-        c.cancel()
 
 
-# ── Template task types (paper / open-source / promote) ────────────
+def test_task_templates_and_the_default_type(tmp_path):
+    """Every built-in type names a template file that exists.
 
-
-def test_task_templates_cover_all_handlers():
-    """Every HANDLERS type has a TASK_TEMPLATES mapping and the file exists.
-
-    Regression guard: template path bugs (promote #304, #306) crashed the
-    scheduler at runtime. This test fails fast if a handler type loses its
-    template mapping or a template file is renamed/missing.
+    Regression guard: template path bugs (promote #304, #306) crashed the scheduler at
+    runtime, and this test fails fast if a mapping loses its template or a template
+    file is renamed. The second half is new with the `HANDLERS` census removal: the
+    type the default task record names must resolve, or a fresh install starts nothing.
     """
     from emrg.server import scheduler as mod
 
-    for task_type in TaskScheduler.HANDLERS:
-        assert task_type in mod.TASK_TEMPLATES, (
-            f"missing TASK_TEMPLATES mapping for {task_type!r}"
-        )
-        template_path = (
-            Path(__file__).resolve().parent.parent
-            / "emrg" / "server" / mod.TASK_TEMPLATES[task_type]
-        )
+    assert mod.DEFAULT_TASK_RECORD["type"] in mod.TASK_TEMPLATES
+    for task_type, filename in mod.TASK_TEMPLATES.items():
+        template_path = Path(__file__).resolve().parent.parent / "emrg" / "server" / filename
         assert template_path.exists(), (
             f"template file missing for {task_type!r}: {template_path.name}"
         )
 
 
+# ── Template task types (paper / open-source / promote) ────────────
+
+
 def test_load_and_start_competition_task(tmp_path):
     """Competition tasks start a TaskHandler with the competition template.
 
-    Rant 2026-09-12T14:57:33: `competition` is a new built-in task type. It
-    reuses the shared TaskHandler (only the template differs), so the failure
-    mode this guards is the wiring: a type registered in HANDLERS but missing
-    from TASK_TEMPLATES (or with a misnamed template file) crashes at start.
+    Rant 2026-09-12T14:57:33: `competition` is a built-in task type. It reuses the
+    shared TaskHandler — only the template differs — so the failure mode this guards is
+    the wiring: a type whose template is missing or misnamed crashes at start.
     """
-    tasks_yml = tmp_path / "tasks.yml"
-    tasks_yml.write_text(yaml.safe_dump([
+    snapshot = asyncio.run(_boot(tmp_path, [
         {"name": "competition-task", "type": "competition",
          "config": {"project": "competitions"},
          "interval": 3600, "enabled": True},
     ]))
 
-    async def _run():
-        sched = TaskScheduler(InstanceIdentity())
-        sched._tasks_file = tasks_yml
-        return sched.load_and_start(), sched
-
-    from emrg.server import scheduler as mod
-    orig_config = mod.config_dir
-    mod.config_dir = lambda: tmp_path
-    try:
-        (coros, sched) = asyncio.run(_run())
-    finally:
-        mod.config_dir = orig_config
-
-    # A file that exists is not seeded (D2), so this task is the only handler.
-    assert len(coros) == 2  # the handler plus the reconcile loop
-    by_name = dict(sched._live)
-    assert set(by_name) == {"competition-task"}
-    assert by_name["competition-task"]._template_path.name == "competition_prompt.md"
-    sched.stop_all()
-    for c in coros:
-        c.cancel()
+    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
+    assert snapshot["templates"] == {"competition-task": "competition_prompt.md"}
 
 
 def test_load_and_start_promote_task(tmp_path):
-    """Promote tasks start an TaskHandler with the promote template."""
-    tasks_yml = tmp_path / "tasks.yml"
-    tasks_yml.write_text(yaml.safe_dump([
+    """Promote tasks start a TaskHandler with the promote template."""
+    snapshot = asyncio.run(_boot(tmp_path, [
         {"name": "olr-promote", "type": "promote",
          "config": {"project": "openlocalrouter"},
          "interval": 3600, "enabled": True},
     ]))
 
-    async def _run():
-        sched = TaskScheduler(InstanceIdentity())
-        sched._tasks_file = tasks_yml
-        return sched.load_and_start(), sched
-
-    from emrg.server import scheduler as mod
-    orig_config = mod.config_dir
-    mod.config_dir = lambda: tmp_path
-    try:
-        (coros, sched) = asyncio.run(_run())
-    finally:
-        mod.config_dir = orig_config
-
-    assert len(coros) == 2  # the handler plus the reconcile loop
-    by_name = dict(sched._live)
-    assert set(by_name) == {"olr-promote"}
-    assert by_name["olr-promote"]._template_path.name == "promote_prompt.md"
-    sched.stop_all()
-    for c in coros:
-        c.cancel()
+    assert snapshot["templates"] == {"olr-promote": "promote_prompt.md"}
 
 
 def test_resolve_task_template_custom_user_file(tmp_path):
@@ -563,32 +492,13 @@ def test_resolve_task_template_journal_builtin_priority(tmp_path):
 
 def test_load_and_start_journal_task(tmp_path):
     """Journal tasks start a TaskHandler with the journal template."""
-    tasks_yml = tmp_path / "tasks.yml"
-    tasks_yml.write_text(yaml.safe_dump([
+    snapshot = asyncio.run(_boot(tmp_path, [
         {"name": "journal-task", "type": "journal",
          "config": {"project": "mem", "role": "author", "author_id": "author-a"},
          "interval": 3600, "enabled": True},
     ]))
 
-    async def _run():
-        sched = TaskScheduler(InstanceIdentity())
-        sched._tasks_file = tasks_yml
-        return sched.load_and_start(), sched
-
-    from emrg.server import scheduler as mod
-    orig_config = mod.config_dir
-    mod.config_dir = lambda: tmp_path
-    try:
-        (coros, sched) = asyncio.run(_run())
-    finally:
-        mod.config_dir = orig_config
-
-    by_name = dict(sched._live)
-    assert set(by_name) == {"journal-task"}
-    assert by_name["journal-task"]._template_path.name == "journal_prompt.md"
-    sched.stop_all()
-    for c in coros:
-        c.cancel()
+    assert snapshot["templates"] == {"journal-task": "journal_prompt.md"}
 
 
 def test_task_create_journal_without_custom_template(tmp_path):
@@ -984,7 +894,7 @@ def test_task_scheduler_total_evolutions():
     sched = TaskScheduler(InstanceIdentity())
     h1 = make_handler(name="a", config={}, interval=60, identity=InstanceIdentity())
     h2 = make_handler(name="b", config={}, interval=60, identity=InstanceIdentity())
-    sched._handlers = [h1, h2]
+    sched._live = {"a": h1, "b": h2}
 
     assert sched.total_evolutions() == 0
     h1.evolutions.append(EvolutionLog(timestamp="t1"))
@@ -1421,28 +1331,36 @@ def test_promote_template_registration_blog_sections():
 
 
 def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
-    """Build an TaskHandler pointed at a tmp config dir."""
+    """Build a TaskHandler whose record points at a tmp config dir."""
     from emrg.server import scheduler as mod
+
     orig_config = mod.config_dir
     mod.config_dir = lambda: tmp_path
-    handler = make_handler(
-        name=name,
-        config={"project": project} if project else {},
-        interval=60,
-        identity=InstanceIdentity(),
-    )
-    mod.config_dir = orig_config
+    try:
+        handler = make_handler(
+            name=name,
+            config={"project": project} if project else {},
+            interval=60,
+        )
+    finally:
+        mod.config_dir = orig_config
     if path is not None:
-        handler._source_dir = str(path)
-        handler.project_path = str(path)
+        # What the handler reads is the derived set, so a test that needs a particular
+        # resolution states it there rather than building a projects.yml to derive it.
+        handler._derived["source_dir"] = str(path)
+        handler._derived["project_path"] = str(path)
     return handler
 
 
 
-def test_ensure_self_evolution_task_adds_when_missing(tmp_path):
-    """tasks.yml without an emrg evolution task gets emrg-task appended."""
+def test_a_record_deleted_from_an_existing_file_stays_deleted(tmp_path):
+    """D2: deleting one record is terminal — the file is not re-seeded for it.
+
+    The seed belongs to a *missing file*, not to a missing record. Re-adding a record
+    the host deleted would resurrect exactly what they removed, and the host's own
+    principle for this area is that the file is the truth.
+    """
     from emrg.server import scheduler as mod
-    from emrg.server.scheduler import TaskScheduler
 
     tasks_yml = tmp_path / "tasks.yml"
     tasks_yml.write_text(yaml.safe_dump([
@@ -1455,51 +1373,33 @@ def test_ensure_self_evolution_task_adds_when_missing(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_self_evolution_task()
-        sched._ensure_self_evolution_task()  # idempotent
+        sched._ensure_emrg_project_entry()
+        sched._ensure_emrg_project_entry()  # idempotent
     finally:
         mod.config_dir = orig_config
 
-    data = yaml.safe_load(tasks_yml.read_text(encoding="utf-8"))
-    names = [e["name"] for e in data]
-    assert "emrg-task" in names
-    assert "other" in names
-    emrg = next(e for e in data if e["name"] == "emrg-task")
-    assert emrg["type"] == "evolution"
-    assert emrg["config"] == {"project": "emrg"}
-    assert emrg["interval"] == 60
-    assert emrg["enabled"] is True
-    assert len(names) == 2  # no duplicate from second call
+    names = [e["name"] for e in yaml.safe_load(tasks_yml.read_text(encoding="utf-8"))]
+    assert names == ["other"], "the file exists, so nothing is seeded into it"
 
 
-def test_ensure_self_evolution_task_idempotent_when_present(tmp_path):
-    """Existing emrg evolution task is left untouched (no duplicate)."""
+def test_the_seed_returns_when_the_whole_file_is_deleted(tmp_path):
+    """D2's other half: deleting the file brings `emrg-task` back."""
     from emrg.server import scheduler as mod
-    from emrg.server.scheduler import TaskScheduler
-
-    tasks_yml = tmp_path / "tasks.yml"
-    tasks_yml.write_text(yaml.safe_dump([
-        {"name": "emrg-task", "type": "evolution",
-         "config": {"project": "emrg"}, "interval": 60, "enabled": True,
-         "last_run": None},
-    ]))
-
-    sched = TaskScheduler(InstanceIdentity())
-    sched._tasks_file = tasks_yml
+    from emrg.server.scheduler import read_table
 
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_self_evolution_task()
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        names = [r["name"] for r in read_table(sched._tasks_file)]
     finally:
         mod.config_dir = orig_config
 
-    data = yaml.safe_load(tasks_yml.read_text(encoding="utf-8"))
-    assert len(data) == 1
-    assert data[0]["name"] == "emrg-task"
+    assert names == ["emrg-task"]
 
 
-def test_ensure_self_evolution_task_adds_project_entry_when_missing(tmp_path):
+def test_ensure_emrg_project_entry_adds_project_entry_when_missing(tmp_path):
     """Missing projects.yml emrg entry gets added (fixed path, no network)."""
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import EVOLUTION_CWD, TaskScheduler
@@ -1509,8 +1409,8 @@ def test_ensure_self_evolution_task_adds_project_entry_when_missing(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_self_evolution_task()
-        sched._ensure_self_evolution_task()  # idempotent
+        sched._ensure_emrg_project_entry()
+        sched._ensure_emrg_project_entry()  # idempotent
     finally:
         mod.config_dir = orig_config
 
@@ -1523,7 +1423,7 @@ def test_ensure_self_evolution_task_adds_project_entry_when_missing(tmp_path):
     assert len([e for e in data if e.get("name") == "emrg"]) == 1  # no dup
 
 
-def test_ensure_self_evolution_task_preserves_existing_project_entry(tmp_path):
+def test_ensure_emrg_project_entry_preserves_existing_project_entry(tmp_path):
     """Existing emrg project entry (dev-machine path) is preserved as-is."""
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
@@ -1542,7 +1442,7 @@ def test_ensure_self_evolution_task_preserves_existing_project_entry(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_self_evolution_task()
+        sched._ensure_emrg_project_entry()
     finally:
         mod.config_dir = orig_config
 
@@ -1552,7 +1452,7 @@ def test_ensure_self_evolution_task_preserves_existing_project_entry(tmp_path):
     assert data[0]["path"] == str(dev_path)  # untouched
 
 
-def test_ensure_self_evolution_task_repairs_stale_project_entry(tmp_path):
+def test_ensure_emrg_project_entry_repairs_stale_project_entry(tmp_path):
     """A dead emrg path (deleted pytest-temp dir) is repaired to the canonical
     workspace (2026-08-12 incident: a test run leaked a pytest temp path into
     the real ~/.emrg/projects.yml; the dir is gone after the suite, leaving a
@@ -1573,7 +1473,7 @@ def test_ensure_self_evolution_task_repairs_stale_project_entry(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_self_evolution_task()
+        sched._ensure_emrg_project_entry()
     finally:
         mod.config_dir = orig_config
 
@@ -1584,7 +1484,7 @@ def test_ensure_self_evolution_task_repairs_stale_project_entry(tmp_path):
     assert len(data) == 2
 
 
-def test_ensure_self_evolution_task_other_entries_preserved(tmp_path):
+def test_ensure_emrg_project_entry_other_entries_preserved(tmp_path):
     """Non-emrg project entries survive the self-heal."""
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
@@ -1599,7 +1499,7 @@ def test_ensure_self_evolution_task_other_entries_preserved(tmp_path):
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        sched._ensure_self_evolution_task()
+        sched._ensure_emrg_project_entry()
     finally:
         mod.config_dir = orig_config
 
@@ -2429,9 +2329,12 @@ def _original_connect_to_server():
 # recommend_slowdown (rant 2026-08-20T10:58:55).
 
 def test_heartbeat_interval_formula(tmp_path):
-    """heartbeat = max(interval, min(interval*8, 8h)); long intervals unchanged."""
+    """heartbeat = max(interval, min(interval*8, 8h)); long intervals unchanged.
+
+    The interval is read from the handler's record, so each row states it there — the
+    one way to set a handler's cadence now that nothing is cached.
+    """
     from emrg.server import scheduler as mod
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     for interval, expected in [
         (1, 8),            # min*8 floor below the 8h cap
         (60, 480),         # emrg-task: 8 minutes
@@ -2441,7 +2344,7 @@ def test_heartbeat_interval_formula(tmp_path):
         (28800, 28800),    # 8h task: unchanged (max keeps original)
         (86400, 86400),    # 24h task: unchanged (8x beyond cap → original)
     ]:
-        handler.interval = interval
+        handler = make_handler(interval=interval)
         assert handler._heartbeat_interval() == expected, (interval, expected)
 
 
@@ -2516,15 +2419,18 @@ def test_throttled_tick_still_runs_full_cycle(tmp_path):
         "recommend=false restores normal cadence (heartbeat continues until then)"
 
 
-def test_list_tasks_logs_slow_handler(tmp_path, caplog):
-    """list_tasks must be pure in-memory; a slow handler.status() (>200ms)
-    surfaces as a WARNING with a per-handler breakdown so the culprit is
-    identifiable without manual profiling (rant 2026-08-18T20:48:45)."""
+def test_list_tasks_logs_slow_status(tmp_path, caplog):
+    """A slow `status()` surfaces as a WARNING naming the culprit.
+
+    The timing probe is the guard the old "MUST stay pure in-memory" wording was
+    standing in for, and it is unchanged: what it protects is the WS loop, so the rule
+    is "no slow I/O" and this probe is how it is enforced (rant 2026-08-18T20:48:45).
+    """
     import logging
     import time as _time
     from emrg.server import scheduler as mod
 
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler = _make_handler(tmp_path, name="slow", project="", path=str(tmp_path))
     orig_status = handler.status
 
     def slow_status():
@@ -2533,7 +2439,11 @@ def test_list_tasks_logs_slow_handler(tmp_path, caplog):
 
     handler.status = slow_status
     sched = mod.TaskScheduler(InstanceIdentity())
-    sched._handlers = [handler]
+    sched._tasks_file = tmp_path / "tasks.yml"
+    sched._tasks_file.write_text(yaml.safe_dump([
+        {"name": "slow", "type": "evolution", "config": {"project": "emrg"}, "enabled": True},
+    ]))
+    sched._live = {"slow": handler}
     with caplog.at_level(logging.WARNING, logger="emrg.server.scheduler"):
         tasks = sched.list_tasks()
     assert len(tasks) == 1
@@ -2544,27 +2454,26 @@ def test_list_tasks_logs_slow_handler(tmp_path, caplog):
     assert handler.name in msgs, "per-handler breakdown must name the slow handler"
 
 
-def test_list_tasks_includes_static_task_config(tmp_path):
-    """list_tasks must merge the task's static config (type/enabled/config/
-    sandbox) into the runtime status — the GUI tasks panel renders type
-    badges + enabled hints and the edit form prefills from these fields;
-    without them type falls back to "evolution" and project/repo/sandbox are
-    lost (R2245 data-shape gap: handler.status() only exposes runtime state).
+def test_list_tasks_reads_the_record_for_the_declared_fields(tmp_path):
+    """type / enabled / config / sandbox come from the record, not from a start copy.
+
+    The GUI tasks panel renders type badges and enabled hints and the edit form
+    prefills from these fields (R2245). They used to be merged from `_handler_cfgs` —
+    a copy of the record taken when the handler was started, which is why editing a
+    task in the file left the panel showing the old values.
     """
     from emrg.server.scheduler import TaskScheduler
 
-    handler = _make_handler(tmp_path, name="journal", project="sci")
     sched = TaskScheduler(InstanceIdentity())
-    sched._handlers = [handler]
-    sched._handler_cfgs[handler.name] = {
-        "name": "journal",
-        "type": "journal",
-        "config": {"project": "sci", "repo": "argszero/sci"},
-        "interval": 3600,
-        "enabled": False,
-        "sandbox": "read-only",
-    }
+    sched._tasks_file = tmp_path / "tasks.yml"
+    sched._tasks_file.write_text(yaml.safe_dump([
+        {"name": "journal", "type": "journal",
+         "config": {"project": "sci", "repo": "argszero/sci"},
+         "interval": 3600, "enabled": False, "sandbox": "read-only"},
+    ]))
+
     tasks = sched.list_tasks()
+
     assert len(tasks) == 1
     row = tasks[0]
     assert row["name"] == "journal"
@@ -2572,24 +2481,29 @@ def test_list_tasks_includes_static_task_config(tmp_path):
     assert row["enabled"] is False
     assert row["config"] == {"project": "sci", "repo": "argszero/sci"}
     assert row["sandbox"] == "read-only"
-    # runtime fields must survive the merge
-    assert "running" in row and "interval" in row and row["interval"] == 60
+    assert row["running"] is False, "no handler is live for it yet"
+    assert row["interval"] == 3600
 
 
-def test_list_tasks_without_cfg_leaves_status_untouched(tmp_path):
-    """A handler not present in _handler_cfgs (edge: hot-reload race) must not
-    be decorated — status fields stay as-is."""
+def test_list_tasks_shows_a_deleted_task_gone_at_once(tmp_path):
+    """A record deleted from the file stops being listed immediately.
+
+    The file is the skeleton of the listing, so a deletion is visible at the next
+    list rather than when the (still running) handler next wakes.
+    """
     from emrg.server.scheduler import TaskScheduler
 
-    handler = _make_handler(tmp_path, name="plain", project="emrg")
     sched = TaskScheduler(InstanceIdentity())
-    sched._handlers = [handler]
-    # no _handler_cfgs entry for this handler
-    tasks = sched.list_tasks()
-    assert len(tasks) == 1
-    assert tasks[0]["name"] == "plain"
-    assert "type" not in tasks[0]
-    assert "config" not in tasks[0]
+    sched._tasks_file = tmp_path / "tasks.yml"
+    sched._tasks_file.write_text(yaml.safe_dump([
+        {"name": "keep", "type": "evolution", "config": {"project": "emrg"}},
+        {"name": "drop", "type": "evolution", "config": {"project": "emrg"}},
+    ]))
+    assert [t["name"] for t in sched.list_tasks()] == ["keep", "drop"]
+
+    sched.task_delete("drop")
+
+    assert [t["name"] for t in sched.list_tasks()] == ["keep"]
 
 
 # ── Task CRUD + hot reload + templates (rant 2026-08-12T18:23:15 P2) ──
@@ -2669,112 +2583,133 @@ def test_task_update_and_delete(tmp_path):
         mod.config_dir = orig
 
 
-def test_apply_tasks_hot_reload(tmp_path):
-    """apply_tasks diffs handlers: add / remove / restart on change (no daemon restart)."""
+def test_reconcile_starts_what_is_missing_and_cancels_nothing(tmp_path):
+    """reconcile adds the records that have no handler, and only ever adds.
+
+    The removal and restart halves of the old `apply_tasks` are gone by construction
+    (design acceptance I1): a config change is not an event, because the handler reads
+    its own record at every wake. So this asserts the two things that replaced them —
+    a deleted record stops being started, and the handler already running for a
+    changed record is left alone.
+    """
     from emrg.server import scheduler as mod
     mod, orig = _p2_env(tmp_path)
     try:
         sched = TaskScheduler(InstanceIdentity())
         sched._tasks_file = tmp_path / "tasks.yml"
-        sched._save_tasks([
+        sched._write_table([
             {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
             {"name": "b", "type": "evolution", "config": {"project": "mem"}, "interval": 300, "enabled": True},
         ])
 
-        async def _load_and_diff(new_tasks):
-            sched.load_and_start()
-            assert {h.name for h in sched._handlers} == {"a", "b"}
-            summary = await sched.apply_tasks(new_tasks)
-            return summary
+        async def _run():
+            first = sched.reconcile()
+            running_a = sched._live["a"]
+            # b is deleted and c added; a's interval changes.
+            sched._write_table([
+                {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 900, "enabled": True},
+                {"name": "c", "type": "evolution", "config": {"project": "mem"}, "interval": 900, "enabled": True},
+            ])
+            second = sched.reconcile()
+            # Nothing has yielded yet, so no handler has woken: this is the live set
+            # exactly as reconcile left it.
+            live_after = dict(sched._live)
+            # D3: the changed interval lands at the next cycle boundary, not by
+            # rebuilding the handler — so drive the handler's own record read and see
+            # the new value arrive there. Read the live set inside the loop: a handler
+            # removes itself when its coroutine ends, and asyncio.run cancels
+            # everything on its way out.
+            await running_a._refresh_record()
+            live = dict(sched._live)
+            sched.stop_all()
+            return first, second, running_a, live_after, live
 
-        summary = asyncio.run(_load_and_diff([
-            {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
-            {"name": "c", "type": "evolution", "config": {"project": "mem"}, "interval": 900, "enabled": True},
-        ]))
-        assert summary["removed"] == ["b"]
-        assert summary["added"] == ["c"]
-        assert summary["updated"] == []
-        names = {h.name for h in sched._handlers}
-        assert names == {"a", "c"}
-        c = next(h for h in sched._handlers if h.name == "c")
-        assert c.interval == 900
-        sched.stop_all()
+        first, second, running_a, live_after, live = asyncio.run(_run())
+        assert first["started"] == ["a", "b"]
+        assert second["started"] == ["c"], "only the new record is started"
+        assert live_after["a"] is running_a, (
+            "an interval change must not rebuild the running handler — that was the "
+            "silent cancel this design removes"
+        )
+        assert "b" in live_after, "a deleted record's handler exits at its next wake, not here"
+        assert live["a"].interval == 900, "the new interval is read from the record"
     finally:
         mod.config_dir = orig
 
 
-def test_apply_tasks_update_restart(tmp_path):
-    """Changing a task's interval restarts (stops + starts) its handler."""
+def test_reconcile_is_idempotent(tmp_path):
+    """Reconciling an unchanged table starts nothing the second time."""
     from emrg.server import scheduler as mod
     mod, orig = _p2_env(tmp_path)
     try:
         sched = TaskScheduler(InstanceIdentity())
         sched._tasks_file = tmp_path / "tasks.yml"
+        sched._write_table([
+            {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
+        ])
 
         async def _run():
-            sched._save_tasks([
-                {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
-            ])
-            sched.load_and_start()
-            h_old = list(sched._live.values())[0]
-            summary = await sched.apply_tasks([
-                {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 600, "enabled": True},
-            ])
-            return h_old, summary
+            sched.reconcile()
+            second = sched.reconcile()
+            live = sorted(sched._live)
+            sched.stop_all()
+            return second, live
 
-        h_old, summary = asyncio.run(_run())
-        assert summary["updated"] == ["a"]
-        assert summary["added"] == [] and summary["removed"] == []
-        assert len(sched._live) == 1
-        assert list(sched._live.values())[0] is not h_old  # restarted
-        assert list(sched._live.values())[0].interval == 600
-        sched.stop_all()
+        second, live = asyncio.run(_run())
+        assert second == {"started": []}
+        assert live == ["a"]
     finally:
         mod.config_dir = orig
 
 
-def test_apply_tasks_idempotent(tmp_path):
-    """Applying the same tasks is a no-op (no add/remove/update)."""
+def test_reconcile_changes_nothing_when_the_table_is_unreadable(tmp_path):
+    """Acceptance I2: an unreadable table is zero action, never "the table is empty".
+
+    Reading it as empty would retire every handler at its next wake — i.e. stop every
+    scheduled task after one non-atomic save by an editor. This is the failure mode the
+    whole change is organised around, so the arm here is the reading, not a comment.
+    """
     from emrg.server import scheduler as mod
     mod, orig = _p2_env(tmp_path)
     try:
         sched = TaskScheduler(InstanceIdentity())
         sched._tasks_file = tmp_path / "tasks.yml"
-        tasks = [
+        sched._write_table([
             {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
-        ]
+        ])
 
         async def _run():
-            sched._save_tasks(tasks)
-            sched.load_and_start()
-            return await sched.apply_tasks(tasks)
+            sched.reconcile()
+            running = dict(sched._live)
+            sched._tasks_file.write_text("a: [unclosed\n")
+            result = sched.reconcile()
+            still = dict(sched._live)
+            sched.stop_all()
+            return running, result, still
 
-        summary = asyncio.run(_run())
-        assert summary == {"added": [], "removed": [], "updated": []}
-        assert len(sched._live) == 1
-        sched.stop_all()
+        running, result, still = asyncio.run(_run())
+        assert result == {"started": [], "unreadable": True}
+        assert still == running, "nothing was started, stopped or rebuilt"
     finally:
         mod.config_dir = orig
 
 
-def test_hot_reload_offloads_handler_construction_to_thread():
-    """rant 2026-08-19T01:05:47 — apply_tasks (hot reload, on the event loop
-    while serving websockets) must not run TaskHandler's sync git probe on
-    the loop. Construction goes through _start_handler_async →
-    asyncio.to_thread(_build_handler); the boot path keeps the sync
-    _start_handler_for (no clients connected yet)."""
+def test_the_record_read_is_what_leaves_the_event_loop():
+    """rant 2026-08-19T01:05:47 — the git probe must not run on the loop.
+
+    Deriving a record probes the project's git remote (a subprocess), and that now
+    happens at every wake inside `run()` rather than once in `__init__` — so the
+    offload moved with it and has to be asserted where it now is. Reading a source
+    string is the check because the alternative is a slow git on the loop, which this
+    suite cannot observe without one.
+    """
     import inspect
 
     from emrg.server import scheduler as mod
 
-    sched_src = inspect.getsource(mod.TaskScheduler)
-    # apply_tasks awaits the async start path
-    assert "await self._start_handler_async(cfg)" in sched_src
-    # async start path offloads the sync construction
-    assert "asyncio.to_thread(self._build_handler, cfg)" in sched_src
-    # boot path unchanged (sync, pre-serve)
-    assert "handler = self._build_handler(cfg)" in sched_src
-    assert "def _start_handler_for(self, cfg: dict) -> TaskHandler:" in sched_src
+    src = inspect.getsource(mod.TaskHandler)
+    assert "record = await asyncio.to_thread(self._read_own_record)" in src
+    assert "await asyncio.to_thread(self._apply_record, record)" in src
 
 
 def test_daemon_projects_list_offloads_git_probe_to_thread():
@@ -2850,9 +2785,13 @@ def test_task_create_custom_type(tmp_path):
         async def _run():
             ok, task = sched.task_create("daily-report", "report", "mem", 300)
             assert ok and task["type"] == "report"
-            sched._save_tasks([task])
+            sched._write_table([task])
             sched.load_and_start()
-            h = next(h for h in sched._handlers if h.name == "daily-report")
+            h = sched._live["daily-report"]
+            # The handler derives its template from its own record at the top of its
+            # loop (design §4: the record's `type` picks the template), so drive that
+            # read rather than assuming it has already happened.
+            await h._refresh_record()
             assert h._template_path == tmp_path / "task-templates" / "report.md"
             sched.stop_all()
 

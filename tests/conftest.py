@@ -10,10 +10,11 @@ GUI project picker shows a dead path.
 
 CI finding (PR #738): test_ws_e2e._boot_server only patched
 daemon/connect config_dir, but EmrgServer.serve() builds a real
-TaskScheduler whose load_and_start() → _ensure_self_evolution_task()
-writes config_dir()/projects.yml AND tasks.yml via scheduler.py's own
-(unpatched) config_dir → on a fresh runner this hits the real
-~/.emrg/ files.
+TaskScheduler whose load_and_start() → _ensure_emrg_project_entry()
+writes config_dir()/projects.yml, and whose reader/writer (`read_table`,
+`write_table`) touch tasks.yml — all through scheduler.py's own
+(unpatched) config_dir → on a fresh runner this hits the real ~/.emrg/
+files.
 
 This autouse fixture makes any write to the REAL ~/.emrg/projects.yml
 or ~/.emrg/tasks.yml a hard test failure: the offending test is named
