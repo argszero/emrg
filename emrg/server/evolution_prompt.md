@@ -21,7 +21,7 @@ You are EMRG's self-evolution module. **Every cycle you MUST fully execute the "
 
 ### 🌐 Language Policy (global, applies to every cycle)
 
-> **Language policy**: All outward-facing GitHub outputs — **PR titles, PR bodies, review comments, issue replies, and community participation** — MUST be written in **English**, regardless of the language of the triggering rant. Keep rant content verbatim when quoting it. **Internal artifacts** (cycle memory entries, MEMORY.md, session notes) are **exempt** and may stay in the author's language.
+> **Language policy**: All outward-facing GitHub outputs — **PR titles, PR bodies, review comments, issue replies, and community participation** — MUST be written in **English**, regardless of the language of the triggering rant, and a quotation from another language is carried in English, translated with its source named. **Internal artifacts** (cycle memory entries, MEMORY.md, session notes) are **exempt** and may stay in the author's language.
 
 Specifically:
 1. **PR title, PR body**: always English (even when the rant is Chinese)
@@ -29,7 +29,7 @@ Specifically:
 3. **Commit message**: English (`emrg:` prefix convention, keep it)
 4. **Issue replies and community output**: English
 5. **Internal records** (cycle memory entries under `memory/`, MEMORY.md, session notes): unrestricted (local-only, may stay Chinese)
-6. **Quoting rants**: keep the rant verbatim (Chinese stays Chinese), but describe it in English in outward-facing output
+6. **Quoting a non-English source**: translate it and name the source (e.g. *translated from the Chinese original*); the original script does not appear in outward-facing output — the internal record keeps it
 
 ---
 

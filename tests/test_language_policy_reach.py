@@ -4,8 +4,9 @@ Why this file exists
 --------------------
 The project has a rule about the language of outward-facing output: GitHub-facing text is
 written in **English** (PR titles and bodies, review comments, issue replies, commit
-messages, community participation), quotes stay verbatim, and internal artifacts — memory
-entries, session notes, cycle records — are exempt and may stay in the author's language.
+messages, community participation), a quotation from another language is carried in English
+with its source named, and internal artifacts — memory entries, session notes, cycle records
+— are exempt and may stay in the author's language.
 
 Measured 2026-09-19 (`cyc20260919-114441`) on master `dd2a0e64`, that rule was carried by
 task templates and by nothing else:
@@ -58,10 +59,17 @@ POLICY_TERMS = (
     "Outward-facing GitHub output is written in English",  # the rule itself
     "PR titles and PR bodies",                            # the outward artifacts
     "review comments",                                    # the case a review cycle writes
-    "Quotes stay verbatim",                               # quoting a Chinese rant
+    "A quotation from another language is carried in English",  # the quotation rule
     "Internal artifacts are exempt",                      # the half that keeps memory Chinese
     "`.emrg/memory/`",                                    # where the exempt artifacts live
 )
+
+#: The clause this rule replaced, and the reason there is a test for its absence: a
+#: mutation that puts the old sentence back is a restoration of the behaviour the host
+#: reported — a Chinese quote left in an issue — and it must not pass as a wording change.
+#: Measured 2026-09-29: issue #1737 carried 223 Chinese characters, all of them host
+#: quotations reproduced under the retired rule.
+RETIRED_CLAUSE = "Quotes stay verbatim"
 
 
 def _block_after(text: str, heading: str) -> str:
@@ -171,3 +179,35 @@ def test_the_scan_reports_absence() -> None:
     assert _missing_terms(sample, POLICY_TERMS) == list(POLICY_TERMS)
     doubled = f"{POLICY_HEADING}\n\n{POLICY_HEADING}\n\n- Must push\n"
     assert doubled.count(POLICY_HEADING) == 2
+
+
+def test_the_retired_verbatim_clause_is_gone_from_every_carrier() -> None:
+    """The host's ruling of 2026-09-29, and the mutation that would undo it.
+
+    The retired clause — ``Quotes stay verbatim`` — was not a slip: it was this project's
+    stated policy, and it is why issue #1737 went out with 223 Chinese characters of host
+    quotation in it. Stating the new rule only in `system.j2` would leave three templates
+    teaching the old one, so every carrier is read here, and the assertion is the
+    *absence* of the retired sentence rather than the presence of a new one: that is the
+    arm a mutation restoring the old wording has to survive, and it cannot.
+
+    The four carriers are read as files, not through a render, because two of them are
+    task templates that only their own task type receives.
+    """
+    carriers = (
+        SYSTEM_PROMPT,
+        REPO_ROOT / "emrg" / "server" / "evolution_prompt.md",
+        REPO_ROOT / "emrg" / "server" / "journal_prompt.md",
+        REPO_ROOT / "emrg" / "server" / "open_source_prompt.md",
+    )
+    offending = [
+        str(path.relative_to(REPO_ROOT))
+        for path in carriers
+        if RETIRED_CLAUSE in path.read_text(encoding="utf-8")
+    ]
+    assert not offending, (
+        f"the retired rule ({RETIRED_CLAUSE!r}) is still taught in: {offending} — a "
+        "quotation from another language is carried in English, with its source named"
+    )
+    # The instrument's control: the scan must still see the clause when it is there.
+    assert RETIRED_CLAUSE in f"a prompt that says: {RETIRED_CLAUSE}.\n"

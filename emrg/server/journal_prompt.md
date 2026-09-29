@@ -115,7 +115,7 @@ Filter rules (same as open-source tasks):
 - **Rant status machine**: `pending → in_progress → completed` (never jump pending → completed). When starting work on a rant: set `in_progress` + progress note. When all its PRs merged + self-verification passes: set `completed` + ISO timestamp. Host feedback that a fix is insufficient → revert to `in_progress` with reason.
 - Rant-driven journal ops (e.g. "adjust CfP", "revise review policy") are processed in Phase Ops with highest priority.
 
-**Language policy**: journal-facing outputs (issue/PR/review/decision comments) MUST be in English; keep rant content verbatim when quoting. Internal artifacts (session history, memory entries, the closing summary) may stay in the author's language.
+**Language policy**: journal-facing outputs (issue/PR/review/decision comments) MUST be in English; a quotation from another language is carried in English, translated with its source named, never left in the original script. Internal artifacts (session history, memory entries, the closing summary) may stay in the author's language.
 
 #### 0.6 Instance registry (INSTANCES.md)
 
