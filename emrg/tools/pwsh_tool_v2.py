@@ -65,10 +65,13 @@ from emrg.sandbox.policy import (
     SandboxPolicy,
     resolve_policy,
 )
+from emrg.sandbox.escalation import with_retry_hint
 from emrg.sandbox.providers import unconfined_mode
 from emrg.server.git_utils import no_prompt_env
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools import command_scan
+from emrg.sandbox.escalation import ESCALATION_TARGETS
+from emrg.sandbox.escalation import hops_from as escalation_hops
 from emrg.tools.base import ToolExecutor
 from emrg.tools.shell_env import confined_env, runner_import_env
 
@@ -368,9 +371,11 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
     platform, not a second rendering rule (blueprint §14.2 layer 5).
 
     :param result: the completed run.
-    :param escalation_modes: the escalation targets this composition advertises;
-        empty here, because EMRG does not advertise escalation yet (design §1.5
-        A5, phase P5).
+    :param escalation_modes: the escalation targets the composition advertises
+        for the tier this run used (design §1.5 A5, phase P5 —
+        ``emrg/sandbox/escalation.py``).  Non-empty adds the same-turn hint
+        after a denial; a tier with nowhere to go passes none, so the hint is
+        never an instruction that could only fail.
     :returns: the model-facing text.
     """
     stdout, stderr = _fit_streams(result.stdout, result.stderr)
@@ -385,7 +390,11 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
     if result.sandbox.get("denied"):
         mode = result.sandbox.get("mode", "")
         markers.append(f"[sandbox: file access denied under {mode} mode]")
-        markers.append(sandbox_denial_marker(mode))
+        markers.append(
+            with_retry_hint(
+                sandbox_denial_marker(mode), mode=mode, advertised=escalation_modes,
+            )
+        )
     if result.timed_out:
         markers.append(f"[timed out after {result.timeout_ms}ms]")
     elif result.signal is not None:
@@ -729,6 +738,20 @@ class PwshToolV2(ToolExecutor):
                         "supplies the session's working directory, which is also the "
                         "writable boundary; passing another value does not widen it.",
                     },
+                    "sandbox_permissions": {
+                        "type": "string",
+                        "enum": list(ESCALATION_TARGETS),
+                        "description": "Ask for a one-hop wider sandbox tier for THIS "
+                        "call only. Must be sent together with `justification`, and it "
+                        "is refused unless the host approves: it never changes the "
+                        "session's default tier, and it cannot cross two hops.",
+                    },
+                    "justification": {
+                        "type": "string",
+                        "description": "Why this call needs the wider tier — a non-empty "
+                        "sentence the host reads before approving. Required with "
+                        "`sandbox_permissions`.",
+                    },
                     "intent": {
                         "type": "string",
                         "description": "The purpose of this call: why you are invoking it and what you want to achieve. "
@@ -776,7 +799,13 @@ class PwshToolV2(ToolExecutor):
         except OSError as exc:
             logger.warning("pwsh v2: %s", exc)
             return ToolResult(name=TOOL_NAME, content=f"Error: {exc}", error=True)
-        return ToolResult(name=TOOL_NAME, content=render_result(result), error=False)
+        return ToolResult(
+            name=TOOL_NAME,
+            content=render_result(
+                result, escalation_modes=escalation_hops(policy.mode),
+            ),
+            error=False,
+        )
 
 
 def _as_timeout(value: object) -> float:
