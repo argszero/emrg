@@ -164,6 +164,38 @@ def _task_open_switch(pending: tuple[str, str] | None, resumed_sid: str) -> str 
     return pending[0]
 
 
+def _resume_target_from_resolution(
+    result: dict, pending_sid: str | None, fallback_cwd: str
+) -> tuple[str, str] | None:
+    """``(session_id, cwd)`` to resume with, from a ``session_cwd_result``.
+
+    Rant 2026-09-29T15:52:49 (requirement 6, the client half). The client used to
+    send its **own** cwd with every ``resume_session``, which is only ever right
+    by accident: a session belonging to another project — a scheduled task's
+    cycle above all — lives under a different ``.emrg/sessions/``, and the
+    daemon's broadcast filter is keyed by ``(session, cwd)``, so the wrong cwd
+    both fails to open it and, where it opens, leaves the live frames addressed
+    to nobody. It now asks the daemon, which has held the fact all along.
+
+    ``None`` means "this answer is not for me": no open is pending, or the answer
+    names a different session than the one asked for. Same discipline as
+    ``_task_open_switch`` at the other end of the same round trip, and for the
+    same reason — a verdict that arrives after its request was abandoned must not
+    move the host into a project they never picked.
+
+    An ``unknown`` answer is **not** the same reading as an answer that carries a
+    cwd. The daemon cannot vouch for the session's project when the global index
+    does not know it, so the client keeps the cwd it has (correct for a session in
+    the current project) rather than treating a guess as a fact.
+    """
+    if not pending_sid or result.get("session_id") != pending_sid:
+        return None
+    resolved = result.get("cwd")
+    if isinstance(resolved, str) and resolved.strip():
+        return pending_sid, resolved
+    return pending_sid, fallback_cwd
+
+
 # ── Stopping a turn: ask the session, wait for its receipt ───
 #
 # Rant 2026-09-20T12:50:13. A cancel used to be two statements about one event:
@@ -828,6 +860,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     # session exists — a task that has never run must not move the client's cwd.
     _task_list_intent: str = "trigger"
     _task_open_pending: tuple[str, str] | None = None
+    # The session a `resolve_session_cwd` was asked about, waiting for its answer
+    # (rant 2026-09-29T15:52:49, requirement 6). Held separately from the tuple
+    # above because the cwd is exactly what is not yet known when the question is
+    # asked — the pair can only be completed once the daemon answers.
+    _resume_pending_sid: str | None = None
 
     # Command autocomplete state (shows dropdown when user types /)
     _autocomplete_active = False
@@ -853,6 +890,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         # /task-session: the daemon's verdict on a task's session decides whether
         # the client moves into that task's project at all (rant 2026-09-17T18:36:08).
         nonlocal cwd, project_name, _task_list_intent, _task_open_pending
+        nonlocal _resume_pending_sid
 
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
@@ -1541,6 +1579,27 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     term.render()
                     continue
 
+                # Where a session lives, asked before resuming it (rant
+                # 2026-09-29T15:52:49, requirement 6). The client used to send its
+                # own cwd with every resume; the daemon answers with the session's
+                # real project instead, and the pair is then handed to the same
+                # `_task_open_pending` machinery that moves the client into it.
+                if data.get("type") == "session_cwd_result":
+                    target = _resume_target_from_resolution(
+                        data, _resume_pending_sid, cwd
+                    )
+                    _resume_pending_sid = None
+                    if target is None:
+                        continue  # an answer to a question this client is not waiting on
+                    sid, target_cwd = target
+                    _task_open_pending = (target_cwd, sid)
+                    await conn.send_command(
+                        "resume_session", session_id=sid, cwd=target_cwd
+                    )
+                    status.update(center=f"resuming {sid}...")
+                    term.render()
+                    continue
+
                 # Resume result
                 if data.get("type") == "resume_result":
                     err = data.get("error", "")
@@ -1823,6 +1882,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal current_model, project_name
         nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
         nonlocal _task_list_intent, _task_open_pending
+        nonlocal _resume_pending_sid
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task, _pending_images
@@ -1893,8 +1953,16 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 chat.remove(session_sel.widget)
                 session_sel.widget = None
                 if sid:
-                    await conn.send_command("resume_session", session_id=sid, cwd=cwd)
-                    status.update(center=f"resuming {sid}...")
+                    # Same question as `/resume <id>`, for the same reason: the
+                    # row came from a list scoped to this cwd, but "which cwd the
+                    # session is really in" is the daemon's fact, and this path
+                    # must not disagree with the other one about it (rant
+                    # 2026-09-29T15:52:49, requirement 6).
+                    _resume_pending_sid = sid
+                    await conn.send_command(
+                        "resolve_session_cwd", session_id=sid, cwd=cwd
+                    )
+                    status.update(center=f"opening {sid}...")
                     term.render()
                 else:
                     chat.add("system", "No session selected.")
@@ -2658,9 +2726,17 @@ Streaming
                         chat.remove(session_sel.widget)
                         session_sel.widget = None
                         session_sel.pending = False
-                        await conn.send_command("resume_session", session_id=target_sid, cwd=cwd)
+                        # Ask where the session lives instead of assuming it is
+                        # here: the id may name another project's session — a
+                        # scheduled task's, above all — and `cwd` is this
+                        # client's, not that session's (rant 2026-09-29T15:52:49,
+                        # requirement 6). The answer drives the resume.
+                        _resume_pending_sid = target_sid
+                        await conn.send_command(
+                            "resolve_session_cwd", session_id=target_sid, cwd=cwd
+                        )
     
-                        status.update(center=f"resuming {target_sid}...")
+                        status.update(center=f"opening {target_sid}...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
