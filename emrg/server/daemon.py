@@ -45,6 +45,7 @@ from emrg.config import (
     resolve_model_vision,
 )
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
+from emrg.server.abort_runs import AbortRuns
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.config_reload import (
     POLL_INTERVAL_SECONDS,
@@ -461,6 +462,24 @@ def _memory_index_compaction_note(paths) -> str:
     return "".join(sections)
 
 
+def _abort_run_sentence(record: dict, round_num: int) -> str:
+    """One abort, said as *which abort of which run* (rant 2026-09-28T15:57:31, L3).
+
+    The measurement behind it: 53 aborted cycles over two days, one cause, and
+    every line about them said the same thing as the first — so the run was
+    invisible to anyone who was not counting by hand. ``record`` is what
+    :meth:`emrg.server.abort_runs.AbortRuns.note` returns (``count``,
+    ``first_at``, ``last_at``); the sentence is built here rather than in the
+    counter so both sites that report an abort say it the same way.
+    """
+    return (
+        f"round {round_num}: the provider's content filter blocked the answer "
+        f"(finish_reason={record.get('cause')}) — this is abort {record.get('count')} "
+        f"of a run that began {record.get('first_at')} "
+        f"(previous abort {record.get('last_at')})"
+    )
+
+
 def build_shell_tool(
     sandbox_config: Optional[SandboxConfig] = None,
     platform_name: str | None = None,
@@ -535,6 +554,14 @@ class EmrgServer:
         # tool, which keeps receiving the parallel bash-word fixes while v2 is
         # built beside it.
         self._sandbox_config = load_sandbox_config()
+        # A run of aborts by one cause, counted rather than merely repeated
+        # (rant 2026-09-28T15:57:31, requirement L3). Constructed here so a
+        # server that never entered `_run()` — every unit test drives one
+        # revision — counts aborts through the same object as a live one. The
+        # state file is not touched until an abort happens: `_read` treats an
+        # absent file as "no run open", so a daemon that never aborts writes
+        # nothing.
+        self._abort_runs = AbortRuns()
         # Hot-reload state + policy (rant 2026-09-17T16:52:57). Constructed
         # here so `_reload_config_once()` has its decision object even in a
         # server that never entered `_run()` (tests drive single revisions);
@@ -3909,6 +3936,23 @@ class EmrgServer:
                 error_text = str(e)
                 if CONTENT_FILTER_ERROR not in error_text:
                     error_text = f"LLM error: {e}. Check config at ~/.emrg/config.toml"
+                else:
+                    # The ladder being spent is one abort, and *a run* of them is
+                    # the fact worth reporting (rant 2026-09-28T15:57:31,
+                    # requirement L3): the generic `logger.exception` above names
+                    # the sentence, but only a count tells a host whether they are
+                    # looking at one unlucky turn or at a trigger that has been
+                    # firing for two days. The session is already the logger's
+                    # own column, so the run is keyed on it too.
+                    logger.error(
+                        "round %d: %s — the retry ladder is spent, reporting it",
+                        round_num,
+                        _abort_run_sentence(
+                            self._abort_runs.note(
+                                CONTENT_FILTER_FINISH, session.session_id),
+                            round_num,
+                        ),
+                    )
                 await self._broadcast(session.session_id, {
                     "error": error_text,
                 })
@@ -3959,10 +4003,14 @@ class EmrgServer:
                     reasoning=full_reasoning,
                 )
                 logger.error(
-                    "round %d: the provider's content filter blocked the answer "
-                    "(finish_reason=%s); %d character(s) had already reached the "
-                    "client and the retry ladder is spent — reporting it",
-                    round_num, CONTENT_FILTER_FINISH, len(full_content),
+                    "%s; %d character(s) had already reached the client and the "
+                    "retry ladder is spent — reporting it",
+                    _abort_run_sentence(
+                        self._abort_runs.note(
+                            CONTENT_FILTER_FINISH, session.session_id),
+                        round_num,
+                    ),
+                    len(full_content),
                 )
                 await self._broadcast(session.session_id, {
                     "request_id": req.id,
@@ -3979,6 +4027,14 @@ class EmrgServer:
                     "session_id": session.session_id,
                 })
                 return
+
+            # A round the filter did not block ends any run of aborts by this
+            # cause (rant 2026-09-28T15:57:31, requirement L3). The count answers
+            # "how many in a row", so a turn that got through makes the next
+            # abort the first of a new run rather than the eleventh of an old
+            # one. Reached only on the rounds that survive Case 0 above, and
+            # `clear` writes nothing when no run is open.
+            self._abort_runs.clear(CONTENT_FILTER_FINISH, session.session_id)
 
             # Case 1: Final text answer — no more tool calls
             if final_finish == "stop" or (final_finish and not tc_by_index):
