@@ -125,6 +125,33 @@ export interface DaemonAppState {
 const SID_NULL = "__emrg_null_sid__";
 const KEY = (sid?: string | null): string => sid || SID_NULL;
 
+/** `resume_result` 帧的载荷（daemon `_handle_resume_session` → `meta.turn`）。 */
+export interface ResumeResultData {
+  type?: string;
+  session_id?: string;
+  meta?: { turn?: { running?: boolean; started_at?: number | null } | null } | null;
+}
+
+/**
+ * `resume_result` 快照说「这个会话的轮正在跑」时，那个轮的开始时刻（epoch ms）。
+ *
+ * requirement 1 给了 `meta["turn"]` 会话的轮状态（`{"running": bool, "started_at": epoch}`）
+ * ——事实归 daemon，客户端只渲染它。打开一个轮已经在跑的会话，必须显示它**已经**跑了多久：
+ * 所以这里返回一个**时刻**而不是时长，由读的人拿同一个时钟相减。TUI 侧的同一条规则是
+ * `resume_turn_instant`（`emrg/client/app.py`），两个客户端刻意用同一个判据，免得漂移。
+ *
+ * `null` 覆盖所有「没什么可渲染」的形状：没有快照、会话没有轮、running 但没有可用时刻。
+ */
+export function resumeTurnInstantMs(meta: unknown): number | null {
+  const turn = (meta as { turn?: unknown } | null | undefined)?.turn;
+  if (typeof turn !== "object" || turn === null) return null;
+  const t = turn as { running?: unknown; started_at?: unknown };
+  if (t.running !== true) return null;
+  const started = t.started_at;
+  if (typeof started !== "number" || !(started > 0)) return null;
+  return started * 1000;
+}
+
 export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
   return createSnapshotStore<DaemonAppState>({
     connected: false,
@@ -283,6 +310,24 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     const { type, data } = frame;
     const sid = frame.sid ?? null;
     switch (type) {
+      case "command_result": {
+        // 打开会话时 daemon 的轮状态快照（requirement 1：`resume_result` 的 `meta.turn`）。
+        // `turn_start` 只在轮**开始的那一刻**广播，所以一个中途打开的会话永远收不到它 ——
+        // 没有这一支，中途打开就只能从 00:00 起算（rant 2026-09-27T18:41:52 requirement 2）。
+        // 快照说「没有轮在跑」时也要**清**：上一条连接留下的时刻不能假装这一轮还在跑，
+        // 这正是 TUI 那一半已经做过的事（`emrg/client/app.py`，stage「requirement 3 TUI half」）。
+        const resume = data as ResumeResultData;
+        if (resume?.type !== "resume_result") break;
+        const k = KEY(resume.session_id ?? sid);
+        const startedMs = resumeTurnInstantMs(resume.meta);
+        const { [k]: _drop, ...rest } = store.get().turnStartBySid;
+        store.update((s) => ({
+          ...s,
+          turnStartBySid: startedMs === null ? rest : { ...s.turnStartBySid, [k]: startedMs },
+          busyBySid: { ...s.busyBySid, [k]: startedMs !== null },
+        }));
+        break;
+      }
       case "turn_start": {
         // Rant 2026-09-02T10:36:26：daemon 权威 turn 开始（含后台演化/其他客户端
         // turn）——记 start 时刻并置 busy；计时基准与 TUI 同一来源。

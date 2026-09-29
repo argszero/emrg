@@ -173,8 +173,47 @@ describe("createDaemonBridge", () => {
     expect(st.turnStartBySid["s1"]).toBeUndefined();
   });
 
-  it("done / cancelled → 顺带清 turn 计时（幂等兜底）", () => {
+  it("resume_result 快照 → 中途打开一个已在跑的会话，计时从 daemon 的时刻起算（requirement 2）", () => {
+    // rant 2026-09-27T18:41:52：`turn_start` 只在轮开始那一刻广播，中途打开的会话收不到它，
+    // 所以快照里的 `meta.turn` 是唯一来源。这里的断言落在 store 上而不是渲染上：
+    // 时刻必须是 daemon 给的那一个（1756785600.5s → 1756785600500ms），
+    // 而不是「客户端见到它时」的 Date.now()。
     const { emit, bridge } = setup();
+    emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { turn: { running: true, started_at: 1756785600.5 } } },
+      sid: "s1",
+    } as DaemonEventFrame);
+    const st = bridge.store.get();
+    expect(st.turnStartBySid["s1"]).toBe(1756785600500);
+    expect(st.busyBySid["s1"]).toBe(true);
+  });
+
+  it("resume_result 快照说没有轮 → 清掉上一条连接留下的时刻（不能假装还在跑）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "turn_start", data: { started_at: 1756785600 }, sid: "s1" });
+    expect(bridge.store.get().turnStartBySid["s1"]).toBe(1756785600000);
+    emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { turn: { running: false, started_at: null } } },
+      sid: "s1",
+    } as DaemonEventFrame);
+    const st = bridge.store.get();
+    expect(st.turnStartBySid["s1"]).toBeUndefined();
+    expect(st.busyBySid["s1"]).toBe(false);
+  });
+
+  it("command_result 里不是 resume_result 的帧 → 不碰轮状态（别把它当快照读）", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "command_result",
+      data: { type: "model_set", meta: { turn: { running: true, started_at: 1756785600 } } },
+      sid: "s1",
+    } as DaemonEventFrame);
+    expect(bridge.store.get().turnStartBySid["s1"]).toBeUndefined();
+  });
+
+  it("done / cancelled → 顺带清 turn 计时（幂等兜底）", () => {    const { emit, bridge } = setup();
     emit({ type: "turn_start", data: { started_at: 1756785600 }, sid: "s1" });
     emit({ type: "done", data: { request_id: "r1" }, sid: "s1" });
     let st = bridge.store.get();

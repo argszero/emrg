@@ -667,8 +667,45 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     expect(info.textContent).toContain("5 msgs");
   });
 
-  it("/model <name> → setModel 直切（对齐 TUI）；无参 → 设置面板", async () => {
+  it("中途打开一个已在跑的会话：计时从 daemon 的快照时刻起算（rant 2026-09-27T18:41:52 requirement 2）", async () => {
+    // 这一轮不是本客户端起的（另一个客户端，或者定时任务），`turn_start` 已经过去了，
+    // 所以打开时只有 `resume_result` 的 `meta.turn` 带着它。计时必须显示**已经**跑了多久，
+    // 而不是从 00:00 起算 —— 分钟数是确定的，秒不必断言（只在断言与渲染之间会走一两秒）。
     const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    const startedAt = Math.floor(Date.now() / 1000) - 305; // 5 分 5 秒前开始
+    m.emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { turn: { running: true, started_at: startedAt } } },
+      sid: "s1",
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("session-info").textContent).toMatch(/\[05:\d\d\]/),
+    );
+  });
+
+  it("快照说没有轮在跑 → 会话信息行不显示计时（不得留下上一轮的时刻）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    m.emit({ type: "turn_start", data: { started_at: Math.floor(Date.now() / 1000) - 305 }, sid: "s1" });
+    await waitFor(() => expect(screen.getByTestId("session-info").textContent).toMatch(/\[05:\d\d\]/));
+    m.emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { turn: { running: false, started_at: null } } },
+      sid: "s1",
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("session-info").textContent).not.toMatch(/\[\d\d:\d\d\]/),
+    );
+  });
+
+  it("/model <name> → setModel 直切（对齐 TUI）；无参 → 设置面板", async () => {    const m = mockEmrg();
     render(wrapper(<Shell />));
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
