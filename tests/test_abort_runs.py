@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import emrg.server.abort_runs as mod
 from emrg.server.abort_runs import RUN_TTL_DAYS, AbortRuns
@@ -182,14 +181,22 @@ def test_the_default_path_is_under_the_daemons_log_directory(tmp_path, monkeypat
     assert mod.default_path() == tmp_path / "home" / "logs" / "abort-runs.json"
 
 
-def test_the_test_suite_is_not_pointed_at_the_hosts_state():
+def test_the_test_suite_is_not_pointed_at_the_hosts_state(tmp_path):
     """The autouse redirect in `tests/conftest.py` — asserted, not assumed.
 
     A test that drives an abort is exactly the test that would write the host's
     `~/.emrg/logs/abort-runs.json`, and the guard is autouse precisely because
     such a test cannot be relied on to remember it.
+
+    `tmp_path` IS the assertion, not a proxy for it. An earlier version asked
+    the neighbouring question — "is the redirect outside the home directory" —
+    and that is false on a Windows runner, where pytest's temp base lives under
+    `%USERPROFILE%\\AppData\\Local\\Temp`: a red row about the platform rather
+    than about the guard (measured on CI run 36538564479, `test-windows`). The
+    property the fixture actually establishes is that this test's state file is
+    in this test's own temp directory, so that is what is checked.
     """
     # Read through the module, not a name imported at collection time: the
     # fixture patches the module attribute, so an early-bound name would keep
     # pointing at the real function and quietly assert nothing.
-    assert Path.home() not in mod.default_path().parents
+    assert mod.default_path() == tmp_path / "abort-runs.json"
