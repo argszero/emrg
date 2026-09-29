@@ -28,7 +28,6 @@ Run this loop every round; never stop at "executed":
 ---
 
 ### Current State
-- Instance: {{ instance_id }} @ {{ host_name }}
 - Promotion target: {{ project.name }}（{% if project.description %}{{ project.description }}{% else %}see projects.yml for description{% endif %}）
 - Project path: `{{ project.path }}`
 - Session ID: `{{ session_id }}`
