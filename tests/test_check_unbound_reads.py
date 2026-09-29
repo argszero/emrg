@@ -63,7 +63,13 @@ class TestItFires:
         )
         proc = _run(tree)
         assert proc.returncode == 1, proc.stdout + proc.stderr
-        assert "emrg/bad.py:2" in proc.stdout, proc.stdout
+        # The guard prints `path.relative_to(root)`, which renders with the
+        # platform's separator -- `emrg\bad.py` on Windows. Asserting the
+        # POSIX spelling passed here and failed `test-windows` (measured
+        # 2026-09-29, run 36644266639): the subject is "which file and line did
+        # it name", never which separator this platform uses. Normalise both.
+        reported = proc.stdout.replace("\\", "/")
+        assert "emrg/bad.py:2" in reported, proc.stdout
         assert "in f()" in proc.stdout, proc.stdout
         assert "'flag'" in proc.stdout, proc.stdout
         assert "before its first binding at 3" in proc.stdout, proc.stdout
