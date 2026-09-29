@@ -314,4 +314,30 @@ describe("createDaemonBridge", () => {
     emit({ type: "upgrade", data: { current_version: "0.2.85", installed_version: "" } });
     expect(bridge.store.get().upgradeBanner).toEqual({ current: "0.2.84", installed: "0.2.85" });
   });
+
+  // Rant 2026-09-29T15:52:38.987951+08:00 后续：提问被 daemon 单方面终结（拒绝/超时），
+  // 客户端必须据此关闭对话框——否则弹窗在提问早已结束后仍宣称"已答复"。
+  it("approval_request → store.pendingApproval（提问承载问题与会话）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "approval_request", data: { request_id: "appr-1", question: "widen?" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval).toEqual({
+      requestId: "appr-1", question: "widen?", sessionId: "s1",
+    });
+  });
+
+  it("approval_resolved → pendingApproval 清空（超时也算一种结局）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "approval_request", data: { request_id: "appr-2", question: "widen?" }, sid: "s1" });
+    emit({ type: "approval_resolved", data: { request_id: "appr-2", outcome: "timed_out" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval).toBeNull();
+  });
+
+  it("approval_resolved 只关掉它命名的那一问（别问的解析帧不得关本窗）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "approval_request", data: { request_id: "appr-3", question: "widen?" }, sid: "s1" });
+    emit({ type: "approval_resolved", data: { request_id: "appr-OTHER", outcome: "refused" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval?.requestId).toBe("appr-3");
+    emit({ type: "approval_resolved", data: { request_id: "appr-3", outcome: "refused" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval).toBeNull();
+  });
 });

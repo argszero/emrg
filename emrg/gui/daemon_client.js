@@ -918,6 +918,14 @@ class DaemonClient {
       this._emit("approval_request", frame);
       return;
     }
+    if (frame.type === "approval_resolved") {
+      // The question is over — answered, refused or expired (rant
+      // 2026-09-29T15:52:38.987951+08:00 follow-up). The daemon refuses the call
+      // at its own timeout, so without this the renderer's dialog stays up
+      // indefinitely and reports an answer nobody accepted.
+      this._emit("approval_resolved", frame);
+      return;
+    }
     if (frame.type === "tool_start") {
       this._onToolStart(frame);
       this._emit("tool_started", frame);

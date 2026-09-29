@@ -212,6 +212,24 @@ test("_findPython: 树里没有 .venv 就回退 PATH 的 python3，不算失败"
   }
 });
 
+test("approval_request / approval_resolved：两帧都直达渲染层（rant 2026-09-29T15:52:38 后续）", async () => {
+  // 提问帧与解析帧都不是 `command_result`：没人发过命令，`_resolvePending` 不得吞掉。
+  // 解析帧若在这里被丢掉，renderer 的对话框就永远不关——提问早已结束，窗还开着。
+  const client = new DaemonClient();
+  const ws = await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+  const send = (obj) => ws.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ type: "approval_request", session_id: "s1", request_id: "appr-1", question: "widen?" });
+  send({ type: "approval_resolved", session_id: "s1", request_id: "appr-1", outcome: "timed_out" });
+  assert.deepStrictEqual(
+    seen.map(([t]) => t), ["approval_request", "approval_resolved"],
+    "both frames must reach the renderer",
+  );
+  assert.strictEqual(seen[1][1].request_id, "appr-1");
+  assert.strictEqual(seen[1][1].outcome, "timed_out");
+});
+
 test("P2 deltaBatchMs: 批量合并 message_delta，终态前冲刷保序（rant 14:11）", async () => {
   const client = new DaemonClient({ deltaBatchMs: 16 });
   await connectClient(client);

@@ -529,6 +529,21 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         }
         break;
       }
+      case "approval_resolved": {
+        // Rant 2026-09-29T15:52:38.987951+08:00 follow-up: the daemon refuses a
+        // confined call at its own timeout and says so here. Without this the
+        // dialog outlived the question — it stayed up reporting an answer nobody
+        // accepted, while i18n already promised "a timeout counts as a denial".
+        // Only a frame naming the question on screen closes it: a resolved
+        // request from another session must not dismiss this one.
+        const ar = data as { request_id?: string };
+        const resolvedId = String(ar?.request_id || "");
+        const current = store.get().pendingApproval;
+        if (current && resolvedId && current.requestId === resolvedId) {
+          store.update((s) => ({ ...s, pendingApproval: null }));
+        }
+        break;
+      }
       case "upgrade": {
         // 心跳每 15s 检测到 installed ≠ current 都会重发；同一 installed 版本只
         // 写一次 store（vanilla lastKnownVersion 语义：不重复弹，dismiss 后不再出现）。

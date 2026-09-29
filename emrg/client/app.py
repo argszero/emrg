@@ -22,6 +22,7 @@ from emrg.client.widgets import (
 )
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import TaskResponse, ToolEnd, ToolStart
+from emrg.sandbox.escalation import APPROVAL_TIMEOUT_SECONDS
 from emrg.session import generate_session_id
 from emrg.skills.loader import load_skills
 from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
@@ -896,9 +897,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     task_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
     _skills_confirm: tuple | None = None  # (skill_name, install_cmd) — next Enter answers the prompt
-    # (request_id, question) while the daemon is waiting on this client's answer
-    # to an escalation request — the next line typed is the answer (rant
-    # 2026-09-29T15:52:38.987951+08:00, requirement 1).
+    # (request_id, question, deadline) while the daemon is waiting on this
+    # client's answer to an escalation request — the next line typed is the
+    # answer (rant 2026-09-29T15:52:38.987951+08:00, requirement 1). The
+    # deadline is this client's backstop for the daemon's own timeout: a line
+    # typed after it is a prompt, never an answer.
     _approval_pending: tuple | None = None
     # /task-session (rant 2026-09-17T18:36:08). `_task_list_intent` is set by the
     # command that asked for the list, so the picker can be built with the right
@@ -1365,13 +1368,40 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 if data.get("type") == "approval_request":
                     nonlocal _approval_pending
                     question = str(data.get("question", ""))
-                    _approval_pending = (str(data.get("request_id", "")), question)
+                    _approval_pending = (
+                        str(data.get("request_id", "")),
+                        question,
+                        # The client's own deadline (rant 2026-09-29T15:52:38.987951+08:00
+                        # follow-up): the daemon refuses the call after this long, so a
+                        # line typed after that is a prompt, not an answer. The frame
+                        # below normally clears the state first — this is the backstop
+                        # for a client that never received it.
+                        time.monotonic() + APPROVAL_TIMEOUT_SECONDS,
+                    )
                     chat.add("system",
                         f"⚠️ The daemon asks for approval — {question}\n"
                         f"Type `yes` to allow it for this one call, or anything "
                         f"else to refuse.")
                     status.update(center="approval needed — yes/no")
                     _render_throttled()
+                    continue
+
+                # The question is over — answered, refused, or expired (rant
+                # 2026-09-29T15:52:38.987951+08:00 follow-up). Without this the
+                # TUI held the question until the host typed something, and a
+                # *prompt* typed after the timeout was swallowed as the answer
+                # while the daemon had already refused the call.
+                if data.get("type") == "approval_resolved":
+                    request_id = str(data.get("request_id", ""))
+                    if _approval_pending is not None and _approval_pending[0] == request_id:
+                        _approval_pending = None
+                        outcome = str(data.get("outcome", ""))
+                        if outcome == "timed_out":
+                            chat.add("system",
+                                "The approval question expired unanswered — that "
+                                "call stays at its default tier.")
+                        status.update(center=server_id or "emrg")
+                        _render_throttled()
                     continue
 
                 # Sessions list
@@ -2439,10 +2469,22 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 # Pending escalation approval — the next line is the answer.
                 # Handled before every other command: the daemon is holding a
                 # call open on this answer, and a line meant as "yes" must not
-                # be read as a prompt to send.
+                # be read as a prompt to send. **Only while the deadline holds**:
+                # the daemon refuses the call at its own timeout, so an expired
+                # question must not swallow the host's next prompt (rant
+                # 2026-09-29T15:52:38.987951+08:00 follow-up).
                 if _approval_pending is not None:
-                    request_id, _question = _approval_pending
+                    request_id, _question, _deadline = _approval_pending
                     _approval_pending = None
+                    if time.monotonic() >= _deadline:
+                        # Expired: the daemon already refused the call, so this
+                        # line is the host typing, not an answer to anything.
+                        chat.add("system",
+                            "The approval question expired unanswered — that call "
+                            "stays at its default tier.")
+                        status.update(center=server_id or "emrg")
+                        inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                        return True
                     approved = text.strip().lower() in ("y", "yes", "approve", "ok")
                     await conn.send_command(
                         "approval_response",

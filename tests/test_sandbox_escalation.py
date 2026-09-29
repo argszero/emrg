@@ -420,7 +420,40 @@ def test_a_question_nobody_answers_times_out_and_leaves_no_state(tmp_path, monke
     answer, pending = asyncio.run(scenario())
     assert answer is None, "a timeout must read as a refusal"
     assert pending == {}, "the question's future outlived its question"
-    assert [f.get("type") for f in ws.sent] == ["approval_request"]
+    # The timeout closes the question *for the clients too* (rant
+    # 2026-09-29T15:52:38.987951+08:00 follow-up): a client that is never told
+    # keeps the question live, so the TUI read the host's next prompt as the
+    # answer and the GUI's dialog outlived the question it asked.
+    assert [f.get("type") for f in ws.sent] == ["approval_request", "approval_resolved"]
+    resolved = ws.sent[-1]
+    assert resolved["outcome"] == "timed_out"
+    assert resolved["request_id"] == ws.sent[0]["request_id"]
+    assert resolved["session_id"] == session.session_id
+
+
+def test_the_resolution_names_the_outcome_a_client_must_render(tmp_path):
+    """Every exit a subscriber can observe is announced, with its own word.
+
+    `approved` and `refused` are distinguished on the wire because they are
+    different events for the person reading the screen — a client that collapses
+    them cannot say whether the host's answer was taken or the question expired.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-outcome", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def ask(answer):
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        frame = await _answer_next_question(server, ws, answer)
+        verdict = await asyncio.wait_for(task, 5)
+        resolved = ws.sent[-1]
+        assert frame["request_id"] == resolved["request_id"]
+        return verdict, resolved
+
+    approved, resolved_yes = asyncio.run(ask(True))
+    assert approved is True and resolved_yes["outcome"] == "approved"
+    refused, resolved_no = asyncio.run(ask(False))
+    assert refused is False and resolved_no["outcome"] == "refused"
 
 
 # ── the loop's call site ────────────────────────────────────────────────────

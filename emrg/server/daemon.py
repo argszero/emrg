@@ -1559,6 +1559,16 @@ class EmrgServer:
         blueprint's fail-closed order and the only direction that can be safe: a
         host who walked away has not approved anything.
 
+        **Every exit that a client can observe is announced** (`approval_resolved`,
+        rant 2026-09-29T15:52:38.987951+08:00's follow-up): the question is
+        broadcast on the way in, so a client keeps it live, and the daemon used to
+        drop that state silently when the answer never came — leaving a TUI that
+        read the host's next *prompt* as the answer, or a GUI dialog that stayed
+        up reporting an answer nobody accepted. The resolution frame is sent
+        before this method returns, on both paths a subscriber can be waiting on:
+        answered (``approved``/``refused``) and timed out (``timed_out``). The
+        no-subscriber early return stays silent, because there is nobody to tell.
+
         :returns: ``True`` approved, ``False`` refused, ``None`` nothing readable
             came back (the caller maps all three to "do not widen").
         """
@@ -1581,7 +1591,7 @@ class EmrgServer:
                 "question": question,
             })
             try:
-                return await asyncio.wait_for(
+                answer = await asyncio.wait_for(
                     future, timeout=escalation.APPROVAL_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
@@ -1589,9 +1599,43 @@ class EmrgServer:
                     "approval %s for session %s timed out after %.0fs — refusing",
                     request_id, session_id, escalation.APPROVAL_TIMEOUT_SECONDS,
                 )
+                await self._announce_approval_outcome(
+                    session_id, request_id, "timed_out",
+                )
                 return None
+            # An unreadable answer is a refusal in effect (`_read_answer` returns
+            # None for it), and the frame says so with the same word rather than a
+            # fourth outcome no client would know how to render.
+            await self._announce_approval_outcome(
+                session_id, request_id, "approved" if answer is True else "refused",
+            )
+            return answer
         finally:
             self._pending_approvals.pop(request_id, None)
+
+    async def _announce_approval_outcome(
+        self, session_id: str, request_id: str, outcome: str,
+    ) -> None:
+        """Tell the session's clients their approval question is over.
+
+        Best-effort and never raises: the outcome is already decided, and a
+        client that misses the frame (a dropped connection) must not turn a
+        refusal into an error for the turn that asked. Losing the frame costs
+        the client's local state, not the call's verdict — the verdict came from
+        the future, and this frame only reports it.
+        """
+        try:
+            await self._broadcast(session_id, {
+                "type": "approval_resolved",
+                "session_id": session_id,
+                "request_id": request_id,
+                "outcome": outcome,
+            })
+        except Exception as exc:  # noqa: BLE001 — reporting must not decide
+            logger.warning(
+                "approval %s resolved as %s but the frame could not be sent: %s",
+                request_id, outcome, exc,
+            )
 
     def _resolve_approval(self, data: dict) -> bool:
         """Route a client's answer to the question that is waiting for it.
