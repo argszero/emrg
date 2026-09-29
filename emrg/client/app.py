@@ -1975,6 +1975,12 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal _request_start, _last_center, _elapsed_task, _pending_images
         nonlocal turn_running
         nonlocal _skills_confirm
+        # The daemon is holding a tool call open on this answer; `handle_key`
+        # consumes it at the "next line is the answer" branch below. Declared
+        # here because it both reads and rebinds it: an undeclared name is
+        # local by assignment, so the read raised UnboundLocalError on every
+        # Enter (v0.3.6, issue #1759) — the whole TUI was unusable.
+        nonlocal _approval_pending
         if len(data) == 0: return True
         if data == b"\x1b[200~": paste_mode = True; return True
         if data == b"\x1b[201~":

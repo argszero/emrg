@@ -8,6 +8,7 @@ variables added to `interactive` without nonlocal in `handle_key`.
 from __future__ import annotations
 
 import ast
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -334,3 +335,73 @@ def test_a_directory_with_only_half_the_shape_is_not_a_checkout(monkeypatch, tmp
     target.write_text("async def interactive():\n    pass\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     assert check_nonlocal._resolve_root() == SCRIPT.parent.parent.resolve()
+
+
+# ---------------------------------------------------------------------------
+# The verdict on *this* checkout: the half that was missing, and why v0.3.6
+# reached the host broken.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _run_guard(cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+    )
+
+
+class TestTheVerdictIsEnforced:
+    """Issue #1759 (rant 2026-09-30T06:56:47).
+
+    A guard prevents nothing until something fails when it fails. Until this
+    class existed, `scripts/check_nonlocal.py` was referenced by no workflow and
+    asserted against no real tree — it returned `rc=1` on master with nobody
+    reading it, and the absent `nonlocal _approval_pending` in `handle_key`
+    reached the host as a TUI that crashed on *every* Enter:
+
+        UnboundLocalError: cannot access local variable '_approval_pending'
+        where it is not associated with a value
+    """
+
+    def test_the_checkout_declares_every_nonlocal_it_reads(self) -> None:
+        """The guard's verdict on the tree this suite lives in."""
+        proc = _run_guard(REPO_ROOT)
+        assert proc.returncode == 0, (
+            f"{SCRIPT.name} reports a nonlocal integrity defect in {REPO_ROOT} "
+            f"(rc={proc.returncode}) - a name an inner function of `interactive` "
+            f"reads and writes without declaring:\n{proc.stdout}{proc.stderr}"
+        )
+
+    def test_the_pending_approval_is_declared_nonlocal_in_handle_key(self) -> None:
+        """The crash site itself, named — so a regression names itself too.
+
+        The first test re-derives this from the whole file; this one pins the
+        specific binding, so the failure message says which branch broke instead
+        of printing a set difference.
+        """
+        tree = ast.parse((REPO_ROOT / check_nonlocal.TARGET).read_text(encoding="utf-8"))
+        interactive = check_nonlocal._find_interactive_body(tree)
+        assert interactive is not None, "no `interactive` function in app.py"
+        handle_key = check_nonlocal._find_inner_fn(interactive.body, "handle_key")
+        assert handle_key is not None, "no `handle_key` nested in `interactive`"
+
+        declared = {
+            name
+            for stmt in handle_key.body
+            if isinstance(stmt, ast.Nonlocal)
+            for name in stmt.names
+        }
+        assert "_approval_pending" in declared, (
+            "`handle_key` reads and rebinds `_approval_pending` at the pending "
+            "escalation-approval branch, so it must declare it nonlocal: an "
+            "undeclared name is local by assignment, and the read raises "
+            "UnboundLocalError on every keystroke (issue #1759; v0.3.6).\n"
+            f"declared nonlocals: {sorted(declared)}"
+        )
