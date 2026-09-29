@@ -25,6 +25,7 @@ from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.llm import CONTENT_RISK, classify_llm_error
 from emrg.server.scheduler import TaskHandler, TaskScheduler
+from tests.task_handler_factory import make_handler
 from emrg.session import Session, _validate_tool_messages
 
 
@@ -33,7 +34,7 @@ from emrg.session import Session, _validate_tool_messages
 
 def test_build_prompt_emrg_self():
     """Builds prompt for emrg self-evolution."""
-    handler = TaskHandler(
+    handler = make_handler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -52,7 +53,7 @@ def test_build_prompt_emrg_self():
 
 def test_build_prompt_with_project():
     """Builds prompt for a custom project — derives owner/repo via git remote."""
-    handler = TaskHandler(
+    handler = make_handler(
         name="myproject", config={"path": "/home/user/src/myproject"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -73,7 +74,7 @@ def test_build_prompt_all_variables_substituted():
     """No raw template placeholders ({var}) should remain in output."""
     import re
 
-    handler = TaskHandler(
+    handler = make_handler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -90,7 +91,7 @@ def test_build_prompt_step22_uses_fetch_head():
     stripped `remote.origin.fetch`), where `git log origin/master` fails
     with "unknown revision" (observed 2026-08-08, cycles 09:15 & 09:30).
     """
-    handler = TaskHandler(
+    handler = make_handler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )

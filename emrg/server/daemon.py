@@ -848,9 +848,9 @@ class EmrgServer:
         """
         try:
             n_handlers = (
-                len(self._scheduler._handlers)
+                len(self._scheduler._live)
                 if self._scheduler is not None
-                and isinstance(getattr(self._scheduler, "_handlers", None), list)
+                and isinstance(getattr(self._scheduler, "_live", None), dict)
                 else 0
             )
         except Exception:
@@ -2316,13 +2316,21 @@ class EmrgServer:
             cwd = msg.get("cwd", "")
             if cwd:
                 self._touch_project(cwd)
-                # Create a task entry in tasks.yml
+                # Create a task entry in tasks.yml — through task_create, because the
+                # legacy `create_task` was a second, unvalidated path to the same file
+                # (rant 2026-09-28T09:54:10, D8). Enabling auto-evolve twice is a
+                # no-op rather than an error: the intent is already satisfied.
                 name = os.path.basename(cwd.rstrip("/"))
                 if self._scheduler:
-                    self._scheduler.create_task(
+                    ok, res = self._scheduler.task_create(
                         name=name, task_type="evolution",
-                        config={"project": name}, interval=600,
+                        project=name, interval=600,
                     )
+                    if ok:
+                        self._scheduler.reconcile()
+                    elif "already exists" not in str(res):
+                        await self._send(ws, {"ok": False, "error": str(res)})
+                        return
                 await self._send(ws, {
                     "ok": True,
                     "message": f"auto_evolve enabled for {cwd}",
@@ -2388,8 +2396,12 @@ class EmrgServer:
             if not ok:
                 await self._send(ws, {"type": "task_result", "error": res})
                 return
-            summary = await self._scheduler.apply_tasks(self._scheduler._load_tasks())
-            await self._send(ws, {"type": "task_result", "ok": True, "task": res, "summary": summary})
+            # The write is the whole change (rant 2026-09-28T09:54:10): it touched no
+            # handler, so there is nothing to undo or rebuild. `reconcile` only starts
+            # what is missing — the reconcile loop would get there within
+            # TABLE_POLL_SECONDS anyway; this just makes a new task start now.
+            started = self._scheduler.reconcile()
+            await self._send(ws, {"type": "task_result", "ok": True, "task": res, "started": started})
 
         elif msg_type == "task_update":
             if not self._scheduler:
@@ -2402,8 +2414,12 @@ class EmrgServer:
             if not ok:
                 await self._send(ws, {"type": "task_result", "error": res})
                 return
-            summary = await self._scheduler.apply_tasks(self._scheduler._load_tasks())
-            await self._send(ws, {"type": "task_result", "ok": True, "task": res, "summary": summary})
+            # The write is the whole change (rant 2026-09-28T09:54:10): it touched no
+            # handler, so there is nothing to undo or rebuild. `reconcile` only starts
+            # what is missing — the reconcile loop would get there within
+            # TABLE_POLL_SECONDS anyway; this just makes a new task start now.
+            started = self._scheduler.reconcile()
+            await self._send(ws, {"type": "task_result", "ok": True, "task": res, "started": started})
 
         elif msg_type == "task_delete":
             if not self._scheduler:
@@ -2413,8 +2429,8 @@ class EmrgServer:
             if not ok:
                 await self._send(ws, {"type": "task_result", "error": err})
                 return
-            summary = await self._scheduler.apply_tasks(self._scheduler._load_tasks())
-            await self._send(ws, {"type": "task_result", "ok": True, "summary": summary})
+            started = self._scheduler.reconcile()
+            await self._send(ws, {"type": "task_result", "ok": True, "started": started})
 
         elif msg_type == "task_template_list":
             if not self._scheduler:
