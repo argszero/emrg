@@ -20,6 +20,7 @@ import os
 import secrets
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 
 from emrg.memory import SessionMemoryStore
 from emrg.sessions_index import remove_session_index, upsert_session_index
@@ -471,6 +472,41 @@ class Session:
 
         logger.info("compact: %d messages → summary (kept %d)", len(compacted), len(recent))
         return len(compacted)
+
+    def drop_history_records(self, positions: Iterable[int]) -> int:
+        """Remove records at the given positions from history.jsonl.
+
+        Rant 2026-09-29T15:55:44.643795+08:00 (content-risk L2): the only cure for
+        a trigger that is a word rather than a replaceable codepoint is taking the
+        offending record out of the history, and this is that write. Positions are
+        absolute record indexes, the same handle `list_history include_records`
+        hands out, so a caller that located a record by reading can name it here.
+
+        The message count is recomputed the way `compact` recomputes it
+        (message-type records only) rather than decremented: the caller may hand
+        in a tool round's worth of records, and a count derived from the surviving
+        records is the one that cannot drift from disk. Out-of-range positions are
+        ignored, so a stale index removes nothing instead of removing a neighbour.
+
+        Returns the number of records actually removed.
+        """
+        records = self._read_history()
+        doomed = {p for p in positions if isinstance(p, int) and 0 <= p < len(records)}
+        if not doomed:
+            return 0
+        kept = [r for i, r in enumerate(records) if i not in doomed]
+        self._write_history(kept)
+        removed = len(records) - len(kept)
+        self._message_count = sum(
+            1 for r in kept if r.get("type", "message") == "message"
+        )
+        self._updated_at = datetime.now().isoformat()
+        self._save_meta()
+        logger.warning(
+            "history: dropped %d record(s) at %s (%d left, %d message(s))",
+            removed, sorted(doomed), len(kept), self._message_count,
+        )
+        return removed
 
     def _write_history(self, records: list[dict]) -> None:
         """Overwrite history.jsonl with new records."""
