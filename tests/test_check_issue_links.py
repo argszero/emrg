@@ -1419,3 +1419,333 @@ def test_the_state_words_are_not_flattened_into_one_mark(mod) -> None:
         if state != "linked":
             assert state.upper() in text, (state, text)
             assert text != marks["linked"]
+
+
+# --------------------------------------------------------------------------- #
+# The chain's first joint: an issue's `Origin: rant <timestamp>` (R5)
+#
+# The link above is read from GitHub; this one is read from a **file**, because a rant
+# timestamp is a host-local handle (`~/.emrg/rants.jsonl`). The questions are different:
+# *does the handle resolve* (otherwise the issue's reader cannot reach the requirement the
+# issue carries) and *is one rant claimed by two unlabelled issues* (otherwise a deliberate
+# split cannot be told from a duplicate claim).
+# --------------------------------------------------------------------------- #
+
+RANT_TS = "2026-09-29T15:52:49.378845+08:00"
+
+
+def _ledger(tmp_path, *timestamps: str):
+    """A rant ledger at `tmp_path`, in the shape `submit_rant` writes (one JSON per line)."""
+    path = tmp_path / "rants.jsonl"
+    path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "timestamp": ts,
+                    "project": "emrg",
+                    "status": "pending",
+                    "progress": "",
+                    "completed": None,
+                    "message": "a rant",
+                }
+            )
+            + "\n"
+            for ts in timestamps
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _issue_with_origin(number: int, origin: str, body: str = "") -> dict:
+    return _issue(number, f"issue {number}", body=f"Origin: rant {origin}\n\n{body}")
+
+
+def _linked_issues(issues: list[dict]) -> FakeGh:
+    """N issues, each declared by its own PR and naming it back — every link reads `ok`.
+
+    The origin reading is a check *beside* the link reading, so the tests that isolate it
+    hold the link clean: otherwise a row's state is the link's fault and the origin fault
+    only rides along in the detail, which would let a broken origin reading pass by looking
+    like a broken link. With the pairs linked, the only thing that can make these rows
+    non-`linked` is the origin itself.
+    """
+    prs: list[dict] = []
+    timelines: dict[int, list[dict]] = {}
+    comments: dict[int, list[dict]] = {}
+    for issue in issues:
+        number = int(issue["number"])
+        pr_number = number + 100
+        prs.append(_pr(pr_number, f"the fix for {number}", body=f"Closes #{number}."))
+        timelines[number] = [_refers_to(pr_number, is_pr=True, body=f"Closes #{number}.")]
+        timelines[pr_number] = [_refers_to(number, is_pr=False)]
+        comments[number] = [_comment(f"Handled by #{pr_number}")]
+    return FakeGh(issues, prs, timelines, comments)
+
+
+def test_an_origin_the_ledger_holds_is_not_a_fault(mod, monkeypatch, capsys, tmp_path) -> None:
+    """The positive case: the handle resolves, so the first joint of the chain is intact."""
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, RANT_TS)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, RANT_TS))])
+
+    assert rc == 0, out
+    assert "origin an issue declares resolves in the rant ledger" in out, out
+
+
+def test_an_origin_the_ledger_does_not_hold_is_a_fault(mod, monkeypatch, capsys, tmp_path) -> None:
+    """An unresolvable handle is the chain broken at its first joint.
+
+    The row keeps the remedy on it and names the ledger it read — a reader told "no such
+    rant" has to be told *where* it was looked for before the sentence is actionable.
+    """
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, RANT_TS)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, "2026-01-01T00:00:00+08:00"))])
+
+    assert rc == 1, out
+    assert "#10 issue ORIGIN-UNRESOLVED" in out, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert RANT_TS in detail and "rants.jsonl" in detail and "verbatim" in detail, detail
+
+
+def test_a_near_match_names_the_ledgers_own_spelling(mod, monkeypatch, capsys, tmp_path) -> None:
+    """A citation that drops the microseconds is fixed by writing the stored spelling.
+
+    The reading does not silently accept the prefix — two rants can share a second, so
+    accepting one would resolve a handle to the wrong record. What it does instead is name
+    the record the writer was reaching for, which is the difference between a remedy and a
+    complaint.
+    """
+    _install(
+        mod,
+        monkeypatch,
+        _linked_issues([_issue_with_origin(10, "2026-09-29T15:52:49+08:00")]),
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, RANT_TS))])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert RANT_TS in detail and "write it verbatim" in detail, detail
+
+
+def test_two_unlabelled_issues_on_one_origin_are_a_duplicate(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """One rant, one issue: two unlabelled claims of the same handle cannot be told apart.
+
+    Both links are clean here, which is the point — without the origin clause this queue
+    reads `OK`, so the row's state is entirely the origin reading's verdict.
+    """
+    _install(
+        mod,
+        monkeypatch,
+        _linked_issues([_issue_with_origin(10, RANT_TS), _issue_with_origin(11, RANT_TS)]),
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, RANT_TS))])
+
+    assert rc == 1, out
+    for subject in ("#10 issue ORIGIN-DUPLICATE", "#11 issue ORIGIN-DUPLICATE"):
+        detail = _detail(out, subject)
+        assert RANT_TS in detail and "Part:" in detail, detail
+
+
+def test_one_issue_writing_its_origin_twice_is_not_a_duplicate(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The duplicate state counts **issues**, not occurrences of the origin line.
+
+    A body can spell its origin line more than once — at the top and again in a provenance
+    section, or because an edit appended where it meant to replace — and that is one issue
+    declaring one origin. The rule it is measured against says "two or more open issues", so
+    a single issue can never be a duplicate of itself; grouping by occurrence made this queue
+    fail with a row reading *"#10 name the same rant origin ... and #10 #10 carry no
+    `Part: n/N`"*, three wrong numbers in the sentence a reader acts on.
+
+    The queue is otherwise clean (`_linked_issues` holds every link `ok` and the ledger holds
+    the timestamp), so `OK` here is the whole verdict: nothing but the origin reading can
+    make it fail.
+    """
+    _install(
+        mod,
+        monkeypatch,
+        _linked_issues(
+            [_issue_with_origin(10, RANT_TS, body=f"Origin: rant {RANT_TS}")]
+        ),
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, RANT_TS))])
+
+    assert rc == 0, out
+    assert "OK" in out, out
+    assert "DUPLICATE" not in out, out
+
+
+def test_a_labelled_split_of_one_rant_is_allowed(mod, monkeypatch, capsys, tmp_path) -> None:
+    """R5's escape hatch: a rant carried by two issues, each saying which part it is.
+
+    Without this the reading would forbid the split the design explicitly permits when a
+    rant's requirements are independent — and a rule that cannot be satisfied is one a cycle
+    answers by editing the reading instead of the work.
+    """
+    _install(
+        mod,
+        monkeypatch,
+        _linked_issues(
+            [
+                _issue_with_origin(10, RANT_TS, body="Part: 1/2"),
+                _issue_with_origin(11, RANT_TS, body="Part: 2/2"),
+            ]
+        ),
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, RANT_TS))])
+
+    assert rc == 0, out
+    assert "OK" in out, out
+
+
+def test_one_labelled_and_one_unlabelled_part_is_still_a_duplicate(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The escape hatch has to be used by **every** part, not by one of them.
+
+    Otherwise "labelled" would depend on which issue a reader looked at first, and the
+    unlabelled one would still be indistinguishable from a duplicate claim.
+    """
+    _install(
+        mod,
+        monkeypatch,
+        _linked_issues(
+            [
+                _issue_with_origin(10, RANT_TS, body="Part: 1/2"),
+                _issue_with_origin(11, RANT_TS),
+            ]
+        ),
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, RANT_TS))])
+
+    assert rc == 1, out
+    assert "#11 issue ORIGIN-DUPLICATE" in out, out
+    assert "#10 issue ORIGIN-DUPLICATE" not in out, out
+
+
+def test_a_queue_that_declares_no_origin_never_reads_the_ledger(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The check is lazy, and that is what keeps it from reddening unrelated queues.
+
+    A host with no ledger — a fork, a fresh machine — must not have its link reading turned
+    into exit 2 by a clause nobody invoked. The path given here does not exist, so any read
+    at all would be measurable as a failure rather than as silence.
+    """
+    _install(mod, monkeypatch, _linked_pair())
+
+    rc, out = _run(mod, capsys, ["--rants", str(tmp_path / "absent.jsonl")])
+
+    assert rc == 0, out
+    assert "OK" in out
+
+
+def test_a_ledger_that_cannot_be_read_is_unmeasurable(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """An issue declares an origin and the ledger is not there: exit 2, never a pass.
+
+    `origin-unresolved` would be a confident claim that the rant never existed, which is not
+    something a missing file can support — the family's rule is that a question the tool
+    cannot answer is reported unanswered.
+    """
+    _install(mod, monkeypatch, FakeGh([_issue_with_origin(10, RANT_TS)], [], {10: []}))
+
+    rc = mod.main(["--rants", str(tmp_path / "absent.jsonl")])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "rant ledger could not be read" in captured.err
+    assert "OK" not in captured.out
+
+
+def test_a_fenced_origin_line_declares_nothing(mod, monkeypatch, capsys, tmp_path) -> None:
+    """An issue that documents the convention in a fence is not declaring an origin.
+
+    R5's text and this tool's own docstring both spell `Origin: rant <ts>` while explaining
+    it, so that quotation is the family's normal input. The path does not exist, so a read
+    at all would be measurable: `origin-unresolved` here would mean the fence leaked.
+    """
+    _install(
+        mod,
+        monkeypatch,
+        FakeGh(
+            [
+                _issue(
+                    10,
+                    "an issue that quotes the rule",
+                    body="R5 asks for a first line like\n\n```\n"
+                    "Origin: rant 1999-01-01T00:00:00+08:00\n```\n",
+                )
+            ],
+            [],
+            {10: []},
+        ),
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(tmp_path / "absent.jsonl")])
+
+    assert rc == 1, out  # unclaimed, which is this issue's real state
+    assert "UNRESOLVED" not in out.upper(), out
+
+
+def test_the_origin_fault_is_folded_into_the_issues_own_row(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """One row per subject: a faulty link keeps the state, the origin fault rides along.
+
+    The report's shape is how it is read at a glance, so an issue does not get a second row.
+    What must not happen is the origin fault *disappearing* when the link is already broken
+    — that is the state where a reader is most likely to be fixing the issue anyway.
+    """
+    _install(mod, monkeypatch, FakeGh([_issue_with_origin(10, RANT_TS)], [], {10: []}))
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, "2026-01-01T00:00:00+08:00"))])
+
+    assert rc == 1, out
+    assert out.count("#10 issue") == 1, out
+    assert "#10 issue UNCLAIMED" in out, out  # the link fault keeps the state
+    assert RANT_TS in _detail(out, "#10 issue UNCLAIMED"), out
+
+
+def test_declared_origins_reads_the_bodys_own_line_and_masks_only_fences(mod) -> None:
+    """The unit-level reading, driven directly so the masking is pinned where it lives.
+
+    Four shapes, each settled against the live queue rather than invented: a plain line
+    declares; a line **inside a fence** does not (a body documenting the convention, which
+    is what this tool's docstring and R5's text both do); a whole line in backticks is not a
+    declaration either, because the anchor cannot see it; and a backticked **timestamp with
+    prose after it** does declare — that is #1745's real first line, and a reading that
+    silently ignored it would miss the very fault it exists to report.
+    """
+    declared = mod.declared_origins(
+        [
+            _issue(1, body="Origin: rant 2026-09-29T15:52:49.378845+08:00\n\nthe body"),
+            _issue(2, body="```\nOrigin: rant 1999-01-01T00:00:00+08:00\n```\n"),
+            _issue(3, body="`Origin: rant 1999-01-01T00:00:00+08:00`\n"),
+            _issue(
+                4,
+                body=(
+                    "Origin: rant `2026-09-29T15:52:43.442676+08:00` (a re-scoped rant), "
+                    "which re-scoped itself from `2026-09-27T19:41:13`.\n"
+                ),
+            ),
+            _issue(5, body="nothing here"),
+            _issue(6, body="R5 asks for a first line like `Origin: rant <timestamp>`.\n"),
+        ]
+    )
+
+    assert declared == {
+        1: ["2026-09-29T15:52:49.378845+08:00"],
+        4: ["2026-09-29T15:52:43.442676+08:00"],
+    }, declared
