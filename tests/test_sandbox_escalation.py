@@ -354,6 +354,30 @@ def test_the_question_reaches_the_session_and_the_answer_resolves_it(tmp_path):
     assert approved is True
 
 
+def test_the_question_declares_the_deadline_the_daemon_will_enforce(tmp_path):
+    """Issue #1757 requirement 2, the half a client cannot import.
+
+    The TUI can read the constant (same language, same repo); a GUI renderer
+    cannot, so the number must ride the frame. The assertion is against the
+    constant itself — a client bounded by a literal would drift the moment
+    either side is edited, which is the defect the field exists to remove.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-deadline", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def scenario():
+        task = asyncio.create_task(
+            server.request_approval(session.session_id, "widen this one call?")
+        )
+        frame = await _answer_next_question(server, ws, True)
+        return frame, await asyncio.wait_for(task, 5)
+
+    frame, _approved = asyncio.run(scenario())
+    assert frame is not None, "no approval_request frame reached the session"
+    assert frame["timeout_seconds"] == escalation.APPROVAL_TIMEOUT_SECONDS
+
+
 def test_a_session_with_no_client_is_refused_and_nothing_is_sent(tmp_path):
     """Fail closed: a host who walked away has not approved anything."""
     server = _server()

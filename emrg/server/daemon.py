@@ -1597,6 +1597,16 @@ class EmrgServer:
                 "session_id": session_id,
                 "request_id": request_id,
                 "question": question,
+                # The question's own deadline, carried to the clients: a client
+                # that never receives the resolution frame must still stop
+                # holding the question, and it must do so at *the daemon's*
+                # instant rather than at a number of its own. Without this the
+                # only home for the value is a copy per client — the TUI can
+                # import the constant (same language, same repo), a renderer
+                # cannot, and a copied number is one that drifts the moment
+                # either side is edited (issue #1757, requirement 2's client
+                # bound generalised to the client that cannot read Python).
+                "timeout_seconds": escalation.APPROVAL_TIMEOUT_SECONDS,
             })
             try:
                 answer = await asyncio.wait_for(
