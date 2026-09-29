@@ -653,3 +653,30 @@ def test_the_widening_belongs_to_one_call_and_not_to_the_next(tmp_path, monkeypa
     assert stub.calls[1]["sandbox"] == "read-only", (
         "the widening outlived the call it was granted for"
     )
+
+
+def test_the_tool_tells_a_denied_model_how_to_ask_at_the_tier_it_ran(
+    tmp_path, monkeypatch,
+):
+    """Requirement 5's wiring, at the site that chooses what to advertise.
+
+    The renderer takes the target set as an argument, so a test that passes one
+    exercises the renderer and not the tool: the tool's own line — which asks
+    ``hops_from`` about the tier the run *used* — is only reached by executing
+    it. The runner is stubbed (this is not a confinement test); what is under
+    test is the tool's choice.
+    """
+    from emrg.tools import bash_tool_v2
+
+    async def fake_run_command(command, *, policy, workdir, timeout):
+        return bash_tool_v2.ShellRunResult(
+            stderr="bash: x: Operation not permitted",
+            exit_code=1,
+            sandbox={"mode": policy.mode, "denied": True, "enforcement": "full"},
+        )
+
+    monkeypatch.setattr(bash_tool_v2, "run_command", fake_run_command, raising=True)
+    denied = asyncio.run(bash_tool_v2.BashToolV2().execute(
+        {"command": "echo x > /tmp/nope", "sandbox": "read-only", "workspace": str(tmp_path)},
+    ))
+    assert escalation.RETRY_HINT in denied.content, denied.content
