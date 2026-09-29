@@ -856,7 +856,7 @@ def test_the_cli_reads_both_roots_named_by_the_override(mod, monkeypatch, capsys
     assert str(project) in out
 
 
-def test_the_records_land_where_the_queue_reads_them(mod):
+def test_the_records_land_where_the_queue_reads_them(mod, tmp_path):
     """The record root the memory system writes is the one this tool searches.
 
     This guard used to scan the rendered template for its `cycle-<ts>.md` path and
@@ -864,42 +864,60 @@ def test_the_records_land_where_the_queue_reads_them(mod):
     prompt stops naming *where* a record goes — 「不需要指定什么东西记录到什么地方」, since a
     session has a memory system and only needs telling *what* to record — so the path left
     the template and the prose-level claim became unmeasurable. The invariant it protected
-    is still real and still worth a reading, so it is now measured where the writer
-    actually is: the daemon's project-memory root for a session whose cwd is this checkout
-    (`_collect_memory_data`, the loader that embeds the index a cycle appends to).
+    is still real and still worth a reading, so it is now read against the writer
+    (`_collect_memory_data`, the loader that embeds the index a cycle appends to) and
+    composed with the reader (`DEFAULT_CYCLES_LOGS`).
 
-    That is a strictly stronger claim than the scan it replaces: the old one compared two
-    pieces of text in one repository, while this one compares the directory a session is
-    told it has memory in against the directory the queue searches, so a move of either
-    side fails here. A record written anywhere else is a record no window reads — and the
-    abstention window is read from these files.
+    **This test failed in CI on its first run, and why is the point of its shape.** It
+    first read the index at *this checkout's* `.emrg/memory/MEMORY.md`, which exists on a
+    host that runs cycles and **not in a fresh clone**: `.emrg` is gitignored, so a runner
+    has no such file and the guard failed there while passing here (run 36519484170,
+    `test` and `test-windows`). A guard whose premise is a local-only artifact measures
+    the host, not the tree. So the checkout is built here with `tmp_path` and the claim is
+    split into its two halves, each measured where it is decidable:
+
+    1. the **writer** derives `<cwd>/.emrg/memory` — measured on a directory this test
+       creates, so it holds on any host; and
+    2. the **reader** searches `<this checkout>/.emrg/memory` — a constant, needing no file.
+
+    Composed, they are the sentence the old scan asserted: a cycle running in this checkout
+    records where the queue reads. A record written anywhere else is a record no window
+    reads — and the abstention window is read from these files.
     """
     from types import SimpleNamespace
 
     from emrg.server.daemon import EmrgServer
 
-    repo_root = REPO_ROOT
-    memory_root = repo_root / ".emrg" / "memory"
-    assert (memory_root / "MEMORY.md").is_file(), (
-        f"{memory_root} carries no index, so the reading below would be about nothing"
-    )
+    # 1. The writer, on a directory that exists wherever this runs.
+    checkout = tmp_path / "checkout"
+    memory_root = checkout / ".emrg" / "memory"
+    memory_root.mkdir(parents=True)
+    (memory_root / "MEMORY.md").write_text("# index\n", encoding="utf-8")
 
     # The same shape `tests/test_prompt_templates.py` uses: an uninitialised instance is
     # enough, because the loader touches only `session.cwd` / `session.memory_dir`.
     daemon = EmrgServer.__new__(EmrgServer)
     data = daemon._collect_memory_data(
-        SimpleNamespace(cwd=repo_root, memory_dir=repo_root / ".emrg" / "sessions" / "x" / "memory")
+        SimpleNamespace(cwd=checkout, memory_dir=checkout / ".emrg" / "sessions" / "x" / "memory")
     )
-    assert data, (
-        "the daemon embedded no project index for a session in this checkout — the "
-        "comparison below would be against nothing"
+    assert data and data.get("project_memory_dir"), (
+        "the loader embedded no project root for a session whose cwd carries "
+        f"{memory_root}/MEMORY.md — the reading below would be about nothing"
     )
     loaded = Path(data["project_memory_dir"]).resolve()
+    assert loaded == memory_root.resolve(), (
+        f"the daemon's project-memory root is {loaded}, not {memory_root} — a cycle's "
+        "record lands under whatever this returns, so a change here moves the corpus"
+    )
+
+    # 2. The reader: the same directory, inside THIS checkout. No file is required: the
+    # root is a constant, and requiring the index is what made this guard fail on a
+    # fresh clone.
     roots = {root.resolve() for root in mod.DEFAULT_CYCLES_LOGS}
-    assert loaded in roots, (
-        f"a cycle running in this checkout records under {loaded}, and review-queue "
-        f"searches {sorted(str(r) for r in roots)} — the abstention window is read from "
-        "the records, so a cycle writing somewhere else is one no window can see"
+    assert (REPO_ROOT / ".emrg" / "memory").resolve() in roots, (
+        f"review-queue searches {sorted(str(r) for r in roots)}, which does not include "
+        f"{REPO_ROOT / '.emrg' / 'memory'} — the abstention window is read from the "
+        "records, so a cycle writing where the queue does not look is one no window can see"
     )
 
 
