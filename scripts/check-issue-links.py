@@ -107,13 +107,45 @@ States
     unlinked     an open PR that points at no open issue: it declares nothing, or it
                  declares a number that is not among the open issues (a closed issue, or
                  a PR number with the wrong keyword form). The row says which
+    origin-unresolved
+                 an open issue declares its origin (`Origin: rant <timestamp>`, R5) and the
+                 rant ledger does not hold that timestamp, so the chain's first joint is
+                 broken: the issue's reader cannot reach the requirement the issue exists to
+                 carry
+    origin-duplicate
+                 two or more open issues declare the same rant origin and at least one
+                 carries no `Part: n/N` — which is what makes a deliberate split of one rant
+                 across several issues distinguishable from a duplicate claim of it
+
+The last two read a **file**, not GitHub, and that difference is why they exist at all
+----------------------------------------------------------------------------------------
+Everything above is read from the API, and the rule it enforces (host 2026-09-26T18:52:57)
+is about PRs and issues. R5 adds the link that comes *before* both — a cycle that takes up a
+rant files the issue it will be finished by, naming the rant's ISO timestamp on the issue's
+first line — and nothing read it, which is measurable rather than theoretical: this cycle
+found its own issue #1747 had been opened without the line (found and fixed during a host
+turn, minutes after R5's template half landed on master as part of #1738).
+
+A rant timestamp is a **host-local** handle, so the resolution is a local file read
+(`~/.emrg/rants.jsonl`, overridable with `--rants` / `$EMRG_RANTS` because the tests must not
+read the host's live ledger) and it is attempted **only when an open issue declares an origin**:
+a queue where nobody declares one costs no file read, and a host without a ledger does not
+have a linked queue turned into exit 2 by a check nobody asked for.
+
+What the resolution cannot decide, stated rather than implied: `submit_rant cleanup` keeps all
+pending and in-progress rants plus the **ten most recent completed** ones, so an origin whose
+rant completed and was pruned reads `origin-unresolved` exactly like one never written. The
+row says so, because the reader's next move differs (worth the ledger's absence or not) and a
+row that hid the difference would be asking for a timestamp no file holds.
 
 Exit codes
 ----------
 0  every open issue has exactly one open PR declaring it, each declaration is named back
-   in the issue, and every open PR declares an open issue
+   in the issue, every open PR declares an open issue, and every origin an issue declares
+   resolves in the rant ledger
 1  at least one row is in a state above that is not `linked`
-2  the question could not be answered (gh failed, a payload did not parse) — never
+2  the question could not be answered (gh failed, a payload did not parse, or an issue
+   declared an origin and the ledger named to resolve it could not be read) — never
    reported as a pass, because a clean queue and an unreadable one are different
    answers and only one of them is evidence
 
@@ -193,10 +225,12 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 #: The repo's own name, so a bare run answers about the queue a cycle is standing in.
 DEFAULT_REPO = "argszero/emrg"
@@ -292,6 +326,44 @@ _INLINE_CODE = re.compile(r"`[^`\n]*`|``.*?``", re.S)
 #: `_without_quote_marks`, which wants a fenced block's contents readable and its marks
 #: gone, the opposite of what `_FENCED_BLOCK` is for.
 _FENCE_MARK = re.compile(r"^[ \t]*(?:```|~~~).*$", re.M)
+
+#: The rant ledger, and the **first link of the chain** this reading now checks: R5 tells
+#: a cycle that takes up a rant to file the issue it will be finished by, with the issue's
+#: first line naming its origin verbatim (`Origin: rant <the rant's ISO timestamp>`). A
+#: timestamp is the rant's only handle, so an issue whose origin cannot be resolved is a
+#: link broken at its first joint — the reader cannot reach the requirement from the work.
+#:
+#: Host-local, exactly like every rant timestamp: the store lives at `~/.emrg/rants.jsonl`
+#: on the machine that wrote the citation (`check-rant-citations.py` measured what happens
+#: on a second host — 0 of 24 resolve there). `--rants` and `$EMRG_RANTS` exist because the
+#: tests must not read the host's live ledger, and because a fork's store is its own.
+DEFAULT_RANTS = Path.home() / ".emrg" / "rants.jsonl"
+
+#: An issue's origin line: the word `Origin:` (any case), the word `rant`, and a timestamp.
+#: Anchored to the start of a line under `re.M`, because R5 asks for it on the issue's
+#: **first line** — a mention of the shape inside a sentence is prose about the convention,
+#: not a declaration of origin. Two deliberate choices in the pattern, both settled on the
+#: live queue the day this was written:
+#:
+#: * the timestamp must be a well-formed ISO instant, not any word. `\S+` was the first
+#:   version and it invents a handle out of the next token — #1745's line continues
+#:   `(【P0 · 要求 5】…)` after its timestamp, and a bare token scan reads that as the origin,
+#:   reporting a fault about a string no ledger could ever hold;
+#: * up to two **inline-code marks** may precede it, and prose may follow it. R5 asks for the
+#:   timestamp verbatim and #1745 spells it in backticks followed by an explanation, so a
+#:   strict reading of a lenient writer is a silent gap — the fault is missed, which is the
+#:   opposite of the direction this family prefers its errors to err in. What stays strict is
+#:   the anchor plus the fence mask in `_origin_lines`.
+_ORIGIN = re.compile(
+    r"(?im)^[ \t]*origin:[ \t]*rant[ \t:]+[`*_]{0,2}"
+    r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))"
+)
+
+#: The escape hatch R5 defines for a rant carried by more than one issue: `Part: 1/3`. Two
+#: open issues naming the same rant are the shape the one-rant-one-issue default forbids,
+#: *unless* each says which part it is — then the reading can tell a deliberate split from
+#: a duplicate claim, which is the whole reason the clause exists.
+_PART = re.compile(r"(?i)\bpart:[ \t]*\d+[ \t]*/[ \t]*\d+")
 
 
 def _without_code(text: str) -> str:
@@ -482,6 +554,189 @@ def issue_claims(text: str | None) -> set[int]:
             continue
         claims.update(int(n) for n in re.findall(r"#(\d+)", match.group(1)))
     return claims
+
+
+def rants_path(override: str | None = None) -> Path:
+    """The rant ledger: `--rants`, else `$EMRG_RANTS`, else the host's own store."""
+    raw = override or os.environ.get("EMRG_RANTS")
+    return Path(raw).expanduser() if raw else DEFAULT_RANTS
+
+
+def load_rants(path: Path) -> set[str]:
+    """Every timestamp the ledger holds, or a `RuntimeError` when it cannot be read.
+
+    A store that is missing or unparseable is **not** "a store with no rants in it": the
+    question this answers is *does this handle resolve*, and an unreadable ledger leaves it
+    unanswered. The caller reports that as unmeasurable (exit 2), which is the family's
+    rule and the reason this raises instead of returning an empty set — an empty set would
+    print `origin-unresolved` for every issue on a host whose ledger simply is not there,
+    a confident wrong verdict about a queue that may be perfectly linked.
+
+    Rows are read with `json.loads` per line, the shape `submit_rant` writes
+    (`emrg/server/rants.py`). A line that is not JSON is skipped rather than fatal: the
+    ledger is appended to by a tool, and a half-written last line is not evidence that the
+    other timestamps are absent — the direction that matters here is the one that would
+    *invent* a fault, and skipping errs the other way.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            f"the rant ledger could not be read ({path}): {exc}"
+        ) from exc
+    stamps: set[str] = set()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and isinstance(row.get("timestamp"), str):
+            stamps.add(row["timestamp"])
+    return stamps
+
+
+def _origin_lines(body: str | None) -> list[str]:
+    """The rant timestamps `body` declares as its origin, in the order they appear.
+
+    Fenced blocks are blanked out first, and only those: a fenced `Origin:` line is a body
+    *documenting* the convention (this tool's own docstring and R5's text both spell it), so
+    it must not read as a declaration. Inline code is deliberately **not** blanked here,
+    which is where this reading parts company with the claim readers above: for a closing
+    keyword, masking an inline span errs toward a loud `UNCLAIMED` row, but for an origin it
+    would err toward **silence** — the fault the reading exists to report would simply not
+    be seen. The line anchor does the work the span mask does there: a line inside backticks
+    starts with a backtick, not with `origin:`.
+    """
+    text = _FENCED_BLOCK.sub(lambda m: " " * len(m.group(0)), body or "")
+    return [m.group("ts") for m in _ORIGIN.finditer(text)]
+
+
+def declared_origins(issues: list[dict]) -> dict[int, list[str]]:
+    """Issue number -> the rant timestamps its **own text** declares as its origin.
+
+    A list per issue, not a single timestamp: a body may carry more than one, and the
+    duplicate check below has to see both to name them. Read through `_origin_lines`, whose
+    docstring carries the masking decision and the live case that settled it.
+    """
+    declared: dict[int, list[str]] = {}
+    for issue in issues:
+        found = _origin_lines(issue.get("body"))
+        if found:
+            declared[int(issue["number"])] = found
+    return declared
+
+
+def _same_instant_spelling(stored: str, cited: str) -> bool:
+    """Is `stored` the record a writer citing `cited` was reaching for?
+
+    Only ever used to choose the remedy's wording — never to resolve a handle — so it may
+    be generous where the verdict is not. The shape it exists for is measured: the ledger
+    spells `2026-09-29T15:52:49.378845+08:00` and a writer dropped the microseconds into
+    `2026-09-29T15:52:49+08:00`, which no prefix rule sees (the sixth character from the end
+    differs) and which a reader cannot fix without being told the exact spelling. The
+    comparison is on the seconds a writer cannot have dropped accidentally — a plain
+    `startswith` either way, plus the `[:19]` instant, two rants in one second being what
+    the ledger's microsecond precision exists to keep apart.
+    """
+    return (
+        stored.startswith(cited)
+        or cited.startswith(stored)
+        or stored[:19] == cited[:19]
+    )
+
+
+def judge_origins(
+    issues: list[dict], store: set[str], where: str
+) -> dict[int, tuple[str, str]]:
+    """Issue number -> `(state, detail)` for every origin fault; a clean origin is absent.
+
+    Two faults, and they are different questions:
+
+    * `origin-unresolved` — the issue names a rant origin the ledger does not hold, so the
+      first joint of the chain `rant -> issue -> PR` is broken and a reader cannot reach
+      the requirement the issue exists to carry. The detail names the ledger it read and,
+      when a stored timestamp differs from the citation only by the precision a writer
+      dropped, names that stored spelling — a remedy a writer can follow.
+    * `origin-duplicate` — two or more **open** issues declare the same rant and at least
+      one of them carries no `Part: n/N`. R5's default is one rant, one issue; the split is
+      legitimate only when every part says which part it is, so an unlabelled one makes the
+      two indistinguishable from a duplicate claim — which is the reading `--json` and a
+      reviewer both need before they can tell deliberate from accidental.
+
+    The pruned-store limit, stated rather than implied: `submit_rant cleanup` keeps all
+    pending and in-progress rants plus the ten most recent completed ones, so an issue
+    whose rant completed and was then pruned reads `origin-unresolved` exactly like one
+    whose origin was never written. That is the right direction here — an open issue whose
+    rant is gone is a chain a reader cannot walk either way — and the detail says so, which
+    is what keeps the row actionable.
+    """
+    faults: dict[int, tuple[str, str]] = {}
+    by_ts: dict[str, list[int]] = {}
+    labelled: dict[int, bool] = {}
+    for issue in issues:
+        number = int(issue["number"])
+        body = issue.get("body") or ""
+        labelled[number] = bool(_PART.search(_without_code(body)))
+        for ts in _origin_lines(body):
+            by_ts.setdefault(ts, []).append(number)
+            if ts in store:
+                continue
+            near = sorted(t for t in store if _same_instant_spelling(t, ts))
+            remedy = (
+                f"the ledger holds `{near[0]}` - write it verbatim"
+                if near
+                else "write the rant's own timestamp verbatim (the ledger is the only "
+                "place it is spelled)"
+            )
+            faults[number] = (
+                "origin-unresolved",
+                f"the origin line names rant `{ts}`, which {where} does not hold - {remedy}. "
+                "The ledger keeps every pending and in-progress rant and only the ten most "
+                "recent completed ones, so a pruned origin reads the same as one never "
+                "written: an open issue whose rant is gone is a chain no reader can walk",
+            )
+    for ts, numbers in by_ts.items():
+        if len(numbers) < 2:
+            continue
+        unlabelled = sorted(n for n in numbers if not labelled[n])
+        if not unlabelled:
+            continue
+        for number in unlabelled:
+            faults[number] = (
+                "origin-duplicate",
+                f"{_numbers(sorted(set(numbers)))} name the same rant origin `{ts}` and "
+                f"{_numbers(unlabelled)} carry no `Part: n/N` - one rant is one issue by "
+                "default, so either fold these into the one issue that finishes the rant, "
+                "or label each with the part it is (`Part: 1/2`) so a reader can tell a "
+                "deliberate split from a duplicate claim",
+            )
+    return faults
+
+
+def apply_origins(rows: list[Row], faults: dict[int, tuple[str, str]]) -> None:
+    """Fold each origin fault into that issue's own row, keeping one row per subject.
+
+    The report's shape — one row per open subject, with the state and the remedy on it — is
+    what makes it readable at a glance, so an origin fault does not get a second row:
+    a row whose **link** is already faulty keeps its link state and carries the origin fault
+    beside it (the link fault is what a reader acts on first), while an issue whose link is
+    clean takes the origin state. Both are faults, so both are excluded from the `OK` count
+    either way; what changes is only which one the state names.
+    """
+    for row in rows:
+        if row.kind != "issue":
+            continue
+        fault = faults.get(row.number)
+        if not fault:
+            continue
+        state, detail = fault
+        if row.clean:
+            row.state, row.detail = state, detail
+        else:
+            row.detail = f"{row.detail} - and the origin is faulty: {detail}"
 
 
 def _paged_json(args: list[str]) -> list[dict]:
@@ -1031,6 +1286,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--repo", default=DEFAULT_REPO, help="owner/name")
     parser.add_argument(
+        "--rants",
+        default=None,
+        help=(
+            "the rant ledger an `Origin: rant <timestamp>` line is resolved against "
+            "(default: $EMRG_RANTS, else ~/.emrg/rants.jsonl). Read only when an open "
+            "issue declares an origin"
+        ),
+    )
+    parser.add_argument(
         "--json", action="store_true", help="emit the rows as one JSON document"
     )
     args = parser.parse_args(argv)
@@ -1044,6 +1308,21 @@ def main(argv: list[str] | None = None) -> int:
     rows = judge_issues(queue.issues, refs_by_issue, stated_by_pr) + judge_prs(
         queue.prs, queue.issue_numbers, stated_by_pr
     )
+
+    # The first link of the chain (R5), read only when an issue actually declares an
+    # origin: a queue where nobody does costs no file read, and — the half that matters —
+    # a host whose ledger is absent does not turn a linked queue into exit 2. Read
+    # failures are unmeasurable, never a pass, so they return before any verdict prints.
+    declared = declared_origins(queue.issues)
+    if declared:
+        path = rants_path(args.rants)
+        try:
+            store = load_rants(path)
+        except RuntimeError as exc:
+            print(f"cannot determine the issue/PR links: {exc}", file=sys.stderr)
+            return 2
+        apply_origins(rows, judge_origins(queue.issues, store, f"the rant ledger ({path})"))
+
     bad = [row for row in rows if not row.clean]
 
     if args.json:
@@ -1083,8 +1362,9 @@ def main(argv: list[str] | None = None) -> int:
         if not bad:
             print(
                 f"\nOK: every open issue has exactly one open PR declaring it, each "
-                f"declaration is named back in the issue, and every open PR declares an "
-                f"open issue ({len(rows)} subject(s) read)"
+                f"declaration is named back in the issue, every open PR declares an "
+                f"open issue, and every origin an issue declares resolves in the rant "
+                f"ledger ({len(rows)} subject(s) read)"
             )
         else:
             print(
