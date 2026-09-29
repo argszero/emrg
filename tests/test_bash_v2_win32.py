@@ -33,11 +33,14 @@ from emrg.sandbox.win32.ffi import SIDAndAttributes
 from emrg.sandbox.win32.runner import (
     RUNNER_FAILURE_EXIT,
     RUNNER_SIGNATURE,
+    START_ANNOUNCEMENT,
     RunnerFailure,
     _build_sandbox,
+    announce,
     fail,
     git_safety_env,
     main,
+    note_cleanup_failure,
     parse_args,
     run,
 )
@@ -583,14 +586,23 @@ def test_the_win32_rule_classifies_the_line_the_runner_really_prints(capsys):
     """
     from emrg.tools.bash_tool_v2 import classify_runner_failure
 
+    # A real run's stderr, in its order: the announcement, then (on this path)
+    # the fatal line — `run` writes the first one on its way to the spawn, and
+    # `fail` is only reached from there.
+    announce()
     with pytest.raises(RunnerFailure, match="no such directory"):
         fail("no such directory: C:\\nope")
     printed = capsys.readouterr().err
+    lines = printed.splitlines()
+    assert lines[0] == START_ANNOUNCEMENT
+    fatal_line = lines[-1]
 
-    # What the runner wrote, through the rule the seam consults: one line, the
-    # same one `main` exits 127 behind (the test above pins that half).
+    # What the runner wrote, through the rule the seam consults: the detail, not
+    # the announcement — the line that is skipped is the one the rule declares as
+    # its start line, and this is the assertion that fails if that stops working.
+    assert fatal_line != START_ANNOUNCEMENT
     assert classify_runner_failure(RUNNER_FAILURE_EXIT, printed, provider.RUNNER_FAILURE_RULES) == (
-        printed.strip()
+        fatal_line
     )
     # The two spellings of the prefix, named so a rename fails as this agreement
     # rather than as an incidental unmatched line.
@@ -651,18 +663,401 @@ def test_an_exit_the_loader_produced_is_read_as_nothing_ran_without_a_signature(
             for reader in readers:
                 assert reader(code, "", rules) is None
 
-    # And it does not swallow what a command really reports: an ordinary nonzero
-    # exit is unchanged, with or without a line, and exit 0 / signal death are
-    # never evidence.
+    # And it does not swallow what a command really reports: beside a run's own
+    # announcement an ordinary nonzero exit is unchanged, with or without a line,
+    # and exit 0 / signal death are never evidence.
+    started = f"{START_ANNOUNCEMENT}\n"
     for code in (1, 2, 127, 3221225477):
         for reader in readers:
-            assert reader(code, "", provider.RUNNER_FAILURE_RULES) is None
+            assert reader(code, started, provider.RUNNER_FAILURE_RULES) is None
     for reader in readers:
-        assert reader(0, "", provider.RUNNER_FAILURE_RULES) is None
-        assert reader(None, "", provider.RUNNER_FAILURE_RULES) is None
+        assert reader(0, started, provider.RUNNER_FAILURE_RULES) is None
+        assert reader(None, started, provider.RUNNER_FAILURE_RULES) is None
     line = r"windows-acl-run: no such directory: C:\nope"
-    assert bash_classify(RUNNER_FAILURE_EXIT, line, provider.RUNNER_FAILURE_RULES) == line
-    assert pwsh_classify(1, line, provider.RUNNER_FAILURE_RULES) is None
+    assert bash_classify(RUNNER_FAILURE_EXIT, started + line, provider.RUNNER_FAILURE_RULES) == line
+    assert pwsh_classify(1, started + line, provider.RUNNER_FAILURE_RULES) is None
+
+
+def test_a_runner_that_never_announced_its_start_is_read_as_nothing_ran(capsys):
+    """The runner's own half of one question: did the child ever start?
+
+    The loader family above reads the *parent's* evidence, and it misses the
+    shape measured on 2026-09-28: this module's own import failed
+    (``ModuleNotFoundError: No module named 'emrg.sandbox'``), so the process
+    exited 1 with empty stdout and the seam reported a dead environment as six
+    consecutive failed commands.  The status is not the evidence there — 1 is a
+    command's own as often as a runner's — and the rant behind issue #1560 asked
+    for the runner's own channel instead: the wrapper knows whether the child
+    ever started, so it should say so on its own line rather than leave the seam
+    decoding a per-platform dialect.
+
+    What it says: one line, written immediately before the spawn.  Its
+    **absence** beside a nonzero exit is a runner that never got that far, which
+    is reported through
+    :func:`emrg.sandbox.contract.never_announced_detail` without decoding the
+    status at all; the line itself is then dropped from what the model reads,
+    because it rides on every confined run and would otherwise put a ``[stderr]``
+    section on every successful command.
+    """
+    from emrg.sandbox.contract import (
+        never_announced_detail,
+        never_started_detail,
+        without_start_announcements,
+    )
+    from emrg.sandbox.providers.darwin import RUNNER_FAILURE_RULES as DARWIN_RULES
+    from emrg.sandbox.providers.linux import RUNNER_FAILURE_RULES as LINUX_RULES
+    from emrg.tools.bash_tool_v2 import classify_runner_failure as bash_classify
+    from emrg.tools.pwsh_tool_v2 import classify_runner_failure as pwsh_classify
+
+    readers = (bash_classify, pwsh_classify)
+    rule = provider.RUNNER_FAILURE_RULES[0]
+    # The agreement between the two spellings, which nothing imports across the
+    # seam, exactly as with the fatal prefix: the runner writes this line and the
+    # rule declares it.
+    assert rule.start_line == START_ANNOUNCEMENT == provider.START_ANNOUNCEMENT
+    # And it is not the failure prefix: a line that matched one would be the first
+    # match of every walk and would hide the detail a real failure printed.
+    assert not any(sig in START_ANNOUNCEMENT.lower() for sig in rule.fatal_signatures)
+    assert RUNNER_SIGNATURE not in START_ANNOUNCEMENT
+
+    # What the runner writes, read off the runner itself.
+    announce()
+    assert capsys.readouterr().err == f"{START_ANNOUNCEMENT}\n"
+
+    # The measured shape: nothing on either stream, a status a command could also
+    # have chosen, and no announcement to be found.
+    for code in (1, 2, 127, 3221225477):
+        for reader in readers:
+            detail = reader(code, "", provider.RUNNER_FAILURE_RULES)
+            assert detail == never_announced_detail(code), hex(code)
+            assert str(code) in detail and f"0x{code:08X}" in detail
+        # Both spellings of the status are the same status to a parent.
+        signed = code - 0x100000000
+        assert bash_classify(signed, "", provider.RUNNER_FAILURE_RULES) == never_announced_detail(code)
+
+    # An announced run is the other reading, whatever the status — and that is
+    # what keeps a command's own failure from being reported as the environment's.
+    for code in (1, 2, 127, 3221225477):
+        for reader in readers:
+            assert reader(code, f"{START_ANNOUNCEMENT}\n", provider.RUNNER_FAILURE_RULES) is None
+
+    # The loader family outranks it: that evidence is exactly the case where the
+    # runner wrote nothing at all.  The sibling rungs, whose runner is a
+    # third-party binary, cannot announce and are untouched by the field.
+    for code in provider.LOADER_EXIT_CODES:
+        for reader in readers:
+            assert reader(code, "", provider.RUNNER_FAILURE_RULES) == never_started_detail(code)
+    for rules in (DARWIN_RULES, LINUX_RULES):
+        assert rules[0].start_line is None
+        for code in (1, 127):
+            for reader in readers:
+                assert reader(code, "", rules) is None
+
+    # Dropped from the text the model reads — the announcement lines and nothing
+    # else, in both line endings, and only where a rule declares one.
+    strip = without_start_announcements
+    assert strip(f"{START_ANNOUNCEMENT}\nerr-marker", provider.RUNNER_FAILURE_RULES) == "err-marker"
+    assert strip(f"{START_ANNOUNCEMENT}\r\nout\n", provider.RUNNER_FAILURE_RULES) == "out\n"
+    assert strip("a\nb\n", provider.RUNNER_FAILURE_RULES) == "a\nb\n"
+    assert strip(f"{START_ANNOUNCEMENT}\n", LINUX_RULES) == f"{START_ANNOUNCEMENT}\n"
+
+
+def test_a_cleanup_notice_beside_the_childs_own_exit_is_not_a_runner_failure(capsys):
+    """The runner's other non-failure line, and why it cannot carry the prefix.
+
+    ``run``'s ``finally`` reports a disposal failure *beside* the code the child
+    exited with — the exit code wins, because the command really ran.  Spelled in
+    the failure vocabulary (``windows-acl-run: cleanup: …``) it was classified as
+    one whenever that code was also 127, which is not exotic: a shell's "command
+    not found" is 127.  A command that ran and returned 127 was then reported as
+    an unusable environment, with the run's own result discarded — the same
+    misreading the start line above exists to prevent, in the other direction.
+    """
+    from emrg.tools.bash_tool_v2 import classify_runner_failure
+    from emrg.tools.pwsh_tool_v2 import classify_runner_failure as pwsh_classify
+
+    started = f"{START_ANNOUNCEMENT}\n"
+    note_cleanup_failure(RuntimeError("dispose failed"))
+    notice = capsys.readouterr().err
+    assert notice == f"{RUNNER_SIGNATURE} cleanup: dispose failed\n"
+
+    for reader in (classify_runner_failure, pwsh_classify):
+        assert reader(RUNNER_FAILURE_EXIT, started + notice, provider.RUNNER_FAILURE_RULES) is None
+
+    # The direction of the pin: in the failure's own spelling the very same notice
+    # *is* classified, so this pair fails if the notice goes back to carrying it.
+    misread = f"{RUNNER_SIGNATURE}: cleanup: dispose failed\n"
+    assert (
+        classify_runner_failure(RUNNER_FAILURE_EXIT, started + misread, provider.RUNNER_FAILURE_RULES)
+        == misread.strip()
+    )
+
+
+def _stub_runner(script: str):
+    """A ``Runner`` whose program is a two-line interpreter script, not a boundary.
+
+    The rules are the real ones for this rung — it is the only backend that
+    declares a ``start_line`` — while the *program* is stubbed, because what the
+    tests below measure is the consumer's wiring rather than the ACL boundary
+    (which the Windows-only tests in this file already measure for real).  The
+    stub is what makes them run on every platform, and what lets them drive the
+    path that no other test reaches: ``run_command``, where the readings and the
+    strip that follows them live.
+
+    :param script: the stub program's source.
+    :returns: a runner that spawns it in place of a confinement tool.
+    """
+    from emrg.sandbox.contract import Runner
+
+    return Runner(
+        name="stub",
+        enforcement="full",
+        denial_signatures=provider.DENIAL_SIGNATURES,
+        runner_failure_rules=provider.RUNNER_FAILURE_RULES,
+        runner_argv=lambda policy: [sys.executable, "-c", script],
+    )
+
+
+def _stub_confined(monkeypatch, script: str):
+    """Point the seam at a stubbed runner for one test.
+
+    Patched on the providers module, not on ``emrg.sandbox.contract``: ``confine``
+    imports ``select_runner`` from there at call time, which is exactly the seam
+    the patch has to reach.
+
+    :param monkeypatch: the pytest fixture.
+    :param script: the stub program's source.
+    """
+    from emrg.sandbox import providers as providers_module
+
+    monkeypatch.setattr(
+        providers_module,
+        "select_runner",
+        lambda mode, *, platform_name=None: _stub_runner(script),
+    )
+
+
+def test_the_announcement_is_stripped_from_what_the_model_reads(monkeypatch, tmp_path):
+    """The consumer's half of the start line, driven through the real seam.
+
+    Two production lines implement this and nothing reached them before: the
+    announcement is removed from the run's stderr in ``run_command``, after the
+    readings that need it and before anything is rendered.  It has to be removed
+    rather than tolerated — the runner writes it on **every** confined run, so
+    leaving it would put a ``[stderr]`` section on every successful command the
+    model reads, and an announcement is not the command's output.
+
+    The stub reports the announcement on stderr and markers on both streams, so
+    one row says all three facts at once: the child's output survives, the
+    announcement does not, and the run is still read as confined (``enforcement``
+    present) rather than as a runner failure.
+    """
+    import asyncio
+
+    from emrg.sandbox.policy import SandboxPolicy
+    from emrg.tools.bash_tool_v2 import render_result as bash_render
+    from emrg.tools.bash_tool_v2 import run_command as bash_run_command
+    from emrg.tools.pwsh_tool_v2 import render_result as pwsh_render
+    from emrg.tools.pwsh_tool_v2 import run_command as pwsh_run_command
+
+    _stub_confined(
+        monkeypatch,
+        "import sys;"
+        f"sys.stderr.write({START_ANNOUNCEMENT!r} + '\\n');"
+        "sys.stderr.flush();"
+        "sys.stdout.write('out-marker');"
+        "sys.stderr.write('err-marker')",
+    )
+    policy = SandboxPolicy(mode="read-only", workspace_root=str(tmp_path))
+
+    for run_command, render in ((bash_run_command, bash_render), (pwsh_run_command, pwsh_render)):
+        result = asyncio.run(
+            run_command(
+                "ignored (the stub never reads it)",
+                policy=policy,
+                workdir=str(tmp_path),
+                timeout=30,
+                platform_name="win32",
+            )
+        )
+        text = render(result)
+        assert "out-marker" in text, text
+        assert "err-marker" in text, text
+        assert START_ANNOUNCEMENT not in text, text
+        assert result.stderr == "err-marker", repr(result.stderr)
+        assert result.sandbox == {
+            "mode": "read-only",
+            "denied": False,
+            "enforcement": "full",
+        }, result.sandbox
+
+    # The row above is only worth having if it can fail, so the strip is
+    # neutralised and the same run repeated: the announcement reappears as
+    # `[stderr]` output the model would read.  Without this, a future edit that
+    # stopped calling the strip would leave the assertions above green while the
+    # leak came back — the "reading that cannot say no" failure mode.
+    import emrg.tools.bash_tool_v2 as bash_module
+
+    monkeypatch.setattr(
+        bash_module, "without_start_announcements", lambda stderr, rules: stderr
+    )
+    unstripped = asyncio.run(
+        bash_module.run_command(
+            "ignored",
+            policy=policy,
+            workdir=str(tmp_path),
+            timeout=30,
+            platform_name="win32",
+        )
+    )
+    assert START_ANNOUNCEMENT in bash_render(unstripped)
+
+
+def test_a_run_with_no_announcement_is_refused_rather_than_reported_as_the_commands(monkeypatch, tmp_path):
+    """The reading's readable end: a dead environment is not a failed command.
+
+    This is the shape the rant measured — the runner's own process dies with a
+    status a command could also have chosen, and nothing on either stream — and
+    what the model must see is a refusal naming the environment, not
+    ``[exit code: 3]`` as though the command had run and returned 3.
+
+    Both the seam (``run_command`` raises) and the tool (what the model reads)
+    are asserted, because the second is the one the rant's three readers asked
+    about and only it shows the sentence that reaches the transcript.
+    """
+    import asyncio
+
+    from emrg.sandbox.contract import SANDBOX_UNAVAILABLE, SandboxUnavailableError, never_announced_detail
+    from emrg.sandbox.policy import SandboxPolicy
+    from emrg.tools.bash_tool_v2 import BashToolV2
+    from emrg.tools.bash_tool_v2 import run_command as bash_run_command
+    from emrg.tools.pwsh_tool_v2 import run_command as pwsh_run_command
+
+    _stub_confined(monkeypatch, "import sys; sys.exit(3)")
+    policy = SandboxPolicy(mode="read-only", workspace_root=str(tmp_path))
+
+    for run_command in (bash_run_command, pwsh_run_command):
+        with pytest.raises(SandboxUnavailableError) as raised:
+            asyncio.run(
+                run_command(
+                    "ignored",
+                    policy=policy,
+                    workdir=str(tmp_path),
+                    timeout=30,
+                    platform_name="win32",
+                )
+            )
+        assert raised.value.code == SANDBOX_UNAVAILABLE
+        assert raised.value.detail == never_announced_detail(3)
+
+    # And the tool's own surface: the refusal, with the environment named.
+    tool_result = asyncio.run(
+        BashToolV2().execute(
+            {
+                "command": "ignored",
+                "intent": "probe",
+                "sandbox": "read-only",
+                "workspace": str(tmp_path),
+                "workdir": str(tmp_path),
+            }
+        )
+    )
+    assert tool_result.error is True, tool_result
+    assert 'sandbox mode "read-only" is requested' in tool_result.content, tool_result.content
+    assert never_announced_detail(3) in tool_result.content, tool_result.content
+    assert "[exit code: 3]" not in tool_result.content, tool_result.content
+
+
+def test_a_matched_fatal_line_outranks_the_missing_announcement(monkeypatch, tmp_path):
+    """The order the two readings take, and why the walk has to be first.
+
+    The same fatal line is present in two of the three rows and only the
+    announcement moves, so one row isolates the ordering claim:
+
+    * announcement + fatal line -> the fatal line (the run spoke and failed);
+    * fatal line alone -> **still** the fatal line, because ``fail()`` prints one
+      for every refusal it raises before the spawn and none of those is preceded
+      by an announcement.  Reading the silence first answered
+      ``never_announced_detail`` here, which reported a deliberate exit as a
+      death, asserted a cause the case does not have, and discarded the only line
+      naming the argument or the directory (``SandboxUnavailableError`` renders
+      without attaching stderr);
+    * nothing at all -> the death reading, which is the case the reading exists
+      for: no signature could exist to match, so silence is the whole evidence.
+    """
+    import asyncio
+
+    from emrg.sandbox.contract import SandboxUnavailableError, never_announced_detail
+    from emrg.sandbox.policy import SandboxPolicy
+    from emrg.tools.bash_tool_v2 import run_command as bash_run_command
+    from emrg.tools.pwsh_tool_v2 import run_command as pwsh_run_command
+
+    fatal = r"windows-acl-run: no such directory: C:\nope"
+    policy = SandboxPolicy(mode="read-only", workspace_root=str(tmp_path))
+
+    for script, expected in (
+        (
+            "import sys;"
+            f"sys.stderr.write({START_ANNOUNCEMENT!r} + '\\n');"
+            f"sys.stderr.write({fatal!r} + '\\n');"
+            "sys.exit(127)",
+            fatal,
+        ),
+        (
+            "import sys;"
+            f"sys.stderr.write({fatal!r} + '\\n');"
+            "sys.exit(127)",
+            fatal,
+        ),
+        (
+            "import sys; sys.exit(127)",
+            never_announced_detail(127),
+        ),
+    ):
+        _stub_confined(monkeypatch, script)
+        for run_command in (bash_run_command, pwsh_run_command):
+            with pytest.raises(SandboxUnavailableError) as raised:
+                asyncio.run(
+                    run_command(
+                        "ignored",
+                        policy=policy,
+                        workdir=str(tmp_path),
+                        timeout=30,
+                        platform_name="win32",
+                    )
+                )
+            assert raised.value.detail == expected
+
+
+def test_the_walk_is_first_at_every_status_a_pre_spawn_refusal_can_exit_with():
+    """The ordering claim, stated where it is cheap to state: a pure predicate.
+
+    Every ``fail()`` in ``runner.py`` exits ``RUNNER_FAILURE_EXIT``, and every one
+    of them prints a line the walk recognises; none is preceded by an
+    announcement.  The row that makes the ordering load-bearing rather than
+    cosmetic is the last one: a status the exit-code gate does not admit is a run
+    the walk cannot answer, so the silence reading — deliberately ungated, since
+    the status a loader dies with is not a dialect we decode — is what remains.
+    """
+    from emrg.sandbox.contract import never_announced_detail, never_started_detail
+    from emrg.tools.bash_tool_v2 import classify_runner_failure as bash_classify
+    from emrg.tools.pwsh_tool_v2 import classify_runner_failure as pwsh_classify
+
+    rules = provider.RUNNER_FAILURE_RULES
+    refusal = f"{RUNNER_SIGNATURE}: --workspace is not an existing directory: C:\\nope\n"
+
+    for reader in (bash_classify, pwsh_classify):
+        # The runner's own line, whatever the announcement says — its absence here
+        # is the pre-spawn refusal's normal shape, not evidence of a death.
+        assert reader(RUNNER_FAILURE_EXIT, refusal, rules) == refusal.strip()
+        assert reader(RUNNER_FAILURE_EXIT, f"{START_ANNOUNCEMENT}\n{refusal}", rules) == refusal.strip()
+        # Silence is still the death, and it is read without decoding the status:
+        # the loader's own family keeps its precedence over both.
+        assert reader(RUNNER_FAILURE_EXIT, "", rules) == never_announced_detail(RUNNER_FAILURE_EXIT)
+        assert reader(1, "", rules) == never_announced_detail(1)
+        assert reader(provider.LOADER_EXIT_CODES[0], "", rules) == never_started_detail(
+            provider.LOADER_EXIT_CODES[0]
+        )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is where the backend is loadable")
@@ -1028,6 +1423,12 @@ def test_a_confined_childs_stdio_reaches_the_seam(tmp_path):
 
     Without this the two boundary tests below can only report "no output", which is
     the same reading for a refused write and for a child that never started.
+
+    One line is the runner's own — the start announcement — and it is pinned here
+    where it belongs: **first**, ahead of everything the child wrote, because
+    that is the position the seam's reading rests on.  The seam then removes it
+    again (``without_start_announcements``), so what the model reads is the
+    child's streams as they were.
     """
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -1039,7 +1440,8 @@ def test_a_confined_childs_stdio_reaches_the_seam(tmp_path):
     )
     assert completed.returncode == 0, _evidence(completed)
     assert completed.stdout.strip() == "out-marker", f"stdout did not reach the seam ({_evidence(completed)})"
-    assert completed.stderr.strip() == "err-marker", f"stderr did not reach the seam ({_evidence(completed)})"
+    assert completed.stderr.splitlines()[0] == START_ANNOUNCEMENT, _evidence(completed)
+    assert completed.stderr.splitlines()[1:] == ["err-marker"], _evidence(completed)
 
 
 @needs_windows

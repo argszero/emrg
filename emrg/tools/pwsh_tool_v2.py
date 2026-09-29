@@ -55,8 +55,10 @@ from emrg.sandbox.contract import (
     RunnerFailureRule,
     SandboxUnavailableError,
     confine,
+    never_announced_detail,
     never_started_detail,
     sandbox_denial_marker,
+    without_start_announcements,
 )
 from emrg.sandbox.policy import (
     DANGER_FULL_ACCESS,
@@ -242,6 +244,19 @@ def classify_runner_failure(
     line returned for them is synthesized by
     :func:`emrg.sandbox.contract.never_started_detail`.
 
+    The walk over the fatal signatures is the other reading, and it is taken
+    *before* the start line.  It is the specific answer: our runner's ``fail()``
+    prints a recognised line for every refusal it raises **before** the spawn
+    (argv parsing, directory validation, ``SetConsoleCtrlHandler``), and not one
+    of those is preceded by an announcement — so reading the silence first would
+    report a deliberate refusal as a death and drop the single line naming the
+    argument or the directory.  Only a run whose stderr the walk recognises
+    *nothing* in is read through the runner's own channel,
+    :attr:`RunnerFailureRule.start_line`: its **absence** beside a nonzero exit
+    means the runner died before it could mirror anything.  That silence reading
+    decodes no status at all and is reported through
+    :func:`emrg.sandbox.contract.never_announced_detail`.
+
     :param exit_code: the process's exit code; ``None`` means signal death.
     :param stderr: collected stderr text, left unchanged.
     :param rules: structured runner-failure rules from the active wrap.
@@ -254,12 +269,22 @@ def classify_runner_failure(
     # the form ``sys.exit`` takes on Windows).
     unsigned = exit_code & 0xFFFFFFFF if exit_code < 0 else exit_code
     lines = re.split(r"\r?\n", stderr)
+    lowered_lines = [line.lower() for line in lines]
     for rule in rules:
         if unsigned in rule.never_started_exit_codes:
             return never_started_detail(unsigned)
+    # The walk comes next, because a recognised line is the *specific* answer: our
+    # runner's ``fail()`` prints one for every refusal it raises **before** the
+    # spawn — argv parsing, directory validation, ``SetConsoleCtrlHandler`` — and
+    # not one of those is preceded by an announcement.  Answering "the environment
+    # died" to those would discard the one line naming the argument or the
+    # directory. Nothing on this path needs a signature the walk has not seen.
+    for rule in rules:
         if rule.allowed_exit_codes is not None and exit_code not in rule.allowed_exit_codes:
             continue
         informational = {line.lower() for line in rule.informational_lines}
+        if rule.start_line is not None:
+            informational.add(rule.start_line.lower())
         signatures = [sig.lower() for sig in rule.fatal_signatures if sig.strip()]
         for line in lines:
             lowered = line.lower()
@@ -267,6 +292,15 @@ def classify_runner_failure(
                 continue
             if any(signature in lowered for signature in signatures):
                 return line
+    # Nothing was recognised, so — and only now — the silence is read. The runner
+    # writes its announcement on the way to the spawn, so a run carrying neither a
+    # signature nor an announcement is one that never got there: the measured
+    # import death, which left no signature because no code of ours ran. Outside
+    # the exit-code gate on purpose — the status a loader dies with is not a
+    # dialect this can decode.
+    for rule in rules:
+        if rule.start_line is not None and rule.start_line.lower() not in lowered_lines:
+            return never_announced_detail(unsigned)
     return None
 
 
@@ -558,6 +592,12 @@ async def run_command(
             "denied": matches_signature(result.exit_code, result.stderr, confined.denial_signatures),
             "enforcement": confined.enforcement,
         }
+        # Last, after every reading: the runner's start announcement is evidence
+        # for this seam, not output the caller asked for, and it is written on
+        # every confined run — so the text the model reads loses it.  Placed last
+        # on purpose: a strip that ran before the readings could only ever be
+        # one's business by accident, and this line is presentational alone.
+        result.stderr = without_start_announcements(result.stderr, confined.runner_failure_rules)
     else:
         result.sandbox = {"mode": effective_mode, "denied": False}
     return result

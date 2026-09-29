@@ -81,12 +81,31 @@ class RunnerFailureRule:
     :attr:`allowed_exit_codes`, because the code is the evidence — gating it on
     the runner's *own* failure exit would refuse exactly the case it exists for.
     Empty by default: a backend that cannot name such a code adds nothing.
+
+    :attr:`start_line` is the **third** reading, and the one the runner itself
+    supplies rather than the parent observing it: the line a runner that this
+    project writes prints on its own stderr immediately before it mirrors the
+    command.  Its **absence** from a run's stderr, beside a nonzero exit, is the
+    evidence — the runner reached neither its announcement nor its failure
+    reporter, so nothing ran.  This is the reading a status cannot give: the
+    measured instances are an interpreter that died at *import* (exit 1, empty
+    stdout, a ``ModuleNotFoundError`` naming this very runner) and a status no
+    loader family contains, and what the exit code was is not decoded but only
+    reported.  Only a backend whose runner is our own code can declare one;
+    ``bwrap`` and ``sandbox-exec`` are third-party binaries, so their rules leave
+    this ``None`` and are unchanged.  The line is deliberately spelled outside
+    the fatal prefix's namespace: a consumer also treats it as informational, so
+    an announcement sharing the prefix would be the first line every walk
+    returns and would hide the detail a real failure printed.
+    ``None`` by default: a backend that cannot announce its own start adds
+    nothing.
     """
 
     fatal_signatures: tuple[str, ...]
     allowed_exit_codes: tuple[int, ...] | None = None
     informational_lines: tuple[str, ...] = ()
     never_started_exit_codes: tuple[int, ...] = ()
+    start_line: str | None = None
 
 
 def never_started_detail(exit_code: int) -> str:
@@ -105,6 +124,49 @@ def never_started_detail(exit_code: int) -> str:
         f"the confined child never started: exit {exit_code} (0x{exit_code:08X}) is one the "
         "OS loader produces when an image cannot be loaded or initialized, so nothing ran "
         "and the failure belongs to the environment, not to the command"
+    )
+
+
+def never_announced_detail(exit_code: int) -> str:
+    """The line a consumer reports when a runner never announced its own start.
+
+    The sibling of :func:`never_started_detail`, and the reading that needs
+    neither a loader status nor a signature line: the runner writes its start
+    line before it mirrors anything, so a nonzero exit with no such line on
+    stderr is a runner that died before it could run the command.  The status is
+    reported, never decoded — a status is a per-platform dialect, and this
+    reading does not rest on which one arrived.
+
+    :param exit_code: the exit status the runner's own process reported, as the
+        unsigned 32-bit value a parent observes.
+    :returns: the detail line, in the vocabulary the seam already speaks.
+    """
+    return (
+        f"the confined runner never started: exit {exit_code} (0x{exit_code:08X}) came with no "
+        "start announcement of its own on stderr, so the runner's process died before it could "
+        "mirror the command — nothing ran, and the failure belongs to the environment, not to "
+        "the command"
+    )
+
+
+def without_start_announcements(stderr: str, rules: tuple[RunnerFailureRule, ...]) -> str:
+    """Drop the runners' own start announcements from a run's collected stderr.
+
+    The announcement is evidence for the seam, not output the caller asked for:
+    it is written on **every** confined run, so leaving it in place would put a
+    ``[stderr]`` section on every successful command the model reads.  Removed
+    after classification and never before it — the line's absence *is* the
+    reading (:func:`never_announced_detail`).
+
+    :param stderr: the collected stderr text.
+    :param rules: the rules of the active wrap.
+    :returns: the same text with the announcement lines removed.
+    """
+    marks = {rule.start_line.lower() for rule in rules if rule.start_line}
+    if not marks or not stderr:
+        return stderr
+    return "".join(
+        line for line in stderr.splitlines(keepends=True) if line.strip().lower() not in marks
     )
 
 
