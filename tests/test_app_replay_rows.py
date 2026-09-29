@@ -30,7 +30,7 @@ from emrg.client.app import _replay_rows
 
 
 def test_a_message_record_becomes_its_own_role_row():
-    """The three message roles map through with their content intact — no truncation.
+    """The roles the records mode projects map through with their content intact.
 
     The old disk path truncated nothing for a message either, and the reason it matters
     is the same defect that made `preview` unacceptable in the daemon's records mode: a
@@ -41,10 +41,27 @@ def test_a_message_record_becomes_its_own_role_row():
     rows = _replay_rows([
         {"record_index": 0, "kind": "message", "role": "user", "content": "hello"},
         {"record_index": 1, "kind": "message", "role": "assistant", "content": long_body},
-        {"record_index": 2, "kind": "message", "role": "system", "content": "noted"},
     ])
 
-    assert rows == [("user", "hello"), ("assistant", long_body), ("system", "noted")]
+    assert rows == [("user", "hello"), ("assistant", long_body)]
+
+
+def test_a_role_the_records_mode_does_not_project_is_skipped():
+    """A `system` record is not material this client may invent.
+
+    The daemon's records mode answers `role: "user" | "assistant"` explicitly. The file
+    on disk holds more than that (system rows, compaction summaries), so a client that
+    rendered them would again be reading a different session than the GUI — the drift
+    requirement 4 removes. If the mode is widened, this client learns it there.
+    """
+    rows = _replay_rows([
+        {"record_index": 0, "kind": "message", "role": "system", "content": "Interrupted"},
+        {"record_index": 1, "kind": "message", "role": "tool", "content": "legacy role"},
+        {"record_index": 2, "kind": "summary", "content": "[Session summary from compact #3]"},
+        {"record_index": 3, "kind": "message", "role": "user", "content": "kept"},
+    ])
+
+    assert rows == [("user", "kept")]
 
 
 def test_a_tool_result_names_the_tool_and_whether_it_failed():
@@ -82,7 +99,6 @@ def test_an_unknown_kind_is_skipped_rather_than_rendered_blank():
     rows = _replay_rows([
         {"record_index": 0, "kind": "message", "role": "user", "content": "kept"},
         {"record_index": 1, "kind": "something_new", "content": "not mine"},
-        {"record_index": 2, "kind": "message", "role": "tool", "content": "legacy role"},
     ])
 
     assert rows == [("user", "kept")]

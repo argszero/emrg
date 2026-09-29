@@ -211,9 +211,12 @@ def _replay_rows(messages) -> list[tuple[str, str]]:
     The rows are `(kind, content)` pairs and `assistant` is deliberately its own
     kind rather than pre-wrapped: the caller renders it through `StreamingMarkdown`
     for colour, and a widget built here would make this function untestable for no
-    gain. A record kind this client does not know is skipped rather than rendered
-    as a blank row — the daemon's set is the contract, and an unknown kind is a
-    newer daemon, not content.
+    gain. What the daemon's records mode emits is its own contract and it is narrow:
+    `kind: "message"` for the user and assistant roles and `kind: "tool_result"`
+    for tool output. A record outside that pair is skipped rather than rendered as
+    a blank row — including a role the file on disk may hold and the records mode
+    does not project, because inventing it here would put the TUI and the GUI back
+    on two different content paths, which is the defect this requirement removes.
     """
     rows: list[tuple[str, str]] = []
     for record in messages or []:
@@ -222,7 +225,7 @@ def _replay_rows(messages) -> list[tuple[str, str]]:
         kind = record.get("kind")
         if kind == "message":
             role = record.get("role")
-            if role in ("user", "assistant", "system"):
+            if role in ("user", "assistant"):
                 rows.append((str(role), str(record.get("content") or "")))
         elif kind == "tool_result":
             # The TUI's rendering of a tool record: which tool, and whether it
@@ -1418,6 +1421,16 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             term.render()
                             continue
                         rows = _replay_rows(data.get("messages", []))
+                        # The message count is a fact about the session, so it
+                        # comes from the session's meta, not from counting the
+                        # rows on screen — those differ from the records on
+                        # purpose (a tool call and its results are several
+                        # records and fewer rows). Counting rows is the fallback
+                        # for a daemon that reported no count at all.
+                        count = meta.get("message_count")
+                        if not isinstance(count, int) or count < 0:
+                            count = len(rows)
+                        msg_count = count
                         for kind, content in rows:
                             if kind == "assistant":
                                 # StreamingMarkdown for colour rendering (rant #28).
@@ -1434,7 +1447,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             session_title = ""
                         chat.add("system",
                             f"Resumed session {pending_sid}{title_extra} "
-                            f"({meta.get('message_count', len(rows))} messages, "
+                            f"({count} messages, "
                             f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
                         status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id or "emrg")
                         term.set_title(f"{session_title or pending_sid} @ {project_name}")
