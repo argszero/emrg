@@ -29,6 +29,7 @@ Usage
     python3 scripts/bump-version.py 0.2.94 --dry-run # preview, write nothing
     python3 scripts/bump-version.py --check          # report drift, no writes
     python3 scripts/bump-version.py --check 0.2.94   # drift against a target
+    python3 scripts/bump-version.py --check --root D # read the tree at D, not this one
 
 The positional is validated as semver in *both* modes - ``--check v0.2.94``
 (the natural slip, since release tags are ``vX.Y.Z``) is an error rather than
@@ -36,6 +37,19 @@ a silently ignored argument (#1119 review).
 
 ``--check`` closes the CI/host symmetry loop: the host can self-verify
 before pushing, instead of discovering drift after a wasted build round.
+
+``--root`` closes the *reviewer's* half of that loop, and it is read-only on
+purpose. A release PR is verified on the tree its merge would land, never on
+its head: a stale head is not that tree, so the command that answers "do the
+eight sources agree" answers `OK` about the **checkout the reviewer is standing
+in** - which, while a release is under review, is still the tree one version
+behind. Measured 2026-09-29 (`cyc20260929-081057`), reviewing the v0.3.5 PR:
+`--check` printed a green `OK: all 8 version sources agree on 0.3.4` about the
+checkout, and only `scripts/check-release-tag.py v0.3.5` failing said anything
+was off. The sibling has taken a ``--root`` for exactly this reason; this is
+the other half of the pair. ``bump()`` still writes the tree resolved from the
+cwd, so the write modes refuse ``--root`` outright: reading a tree you are not
+standing in is a review, and writing one is the 2026-09-11 accident reversed.
 
 After bumping, the release flow is (see Agent.md "Releasing"):
 
@@ -290,7 +304,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run", action="store_true", help="show what would change, write nothing"
     )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help=(
+            "the tree to READ, for --check only (default: the checkout the caller "
+            "stands in) - e.g. a PR's landing tree, which is not its head"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    # The tree this run answers about, which is not always the checkout the
+    # caller stands in. Resolved *before* the `tree:` line, so the line names
+    # the tree that actually answered rather than the one this script lives in.
+    if args.root is None:
+        root = REPO_ROOT
+    else:
+        if not args.check:
+            print(
+                "error: --root is read-only and takes --check - it names a tree "
+                "to inspect, while a bump writes the tree it resolves from the cwd "
+                f"({REPO_ROOT})",
+                file=sys.stderr,
+            )
+            return 2
+        root = args.root.resolve()
+        # Fail closed on a path that is not a checkout: reading 8 version sources
+        # out of a directory that has none of them would report every source as
+        # MISSING rather than saying the argument was wrong.
+        if not (root / BASE_FILE).is_file() or not (root / "scripts").is_dir():
+            print(
+                f"error: not a checkout: {root} (no {BASE_FILE}, or no scripts/) "
+                "- --root takes the top of a tree, e.g. the directory "
+                "check-merge-plan-suite.py --keep left behind",
+                file=sys.stderr,
+            )
+            return 2
 
     # Say which tree answered. The whole job of `--check` is to gate a release,
     # and the 2026-09-11 defect was a confident `OK` about a checkout the caller
@@ -298,10 +348,10 @@ def main(argv: list[str] | None = None) -> int:
     # stdout-safe for every existing caller: the tool is invoked by humans and
     # its exit code is what gates CI (tests/test_version_sync.py has its own
     # independent parser).
-    print(f"tree: {REPO_ROOT}")
+    print(f"tree: {root}")
 
     try:
-        current = read_current_version()
+        current = read_current_version(root)
     except BumpError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -332,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             base = current
             print(f"checking all {FILE_COUNT} files against {base} ({BASE_FILE}) ...")
-        problems = check(base)
+        problems = check(base, root)
         if problems:
             print(f"\nFAIL: {len(problems)} drift(s) found:")
             for p in problems:

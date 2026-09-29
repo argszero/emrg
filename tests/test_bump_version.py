@@ -529,6 +529,108 @@ def test_cli_check_without_positional_still_uses_the_base_version(
 
 
 # --------------------------------------------------------------------------
+# --root — the reviewer's half of the release gate (measured 2026-09-29)
+# --------------------------------------------------------------------------
+
+
+def _landing_tree(mod, tmp_path: Path, version: str) -> Path:
+    """A checkout-shaped tree at ``version``: the eight sources *plus* ``scripts/``.
+
+    Both halves are load-bearing. The sources are what gets read; ``scripts/`` is
+    half of how this tool - and ``_resolve_root`` - decides that a directory is
+    the top of a checkout. A sources-only directory is therefore *not* a checkout,
+    and ``--root`` refuses it, which is its own test below.
+    """
+    tree = tmp_path / "landing"
+    for rel in SOURCE_FILES:
+        dst = tree / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO_ROOT / rel, dst)
+    (tree / "scripts").mkdir()
+    assert mod.bump(version, root=tree), "the landing tree must have been stamped"
+    return tree
+
+
+def test_cli_check_root_reads_the_named_tree_not_the_callers(mod, tmp_path, capsys):
+    """``--check --root D`` answers about D — and names the tree that answered.
+
+    Measured 2026-09-29 (`cyc20260929-081057`), reviewing the v0.3.5 release PR:
+    ``--check`` run in the checkout printed a green
+    ``OK: all 8 version sources agree on 0.3.4`` about the tree one version
+    *behind* the release under review. The reading was green and the question was
+    wrong — this family's signature failure, and why a release PR is verified on
+    its landing tree rather than on its head. The sibling
+    ``check-release-tag.py`` has taken a ``--root`` all along; this is the other
+    half of the pair, so both gates can be pointed at one tree.
+    """
+    landing = _landing_tree(mod, tmp_path, TARGET)
+    assert mod.main(["--check", "--root", str(landing)]) == 0
+    out = capsys.readouterr().out
+    assert f"agree on {TARGET}" in out
+    # Resolved on both sides: the tool prints the resolved root, and on macOS the
+    # tmp base is reached through a symlink the raw fixture path does not carry.
+    assert str(landing.resolve()) in out, "the tree that answered must be named"
+
+
+def test_cli_check_root_reports_drift_in_the_named_tree(mod, tmp_path, capsys):
+    """The drift reading follows the root, not the checkout.
+
+    The control for the test above: both trees are internally consistent, so
+    "which tree answered" cannot be told from the OK line alone — only a source
+    doctored *inside the named tree* separates the two readings. If ``--root``
+    were parsed and then ignored, this run would find a clean checkout and exit 0.
+    """
+    landing = _landing_tree(mod, tmp_path, TARGET)
+    target = landing / "pyproject.toml"
+    target.write_text(
+        target.read_text(encoding="utf-8").replace(TARGET, _sentinel(TARGET)),
+        encoding="utf-8",
+    )
+    assert mod.main(["--check", "--root", str(landing)]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "pyproject.toml" in out
+
+
+def test_cli_root_is_refused_by_the_write_modes(mod, tmp_path, capsys):
+    """``--root`` names a tree to read; a bump writes the tree it stands in.
+
+    The refusal is the point rather than a formality: the 2026-09-11 defect was a
+    bump that rewrote *another* checkout's eight version sources, and pointing a
+    writer at a tree it is not standing in is that same accident with the
+    arguments reversed. Reading a tree you are not in is a review, so ``--root``
+    takes ``--check`` and nothing else — including ``--dry-run``, which computes
+    the same changes a write would.
+    """
+    elsewhere = _landing_tree(mod, tmp_path, TARGET)
+    before = (elsewhere / "emrg/__init__.py").read_bytes()
+    for argv in (
+        [TARGET, "--root", str(elsewhere)],
+        [TARGET, "--dry-run", "--root", str(elsewhere)],
+    ):
+        assert mod.main(argv) == 2, argv
+        assert "read-only" in capsys.readouterr().err, argv
+    assert (elsewhere / "emrg/__init__.py").read_bytes() == before
+
+
+def test_cli_root_refuses_a_directory_that_is_not_a_checkout(mod, tmp_path, capsys):
+    """A path with no sources is an argument error, not eight MISSING FILEs.
+
+    Failing closed here is what keeps the option honest. Handed ``emrg/`` (a
+    subdirectory of a checkout) or an empty directory, the tool must say the
+    argument is wrong rather than report a tree in which every source happens to
+    be missing — a red that names the wrong cause. The verdict is refused
+    *before* the ``tree:`` line, so no reading is printed at all.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert mod.main(["--check", "--root", str(empty)]) == 2
+    captured = capsys.readouterr()
+    assert "not a checkout" in captured.err
+    assert captured.out == "", "a refusal must print no verdict about the path"
+
+
+# --------------------------------------------------------------------------
 # host-codec safety — the self-check a host runs before pushing a release
 # --------------------------------------------------------------------------
 
