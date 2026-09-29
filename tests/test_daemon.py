@@ -107,7 +107,7 @@ def test_build_prompt_step22_uses_fetch_head():
     )
     prompt = handler._build_evolution_prompt()
     # The actual Step 2.2 command block must log FETCH_HEAD, not origin/master.
-    step22 = prompt.split("#### 2.2 Latest GitHub code changes", 1)[1].split("#### 2.3", 1)[0]
+    step22 = prompt.split("#### 2.2 The latest on master", 1)[1].split("#### 2.3", 1)[0]
     assert "git fetch origin master && git log FETCH_HEAD --oneline -10" in step22
     assert "git fetch origin master && git log origin/master" not in step22
     # Merge-conflict guidance must also merge FETCH_HEAD (line 148).

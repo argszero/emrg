@@ -856,55 +856,68 @@ def test_the_cli_reads_both_roots_named_by_the_override(mod, monkeypatch, capsys
     assert str(project) in out
 
 
-def test_the_prompt_writes_its_cycle_records_where_the_queue_reads_them(mod):
-    """The template's record path lands in a directory this tool searches.
+def test_the_records_land_where_the_queue_reads_them(mod, tmp_path):
+    """The record root the memory system writes is the one this tool searches.
 
-    *Which directory holds the cycle records* is a fact about the template, not about
-    this tool — and it moved once already: D9 (PR #1555, in every build from v0.3.2)
-    re-based the prompt's memory roots from `{{ evolution_cwd }}` onto
-    `{{ source_dir }}`, i.e. from the root beside the checkout to the project memory
-    root inside it, while the corpus stayed where it was. Repairing the reader once
-    would not have caught that, and would not catch the next move; so the template is
-    rendered here, with the two variables the daemon supplies for the evolution task
-    (`scheduler._build_evolution_prompt`), and every directory its `cycle-<ts>.md`
-    path names is required to be one of the roots this tool reads. A record written
-    anywhere else is a record no window reads.
+    This guard used to scan the rendered template for its `cycle-<ts>.md` path and
+    require it to land in `DEFAULT_CYCLES_LOGS`. On 2026-09-29 the host ruled that the
+    prompt stops naming *where* a record goes — 「不需要指定什么东西记录到什么地方」, since a
+    session has a memory system and only needs telling *what* to record — so the path left
+    the template and the prose-level claim became unmeasurable. The invariant it protected
+    is still real and still worth a reading, so it is now read against the writer
+    (`_collect_memory_data`, the loader that embeds the index a cycle appends to) and
+    composed with the reader (`DEFAULT_CYCLES_LOGS`).
+
+    **This test failed in CI on its first run, and why is the point of its shape.** It
+    first read the index at *this checkout's* `.emrg/memory/MEMORY.md`, which exists on a
+    host that runs cycles and **not in a fresh clone**: `.emrg` is gitignored, so a runner
+    has no such file and the guard failed there while passing here (run 36519484170,
+    `test` and `test-windows`). A guard whose premise is a local-only artifact measures
+    the host, not the tree. So the checkout is built here with `tmp_path` and the claim is
+    split into its two halves, each measured where it is decidable:
+
+    1. the **writer** derives `<cwd>/.emrg/memory` — measured on a directory this test
+       creates, so it holds on any host; and
+    2. the **reader** searches `<this checkout>/.emrg/memory` — a constant, needing no file.
+
+    Composed, they are the sentence the old scan asserted: a cycle running in this checkout
+    records where the queue reads. A record written anywhere else is a record no window
+    reads — and the abstention window is read from these files.
     """
-    import re
+    from types import SimpleNamespace
 
-    import jinja2
+    from emrg.server.daemon import EmrgServer
 
-    template = (
-        REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
-    ).read_text(encoding="utf-8")
-    rendered = (
-        jinja2.Environment(undefined=jinja2.Undefined)
-        .from_string(template)
-        .render(
-            source_dir=str(REPO_ROOT),
-            timestamp="20260925-101010",
-            # The two mappings the template iterates over; every other name it uses is
-            # a display field, and the daemon's `Undefined` renders those empty here as
-            # it would there. The claim below is about a *path*, built from the three
-            # names set above, which the daemon supplies from `_source_dir`
-            # and the render clock.
-            task={},
-            project={},
-        )
+    # 1. The writer, on a directory that exists wherever this runs.
+    checkout = tmp_path / "checkout"
+    memory_root = checkout / ".emrg" / "memory"
+    memory_root.mkdir(parents=True)
+    (memory_root / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+
+    # The same shape `tests/test_prompt_templates.py` uses: an uninitialised instance is
+    # enough, because the loader touches only `session.cwd` / `session.memory_dir`.
+    daemon = EmrgServer.__new__(EmrgServer)
+    data = daemon._collect_memory_data(
+        SimpleNamespace(cwd=checkout, memory_dir=checkout / ".emrg" / "sessions" / "x" / "memory")
     )
-    written = [
-        Path(match) for match in re.findall(r"`([^`]*/cycle-[^`]*\.md)`", rendered)
-    ]
-    assert written, (
-        "the template no longer names a cycle-record path this guard can read - "
-        "update the guard with it rather than deleting the claim"
+    assert data and data.get("project_memory_dir"), (
+        "the loader embedded no project root for a session whose cwd carries "
+        f"{memory_root}/MEMORY.md — the reading below would be about nothing"
     )
+    loaded = Path(data["project_memory_dir"]).resolve()
+    assert loaded == memory_root.resolve(), (
+        f"the daemon's project-memory root is {loaded}, not {memory_root} — a cycle's "
+        "record lands under whatever this returns, so a change here moves the corpus"
+    )
+
+    # 2. The reader: the same directory, inside THIS checkout. No file is required: the
+    # root is a constant, and requiring the index is what made this guard fail on a
+    # fresh clone.
     roots = {root.resolve() for root in mod.DEFAULT_CYCLES_LOGS}
-    elsewhere = [path for path in written if path.parent.resolve() not in roots]
-    assert not elsewhere, (
-        "these cycle-record paths land outside the roots review-queue searches "
-        f"({', '.join(str(root) for root in mod.DEFAULT_CYCLES_LOGS)}): "
-        + ", ".join(str(path) for path in elsewhere)
+    assert (REPO_ROOT / ".emrg" / "memory").resolve() in roots, (
+        f"review-queue searches {sorted(str(r) for r in roots)}, which does not include "
+        f"{REPO_ROOT / '.emrg' / 'memory'} — the abstention window is read from the "
+        "records, so a cycle writing where the queue does not look is one no window can see"
     )
 
 

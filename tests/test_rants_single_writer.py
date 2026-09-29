@@ -30,22 +30,20 @@ fixed in the change that emptied the set. The set is gone rather than left empty
 with no pending template it asserted nothing, and a scan with an exception list is a
 scan whose coverage can silently shrink.
 
-That last sentence is then in tension with `_UNEDITABLE_TEMPLATES`, which is an
-exception list, so the difference has to be stated rather than assumed. The pending-set
-was "these lines are still wrong and someone else should fix them" — a claim about
-ownership that was false, and one that shrinks the guard's *coverage* while looking
-like a fix. `_UNEDITABLE_TEMPLATES` is "this file cannot be changed by routine
-evolution at all" (host rant 2026-08-17T14:22:21), so no change to this guard could
-sweep it. Three things keep it from becoming the first kind, and a test asserts each:
-the set is pinned to exactly one name, that name must still be in the corpus, and the
-exemption must still be **needed** (if the template is ever cleaned the test fails and
-says to remove the exclusion).
+This file used to carry a second exception list, `_UNEDITABLE_TEMPLATES`, holding the one
+stable template (`evolution_prompt.md`, host rant 2026-08-17T14:22:21) that routine
+evolution may not edit — and a test that asserted the exemption was still *needed*, because
+the template restated the writer's rules in prose (`_RANT_RULE_RESTATED` matched its §6
+sort/field-order/encoding text). The 2026-09-29 restructure (`cyc20260929-110933`) deleted
+those restatements and moved the lifecycle to the `submit_rant` tool's own description, so
+the exemption's stated ground is gone and the exemption went with it: **the corpus is now
+all six built-in templates, with no exception list at all** — which is the property the
+pending-set's removal was after, one file over. Nothing was lost by holding the template to
+account: the scans below read it for the first time, and they pass.
 
-Named limit: this is a *text* guard over the built-in task templates, and the
-`cat ~/.emrg/rants.jsonl` read recipes (in `evolution_prompt.md`, which normal
-evolution must not edit, and in the review steps of the other templates) are
-**legal** here: they name the file without a mutating verb, and a read is not what
-corrupted it. The read half does cover the one shape that is decidable — a template
+Named limit: this is a *text* guard over the built-in task templates, and a read recipe that
+names the rant file without a mutating verb is **legal** here: it hands over a read, and a
+read is not what corrupted the file. The read half does cover the one shape that is decidable — a template
 that forbids opening the file, *even to read it*, while handing the reader a recipe
 that opens it (measured 2026-09-17 on `paper_prompt.md`; see
 `test_no_template_forbids_opening_the_rant_file_while_handing_out_a_read_recipe`).
@@ -154,17 +152,6 @@ _RANT_READ_DENIAL = re.compile(
     re.IGNORECASE,
 )
 
-# The one template the scans above do not read, with the reason it cannot be
-# fixed the way the others were. It is a *real* owner, unlike the pending-set entry
-# this guard started with (which named #1226, a PR that never touched the snippet):
-# `evolution_prompt.md` is the stable evolution template, and routine evolution is
-# forbidden to edit it (host rant 2026-08-17T14:22:21) — its §6 restates the same
-# rules and can only be changed through a prompt-specific rant. The set is pinned
-# to exactly this name, and a test asserts the exclusion is still *needed*, so it
-# cannot silently grow into a list of things someone did not want to fix.
-_UNEDITABLE_TEMPLATES = {"evolution_prompt.md"}
-
-
 def _template_names() -> list[str]:
     """The corpus under guard, with the scan's own health asserted here once."""
     names = sorted({name for _task_type, name in TASK_TEMPLATES.items()})
@@ -177,8 +164,13 @@ def _template_names() -> list[str]:
 
 
 def _scanned_templates() -> list[str]:
-    """The corpus minus the one template this guard may not hold to account."""
-    return [n for n in _template_names() if n not in _UNEDITABLE_TEMPLATES]
+    """The whole corpus.
+
+    No exception list: the one that used to sit here held the stable evolution template out
+    of the scans, and its stated ground — the template restated the writer's rules — was
+    deleted with those restatements on 2026-09-29.
+    """
+    return _template_names()
 
 
 def _instructs_a_hand_written_write(line: str) -> bool:
@@ -455,32 +447,3 @@ def test_no_template_forbids_opening_the_rant_file_while_handing_out_a_read_reci
         "no scanned template claims the file is not to be opened, so the scan above is "
         "vacuous — delete it rather than leaving a green guard over nothing"
     )
-
-
-def test_the_excluded_template_is_excluded_because_it_cannot_be_edited() -> None:
-    """The exception must name a real owner, and must still be needed.
-
-    The pending-set this guard started with exempted the one template that still
-    had the defect and named a PR that never touched it — a fake owner. This
-    exclusion is the opposite: the file cannot be changed by routine evolution at
-    all. So it is pinned to exactly one name, and the second half of the test
-    asserts the exemption is doing something — if the prompt is ever cleaned, this
-    fails and tells you to drop the exclusion rather than leaving a stale hole.
-    """
-    assert _UNEDITABLE_TEMPLATES == {"evolution_prompt.md"}, (
-        "the exclusion set is not the single stable template — an exception list "
-        "that grows is how the first version of this guard went green over the one "
-        "line it was written for"
-    )
-    excluded = sorted(_UNEDITABLE_TEMPLATES)
-    assert excluded[0] in _template_names(), (
-        "the excluded template is no longer in the corpus — the exclusion is stale"
-    )
-    text = (PROMPTS_DIR / excluded[0]).read_text(encoding="utf-8")
-    assert _RANT_RULE_RESTATED.search(text), (
-        f"{excluded[0]} no longer restates a rule the tool owns, so the exclusion "
-        f"in _UNEDITABLE_TEMPLATES is no longer needed — remove it (routine "
-        f"evolution may not edit that template, so the clean-up needs a "
-        f"prompt-specific rant)"
-    )
-
