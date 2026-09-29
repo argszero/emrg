@@ -25,6 +25,7 @@ SCRIPT = REPO_ROOT / "scripts" / "check-release-published.py"
 
 TAG = "v0.3.5"
 REPO = "argszero/emrg"
+WORKFLOW = "build-release.yml"
 RUN_ID = 36505953376
 
 
@@ -116,6 +117,22 @@ def _routes(**overrides):
     return routes
 
 
+def _install_missing_release(mod, monkeypatch, routes) -> None:
+    """`gh` answers 404 for this tag's release, and the routing table for everything else.
+
+    404 is the *definite* absence (`release_for_tag` returns None for it), which is the
+    state "nothing was ever published for this tag" -- distinct from a call that failed.
+    The error is built the way `_gh` builds it from a real call: process code 1, the
+    status in the message (measured 2026-09-29; `gh api` exits 1 for 404 and for 500).
+    """
+    def _gh(args):
+        if tuple(args[:2]) == ("api", f"repos/{REPO}/releases/tags/{TAG}"):
+            raise mod.GhError(1, args, "gh: Not Found (HTTP 404)", http_status=404)
+        return FakeGh({k: v for k, v in routes.items() if v is not None})(args)
+
+    monkeypatch.setattr(mod, "_gh", _gh)
+
+
 def _check(mod, monkeypatch, capsys, routes):
     fake = FakeGh(routes)
     _install(mod, monkeypatch, fake)
@@ -197,13 +214,43 @@ def test_a_non_json_answer_is_not_measurable(mod, monkeypatch, capsys):
 # --------------------------------------------------------------------------- 1
 
 
-def test_no_run_for_the_tag_is_a_fault_naming_the_only_trigger(mod, monkeypatch, capsys):
+def test_no_run_and_no_release_is_a_fault_naming_the_only_trigger(mod, monkeypatch, capsys):
+    """Both halves absent: nothing was published, so the re-push remedy is the right one."""
     routes = _routes(runs=[])
-    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    _install_missing_release(mod, monkeypatch, routes)
+    code = mod.check(TAG, REPO)
+    out = capsys.readouterr().out
     assert code == 1
     assert "no `build-release.yml` run exists" in out
     assert "only thing that creates a release" in out
     assert "git push origin" in out
+    assert "no release exists for the tag either" in out
+
+
+def test_no_run_but_a_published_release_is_not_measurable_never_a_fault(
+    mod, monkeypatch, capsys
+):
+    """The state the 50-run window produced for v0.2.57 on 2026-09-29.
+
+    The run exists; the reading simply did not see it. Reporting that as a fault handed
+    out a remedy that deletes the tag of a live release, so a release that exists must
+    make this unmeasurable instead -- and the verdict must not name the re-push.
+    """
+    code, out, _ = _check(mod, monkeypatch, capsys, _routes(runs=[]))
+    assert code == 2
+    assert "not measurable" in out
+    assert "not a window limit" in out
+    assert "a release for the tag DOES exist" in out
+    assert "Do NOT re-push the tag" in out
+    # The control: no re-push remedy, and never a pass.
+    assert "git push origin" not in out
+    assert "OK" not in out
+
+
+def test_the_run_list_is_asked_for_by_the_tag_not_by_a_window(mod, monkeypatch, capsys):
+    """A window over the workflow's runs answers about whichever tags are inside it."""
+    _, _, fake = _check(mod, monkeypatch, capsys, _routes())
+    assert fake.called("run", "list", "--repo", REPO, "--workflow", WORKFLOW, "--branch", TAG)
 
 
 def test_a_red_run_names_the_jobs_that_failed(mod, monkeypatch, capsys):
@@ -234,15 +281,7 @@ def test_a_cancelled_run_is_a_fault_not_a_pass(mod, monkeypatch, capsys):
 def test_a_green_run_with_no_release_is_a_fault(mod, monkeypatch, capsys):
     """The state the workflow's own final step exists to report, read from outside."""
     routes = _routes()
-    routes.pop(("api", f"repos/{REPO}/releases/tags/{TAG}"))
-    routes[("api", f"repos/{REPO}/releases/tags/{TAG}")] = None
-
-    def _gh(args):
-        if tuple(args[:2]) == ("api", f"repos/{REPO}/releases/tags/{TAG}"):
-            raise mod.GhError(404, args, "gh: Not Found (HTTP 404)")
-        return FakeGh({k: v for k, v in routes.items() if v is not None})(args)
-
-    monkeypatch.setattr(mod, "_gh", _gh)
+    _install_missing_release(mod, monkeypatch, routes)
     code = mod.check(TAG, REPO)
     out = capsys.readouterr().out
     assert code == 1
@@ -303,3 +342,59 @@ def test_the_run_is_matched_on_the_head_branch_of_the_tag(mod, monkeypatch, caps
 def test_only_the_publishing_workflow_is_asked(mod, monkeypatch, capsys):
     _, _, fake = _check(mod, monkeypatch, capsys, _routes())
     assert fake.called("run", "list", "--repo", REPO, "--workflow", "build-release.yml")
+
+
+class _Proc:
+    """Enough of `subprocess.CompletedProcess` for `_gh`."""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_gh_carries_the_http_status_out_of_ghs_own_message(mod, monkeypatch):
+    """`gh api` exits 1 for 404 exactly as it does for 500, so the code cannot ask.
+
+    Measured 2026-09-29: `gh api repos/argszero/emrg/releases/tags/v9.9.9` prints
+    `gh: Not Found (HTTP 404)` and exits 1. Without reading the status out of that
+    message the absent-release branch is unreachable in production, and a tag that was
+    never published reads as *not measurable* instead of as the fault it is.
+    """
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *a, **k: _Proc(1, stderr="gh: Not Found (HTTP 404)\n"),
+    )
+    with pytest.raises(mod.GhError) as excinfo:
+        mod._gh(["api", f"repos/{REPO}/releases/tags/v9.9.9"])
+    assert excinfo.value.returncode == 1
+    assert excinfo.value.http_status == 404
+
+
+def test_a_failure_that_is_not_http_shaped_carries_no_status(mod, monkeypatch):
+    """`run list` refusing a workflow name is not an HTTP answer: nothing is inferred."""
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *a, **k: _Proc(1, stderr="could not find any workflows named nope.yml\n"),
+    )
+    with pytest.raises(mod.GhError) as excinfo:
+        mod._gh(["run", "list"])
+    assert excinfo.value.http_status is None
+
+
+def test_only_a_404_is_the_definite_absence(mod, monkeypatch):
+    """A 500 is a question that could not be asked, and must propagate as one."""
+    def not_found(args):
+        raise mod.GhError(1, args, "gh: Not Found (HTTP 404)", http_status=404)
+
+    monkeypatch.setattr(mod, "_gh", not_found)
+    assert mod.release_for_tag(TAG, REPO) is None
+
+    def server_error(args):
+        raise mod.GhError(1, args, "gh: Server Error (HTTP 500)", http_status=500)
+
+    monkeypatch.setattr(mod, "_gh", server_error)
+    with pytest.raises(mod.GhError):
+        mod.release_for_tag(TAG, REPO)

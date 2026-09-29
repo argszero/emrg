@@ -33,18 +33,36 @@ reports the very failure it exists for (the v0.3.1 draft). A second implementer 
 comparison would be a second thing to keep in step, and a release whose CI said
 `published, not prerelease, 9 asset(s)` needs no second opinion. What this adds is the
 reading from **outside** the run, by a later cycle or by the host, including the two
-states that run's own step cannot report at all: **no run exists** for the tag, and a
-run that is **still running**.
+states that run's own step cannot report at all: **no run** for the tag, and a run that
+is **still running**.
+
+A tag is not a window:
+
+Measured 2026-09-29, one day after this guard landed: the workflow holds **163** runs, so
+a reading built on "the 50 most recent runs" stops at v0.2.58 -- and v0.2.57, published
+with its full asset set since 2026-08-20, read as `FAULT: no run exists ... nothing was
+published for this tag`, whose remedy (`git push origin :refs/tags/v0.2.57`) would have
+deleted the tag of a live release. A question the instrument cannot answer had been
+reported as a definite fault. Two changes answer it. The run list is filtered **by the
+tag's own branch** (`--branch <tag>`; measured to return v0.2.57's run, 32322632199, while
+the 50 newest stop at v0.2.58), so how much history the workflow has accumulated cannot
+hide a tag's run -- and the client-side head-branch comparison stays, so an ignored filter
+cannot widen the match either. And if no run comes back even then, the release is asked
+about **before** any verdict: a release for the tag makes the build half *unmeasured*
+(rc 2, do not re-push), never a fault with a destructive remedy.
 
 Exit codes, the family's contract:
 
     0  the tagged run is green AND the release for the tag is published: not a draft,
        not a prerelease, with at least one asset
-    1  a fault, named with its remedy: no run exists for the tag; the run failed (the
-       failing jobs are listed); no release exists for the tag although its run is
-       green; the release is a draft, is a prerelease, or carries no asset
+    1  a fault, named with its remedy: no run for the tag (asked by the tag's own branch,
+       not by a window) and no release for the tag either; the run failed (the failing
+       jobs are listed); no release exists for the tag although its run is green; the
+       release is a draft, is a prerelease, or carries no asset
     2  not measurable -- never 0. `gh` is missing, unauthenticated, or refused the
-       call, or the tagged run has not concluded yet. A run that is still running is
+       call; the tagged run has not concluded yet; or no run for the tag could be read
+       although a release for the tag does exist, which leaves the build half unmeasured
+       and forbids the re-push remedy. A run that is still running is
        exactly the state this reading must not call a pass: the release does not exist
        until the run's own release job has created it, and a guard that passes because
        it could not read its subject is the defect this family exists to catch.
@@ -59,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 
@@ -71,23 +90,41 @@ DEFAULT_REPO = "argszero/emrg"
 #: is a fault rather than a gap: nothing else creates a release.
 WORKFLOW = "build-release.yml"
 
-#: Enough runs to find an old tag's own run without paginating. A tag older than this
-#: one is reported as having no run, which is the honest reading of what was looked at.
+#: How many of the tag's *own* runs are read. The list is asked for by the tag
+#: (`--branch <tag>`), so this bounds one tag's runs rather than the workflow's whole
+#: history: a tag older than any window is still found by its own name. A re-pushed tag
+#: leaves more than one run behind, and the newest is the one that counts.
 RUN_LIMIT = 50
+
+
+#: `gh api` reports the HTTP status inside its own message -- `gh: Not Found (HTTP 404)`
+#: -- and exits 1 for every HTTP failure. The process code therefore cannot tell 404 from
+#: 500, so the status is parsed out of the message (measured 2026-09-29 on
+#: `releases/tags/v9.9.9` and on an unauthenticated call).
+_HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 
 
 class GhError(RuntimeError):
     """A `gh` invocation that did not answer.
 
-    `returncode` is carried rather than folded into the message because 404 is not a
+    `http_status` is carried rather than folded into the message because 404 is not a
     failure to measure: for `releases/tags/<tag>` it is the definite answer "there is no
-    release for this tag". Every other code means the question could not be asked.
+    release for this tag". Every other status means the question could not be asked, and
+    so does None -- a call that is not HTTP-shaped at all (`run list` refusing a workflow
+    name, or `gh` missing from the machine).
     """
 
-    def __init__(self, returncode: int | None, args: list[str], detail: str) -> None:
+    def __init__(
+        self,
+        returncode: int | None,
+        args: list[str],
+        detail: str,
+        http_status: int | None = None,
+    ) -> None:
         super().__init__(f"gh {' '.join(args)} failed (rc={returncode}): {detail}")
         self.returncode = returncode
         self.detail = detail
+        self.http_status = http_status
 
 
 def _gh(args: list[str]) -> str:
@@ -103,7 +140,14 @@ def _gh(args: list[str]) -> str:
     except FileNotFoundError as exc:
         raise GhError(None, args, f"gh is not available on this machine ({exc})") from exc
     if proc.returncode != 0:
-        raise GhError(proc.returncode, args, proc.stderr.strip())
+        detail = proc.stderr.strip()
+        status = _HTTP_STATUS.search(detail)
+        raise GhError(
+            proc.returncode,
+            args,
+            detail,
+            http_status=int(status.group(1)) if status else None,
+        )
     return proc.stdout
 
 
@@ -116,13 +160,17 @@ def runs_for_tag(tag: str, repo: str) -> list[dict]:
 
     The head branch is how the workflow records the tag it was triggered by (a tag push
     sets `GITHUB_REF_NAME` to the tag and the run's head branch to it too), so this is a
-    comparison of the tag against the run's own record rather than against a title.
+    comparison of the tag against the run's own record rather than against a title. The
+    same ref is what the API is asked to filter on (`--branch`): a window over *all* the
+    workflow's runs answers about the tags inside it, not about the tag that was asked
+    for, and the tag it leaves out reads as one that was never published.
     """
     runs = _gh_json(
         [
             "run", "list",
             "--repo", repo,
             "--workflow", WORKFLOW,
+            "--branch", tag,
             "--limit", str(RUN_LIMIT),
             "--json", "databaseId,headBranch,status,conclusion,displayTitle,url",
         ]
@@ -130,6 +178,41 @@ def runs_for_tag(tag: str, repo: str) -> list[dict]:
     if not isinstance(runs, list):
         raise GhError(None, ["run", "list"], "the run list was not a list")
     return [r for r in runs if r.get("headBranch") == tag]
+
+
+def _no_run_for_tag(tag: str, repo: str) -> int:
+    """No run came back for the tag: the release decides which absence this is.
+
+    A run this guard could not read is not the same state as a tag nothing was ever
+    published for, and the two must not arrive as the same verdict: only the second has a
+    remedy, and the remedy for the second -- `git push origin :refs/tags/<tag>` -- would
+    delete the tag of a live release. So the release is asked about first, and a release
+    that exists turns this into an unmeasured build half (rc 2), never a fault.
+    """
+    release = release_for_tag(tag, repo)
+    if release is not None:
+        assets = release.get("assets")
+        count = len(assets) if isinstance(assets, list) else 0
+        print(
+            f"not measurable: no `{WORKFLOW}` run for {tag} came back -- the list was "
+            f"asked for by the tag's own branch (`--branch {tag}`), so this is not a "
+            f"window limit -- but a release for the tag DOES exist: draft="
+            f"{release.get('draft')} prerelease={release.get('prerelease')} assets={count}. "
+            f"The build-run half is therefore unread, which is not a pass. Do NOT re-push "
+            f"the tag: overwriting it would delete the tag of a published release and "
+            f"re-run signing for a version already out. List the tag's own runs with "
+            f"`gh run list --branch {tag}` and compare them against this release."
+        )
+        return 2
+    print(
+        f"FAULT: no `{WORKFLOW}` run exists for {tag} -- read by the tag's own branch, so "
+        f"not a window over the workflow's runs -- and no release exists for the tag "
+        f"either. That workflow is the only thing that creates a release, so nothing was "
+        f"published for this tag. Re-trigger it by pushing the tag again "
+        f"(`git push origin :refs/tags/{tag} && git push origin {tag}`) and watch the "
+        f"run it starts."
+    )
+    return 1
 
 
 def failed_jobs(run_id: object, repo: str) -> tuple[list[str], str]:
@@ -161,12 +244,14 @@ def release_for_tag(tag: str, repo: str) -> dict | None:
 
     None is the definite absence (HTTP 404), not an unreadable answer: every other
     failure propagates, because "no release" and "could not ask" must not arrive as the
-    same value.
+    same value. The status itself has to be read out of gh's message -- `gh api` exits 1
+    for 404 exactly as it does for 500 (measured 2026-09-29), so a test on the process
+    code would never take this branch and every absent release would read as unmeasurable.
     """
     try:
         payload = _gh_json(["api", f"repos/{repo}/releases/tags/{tag}"])
     except GhError as exc:
-        if exc.returncode == 404:
+        if exc.http_status == 404:
             return None
         raise
     if not isinstance(payload, dict):
@@ -219,14 +304,7 @@ def _read(tag: str, repo: str) -> int:
     """The readings, on a subject whose name is already printed."""
     runs = runs_for_tag(tag, repo)
     if not runs:
-        print(
-            f"FAULT: no `{WORKFLOW}` run exists for {tag} (looked at the {RUN_LIMIT} most "
-            f"recent runs). That workflow is the only thing that creates a release, so "
-            f"nothing was published for this tag. Re-trigger it by pushing the tag again "
-            f"(`git push origin :refs/tags/{tag} && git push origin {tag}`) and watch the "
-            f"run it starts."
-        )
-        return 1
+        return _no_run_for_tag(tag, repo)
 
     run = runs[0]
     run_id = run.get("databaseId")
