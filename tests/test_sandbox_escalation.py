@@ -1,0 +1,550 @@
+"""In-session escalation, and the approval channel it is worthless without.
+
+Rant 2026-09-29T15:52:38.987951+08:00, requirement 1 / design §D3 (phase P5).
+The module landed with **no test that names it** — `grep -rn "approve_escalation"
+tests/` had zero hits while the suite read green, which is the rule of
+`requirement-guarded-only-if-a-test-names-it.md` read the other way round: a
+requirement is guarded only if a test names it, and an unguarded one is one
+editing session away from being wrong in the direction nobody notices (a wider
+tier granted by accident, or a "no" that runs anyway).
+
+What is pinned here, in the order the module itself orders its decisions:
+
+* the strict-wider table — one hop, never a jump, and a tier with no neighbour;
+* the pair check — `sandbox_permissions` + `justification` arrive together;
+* fail-closed, all five ways — no channel, a refusal, an unreadable answer, a
+  channel that raised, a timeout: **every one of them leaves the call where it
+  was**;
+* the daemon's channel — the question reaches the session, the first answer
+  wins, and nobody answering is not consent;
+* the loop's own call site — the command does not run when the escalation was
+  refused, and the widening does not stick to the next call.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from emrg.config import LlmConfig
+from emrg.protocol import TaskRequest
+from emrg.sandbox import escalation
+from emrg.sandbox.policy import DANGER_FULL_ACCESS
+from emrg.server import daemon as daemon_mod
+from emrg.server.daemon import EmrgServer
+from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.session import Session
+
+
+# ── fixtures ────────────────────────────────────────────────────────────────
+
+
+class _FakeWs:
+    """Minimal subscriber: records what the daemon sends it."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, data) -> None:
+        self.sent.append(json.loads(data))
+
+
+class _StubTool:
+    """A shell-tool stand-in: records the arguments the daemon handed it.
+
+    Registered under a real shell tool's name on purpose — `_apply_escalation`
+    keys on `SHELL_TOOL_NAMES`, so a stand-in under a made-up name would test
+    the branch that skips escalation instead of the one that takes it.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[dict] = []
+
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(name=self.name, description="stub", parameters={})
+
+    async def execute(self, arguments: dict) -> ToolResult:
+        self.calls.append(dict(arguments))
+        return ToolResult(content="stub ran", error=False)
+
+
+def _server() -> EmrgServer:
+    server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    server._projects_log = Path(tempfile.mkdtemp()) / "projects.yml"
+    return server
+
+
+def _subscribe(server: EmrgServer, session: Session) -> _FakeWs:
+    ws = _FakeWs()
+    server._session_subscribers[session.session_id] = {ws: str(session.cwd)}
+    return ws
+
+
+async def _answer_next_question(server: EmrgServer, ws: _FakeWs, answer=object()):
+    """Answer the first approval question the daemon broadcasts.
+
+    Mirrors what a client does rather than reaching into the future: the test
+    reads the *frame* and hands the daemon the answer it would have sent.
+    """
+    for _ in range(500):
+        for frame in ws.sent:
+            if frame.get("type") != "approval_request" or frame.get("_answered"):
+                continue
+            frame["_answered"] = True
+            payload: dict = {"request_id": frame.get("request_id")}
+            if answer is not object():
+                payload["approved"] = answer
+            server._resolve_approval(payload)
+            return frame
+        await asyncio.sleep(0.002)
+    return None
+
+
+# ── the table ───────────────────────────────────────────────────────────────
+
+
+def test_the_table_widens_by_one_hop_and_no_tier_widens_itself():
+    """The blueprint's `_STRICTLY_WIDER` (`escalation.ts:28-31`), read whole."""
+    assert escalation.hops_from("read-only") == ("workspace-write", DANGER_FULL_ACCESS)
+    assert escalation.hops_from("workspace-write") == (DANGER_FULL_ACCESS,)
+    assert escalation.hops_from(DANGER_FULL_ACCESS) == ()
+    # An unknown mode is not a tier with no neighbour; it is not a tier.
+    assert escalation.hops_from("readonly") == ()
+
+
+def test_only_a_tier_with_a_wider_neighbour_advertises_the_field():
+    """The blueprint's conditional hint: a tier with no hop must not advertise
+    an instruction that can only ever fail."""
+    assert escalation.advertises_escalation("read-only")
+    assert escalation.advertises_escalation("workspace-write")
+    assert not escalation.advertises_escalation(DANGER_FULL_ACCESS)
+
+
+def test_the_advertised_set_is_what_a_schema_can_declare():
+    """The schema advertises the whole target set (`escalation.ts:41`); the hop
+    table decides what is reachable from where a call actually stands."""
+    assert set(escalation.ESCALATION_TARGETS) == {"workspace-write", DANGER_FULL_ACCESS}
+    assert set(escalation.ESCALATION_TARGETS) <= set(escalation.SANDBOX_MODES)
+
+
+# ── the pair ────────────────────────────────────────────────────────────────
+
+
+def test_both_arguments_absent_is_not_an_escalation_request():
+    assert escalation.validate_pairing(None, None) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "target,reason",
+    [
+        ("workspace-write", None),          # a request with no reason
+        (None, "I need to write files"),    # a stray field
+        ("", "I need it"),                  # a target that names nothing
+        ("workspace-write", ""),            # an empty justification
+        ("workspace-write", "   "),         # whitespace is not a justification
+    ],
+)
+def test_half_an_escalation_request_is_refused(target, reason):
+    with pytest.raises(escalation.EscalationRefused):
+        escalation.validate_pairing(target, reason)
+
+
+def test_the_pair_is_stripped_and_returned_as_the_words_that_will_be_shown():
+    assert escalation.validate_pairing(" workspace-write ", " npm install ") == (
+        "workspace-write",
+        "npm install",
+    )
+
+
+# ── the hop ─────────────────────────────────────────────────────────────────
+
+
+def test_a_hop_names_where_the_call_stands_and_where_it_may_go():
+    hop = escalation.validate_hop("read-only", "workspace-write")
+    assert (hop.from_mode, hop.to_mode) == ("read-only", "workspace-write")
+    assert hop.describe() == "read-only → workspace-write"
+
+
+@pytest.mark.parametrize(
+    "current,target",
+    [
+        ("read-only", "read-only"),            # the tier it already has
+        ("workspace-write", "read-only"),      # narrower, not wider
+        ("read-only", "no-such-tier"),         # not a tier at all
+        (DANGER_FULL_ACCESS, "workspace-write"),
+    ],
+)
+def test_a_target_that_is_not_one_hop_wider_is_refused(current, target):
+    with pytest.raises(escalation.EscalationRefused):
+        escalation.validate_hop(current, target)
+
+
+def test_the_refusal_says_what_was_reachable():
+    """A refusal is an instruction the model can act on, not just a verdict."""
+    with pytest.raises(escalation.EscalationRefused) as exc:
+        escalation.validate_hop(DANGER_FULL_ACCESS, "workspace-write")
+    assert "nothing" in str(exc.value)
+    assert "danger-full-access" in str(exc.value)
+
+
+# ── fail-closed, all five ways ──────────────────────────────────────────────
+
+
+def _approve(ask, *, current="read-only", target="workspace-write"):
+    return asyncio.run(
+        escalation.approve_escalation(
+            current_mode=current, target=target,
+            justification="npm install", ask=ask,
+        )
+    )
+
+
+def test_no_channel_is_a_refusal_not_a_permission():
+    """A deployment where nobody can be asked has not approved anything."""
+    called = []
+
+    async def ask(question):  # pragma: no cover — must not be reached
+        called.append(question)
+        return True
+
+    outcome = _approve(None)
+    assert (outcome.approved, outcome.answered) == (False, False)
+    assert outcome.reason == "no-approval-channel"
+    assert called == []
+
+
+def test_an_affirmative_answer_widens_the_call():
+    async def ask(question):
+        assert "justification: npm install" in question
+        return True
+
+    outcome = _approve(ask)
+    assert (outcome.approved, outcome.answered) == (True, True)
+    assert outcome.reason == "approved"
+
+
+def test_a_host_saying_no_is_a_decision_and_is_reported_as_one():
+    """`answered` separates "the host refused" from "nobody could tell"."""
+    async def ask(question):
+        return False
+
+    outcome = _approve(ask)
+    assert (outcome.approved, outcome.answered) == (False, True)
+    assert outcome.reason == "denied"
+
+
+def test_an_answer_nobody_can_read_is_not_consent():
+    async def ask(question):
+        return "maybe"
+
+    outcome = _approve(ask)
+    assert outcome.approved is False
+    assert outcome.reason == "unreadable-answer"
+
+
+def test_a_channel_that_raises_is_a_refusal():
+    async def ask(question):
+        raise RuntimeError("the client died mid-question")
+
+    outcome = _approve(ask)
+    assert outcome.approved is False
+    assert outcome.reason == "channel-failed"
+
+
+def test_a_host_who_never_answers_has_not_approved():
+    async def ask(question):
+        await asyncio.sleep(30)
+        return True
+
+    outcome = asyncio.run(
+        escalation.approve_escalation(
+            current_mode="read-only", target="workspace-write",
+            justification="npm install", ask=ask, timeout=0.05,
+        )
+    )
+    assert outcome.approved is False
+    assert outcome.reason == "timeout"
+
+
+def test_the_hop_is_checked_before_anyone_is_asked():
+    """The order is the safety property: a request that is not a legal hop must
+    never become a question a host could say yes to — an approval channel that
+    can authorise anything is not a safety mechanism."""
+    asked = []
+
+    async def ask(question):
+        asked.append(question)
+        return True
+
+    with pytest.raises(escalation.EscalationRefused):
+        asyncio.run(
+            escalation.approve_escalation(
+                current_mode="workspace-write", target="read-only",
+                justification="let me out", ask=ask,
+            )
+        )
+    assert asked == []
+
+
+@pytest.mark.parametrize(
+    "answer,expected",
+    [
+        (True, True),
+        ("yes", True),
+        ("APPROVE", True),
+        ({"approved": True}, True),
+        (False, False),
+        ("no", False),
+        ({"approved": "deny"}, False),
+        ("maybe", None),
+        (None, None),
+        (3, None),
+    ],
+)
+def test_the_spellings_a_client_may_use(answer, expected):
+    """Two clients ship this frame; a wire format only one of them can produce
+    is a bug waiting for a second implementation."""
+    assert escalation._read_answer(answer) is expected
+
+
+# ── the retry hint ──────────────────────────────────────────────────────────
+
+
+def test_the_hint_is_appended_only_where_escalation_is_reachable():
+    text = "⛔ write refused"
+    widened = escalation.with_retry_hint(text, mode="read-only")
+    assert escalation.RETRY_HINT in widened
+    assert "sandbox_permissions" in widened and "justification" in widened
+    assert escalation.with_retry_hint(text, mode=DANGER_FULL_ACCESS) == text
+
+
+def test_the_hint_is_idempotent_and_honours_an_explicit_target_list():
+    once = escalation.with_retry_hint("nope", mode="read-only")
+    assert escalation.with_retry_hint(once, mode="read-only") == once
+    narrowed = escalation.with_retry_hint("nope", mode=DANGER_FULL_ACCESS, advertised=("workspace-write",))
+    assert escalation.RETRY_HINT in narrowed
+
+
+# ── the daemon's channel ────────────────────────────────────────────────────
+
+
+def test_the_question_reaches_the_session_and_the_answer_resolves_it(tmp_path):
+    server = _server()
+    session = Session.create_with_id("esc-ask", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def scenario():
+        task = asyncio.create_task(
+            server.request_approval(session.session_id, "widen this one call?")
+        )
+        frame = await _answer_next_question(server, ws, True)
+        return frame, await asyncio.wait_for(task, 5)
+
+    frame, approved = asyncio.run(scenario())
+    assert frame is not None, "no approval_request frame reached the session"
+    assert frame["type"] == "approval_request"
+    assert frame["question"] == "widen this one call?"
+    assert frame["session_id"] == session.session_id
+    assert frame["request_id"]
+    assert approved is True
+
+
+def test_a_session_with_no_client_is_refused_and_nothing_is_sent(tmp_path):
+    """Fail closed: a host who walked away has not approved anything."""
+    server = _server()
+    session = Session.create_with_id("esc-nobody", tmp_path)
+    ws = _FakeWs()  # never subscribed
+
+    async def scenario():
+        return await asyncio.wait_for(
+            server.request_approval(session.session_id, "anyone?"), 5
+        )
+
+    assert asyncio.run(scenario()) is None
+    assert ws.sent == []
+
+
+def test_the_first_answer_wins_and_a_late_one_changes_nothing(tmp_path):
+    """A command already running at a wider tier cannot be un-widened by a
+    contrary answer, so the second one is dropped rather than racing the first."""
+    server = _server()
+    session = Session.create_with_id("esc-first", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def scenario():
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        frame = await _answer_next_question(server, ws, True)
+        # The mirror of a second client answering "no" afterwards.
+        server._resolve_approval({"request_id": frame["request_id"], "approved": False})
+        return await asyncio.wait_for(task, 5)
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_an_unreadable_answer_leaves_the_future_unapproved(tmp_path):
+    server = _server()
+    session = Session.create_with_id("esc-garbled", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def scenario():
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        await _answer_next_question(server, ws, "please")
+        return await asyncio.wait_for(task, 5)
+
+    assert asyncio.run(scenario()) is None
+
+
+def test_an_answer_for_a_request_nobody_waits_for_changes_nothing(tmp_path):
+    server = _server()
+    assert server._resolve_approval({"request_id": "appr-nonexistent", "approved": True}) is False
+    assert server._pending_approvals == {}
+
+
+def test_a_question_nobody_answers_times_out_and_leaves_no_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(escalation, "APPROVAL_TIMEOUT_SECONDS", 0.05)
+    server = _server()
+    session = Session.create_with_id("esc-timeout", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def scenario():
+        answer = await asyncio.wait_for(
+            server.request_approval(session.session_id, "widen?"), 5
+        )
+        return answer, dict(server._pending_approvals)
+
+    answer, pending = asyncio.run(scenario())
+    assert answer is None, "a timeout must read as a refusal"
+    assert pending == {}, "the question's future outlived its question"
+    assert [f.get("type") for f in ws.sent] == ["approval_request"]
+
+
+# ── the loop's call site ────────────────────────────────────────────────────
+
+
+def _drive_shell_call(
+    tmp_path, monkeypatch, *, args: dict, answer=object(), sandbox="read-only",
+    tool_name="bash",
+):
+    """Run one tool loop whose single tool call carries `args`.
+
+    Returns `(tool, frames, ws)`: the stub tool the loop executed (or not),
+    everything it broadcast, and the subscriber that received it.
+    """
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH",
+                        tmp_path / "planted-fire-heartbeat")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
+    server = _server()
+    session = Session.create_with_id("esc-loop", tmp_path)
+    ws = _subscribe(server, session)
+    stub = _StubTool(tool_name)
+    server.tools._tools[tool_name] = stub
+
+    calls: list[list[dict]] = []
+
+    async def fake_stream(messages, tools=None):
+        calls.append(list(messages))
+        if len(calls) == 1:
+            yield {
+                "content": "", "finish_reason": "tool_calls",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+                "tool_calls": [{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {"name": tool_name, "arguments": json.dumps(args)},
+                }],
+            }
+        else:
+            yield {"content": "done", "tool_calls": None, "finish_reason": "stop",
+                   "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+
+    server.llm.chat_stream = fake_stream
+    req = TaskRequest(id="req-esc", session_id=session.session_id, prompt="go",
+                      sandbox=sandbox)
+
+    async def scenario():
+        task = asyncio.create_task(server._run_tool_loop(req, None, session))
+        if answer is not object():
+            await _answer_next_question(server, ws, answer)
+        await asyncio.wait_for(task, 10)
+
+    asyncio.run(scenario())
+    return stub, ws, session
+
+
+def test_a_shell_call_that_names_a_hop_asks_before_it_runs(tmp_path, monkeypatch):
+    """The requirement, at the site that decides: the host is asked, and a yes
+    widens **this call**."""
+    stub, ws, session = _drive_shell_call(
+        tmp_path, monkeypatch,
+        args={"command": "npm install", "sandbox_permissions": "workspace-write",
+              "justification": "npm install"},
+        answer=True,
+    )
+    asked = [f for f in ws.sent if f.get("type") == "approval_request"]
+    assert len(asked) == 1, "the daemon widened nothing without asking"
+    assert "read-only" in asked[0]["question"]
+    assert "justification: npm install" in asked[0]["question"]
+    assert stub.calls, "an approved escalation did not run the command"
+    assert stub.calls[0]["sandbox"] == "workspace-write"
+    # …and the session's own default is untouched: nothing is written back.
+    assert session.session_id == "esc-loop"
+
+
+def test_a_refused_escalation_does_not_run_the_command_at_all(tmp_path, monkeypatch):
+    """A hop that was not granted must not be granted by accident — so the call
+    does not run, and the refusal is its outcome."""
+    stub, ws, session = _drive_shell_call(
+        tmp_path, monkeypatch,
+        args={"command": "npm install", "sandbox_permissions": "workspace-write",
+              "justification": "npm install"},
+        answer=False,
+    )
+    assert [f for f in ws.sent if f.get("type") == "approval_request"]
+    assert stub.calls == [], "a refused escalation ran the command anyway"
+    results = [m for m in session.get_messages_for_llm() if m.get("role") == "tool"]
+    assert any("escalation refused" in r["content"] for r in results), results
+
+
+def test_a_silent_client_refuses_the_call(tmp_path, monkeypatch):
+    """Nobody answered: the command must not run at the wider tier, and it must
+    not run at the default one either — the escalation was the call's reason."""
+    stub, ws, session = _drive_shell_call(
+        tmp_path, monkeypatch,
+        args={"command": "npm install", "sandbox_permissions": "workspace-write",
+              "justification": "npm install"},
+        answer=None,
+    )
+    assert stub.calls == []
+    results = [m for m in session.get_messages_for_llm() if m.get("role") == "tool"]
+    assert any("no-approval-channel" in r["content"] or "timeout" in r["content"]
+               or "unreadable-answer" in r["content"] for r in results), results
+
+
+def test_a_shell_call_without_the_pair_is_untouched(tmp_path, monkeypatch):
+    """The overwhelming majority of calls: no escalation asked, no question, no
+    change — a feature that taxes every call is one that gets switched off."""
+    stub, ws, _session = _drive_shell_call(
+        tmp_path, monkeypatch, args={"command": "ls"},
+    )
+    assert not [f for f in ws.sent if f.get("type") == "approval_request"]
+    # The daemon injects the session's own tier either way (D1); what must not
+    # happen is the tier *moving* — an escalation is the only thing that writes
+    # it, and this call asked for none.
+    assert stub.calls and stub.calls[0].get("sandbox") == "read-only", stub.calls
+
+
+def test_a_tool_the_tier_does_not_reach_cannot_escalate(tmp_path, monkeypatch):
+    """`read` is not a shell tool: the daemon injects no tier for it, so the
+    field is a stray argument rather than a request — and no question is asked."""
+    stub, ws, _session = _drive_shell_call(
+        tmp_path, monkeypatch, tool_name="read",
+        args={"path": "README.md", "sandbox_permissions": "workspace-write",
+              "justification": "I want to read"},
+    )
+    assert not [f for f in ws.sent if f.get("type") == "approval_request"]
+    assert stub.calls, "the tool did not run"
