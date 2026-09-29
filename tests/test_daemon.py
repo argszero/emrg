@@ -40,11 +40,18 @@ def test_build_prompt_emrg_self():
     prompt = handler._build_evolution_prompt()
 
     # Core template variables must be present
-    assert "test-id" in prompt
-    assert "testhost" in prompt
     assert "argszero/emrg" in prompt
     assert "emrg-evolution" in prompt
     assert "https://github.com/argszero/emrg.git" in prompt
+    # …and the per-daemon identity must NOT be, even though the builder still passes it
+    # (it is there for the host's own custom templates in `~/.emrg/task-templates/`).
+    # `instance_id` is regenerated at every daemon start and `host_name` is the machine,
+    # so neither can stand for a participant in a durable, cross-machine record; the
+    # templates read `task.author_id` instead (`tests/test_prompt_templates.py` holds the
+    # template half of this rule — this is the rendered-prompt half, which is where the
+    # two assertions above used to pin the retired line).
+    assert "test-id" not in prompt
+    assert "testhost" not in prompt
     # Conflict markers must NOT be present
     assert "<<<<<<<" not in prompt
     assert ">>>>>>>" not in prompt
