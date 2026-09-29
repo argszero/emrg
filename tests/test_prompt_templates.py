@@ -194,6 +194,132 @@ def test_no_prompt_names_a_placeholder_the_builder_does_not_provide(
             ) from exc
 
 
+# ── The per-daemon identity the prompts must not carry ────────────────────────────
+#
+# `instance_id` is `"emrg-" + os.urandom(4).hex()` (`daemon.py`), regenerated at every daemon
+# start and never persisted; `host_name` is `platform.node()`. The pair names *this process on
+# this machine*, not the participant — and every built-in template carried it in one unread
+# line (`- Instance: {{ instance_id }} @ {{ host_name }}`). The journal template is where that
+# was not harmless: it was the human-facing identity written into `INSTANCES.md`, the
+# `assigned-<id>` claim label and the `## Review by <id>` signature. Measured 2026-09-29,
+# `silicon-science-cs/INSTANCES.md` held 23 inactive rows out of 25, 22 of them the same
+# machine's editor retired for "an instance change", while the author row used a chosen handle
+# (`how2how2how2-arch`) that never rotated. Identity now comes from `task.author_id`, a value
+# in tasks.yml the host edits. The machine and process names stay in the builder's context for
+# *custom* user templates (`~/.emrg/task-templates/`, whose author is the host); the built-in
+# templates must not use them.
+_DAEMON_IDENTITY = re.compile(r"\{\{\s*(?P<name>instance_id|host_name)\s*\}\}")
+
+
+def _daemon_identity_names(text: str) -> list[str]:
+    """Which per-daemon identity placeholders ``text`` names, sorted and deduplicated."""
+    return sorted({match.group("name") for match in _DAEMON_IDENTITY.finditer(text)})
+
+
+def test_no_builtin_template_names_the_per_daemon_identity() -> None:
+    """The built-in prompts address the participant, never the process or the machine.
+
+    Both directions, because a scan that finds nothing is not evidence that it looked: the
+    control re-creates the retired line verbatim and must be caught, and the mutation puts
+    that line back into **each** template one at a time — re-adding it anywhere is the same
+    defect, so the loop below has to be able to see it there.
+
+    Named limit: this reads the templates as text, so a name one of them assembles at runtime
+    is outside it. It deliberately does not cover the host's own custom templates.
+    """
+    assert _daemon_identity_names(
+        "- Instance: {{ instance_id }} @ {{ host_name }}"
+    ) == ["host_name", "instance_id"], (
+        "the scan no longer catches the retired line it exists for"
+    )
+
+    for _task_type, filename in _builtin_templates():
+        text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
+        mutated = (
+            f"- Instance: {{{{ instance_id }}}} @ {{{{ host_name }}}}\n" + text
+        )
+        assert _daemon_identity_names(mutated) == ["host_name", "instance_id"], (
+            f"{filename}: putting the retired identity line back would not be flagged, "
+            f"so 'no offenders' below would prove nothing"
+        )
+        offenders = _daemon_identity_names(text)
+        assert not offenders, (
+            f"{filename}: names the per-daemon identity {offenders} — that value is "
+            f"regenerated or re-detected at every daemon start, so it cannot stand for a "
+            f"participant in a cross-machine record; take the identity from "
+            f"`{{{{ task.author_id }}}}` instead"
+        )
+
+
+def _journal_id_line(text: str) -> str:
+    """The rendered `- Instance id: …` line of the journal prompt."""
+    return next(line for line in text.splitlines() if line.startswith("- Instance id:"))
+
+
+JOURNAL_ID = "author-a"
+JOURNAL_NO_IDENTITY = "🛑 STOP — this task has no identity."
+
+
+def test_the_journal_prompt_takes_its_identity_from_the_task_config(
+    tmp_path, monkeypatch
+) -> None:
+    """Journal identity = `config.author_id`, rendered — and fail-closed when it is absent.
+
+    Measured 2026-09-29 (the reason the line above exists): the journal template read
+    `{{ instance_id }}`, which the daemon regenerates at every start, as the identity written
+    into the cross-machine `INSTANCES.md` registry, the `assigned-<id>` claim label and the
+    review signature. The registry's own history is the receipt — 22 of its rows are the same
+    editor retired for "an instance change". `task.author_id` is the same name in every run,
+    because it is a value in tasks.yml.
+
+    Three readings, because each can go missing on its own: the id reaches the durable
+    records; a task with **no** id stops rather than inventing one, and the stop clause is
+    conditional (absent when the id is set — an always-on banner would be no signal); and the
+    retired placeholder is gone from the rendered text.
+    """
+    configured = _make_handler(
+        tmp_path,
+        monkeypatch,
+        "journal_prompt.md",
+        {"project": "demoproj", "role": "author", "author_id": JOURNAL_ID},
+    )._build_evolution_prompt()
+
+    assert _journal_id_line(configured) == (
+        f"- Instance id: **{JOURNAL_ID}** (from tasks.yml)"
+    ), "the identity line is not the one this test reads as the task's identity"
+    # The three records it is written into, each named the way the template spells it.
+    assert f"assigned-{JOURNAL_ID}" in configured, (
+        "the claim label does not carry the configured id — the label and the registry row "
+        "would name different actors"
+    )
+    assert f"## Review by {JOURNAL_ID}" in configured, (
+        "the review signature does not carry the configured id"
+    )
+    assert JOURNAL_NO_IDENTITY not in configured, (
+        "the fail-closed clause is rendered even with an id — it is not conditional, so it "
+        "cannot signal that the id is missing"
+    )
+    assert "instance_id" not in configured, (
+        "the retired per-daemon placeholder still reaches the rendered journal prompt"
+    )
+
+    bare = _make_handler(
+        tmp_path,
+        monkeypatch,
+        "journal_prompt.md",
+        {"project": "demoproj", "role": "author"},
+    )._build_evolution_prompt()
+
+    assert _journal_id_line(bare) == "- Instance id: **** (from tasks.yml)", (
+        "the identity line does not render empty when the task has no `author_id`"
+    )
+    assert JOURNAL_NO_IDENTITY in bare, (
+        "a journal task with no `config.author_id` must be told to stop: every journal action "
+        "writes the identity into a durable, cross-machine record, and a name invented to fill "
+        "the blank is worse than a missed cycle"
+    )
+
+
 # The memory roots a template may name, in the spelling a template writes them: the
 # session's *project* memory (`<session.cwd>/.emrg/memory/`) and its *session* memory
 # (`<session.cwd>/.emrg/sessions/<id>/memory/`). After D9 (design §6 D9, host decision
