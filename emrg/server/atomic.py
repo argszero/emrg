@@ -22,11 +22,17 @@ def atomic_write_yaml(
     *,
     prefix: str = ".atomic_",
     suffix: str = ".tmp",
+    dumper: type | None = None,
 ) -> None:
     """Atomically write a list of dicts as YAML to target.
 
     Writes to a temp file in the same directory, then os.replace()
     to atomically swap. On error, the temp file is cleaned up.
+
+    ``dumper`` substitutes the dumper class. It exists for tasks.yml, whose writer
+    needs multi-line strings as literal `|` blocks (a `SafeDumper` representer) so
+    one edit does not reflow the host's own formatting; the default keeps the exact
+    behaviour every other caller already had.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -36,12 +42,21 @@ def atomic_write_yaml(
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                default_flow_style=False,
-                sort_keys=False,
-            )
+            if dumper is None:
+                yaml.safe_dump(
+                    data, f,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+            else:
+                yaml.dump(
+                    data, f,
+                    Dumper=dumper,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
         os.replace(tmp_path, target)
     except OSError:
         logger.warning(

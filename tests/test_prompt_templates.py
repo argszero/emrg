@@ -49,6 +49,7 @@ from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.server import scheduler as mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.scheduler import TaskHandler
+from tests.task_handler_factory import make_handler
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROMPTS_DIR = REPO_ROOT / "emrg" / "server"
@@ -94,7 +95,7 @@ def _make_handler(
     monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
     name = config.get("project", "demoproj")
     _write_projects_yml(tmp_path, name, project_entry or {"name": name})
-    return TaskHandler(
+    return make_handler(
         name="demo-task",
         config=config,
         interval=300,

@@ -45,6 +45,7 @@ import yaml
 from emrg.protocol import InstanceIdentity
 from emrg.server import scheduler as mod
 from emrg.server.scheduler import TaskHandler
+from tests.task_handler_factory import make_handler
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROMPTS_DIR = REPO_ROOT / "emrg" / "server"
@@ -90,7 +91,7 @@ def rendered(tmp_path, monkeypatch) -> str:
     (tmp_path / "projects.yml").write_text(
         yaml.safe_dump([{"name": "demoproj", "path": str(project_dir)}]), encoding="utf-8"
     )
-    handler = TaskHandler(
+    handler = make_handler(
         name="demo-task",
         config={"project": "demoproj"},
         interval=300,

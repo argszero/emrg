@@ -2716,15 +2716,19 @@ class TestWSTaskWire:
 
     @staticmethod
     def _mock_scheduler(create_side_effect=None, update_side_effect=None):
-        """Scheduler mock with async methods the daemon awaits (apply_tasks/wait_all)."""
+        """Scheduler mock with the calls the daemon makes on a CRUD frame.
+
+        Every one of them must return a real value: the daemon puts `reconcile()`'s
+        result straight into the reply frame, and a bare `Mock` is not JSON
+        serializable — that failed the send and dropped the connection.
+        """
         from unittest.mock import AsyncMock, Mock
         sched = Mock()
         sched.task_create = Mock(side_effect=create_side_effect or (lambda **kw: (True, {"name": "x"})))
         sched.task_update = Mock(side_effect=update_side_effect or (lambda name, **fields: (True, {"name": name})))
-        sched.apply_tasks = AsyncMock(return_value="")
+        sched.reconcile = Mock(return_value={"started": []})
         sched.wait_all = AsyncMock()
         sched.stop_all = Mock()
-        sched._load_tasks = Mock(return_value=[])
         return sched
 
     def test_task_create_reads_task_type(self):

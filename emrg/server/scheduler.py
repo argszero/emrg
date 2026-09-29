@@ -1,14 +1,17 @@
 """Task-based scheduler — replaces BackgroundThread with independent coroutines.
 
-Each task in ~/.emrg/tasks.yml gets its own asyncio.create_task() coroutine.
-The scheduler only manages lifecycle (start/stop/monitor); handlers are self-contained.
+The file ~/.emrg/tasks.yml is the whole truth: `read_table` is its only reader and
+`write_table` its only writer, and a handler reads its own record at every wake
+instead of holding a copy. `reconcile()` starts a handler for an enabled record
+that has none and can do nothing else, so a write cannot disturb a running cycle
+(rant 2026-09-28T09:54:10).
 
 projects.yml remains for project tracking (_touch_project only).
-tasks.yml controls what gets auto-evolved.
 
 Task config schema:
-  name, type, enabled, interval, last_run — common base fields.
+  name, type, enabled, interval — common base fields.
   config — type-specific config. For evolution: config.project links to projects.yml name.
+  sandbox / description / extra_prompt — optional; anything else is ignored.
 """
 
 from __future__ import annotations
@@ -168,6 +171,136 @@ TASK_NAME_MAX = 32
 MIN_INTERVAL = 60
 DEFAULT_INTERVAL = 1800
 
+# ── tasks.yml is the only source of truth (rant 2026-09-28T09:54:10) ──
+#
+# The host's principle, verbatim: 「tasks.yml 本身不做任何内存缓存。什么时候用，
+# 什么时候直接读文件。读取时如果发现文件不在，则默认生成文件。写 tasks.yml 时，
+# 不影响现有任务的执行。新增、修改、删除的任务可以自动发现并生效。」
+#
+# Measured at the time of the change: the whole file is 6,968 bytes / 95 lines and a
+# full `read_text + yaml.safe_load` costs 1.593 ms — 0.08% duty cycle at the poll
+# interval below. A cache buys nothing and costs four layers of consistency (a
+# construct-time snapshot, a start-time cfg copy, a change signature, and an applier
+# whose only means of applying a change was `coro.cancel()`), which is where every
+# scheduling defect in this area came from. There are exactly three verbs now:
+# `read_table` (the only reader), `write_table` (the only writer — it touches no
+# memory and starts/stops nothing) and `reconcile` (the only way the live set moves).
+TABLE_POLL_SECONDS = 2.0
+#: How long a handler waits after finding the table unreadable. Same value as
+#: `config_reload.POLL_INTERVAL_SECONDS`'s order of magnitude, and for the same
+#: product reason: this is "how long may a hand edit take to matter", not a new knob.
+TABLE_RETRY_SECONDS = 30
+
+#: The table seeded when the file does not exist. `interval` is 600, not the 60 the
+#: old self-heal hardcoded — 600 is what this host actually ran (`~/.emrg/tasks.yml`),
+#: so the seed reproduces the working state rather than a third number.
+DEFAULT_TASK_RECORD: dict = {
+    "name": "emrg-task",
+    "type": "evolution",
+    "config": {"project": "emrg"},
+    "interval": 600,
+    "enabled": True,
+}
+
+
+class TableUnreadable(Exception):
+    """tasks.yml exists but could not be read as a list of task records.
+
+    Raised, never swallowed into an empty list, because the two mean opposite things:
+    "no tasks" retires every handler at its next cycle boundary, while "unreadable"
+    must change nothing (see `reconcile`). A host editor's non-atomic save is the
+    ordinary way this happens, so the wrong reading here stops every scheduled task.
+    """
+
+
+class _TaskTableDumper(yaml.SafeDumper):
+    """SafeDumper that writes multi-line strings as literal `|` blocks.
+
+    `yaml.safe_dump` folds a multi-line `extra_prompt` into single-quoted, hard-wrapped
+    lines — measured — so one GUI edit used to reflow the host's own `|` blocks in
+    every record of the file, including the ones the edit did not touch.
+    """
+
+
+def _represent_multiline_str(dumper: yaml.SafeDumper, data: str):
+    """Represent a string as a `|` literal block when it spans lines."""
+    style = "|" if "\n" in data else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+
+_TaskTableDumper.add_representer(str, _represent_multiline_str)
+
+
+def _tasks_yml_path() -> Path:
+    """The tasks.yml this process reads and writes."""
+    return config_dir() / "tasks.yml"
+
+
+def read_table(path: Path | None = None) -> list[dict]:
+    """Read tasks.yml. The only reader in the codebase.
+
+    - File missing ⇒ write the default table, then return it. This is a general rule
+      and not an install step (host principle): deleting the file re-seeds `emrg-task`.
+    - Parse failure, or a root that is not a list ⇒ `TableUnreadable`. Never `[]`.
+    - Otherwise the records exactly as written: keys not rewritten, order not changed,
+      fields not filled in.
+    """
+    path = path or _tasks_yml_path()
+    if not path.exists():
+        write_table([dict(DEFAULT_TASK_RECORD)], path)
+        logger.info("TaskScheduler: %s was missing — seeded the default table", path)
+        return [dict(DEFAULT_TASK_RECORD)]
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError) as exc:
+        raise TableUnreadable(f"{path}: {exc}") from exc
+    if data is None:
+        raise TableUnreadable(f"{path}: empty document")
+    if not isinstance(data, list):
+        raise TableUnreadable(f"{path}: root is {type(data).__name__}, not a list")
+    return [e for e in data if isinstance(e, dict)]
+
+
+def write_table(records: list[dict], path: Path | None = None) -> None:
+    """Replace tasks.yml atomically. The only writer in the codebase.
+
+    It writes the file and does nothing else: no in-memory set is touched and no
+    handler is started, stopped or cancelled. That is why "writing tasks.yml does not
+    affect running tasks" is a property of the structure rather than a rule somebody
+    has to remember.
+    """
+    path = path or _tasks_yml_path()
+    atomic_write_yaml(records, path, prefix=".tasks_", dumper=_TaskTableDumper)
+
+
+def validate_task_record(record: dict) -> str | None:
+    """Return why a record cannot be run, or None when it is usable.
+
+    One function for both the loader and the CRUD path. They used to differ, and the
+    difference was a live defect: the IPC side rejected an unknown `type`, while the
+    loader fell back to `evolution_prompt.md` in silence, so a typo in a hand-edited
+    file ran the evolution prompt for a task that meant something else.
+    """
+    if not isinstance(record, dict):
+        return f"record is {type(record).__name__}, not a mapping"
+    name = record.get("name")
+    if not isinstance(name, str) or not name or not TASK_NAME_RE.match(name):
+        return f"invalid or missing name {name!r}"
+    if len(name) > TASK_NAME_MAX:
+        return f"name {name!r} is longer than {TASK_NAME_MAX} chars"
+    task_type = record.get("type")
+    if not isinstance(task_type, str) or not task_type:
+        return f"task {name!r} has no type"
+    if task_type not in TASK_TEMPLATES and task_type not in _custom_templates():
+        return f"task {name!r} has unknown type {task_type!r} (not builtin, no custom template)"
+    interval = record.get("interval", DEFAULT_INTERVAL)
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval < MIN_INTERVAL:
+        return f"task {name!r} has interval {interval!r} (must be an integer >= {MIN_INTERVAL})"
+    cfg = record.get("config")
+    if cfg is not None and not isinstance(cfg, dict):
+        return f"task {name!r} has config of type {type(cfg).__name__}, not a mapping"
+    return None
+
 
 def _task_templates_dir() -> Path:
     """Directory holding user-defined task type templates."""
@@ -232,23 +365,6 @@ def _resolve_task_template(task_type: str) -> Path:
     return Path(__file__).parent / "evolution_prompt.md"
 
 
-def _task_cfg_signature(cfg: dict) -> tuple:
-    """Stable signature of a task cfg for hot-reload diffing.
-
-    Any change to type / config / interval / enabled marks the task
-    as needing a handler restart.
-    """
-    conf = cfg.get("config") if isinstance(cfg.get("config"), dict) else {}
-    return (
-        cfg.get("name"),
-        cfg.get("type"),
-        json.dumps(conf, sort_keys=True),
-        cfg.get("interval", DEFAULT_INTERVAL),
-        bool(cfg.get("enabled", True)),
-        cfg.get("sandbox"),
-    )
-
-
 def _resolve_project_path(name: str) -> str | None:
     """Resolve a project name to its path from projects.yml."""
     projects_file = config_dir() / "projects.yml"
@@ -301,6 +417,17 @@ class TaskHandler:
 
     Each handler runs its own while+sleep(interval) coroutine,
     independent of all other handlers.
+
+    **A handler holds a name and nothing that can go stale** (rant 2026-09-28T09:54:10).
+    It used to be constructed from the task's cfg — type, interval, config, project
+    path, owner/repo, template path, sandbox — and kept all of it, which is why editing
+    `extra_prompt` in tasks.yml had no effect until a daemon restart, and why the only
+    way to apply a config change was to cancel and rebuild the handler mid-cycle.
+
+    It now reads its own record out of tasks.yml at the top of every cycle
+    (`_read_own_record`) and derives everything from *that*. A configuration change is
+    therefore not an event this class has to be told about: the next cycle simply reads
+    the new values. See `_apply_record` for the derived set.
     """
 
     EMRG_REPO_URL = "https://github.com/argszero/emrg.git"
@@ -310,23 +437,26 @@ class TaskHandler:
     def __init__(
         self,
         name: str,
-        config: dict,
-        interval: int,
         identity: InstanceIdentity,
-        template_path: Path | None = None,
-        sandbox: str | None = None,
     ) -> None:
         self.name = name
+        self.identity = identity
+        #: The record this handler is currently running under. Empty until the first
+        #: cycle reads the table; every cfg-derived value below reads it, so a handler
+        #: that has never run a cycle falls back to the defaults rather than to a
+        #: snapshot taken before anything existed.
+        self._task: dict = {}
+        self._derived: dict = {}
+        #: The table to read, injected by the TaskScheduler so a test that points the
+        #: scheduler at a tmp path points its handlers at the same file. Plumbing, not
+        #: configuration: it says *where* the truth is, never what it says.
+        self._tasks_file: Path | None = None
         # Rant 2026-08-19T10:18:44: per-task logger — LoggerAdapter injects a
         # `task` extra; the daemon's custom Formatter renders it as a dedicated
         # [task] column in emrgd.log (scheduler lines are otherwise hard to
         # tell apart when several tasks interleave). TaskScheduler-level logs
         # keep the module logger (no task extra → "-" column).
         self._logger = logging.LoggerAdapter(logger, {"task": self.name})
-        self._template_path = template_path or (Path(__file__).parent / "evolution_prompt.md")
-        self._config = config
-        self.interval = interval
-        self.identity = identity
         self._running = False
         self._cycle_start_time: float | None = None  # per-cycle start (rant 2026-08-22T07:18:35 elapsed display)
         self._trigger_event = asyncio.Event()
@@ -399,44 +529,133 @@ class TaskHandler:
         self._next_run_file = self._next_run_dir / f"{self.name}.json"
         self._resume_next_run_at: float | None = self._load_next_run_state()
 
+    # ── The record this handler runs under (rant 2026-09-28T09:54:10) ──
+
+    def _read_own_record(self) -> dict | None:
+        """This task's record from tasks.yml, or None when it is gone or disabled.
+
+        Raises `TableUnreadable` upward: a table that cannot be read is not a table
+        that lost this task, and only the caller knows which of the two it is holding.
+        """
+        table = read_table(self._tasks_file)
+        for record in table:
+            if record.get("name") != self.name:
+                continue
+            problem = validate_task_record(record)
+            if problem:
+                self._logger.error(
+                    "TaskHandler[%s]: record is not usable (%s) — not running",
+                    self.name, problem,
+                )
+                return None
+            return record
+        return None
+
+    def _apply_record(self, record: dict) -> None:
+        """Derive everything this cycle needs from `record`.
+
+        Called once per cycle with the record read at that moment — which is what makes
+        a hand edit take effect at the next cycle boundary with nothing to invalidate:
+        there is no cached copy to compare against, so there is no comparison to get
+        wrong. The rules are unchanged from when the same values were computed in
+        `__init__`; only their input has moved (construction argument → this cycle's
+        record).
+        """
+        self._task = dict(record)
+        cfg = record.get("config") if isinstance(record.get("config"), dict) else {}
         # Resolve project path from config (new schema) or fall back to
         # config.path for backward-compat with old tasks.yml entries.
-        project_name = config.get("project", "")
-        self._project_name = project_name
-        path = _resolve_project_path(project_name) if project_name else config.get("path", "")
-        self.project_path = path or name  # default to name for emrg itself
-
+        project_name = cfg.get("project", "")
+        path = _resolve_project_path(project_name) if project_name else cfg.get("path", "")
         # Derive owner/repo/git from config override → path git remote → defaults.
         # (rant 2026-08-19T14:20:52: workspace self-heal deleted — these fields
         # remain for prompt context {repo}/{owner} and task-config resolution;
         # the agent manages its own git workspace via tools.)
         repo_spec = _detect_git_remote(path) if path else ""
-        cfg_owner = config.get("owner")
-        cfg_repo = config.get("repo")
+        cfg_owner = cfg.get("owner")
+        cfg_repo = cfg.get("repo")
         if cfg_owner and cfg_repo:
-            self._owner, self._repo = cfg_owner, cfg_repo
-            self._repo_url = f"https://github.com/{self._owner}/{self._repo}.git"
-            self._repo_configured = True
+            owner, repo = cfg_owner, cfg_repo
+            repo_url = f"https://github.com/{owner}/{repo}.git"
+            repo_configured = True
         elif repo_spec and "/" in repo_spec:
-            self._owner, self._repo = repo_spec.split("/", 1)
-            self._repo_url = f"https://github.com/{self._owner}/{self._repo}.git"
-            self._repo_configured = True
+            owner, repo = repo_spec.split("/", 1)
+            repo_url = f"https://github.com/{owner}/{repo}.git"
+            repo_configured = True
         else:
-            self._owner = self.OWNER
-            self._repo = self.REPO
-            self._repo_url = self.EMRG_REPO_URL
-            self._repo_configured = project_name == "emrg"
-        self._session_id = f"emrg-evolution-{name}"
-        self._source_dir = path or name
-        # Sandbox tier for this task's bash tool (rant 2026-08-20T15:46:50 +
-        # 18:05:20): explicit config wins, otherwise unified default
-        # workspace-write. No task-name builtin defaults, no implicit
-        # danger-full-access fallback.
-        self._sandbox = self._resolve_sandbox(config, sandbox)
-        if self._sandbox:
-            self._logger.info(
-                "TaskHandler[%s]: bash sandbox tier = %s", name, self._sandbox
-            )
+            owner, repo = self.OWNER, self.REPO
+            repo_url = self.EMRG_REPO_URL
+            repo_configured = project_name == "emrg"
+        sandbox = self._resolve_sandbox(cfg, record.get("sandbox"))
+        self._derived = {
+            "config": cfg,
+            "project_name": project_name,
+            "project_path": path or self.name,  # default to name for emrg itself
+            "owner": owner,
+            "repo": repo,
+            "repo_url": repo_url,
+            "repo_configured": repo_configured,
+            "session_id": f"emrg-evolution-{self.name}",
+            "source_dir": path or self.name,
+            "sandbox": sandbox,
+            # The template follows the record's type, so changing a task's type in
+            # tasks.yml switches its prompt at the next cycle (design §4).
+            "template_path": _resolve_task_template(record.get("type", "evolution")),
+        }
+
+    # The derived set, read exactly as the old attributes were read. Each falls back
+    # to a live default — never to a snapshot — so a handler that has not yet read a
+    # record still answers coherently (a test constructing one, a status() call
+    # before the first cycle).
+    @property
+    def _config(self) -> dict:
+        return self._derived.get("config", {})
+
+    @property
+    def interval(self) -> int:
+        return self._task.get("interval", DEFAULT_INTERVAL)
+
+    @property
+    def _project_name(self) -> str:
+        return self._derived.get("project_name", "")
+
+    @property
+    def project_path(self) -> str:
+        return self._derived.get("project_path", self.name)
+
+    @property
+    def _owner(self) -> str:
+        return self._derived.get("owner", self.OWNER)
+
+    @property
+    def _repo(self) -> str:
+        return self._derived.get("repo", self.REPO)
+
+    @property
+    def _repo_url(self) -> str:
+        return self._derived.get("repo_url", self.EMRG_REPO_URL)
+
+    @property
+    def _repo_configured(self) -> bool:
+        return bool(self._derived.get("repo_configured", False))
+
+    @property
+    def _session_id(self) -> str:
+        return self._derived.get("session_id", f"emrg-evolution-{self.name}")
+
+    @property
+    def _source_dir(self) -> str:
+        return self._derived.get("source_dir", self.name)
+
+    @property
+    def _sandbox(self) -> str:
+        return self._derived.get("sandbox", "workspace-write")
+
+    @property
+    def _template_path(self) -> Path:
+        return self._derived.get(
+            "template_path", Path(__file__).parent / "evolution_prompt.md"
+        )
 
     @staticmethod
     def _resolve_sandbox(config: dict, explicit: str | None) -> str:
@@ -1618,18 +1837,93 @@ class TaskHandler:
                 self.name, exc,
             )
 
+    # ── Reading the record: the handler's only input (rant 2026-09-28T09:54:10) ──
+
+    #: Returned by `_refresh_record` when the cycle may run / must be skipped /
+    #: must never run again.
+    RECORD_OK = "ok"
+    RECORD_GONE = "gone"
+    RECORD_UNREADABLE = "unreadable"
+
+    async def _refresh_record(self) -> str:
+        """Read this task's record now and apply it. Returns one of the three above.
+
+        Called twice per iteration — once before the wait (so the wait uses the
+        interval the file currently states) and once when the wait ends (so a record
+        deleted or edited while the handler slept is caught on waking). Two reads per
+        interval is the whole cost of having no cache: measured, a full read of this
+        file is 1.593 ms.
+
+        Both steps run in a worker thread: deriving the record probes the project's git
+        remote, which is a subprocess, and this coroutine runs on the event loop
+        (rant 2026-08-19T01:05:47).
+        """
+        try:
+            record = await asyncio.to_thread(self._read_own_record)
+        except TableUnreadable as exc:
+            # Fail closed and change nothing. A table an editor is mid-write on must
+            # not be read as "this task was deleted", which is why read_table raises
+            # instead of returning [] — the wrong reading here retires every handler.
+            self._logger.error(
+                "TaskHandler[%s]: %s — cycle skipped, retrying in %ds",
+                self.name, exc, TABLE_RETRY_SECONDS,
+            )
+            return self.RECORD_UNREADABLE
+        if record is None or not record.get("enabled", True):
+            return self.RECORD_GONE
+        await asyncio.to_thread(self._apply_record, record)
+        return self.RECORD_OK
+
+    def _clear_runtime_state(self) -> None:
+        """Remove this handler's own runtime files (it is not coming back).
+
+        Without this a deleted task leaves a heartbeat and a next-run slot behind, and
+        both read as "something is scheduled here" to anyone who looks.
+        """
+        for path in (self._heartbeat_file, self._next_run_file):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                self._logger.warning(
+                    "TaskHandler[%s]: could not remove %s: %s", self.name, path, exc,
+                )
+
     async def run(self) -> None:
         """Run evolution cycles at configured interval.
 
         Uses an asyncio.Event for interruptible sleep — manual triggers
         via trigger() wake the coroutine immediately.
+
+        The record is read from tasks.yml at every wake rather than held from
+        construction (rant 2026-09-28T09:54:10): editing `interval`, `config`,
+        `project` or `type` in the file takes effect at the next cycle boundary with
+        nothing to invalidate, and deleting the record (or setting `enabled: false`)
+        ends the handler at its next wake instead of leaving it running a task nothing
+        declares. A cycle already underway always runs to completion — this loop only
+        ever exits between cycles, never inside one.
         """
         self._running = True
-        self._logger.info(
-            "TaskHandler[%s] started — every %ds", self.name, self.interval
-        )
+        # The "started" line is printed on the first wake, not here: the interval
+        # it names is read from tasks.yml at that wake (rant 2026-09-28T09:54:10),
+        # so a handler whose record is gone never announces a schedule nothing
+        # declares. `_start_time` is not kept — the template that read it is gone
+        # (rant 2026-09-29T09:23:55), and this loop only needs to know whether it
+        # has already said this once.
+        _started_logged = False
 
         while self._running:
+            outcome = await self._refresh_record()
+            if outcome == self.RECORD_GONE:
+                break
+            if outcome == self.RECORD_UNREADABLE:
+                await asyncio.sleep(TABLE_RETRY_SECONDS)
+                continue
+            if not _started_logged:
+                self._logger.info(
+                    "TaskHandler[%s] started — every %ds", self.name, self.interval
+                )
+                _started_logged = True
+
             # Slowdown → wait at the heartbeat interval (low-frequency full
             # cycle, rant 2026-08-09T09:35:55; flag set by vibe check
             # recommend_slowdown, rant 2026-08-20T10:58:55); otherwise the
@@ -1679,6 +1973,17 @@ class TaskHandler:
                 # Normal scheduled run
                 pass
 
+            if not self._running:
+                break
+            # Woken: the record may have been edited, deleted or disabled during the
+            # wait. Re-read before spending a cycle on it.
+            outcome = await self._refresh_record()
+            if outcome == self.RECORD_GONE:
+                break
+            if outcome == self.RECORD_UNREADABLE:
+                await asyncio.sleep(TABLE_RETRY_SECONDS)
+                continue
+
             # Manual triggers always clear the slowdown flag — the host
             # manually paying attention means back to high frequency
             # (rant 2026-08-20T10:58:55, host-confirmed semantics).
@@ -1699,6 +2004,7 @@ class TaskHandler:
             self._save_next_run_state()  # clear the persisted slot (cycle starting now)
             await self._run_cycle_bounded()
 
+        self._clear_runtime_state()
         await self._write_final_summary()
         self._logger.info("TaskHandler[%s] stopped", self.name)
 
@@ -2272,26 +2578,40 @@ class TaskHandler:
 class TaskScheduler:
     """Manages tasks from ~/.emrg/tasks.yml.
 
-    Each enabled task gets an independent asyncio coroutine.
-    The scheduler only creates/monitors tasks; handlers are self-contained.
-    """
+    tasks.yml is the only source of truth (rant 2026-09-28T09:54:10). This class keeps
+    no copy of it: `read_table` is called whenever the file is needed, `write_table` is
+    the only writer, and neither of them touches the live set. The live set moves in
+    exactly one direction, through `reconcile`, which only ever *starts* a handler for
+    an enabled record that has none.
 
-    HANDLERS: dict[str, type] = {
-        "evolution": TaskHandler,
-        "paper": TaskHandler,  # same handler, different template
-        "open-source": TaskHandler,  # same handler, different template
-        "promote": TaskHandler,  # same handler, different template
-        "journal": TaskHandler,  # same handler, different template
-        "competition": TaskHandler,  # same handler, different template
-    }
+    Two consequences are the whole point of the design, so they are stated rather than
+    left to be noticed:
+
+      * **"Writing tasks.yml does not disturb a running task" is structural.** The write
+        path cannot reach a running cycle, so there is nothing anyone has to remember
+        not to do. The old `apply_tasks` applied a config change by calling
+        `coro.cancel()` — which is how editing an interval in the GUI silently killed
+        the cycle that was running at that moment.
+      * **`cancel()` on a handler coroutine has one caller left: `stop_all`.** That is
+        shutdown. A config change is no longer an event at all: the handler reads its
+        own record at every wake and derives everything from it.
+
+    A deletion or `enabled: false` likewise needs no counterpart here — the handler
+    notices at its next wake (`TaskHandler._refresh_record`) and retires, and
+    `list_tasks` reads the file, so the GUI stops showing it at once while a cycle
+    already underway runs to completion.
+    """
 
     def __init__(self, identity: InstanceIdentity) -> None:
         self.identity = identity
-        self._tasks_file: Path | None = None
-        self._handlers: list[TaskHandler] = []
-        self._coros: list[asyncio.Task] = []
-        # cfg (from tasks.yml) used to start each handler — for hot-reload diffing.
-        self._handler_cfgs: dict[str, dict] = {}
+        self.__tasks_file: Path | None = None
+        #: name -> handler. Deliberately NOT `name -> (handler, record)`: a copy of the
+        #: record here would be exactly the cache this change exists to delete, and it
+        #: would go stale in the same way. The handler holds its own copy from its last
+        #: wake; nothing else needs one.
+        self._live: dict[str, TaskHandler] = {}
+        self._coros: dict[str, asyncio.Task] = {}
+        self._reconcile_task: asyncio.Task | None = None
 
     @property
     def _tasks_file(self) -> Path:
@@ -2299,148 +2619,170 @@ class TaskScheduler:
         (hermeticity guard #738: tests patch config_dir after construction,
         and tests may override _tasks_file directly with a tmp path)."""
         if self.__tasks_file is None:
-            self.__tasks_file = config_dir() / "tasks.yml"
+            self.__tasks_file = _tasks_yml_path()
         return self.__tasks_file
 
     @_tasks_file.setter
     def _tasks_file(self, value: Path | None) -> None:
         self.__tasks_file = value
 
-    def _build_handler(self, cfg: dict) -> TaskHandler:
-        """Construct a TaskHandler for a task cfg (pure sync construction).
+    # ── The live set ────────────────────────────────────────────────
 
-        May block briefly (git remote detection in ``TaskHandler.__init__``
-        + template lookup) — callers in the event loop must offload via
-        ``asyncio.to_thread`` (rant 2026-08-19T01:05:47: no blocking calls
-        in the loop).
+    def _start_handler(self, record: dict) -> TaskHandler:
+        """Create and start the handler for one record.
+
+        Safe to call from the event loop: `TaskHandler.__init__` no longer probes
+        git (that moved into the handler's per-cycle derivation, which runs in a
+        worker thread), so construction does no blocking I/O at all. The old split
+        between a sync boot path and an `asyncio.to_thread` hot-reload path existed
+        only for that probe.
         """
-        template_path = _resolve_task_template(cfg["type"])
-        return TaskHandler(
-            name=cfg["name"],
-            config=cfg.get("config", {}),
-            interval=cfg.get("interval", DEFAULT_INTERVAL),
-            identity=self.identity,
-            template_path=template_path,
-            sandbox=cfg.get("sandbox"),
+        handler = TaskHandler(name=record["name"], identity=self.identity)
+        # Where the truth is, not what it says — the handler reads the file itself.
+        handler._tasks_file = self._tasks_file
+        self._live[handler.name] = handler
+        coro = asyncio.create_task(handler.run())
+        self._coros[handler.name] = coro
+        # Self-cleaning: a handler that retires (its record was deleted) removes
+        # itself, so nothing needs a periodic sweep to notice.
+        coro.add_done_callback(lambda _t, name=handler.name: self._forget(name))
+        logger.info(
+            "TaskScheduler: started %s[%s] every %ds",
+            record.get("type"), handler.name,
+            record.get("interval", DEFAULT_INTERVAL),
         )
+        return handler
 
-    def _start_handler_for(self, cfg: dict) -> TaskHandler:
-        """Create + start a handler for a task cfg; returns the handler.
+    def _forget(self, name: str) -> None:
+        """Drop a finished handler from the live set (done-callback)."""
+        self._live.pop(name, None)
+        self._coros.pop(name, None)
 
-        Boot path (no websocket clients connected yet) — sync construction
-        is acceptable here.
+    def reconcile(self) -> dict:
+        """Start a handler for every enabled record that has none.
+
+        This is the only way the live set grows, and it can only add — so it cannot
+        cancel a running cycle by construction, and it is idempotent by construction
+        too (a name already in `_live` is skipped).
+
+        An unreadable table is reported and changes **nothing**. That is the one
+        failure mode worth being pedantic about: reading "unreadable" as "empty" would
+        retire every handler at its next wake, i.e. stop every scheduled task after one
+        non-atomic save by an editor.
         """
-        handler = self._build_handler(cfg)
-        self._handlers.append(handler)
-        self._handler_cfgs[handler.name] = cfg
-        self._coros.append(asyncio.create_task(handler.run()))
-        return handler
-
-    async def _start_handler_async(self, cfg: dict) -> TaskHandler:
-        """Hot-reload path (apply_tasks, on the event loop while serving):
-        offload the sync handler construction to a worker thread so a slow
-        git probe never freezes the loop (rant 2026-08-19T01:05:47)."""
-        handler = await asyncio.to_thread(self._build_handler, cfg)
-        self._handlers.append(handler)
-        self._handler_cfgs[handler.name] = cfg
-        self._coros.append(asyncio.create_task(handler.run()))
-        return handler
-
-    def _stop_handler(self, handler: TaskHandler) -> None:
-        """Stop a handler and cancel its coroutine (hot-reload removal/restart)."""
-        handler.stop()
         try:
-            idx = self._handlers.index(handler)
-        except ValueError:
-            idx = -1
-        if idx >= 0:
-            coro = self._coros[idx]
-            coro.cancel()
-            del self._coros[idx]
-            del self._handlers[idx]
-        self._handler_cfgs.pop(handler.name, None)
+            table = read_table(self._tasks_file)
+        except TableUnreadable as exc:
+            logger.error(
+                "TaskScheduler: %s is unreadable (%s) — no handler started or "
+                "stopped this tick", self._tasks_file, exc,
+            )
+            return {"started": [], "unreadable": True}
+        started: list[str] = []
+        for record in table:
+            name = record.get("name")
+            if not isinstance(name, str) or name in self._live:
+                continue
+            if not record.get("enabled", True):
+                continue
+            problem = validate_task_record(record)
+            if problem:
+                # Log and skip. The old loader fell back to evolution_prompt.md in
+                # silence, so a typo'd `type` ran the wrong prompt for a task nobody
+                # could tell had been rejected.
+                logger.error("TaskScheduler: not starting %r: %s", name, problem)
+                continue
+            self._start_handler(record)
+            started.append(name)
+        if started:
+            logger.info("TaskScheduler: reconcile started %s", ", ".join(started))
+        return {"started": started}
+
+    async def reconcile_loop(self) -> None:
+        """Poll tasks.yml and reconcile — the discovery half of the design.
+
+        A poll rather than a filesystem watcher: `TABLE_POLL_SECONDS` is the same order
+        as the config-reload loop's interval, and a tick costs one measured 1.6 ms read.
+        """
+        while True:
+            try:
+                self.reconcile()
+            except Exception:
+                logger.warning("TaskScheduler: reconcile failed", exc_info=True)
+            await asyncio.sleep(TABLE_POLL_SECONDS)
 
     def load_and_start(self) -> list[asyncio.Task]:
-        """Load tasks.yml, start all enabled tasks, return coroutine list."""
-        # Self-heal: packaged installs may lack the emrg self-evolution task.
-        # This must run here (not inside the handler) because a missing task
-        # means no TaskHandler is ever started (rant 20:42 方案 C).
-        self._ensure_self_evolution_task()
-
-        tasks_config = self._load_tasks()
-        if not tasks_config:
-            # Bootstrap: if projects.yml has auto_evolve entries but
-            # tasks.yml is empty, migrate them.
-            self._migrate_from_projects()
-
-        tasks_config = self._load_tasks()
-        for cfg in tasks_config:
-            if not cfg.get("enabled", True):
-                continue
-            handler_cls = self.HANDLERS.get(cfg["type"], TaskHandler)
-            if handler_cls is None:
-                logger.warning(
-                    "TaskScheduler: unknown type %r for task %r",
-                    cfg["type"], cfg["name"],
-                )
-                continue
-            self._start_handler_for(cfg)
-            logger.info(
-                "TaskScheduler: started %s[%s] every %ds",
-                cfg["type"], cfg["name"], cfg.get("interval", DEFAULT_INTERVAL),
-            )
-
-        return self._coros
+        """Ensure the emrg project entry, start the enabled tasks, start reconciliation."""
+        # Packaged installs may have no tasks.yml at all: `read_table` seeds the
+        # default table for that case, which is also the only case in which a missing
+        # `emrg-task` is restored. A file that exists without that record is the host's
+        # decision and stays that way (design decision D2).
+        self._ensure_emrg_project_entry()
+        self.reconcile()
+        self._reconcile_task = asyncio.create_task(self.reconcile_loop())
+        return [*self._coros.values(), self._reconcile_task]
 
     def stop_all(self) -> None:
-        """Stop all running handlers."""
-        for handler in self._handlers:
+        """Stop every handler and the reconcile loop (shutdown only)."""
+        if self._reconcile_task is not None:
+            self._reconcile_task.cancel()
+        for handler in list(self._live.values()):
             handler.stop()
-        for coro in self._coros:
+        for coro in list(self._coros.values()):
             coro.cancel()
 
     def trigger_task(self, name: str) -> dict | None:
         """Manually trigger a task by name. Returns result dict or None if not found."""
-        for handler in self._handlers:
-            if handler.name == name:
-                result, detail = handler.trigger()
-                return {"name": name, "result": result, "detail": detail}
-        return None
+        handler = self._live.get(name)
+        if handler is None:
+            return None
+        result, detail = handler.trigger()
+        return {"name": name, "result": result, "detail": detail}
 
     def list_tasks(self) -> list[dict]:
-        """Return status for all running handlers.
+        """Task status: tasks.yml is the skeleton, live runtime state is merged in.
 
-        MUST stay pure in-memory (rant 2026-08-18T20:48:45): this is the
-        /trigger + tasks-panel request path — any I/O here stalls every WS
-        message. The per-handler timing below exists to catch exactly that:
-        total >200ms → WARNING with a per-handler breakdown, >50ms → DEBUG.
+        The file is read here (measured 1.593 ms on this host) so a task the host just
+        deleted stops appearing at once, and one just added appears as "not running
+        yet" during the second before `reconcile` starts it.
+
+        The old contract said "MUST stay pure in-memory"; what it was protecting was
+        WS-loop stalls, so the rule is now "no slow I/O" and the timing probe below —
+        which is the actual guard — still enforces it (>200ms → WARNING, >50ms → DEBUG;
+        the read is 1/31 of even the DEBUG threshold).
         """
         start = time.monotonic()
+        try:
+            table = read_table(self._tasks_file)
+        except TableUnreadable as exc:
+            logger.error(
+                "TaskScheduler: %s is unreadable (%s) — listing live tasks only",
+                self._tasks_file, exc,
+            )
+            table = []
         results = []
         per_handler: list[str] = []
-        for handler in self._handlers:
+        for record in table:
+            name = record.get("name")
+            if not isinstance(name, str):
+                continue
             h_start = time.monotonic()
-            status = handler.status()
-            # Task config enrichment (R2245): handler.status() exposes only
-            # runtime state — the GUI tasks panel + edit form need the task's
-            # static config (type/enabled/config/sandbox) to render type
-            # badges, enabled hints, project links, and prefill the edit form
-            # (previously undefined → GUI fell back to "evolution"/defaults).
-            # Merged from _handler_cfgs (pure in-memory — keeps list_tasks
-            # I/O-free per rant 2026-08-18T20:48:45).
-            cfg = self._handler_cfgs.get(handler.name)
-            if cfg:
-                status["type"] = cfg.get("type", "evolution")
-                status["enabled"] = cfg.get("enabled", True)
-                status["config"] = cfg.get("config", {})
-                status["sandbox"] = cfg.get("sandbox")
+            handler = self._live.get(name)
+            status = handler.status() if handler is not None else self._idle_status(record)
+            # The GUI tasks panel + edit form need the task's declared fields to render
+            # type badges, enabled hints, project links, and prefill the edit form.
+            # They come from the record now, not from a start-time copy of it.
+            status["type"] = record.get("type", "evolution")
+            status["enabled"] = record.get("enabled", True)
+            status["config"] = record.get("config", {})
+            status["sandbox"] = record.get("sandbox")
             results.append(status)
-            per_handler.append(f"{handler.name}={1000 * (time.monotonic() - h_start):.1f}ms")
+            per_handler.append(f"{name}={1000 * (time.monotonic() - h_start):.1f}ms")
         elapsed_ms = 1000 * (time.monotonic() - start)
         if elapsed_ms > 200:
             logger.warning(
-                "TaskScheduler: list_tasks took %.1fms (>200ms — "
-                "status() must stay in-memory) — per-handler: %s",
+                "TaskScheduler: list_tasks took %.1fms (>200ms — status() must not "
+                "do slow I/O) — per-handler: %s",
                 elapsed_ms, ", ".join(per_handler),
             )
         elif elapsed_ms > 50:
@@ -2450,87 +2792,70 @@ class TaskScheduler:
             )
         return results
 
+    def _idle_status(self, record: dict) -> dict:
+        """The same shape `TaskHandler.status()` returns, for a record with no handler.
+
+        Same keys on purpose: a client must not have to know whether a task has been
+        started before it can render the row.
+        """
+        cfg = record.get("config") if isinstance(record.get("config"), dict) else {}
+        project = cfg.get("project", "")
+        return {
+            "name": record.get("name"),
+            "running": False,
+            "started_at": None,
+            "next_run_in_seconds": None,
+            "interval": record.get("interval", DEFAULT_INTERVAL),
+            "last_run_at": None,
+            "recent_runs": [],
+            "saturation": {},
+            "project": project,
+            "project_path": _resolve_project_path(project) if project else "",
+            "session_id": f"emrg-evolution-{record.get('name')}",
+        }
+
     def total_evolutions(self) -> int:
         """Total completed evolution cycles across all running handlers."""
-        return sum(len(handler.evolutions) for handler in self._handlers)
+        return sum(len(handler.evolutions) for handler in self._live.values())
 
     async def wait_all(self) -> None:
-        """Wait for all handler coroutines to finish (after cancel)."""
-        for coro in self._coros:
+        """Wait for the reconcile loop and all handler coroutines to finish."""
+        coros = [*self._coros.values()]
+        if self._reconcile_task is not None:
+            coros.append(self._reconcile_task)
+        for coro in coros:
             try:
                 await coro
             except asyncio.CancelledError:
                 pass
 
-    def _load_tasks(self) -> list[dict]:
-        """Read tasks.yml and return list of task configs."""
-        if not self._tasks_file.exists():
-            return []
-        try:
-            data = yaml.safe_load(self._tasks_file.read_text(encoding="utf-8"))
-        except (yaml.YAMLError, OSError):
-            logger.warning("TaskScheduler: failed to parse %s", self._tasks_file)
-            return []
-        if not isinstance(data, list):
-            return []
-        return [e for e in data if isinstance(e, dict)]
+    def _read_table(self) -> list[dict]:
+        """Read tasks.yml (the module-level reader, this scheduler's path)."""
+        return read_table(self._tasks_file)
 
-    def _save_tasks(self, tasks: list[dict]) -> None:
-        """Atomically write tasks.yml."""
-        atomic_write_yaml(tasks, self._tasks_file, prefix=".tasks_")
+    def _write_table(self, records: list[dict]) -> None:
+        """Replace tasks.yml atomically (the module-level writer, this path).
 
-    def _migrate_from_projects(self) -> None:
-        """One-time migration: auto_evolve=True entries -> tasks.yml."""
-        projects_file = config_dir() / "projects.yml"
-        if not projects_file.exists():
-            return
-        try:
-            data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
-        except (yaml.YAMLError, OSError):
-            return
-        if not isinstance(data, list):
-            return
-
-        new_tasks = []
-        for entry in data:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("auto_evolve"):
-                project_name = entry.get("name", "unknown")
-                new_tasks.append({
-                    "name": project_name,
-                    "type": "evolution",
-                    "config": {"project": project_name},
-                    "interval": entry.get("interval", 1800),
-                    "enabled": True,
-                    "last_run": None,
-                })
-                logger.info(
-                    "TaskScheduler: migrated %s → tasks.yml", entry.get("name")
-                )
-
-        if new_tasks:
-            self._save_tasks(new_tasks)
-            logger.info(
-                "TaskScheduler: migrated %d auto_evolve entries to tasks.yml",
-                len(new_tasks),
-            )
-
-    def _ensure_self_evolution_task(self) -> None:
-        """Ensure projects.yml has an emrg entry and tasks.yml has the task.
-
-        Packaged installs (or first runs) may lack tasks.yml entirely, or lack
-        the emrg-task entry. Without it, no TaskHandler is ever created, so
-        the emrg task never runs.
-
-        The projects.yml emrg entry is ensured here too (rant 02:58): if
-        projects.yml lacks the entry, _resolve_project_path("emrg") returns
-        None and the handler's _source_dir degenerates to the relative string
-        "emrg" (dangling cwd). The path is fixed to ~/.emrg/evolution/emrg;
-        an existing entry is preserved as-is (dev machines may configure a
-        custom path).
+        Writes the file and does nothing else — no handler is started, stopped or
+        cancelled, which is why a write can never disturb a running cycle.
         """
-        # 1. projects.yml — add name=emrg entry if missing (preserve existing).
+        write_table(records, self._tasks_file)
+
+    def _ensure_emrg_project_entry(self) -> None:
+        """Ensure projects.yml has an emrg entry.
+
+        Not a task seeder any more (design decision D2, rant 2026-09-28T09:54:10): the
+        default table is seeded by `read_table` when *the file* is missing, and a record
+        deleted from a file that exists is terminal — re-adding it here would resurrect
+        exactly what the host deleted.
+
+        What is still needed is the project entry (rant 02:58): if projects.yml lacks
+        `emrg`, `_resolve_project_path("emrg")` returns None and the handler's
+        `_source_dir` degenerates to the relative string "emrg" (a dangling cwd). The
+        path is fixed to ~/.emrg/evolution/emrg; an existing entry is preserved as-is
+        (dev machines may configure a custom path).
+        """
+        # projects.yml — add name=emrg entry if missing (preserve existing).
         projects_file = config_dir() / "projects.yml"
         try:
             entries: list[dict] = []
@@ -2575,52 +2900,6 @@ class TaskScheduler:
                 "TaskScheduler: projects.yml self-heal failed: %s", e
             )
 
-        # 2. tasks.yml — add emrg-task if missing (existing logic unchanged).
-        tasks = self._load_tasks()
-        for t in tasks:
-            cfg = t.get("config") if isinstance(t.get("config"), dict) else {}
-            if t.get("type") == "evolution" and cfg.get("project") == "emrg":
-                return  # already present — idempotent
-        tasks.append({
-            "name": "emrg-task",
-            "type": "evolution",
-            "config": {"project": "emrg"},
-            "interval": 60,
-            "enabled": True,
-            "last_run": None,
-        })
-        self._save_tasks(tasks)
-        logger.info("TaskScheduler: self-heal — added emrg-task to tasks.yml")
-
-    def create_task(self, name: str, task_type: str, config: dict, interval: int) -> None:
-        """Add a new task entry (used by init_auto_evolve).
-
-        config is a dict of type-specific settings (e.g. {'project': 'emrg'}).
-        """
-        tasks = self._load_tasks()
-
-        # Update existing or append new — match by name
-        for t in tasks:
-            if t.get("name") == name:
-                t["enabled"] = True
-                t["interval"] = interval
-                t["type"] = task_type
-                t["config"] = config
-                self._save_tasks(tasks)
-                logger.info("TaskScheduler: updated task %s", name)
-                return
-
-        tasks.append({
-            "name": name,
-            "type": task_type,
-            "config": config,
-            "interval": interval,
-            "enabled": True,
-            "last_run": None,
-        })
-        self._save_tasks(tasks)
-        logger.info("TaskScheduler: created task %s", name)
-
     # ── Task CRUD + hot reload (rant 2026-08-12T18:23:15 P2) ────────
 
     @staticmethod
@@ -2651,7 +2930,7 @@ class TaskScheduler:
             return False, err
         if sandbox is not None and sandbox not in SANDBOX_MODES:
             return False, f"invalid sandbox {sandbox!r} (expected one of {', '.join(SANDBOX_MODES)})"
-        tasks = self._load_tasks()
+        tasks = self._read_table()
         if any(t.get("name") == name for t in tasks):
             return False, f"task {name!r} already exists"
         cfg: dict = {"project": project}
@@ -2663,20 +2942,19 @@ class TaskScheduler:
             "config": cfg,
             "interval": interval,
             "enabled": bool(enabled),
-            "last_run": None,
         }
         if sandbox is not None:
             task["sandbox"] = sandbox
         if description:
             task["description"] = description
         tasks.append(task)
-        self._save_tasks(tasks)
+        self._write_table(tasks)
         logger.info("TaskScheduler: task %s created (type=%s)", name, task_type)
         return True, task
 
     def task_update(self, name: str, **fields) -> tuple[bool, str | dict]:
         """Update a task's fields. Returns (ok, error) or (ok, task-dict)."""
-        tasks = self._load_tasks()
+        tasks = self._read_table()
         task = next((t for t in tasks if t.get("name") == name), None)
         if task is None:
             return False, f"task {name!r} not found"
@@ -2711,52 +2989,20 @@ class TaskScheduler:
             if fields["sandbox"] is not None and fields["sandbox"] not in SANDBOX_MODES:
                 return False, f"invalid sandbox {fields['sandbox']!r} (expected one of {', '.join(SANDBOX_MODES)})"
             task["sandbox"] = fields["sandbox"]
-        self._save_tasks(tasks)
+        self._write_table(tasks)
         logger.info("TaskScheduler: task %s updated", name)
         return True, task
 
     def task_delete(self, name: str) -> tuple[bool, str]:
         """Delete a task by name. Returns (ok, error)."""
-        tasks = self._load_tasks()
+        tasks = self._read_table()
         before = len(tasks)
         tasks = [t for t in tasks if t.get("name") != name]
         if len(tasks) == before:
             return False, f"task {name!r} not found"
-        self._save_tasks(tasks)
+        self._write_table(tasks)
         logger.info("TaskScheduler: task %s deleted", name)
         return True, ""
-
-    async def apply_tasks(self, tasks: list[dict]) -> dict:
-        """Hot-reload tasks from a new config list (rant 2026-08-12T18:23:15 P2).
-
-        Writes tasks.yml atomically, diffs against running handlers, and
-        starts/stops/restarts handlers as needed — no daemon restart.
-        Idempotent; returns {"added": [...], "removed": [...], "updated": [...]}.
-        """
-        self._save_tasks(tasks)
-        enabled = {
-            t.get("name"): t for t in tasks
-            if isinstance(t, dict) and t.get("enabled", True)
-        }
-        current = {h.name: h for h in list(self._handlers)}
-        added: list[str] = []
-        removed: list[str] = []
-        updated: list[str] = []
-        for name, handler in list(current.items()):
-            if name not in enabled:
-                removed.append(name)
-                self._stop_handler(handler)
-        for name, cfg in enabled.items():
-            if name not in current:
-                added.append(name)
-                await self._start_handler_async(cfg)
-            else:
-                old = self._handler_cfgs.get(name)
-                if old is not None and _task_cfg_signature(old) != _task_cfg_signature(cfg):
-                    updated.append(name)
-                    self._stop_handler(current[name])
-                    await self._start_handler_async(cfg)
-        return {"added": added, "removed": removed, "updated": updated}
 
     def list_templates(self) -> list[dict]:
         """List all task types: builtin (read-only) + custom (with prompt preview).
@@ -2823,7 +3069,7 @@ class TaskScheduler:
             return False, f"builtin task type {name!r} is read-only"
         if _read_custom_template(name) is None:
             return False, f"template {name!r} not found"
-        tasks = self._load_tasks()
+        tasks = self._read_table()
         refs = [t.get("name") for t in tasks if t.get("type") == name]
         if refs:
             return False, (
