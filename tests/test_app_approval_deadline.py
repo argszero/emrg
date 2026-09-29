@@ -1,4 +1,4 @@
-"""An expired approval question must not eat the host's next prompt.
+"""The TUI's half of issue #1757 — the frame closes the question, the deadline backs it up.
 
 Rant 2026-09-29T15:52:38.987951+08:00 follow-up (issue #1757), the TUI's half of
 the defect the `approval_resolved` frame closes. The daemon refuses a confined
@@ -6,6 +6,13 @@ call at `APPROVAL_TIMEOUT_SECONDS` and says so; the frame is the primary path,
 and this file is about the client's own backstop for a frame that never arrives
 (a dropped connection, an older daemon): `_approval_pending` carries a deadline
 stamped when the question arrived.
+
+Both halves are named here because requirement 2 asks for both — the client
+clears the question on the frame *and* bounds it independently — and the
+clearing half was guarded by nothing: the branch sits inside the frame loop,
+which needs a connection and a terminal, and by this repo's rule a requirement no
+test names does not exist. Deleting those two lines put the original defect back
+in silence, which the arms below measure.
 
 The defect this pins: the expiry arm cleared the input and returned, so a line
 the host typed after the daemon had given up was consumed as an answer that
@@ -35,16 +42,25 @@ pytestmark = pytest.mark.skipif(
     reason="TUI widget rendering depends on POSIX terminal behaviour (raw mode/SIGWINCH)",
 )
 
-from emrg.client.app import approval_question_is_still_live
+from emrg.client.app import (
+    approval_question_is_still_live,
+    approval_resolution_closes,
+)
 
 APP_PY = Path(__file__).resolve().parents[1] / "emrg" / "client" / "app.py"
 
-#: Where the pending-question arm starts and the next handler begins. The
-#: start marker matches only the keystroke handler's arm — the frame loop's
-#: `if _approval_pending is not None and _approval_pending[0] == request_id:`
-#: keeps reading after `None`, so it is not this string.
+#: Where the pending-question arm starts and the next handler begins. The start
+#: marker matches only the keystroke handler's arm: the frame loop's resolution
+#: branch asks `approval_resolution_closes(...)` instead of reading the tuple
+#: itself, so this exact string occurs once and the scan cannot drift onto it.
 ARM_START = "if _approval_pending is not None:"
 ARM_END = "# Pending /skills install confirmation"
+
+#: The frame loop's resolution branch, and the handler after it. Bounded by the
+#: next `# Sessions list` comment rather than by an indentation inference, for
+#: the same reason the keystroke scan is bounded by a comment.
+RESOLUTION_START = 'if data.get("type") == "approval_resolved":'
+RESOLUTION_END = "# Sessions list"
 
 
 def _pending_approval_arm() -> str:
@@ -52,6 +68,14 @@ def _pending_approval_arm() -> str:
     src = APP_PY.read_text(encoding="utf-8")
     start = src.index(ARM_START)
     end = src.index(ARM_END, start)
+    return src[start:end]
+
+
+def _resolution_arm() -> str:
+    """The source of the frame loop's resolution branch."""
+    src = APP_PY.read_text(encoding="utf-8")
+    start = src.index(RESOLUTION_START)
+    end = src.index(RESOLUTION_END, start)
     return src[start:end]
 
 
@@ -102,3 +126,56 @@ def test_an_expired_question_leaves_the_line_to_the_prompt_path():
     # by consuming the line, so this cannot pass by the arm having gone inert.
     assert "approval_response" in answered
     assert "return True" in answered
+
+
+# ── the decision: which frame closes which question ──────────
+
+
+def test_a_resolution_naming_this_question_closes_it():
+    assert approval_resolution_closes(("appr-1", "widen?"), "appr-1") is True
+
+
+def test_a_resolution_naming_another_question_leaves_this_one_alone():
+    """Requirement 3's clause, on the client the requirement does not name.
+
+    The daemon keeps questions per request id, so it can be waiting on one for
+    another session while this client has one on screen. A client that closed on
+    the *arrival* of any resolution would drop the question the host is looking
+    at, and the answer they then typed would reach nobody — the swallow this
+    issue exists to remove, entered from the other side.
+    """
+    assert approval_resolution_closes(("appr-1", "widen?"), "appr-2") is False
+
+
+def test_there_is_nothing_to_close_with_no_pending_question():
+    assert approval_resolution_closes(None, "appr-1") is False
+
+
+# ── the wiring: the frame arm asks the predicate, and clears ──
+
+
+def test_the_resolution_region_is_the_frame_handlers():
+    """The control that the two scans below read the right slice.
+
+    Without it a marker that had moved, or a slice that came back empty, would
+    make every assertion about the region pass vacuously. The two endings the
+    branch reports are the anchor: they are written inside it and nowhere else in
+    the frame loop.
+    """
+    arm = _resolution_arm()
+    assert "timed_out" in arm
+    assert "cancelled" in arm
+
+
+def test_the_frame_arm_reads_the_decision_through_the_predicate():
+    """The control that the predicate is wired in, not merely defined."""
+    assert "approval_resolution_closes(" in _resolution_arm()
+
+
+def test_the_frame_arm_actually_clears_the_question():
+    """Asking is not closing: the state write must live in the same branch.
+
+    A scan that found only the call would pass with the predicate asked and its
+    answer discarded — the question would stay live, which is the defect itself.
+    """
+    assert "_approval_pending = None" in _resolution_arm()

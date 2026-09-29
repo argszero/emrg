@@ -376,6 +376,28 @@ def approval_question_is_still_live(*, now: float, deadline: float) -> bool:
     return now < deadline
 
 
+def approval_resolution_closes(pending: tuple | None, request_id: str) -> bool:
+    """Whether a resolution frame names the question this client is holding.
+
+    Rant 2026-09-29T15:52:38.987951+08:00 follow-up (issue #1757), requirement 2's
+    first half. The frame is the primary path that ends a question — the deadline
+    above is the backstop for one that never arrives — and this client holds one
+    question at a time, so the decision is whether *this* frame is about it. A
+    resolution for another request must not dismiss the question on screen: the
+    daemon can be holding two questions for two sessions at once, and the
+    direction that fails silently is this one — the host's question disappears
+    and the answer they then type reaches nobody.
+
+    The comparison is on the request id and never on the outcome word, so a
+    future ending cannot reintroduce a stuck question. It is also why the
+    predicate is here rather than inline: the branch it decides sits inside the
+    frame loop, which needs a connection and a terminal, and a decision no test
+    can name is a requirement that does not exist — the rule the sibling above
+    was extracted for.
+    """
+    return pending is not None and pending[0] == request_id
+
+
 def turn_start_instant(data: dict) -> float | None:
     """The instant a ``turn_start`` frame says the session's turn began, or None.
 
@@ -1417,7 +1439,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 # endings they did *not* cause are reported here.
                 if data.get("type") == "approval_resolved":
                     request_id = str(data.get("request_id", ""))
-                    if _approval_pending is not None and _approval_pending[0] == request_id:
+                    if approval_resolution_closes(_approval_pending, request_id):
                         _approval_pending = None
                         outcome = str(data.get("outcome", ""))
                         if outcome == "timed_out":
