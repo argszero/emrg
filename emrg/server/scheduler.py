@@ -3012,18 +3012,6 @@ class TaskScheduler:
         logger.info("TaskScheduler: task %s deleted", name)
         return True, ""
 
-    async def apply_tasks(self, tasks: list[dict]) -> dict:
-        """Write the given table and reconcile — kept only as the daemon's entry point.
-
-        This used to be the hot-reload *applier*: it diffed the new table against the
-        running handlers and cancelled + rebuilt any whose config signature had changed
-        (rant 2026-08-12T18:23:15 P2). That is the mechanism this design deletes, so all
-        that is left is "write, then apply what is missing" — which is `write_table` +
-        `reconcile`, and it cannot cancel anything.
-        """
-        self._write_table(tasks)
-        return self.reconcile()
-
     def list_templates(self) -> list[dict]:
         """List all task types: builtin (read-only) + custom (with prompt preview).
 
