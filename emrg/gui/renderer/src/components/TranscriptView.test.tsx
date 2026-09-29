@@ -269,6 +269,20 @@ describe("TranscriptView", () => {
     expect(container.querySelector(".remote-label")).not.toBeInTheDocument();
   });
 
+  it("同一内容不因「谁发的」而不同：本连接的流与他端的流逐字渲染一致（rant 2026-09-29T15:52:49 要求 3）", () => {
+    // 宿主原则：daemon 是唯一状态源，客户端只是渲染器，唯一允许的差异是显示方式。
+    // 所以「本连接发出的流」与「另一客户端发出的流」在渲染上必须无从分辨 —— 这正是
+    // 拆掉 ownStreamRidBySid 判定的验收。若把「谁的消息」判定加回来（打标 / 加类名 /
+    // 加标签），两条同内容的流就不再逐字相同，这条断言必红。
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleDelta([{ request_id: "r-own", content: "same text" }], "s1");
+    store.handleDelta([{ request_id: "r-remote", content: "same text" }], "s1");
+    const { container } = setup(store, "s1");
+    const bodies = [...container.querySelectorAll(".msg.assistant")].map((n) => n.innerHTML);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+  });
+
   it("sid=null 缺省桶：无 sid 事件渲染到默认视图", () => {
     const store = createTranscriptStore({ t: (k) => k });
     store.addUserMessage("legacy", null);

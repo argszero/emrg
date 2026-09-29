@@ -196,6 +196,46 @@ def _resume_target_from_resolution(
     return pending_sid, fallback_cwd
 
 
+def _replay_rows(messages) -> list[tuple[str, str]]:
+    """The rows a resumed session replays, from the daemon's record list.
+
+    Rant 2026-09-29T15:52:49, requirement 4. The TUI used to render a session by
+    reading `<cwd>/.emrg/sessions/<sid>/history.jsonl` straight off disk, while the
+    GUI asked the daemon; two paths over one file can drift, and the daemon's answer
+    is the one that carries what the live stream showed — records in record order,
+    a tool call and its results never cut apart, each with its absolute
+    `record_index`. So the material now comes from the daemon, and this is the
+    mapping from its records onto chat rows, kept pure so it is testable without a
+    terminal (the same split `_task_session_target` uses for the picker).
+
+    The rows are `(kind, content)` pairs and `assistant` is deliberately its own
+    kind rather than pre-wrapped: the caller renders it through `StreamingMarkdown`
+    for colour, and a widget built here would make this function untestable for no
+    gain. A record kind this client does not know is skipped rather than rendered
+    as a blank row — the daemon's set is the contract, and an unknown kind is a
+    newer daemon, not content.
+    """
+    rows: list[tuple[str, str]] = []
+    for record in messages or []:
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("kind")
+        if kind == "message":
+            role = record.get("role")
+            if role in ("user", "assistant", "system"):
+                rows.append((str(role), str(record.get("content") or "")))
+        elif kind == "tool_result":
+            # The TUI's rendering of a tool record: which tool, and whether it
+            # failed — the two facts the live stream shows. The GUI may expand the
+            # same record into a full tool card; the difference is presentation
+            # only, which is the only difference the rule allows.
+            name = str(record.get("tool_name") or "tool")
+            body = str(record.get("content") or "").strip()
+            mark = "error" if record.get("error") else "result"
+            rows.append(("tool", f"  {name} {mark}: {body[:500]}"))
+    return rows
+
+
 # ── Stopping a turn: ask the session, wait for its receipt ───
 #
 # Rant 2026-09-20T12:50:13. A cancel used to be two statements about one event:
@@ -865,6 +905,13 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     # above because the cwd is exactly what is not yet known when the question is
     # asked — the pair can only be completed once the daemon answers.
     _resume_pending_sid: str | None = None
+    # The session whose history replay is in flight, with the meta the resume
+    # answer carried (rant 2026-09-29T15:52:49, requirement 4): the rows are
+    # rendered from the daemon's answer rather than read off disk, so the one
+    # thing the replay path must remember is what it asked about. The meta rides
+    # along because the "Resumed session" line is written after the rows it
+    # summarises, not before them.
+    _replay_pending: tuple[str, dict] | None = None
 
     # Command autocomplete state (shows dropdown when user types /)
     _autocomplete_active = False
@@ -891,6 +938,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         # the client moves into that task's project at all (rant 2026-09-17T18:36:08).
         nonlocal cwd, project_name, _task_list_intent, _task_open_pending
         nonlocal _resume_pending_sid
+        nonlocal _replay_pending
 
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
@@ -1350,6 +1398,50 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 # History list (for /rewind)
                 if data.get("type") == "history_list":
                     nonlocal rewind_sel
+                    # A replay answer and a /rewind answer arrive on the same
+                    # message type, and they are told apart by the question that
+                    # asked: the records mode is only ever requested by the resume
+                    # path (rant 2026-09-29T15:52:49, requirement 4), while /rewind
+                    # sends no `include_records`. Reading the flag rather than the
+                    # payload also means a /rewind answer arriving after a resume
+                    # does not get rendered as a replay.
+                    if _replay_pending is not None and data.get("session_id") == _replay_pending[0]:
+                        pending_sid, meta = _replay_pending
+                        _replay_pending = None
+                        err = data.get("error", "")
+                        if err:
+                            # The session is open but its history could not be
+                            # read: say so on the transcript rather than silently
+                            # showing an empty session, which is the difference
+                            # between "nothing was said" and "nothing was read".
+                            chat.add("system", f"Could not load history: {err}")
+                            term.render()
+                            continue
+                        rows = _replay_rows(data.get("messages", []))
+                        for kind, content in rows:
+                            if kind == "assistant":
+                                # StreamingMarkdown for colour rendering (rant #28).
+                                md = StreamingMarkdown()
+                                md.feed(content)
+                                chat.add(md)
+                            else:
+                                chat.add(kind, content)
+                        title_extra = ""
+                        if meta.get("title"):
+                            title_extra = f" [{meta['title']}]"
+                            session_title = meta["title"]
+                        else:
+                            session_title = ""
+                        chat.add("system",
+                            f"Resumed session {pending_sid}{title_extra} "
+                            f"({meta.get('message_count', len(rows))} messages, "
+                            f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
+                        status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id or "emrg")
+                        term.set_title(f"{session_title or pending_sid} @ {project_name}")
+                        _update_left_extra()
+                        term.render()
+                        continue
+
                     messages = data.get("messages", [])
                     err = data.get("error", "")
                     if err:
@@ -1644,62 +1736,22 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         cwd = switch_to
                         project_name = Path(cwd).name
 
-                    # Clear and replay history from disk
+                    # Clear and replay: the material comes from the daemon, not
+                    # from disk (rant 2026-09-29T15:52:49, requirement 4 — two
+                    # content paths over one file can drift, and the daemon's
+                    # records are the ones that carry what the live stream showed).
+                    # The replay itself happens when the answer arrives, so the
+                    # "Resumed session" line lands after the rows it summarises
+                    # rather than above them.
                     chat.rows.clear()
                     chat.dirty = True
-
-                    hist_path = Path(cwd) / ".emrg" / "sessions" / session_id / "history.jsonl"
-                    record_count = 0
-                    if hist_path.exists():
-                        for line in hist_path.read_text(encoding="utf-8").splitlines():
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                r = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            record_count += 1
-                            rtype = r.get("type", "")
-                            if rtype == "message":
-                                role = r.get("role", "")
-                                content = r.get("content", "")
-                                if role == "user":
-                                    chat.add("user", content)
-                                elif role == "assistant":
-                                    # Use StreamingMarkdown for color rendering (rant #28)
-                                    md = StreamingMarkdown()
-                                    md.feed(content)
-                                    chat.add(md)
-                                elif role == "system":
-                                    chat.add("system", content)
-                                elif role == "tool":
-                                    chat.add("tool", content)
-                            elif rtype == "summary":
-                                chat.add("system",
-                                    f"[Session summary from compact #"
-                                    f"{r.get('compact_id', '?')}]: "
-                                    f"{r.get('content', '')[:300]}")
-                            elif rtype == "tool_call":
-                                pass
-                            elif rtype == "tool_result":
-                                chat.add("tool", f"  result: {r.get('content', '')[:500]}")
-
-                    title_extra = ""
-                    if meta.get("title"):
-                        title_extra = f" [{meta['title']}]"
-                        session_title = meta["title"]
-                    else:
-                        session_title = ""
-                    chat.add("system",
-                        f"Resumed session {session_id}{title_extra} "
-                        f"({meta.get('message_count', record_count)} messages, "
-                        f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
-                    status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id or "emrg")
-                    term.set_title(f"{session_title or session_id} @ {project_name}")
-                    # Set message count from loaded session
-                    msg_count = meta.get("message_count", record_count)
-                    _update_left_extra()
+                    _replay_pending = (session_id, meta)
+                    await conn.send_command(
+                        "list_history",
+                        session_id=session_id,
+                        cwd=cwd,
+                        include_records=True,
+                    )
                     term.render()
                     continue
 

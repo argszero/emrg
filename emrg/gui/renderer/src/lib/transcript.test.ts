@@ -124,7 +124,9 @@ describe("流式 delta", () => {
     expect(e!.segments).toHaveLength(1);
     expect(e!.segments[0].text).toBe("Hello");
     expect(e!.segments[0].typing).toBe(true);
-    expect(e!.isOwn).toBe(false);
+    // 条目不带「谁的消息」字段（rant 2026-09-29T15:52:49 要求 3）：形状就是这三个键。
+    // 这条断言是可判的守卫——把 isOwn 之类的所有权字段加回来即红。
+    expect(Object.keys(e!).sort()).toEqual(["kind", "rid", "segments"]);
   });
 
   it("上一文本段被工具封存后，新 delta 开新 AssistantEntry（rant 2026-08-31T12:30:33）", () => {
