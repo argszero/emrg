@@ -59,7 +59,6 @@ export interface AssistantSegment {
 export interface AssistantEntry {
   kind: "assistant";
   rid: string;
-  isOwn: boolean;
   segments: AssistantSegment[];
 }
 
@@ -141,8 +140,6 @@ export interface TranscriptStore {
   st(sid?: string | null): SessionTranscript;
   getEntries(sid?: string | null): TranscriptEntry[];
   getLoadBar(sid?: string | null): string | null;
-  /** 设置 own stream request id（决定助手消息是否显示“来自其他客户端”标签） */
-  setOwnStream(rid: string | null): void;
   handleDelta(chunks: DeltaChunk[], sid?: string | null): void;
   handleDone(data: DoneData, sid?: string | null): void;
   handleToolStart(data: ToolStartData, sid?: string | null): void;
@@ -205,7 +202,6 @@ function shiftIndexes(s: SessionTranscript, delta: number): void {
 export function createTranscriptStore(opts: { t?: TranslateFn } = {}): TranscriptStore {
   const t = opts.t ?? ((key: string): string => key);
   const sessions = new Map<string, SessionTranscript>();
-  let ownStreamRequestId: string | null = null;
   let version = 0;
   let draftVersion = 0;
   const listeners = new Set<() => void>();
@@ -283,7 +279,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         let entryIndex = s.groupIndex.get(rid);
         let entry = entryIndex !== undefined ? s.entries[entryIndex] : undefined;
         if (!entry || entry.kind !== "assistant") {
-          const e: AssistantEntry = { kind: "assistant", rid, isOwn: ownStreamRequestId === rid, segments: [] };
+          const e: AssistantEntry = { kind: "assistant", rid, segments: [] };
           s.entries.push(e);
           s.groupIndex.set(rid, s.entries.length - 1);
         }
@@ -297,7 +293,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
             // 文本会经 groupIndex 回挂到工具上方的旧 entry，被渲染在工具上方
             // （“文本→工具”错序：工具后文本永远在工具之上）。新 entry 排在工具行
             // 之后，与 TUI 的到达顺序语义对齐（文本1→工具→文本2）。
-            const e: AssistantEntry = { kind: "assistant", rid, isOwn: ownStreamRequestId === rid, segments: [] };
+            const e: AssistantEntry = { kind: "assistant", rid, segments: [] };
             s.entries.push(e);
             s.groupIndex.set(rid, s.entries.length - 1);
             as = e;
@@ -462,11 +458,6 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     getEntries: (sid) => st(sid).entries,
     getLoadBar: (sid) => st(sid).loadBar,
     getComposerDraft: (sid) => st(sid).draft,
-    setOwnStream: (rid) => {
-      mutate(() => {
-        ownStreamRequestId = rid;
-      });
-    },
     handleDelta,
     handleDone,
     handleToolStart,

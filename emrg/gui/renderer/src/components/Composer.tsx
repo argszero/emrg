@@ -466,27 +466,26 @@ export function Composer({
     store.addUserMessage(value, sid);
     editor.commands.clearContent();
     // B3：消息已发送 → 清除草稿（tiptap 内容即草稿，发送即清）
-    // G143：send 前预生成 requestId 并标记自有流——消除 IPC 往返竞态窗口
+    // G143：send 前预生成 requestId——消除 IPC 往返竞态窗口。（G143 原本还用它给消息打
+    // 「自有流」标；那是客户端自持的“谁的消息”判定，已按 rant 2026-09-29T15:52:49 要求 3
+    // 移除：daemon 是唯一状态源，客户端只是渲染器。）
     const requestId = genRequestId();
-    store.setOwnStream(requestId);
     if (wasBusy) {
       queueSend(queuedRef.current, sid, { requestId, text: value, sandbox: tier, images });
     }
     try {
-      const res = await sendFn({
+      await sendFn({
         sessionId: sid,
         text: value,
         requestId,
         sandbox: tier,
         images: images.length ? images : null,
       });
-      store.setOwnStream(res.requestId || requestId); // G124：以 daemon 回显为准
       // 发送成功 → 清 pending（图片已随消息交给 daemon；失败保留以便重发）
       pendingRef.current = [];
       setPending([]);
     } catch {
       setInternalBusy(false);
-      store.setOwnStream(null);
       // G49：失败恢复输入框，文案不责怪用户（copy.sendFailed）；markdown 回填
       store.addSystemMessage(t("copy.sendFailed"), sid);
       editor.commands.setContent(value);

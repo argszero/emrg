@@ -2818,3 +2818,107 @@ class TestWSTaskWire:
                 finally:
                     await cleanup()
         asyncio.run(_test())
+
+
+class TestWSResolveSessionCwd:
+    """The daemon answers where a session lives, so a client need not guess.
+
+    Rant 2026-09-29T15:52:49, requirement 6 (the client half). The TUI sent its
+    own cwd with every `resume_session`, so a session in another project — a
+    scheduled task's cycle above all — could not be opened from `/resume <id>`,
+    and one that did open received no live frames, because `_broadcast` filters by
+    (session, cwd). The daemon has held the fact all along; this command exposes it.
+
+    Both states are asserted apart on purpose: `index` (the daemon can vouch for
+    the project) and `unknown` (it cannot). Collapsing them would make "the index
+    has not seen this session yet" read the same as "this session lives at the cwd
+    you asked about", and a client's fallback is only safe for the second.
+
+    The index is written through `sessions_index_path()` rather than through a
+    patched `config_dir` — the suite's autouse redirect replaces *that function*,
+    so a test that patches `config_dir` instead writes to a file nothing reads
+    and then measures nothing (the ghost guard above has the same shape and
+    passes anyway, because a `None` lookup rejects too).
+    """
+
+    def _write_index(self, mapping: dict) -> None:
+        import emrg.sessions_index as si_mod
+        si_mod._write(mapping, si_mod.sessions_index_path())
+
+    def test_it_answers_the_index_and_says_so(self, tmp_path):
+        async def _test():
+            real_dir = tmp_path / "proj_a" / ".emrg" / "sessions" / "s_resolve"
+            real_dir.mkdir(parents=True, exist_ok=True)
+            _, _, cleanup = await _boot_server(tmp_path)
+            try:
+                # Written AFTER the daemon's startup rebuild, so nothing prunes it.
+                self._write_index({"s_resolve": str(real_dir)})
+                ws = await connect_to_server()
+                try:
+                    # Asked from somewhere else entirely: the answer must be the
+                    # session's own project, not the cwd the asker stands in.
+                    await ws.send(json.dumps({
+                        "type": "resolve_session_cwd",
+                        "session_id": "s_resolve",
+                        "cwd": str(tmp_path / "somewhere_else"),
+                    }))
+                    resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                    assert resp.get("type") == "session_cwd_result", resp
+                    assert resp.get("source") == "index", resp
+                    assert resp["cwd"] == str(tmp_path / "proj_a"), (
+                        "the daemon answered with something other than the indexed "
+                        f"project: {resp!r}"
+                    )
+                finally:
+                    await ws.close()
+            finally:
+                await cleanup()
+        asyncio.run(_test())
+
+    def test_an_unindexed_session_says_unknown_rather_than_echoing_a_guess(self, tmp_path):
+        async def _test():
+            _, _, cleanup = await _boot_server(tmp_path)
+            try:
+                self._write_index({})
+                ws = await connect_to_server()
+                try:
+                    await ws.send(json.dumps({
+                        "type": "resolve_session_cwd",
+                        "session_id": "s_never_indexed",
+                        "cwd": str(tmp_path / "host_cwd"),
+                    }))
+                    resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                    assert resp.get("type") == "session_cwd_result", resp
+                    assert resp.get("source") == "unknown", resp
+                    assert resp.get("cwd") is None, (
+                        "the daemon echoed the asker's cwd as the session's "
+                        f"location — that is the guess, not a reading: {resp!r}"
+                    )
+                    assert resp.get("requested_cwd") == str(tmp_path / "host_cwd"), (
+                        "the candidate is offered apart from the answer, so a client "
+                        "can tell a fallback from a fact"
+                    )
+                    assert "error" not in resp, (
+                        "an index that has not seen the session is not a broken request"
+                    )
+                finally:
+                    await ws.close()
+            finally:
+                await cleanup()
+        asyncio.run(_test())
+
+    def test_a_missing_session_id_is_refused(self, tmp_path):
+        async def _test():
+            _, _, cleanup = await _boot_server(tmp_path)
+            try:
+                ws = await connect_to_server()
+                try:
+                    await ws.send(json.dumps({"type": "resolve_session_cwd"}))
+                    resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                    assert resp.get("type") == "session_cwd_result"
+                    assert "error" in resp
+                finally:
+                    await ws.close()
+            finally:
+                await cleanup()
+        asyncio.run(_test())

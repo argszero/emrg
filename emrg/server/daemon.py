@@ -2511,6 +2511,16 @@ class EmrgServer:
                 return
             await self._handle_list_sessions(Path(cwd), ws)
 
+        elif msg_type == "resolve_session_cwd":
+            session_id = msg.get("session_id", "")
+            if not session_id:
+                await self._send(ws, {
+                    "type": "session_cwd_result",
+                    "error": "resolve_session_cwd requires session_id",
+                })
+                return
+            await self._handle_resolve_session_cwd(session_id, msg.get("cwd", ""), ws)
+
         elif msg_type == "resume_session":
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
@@ -5484,6 +5494,47 @@ class EmrgServer:
         except Exception:
             logger.debug("canonical session cwd lookup failed", exc_info=True)
             return None
+
+    async def _handle_resolve_session_cwd(
+        self, session_id: str, requested_cwd: str, ws
+    ) -> None:
+        """Answer where a session lives, so a client does not have to guess.
+
+        Rant 2026-09-29T15:52:49 (requirement 6, the client half): the TUI sent
+        its **own** cwd with `resume_session`, so a session belonging to another
+        project — a scheduled task's cycle above all — could not be opened from
+        `/resume <id>`, and the live frames never arrived for one that could,
+        because the broadcast filter is keyed by (session, cwd). The daemon has
+        held the fact all along (`_canonical_session_cwd`, the same global index
+        the ghost-session guard reads); it was simply not exposed, so the client
+        had nothing to ask.
+
+        Two states, and they are deliberately not the same value: `index` when
+        the global index knows the session's project, `unknown` when it does
+        not. The requested cwd is **echoed only as a candidate** in the unknown
+        case — never relabelled as canonical — because the daemon cannot vouch
+        for it, and a client that treats a guess as a fact is the defect this
+        command exists to remove. A lookup that fails outright answers `unknown`
+        rather than an error: the caller's fallback (keep the cwd you have) is
+        the same either way, and an error frame would make "no entry yet" read
+        like a broken request.
+        """
+        canonical = self._canonical_session_cwd(session_id)
+        if canonical is None:
+            await self._send(ws, {
+                "type": "session_cwd_result",
+                "session_id": session_id,
+                "cwd": None,
+                "source": "unknown",
+                "requested_cwd": requested_cwd or "",
+            })
+            return
+        await self._send(ws, {
+            "type": "session_cwd_result",
+            "session_id": session_id,
+            "cwd": canonical,
+            "source": "index",
+        })
 
     # ── GUI workspace panel: list_files / read_file (rant 2026-08-11T12:20:35 P1.1) ──
     # 单目录条目上限：超出截断 + truncated 提示（与 ReadTool 的防爆理念一致）

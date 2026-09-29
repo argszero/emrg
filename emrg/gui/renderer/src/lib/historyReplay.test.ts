@@ -17,15 +17,16 @@ import { replayHistoryRecords, replayHistoryRecordsPrepend, toolCallIntent, type
 const SID = "s1";
 
 /**
- * 条目数组的逐项比较值：去掉 `rid`/`isOwn`——它们是**流的标识**，实时那一路由 daemon 的
+ * 条目数组的逐项比较值：去掉 `rid`——它是**流的标识**，实时那一路由 daemon 的
  * `request_id` 给出、回放那一路由 record_index 合成，两者本就不必相同（也不该相同：
  * 回放取不到当初那个 request_id）。除此之外每个字段都比——正是 rant 列的顺序、角色、
  * 文本、工具行（callId/name/status/intent/content）、合并组（rows/summary/收起态）。
+ *
+ * `isOwn` 曾在这里被一并剥掉，因为它是「这条消息是不是本连接发的」——那条判定整个
+ * 没有了（rant 2026-09-29T15:52:49 要求 3），条目形状里不再有可剥的东西。
  */
 function comparable(entries: TranscriptEntry[]): unknown {
-  return JSON.parse(
-    JSON.stringify(entries, (k, v) => (k === "rid" || k === "isOwn" ? undefined : v)),
-  );
+  return JSON.parse(JSON.stringify(entries, (k, v) => (k === "rid" ? undefined : v)));
 }
 
 /** 实时那一路：与 daemon 的发送顺序一致（一轮一个 request_id，done 收尾）。 */
