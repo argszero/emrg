@@ -288,12 +288,31 @@ _FENCED_BLOCK = re.compile(
     r"^[ \t]*(?:```|~~~).*?(?:^[ \t]*(?:```|~~~)[ \t\r]*$|\Z)", re.S | re.M
 )
 _INLINE_CODE = re.compile(r"`[^`\n]*`|``.*?``", re.S)
+#: One fence **marker line** — opener or closer — and not the block it delimits. Used by
+#: `_without_quote_marks`, which wants a fenced block's contents readable and its marks
+#: gone, the opposite of what `_FENCED_BLOCK` is for.
+_FENCE_MARK = re.compile(r"^[ \t]*(?:```|~~~).*$", re.M)
 
 
 def _without_code(text: str) -> str:
     """`text` with inline code spans and fenced blocks blanked out, same length."""
     masked = _FENCED_BLOCK.sub(lambda m: " " * len(m.group(0)), text)
     return _INLINE_CODE.sub(lambda m: " " * len(m.group(0)), masked)
+
+
+def _without_quote_marks(text: str) -> str:
+    """`text` with the code **delimiters** removed and their contents kept, same length.
+
+    The complement of `_without_code`: that one blanks what a span contains, so a keyword
+    inside one stops being a claim; this one keeps the contents and blanks only the marks,
+    which is what lets a keyword be read *and* have its negation window read with it. A
+    `` ` `` is not a word, and leaving it in place breaks the window's end anchor — measured
+    on this very function: "This does not `` `close #1718` ``." reads as a claim under a
+    raw scan and as no claim at all once the mark is a space, because the negation pattern
+    requires whitespace between the negation and the verb it governs.
+    """
+    spaced = _FENCE_MARK.sub(lambda m: " " * len(m.group(0)), text)
+    return spaced.replace("`", " ")
 
 
 @dataclass
@@ -383,6 +402,21 @@ def _gh(args: list[str]) -> str:
     return proc.stdout
 
 
+def _scan_claims(text: str) -> set[int]:
+    """The issue numbers a closing keyword names in `text`, negation window applied.
+
+    The one place the keyword-and-number vocabulary lives, so the masked reading
+    (:func:`declared_claims`) and the masked-away one (:func:`quoted_claims`) cannot
+    drift apart: they differ in the text they are handed, not in how they read it.
+    """
+    claims: set[int] = set()
+    for match in _CLOSING_KEYWORD.finditer(text):
+        if _NEGATED_KEYWORD.search(text[: match.start()]):
+            continue
+        claims.update(int(n) for n in re.findall(r"#(\d+)", match.group(1)))
+    return claims
+
+
 def declared_claims(body: str | None) -> set[int]:
     """The issue numbers a body declares it closes, by GitHub's closing keywords.
 
@@ -399,13 +433,30 @@ def declared_claims(body: str | None) -> set[int]:
     defect this reading caught in itself, and the reason both the masking and the
     negation window are asserted in the tests rather than described.
     """
-    text = _without_code(body or "")
-    claims: set[int] = set()
-    for match in _CLOSING_KEYWORD.finditer(text):
-        if _NEGATED_KEYWORD.search(text[: match.start()]):
-            continue
-        claims.update(int(n) for n in re.findall(r"#(\d+)", match.group(1)))
-    return claims
+    return _scan_claims(_without_code(body or ""))
+
+
+def quoted_claims(body: str | None) -> set[int]:
+    """The numbers a closing keyword names where masking hides it from `declared_claims`.
+
+    The difference between reading the body and reading it with code spans and fenced
+    blocks blanked out: the numbers a keyword names *inside* them. They are not claims
+    — that is the point of the masking — but a report that says "this PR declares no
+    issue" while the body visibly carries a closing keyword sends its reader to the
+    wrong remedy. Measured 2026-09-29 on PR #1715: its Tracking section read
+    "`Closes #1718`." in backticks, so the row said the PR declares nothing and the
+    author's own sentence — that the tool read the pair `ok` — was the only thing wrong
+    with a body that had made the declaration it was being asked for.
+
+    So the mask is a reading rule and stays one; what this adds is the sentence that
+    names it. `_scan_claims` is the same reader over a text that keeps the span contents
+    and drops only the marks (`_without_quote_marks`), so a keyword that is negated, or
+    that names nothing, is not counted in either direction.
+
+    Called by the `one-way` PR row, which is the state where the reader has a number to
+    point at: an issue names the PR and the PR's declaration of it is masked.
+    """
+    return _scan_claims(_without_quote_marks(body or "")) - declared_claims(body)
 
 
 def issue_claims(text: str | None) -> set[int]:
@@ -881,6 +932,25 @@ def judge_prs(
         # No open issue is declared, and something named this PR: the mirror case, and
         # not symmetric with the one above - a reader of the *PR* is the one who has to
         # know which tracked problem it belongs to. Same rule, different reader.
+        #
+        # A body that makes the declaration *inside* a code span reads as declaring
+        # nothing here, and the generic remedy then asks for a sentence the body already
+        # has. Naming the mask is the difference between "write it" and "move it out of
+        # the backticks" (measured on #1715, 2026-09-29: `Closes #1718` in backticks).
+        #
+        # Compared against `inbound` — the issues that named this PR — and not against
+        # `number`, which is the PR's own: the masked reading is of *issue* numbers, so
+        # the PR's number in the same test would never match (caught by the test below,
+        # which is why the note is asserted on a real report rather than only as a unit).
+        masked = quoted_claims(pr.get("body")) & inbound
+        note = (
+            " - and this body does carry a closing keyword for "
+            + _numbers(masked)
+            + " inside a code span or a fenced block, which this tool blanks out before "
+            "it reads one, so the declaration is there and has to stand outside them"
+            if masked
+            else ""
+        )
         rows.append(
             Row(
                 "pr",
@@ -890,7 +960,8 @@ def judge_prs(
                 _numbers(inbound)
                 + " names it and this PR declares no issue - state it in the PR body "
                 "(`Closes #N` where the PR finishes it), because the issue is the unit "
-                "of work here and the PR is where its reader looks next",
+                "of work here and the PR is where its reader looks next"
+                + note,
                 age,
             )
         )
