@@ -1723,6 +1723,46 @@ def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_pa
     assert "inside the window" not in out, out
 
 
+def test_a_vote_from_a_cycle_the_corpus_does_not_hold_says_the_predecessor_is_assumed(
+    mod, monkeypatch, capsys, tmp_path
+):
+    """"previous cycle cycX" is a claim about a corpus, and it says when it is only that.
+
+    The measured case (2026-09-29, reviewing #1722): three votes, each naming a cycle of
+    the host that wrote it, every one voided here against `cyc20260929-065510` — a cycle
+    of *this* host's own series, because that is the newest record the corpus holds below
+    the vote's cycle id. The void stands: a substitute always sorts below the true
+    predecessor, so it can only widen the window, and a wide window costs a delay where a
+    narrow one spends a vote. What no longer stands is the silence — a reader cannot tell
+    "the cycle before yours pushed this head" from "the newest record this host has before
+    your id was treated as your predecessor", and the two are different findings about a
+    head this host cannot see the push of.
+    """
+    corpus = tmp_path / "cycles"
+    corpus.mkdir()
+    (corpus / "cycle-20260929-065510.md").write_text("# a cycle record\n", encoding="utf-8")
+    argv = ["1", "--cycles-log", str(corpus)]
+    vote = _approve("cyc20260929-081057", _push(2026, 9, 29, 8, 30))
+    pushed = _push(2026, 9, 29, 7, 3)
+
+    rc = _run(mod, monkeypatch, FakeGh([vote], push_time=pushed), argv)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "VOID cyc20260929-081057" in out, out
+    assert "previous cycle cyc20260929-065510" in out, out
+    assert "assumed rather than read" in out, out
+    assert "cyc20260929-081057" in out, out
+
+    # The control: the same vote, the same verdict, with the voting cycle's own record in
+    # the corpus — there the clause *read* a predecessor, and it says so by saying nothing.
+    (corpus / "cycle-20260929-081057.md").write_text("# a cycle record\n", encoding="utf-8")
+    rc = _run(mod, monkeypatch, FakeGh([vote], push_time=pushed), argv)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "VOID cyc20260929-081057" in out, out
+    assert "assumed" not in out, out
+
+
 def test_a_cycle_id_that_names_no_instant_is_not_passed(mod, monkeypatch, capsys):
     """An unresolved window is never a pass - the sibling's rule, on the reading side.
 

@@ -501,13 +501,17 @@ def own_head_window(
     run, and the remedy is the same here — get the run, then ask again.
     """
     queue = review_queue()
+    logs = None
     if prev_cycle:
         previous, where = prev_cycle, "named by --prev-cycle"
     else:
-        previous, where = queue.previous_cycle(
-            cycle, queue.resolve_cycle_logs(cycles_log)
-        )
-    window = queue.abstain_window(cycle, previous, where)
+        logs = queue.resolve_cycle_logs(cycles_log)
+        previous, where = queue.previous_cycle(cycle, logs)
+    # The corpus goes in only when it was the source: `--prev-cycle` is the caller's
+    # own claim, and a claim is not second-guessed. A predecessor read out of a corpus
+    # that holds no record for this cycle is reported as assumed, so the poster's
+    # refusal says what the counter's reading says.
+    window = queue.abstain_window(cycle, previous, where, cycles_logs=logs)
 
     note = ""
     if window.unresolved:

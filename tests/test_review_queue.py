@@ -823,6 +823,51 @@ def test_a_root_that_cannot_be_read_is_named_rather_than_passed_over(mod, tmp_pa
     assert "could not be read" in where and "no cycle record" not in where
 
 
+def test_a_predecessor_the_corpus_cannot_confirm_is_reported_as_assumed(mod, tmp_path):
+    """A window read out of a corpus that does not hold this cycle is a claim, not a reading.
+
+    `previous_cycle` answers "the newest record below this id", and its callers render
+    that as "previous cycle `cycX`" — true on one instance, where every cycle writes its
+    record when it ends, and silently false off it: measured 2026-09-29 on PR #1722,
+    where three votes from another instance's cycles (`cyc20260929-074033`, `081057`,
+    `085532`) were each voided against this host's own `cyc20260929-065510`, a cycle
+    whose series the reading host *does* hold — the PR's own other vote named `074033`,
+    which sorts between them.
+
+    The verdict is kept: a substitute can only widen the window (it always sorts below
+    the true predecessor), and a wider window costs a delay where a narrower one spends
+    a vote. What is asked of the corpus here is that it admit what it does not hold.
+    """
+    corpus = tmp_path / "cycles"
+    corpus.mkdir()
+    (corpus / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+
+    # The control: with the voting cycle's own record in the corpus the predecessor is
+    # *read*, and the source stays the short form a `--prev-cycle` caller also gets.
+    (corpus / f"cycle-{CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    read = mod.abstain_window(CYCLE, PREV_CYCLE, str(corpus), cycles_logs=(corpus,))
+    assert read.source == f"previous cycle {PREV_CYCLE} ({corpus})", read.source
+
+    # The reading the host is actually in: this cycle's record is not in the corpus.
+    (corpus / f"cycle-{CYCLE[3:]}.md").unlink()
+    assumed = mod.abstain_window(CYCLE, PREV_CYCLE, str(corpus), cycles_logs=(corpus,))
+    assert assumed.start == read.start, "the window must not move - only what is said about it"
+    assert assumed.applied
+    assert "assumed rather than read" in assumed.source, assumed.source
+    assert CYCLE in assumed.source and PREV_CYCLE in assumed.source, assumed.source
+
+    # Two states that are *not* this one, because neither is a corpus that was read and
+    # found wanting. A caller that named the predecessor itself (`--prev-cycle`) states
+    # it, so it is not second-guessed ...
+    named = mod.abstain_window(CYCLE, PREV_CYCLE, "named by --prev-cycle")
+    assert named.source == f"previous cycle {PREV_CYCLE} (named by --prev-cycle)"
+    # ... and a root that could not be read cannot say what it does not hold (the same
+    # rule `previous_cycle` follows: half a corpus is not an absence).
+    gone = tmp_path / "gone"
+    unread = mod.abstain_window(CYCLE, PREV_CYCLE, str(gone), cycles_logs=(gone,))
+    assert "assumed" not in unread.source, unread.source
+
+
 def test_the_cycle_log_override_names_one_root_or_several(mod, monkeypatch, tmp_path):
     """`--cycles-log` / `EMRG_CYCLES_LOG` keep the single-directory meaning and accept
     the pair, so a caller can state the roots instead of relying on the defaults."""

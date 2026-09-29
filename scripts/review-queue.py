@@ -292,6 +292,48 @@ def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str]:
     return (earlier[-1], where) if earlier else ("", where)
 
 
+def corpus_holds_cycle(cycle: str, cycles_logs) -> tuple[bool, str]:
+    """Does the corpus hold a record for `cycle` *itself*? `(held, why_not)`.
+
+    `previous_cycle` answers a question about a **corpus** — the newest record that
+    sorts before this cycle — and its callers render that answer as "previous cycle
+    cycX". On one instance the two coincide: every cycle writes its record when it
+    ends, so the newest record below a cycle's id is the cycle before it. Off that
+    instance they part, and the divergence is silent: the newest record before a
+    *vote's* cycle can belong to another host's series, so what gets rendered as the
+    predecessor is a record this corpus cannot show is one. Measured 2026-09-29 on PR
+    #1722, whose three votes all named cycles this host has no record of
+    (`cyc20260929-074033`/`081057`/`085532`): each was voided with "previous cycle
+    `cyc20260929-065510`" — a cycle of this host's own series, while the PR's own other
+    vote named `074033`, which sorts *between* the two.
+
+    Why the window keeps its force rather than narrowing: the substitution can only
+    widen it (the substitute always sorts below the true predecessor, so its start is
+    earlier), and a widened window costs a delay where a narrowed one spends a vote —
+    the direction this family prefers everywhere. What must not survive is the
+    *claim*: a reader is owed the fact that the predecessor was put forward by a
+    corpus, not read out of one.
+
+    A directory that could not be read answers `held=True`: absence is a claim about a
+    corpus, and half a corpus cannot make it.
+    """
+    logs = tuple(Path(entry) for entry in (cycles_logs or ()))
+    wanted = f"cycle-{cycle[3:]}.md" if _CYCLE_ID.fullmatch(cycle or "") else None
+    if not logs or wanted is None:
+        return True, ""
+    for log in logs:
+        try:
+            names = [entry.name for entry in log.iterdir()]
+        except OSError:
+            return True, ""
+        if wanted in names:
+            return True, ""
+    return False, (
+        f"and it holds no record for {cycle} itself, so this predecessor is assumed "
+        "rather than read"
+    )
+
+
 @dataclass
 class Window:
     """The span of cycles whose heads this cycle must neither vote on nor merge.
@@ -314,7 +356,9 @@ class Window:
         return self.start.isoformat(timespec="seconds") if self.start else ""
 
 
-def abstain_window(cycle: str, previous: str, where: str) -> Window:
+def abstain_window(
+    cycle: str, previous: str, where: str, *, cycles_logs=None
+) -> Window:
     """The window, from the previous cycle's id — or a narrower one that says so.
 
     The previous cycle's start is preferred because it is the wider window: a head
@@ -322,13 +366,27 @@ def abstain_window(cycle: str, previous: str, where: str) -> Window:
     (precedent `cyc20260917-125823`). Without it the scan shrinks to this cycle's own
     start, which is a strictly weaker reading and must not be printed as the stronger
     one.
+
+    `cycles_logs` is what turns "the record before you" into a **claim**: with the
+    corpus in hand the source also says whether it holds a record for `cycle` itself,
+    and when it does not, the predecessor is named as assumed (see
+    `corpus_holds_cycle`). Omitted — as a caller that supplied `--prev-cycle`, or a
+    test asking only about the widening, does — the source is exactly what it was, and
+    the narrowed form's `unresolved` note is unchanged. Every call site that reads the
+    predecessor out of a corpus passes it, so all three readers say the same thing.
     """
     own = cycle_start(cycle)
     start = cycle_start(previous)
+    assumed = ""
+    if start is not None and cycles_logs is not None:
+        held, why_not = corpus_holds_cycle(cycle, cycles_logs)
+        assumed = "" if held else f" - {why_not}"
     if start is not None:
         return Window(
             start=start,
-            source=f"previous cycle {previous}" + (f" ({where})" if where else ""),
+            source=f"previous cycle {previous}"
+            + (f" ({where})" if where else "")
+            + assumed,
         )
     if own is not None:
         return Window(
@@ -964,13 +1022,18 @@ def main(argv: list[str] | None = None) -> int:
 
     window: Window | None = None
     if args.cycle:
+        logs = resolve_cycle_logs(args.cycles_log)
         if args.prev_cycle:
             previous, where = args.prev_cycle, "named by --prev-cycle"
         else:
-            previous, where = previous_cycle(
-                args.cycle, resolve_cycle_logs(args.cycles_log)
-            )
-        window = abstain_window(args.cycle, previous, where)
+            previous, where = previous_cycle(args.cycle, logs)
+        # The corpus goes with the window when it *is* the source: a predecessor read
+        # out of a corpus is reported as assumed when that corpus holds no record of
+        # this cycle, while one the caller named with `--prev-cycle` is the caller's
+        # own claim and is not second-guessed.
+        window = abstain_window(
+            args.cycle, previous, where, cycles_logs=None if args.prev_cycle else logs
+        )
 
     try:
         queue = args.prs if args.prs else open_prs(args.repo)

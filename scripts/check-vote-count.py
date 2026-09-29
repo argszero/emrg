@@ -432,8 +432,14 @@ def own_head_window(
     if not cycle:  # a caller error, not a reading: only a resolved cycle is asked about
         raise ValueError("own_head_window needs the vote's cycle id")
     queue = review_queue()
-    previous, where = queue.previous_cycle(cycle, queue.resolve_cycle_logs(cycles_log))
-    window = queue.abstain_window(cycle, previous, where)
+    logs = queue.resolve_cycle_logs(cycles_log)
+    previous, where = queue.previous_cycle(cycle, logs)
+    # The corpus is handed over with the window: whether it holds a record for the
+    # *voting* cycle is what separates "the cycle before mine pushed this" from "the
+    # newest record this host has before your id is treated as your predecessor". The
+    # verdict is the same either way (the substitution can only widen the window, and a
+    # wider window costs a delay rather than a vote); the reason is not.
+    window = queue.abstain_window(cycle, previous, where, cycles_logs=logs)
     if not window.applied:
         return True, (
             "the head's own window cannot be decided from this vote's cycle "
