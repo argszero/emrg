@@ -37,7 +37,6 @@ from emrg.server.git_utils import (
     _detect_git_remote,
     ensure_local_exclude,
     repo_scope,
-    resolve_git_gh,
 )
 
 logger = logging.getLogger("emrg.server.scheduler")
@@ -148,11 +147,12 @@ def recovery_recipe(stash_message: str) -> str:
     return RECOVERY_RECIPE_TEMPLATE.format(message=stash_message)
 
 
-# ── Module-level constants (shared with daemon) ──────────────────
-EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
-
-# Template files for each task type. All use the same format variables
-# ({instance_id}, {host_name}, {uptime}, ...).
+# ── Module-level constants ───────────────────────────────
+# Template files for each task type. Every one renders from the same Jinja2
+# context, declared once in `TaskHandler._build_evolution_prompt` below —
+# there is no separate list of variables to keep in step (the enumeration
+# that used to sit here named `{instance_id}, {host_name}, {uptime}`, all
+# three retired on 2026-09-29).
 TASK_TEMPLATES: dict[str, str] = {
     "evolution": "evolution_prompt.md",
     "paper": "paper_prompt.md",
@@ -328,7 +328,6 @@ class TaskHandler:
         self.interval = interval
         self.identity = identity
         self._running = False
-        self._start_time: float | None = None  # handler start (template uptime)
         self._cycle_start_time: float | None = None  # per-cycle start (rant 2026-08-22T07:18:35 elapsed display)
         self._trigger_event = asyncio.Event()
         self._cycle_running = False
@@ -1547,9 +1546,10 @@ class TaskHandler:
     # (append-only JSONL, one line per cycle) so the GUI task recent-runs
     # secondary list survives daemon restarts. self.evolutions (in-memory)
     # stays the primary source for status(); the JSONL is a durable copy
-    # restored on init, bounded to the most recent _TASK_RUNS_MAX records.
-    _TASK_RUNS_MAX = 50
-
+    # restored on init, in full — the 50-record cap that used to bound this
+    # restoration made the restored list a window, not a history, and the
+    # `{{ evolution_count }}` line printed it as a total (rant
+    # 2026-09-29T09:29:21).
     def _load_task_runs(self) -> list[EvolutionLog]:
         """Restore the most recent execution records from the task JSONL.
 
@@ -1561,7 +1561,7 @@ class TaskHandler:
         try:
             if self._task_runs_file.exists():
                 lines = self._task_runs_file.read_text(encoding="utf-8").splitlines()
-                for line in lines[-self._TASK_RUNS_MAX:]:
+                for line in lines:
                     line = line.strip()
                     if not line:
                         continue
@@ -1595,11 +1595,12 @@ class TaskHandler:
         return records
 
     def _append_task_run(self, log: EvolutionLog) -> None:
-        """Append one execution record to the task JSONL (bounded append).
+        """Append one execution record to the task JSONL.
 
-        Writes a JSON line for the completed cycle, then trims the file to the
-        most recent _TASK_RUNS_MAX records. Fault-tolerant: a write failure
-        only logs a warning and never affects the running cycle.
+        Appends one line and never rewrites the file: the trim to the most
+        recent `_TASK_RUNS_MAX` records was removed with the cap itself (rant
+        2026-09-29T09:29:21). Fault-tolerant: a write failure only logs a
+        warning and never affects the running cycle.
         """
         try:
             self._task_runs_dir.mkdir(parents=True, exist_ok=True)
@@ -1611,15 +1612,6 @@ class TaskHandler:
                     "slowdown_reason": log.slowdown_reason,
                     "tool_count": log.tool_count,
                 }, ensure_ascii=False) + "\n")
-            # Trim to the last _TASK_RUNS_MAX records (rewrite in place only
-            # when over the cap, mirroring the old 27-file rotation).
-            try:
-                lines = self._task_runs_file.read_text(encoding="utf-8").splitlines()
-                if len(lines) > self._TASK_RUNS_MAX:
-                    with open(self._task_runs_file, "w", encoding="utf-8") as f:
-                        f.write("\n".join(lines[-self._TASK_RUNS_MAX:]) + "\n")
-            except Exception:
-                pass  # trimming is best-effort; the append already succeeded
         except Exception as exc:
             self._logger.warning(
                 "TaskHandler[%s]: failed to persist task-run record: %s",
@@ -1633,7 +1625,6 @@ class TaskHandler:
         via trigger() wake the coroutine immediately.
         """
         self._running = True
-        self._start_time = time.time()
         self._logger.info(
             "TaskHandler[%s] started — every %ds", self.name, self.interval
         )
@@ -1837,8 +1828,9 @@ class TaskHandler:
         # rant 2026-08-22T07:18:35: expose the CURRENT cycle's start time so the
         # GUI tasks panel can show "已运行 XXs" (elapsed, ticking up). Epoch
         # seconds; valid only while running — None when idle/completed.
-        # (Uses _cycle_start_time — per-cycle base; _start_time is handler
-        # uptime and would report cumulative time across cycles.)
+        # (Uses _cycle_start_time — the per-cycle base. There is no handler
+        # start time to confuse it with any more: it existed only to render
+        # `{{ uptime }}` and went with that placeholder, rant 2026-09-29T09:23:55.)
         started_at = self._cycle_start_time if self._cycle_running else None
         return {
             "name": self.name,
@@ -2238,21 +2230,14 @@ class TaskHandler:
         """
         import jinja2
 
-        if self._start_time is not None:
-            uptime_seconds = int(time.time() - self._start_time)
-        else:
-            uptime_seconds = 0
-        uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
-
-        git_path, gh_path = resolve_git_gh()
-
+        # `git_path` / `gh_path` were provided here until 2026-09-29 and read by no
+        # built-in template (the guard in tests/test_prompt_templates.py now asks the
+        # reverse question, and found them). A value nothing consumes is a value nothing
+        # measures — the same reason `uptime` / `evolution_count` / `evolution_cwd` went.
         context = {
             "instance_id": self.identity.instance_id,
             "host_name": self.identity.host_name,
-            "uptime": uptime,
-            "evolution_count": len(self.evolutions),
             "repo_url": self._repo_url,
-            "evolution_cwd": str(EVOLUTION_CWD),
             "local_source": str(self._source_dir),
             "owner": self._owner,
             "repo": self._repo,
@@ -2262,8 +2247,6 @@ class TaskHandler:
             "current_time_human": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "task": self._config,
             "project": _load_project_config(self._project_name, str(self._source_dir)),
-            "git_path": git_path,
-            "gh_path": gh_path,
         }
 
         env = jinja2.Environment(undefined=jinja2.Undefined)
@@ -2558,7 +2541,7 @@ class TaskScheduler:
             if not any(e.get("name") == "emrg" for e in entries):
                 entries.append({
                     "name": "emrg",
-                    "path": str(EVOLUTION_CWD / "emrg"),
+                    "path": str(Path.home() / ".emrg" / "evolution" / "emrg"),
                     "last_active": datetime.now().isoformat(),
                 })
                 atomic_write_yaml(entries, projects_file, prefix=".projects_")
@@ -2579,7 +2562,7 @@ class TaskScheduler:
                     existing = entry.get("path")
                     if existing and Path(existing).is_dir():
                         break  # real checkout — preserved as-is
-                    entry["path"] = str(EVOLUTION_CWD / "emrg")
+                    entry["path"] = str(Path.home() / ".emrg" / "evolution" / "emrg")
                     entry["last_active"] = datetime.now().isoformat()
                     atomic_write_yaml(entries, projects_file, prefix=".projects_")
                     logger.info(

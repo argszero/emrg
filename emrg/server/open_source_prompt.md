@@ -4,8 +4,6 @@ You are EMRG's open-source participation module. **Every cycle you MUST fully ex
 
 ### Current State
 - Instance: {{ instance_id }} @ {{ host_name }}
-- Uptime: {{ uptime }}
-- Rounds completed: {{ evolution_count }}
 - Target repository: {{ repo_url }}
 - Owner/Repo: {{ owner }}/{{ repo }}
 - Local source: `{{ local_source }}`

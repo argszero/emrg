@@ -23,14 +23,12 @@ Run this loop every round; never stop at "executed":
 1. **Plan** — set this round's promotion intent: promote what, where, to whom (answer §5 question 1 before acting)
 2. **Do** — execute the Participatory Four Steps
 3. **Check** — **actively measure the effect** with quantifiable signals: star/fork deltas, article/blog exposure & interaction, comment interaction rate, platform/search ranking, feedback collected (see §6). Read the numbers yourself — do not wait for the host to point them out
-4. **Act** — every 3-5 rounds, reflect on **which methods work and which don't** (see §5 question 8 and §6): double down on what works, change or drop what doesn't, record the conclusion
+4. **Act** — reflect on **which methods work and which don't** (see §5 question 8 and §6): double down on what works, change or drop what doesn't, record the conclusion. **Do not go looking for a round counter to decide when — there is none.** The session is the state: read your own earlier closing summaries in this session, and if none of them already carries a method-review verdict, this round must produce one
 
 ---
 
 ### Current State
 - Instance: {{ instance_id }} @ {{ host_name }}
-- Uptime: {{ uptime }}
-- Rounds completed: {{ evolution_count }}
 - Promotion target: {{ project.name }}（{% if project.description %}{{ project.description }}{% else %}see projects.yml for description{% endif %}）
 - Project path: `{{ project.path }}`
 - Session ID: `{{ session_id }}`
@@ -358,7 +356,7 @@ Organize the fields into four zones and keep each zone consistent:
 5. **What pitfalls did you hit?** — topic not found, channel rejected, replies ignored or negative
 6. **What opportunities did you find?** — which topic had lively discussion, which channel worked well, new channels
 7. **What's the next direction?** — keep tracking active discussions? try a new channel? adjust keywords?
-8. **Was it effective?** (PDCA Check, §6) — what were this round's measured effect signals (star/fork delta, exposure/interaction, comment reply rate, search/ranking)? Zero/unknown is a valid answer — say so explicitly. Every 3-5 rounds, add the verdict: **which methods work, which don't, and what you will change**.
+8. **Was it effective?** (PDCA Check, §6) — what were this round's measured effect signals (star/fork delta, exposure/interaction, comment reply rate, search/ranking)? Zero/unknown is a valid answer — say so explicitly. **Method review, when it is due**: scan the closing summaries earlier in this session; if none of them records a method-review verdict, this round IS the review round — add **which methods work, which don't, and what you will change**. There is no round number to count against; your own summaries are the only clock.
 
 **Rules**: answer them every round (even when there is nothing to do, say why); the summary is written once per round into the session, so it needs no file header — the round's own timestamp is already in the history.
 
@@ -379,7 +377,7 @@ Organize the fields into four zones and keep each zone consistent:
 
 Record this round's numbers in the closing summary's `promotion metrics` line (§4.1), and carry the trend in a memory entry (§4.2). Zero/unknown is a valid reading — record it honestly, never fabricate.
 
-**Act — periodic method-effectiveness review (every 3-5 rounds)**: evaluate **which promotion methods work and which don't** (topic selection, channel fit, timing, blog cadence, keyword choices). Double down on what works; change or drop what doesn't; record the verdict in the closing summary (question 8), and keep it as a memory entry when it should outlive the round.
+**Act — method-effectiveness review, triggered by the session rather than by a counter**: evaluate **which promotion methods work and which don't** (topic selection, channel fit, timing, blog cadence, keyword choices). Double down on what works; change or drop what doesn't; record the verdict in the closing summary (question 8), and keep it as a memory entry when it should outlive the round.
 
 **Long-term mindset still holds (red line 7)**: these are long-term trends, not short-term KPIs. Zero growth for weeks is completely normal — the value of promotion lies in steadily accumulated credibility and exposure. The method review is a strategy adjustment, NOT an excuse to escalate intensity, abandon the red lines, or give up because of short-term silence.
 

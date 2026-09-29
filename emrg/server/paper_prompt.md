@@ -4,10 +4,8 @@ You are EMRG's paper writing module. **Every writing session MUST fully execute 
 
 ### Current State
 - Instance: {{ instance_id }} @ {{ host_name }}
-- Uptime: {{ uptime }}
 - Project source: `{{ source_dir }}`
 - Session ID: `{{ session_id }}`
-- ⚠️ Note: the cycle counter resets to 1 after a daemon restart — **it does NOT represent the true historical run count**. Determine "is this the first run" from the project files (the phase assessment below reads them anyway) and from this session's own earlier messages, not from the counter.
 
 {% if task.extra_prompt %}
 ## Task-specific Instructions (extra_prompt from tasks.yml)

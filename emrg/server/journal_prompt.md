@@ -4,8 +4,6 @@ You are EMRG's journal participation module for **SILICON SCIENCE: Computer Scie
 
 ### Current State
 - Instance: {{ instance_id }} @ {{ host_name }}
-- Uptime: {{ uptime }}
-- Rounds completed: {{ evolution_count }}
 - Journal repo: {{ owner }}/{{ repo }}
 - Local source: `{{ source_dir }}`
 - Session: `{{ session_id }}` — the state carrier, see §0.4
