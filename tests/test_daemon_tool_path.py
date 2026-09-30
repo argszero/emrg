@@ -254,22 +254,38 @@ def test_a_version_manager_shim_dir_is_a_candidate():
         assert f"/home/host/{name}" in offered, f"{name} is not a candidate directory"
 
 
-def test_the_shims_are_reached_from_a_dock_started_daemons_path(tmp_path):
-    """The end-to-end shape: launchd's minimal `PATH` plus the shim directory.
+def test_a_listed_tool_dir_is_appended_against_a_real_filesystem(tmp_path):
+    """The mechanism, measured on the real `isdir` rather than an injected one.
 
-    The `PATH` below is the one `~/.emrg/emrgd.log` recorded for a GUI start, and
-    `isdir` is the real one — the directory is made under `tmp_path`, so what is
-    measured is that an existing shim directory is *appended*, not that this host
-    happens to have `asdf`.
+    Two things this covers that no test above does: the directory really exists
+    on disk (so the existence branch is exercised by the filesystem, not by a
+    stub), and the appended entry is the one a minimal inherited `PATH` gains —
+    the Dock-start shape `~/.emrg/emrgd.log` recorded, where the daemon reached
+    only launchd's directories.
+
+    **The subject is taken from `tool_dirs()` and the platform is the running
+    one, and both are deliberate.** The list is per-platform (Windows offers
+    `~/.local/bin` alone), and `home` is a real `tmp_path` in the host's flavour,
+    so naming a platform here would join it with the wrong flavour's separator —
+    green on macOS and red on `test-windows`, which is the defect this file's own
+    docstring records and which this test shipped with once. What the *list*
+    contains is asserted by name in `test_a_version_manager_shim_dir_is_a_candidate`;
+    what this asserts is the arithmetic applied to whatever the list offers.
     """
-    home = _home_with(tmp_path, ".asdf/shims")
-    dock_path = "/Users/host/.emrg/install/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    env = {"PATH": dock_path}
+    home = tmp_path / "home"
+    offered = tool_path.tool_dirs(home=home)
+    under_home = [d for d in offered if str(d).startswith(str(home))]
+    assert under_home, "the platform's list must offer a directory under the home"
+    target = under_home[0]
+    Path(target).mkdir(parents=True)
 
-    added = tool_path.augment_path(env, platform="linux", home=home)
+    inherited = tool_path.path_separator().join(["/usr/bin", "/bin"])
+    env = {"PATH": inherited}
 
-    assert str(home / ".asdf/shims") in [str(d) for d in added]
-    assert env["PATH"].startswith(dock_path), "the inherited PATH keeps priority"
+    added = tool_path.augment_path(env, home=home)
+
+    assert str(target) in [str(d) for d in added]
+    assert env["PATH"].startswith(inherited), "the inherited PATH keeps priority"
 
 
 def test_a_version_keyed_directory_is_documented_as_out_of_reach():
