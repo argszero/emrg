@@ -22,6 +22,7 @@ from emrg.client.widgets import (
 )
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import TaskResponse, ToolEnd, ToolStart
+from emrg.sandbox.escalation import APPROVAL_TIMEOUT_SECONDS
 from emrg.session import generate_session_id
 from emrg.skills.loader import load_skills
 from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
@@ -352,6 +353,49 @@ def the_ending_completes_a_receipt_this_client_holds(
     it says (see the frame loop) and dropped by the start of a new turn.
     """
     return receipt_held and turn_ended_cancelled
+
+
+def approval_question_is_still_live(*, now: float, deadline: float) -> bool:
+    """Whether a line typed at ``now`` is still the answer to a pending question.
+
+    Rant 2026-09-29T15:52:38.987951+08:00 follow-up (issue #1757). The daemon
+    gives a question `APPROVAL_TIMEOUT_SECONDS` and then refuses the call, so a
+    line typed after that instant answers nothing. The TUI held the question
+    until the host typed and took whatever they typed as the answer, so a
+    *prompt* typed after the daemon had already given up was consumed as an
+    answer and never sent. The client now carries its own deadline — stamped
+    when the request frame arrives — and this is the one decision between the
+    two readings: inside it the line is the answer, outside it the line is the
+    host typing.
+
+    The client's stamp is set when the frame *arrives*, so its deadline falls
+    later than the daemon's by the frame's flight time. The direction is the
+    safe one: the two clocks disagree only in a window the daemon has already
+    stopped waiting in, never the other way round.
+    """
+    return now < deadline
+
+
+def approval_resolution_closes(pending: tuple | None, request_id: str) -> bool:
+    """Whether a resolution frame names the question this client is holding.
+
+    Rant 2026-09-29T15:52:38.987951+08:00 follow-up (issue #1757), requirement 2's
+    first half. The frame is the primary path that ends a question — the deadline
+    above is the backstop for one that never arrives — and this client holds one
+    question at a time, so the decision is whether *this* frame is about it. A
+    resolution for another request must not dismiss the question on screen: the
+    daemon can be holding two questions for two sessions at once, and the
+    direction that fails silently is this one — the host's question disappears
+    and the answer they then type reaches nobody.
+
+    The comparison is on the request id and never on the outcome word, so a
+    future ending cannot reintroduce a stuck question. It is also why the
+    predicate is here rather than inline: the branch it decides sits inside the
+    frame loop, which needs a connection and a terminal, and a decision no test
+    can name is a requirement that does not exist — the rule the sibling above
+    was extracted for.
+    """
+    return pending is not None and pending[0] == request_id
 
 
 def turn_start_instant(data: dict) -> float | None:
@@ -896,9 +940,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     task_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
     _skills_confirm: tuple | None = None  # (skill_name, install_cmd) — next Enter answers the prompt
-    # (request_id, question) while the daemon is waiting on this client's answer
-    # to an escalation request — the next line typed is the answer (rant
-    # 2026-09-29T15:52:38.987951+08:00, requirement 1).
+    # (request_id, question, deadline) while the daemon is waiting on this
+    # client's answer to an escalation request — the next line typed is the
+    # answer (rant 2026-09-29T15:52:38.987951+08:00, requirement 1). The
+    # deadline is this client's backstop for the daemon's own timeout: a line
+    # typed after it is a prompt, never an answer.
     _approval_pending: tuple | None = None
     # /task-session (rant 2026-09-17T18:36:08). `_task_list_intent` is set by the
     # command that asked for the list, so the picker can be built with the right
@@ -1365,13 +1411,47 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 if data.get("type") == "approval_request":
                     nonlocal _approval_pending
                     question = str(data.get("question", ""))
-                    _approval_pending = (str(data.get("request_id", "")), question)
+                    _approval_pending = (
+                        str(data.get("request_id", "")),
+                        question,
+                        # The client's own deadline (rant 2026-09-29T15:52:38.987951+08:00
+                        # follow-up): the daemon refuses the call after this long, so a
+                        # line typed after that is a prompt, not an answer. The frame
+                        # below normally clears the state first — this is the backstop
+                        # for a client that never received it.
+                        time.monotonic() + APPROVAL_TIMEOUT_SECONDS,
+                    )
                     chat.add("system",
                         f"⚠️ The daemon asks for approval — {question}\n"
                         f"Type `yes` to allow it for this one call, or anything "
                         f"else to refuse.")
                     status.update(center="approval needed — yes/no")
                     _render_throttled()
+                    continue
+
+                # The question is over — answered, refused, expired, or cancelled
+                # under the turn (rant 2026-09-29T15:52:38.987951+08:00
+                # follow-up). Without this the TUI held the question until the
+                # host typed something, and a *prompt* typed after the timeout was
+                # swallowed as the answer while the daemon had already refused the
+                # call. An outcome the host's own answer produced needs no line —
+                # the line above it already said what they chose — so only the two
+                # endings they did *not* cause are reported here.
+                if data.get("type") == "approval_resolved":
+                    request_id = str(data.get("request_id", ""))
+                    if approval_resolution_closes(_approval_pending, request_id):
+                        _approval_pending = None
+                        outcome = str(data.get("outcome", ""))
+                        if outcome == "timed_out":
+                            chat.add("system",
+                                "The approval question expired unanswered — that "
+                                "call stays at its default tier.")
+                        elif outcome == "cancelled":
+                            chat.add("system",
+                                "The approval question was cancelled with the turn "
+                                "— no answer was needed.")
+                        status.update(center=server_id or "emrg")
+                        _render_throttled()
                     continue
 
                 # Sessions list
@@ -2439,22 +2519,40 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 # Pending escalation approval — the next line is the answer.
                 # Handled before every other command: the daemon is holding a
                 # call open on this answer, and a line meant as "yes" must not
-                # be read as a prompt to send.
+                # be read as a prompt to send. **Only while the deadline holds**:
+                # the daemon refuses the call at its own timeout, so an expired
+                # question must not swallow the host's next prompt (rant
+                # 2026-09-29T15:52:38.987951+08:00 follow-up).
                 if _approval_pending is not None:
-                    request_id, _question = _approval_pending
+                    request_id, _question, _deadline = _approval_pending
                     _approval_pending = None
-                    approved = text.strip().lower() in ("y", "yes", "approve", "ok")
-                    await conn.send_command(
-                        "approval_response",
-                        request_id=request_id,
-                        approved=approved,
-                    )
-                    chat.add("system",
-                        "Approved for this one call." if approved
-                        else "Refused — the command stays at its default tier.")
-                    status.update(center=server_id or "emrg")
-                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
-                    return True
+                    if not approval_question_is_still_live(
+                        now=time.monotonic(), deadline=_deadline,
+                    ):
+                        # Expired: the daemon already refused the call, so this
+                        # line is the host typing, not an answer to anything —
+                        # and it is left to the ordinary prompt path below
+                        # rather than consumed and erased here. Consuming it was
+                        # the swallow the deadline exists to prevent: the host's
+                        # prompt vanished along with the question.
+                        chat.add("system",
+                            "The approval question expired unanswered — that call "
+                            "stays at its default tier.")
+                        status.update(center=server_id or "emrg")
+                        term.render()
+                    else:
+                        approved = text.strip().lower() in ("y", "yes", "approve", "ok")
+                        await conn.send_command(
+                            "approval_response",
+                            request_id=request_id,
+                            approved=approved,
+                        )
+                        chat.add("system",
+                            "Approved for this one call." if approved
+                            else "Refused — the command stays at its default tier.")
+                        status.update(center=server_id or "emrg")
+                        inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                        return True
 
                 # Pending /skills install confirmation — next line is the answer
                 if _skills_confirm is not None:

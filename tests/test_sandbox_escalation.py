@@ -354,6 +354,30 @@ def test_the_question_reaches_the_session_and_the_answer_resolves_it(tmp_path):
     assert approved is True
 
 
+def test_the_question_declares_the_deadline_the_daemon_will_enforce(tmp_path):
+    """Issue #1757 requirement 2, the half a client cannot import.
+
+    The TUI can read the constant (same language, same repo); a GUI renderer
+    cannot, so the number must ride the frame. The assertion is against the
+    constant itself — a client bounded by a literal would drift the moment
+    either side is edited, which is the defect the field exists to remove.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-deadline", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def scenario():
+        task = asyncio.create_task(
+            server.request_approval(session.session_id, "widen this one call?")
+        )
+        frame = await _answer_next_question(server, ws, True)
+        return frame, await asyncio.wait_for(task, 5)
+
+    frame, _approved = asyncio.run(scenario())
+    assert frame is not None, "no approval_request frame reached the session"
+    assert frame["timeout_seconds"] == escalation.APPROVAL_TIMEOUT_SECONDS
+
+
 def test_a_session_with_no_client_is_refused_and_nothing_is_sent(tmp_path):
     """Fail closed: a host who walked away has not approved anything."""
     server = _server()
@@ -420,7 +444,175 @@ def test_a_question_nobody_answers_times_out_and_leaves_no_state(tmp_path, monke
     answer, pending = asyncio.run(scenario())
     assert answer is None, "a timeout must read as a refusal"
     assert pending == {}, "the question's future outlived its question"
-    assert [f.get("type") for f in ws.sent] == ["approval_request"]
+    # The timeout closes the question *for the clients too* (rant
+    # 2026-09-29T15:52:38.987951+08:00 follow-up): a client that is never told
+    # keeps the question live, so the TUI read the host's next prompt as the
+    # answer and the GUI's dialog outlived the question it asked.
+    assert [f.get("type") for f in ws.sent] == ["approval_request", "approval_resolved"]
+    resolved = ws.sent[-1]
+    assert resolved["outcome"] == "timed_out"
+    assert resolved["request_id"] == ws.sent[0]["request_id"]
+    assert resolved["session_id"] == session.session_id
+
+
+def test_the_resolution_names_the_outcome_a_client_must_render(tmp_path):
+    """Every exit a subscriber can observe is announced, with its own word.
+
+    `approved` and `refused` are distinguished on the wire because they are
+    different events for the person reading the screen — a client that collapses
+    them cannot say whether the host's answer was taken or the question expired.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-outcome", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def ask(answer):
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        frame = await _answer_next_question(server, ws, answer)
+        verdict = await asyncio.wait_for(task, 5)
+        resolved = ws.sent[-1]
+        assert frame["request_id"] == resolved["request_id"]
+        return verdict, resolved
+
+    approved, resolved_yes = asyncio.run(ask(True))
+    assert approved is True and resolved_yes["outcome"] == "approved"
+    refused, resolved_no = asyncio.run(ask(False))
+    assert refused is False and resolved_no["outcome"] == "refused"
+
+
+def test_a_question_cancelled_mid_wait_is_announced_too(tmp_path):
+    """A third exit a subscriber can observe: the turn is cancelled under it.
+
+    ESC on a turn cancels the task that is waiting for the answer
+    (`_session_turn_task`, the handle `daemon.py:1344` cancels), so the wait
+    dies with `CancelledError` — a `BaseException` that the timeout branch does
+    not catch and cannot be made to catch by widening it to `Exception`. Without
+    this the question stays live on every client exactly as it did in the
+    timeout case: the GUI's dialog never closes, and the TUI's own deadline is
+    the only thing that eventually stops it swallowing a prompt.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-cancelled", tmp_path)
+    ws = _subscribe(server, session)
+
+    async def scenario():
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        for _ in range(500):
+            if any(f.get("type") == "approval_request" for f in ws.sent):
+                break
+            await asyncio.sleep(0.002)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return dict(server._pending_approvals)
+
+    pending = asyncio.run(scenario())
+    assert pending == {}, "a cancelled question must not leave its future behind"
+    assert [f.get("type") for f in ws.sent] == ["approval_request", "approval_resolved"]
+    resolved = ws.sent[-1]
+    assert resolved["outcome"] == "cancelled"
+    assert resolved["request_id"] == ws.sent[0]["request_id"]
+    assert resolved["session_id"] == session.session_id
+
+
+class _WsHoldingTheFrame(_FakeWs):
+    """A subscriber that records a frame and then holds its send open.
+
+    `holds` names the type whose *delivery* is the window this client opens: the
+    request (the question has reached the client and the daemon has not yet begun
+    to wait) or the resolution (the ending is already on the wire and the turn
+    dies while that frame is being written). Both are awaits inside
+    `request_approval`, and neither is the wait the older cancellation test
+    cancels.
+    """
+
+    def __init__(self, holds: str) -> None:
+        super().__init__()
+        self.holds = holds
+        self.seen = asyncio.Event()
+        self.hold = asyncio.Event()  # never released: the cancel is the exit
+        self._held = False  # the hold is one-shot, so a repeat cannot deadlock
+
+    async def send(self, data) -> None:
+        frame = json.loads(data)
+        self.sent.append(frame)
+        if frame.get("type") == self.holds and not self._held:
+            self._held = True
+            self.seen.set()
+            await self.hold.wait()
+
+
+def test_a_cancel_while_the_question_is_told_is_announced_too(tmp_path):
+    """The wait is not the only place a question can die.
+
+    `request_approval` broadcasts the question *before* it waits for the answer,
+    and `_broadcast` awaits one send per subscriber — so a cancel (ESC on the
+    turn, `_session_turn_task`, `daemon.py:1344`) that lands inside that
+    broadcast kills the call at a point the timeout branch and the wait branch
+    both sit after. The client that already received the question then holds it
+    dead, which is the whole defect this feature exists to remove: the frame is
+    the only thing that tells a client the question is over.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-cancel-broadcast", tmp_path)
+    ws = _WsHoldingTheFrame("approval_request")
+    server._session_subscribers[session.session_id] = {ws: str(session.cwd)}
+
+    async def scenario():
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        await asyncio.wait_for(ws.seen.wait(), 5)
+        # The question reached this client before the cancel — not an assumption:
+        # `seen` is set from the frame the client was handed.
+        assert [f.get("type") for f in ws.sent] == ["approval_request"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        return list(ws.sent), dict(server._pending_approvals)
+
+    sent, pending = asyncio.run(scenario())
+    assert [f.get("type") for f in sent] == ["approval_request", "approval_resolved"]
+    resolved = sent[-1]
+    assert resolved["outcome"] == "cancelled"
+    assert resolved["request_id"] == sent[0]["request_id"]
+    assert resolved["session_id"] == session.session_id
+    assert pending == {}, "a cancelled question must not leave its future behind"
+
+
+def test_a_cancel_while_the_ending_is_told_does_not_say_two_endings(tmp_path):
+    """One question, one resolution — whichever await the cancel interrupts.
+
+    The ending is decided before it is delivered, so a cancel that lands while
+    the answering frame is being written must not add a second word for the same
+    question: the client would be told both that the host approved and that the
+    turn cancelled the question, and the last one would be false about how the
+    question itself ended (the turn's own `done{cancelled}` is where the death of
+    the *turn* is told). This is the guard on the one-shot flag the broadcast
+    window needs: without it the flag is a comment.
+    """
+    server = _server()
+    session = Session.create_with_id("esc-cancel-announce", tmp_path)
+    ws = _WsHoldingTheFrame("approval_resolved")
+    server._session_subscribers[session.session_id] = {ws: str(session.cwd)}
+
+    async def scenario():
+        task = asyncio.create_task(server.request_approval(session.session_id, "widen?"))
+        for _ in range(500):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.002)
+        server._resolve_approval({"request_id": ws.sent[0]["request_id"], "approved": True})
+        await asyncio.wait_for(ws.seen.wait(), 5)
+        # The verdict is already on the wire when the cancel arrives.
+        assert [f.get("type") for f in ws.sent] == ["approval_request", "approval_resolved"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        return list(ws.sent)
+
+    sent = asyncio.run(scenario())
+    assert [f.get("type") for f in sent] == ["approval_request", "approval_resolved"]
+    assert sent[-1]["outcome"] == "approved"
+    assert sent[-1]["request_id"] == sent[0]["request_id"]
 
 
 # ── the loop's call site ────────────────────────────────────────────────────

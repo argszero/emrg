@@ -314,4 +314,128 @@ describe("createDaemonBridge", () => {
     emit({ type: "upgrade", data: { current_version: "0.2.85", installed_version: "" } });
     expect(bridge.store.get().upgradeBanner).toEqual({ current: "0.2.84", installed: "0.2.85" });
   });
+
+  // Rant 2026-09-29T15:52:38.987951+08:00 后续：提问被 daemon 单方面终结（拒绝/超时），
+  // 客户端必须据此关闭对话框——否则弹窗在提问早已结束后仍宣称"已答复"。
+  it("approval_request → store.pendingApproval（提问承载问题与会话）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "approval_request", data: { request_id: "appr-1", question: "widen?" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval).toEqual({
+      requestId: "appr-1", question: "widen?", sessionId: "s1",
+    });
+  });
+
+  it("approval_resolved → pendingApproval 清空（超时也算一种结局）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "approval_request", data: { request_id: "appr-2", question: "widen?" }, sid: "s1" });
+    emit({ type: "approval_resolved", data: { request_id: "appr-2", outcome: "timed_out" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval).toBeNull();
+  });
+
+  it("approval_resolved 只关掉它命名的那一问（别问的解析帧不得关本窗）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "approval_request", data: { request_id: "appr-3", question: "widen?" }, sid: "s1" });
+    emit({ type: "approval_resolved", data: { request_id: "appr-OTHER", outcome: "refused" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval?.requestId).toBe("appr-3");
+    emit({ type: "approval_resolved", data: { request_id: "appr-3", outcome: "refused" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval).toBeNull();
+  });
+
+  it("approval_resolved 的第三种结局（随轮取消）同样关窗——结局名不参与判定", () => {
+    // The daemon announces a `cancelled` ending too, because ESC cancels the
+    // handle waiting on the answer. Which word a resolution carries must not
+    // decide whether the dialog closes: the two clients only need to know that
+    // the question the frame names is over. A future outcome therefore cannot
+    // reintroduce the stuck dialog this fix removes.
+    const { emit, bridge } = setup();
+    emit({ type: "approval_request", data: { request_id: "appr-4", question: "widen?" }, sid: "s1" });
+    emit({ type: "approval_resolved", data: { request_id: "appr-4", outcome: "cancelled" }, sid: "s1" });
+    expect(bridge.store.get().pendingApproval).toBeNull();
+  });
+
+  // Issue #1757 的要求 2，落到渲染器一侧：客户端必须能自己收尾。TUI 的自有期限
+  // （`approval_question_is_still_live`）是同一规则的另一半；GUI 从前只在收到帧时
+  // 关窗，于是一旦帧没到（连接断、daemon 死在提问中途、写入被打断）对话框就永远留着，
+  // 而 i18n 早就写着「超时也算拒绝」。期限来自 daemon 的 `timeout_seconds`，客户端
+  // 不自造数字。
+  it("提问自带期限：帧没来也会到点关窗（GUI 不再无限持有）", () => {
+    vi.useFakeTimers();
+    try {
+      const { emit, bridge } = setup();
+      emit({
+        type: "approval_request",
+        data: { request_id: "appr-5", question: "widen?", timeout_seconds: 120 },
+        sid: "s1",
+      });
+      expect(bridge.store.get().pendingApproval?.requestId).toBe("appr-5");
+      vi.advanceTimersByTime(119_000);
+      expect(bridge.store.get().pendingApproval?.requestId).toBe("appr-5");
+      vi.advanceTimersByTime(1_000);
+      expect(bridge.store.get().pendingApproval).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("帧先到就不留计时器：它不得在之后关掉别的一问", () => {
+    vi.useFakeTimers();
+    try {
+      const { emit, bridge } = setup();
+      emit({
+        type: "approval_request",
+        data: { request_id: "appr-6", question: "first?", timeout_seconds: 120 },
+        sid: "s1",
+      });
+      emit({ type: "approval_resolved", data: { request_id: "appr-6", outcome: "approved" }, sid: "s1" });
+      emit({
+        type: "approval_request",
+        data: { request_id: "appr-7", question: "second?", timeout_seconds: 300 },
+        sid: "s1",
+      });
+      // 越过第一问原本的期限：它已经结束，不能顺手关掉第二问。
+      vi.advanceTimersByTime(120_000);
+      expect(bridge.store.get().pendingApproval?.requestId).toBe("appr-7");
+      vi.advanceTimersByTime(180_000);
+      expect(bridge.store.get().pendingApproval).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("daemon 没声明期限就不计时（客户端不自造数字）", () => {
+    vi.useFakeTimers();
+    try {
+      const { emit, bridge } = setup();
+      emit({ type: "approval_request", data: { request_id: "appr-8", question: "widen?" }, sid: "s1" });
+      vi.advanceTimersByTime(10 * 60_000);
+      expect(bridge.store.get().pendingApproval?.requestId).toBe("appr-8");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("host 自己答复后不留计时器（问已结束）", async () => {
+    vi.useFakeTimers();
+    try {
+      const { emit, bridge } = setup();
+      emit({
+        type: "approval_request",
+        data: { request_id: "appr-9", question: "widen?", timeout_seconds: 120 },
+        sid: "s1",
+      });
+      await bridge.respondApproval(true);
+      emit({
+        type: "approval_request",
+        data: { request_id: "appr-10", question: "next?", timeout_seconds: 300 },
+        sid: "s1",
+      });
+      // 越过第一问原本的期限：它已被 host 答复，不能顺手关掉第二问。
+      vi.advanceTimersByTime(120_000);
+      expect(bridge.store.get().pendingApproval?.requestId).toBe("appr-10");
+      vi.advanceTimersByTime(180_000);
+      expect(bridge.store.get().pendingApproval).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -294,6 +294,53 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
    */
   const inflightRidBySid = new Map<string, string | null>();
 
+  /**
+   * The bound on the question on screen: the timer and the request it belongs to.
+   *
+   * Issue #1757. `pendingApproval` used to be cleared only by a frame, so the
+   * dialog outlived the question whenever the frame did not arrive — a dropped
+   * connection, a daemon that died mid-question, a resolution whose write was
+   * interrupted. The TUI's own bound is its half of the same rule
+   * (`approval_question_is_still_live`, `emrg/client/app.py`); this is the
+   * renderer's, and it is deliberately the *last* thing to close the dialog: a
+   * frame that arrives first clears it and cancels the timer.
+   *
+   * The instant is the daemon's, never this client's — the value rides the
+   * request frame (`timeout_seconds`). A frame that declares none arms nothing,
+   * because a client that cannot measure the bound must not invent one: guessing
+   * would either close a live question early or claim a deadline the daemon
+   * never set.
+   */
+  let approvalBound: { requestId: string; handle: ReturnType<typeof setTimeout> } | null = null;
+
+  function clearApprovalBound(): void {
+    if (approvalBound) {
+      clearTimeout(approvalBound.handle);
+      approvalBound = null;
+    }
+  }
+
+  function armApprovalBound(requestId: string, timeoutSeconds: unknown): void {
+    clearApprovalBound();
+    const seconds =
+      typeof timeoutSeconds === "number" && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+        ? timeoutSeconds
+        : null;
+    if (seconds === null) return;
+    approvalBound = {
+      requestId,
+      handle: setTimeout(() => {
+        approvalBound = null;
+        // Only the question this timer was armed for: a later question has its
+        // own timer, and an earlier one must not dismiss it.
+        const current = store.get().pendingApproval;
+        if (current && current.requestId === requestId) {
+          store.update((s) => ({ ...s, pendingApproval: null }));
+        }
+      }, seconds * 1000),
+    };
+  }
+
   function setInflightRid(sid: string | null, rid: string | null): void {
     inflightRidBySid.set(KEY(sid), rid);
   }
@@ -515,7 +562,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         // is a refusal. The frame carries the question, so it is stored whole —
         // and `sid` is kept beside it because the answer has to travel back on the
         // same session's connection.
-        const ap = data as { request_id?: string; question?: string };
+        const ap = data as { request_id?: string; question?: string; timeout_seconds?: number };
         const requestId = String(ap?.request_id || "");
         if (requestId) {
           store.update((s) => ({
@@ -526,6 +573,29 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
               sessionId: sid,
             },
           }));
+          // The daemon declares how long it will wait; this dialog is bounded by
+          // that number, not by the arrival of a frame that may never come
+          // (issue #1757: "no timer, no dismissal" is the defect).
+          armApprovalBound(requestId, ap?.timeout_seconds);
+        }
+        break;
+      }
+      case "approval_resolved": {
+        // Rant 2026-09-29T15:52:38.987951+08:00 follow-up: the daemon refuses a
+        // confined call at its own timeout and says so here. Without this the
+        // dialog outlived the question — it stayed up reporting an answer nobody
+        // accepted, while i18n already promised "a timeout counts as a denial".
+        // Only a frame naming the question on screen closes it: a resolved
+        // request from another session must not dismiss this one.
+        const ar = data as { request_id?: string };
+        const resolvedId = String(ar?.request_id || "");
+        const current = store.get().pendingApproval;
+        if (current && resolvedId && current.requestId === resolvedId) {
+          // The frame closed it first, so its timer must not fire later: it is
+          // armed for a request id this store no longer holds, but a timer that
+          // outlives its question is a leak with a state write attached.
+          clearApprovalBound();
+          store.update((s) => ({ ...s, pendingApproval: null }));
         }
         break;
       }
@@ -548,7 +618,13 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     }
   }
 
-  const dispose = onEvent((evt) => handleFrame(evt));
+  const unsubscribe = onEvent((evt) => handleFrame(evt));
+  // Teardown takes the bound with it: a timer armed for a question this bridge
+  // will never render again is a write into a dead store (issue #1757).
+  const dispose = (): void => {
+    clearApprovalBound();
+    unsubscribe();
+  };
 
   function applyInit(result: InitResult): void {
     if (!result) return;
@@ -568,6 +644,9 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
 
   async function respondApproval(approved: boolean): Promise<boolean> {
     const pending = store.get().pendingApproval;
+    // The host answered, so the question is over on this side too: the bound was
+    // armed for a question that no longer exists (issue #1757).
+    clearApprovalBound();
     store.update((s) => ({ ...s, pendingApproval: null }));
     if (!pending) return false;
     const responder = emrg.respondApproval;
