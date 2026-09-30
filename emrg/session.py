@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Iterable
 
 from emrg.memory import SessionMemoryStore
+from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.sessions_index import remove_session_index, upsert_session_index
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,13 @@ class Session:
         self._created_at: str = ""
         self._updated_at: str = ""
         self._last_compact_at: str | None = None
+        # The session's sandbox tier, or None when the session has never been
+        # given one (rant 2026-09-30T09:30:16). Stored, not defaulted: the
+        # default belongs to the path that *starts* a turn — a client turn runs
+        # at `workspace-write` when nothing was declared, while the upgrade
+        # session's silence keeps meaning "unconfined" (`policy.DEFAULT_MODE`),
+        # and a property that answered the default would erase that difference.
+        self._sandbox: str | None = None
 
         # Lazy-initialized memory store
         self._memory_store = None
@@ -284,6 +292,7 @@ class Session:
             session._created_at = meta.get("created_at", "")
             session._updated_at = meta.get("updated_at", "")
             session._last_compact_at = meta.get("last_compact_at")
+            session._sandbox = meta.get("sandbox")
         logger.info("session loaded: %s (%d messages)", session_id, session._message_count)
         return session
 
@@ -328,6 +337,33 @@ class Session:
         self._updated_at = datetime.now().isoformat()
         self._save_meta_with_title(title)
         logger.info("session renamed: %s -> %s", self.session_id, title)
+
+    # ── Sandbox tier ──────────────────────────────────────────
+
+    @property
+    def sandbox(self) -> str | None:
+        """This session's sandbox tier, or ``None`` when it has never had one.
+
+        Read by the daemon as the *session* half of a turn's tier (rant
+        2026-09-30T09:30:16). Deliberately not defaulted — see the attribute's
+        comment in ``__init__``.
+        """
+        return self._sandbox
+
+    def set_sandbox(self, mode: str) -> None:
+        """Persist this session's sandbox tier into ``meta.json``.
+
+        The only writer of the key, and it validates before writing: an unknown
+        mode is refused and leaves the file untouched, so a typo cannot become a
+        stored tier that every later turn inherits.
+        """
+        if mode not in SANDBOX_MODES:
+            raise ValueError(
+                f"unknown sandbox mode {mode!r} (expected one of {', '.join(SANDBOX_MODES)})"
+            )
+        self._sandbox = mode
+        self._save_meta()
+        logger.info("session sandbox tier set: %s -> %s", self.session_id, mode)
 
     # ── Message persistence ───────────────────────────────────
 
@@ -546,6 +582,11 @@ class Session:
             "compact_count": self._compact_count,
             "last_compact_at": self._last_compact_at,
         }
+        # Only when one was set: a session that never declared a tier must not
+        # gain a key saying it did — the silence is what tells the upgrade
+        # session's path from a client turn's (rant 2026-09-30T09:30:16).
+        if self._sandbox:
+            meta["sandbox"] = self._sandbox
         if title is not None:
             meta["title"] = title
         else:

@@ -17,12 +17,13 @@ from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Termi
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
 from emrg.client.widgets import (
     InputWidget, RewindSelector, SessionSelector, ProjectSelector,
-    TaskSelector, ModelSelector, CommandDropdown, ChatHistory, SelectorState,
-    _COMMAND_HELP,
+    TaskSelector, ModelSelector, SandboxSelector, CommandDropdown, ChatHistory,
+    SelectorState, _COMMAND_HELP,
 )
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import TaskResponse, ToolEnd, ToolStart
 from emrg.sandbox.escalation import APPROVAL_TIMEOUT_SECONDS
+from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.session import generate_session_id
 from emrg.skills.loader import load_skills
 from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
@@ -69,7 +70,8 @@ def _csi_modifier_action(data: bytes) -> str | None:
 
 
 def _format_status_left(
-    title: str, sid: str, model: str = "", vision: bool | None = None
+    title: str, sid: str, model: str = "", vision: bool | None = None,
+    sandbox: str | None = None,
 ) -> str:
     """Format left status: version + session title + short ID + model (+ images).
 
@@ -97,6 +99,13 @@ def _format_status_left(
             parts.append(f"[{model}]")
         else:
             parts.append(f"[{model} {'img' if vision else 'no-img'}]")
+    # The session's sandbox tier, as the daemon reports it (rant 2026-09-30T09:30:16).
+    # Shown on the same rule as `vision`: only once a value arrived, so the segment
+    # stays absent while an older daemon says nothing and the line is unchanged for
+    # a host who never sets a tier. Without it there is no way to see that a tier set
+    # in another client took effect — which is most of what the setting is for.
+    if sandbox:
+        parts.append(f"[{sandbox}]")
     return " ".join(parts)
 
 
@@ -797,10 +806,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     stdin_queue: asyncio.Queue = asyncio.Queue()
 
     def _status_left(
-        title: str, sid: str, model: str = "", vision: bool | None = None
+        title: str, sid: str, model: str = "", vision: bool | None = None,
+        sandbox: str | None = None,
     ) -> str:
         """Format left status: version + session title + short ID + model."""
-        return _format_status_left(title, sid, model, vision)
+        return _format_status_left(title, sid, model, vision, sandbox)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
     # Set from a `done` frame whose `cancelled` field is true, so a receipt that
     # arrives after the ending still finds a turn this client is showing (rant
@@ -823,6 +833,10 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     # Effective image capability, as the daemon reports it (rant 2026-09-17T16:53:02).
     # None until a pong or model_set frame says — an older daemon never does.
     current_vision: bool | None = None
+    # This session's sandbox tier, as the daemon reports it (rant 2026-09-30T09:30:16).
+    # None until the session's snapshot or a `sandbox_set` frame says; this client
+    # never decides it, it only displays what the daemon resolved.
+    current_sandbox: str | None = None
 
     def _narrate_the_stop() -> None:
         """Say that the turn stopped, from whichever frame made that knowable.
@@ -852,7 +866,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         status.update(center=_last_center)
         chat.dirty = True; term.render()
 
-    status = StatusLine(left=_status_left(session_title, session_id, current_model, current_vision), center="connecting...")
+    status = StatusLine(left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox), center="connecting...")
     inp = InputWidget(); chat = ChatHistory()
     term.mount(status=status, composer=inp, chat=chat)
 
@@ -936,6 +950,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     delete_sel = SelectorState()
     project_sel = SelectorState()
     model_sel = SelectorState()
+    sandbox_sel = SelectorState()
     rewind_sel = SelectorState()
     task_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
@@ -984,7 +999,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
         nonlocal turn_ended_cancelled, cancel_receipt_held
-        nonlocal current_model, current_vision
+        nonlocal current_model, current_vision, current_sandbox
         nonlocal _last_center, _elapsed_task, conn
         nonlocal _request_start, turn_running
         # /task-session: the daemon's verdict on a task's session decides whether
@@ -1060,7 +1075,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         import emrg
                         ver = getattr(emrg, "__version__", "dev")
                         chat.add("system", f"EMRG {ver}  |  {server_id}\nType /help for shortcuts, or just start chatting.")
-                    status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id)
+                    status.update(left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox), center=server_id)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     term.render(); continue
 
@@ -1229,6 +1244,19 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # broadcasts no receipt of its own — and print an interruption under
                     # that turn instead.
                     cancel_receipt_held = False
+                    # The tier this turn runs at travels with the frame (rant
+                    # 2026-09-30T09:30:16): a session nobody has set a tier on
+                    # still shows what its turns are confined to, and a change made
+                    # in another client lands here on the next turn as well as in
+                    # the `sandbox_set` broadcast. Display only — the daemon resolved
+                    # it, and this client never decides a tier.
+                    sandbox_now = data.get("sandbox")
+                    if sandbox_now and sandbox_now != current_sandbox:
+                        current_sandbox = sandbox_now
+                        status.update(
+                            left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox),
+                            center=_last_center,
+                        )
                     started = turn_start_instant(data)
                     if started is not None:
                         _request_start = started
@@ -1343,10 +1371,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             new_sid = generate_session_id(Path(cwd))
                             session_id = new_sid
                             session_title = ""
+                            # A brand-new session has no tier of its own yet: the
+                            # previous session's must not be shown against it (the
+                            # next turn's `turn_start` says what it really runs at).
+                            current_sandbox = None
                             chat.rows.clear()
                             chat.dirty = True
                             chat.add("system", f"Created new session {new_sid} — continue chatting.")
-                            status.update(left=_status_left("", new_sid, current_model, current_vision), center=server_id or "emrg")
+                            status.update(left=_status_left("", new_sid, current_model, current_vision, current_sandbox), center=server_id or "emrg")
                             term.set_title(f"{new_sid} @ {project_name}")
                             msg_count = 0
                             _update_left_extra()
@@ -1551,7 +1583,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             f"Resumed session {pending_sid}{title_extra} "
                             f"({count} messages, "
                             f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
-                        status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id or "emrg")
+                        status.update(left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox), center=server_id or "emrg")
                         term.set_title(f"{session_title or pending_sid} @ {project_name}")
                         _update_left_extra()
                         term.render()
@@ -1638,7 +1670,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     if current_vision is not None:
                         vision_note = f" (images: {'yes' if current_vision else 'no'})"
                     chat.add("system", f"config.toml reloaded: {moved}{vision_note}")
-                    status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id)
+                    status.update(left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox), center=server_id)
                     term.render()
                     continue
 
@@ -1670,7 +1702,34 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                                  f" (context: {ctx_win:,}{vision_note})")
                         # Track model independently and refresh the left section
                         current_model = model_name
-                        status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id)
+                        status.update(left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox), center=server_id)
+                    term.render()
+                    continue
+
+                # Session sandbox tier (rant 2026-09-30T09:30:16). Reached both by
+                # this client's own `/sandbox` and by another client's — the frame
+                # is broadcast, which is what makes a tier set elsewhere visible
+                # here without a reload. Nothing is derived locally: the mode that
+                # arrives is the daemon's, and it is what the status line shows.
+                if data.get("type") == "sandbox_set":
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Sandbox tier failed: {err}")
+                    else:
+                        sid = data.get("session_id", "")
+                        mode = data.get("mode", "")
+                        # Another session's change is not this view's state: the
+                        # daemon broadcasts to every connection, and a client
+                        # watching session B must not relabel session A. The
+                        # status line is about the session on screen, so a foreign
+                        # broadcast is absorbed silently rather than announced.
+                        if not sid or sid == session_id:
+                            current_sandbox = mode
+                            status.update(
+                                left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox),
+                                center=server_id,
+                            )
+                            chat.add("system", f"Sandbox tier set: {mode}")
                     term.render()
                     continue
 
@@ -1842,6 +1901,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # Switch session
                     session_id = new_sid
 
+                    # The session's sandbox tier travels with the same snapshot and
+                    # for the same reason `turn` does (rant 2026-09-30T09:30:16):
+                    # `sandbox_set` is a broadcast that is never replayed, so a
+                    # client opening a session must learn the tier the opener set —
+                    # otherwise the setting is invisible until someone changes it
+                    # again. Reset for every resume: this is the new session's.
+                    current_sandbox = meta.get("sandbox") or None
+
                     # /task-session: the session exists, so the client now moves
                     # into that task's project — before the history replay below,
                     # which reads it from `cwd`.
@@ -1879,7 +1946,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         new_title = data.get("title", "")
                         session_title = new_title
                         chat.add("system", f"Session renamed to: {new_title}")
-                        status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id or "emrg")
+                        status.update(left=_status_left(session_title, session_id, current_model, current_vision, current_sandbox), center=server_id or "emrg")
                         term.set_title(f"{session_title} @ {project_name}")
                     term.render()
                     continue
@@ -2046,8 +2113,8 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, conn, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
         nonlocal turn_ended_cancelled, cancel_receipt_held
-        nonlocal current_model, project_name
-        nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
+        nonlocal current_model, project_name, current_sandbox
+        nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel, sandbox_sel
         nonlocal _task_list_intent, _task_open_pending
         nonlocal _resume_pending_sid
         nonlocal history_index, history_saved_input
@@ -2235,6 +2302,40 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 chat.dirty = True; term.render()
                 return True
             # Ignore other keys when in model selector mode
+            return True
+
+        # ── Sandbox tier selector mode ───────────────────
+        # Rant 2026-09-30T09:30:16. Shaped like the model selector beside it, and
+        # for the same reason: choosing only *sends* the choice, so this list can
+        # never become a second place the tier is stored.
+        if sandbox_sel.active and sandbox_sel.widget:
+            if data == b"\x1b":  # Esc — cancel selection
+                sandbox_sel.active = False
+                chat.add("system", "Sandbox tier selection cancelled.")
+                chat.remove(sandbox_sel.widget)
+                sandbox_sel.widget = None
+                status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if data == b"\r" or data == b"\n":  # Enter — confirm
+                mode = sandbox_sel.widget.selected_mode
+                sandbox_sel.active = False
+                chat.remove(sandbox_sel.widget)
+                sandbox_sel.widget = None
+                if mode:
+                    await conn.send_command(
+                        "set_sandbox", session_id=session_id, cwd=cwd, mode=mode
+                    )
+                    status.update(center=f"setting sandbox tier to {mode}...")
+                else:
+                    chat.add("system", "No sandbox tier selected.")
+                    status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if _handle_selector_nav(data, sandbox_sel.widget):
+                chat.dirty = True; term.render()
+                return True
+            # Ignore other keys while the sandbox picker is open
             return True
 
         # ── Rewind selector mode ──────────────────────────
@@ -2878,6 +2979,29 @@ Streaming
                                                prompt=hint)
                     if was_busy:
                         _queued_sends.append({"id": rid, "prompt": hint, "images": None})
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
+                # Handle /sandbox command (rant 2026-09-30T09:30:16). The same
+                # two shapes as /model: with an argument it sets directly, without
+                # one it opens a picker built from the one mode vocabulary. Both
+                # only send `set_sandbox` — the daemon validates, persists and
+                # broadcasts, and this client keeps no tier of its own.
+                if text.lower().startswith("/sandbox"):
+                    parts = text.split(None, 1)
+                    mode_arg = parts[1].strip() if len(parts) > 1 else ""
+                    if mode_arg:
+                        await conn.send_command(
+                            "set_sandbox", session_id=session_id, cwd=cwd, mode=mode_arg
+                        )
+                        status.update(center=f"setting sandbox tier to {mode_arg}...")
+                    else:
+                        sandbox_sel.widget = SandboxSelector(
+                            list(SANDBOX_MODES), current_sandbox or ""
+                        )
+                        sandbox_sel.active = True
+                        chat.add(sandbox_sel.widget)
+                        status.update(center="select sandbox tier")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
