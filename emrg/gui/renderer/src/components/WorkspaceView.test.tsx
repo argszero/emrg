@@ -5,10 +5,11 @@
  * 类名与 vanilla CSS 一致（Batch 5 复用）。
  */
 import { describe, expect, it, vi } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "../lib/i18n";
 import { WorkspaceView, type WorkspaceViewProps } from "./WorkspaceView";
+import type { MarkdownRenderer } from "../lib/markdown";
 import type { ProjectRec, RantRec, TaskRec } from "../lib/workspaceView";
 
 function setup(props: Partial<WorkspaceViewProps> = {}) {
@@ -40,6 +41,13 @@ const rant = (over: Partial<RantRec> = {}): RantRec => ({
   message: "## 测试 rant\n正文",
   ...over,
 });
+
+/** 假渲染器（rant 2026-09-30T09:06:16 / #1763）：包一层 .md-test 便于断言渲染产物落进 DOM */
+const fakeMd: MarkdownRenderer = {
+  renderMarkdown: async (text) => `<div class="md-test">${text}</div>`,
+  streamProject: () => false,
+  streamFinalize: async () => {},
+};
 
 describe("WorkspaceView", () => {
   it("面板切换：projects/tasks/rants/settings 各自渲染", async () => {
@@ -201,6 +209,42 @@ describe("WorkspaceView", () => {
     expect(screen.getByTestId("rants-empty")).toHaveTextContent("暂无 Rant");
     await userEvent.click(screen.getByText("待处理"));
     expect(screen.getByTestId("rants-empty")).toHaveTextContent("该状态下暂无 Rant");
+  });
+
+  // ── Rant 详情：markdown 渲染 + 两个带标签区块（rant 2026-09-30T09:06:16 / #1763） ──
+  // 回归形态：预处理后的字符串直接落成文本节点，渲染调用丢失 ⇒ .rant-md h4 成死代码。
+
+  it("Rant 详情：有渲染器走 renderMarkdown，无渲染器退回纯文本（不白屏不抛错）", async () => {
+    const rants = [rant({ message: "【现象】\n**加粗**正文" })];
+
+    const plain = setup({ activeView: "rants", rants });
+    await userEvent.click(screen.getByTestId("rant-row"));
+    expect(document.querySelector(".rant-md")).toHaveTextContent("#### 【现象】");
+    expect(document.querySelector(".rant-md .md-test")).toBeNull();
+    plain.unmount();
+
+    setup({ activeView: "rants", rants, renderer: fakeMd });
+    await userEvent.click(screen.getByTestId("rant-row"));
+    await waitFor(() => expect(document.querySelector(".rant-md .md-test")).not.toBeNull());
+    // 渲染器收到的是预处理后的文本（#### 层次依赖 preprocessRantMarkdown 仍生效）
+    expect(document.querySelector(".rant-md .md-test")).toHaveTextContent("#### 【现象】");
+  });
+
+  it("Rant 详情：内容与进度是两个带标签区块，进度全文可见且不带状态词前缀", async () => {
+    const long = Array.from({ length: 6 }, (_, i) => `第 ${i + 1} 行进度`).join("\n");
+    setup({ activeView: "rants", rants: [rant({ status: "completed", progress: long })], renderer: fakeMd });
+    await userEvent.click(screen.getByTestId("rant-row"));
+    const labels = Array.from(document.querySelectorAll(".rant-section-label")).map((el) => el.textContent);
+    expect(labels).toEqual(["内容", "进度"]);
+    // 全文可见（详情不截断），且旧形态的「进行中: 」状态词前缀已去掉
+    expect(screen.getByTestId("rant-progress")).toHaveTextContent("第 6 行进度");
+    expect(screen.getByTestId("rant-progress").textContent).toBe(long);
+  });
+
+  it("Rant 详情：无进度时显式说明（rants.noProgress）", async () => {
+    setup({ activeView: "rants", rants: [rant({ progress: null })] });
+    await userEvent.click(screen.getByTestId("rant-row"));
+    expect(screen.getByTestId("rant-progress")).toHaveTextContent("（无进度说明）");
   });
 
   // ── 项目会话子视图（Batch 5 接线：真实 listProjectSessions 数据） ──

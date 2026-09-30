@@ -708,6 +708,7 @@ export function Shell() {
               onEditTask={(task) => void openTaskForm(task)}
               onDeleteTask={(task) => deleteTask(task)}
               onNewRant={() => void newRant()}
+              renderer={mdRenderer}
             />
           ) : (
             <>

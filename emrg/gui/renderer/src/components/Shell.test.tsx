@@ -491,6 +491,23 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByTestId("rant-row")).toBeInTheDocument());
   });
 
+  it("展开 Rant 行 → 详情走真实 markdown 渲染器（Shell 把渲染器传进 WorkspaceView，rant 2026-09-30T09:06:16）", async () => {
+    // 守卫点：Shell → WorkspaceView → RantList 的 renderer 接线（回归正是断在这里）。
+    // 走真实 createProdMarkdownRenderer（marked/DOMPurify 经 vendorMarkdown 注入），
+    // 因此断言的是真渲染产物：#### 【现象】 → <h4>。
+    const m = mockEmrg();
+    m.listRants.mockResolvedValue([
+      { timestamp: "2026-09-30T09:06:16+08:00", project: "emrg", status: "pending", message: "【现象】\n**加粗**正文" },
+    ]);
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-rants"));
+    await waitFor(() => expect(screen.getByTestId("rant-row")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("rant-row"));
+    await waitFor(() => expect(document.querySelector(".rant-md h4")).not.toBeNull());
+    expect(document.querySelector(".rant-md strong")).not.toBeNull();
+  });
+
   it("进入项目面板 → 加载 listProjects；查看会话 → listProjectSessions 加载会话行", async () => {
     const m = mockEmrg();
     m.listProjects.mockResolvedValue([{ name: "p1", path: "/p/p1" }]);
