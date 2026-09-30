@@ -571,15 +571,20 @@ def rants_path(override: str | None = None) -> Path:
     return Path(raw).expanduser() if raw else DEFAULT_RANTS
 
 
-def load_rants(path: Path) -> set[str]:
-    """Every timestamp the ledger holds, or a `RuntimeError` when it cannot be read.
+def load_rant_rows(path: Path) -> list[dict]:
+    """Every row the ledger holds, in file order, or a `RuntimeError` when it cannot be read.
+
+    The one reader of the ledger's file format. `load_rants` is the set view of it, and
+    `scripts/review-queue.py` is the second consumer (it renders a row per open rant), so
+    the parsing lives here once: a second copy of it is a second answer to "what is a rant
+    row", and the copy that drifts is the one nobody reads.
 
     A store that is missing or unparseable is **not** "a store with no rants in it": the
-    question this answers is *does this handle resolve*, and an unreadable ledger leaves it
-    unanswered. The caller reports that as unmeasurable (exit 2), which is the family's
-    rule and the reason this raises instead of returning an empty set — an empty set would
-    print `origin-unresolved` for every issue on a host whose ledger simply is not there,
-    a confident wrong verdict about a queue that may be perfectly linked.
+    question both consumers ask is about what the ledger *holds*, and an unreadable ledger
+    leaves it unanswered. Callers report that as unmeasurable (exit 2), which is the
+    family's rule and the reason this raises instead of returning an empty list — an empty
+    answer would print `origin-unresolved` for every issue (or "no rants") on a host whose
+    ledger simply is not there, a confident wrong verdict about a queue that may be fine.
 
     Rows are read with `json.loads` per line, the shape `submit_rant` writes
     (`emrg/server/rants.py`). A line that is not JSON is skipped rather than fatal: the
@@ -593,7 +598,7 @@ def load_rants(path: Path) -> set[str]:
         raise RuntimeError(
             f"the rant ledger could not be read ({path}): {exc}"
         ) from exc
-    stamps: set[str] = set()
+    rows: list[dict] = []
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -602,9 +607,22 @@ def load_rants(path: Path) -> set[str]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(row, dict) and isinstance(row.get("timestamp"), str):
-            stamps.add(row["timestamp"])
-    return stamps
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def load_rants(path: Path) -> set[str]:
+    """Every timestamp the ledger holds, or a `RuntimeError` when it cannot be read.
+
+    The set view of `load_rant_rows` — this is the question "does this handle resolve",
+    which wants membership and nothing else.
+    """
+    return {
+        row["timestamp"]
+        for row in load_rant_rows(path)
+        if isinstance(row.get("timestamp"), str)
+    }
 
 
 def _origin_lines(body: str | None) -> list[str]:

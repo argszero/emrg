@@ -1795,3 +1795,59 @@ def test_an_offset_less_origin_is_a_fault_whose_remedy_names_the_spelling(
     assert "#10 issue ORIGIN-UNRESOLVED" in out, out
     detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
     assert stored in detail and "verbatim" in detail, detail
+
+# --- the ledger, the one reader both scripts rest on ------------------------
+#
+# The reader was widened for a second consumer — `scripts/review-queue.py` renders a row
+# per open rant (memory `queue-renders-no-row-for-a-pending-rant.md`) — so what is pinned
+# here is that the file format has **one** answer: the rows view and the set view of one
+# ledger agree, and both keep the distinction the tool's docstring is built on.
+
+
+def _ledger_lines(tmp_path, *lines, name="rants.jsonl"):
+    path = tmp_path / name
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_the_ledger_reader_returns_rows_and_the_set_view_agrees(mod, tmp_path):
+    """Two views of one file, and the set view is *derived* from the rows view: a second
+    parse of the same format is a second answer to "what is a rant row", and the copy
+    that drifts is the one nobody reads."""
+    path = _ledger_lines(
+        tmp_path,
+        json.dumps({"timestamp": "2026-09-30T09:17:54+08:00", "status": "pending"}),
+        "not json at all",
+        json.dumps({"timestamp": "2026-09-30T09:35:04+08:00", "status": "completed"}),
+        json.dumps(["a list, not a row"]),
+        json.dumps({"status": "pending", "no_timestamp": True}),
+        "   ",
+    )
+
+    rows = mod.load_rant_rows(path)
+    assert [row.get("timestamp") for row in rows] == [
+        "2026-09-30T09:17:54+08:00",
+        "2026-09-30T09:35:04+08:00",
+        None,
+    ], rows
+    assert mod.load_rants(path) == {
+        "2026-09-30T09:17:54+08:00",
+        "2026-09-30T09:35:04+08:00",
+    }
+
+
+def test_a_ledger_that_is_not_there_is_not_an_empty_one(mod, tmp_path):
+    """`origin-unresolved` for every issue, or "no rants" for the queue, is a confident
+    wrong verdict about a queue that may be perfectly fine — so the reader raises and the
+    caller reports exit 2."""
+    with pytest.raises(RuntimeError):
+        mod.load_rant_rows(tmp_path / "absent.jsonl")
+
+
+def test_the_ledger_path_is_overridable(mod, monkeypatch):
+    """`--rants`, then `$EMRG_RANTS`, then the host's own store — the order a host with a
+    ledger elsewhere depends on, and the seam `review-queue.py` passes through."""
+    assert mod.rants_path("/tmp/elsewhere.jsonl") == Path("/tmp/elsewhere.jsonl")
+    monkeypatch.setenv("EMRG_RANTS", "/tmp/from-env.jsonl")
+    assert mod.rants_path() == Path("/tmp/from-env.jsonl")
+    assert mod.rants_path("/tmp/wins.jsonl") == Path("/tmp/wins.jsonl")

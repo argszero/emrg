@@ -37,7 +37,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import sys
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -91,6 +93,66 @@ def _load_module():
 @pytest.fixture
 def mod():
     return _load_module()
+
+
+class FakeLedger:
+    """`open_rant_rows` replaced: rows in, rows out, and what it was asked.
+
+    Only the last of that function's three steps is faked. The other two — parsing the
+    ledger's file format, and keeping only the rows whose status is open — are the
+    sibling's, and they are pinned where they live (`tests/test_check_issue_links.py`);
+    a lookalike here would agree with a misreading of the same file. What this file is
+    about is what the queue *does* with those rows.
+    """
+
+    def __init__(self, rows: list | None = None, boom: str | None = None):
+        self.rows = rows if rows is not None else []
+        self.boom = boom
+        self.calls: list[tuple[str | None, str | None]] = []
+
+    def __call__(self, rants=None, repo=None):
+        self.calls.append((rants, repo))
+        if self.boom:
+            raise RuntimeError(self.boom)
+        return self.rows
+
+
+
+def rants_of(mod, monkeypatch, *specs, boom=None):
+    """Install ledger rows on the seam and hand back the fake, for its `calls`.
+
+    Each `spec` is `(timestamp, status)` or `(timestamp, status, issues)` — the shape a
+    caller varies one axis of, so the tests below read as one line each.
+    """
+    rows = []
+    for spec in specs:
+        stamp, status = spec[0], spec[1]
+        issues = list(spec[2]) if len(spec) > 2 else []
+        rows.append(
+            mod.Rant(
+                timestamp=stamp,
+                status=status,
+                message=f"the ledger row for {stamp}",
+                issues=issues,
+            )
+        )
+    fake = FakeLedger(rows, boom)
+    monkeypatch.setattr(mod, "open_rant_rows", fake)
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def _no_ledger_unless_asked(mod, monkeypatch):
+    """Every run reads the rant ledger through the seam, never through the host's file.
+
+    `main` asks "is any rant open?" on **every** invocation now, so without this a test
+    would open `~/.emrg/rants.jsonl` — and, when that file has an open row, make a second
+    `gh api` call for the issues that declare it. A test that measures the machine it runs
+    on is not a test of the tool, and on this host the ledger is *not* empty: the answer
+    would differ between the author's laptop, CI, and the next cycle. The default is the
+    empty ledger; `rants_of` installs rows for the tests that are about them.
+    """
+    monkeypatch.setattr(mod, "open_rant_rows", FakeLedger([]))
 
 
 # --- the two halves, as the siblings answer them ---------------------------
@@ -607,6 +669,7 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
     row = dict(payload[0])
     why = row.pop("why")
     assert row == {
+        "subject": "pr",
         "tree": "/checkout",
         "branch": "some-branch",
         "pr": 1,
@@ -1153,3 +1216,290 @@ def test_the_absent_cycle_note_stays_out_of_the_json_document(mod, monkeypatch, 
     assert payload[0]["vote_window_start"] is None
     assert payload[0]["vote_window_source"] == ""
     assert payload[0]["action"] == "vote"
+
+
+# --- the rows the PR half cannot show --------------------------------------
+#
+# The defect these pin (memory `queue-renders-no-row-for-a-pending-rant.md`, measured
+# 2026-09-29): the reading had no rant input at all, so a cycle that asked it "is there
+# anything to move?" was told `3 PR(s): measure-then-vote 2, park 1` while three pending
+# rants with no issue sat in the ledger. The rows below are the second half of the
+# answer, and the pair that matters is the two `nothing` cases — an empty queue *with* an
+# open rant, and one without — because collapsing those is the whole defect.
+
+
+def test_an_empty_queue_with_an_open_rant_does_not_say_nothing_to_review(
+    mod, monkeypatch, capsys
+):
+    """The trap itself. `nothing to review` is a claim about the whole queue, and the
+    ungated version of this line printed it while unstarted work existed."""
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(mod, monkeypatch, ("2026-09-30T09:17:54+08:00", "pending"))
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "nothing to review" not in out, out
+    assert "1 open rant(s)" in out
+    assert "2026-09-30T09:17:54+08:00" in out
+
+
+def test_an_empty_queue_and_an_empty_ledger_is_nothing_to_review(
+    mod, monkeypatch, capsys
+):
+    """The control on the line above: with no PR and no open rant the sentence is true,
+    so the guard must not be bought by never printing it."""
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "nothing to review" in out
+    assert "open rant(s)" not in out
+
+
+def test_a_pending_rant_is_a_row_with_its_status_and_no_issue(mod, monkeypatch, capsys):
+    """`no issue yet` is R5 seen from the queue's side: the issue and its PR are born
+    together, so a rant row that has neither is the row a cycle must act on first."""
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    rants_of(mod, monkeypatch, ("2026-09-30T09:35:04+08:00", "pending"))
+    _run(mod, monkeypatch, votes, fresh, ["1"])
+    out = capsys.readouterr().out
+
+    assert "rant 2026-09-30T09:35:04+08:00  pending  no issue yet" in out
+    assert "the ledger row for 2026-09-30T09:35:04+08:00" in out
+
+
+def test_a_rant_names_the_issue_that_declares_it(mod, monkeypatch, capsys):
+    """Two numbers mean two issues claim one rant — a duplicate `check-issue-links.py`
+    reports; this row names them all rather than picking one."""
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(mod, monkeypatch, ("2026-09-30T09:30:16+08:00", "in_progress", [1771, 1772]))
+    mod.main([])
+    out = capsys.readouterr().out
+
+    assert "in_progress  #1771, #1772" in out
+
+
+def test_the_rant_rows_are_after_the_pr_rows_and_under_their_own_header(
+    mod, monkeypatch, capsys
+):
+    """A cycle that reads only the `N PR(s)` summary line must not come away thinking the
+    queue was the whole of what is open."""
+    votes, fresh = FakeVotes(reviews=[_review(cycle="cyc1")]), FakeFresh()
+    rants_of(mod, monkeypatch, ("2026-09-30T09:17:54+08:00", "pending"))
+    _run(mod, monkeypatch, votes, fresh, ["1"])
+    out = capsys.readouterr().out
+
+    lines = [line for line in out.splitlines() if line.strip()]
+    pr_row = next(i for i, line in enumerate(lines) if line.startswith("#1 "))
+    header = next(i for i, line in enumerate(lines) if "open rant(s)" in line)
+    assert pr_row < header, out
+    assert "1 PR(s)" in out
+
+
+def test_the_ledger_read_is_spent_only_when_a_rant_is_open(mod, monkeypatch, capsys):
+    """The seam is the tool's own function, so this test also pins the *arguments*: the
+    `--rants` override is what a host with a ledger elsewhere has to be able to move."""
+    fake = rants_of(mod, monkeypatch, ("2026-09-30T09:17:54+08:00", "pending"))
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    mod.main(["--rants", "/somewhere/else.jsonl", "--repo", "owner/repo"])
+    capsys.readouterr()
+
+    assert fake.calls == [("/somewhere/else.jsonl", "owner/repo")]
+
+
+def test_an_unreadable_ledger_is_not_an_empty_one(mod, monkeypatch, capsys):
+    """`no open rants` and `could not read the ledger` are the two answers this file's
+    sibling exists to keep apart, and the empty one is the one a cycle acts on."""
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(mod, monkeypatch, boom="the rant ledger could not be read (/nope.jsonl)")
+    rc = mod.main([])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "could not be read" in captured.err
+    assert "nothing to review" not in captured.out, captured.out
+    assert "open rant(s)" not in captured.out, captured.out
+
+
+def test_an_unreadable_ledger_does_not_erase_the_pr_half(mod, monkeypatch, capsys):
+    """The PR rows are measured before the ledger is opened, so a cycle still gets the
+    half that could be measured — and exit 2, because the other half is not a pass."""
+    votes, fresh = FakeVotes(reviews=[_review(cycle="cyc1")]), FakeFresh()
+    rants_of(mod, monkeypatch, boom="the rant ledger could not be read (/nope.jsonl)")
+    rc = _run(mod, monkeypatch, votes, fresh, ["1"])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "#1 " in captured.out, captured.out
+    assert "could not be read" in captured.err
+
+
+def test_the_json_document_carries_both_subjects_in_one_list(mod, monkeypatch, capsys):
+    """One shape, and `subject` on **every** row: a consumer that had to infer "no `pr`
+    key means a rant" would be reading a shape by absence."""
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    monkeypatch.setattr(mod, "local_tree", lambda: ("/checkout", "some-branch", "b" * 40))
+    rants_of(mod, monkeypatch, ("2026-09-30T09:17:54+08:00", "pending", [1771]))
+    _run(mod, monkeypatch, votes, fresh, ["1", "--json"])
+    out = capsys.readouterr().out
+
+    payload = json.loads(out)
+    assert isinstance(payload, list), type(payload)
+    assert [row["subject"] for row in payload] == ["pr", "rant"], payload
+    rant = payload[-1]
+    assert rant["timestamp"] == "2026-09-30T09:17:54+08:00"
+    assert rant["status"] == "pending"
+    assert rant["issues"] == [1771]
+    assert rant["tree"] == "/checkout"
+    assert rant["branch"] == "some-branch"
+
+
+def test_the_json_document_keeps_its_shape_with_no_rants(mod, monkeypatch, capsys):
+    """The other direction: the list is the document whether or not there are rants, and
+    a rant row is appended to it rather than replacing its shape."""
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    monkeypatch.setattr(mod, "local_tree", lambda: ("/checkout", "some-branch", "b" * 40))
+    _run(mod, monkeypatch, votes, fresh, ["1", "--json"])
+    out = capsys.readouterr().out
+
+    payload = json.loads(out)
+    assert [row["subject"] for row in payload] == ["pr"], payload
+
+
+# --- the body the autouse stub hides ---------------------------------------
+#
+# Everything above replaces `open_rant_rows` wholesale, which is right for testing what the
+# queue *does* with rows — and wrong for the three decisions inside it: which rows are
+# open, whether the issue lookup is spent, and which ledger is read. Those are pinned here
+# against a second import of the tool, because the autouse fixture has already replaced the
+# attribute on the shared module by the time a test body runs.
+
+
+def _fresh_tool():
+    """The tool imported again, under a name of its own.
+
+    A distinct name so this load does not displace the fixture's module in `sys.modules`:
+    `dataclasses` resolves annotations through it at class-creation time, and a missing
+    entry raises an `AttributeError` from inside `dataclasses` itself.
+    """
+    spec = importlib.util.spec_from_file_location("review_queue_real", SCRIPT)
+    tool = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = tool
+    spec.loader.exec_module(tool)
+    return tool
+
+
+class FakeLinks:
+    """`check-issue-links.py` as `open_rant_rows` uses it — ledger and queue, no network.
+
+    The four names this tool reaches for, and nothing else: a wider fake would let the
+    tool call something the real sibling does not have, and the failure would land in the
+    live queue instead of here.
+    """
+
+    def __init__(self, rows, issues=(), path="/tmp/rants.jsonl"):
+        self.rows = rows
+        self.issues = [{"number": n, "body": b} for n, b in issues]
+        self.path = Path(path)
+        self.queue_calls: list[str] = []
+        self.read: Path | None = None
+        self.origins_asked: list[list[dict]] = []
+
+    def rants_path(self, override=None):
+        return Path(override) if override else self.path
+
+    def load_rant_rows(self, path):
+        self.read = path
+        return self.rows
+
+    def load_queue(self, repo):
+        self.queue_calls.append(repo)
+        return types.SimpleNamespace(issues=self.issues)
+
+    def declared_origins(self, issues):
+        """The sibling's reading, as its own tests pin it: the `Origin: rant <ts>` line."""
+        self.origins_asked.append(list(issues))
+        found = {}
+        for issue in issues:
+            stamps = re.findall(r"^Origin: rant (\S+)\s*$", issue["body"], re.M)
+            if stamps:
+                found[int(issue["number"])] = stamps
+        return found
+
+
+def _links(monkeypatch, tool, rows, issues=(), path="/tmp/rants.jsonl"):
+    links = FakeLinks(rows, issues, path)
+    monkeypatch.setattr(tool, "issue_links", lambda: links)
+    return links
+
+
+def _row(stamp, status="pending", message="a rant"):
+    return {"timestamp": stamp, "status": status, "message": message, "project": "emrg"}
+
+
+def test_only_open_rants_become_rows_and_the_newest_is_first(monkeypatch):
+    """`completed` is history (R6's cleanup keeps the ten most recent), so rendering it
+    would bury the work that is actually left — and the order is what a cycle reads first."""
+    tool = _fresh_tool()
+    _links(
+        monkeypatch,
+        tool,
+        [
+            _row("2026-09-30T09:17:54+08:00", "pending"),
+            _row("2026-09-30T09:35:04+08:00", "completed"),
+            _row("2026-09-30T09:30:16+08:00", "in_progress"),
+        ],
+    )
+
+    rows = tool.open_rant_rows(None, tool.REPO)
+
+    assert [row.timestamp for row in rows] == [
+        "2026-09-30T09:30:16+08:00",
+        "2026-09-30T09:17:54+08:00",
+    ], rows
+
+
+def test_the_issue_lookup_is_not_spent_when_no_rant_is_open(monkeypatch):
+    """It costs a `gh` call, and a queue with nothing pending should not pay it. A short
+    circuit written the other way round reads a second endpoint on every run, which is a
+    cost nobody sees and a network dependency on a queue that needs none."""
+    tool = _fresh_tool()
+    links = _links(monkeypatch, tool, [_row("2026-09-30T09:35:04+08:00", "completed")])
+
+    assert tool.open_rant_rows(None, tool.REPO) == []
+    assert links.queue_calls == [], "the queue must not be listed for a closed ledger"
+
+
+def test_an_issue_declaring_a_rant_is_attached_to_that_rants_row(monkeypatch):
+    """The join is by timestamp, per `Origin: rant <ts>` — and an issue naming no rant
+    must not be attached to one by accident of ordering."""
+    tool = _fresh_tool()
+    _links(
+        monkeypatch,
+        tool,
+        [_row("2026-09-30T09:17:54+08:00"), _row("2026-09-30T09:30:16+08:00")],
+        issues=[
+            (1771, "Origin: rant 2026-09-30T09:17:54+08:00\n\nthe body"),
+            (1772, "no origin line here"),
+        ],
+    )
+
+    rows = {row.timestamp: row.issues for row in tool.open_rant_rows(None, tool.REPO)}
+
+    assert rows == {
+        "2026-09-30T09:17:54+08:00": [1771],
+        "2026-09-30T09:30:16+08:00": [],
+    }, rows
+
+
+def test_the_ledger_the_override_names_is_the_one_read(monkeypatch):
+    """`--rants` is the whole of how a host with a ledger elsewhere is reached."""
+    tool = _fresh_tool()
+    links = _links(monkeypatch, tool, [_row("2026-09-30T09:17:54+08:00")])
+
+    tool.open_rant_rows("/elsewhere/rants.jsonl", tool.REPO)
+
+    assert links.read == Path("/elsewhere/rants.jsonl")
+    assert links.queue_calls == [tool.REPO]

@@ -1547,10 +1547,15 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             session_title = meta["title"]
                         else:
                             session_title = ""
+                        # Rant 2026-09-30T10:27:20：提示行同步给出最后活动时刻（选择器行
+                        # 显示的是它）；创建时刻保留在此处，二者不再只有其一可见。
+                        # updated_at 缺失（老 meta）时回退 created_at，不留空串。
+                        _created = str(meta.get("created_at", ""))[:16].replace("T", " ")
+                        _updated = str(meta.get("updated_at") or meta.get("created_at", ""))[:16].replace("T", " ")
                         chat.add("system",
                             f"Resumed session {pending_sid}{title_extra} "
                             f"({count} messages, "
-                            f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
+                            f"created {_created}, updated {_updated})")
                         status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id or "emrg")
                         term.set_title(f"{session_title or pending_sid} @ {project_name}")
                         _update_left_extra()
