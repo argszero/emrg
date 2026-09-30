@@ -167,7 +167,23 @@ TASK_TEMPLATES: dict[str, str] = {
 }
 
 # ── Task CRUD constants (rant 2026-08-12T18:23:15 P2) ─────────────
-TASK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+#
+# 这条规则是**路径安全**规则，不是命名风格规则。任务名同时是文件名与会话 id：
+# `~/.emrg/logs/task-runs/<name>.jsonl`、`<name>.heartbeat.json`、`~/.emrg/next-run/
+# <name>.json`、会话 id `emrg-evolution-{name}`。所以它必须挡住分隔符、跳转、空格与
+# 超长——那些会逃出目录或造出非法文件名。大小写不在其中。
+#
+# 原先只收小写，于是一条**已经在 tasks.yml 里**的记录被加载器每个 tick 拒绝：
+# `OfficeCLI-opensource-task`（宿主照 projects.yml 里真实的项目名 `OfficeCLI` 命名）。
+# 实测 2026-09-30：`~/.emrg/emrgd.log` 里同一条错误 3963 行，06:51:45 首发、11:19:11
+# 仍在发，任务整上午一次没跑——而记录里仍写着 `enabled: true`，因为任务列表就是从
+# 这个文件建的，一个被拒的任务看起来和正在跑的一模一样。同一处校验还挡着 CRUD 的
+# `task_update`，所以宿主连「从 GUI 关掉它」都做不到。
+#
+# 「文件是唯一真源」意味着加载器不得拒绝自己文件里的内容——这正是本条被违反的方式。
+# 模式只写一处，错误信息引用它，免得改了规则而信息仍在说旧规则。
+TASK_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9-]*$"
+TASK_NAME_RE = re.compile(TASK_NAME_PATTERN)
 TASK_NAME_MAX = 32
 MIN_INTERVAL = 60
 DEFAULT_INTERVAL = 1800
@@ -3079,7 +3095,7 @@ class TaskScheduler:
     ) -> str | None:
         """Return an error string, or None when the fields are valid."""
         if not TASK_NAME_RE.match(name) or len(name) > TASK_NAME_MAX:
-            return f"invalid task name {name!r} (^[a-z0-9][a-z0-9-]*$, <= {TASK_NAME_MAX} chars)"
+            return f"invalid task name {name!r} ({TASK_NAME_PATTERN}, <= {TASK_NAME_MAX} chars)"
         if task_type not in TASK_TEMPLATES and task_type not in _custom_templates():
             return f"unknown task type {task_type!r} (not builtin, no custom template)"
         if not project or _resolve_project_path(project) is None:
@@ -3102,8 +3118,15 @@ class TaskScheduler:
         if sandbox is not None and sandbox not in SANDBOX_MODES:
             return False, f"invalid sandbox {sandbox!r} (expected one of {', '.join(SANDBOX_MODES)})"
         tasks = self._read_table()
-        if any(t.get("name") == name for t in tasks):
-            return False, f"task {name!r} already exists"
+        # 名字即文件名与会话 id，而 macOS/Windows 的文件系统不区分大小写：`Foo` 与
+        # `foo` 会写进同一个 `<name>.jsonl`、同一个 `emrg-evolution-{name}` 会话。
+        # 允许大写之后这种重名才可能出现，所以这道唯一性比较必须忽略大小写。
+        if any(str(t.get("name", "")).lower() == name.lower() for t in tasks):
+            return False, (
+                f"task {name!r} already exists (names are compared case-insensitively: "
+                "the name is a file name and a session id, and those are not case-sensitive "
+                "on every platform)"
+            )
         cfg: dict = {"project": project}
         if repo:
             cfg["repo"] = repo
@@ -3208,7 +3231,7 @@ class TaskScheduler:
     def template_create(self, name: str, prompt: str) -> tuple[bool, str]:
         """Create a custom task type template. Returns (ok, error)."""
         if not TASK_NAME_RE.match(name) or len(name) > TASK_NAME_MAX:
-            return False, f"invalid template name {name!r} (^[a-z0-9][a-z0-9-]*$, <= {TASK_NAME_MAX} chars)"
+            return False, f"invalid template name {name!r} ({TASK_NAME_PATTERN}, <= {TASK_NAME_MAX} chars)"
         if name in TASK_TEMPLATES:
             return False, f"builtin task type {name!r} is read-only"
         if not prompt or not prompt.strip():

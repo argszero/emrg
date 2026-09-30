@@ -2555,6 +2555,104 @@ def test_task_create_and_duplicate(tmp_path):
         mod.config_dir = orig
 
 
+def test_a_record_the_file_carries_runs_even_with_uppercase_in_its_name(tmp_path):
+    """The loader must not refuse the content of its own file.
+
+    `OfficeCLI-opensource-task` is the host's real record, named after the project
+    `OfficeCLI` in projects.yml. While the name rule accepted lowercase only, the loader
+    refused it at **every** scheduler tick — measured 2026-09-30: one identical error
+    line ×3963 in `~/.emrg/emrgd.log`, first at 06:51:45 and still firing at 11:19:11, so
+    the task did not run all morning while its record still read `enabled: true`.
+
+    The guard sits on the seam that broke, `_read_own_record` — the one the scheduler
+    calls at each wake — because that is what turned the rule into a dead task. Its
+    second half pins the other direction: a name that is *not* path-safe is still
+    refused, so widening the character class did not widen what may reach the filesystem.
+    """
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import write_table
+
+    mod, orig = _p2_env(tmp_path)
+    try:
+        tasks_yml = tmp_path / "tasks.yml"
+        host_record = {
+            "name": "OfficeCLI-opensource-task",
+            "type": "open-source",
+            "sandbox": "workspace-write",
+            "config": {"project": "OfficeCLI", "role": "contributor"},
+            "interval": 3600,
+            "enabled": True,
+        }
+        write_table([host_record], tasks_yml)
+
+        handler = TaskHandler(name="OfficeCLI-opensource-task", identity=InstanceIdentity())
+        handler._tasks_file = tasks_yml
+        record = handler._read_own_record()
+        assert record is not None, "the loader refused a record its own file carries"
+        assert record["name"] == "OfficeCLI-opensource-task"
+
+        # The other direction: path traversal is still not a task name.
+        write_table([dict(host_record, name="../escape")], tasks_yml)
+        unsafe = TaskHandler(name="../escape", identity=InstanceIdentity())
+        unsafe._tasks_file = tasks_yml
+        assert unsafe._read_own_record() is None
+    finally:
+        mod.config_dir = orig
+
+
+def test_the_name_rule_is_about_the_path_not_the_case(tmp_path):
+    """It refuses what could escape a directory, and nothing else.
+
+    The task name is a file name (`task-runs/<name>.jsonl`, `<name>.heartbeat.json`,
+    `next-run/<name>.json`) and a session id (`emrg-evolution-{name}`), so separators,
+    traversal, spaces, control characters and over-length are unsafe. Case is not: it
+    was never a safety property, and treating it as one killed a live host task.
+    """
+    from emrg.server.scheduler import TASK_NAME_MAX, validate_task_record
+
+    def record(name: str) -> dict:
+        return {"name": name, "type": "evolution", "interval": 60, "config": {}}
+
+    # Accepted — including the host's own name and any other real project name.
+    assert validate_task_record(record("OfficeCLI-opensource-task")) is None
+    assert validate_task_record(record("MixedCase-Task")) is None
+    assert validate_task_record(record("a" * TASK_NAME_MAX)) is None
+
+    # Refused — each would escape a directory, or is not a name at all.
+    for bad in [
+        "",
+        "Bad Name",
+        "../escape",
+        "a/b",
+        "a\\b",
+        "-lead",
+        ".hidden",
+        "emoji🙂",
+        "a" * (TASK_NAME_MAX + 1),
+    ]:
+        assert validate_task_record(record(bad)) is not None, bad
+
+
+def test_task_names_differing_only_in_case_are_the_same_task(tmp_path):
+    """`Foo` and `foo` are one file and one session id on a case-insensitive filesystem.
+
+    Allowing uppercase made this collision reachable, so the uniqueness check — which
+    lives at the write boundary, where a name is chosen — compares case-insensitively.
+    """
+    from emrg.server import scheduler as mod
+
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        ok, _ = sched.task_create("daily", "evolution", "mem", 300)
+        assert ok
+        ok, err = sched.task_create("Daily", "evolution", "mem", 300)
+        assert not ok and "already exists" in err
+    finally:
+        mod.config_dir = orig
+
+
 def test_task_update_and_delete(tmp_path):
     """Update changes fields; delete removes the entry; not-found errors."""
     from emrg.server import scheduler as mod
