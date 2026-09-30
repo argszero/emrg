@@ -6,6 +6,8 @@ ChatHistory, _COMMAND_HELP, and SelectorState.
 
 from __future__ import annotations
 
+import json
+
 from rich.cells import cell_len
 from rich.style import Style
 from emrg.client.python_tui import ChatRow, ToolCard
@@ -355,6 +357,159 @@ class SessionSelector(Widget):
             lines.append(Line(spans=spans, style=ctx.style))
         self._dirty = False
         return lines
+
+
+class ToolSelector(Widget):
+    """Interactive tool-detail picker for Tab — arrow-key navigation + detail pane.
+
+    Rant 2026-09-30T09:17:54 (the host's option C). The collapsed chat row is a
+    tool's name plus the agent's intent; **this** is where the rest is read.
+
+    It exists because in-place expansion cannot work. The terminal's viewport is
+    write-only — `emrg/client/python_tui/terminal.py` draws into native scrollback
+    — so a card that has scrolled past cannot be repainted, which is exactly why
+    the old Tab handler looked like it did nothing: it expanded the *earliest*
+    unexpanded card, and that one is almost always off-screen. A selector
+    re-renders on every keystroke and its output lands at the bottom of the
+    viewport. That is why the detail is drawn *after* the list rather than beside
+    each row, and why the list is windowed: with one line per tool, a session of
+    forty calls would push both the selected row and the detail off the top, which
+    would reproduce the defect this widget replaces.
+
+    It is the only view from which an older tool's output can be read at all, so
+    the detail shows the output to the end rather than a prefix.
+    """
+
+    #: Rows of the list kept on screen. Chosen so the list plus a typical detail
+    #: fit an 80×24 terminal; the selected row is always inside the window.
+    WINDOW = 10
+
+    def __init__(self, cards: list[ToolCard] | None = None):
+        self.cards: list[ToolCard] = list(cards or [])
+        # Open on the most recent call: Tab is pressed about the tool that just
+        # ran, and the older ones are reached with ↑ from there.
+        self.selected_index: int = max(0, len(self.cards) - 1)
+        self._dirty: bool = True
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    @dirty.setter
+    def dirty(self, value: bool) -> None:
+        self._dirty = value
+
+    def move_up(self) -> None:
+        if self.selected_index > 0:
+            self.selected_index -= 1
+            self._dirty = True
+
+    def move_down(self) -> None:
+        if self.selected_index < len(self.cards) - 1:
+            self.selected_index += 1
+            self._dirty = True
+
+    @property
+    def selected_card(self) -> ToolCard | None:
+        if 0 <= self.selected_index < len(self.cards):
+            return self.cards[self.selected_index]
+        return None
+
+    def window(self) -> tuple[int, int]:
+        """The half-open range of card indices on screen, containing the selection."""
+        n = len(self.cards)
+        if n <= self.WINDOW:
+            return 0, n
+        start = min(self.selected_index - self.WINDOW // 2, n - self.WINDOW)
+        start = max(0, start)
+        return start, start + self.WINDOW
+
+    @staticmethod
+    def _duration(card: ToolCard) -> str:
+        return f"{card.elapsed:.1f}s" if card.elapsed else ""
+
+    def render(self, ctx):
+        lines: list[Line] = []
+        pstyle = Style.parse("bold cyan")
+        lines.append(Line(
+            spans=[Span("🔧 ", style="dim"), Span(
+                "Tool details (↑↓/j/k to move, Esc to close):", style="bold"
+            )],
+            style=ctx.style,
+        ))
+        lines.append(Line(
+            spans=[Span("  " + "─" * (ctx.width - 4), style="dim")],
+            style=ctx.style,
+        ))
+
+        start, end = self.window()
+        if start > 0:
+            lines.append(Line(
+                spans=[Span(f"  ↑ {start} more", style="dim")],
+                style=ctx.style,
+            ))
+        for i in range(start, end):
+            card = self.cards[i]
+            duration = self._duration(card)
+            label = f"  {card.icon} {card.name}: {card.command}"
+            if duration:
+                label += f"  ({duration})"
+            if i == self.selected_index:
+                spans = [Span("> ", style=pstyle), Span(label, style=Style(reverse=True))]
+            else:
+                spans = [Span("  ", style="dim"), Span(label, style=ctx.style)]
+            lines.append(Line(spans=spans, style=ctx.style))
+        if end < len(self.cards):
+            lines.append(Line(
+                spans=[Span(f"  ↓ {len(self.cards) - end} more", style="dim")],
+                style=ctx.style,
+            ))
+
+        card = self.selected_card
+        if card is not None:
+            lines.append(Line(spans=[Span("", style=ctx.style)], style=ctx.style))
+            lines.append(Line(
+                spans=[Span("tool:   ", style="dim"), Span(card.name, style=ctx.style)],
+                style=ctx.style,
+            ))
+            lines.append(Line(
+                spans=[Span("input:  ", style="dim")],
+                style=ctx.style,
+            ))
+            for input_line in _format_tool_input(card.arguments):
+                lines.append(Line(
+                    spans=[Span(f"    {input_line}", style="dim")],
+                    style=ctx.style,
+                ))
+            lines.append(Line(spans=[Span("output: ", style="dim")], style=ctx.style))
+            output = card.output or ""
+            if not output.strip():
+                lines.append(Line(
+                    spans=[Span("    (no output yet)", style="dim")],
+                    style=ctx.style,
+                ))
+            else:
+                # The whole output, not a prefix: with in-place expansion gone
+                # this is the only place a tool's result can be read.
+                for output_line in output.split("\n"):
+                    lines.append(Line(
+                        spans=[Span(f"    {output_line}", style=ctx.style)],
+                        style=ctx.style,
+                    ))
+
+        self._dirty = False
+        return lines
+
+
+def _format_tool_input(arguments: dict) -> list[str]:
+    """A tool call's arguments as readable lines for the detail pane."""
+    if not arguments:
+        return ["(none)"]
+    try:
+        text = json.dumps(arguments, indent=2, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(arguments)
+    return text.split("\n")
 
 
 class ProjectSelector(Widget):
@@ -737,6 +892,20 @@ class ChatHistory(Widget):
     def last_tool_card(self):
         for row in reversed(self.rows):
             if isinstance(row, ToolCard):
+                return row
+        return None
+
+    def tool_card_by_id(self, tool_call_id: str) -> ToolCard | None:
+        """The card for a specific tool call, or None.
+
+        Position is not an identity: concurrent calls stack, and a replay pairs a
+        result with the call it answers rather than with whatever came last
+        (rant 2026-09-30T09:17:54).
+        """
+        if not tool_call_id:
+            return None
+        for row in reversed(self.rows):
+            if isinstance(row, ToolCard) and row.tool_call_id == tool_call_id:
                 return row
         return None
 
