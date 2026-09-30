@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../lib/i18n";
+import type { MarkdownRenderer } from "../lib/markdown";
+import { MarkdownText } from "./MarkdownText";
 import { SettingsPanel } from "./SettingsPanel";
 import { sessionRowView, type SessionRow } from "../lib/openSession";
 import {
@@ -54,6 +56,11 @@ export interface WorkspaceViewProps {
   /** 任务面板「打开会话」（vanilla #924：switchSession 到任务所属会话，无 session_id 时按钮禁用） */
   onOpenSessionTask?: (task: TaskRec) => void;
   onNewRant?: () => void;
+  /**
+   * markdown 渲染器（Shell 注入 createProdMarkdownRenderer，与 TranscriptView 同一实例）。
+   * 缺省 ⇒ Rant 详情退回纯文本（vanilla else 分支语义），不白屏、不抛错。
+   */
+  renderer?: MarkdownRenderer;
 }
 
 const RANT_FILTERS: { value: RantFilter; labelKey: string }[] = [
@@ -83,6 +90,7 @@ export function WorkspaceView({
   onDeleteTask,
   onOpenSessionTask,
   onNewRant,
+  renderer,
 }: WorkspaceViewProps) {
   const { t } = useI18n();
   const [rantFilter, setRantFilter] = useState<RantFilter>("");
@@ -200,6 +208,7 @@ export function WorkspaceView({
               rants={filteredRants}
               filter={rantFilter}
               t={t}
+              renderer={renderer}
               expanded={expandedRant}
               onToggle={(key) => setExpandedRant(expandedRant === key ? null : key)}
             />
@@ -423,12 +432,14 @@ function RantList({
   rants,
   filter,
   t,
+  renderer,
   expanded,
   onToggle,
 }: {
   rants: RantRec[];
   filter: RantFilter;
   t: (k: string, v?: Record<string, unknown>) => string;
+  renderer?: MarkdownRenderer;
   expanded: string | null;
   onToggle: (key: string) => void;
 }) {
@@ -463,9 +474,29 @@ function RantList({
             {isExpanded && (
               <div className="rant-detail" style={{ padding: "6px 8px", borderTop: "1px solid var(--border)", fontSize: "var(--fs-secondary)" }}>
                 <div className="rant-meta">{ts} · {r.project || "—"} · {st.text}</div>
-                <div className="msg-body rant-md">{preprocessRantMarkdown(r.message)}</div>
-                <div className="rant-progress">
-                  {r.progress ? `${t("rants.statusInProgress")}: ${r.progress}` : t("rants.noProgress")}
+                <div className="rant-section">
+                  <div className="rant-section-label">{t("rants.colContent")}</div>
+                  {/* markdown 渲染（rant 2026-09-30T09:06:16 / #1763）：preprocessRantMarkdown 的
+                      #### 层次必须经渲染器才成立；无渲染器时退回纯文本（vanilla else 分支）。 */}
+                  <div className="msg-body rant-md" data-testid="rant-content">
+                    {renderer ? (
+                      <MarkdownText
+                        text={preprocessRantMarkdown(r.message)}
+                        md={renderer}
+                        stripMark={false}
+                        className="rant-md-html"
+                        plainClassName="rant-md-plain"
+                      />
+                    ) : (
+                      preprocessRantMarkdown(r.message)
+                    )}
+                  </div>
+                </div>
+                <div className="rant-section">
+                  <div className="rant-section-label">{t("rants.colProgress")}</div>
+                  <div className="rant-progress" data-testid="rant-progress">
+                    {r.progress ? String(r.progress) : t("rants.noProgress")}
+                  </div>
                 </div>
               </div>
             )}
