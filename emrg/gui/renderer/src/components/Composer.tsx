@@ -12,10 +12,14 @@ import {
   queueSend,
   imagePlaceholder,
   toSafeImageLabel,
+  collectImageFiles,
+  declaredTypes,
+  declaresImageOrFile,
   normalizePlaceholders,
   resolveSendImages,
   type CmdMenuState,
   type ImageAttach,
+  type ImageCarrier,
 } from "../lib/composer";
 import { genRequestId } from "../lib/utils";
 import { useI18n } from "../lib/i18n";
@@ -80,6 +84,12 @@ export interface ComposerProps {
   sendMessage?: (opts: SendOptions) => Promise<SendResult>;
   /** 注入图片落盘函数（默认 window.emrg.saveImage；测试传假实现） */
   saveImage?: (payload: SaveImagePayload) => Promise<SaveImageResult>;
+  /**
+   * 注入日志函数（默认 preload 的 window.emrg.log → ~/.emrg/emrg-gui.log）。
+   * 图片路径的每一次成功/拒绝都要留痕（rant 2026-09-30T09:35:04 要求 3）：
+   * 该功能上线至今 IPC 一次没被走到，而日志里查不出为什么——因为拒绝全被吞了。
+   */
+  logLine?: (level: string, msg: string) => void;
   /** 注入中断函数（默认 window.emrg.cancel；busy 时发送按钮切换为停止按钮，rant 2026-09-02T20:30:05） */
   cancel?: (sessionId: string) => Promise<unknown>;
   /** / 指令路由回调（Batch 5 接线：/clear /model /memory …） */
@@ -134,6 +144,7 @@ export function Composer({
   busy: busyProp,
   sendMessage: send,
   saveImage: saveImageProp,
+  logLine: logLineProp,
   cancel: cancelProp,
   onCommand,
   editorRef,
@@ -210,6 +221,26 @@ export function Composer({
         ?.saveImage?.(payload) ?? Promise.reject(new Error("window.emrg.saveImage unavailable")));
   const saveRef = useRef(saveFn);
   saveRef.current = saveFn;
+  // 日志桥（rant 2026-09-30T09:35:04 要求 3）：默认 preload 的 window.emrg.log；
+  // 缺失时静默降级（jsdom / 预览环境不能因此崩溃）
+  const logFn =
+    logLineProp ??
+    ((level: string, msg: string) => {
+      try {
+        (window as unknown as { emrg?: { log?: (l: string, m: string) => void } }).emrg?.log?.(level, msg);
+      } catch {
+        /* 日志失败不得影响输入 */
+      }
+    });
+  const logRef = useRef(logFn);
+  logRef.current = logFn;
+  /** 图片路径的可见拒绝（rant 要求 3：每次拒绝都要看得见，且有对称的日志行） */
+  const [imageNotice, setImageNotice] = useState<string | null>(null);
+  const refuseImage = (key: string, params?: Record<string, unknown>): void => {
+    const msg = tRef.current(key, params);
+    setImageNotice(msg);
+    logRef.current("warn", `[composer:image] refused: ${msg}`);
+  };
   // tiptap 一次性闭包内读写 editor 的桥（editor 变量在 useEditor 之后才声明）
   const editorBoxRef = useRef<Editor | null>(null);
 
@@ -291,14 +322,19 @@ export function Composer({
       transformPastedHTML: (html) => DOMPurify.sanitize(html),
       // rant 2026-09-02T15:23:53：剪贴板图片粘贴——同带 text/plain 先插文本
       // （对齐 TUI「文本粘贴后追加图」），图片逐张走「附加图片」落盘 + 占位符
+      // rant 2026-09-30T09:35:04：①两个面都取（files + items），②拒绝出声
       handlePaste: (_view, event) => {
-        const cd = event.clipboardData;
+        const cd = event.clipboardData as unknown as ImageCarrier | null;
         if (!cd) return false;
-        const files = Array.from(cd.files || []);
-        const imgs = files.filter((f) => f.type && f.type.startsWith("image/"));
-        if (imgs.length === 0) return false;
+        setImageNotice(null);
+        const imgs = collectImageFiles(cd);
+        const types = declaredTypes(cd);
+        if (imgs.length === 0) {
+          if (declaresImageOrFile(types)) refuseImage("composer.imageReasonEmpty", { types: types.join(", ") });
+          return false;
+        }
         event.preventDefault();
-        const text = cd.getData("text/plain");
+        const text = (cd as unknown as DataTransfer).getData("text/plain");
         const ed = editorBoxRef.current;
         if (text && ed) {
           const from = ed.state.selection.from;
@@ -311,11 +347,10 @@ export function Composer({
       },
       // rant 2026-09-02T15:23:53：拖拽图片文件进输入区
       handleDrop: (_view, event) => {
-        const dt = event.dataTransfer;
+        const dt = event.dataTransfer as unknown as ImageCarrier | null;
         if (!dt) return false;
-        const files = Array.from(dt.files || []);
-        if (files.length === 0) return false;
-        const imgs = files.filter((f) => f.type && f.type.startsWith("image/"));
+        setImageNotice(null);
+        const imgs = collectImageFiles(dt);
         if (imgs.length === 0) return false;
         event.preventDefault();
         attachRef.current(imgs, null);
@@ -563,16 +598,29 @@ export function Composer({
   async function attachImages(files: File[], at?: number | null): Promise<void> {
     const ed = editorBoxRef.current;
     const sid = sidRef.current;
-    if (!ed || !sid) return;
+    if (!ed || !sid) {
+      refuseImage("composer.imageReasonNoSession");
+      return;
+    }
     const imgs = files.filter((f) => f.type && SUPPORTED_IMAGE_MIME.has(f.type.toLowerCase()));
+    const rejected = files.filter((f) => !f.type || !SUPPORTED_IMAGE_MIME.has(f.type.toLowerCase()));
+    if (rejected.length > 0) {
+      // 系统给什么就得能看到什么（rant 要求 4）：被白名单拒绝的如实说出类型，
+      // 而不是静默丢弃 —— macOS 菜单栏给的 TIFF 正是此前无声消失的那一类
+      refuseImage("composer.imageReasonType", {
+        types: rejected.map((f) => f.type || "(no type)").join(", "),
+      });
+    }
     if (imgs.length === 0) return;
+    logRef.current("info", `[composer:image] attach ${imgs.length} file(s): ${imgs.map((f) => f.type).join(", ")}`);
     let pos = at ?? ed.state.selection.from;
     for (const file of imgs) {
       const mime = file.type.toLowerCase();
       let b64: string;
       try {
         b64 = await fileToBase64(file);
-      } catch {
+      } catch (err) {
+        refuseImage("composer.imageReasonRead", { msg: String((err as Error)?.message ?? err) });
         continue;
       }
       const n = pendingRef.current.length + 1;
@@ -581,14 +629,17 @@ export function Composer({
       let res: SaveImageResult;
       try {
         res = await saveRef.current({ sessionId: sid, data: b64, label: display, mime });
-      } catch {
-        continue; // 落盘失败（无会话/类型不支持/超限）→ 跳过，不插幽灵占位符
+      } catch (err) {
+        // 落盘失败（无会话/类型不支持/超限）——说清是哪一条，并留一行对称的日志
+        refuseImage("composer.imageReasonSave", { msg: String((err as Error)?.message ?? err) });
+        continue;
       }
       const placeholder = imagePlaceholder(display);
       insertRawText(placeholder, pos);
       pos += placeholder.length;
       pendingRef.current = [...pendingRef.current, { path: res.path, label: placeholder, mime: res.mime || mime }];
       setPending(pendingRef.current);
+      logRef.current("info", `[composer:image] attached ${res.path}`);
     }
     ed.commands.focus();
   }
@@ -607,10 +658,10 @@ export function Composer({
       }}
       onDrop={(e) => {
         if (e.defaultPrevented) return; // tiptap handleDrop 已处理（编辑器内）
-        const dt = e.dataTransfer;
+        const dt = e.dataTransfer as unknown as ImageCarrier | null;
         if (!dt) return;
-        const files = Array.from(dt.files || []);
-        const imgs = files.filter((f) => f.type && f.type.startsWith("image/"));
+        setImageNotice(null);
+        const imgs = collectImageFiles(dt);
         if (!imgs.length) return;
         e.preventDefault();
         attachRef.current(imgs, null);
@@ -711,6 +762,11 @@ export function Composer({
           </button>
         )}
       </div>
+      {imageNotice ? (
+        <div className="composer-notice" role="alert" data-testid="composer-image-notice">
+          {imageNotice}
+        </div>
+      ) : null}
       <LinkDialog
         open={linkDialogOpen}
         currentHref={linkHref}
