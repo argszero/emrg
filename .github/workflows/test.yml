@@ -148,3 +148,22 @@ jobs:
           bash "$STAGE/gen.sh"
           command -v iscc >/dev/null 2>&1 || { echo "::error::iscc not on PATH (runner image regression)"; exit 1; }
           iscc "$STAGE/emrg.iss"
+          # R131（rant 2026-09-30T11:43:44）：元数据必须**真的编译进产物**，所以这条断言
+          # 读的是 iscc 刚写出的 exe 的版本资源，不是 .iss 的文本 —— 读文本只能证明写了
+          # 指令。缺任一项即失败：一个字段为空的 exe 就是当初被判
+          # Trojan:Win32/Sabsik.FL.A!ml 的那种匿名自解压包，也是 SignPath 拒收的形态。
+          EXE="$STAGE/dist/artifacts/EMRG-$VERSION-windows-x64.exe"
+          test -f "$EXE" || { echo "::error::iscc did not produce $EXE"; exit 1; }
+          powershell -NoProfile -Command "
+            \$v = (Get-Item -LiteralPath '$STAGE_WIN/dist/artifacts/EMRG-$VERSION-windows-x64.exe').VersionInfo
+            \$missing = @()
+            if (-not \$v.CompanyName) { \$missing += 'CompanyName' }
+            if (-not \$v.ProductName) { \$missing += 'ProductName' }
+            if (-not \$v.FileDescription) { \$missing += 'FileDescription' }
+            if (-not \$v.FileVersion) { \$missing += 'FileVersion' }
+            if (\$missing.Count) {
+              Write-Host \"::error::exe version resource is missing: \$(\$missing -join ', ')\"
+              exit 1
+            }
+            Write-Host \"version resource OK: \$(\$v.CompanyName) / \$(\$v.ProductName) / \$(\$v.FileDescription) / \$(\$v.FileVersion)\"
+          "

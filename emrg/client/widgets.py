@@ -576,8 +576,75 @@ class ProjectSelector(Widget):
         return lines
 
 
-TASK_SELECTOR_TITLES: dict[str, str] = {
-    # Rant 2026-09-17T18:36:08: the same list serves two commands, and the title
+class SandboxSelector(Widget):
+    """Interactive sandbox-tier picker — the TUI's `/sandbox` entry point.
+
+    Rant 2026-09-30T09:30:16. The options are the daemon's mode vocabulary, held
+    locally only so the list can be drawn without a round trip: picking one sends
+    `set_sandbox` to the daemon, which validates it and persists it. Nothing here
+    decides a tier — the same rule as the model picker, which also only names a
+    choice.
+    """
+
+    def __init__(self, modes: list[str] | None = None, current: str = ""):
+        self.modes: list[str] = list(modes or [])
+        self.current: str = current
+        self.selected_index: int = 0
+        self._dirty: bool = True
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    @dirty.setter
+    def dirty(self, value: bool) -> None:
+        self._dirty = value
+
+    def move_up(self) -> None:
+        if self.selected_index > 0:
+            self.selected_index -= 1
+            self._dirty = True
+
+    def move_down(self) -> None:
+        if self.selected_index < len(self.modes) - 1:
+            self.selected_index += 1
+            self._dirty = True
+
+    @property
+    def selected_mode(self) -> str | None:
+        if 0 <= self.selected_index < len(self.modes):
+            return self.modes[self.selected_index]
+        return None
+
+    def render(self, ctx):
+        lines: list[Line] = []
+        pstyle = Style.parse("bold cyan")
+        lines.append(Line(
+            spans=[Span("○ ", style="dim"),
+                   Span("Select this session's sandbox tier (↑↓/j/k to move, Enter to confirm, Esc to cancel):",
+                        style="bold")],
+            style=ctx.style,
+        ))
+        for i, mode in enumerate(self.modes):
+            label = f"  {mode}"
+            if mode == self.current:
+                label += "  (current)"
+            if i == self.selected_index:
+                spans = [
+                    Span("> ", style=pstyle),
+                    Span(label, style=Style(reverse=True)),
+                ]
+            else:
+                spans = [
+                    Span("  ", style=ctx.style),
+                    Span(label, style=ctx.style),
+                ]
+            lines.append(Line(spans=spans, style=ctx.style))
+        self._dirty = False
+        return lines
+
+
+TASK_SELECTOR_TITLES: dict[str, str] = {    # Rant 2026-09-17T18:36:08: the same list serves two commands, and the title
     # is the only thing that tells the host which one they are in the middle of —
     # Enter means "trigger this task" in one and "open this task's session" in
     # the other. Derived from `intent` rather than passed alongside it, so the
@@ -755,6 +822,7 @@ _COMMAND_HELP: dict[str, str] = {
     "/clear":    "Clear current session history and start fresh",
     "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
     "/model":    "Switch LLM model [/model | /model <name>]",
+    "/sandbox":  "Set this session's sandbox tier [/sandbox | /sandbox <mode>]",
     "/trigger":  "List or manually trigger scheduled tasks [/trigger | /trigger <name>]",
     "/task-session": "Open a scheduled task's session (no args = interactive picker)",
     "/skills":   "List loaded skills (user + project)",

@@ -11,6 +11,8 @@
  * - sendCommand：payload（type + params）；cancel 无多余字段（G24）
  * - 帧分类（G21+G58）：tool_start/tool_end/delta/done/cancelled/error/pong/
  *   list_result/command_result 各帧正确分类
+ * - turn 生命周期广播（rant 2026-09-30T09:47:11）：turn_start/turn_end 转发到
+ *   渲染层而非落进兜底；兜底日志以 `type=` 开头（可 grep 计数）
  * - 命令-响应配对（G93+G103）：配对 resolve / 超时 reject / error FIFO reject /
  *   无未决 error → 广播事件
  * - 分组生命周期（G83+G104）：tool_start/delta 建组 → done 清理；>20 丢最老
@@ -758,6 +760,48 @@ test("帧分类（G21+G58）：各帧事件分发正确", async () => {
   // resume_result/model_set/session_deleted 落 command_result
   const cmd = seen.filter(([t]) => t === "command_result");
   assert.strictEqual(cmd.length, 3);
+});
+
+test("rant 2026-09-30T09:47:11：turn_start/turn_end 广播转发（GUI 会话计时基准）", async () => {
+  // 这个 bug 的形状是「daemon 发了、渲染层要了、中间层丢了」：`turn_start`/`turn_end`
+  // 落进 `_classify` 的兜底分支，只记日志、不发事件 —— 于是 `daemonBridge.ts` 的
+  // `case "turn_start"/"turn_end"` 永不触发，会话计时既起不来也清不掉。
+  // 实测（`~/.emrg/emrg-gui.log`）：turn_start 丢 703、turn_end 丢 704。
+  // 守卫就放在断掉的那道缝上（`_classify`），所以假 logger 的 warn 是断言的一半。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const STARTED = 1756785600.5;
+  send({ type: "turn_start", session_id: "s1", started_at: STARTED });
+  send({ type: "turn_end", session_id: "s1" });
+
+  // ① 按原名转发 —— 渲染层 switch 的就是这两个名字
+  assert.deepStrictEqual(seen.map(([t]) => t), ["turn_start", "turn_end"]);
+  // ② 负载原样带过去：秒 → 毫秒的换算在渲染层，中间层不做二次解释
+  assert.strictEqual(seen[0][1].started_at, STARTED);
+  assert.strictEqual(seen[0][1].session_id, "s1");
+  assert.strictEqual(seen[1][1].session_id, "s1");
+  // ③ 不再落入兜底（「只记日志、不发事件」正是本 bug 的形状）
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
+test("兜底日志以 type= 开头——下次可 grep 计数，不必从截断 JSON 里抠类型", async () => {
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  // 别的会话发出的命令回执：daemon 广播给全部订阅者（daemon.py:1518），
+  // 本连接既不认领也不该转发 —— 落到兜底是**预期**的，但它必须留痕。
+  send({ type: "templates_list", templates: [] });
+  // 连 type 都没有的帧（老 `error` FIFO 之外的裸帧）：也要能说出是哪种
+  send({ nothing: 1 });
+  assert.strictEqual(warned.length, 2);
+  assert.match(warned[0], /unknown frame type=templates_list/);
+  assert.match(warned[1], /unknown frame type=<no-type>/);
 });
 
 test("命令-响应配对（G93）：list_sessions → sessions_list resolve", async () => {

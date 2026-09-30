@@ -73,6 +73,7 @@ from emrg.server.git_utils import (
 )
 from emrg.sandbox import escalation
 from emrg.sandbox.policy import DEFAULT_MODE as DEFAULT_SANDBOX_MODE
+from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.server import content_risk_probe
 from emrg.server.tool_types import ToolResult
 from emrg.memory import (
@@ -89,6 +90,39 @@ from emrg.protocol import (
     TaskRequest,
 )
 from emrg.session import Session, last_n_messages, records_to_messages
+
+
+# ── 会话级 sandbox 档位（rant 2026-09-30T09:30:16）─────────────────────
+#: The tier a turn that a **client** started runs at when neither the session
+#: nor the message declared one — the host's ruling B (2026-09-30T09:29).
+#:
+#: Deliberately *not* ``policy.DEFAULT_MODE``, and it must never become it: that
+#: constant stays ``danger-full-access``, pinned by ``tests/test_bash_v2_policy.py``
+#: and by the upgrade session's own pins. Silence carries two meanings here, by
+#: design. For an agent session nobody asked to confine, the host ruled the
+#: fail-safe is confinement. For the one session that must write outside its own
+#: cwd — the auto-upgrade — silence resolving to ``policy.DEFAULT_MODE`` is a
+#: *deployment* decision its consumer declared (rant 2026-09-23T21:46:12;
+#: confining it instead cost 23 attempts / 132 minutes / zero bytes written), so
+#: this default is applied only where a client's turn begins and never inside
+#: the injection rule that every path shares.
+SESSION_DEFAULT_SANDBOX_MODE = "workspace-write"
+
+
+def resolve_client_tier(session, req_sandbox: str | None = None) -> str:
+    """The sandbox tier a turn that a client started in ``session`` runs at.
+
+    The session is the source of truth (rant 2026-09-30T09:30:16): a tier set on
+    it wins, the tier the message itself carried is the fallback an older client
+    still relies on, and only when neither says anything does the ruling's
+    default apply.
+
+    Called where a client's turn *begins* — the one place that knows the turn is
+    a client's — rather than inside ``_inject_tool_arguments``, which the
+    scheduler's task turns and the upgrade session also pass through and whose
+    tiers must stay their own (a scheduled task keeps its ``tasks.yml`` tier).
+    """
+    return getattr(session, "sandbox", None) or req_sandbox or SESSION_DEFAULT_SANDBOX_MODE
 
 # ── 日志脱敏（rant 2026-08-06T10:21:26）────────────────────────────
 # tool call 参数可能含 api_key/token/authorization/password 等敏感字段，
@@ -1424,6 +1458,12 @@ class EmrgServer:
                             _cancel_event.set()
                         _tool_task.cancel()
                     session = self._get_or_create_session(session_id, Path(cwd))
+                    # The turn's tier is the **session's** (rant 2026-09-30T09:30:16):
+                    # resolved here, where the turn begins as a client's, and carried
+                    # on the request the loop reads — the injection rule
+                    # (`_inject_tool_arguments`) is shared with the scheduler's turns
+                    # and the upgrade session, whose tiers must stay their own.
+                    req.sandbox = resolve_client_tier(session, req.sandbox)
                     # Rant 2026-08-24T10:48:50: tag this task's context with the
                     # session label so the emrgd.log [session] column attributes
                     # every tool-loop line (task received / round / LLM stream /
@@ -2916,6 +2956,14 @@ class EmrgServer:
                 return
             await self._handle_set_model(model_name, ws)
 
+        elif msg_type == "set_sandbox":
+            await self._handle_set_sandbox(
+                msg.get("session_id", ""),
+                msg.get("cwd", ""),
+                msg.get("mode", ""),
+                ws,
+            )
+
         elif msg_type == "list_projects":
             await self._handle_list_projects(ws)
 
@@ -3459,6 +3507,13 @@ class EmrgServer:
             "type": "turn_start",
             "session_id": session_id,
             "started_at": started_at,
+            # The tier this turn actually runs at (rant 2026-09-30T09:30:16),
+            # resolved by the caller that started it: a client's turn from its
+            # session, a scheduled task's from its record, the upgrade session's
+            # from its declared silence. It rides this frame so a client can show
+            # the truth without asking — and so a session nobody has set a tier on
+            # still shows the tier its turns are running at, rather than nothing.
+            "sandbox": req.sandbox,
         })
         normal_end = False
         # What ended the turn, when nothing below the wrapper did. A `BaseException`
@@ -5768,6 +5823,47 @@ class EmrgServer:
         # The requester already got model_set above; exclude it from _broadcast_all.
         await self._broadcast_all(frame, exclude=ws)
 
+    async def _handle_set_sandbox(
+        self, session_id: str, cwd: str, mode: str, ws
+    ) -> None:
+        """Set a session's sandbox tier — the daemon is the only writer.
+
+        Rant 2026-09-30T09:30:16: a client is an entry point and a display,
+        never a place the tier lives. Both clients send this one command, the
+        daemon persists it into the session's ``meta.json`` and broadcasts the
+        result, which is the whole mechanism behind "set it on one client and
+        every client sees it at once".
+
+        Two refusals, and both are reported rather than silently ignored: a
+        request missing the session identity cannot be persisted anywhere, and a
+        mode outside ``SANDBOX_MODES`` is refused **before** the write, so a typo
+        never becomes a stored tier that every later turn inherits.
+        """
+        if not session_id or not cwd:
+            await self._send(ws, {
+                "type": "sandbox_set",
+                "error": "set_sandbox requires session_id and cwd",
+            })
+            return
+        if mode not in SANDBOX_MODES:
+            await self._send(ws, {
+                "type": "sandbox_set",
+                "session_id": session_id,
+                "error": (
+                    f"unknown sandbox mode {mode!r} "
+                    f"(expected one of {', '.join(SANDBOX_MODES)})"
+                ),
+            })
+            return
+        session = self._get_or_create_session(session_id, Path(cwd))
+        session.set_sandbox(mode)
+        frame = {"type": "sandbox_set", "session_id": session_id, "mode": mode}
+        await self._send(ws, frame)
+        # Same shape as the model switch above: the requester got its own reply,
+        # every other connection is told here, so one client's change is visible
+        # in the other client's status line without a reload.
+        await self._broadcast_all(frame, exclude=ws)
+
     def _apply_model_switch(self, model_name: str) -> dict:
         """The state change behind `/model`, as one reusable step.
 
@@ -5892,6 +5988,12 @@ class EmrgServer:
                 "created_at": session._created_at,
                 "updated_at": session._updated_at,
                 "title": session.title,
+                # The tier a turn started *here* runs at (rant 2026-09-30T09:30:16):
+                # the session's own when it has one, else the ruling's default. It
+                # travels with the session snapshot for the same reason `turn` does —
+                # a client opening a session must be able to show the state another
+                # client set, and `sandbox_set` is a broadcast that is never replayed.
+                "sandbox": resolve_client_tier(session),
                 # A client opening a session learns the session's live state
                 # here, because `turn_start`/`turn_end` are broadcasts — they
                 # are addressed to whoever is subscribed at the time and are
