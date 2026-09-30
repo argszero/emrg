@@ -1751,6 +1751,51 @@ def test_declared_origins_reads_the_bodys_own_line_and_masks_only_fences(mod) ->
     }, declared
 
 
+# --- the origin line a writer dropped the offset from ------------------------
+#
+# Measured live 2026-09-30: issue #1767's first line reads
+# `Origin: rant 2026-09-30T10:27:20` while the ledger spells
+# `2026-09-30T10:27:20.573512+08:00`. Requiring the offset made `_origin_lines` return the
+# empty list, so the row read `ok` — the fault the reading exists to report, reported as
+# nothing at all. The pair below is the whole point: the same body must be *recognised*, and
+# recognising it must make it **fail**, because no naive instant equals an offset one.
+
+
+def test_an_origin_without_an_offset_is_still_read(mod):
+    """The silent gap. An unrecognised origin is not a lenient pass — it is the absence of
+    a reading, which is why this one is asserted at the recogniser as well as in the report."""
+    assert mod._origin_lines("Origin: rant 2026-09-30T10:27:20\n") == [
+        "2026-09-30T10:27:20"
+    ]
+    # The forms that must not change: an offset, `Z`, and the whole-instant spelling.
+    assert mod._origin_lines("Origin: rant 2026-09-30T10:27:20+08:00\n") == [
+        "2026-09-30T10:27:20+08:00"
+    ]
+    assert mod._origin_lines("Origin: rant 2026-09-30T02:27:20Z\n") == [
+        "2026-09-30T02:27:20Z"
+    ]
+    # And the guard against reading a *sentence* about the convention as a declaration.
+    assert mod._origin_lines("See `Origin: rant <timestamp>` for the shape.\n") == []
+
+
+def test_an_offset_less_origin_is_a_fault_whose_remedy_names_the_spelling(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """Recognising it is only half: the row must go red and hand the writer the ledger's own
+    spelling, or the reading has moved the silence one step instead of removing it."""
+    # The ledger's own spelling of that instant — the live pair, verbatim.
+    stored = "2026-09-30T10:27:20.573512+08:00"
+    _install(
+        mod, monkeypatch, _linked_issues([_issue_with_origin(10, "2026-09-30T10:27:20")])
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, stored))])
+
+    assert rc == 1, out
+    assert "#10 issue ORIGIN-UNRESOLVED" in out, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert stored in detail and "verbatim" in detail, detail
+
 # --- the ledger, the one reader both scripts rest on ------------------------
 #
 # The reader was widened for a second consumer — `scripts/review-queue.py` renders a row

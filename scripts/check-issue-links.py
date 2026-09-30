@@ -353,10 +353,19 @@ DEFAULT_RANTS = Path.home() / ".emrg" / "rants.jsonl"
 #:   timestamp verbatim and #1745 spells it in backticks followed by an explanation, so a
 #:   strict reading of a lenient writer is a silent gap — the fault is missed, which is the
 #:   opposite of the direction this family prefers its errors to err in. What stays strict is
-#:   the anchor plus the fence mask in `_origin_lines`.
+#:   the anchor plus the fence mask in `_origin_lines`;
+#: * the **offset may be missing**. Measured on a live body 2026-09-30 (issue #1767): its
+#:   first line reads `Origin: rant 2026-09-30T10:27:20` while the ledger spells
+#:   `2026-09-30T10:27:20.573512+08:00`. Requiring `Z`/`±hh:mm` made `_origin_lines` return
+#:   the **empty list** for that body, so `judge_origins` saw no origin to resolve and the row
+#:   read `ok` — a broken first joint reported as intact, which is the silent gap this
+#:   docstring's line above already argues against. Recognising the instant is what lets the
+#:   fault surface with `_same_instant_spelling`'s remedy ("write it verbatim") instead of
+#:   vanishing. Dropping the offset is a writer's slip, not a hole a ledger could fill: no
+#:   comparison here treats a naive instant as equal to an offset one.
 _ORIGIN = re.compile(
     r"(?im)^[ \t]*origin:[ \t]*rant[ \t:]+[`*_]{0,2}"
-    r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))"
+    r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
 )
 
 #: The escape hatch R5 defines for a rant carried by more than one issue: `Part: 1/3`. Two
