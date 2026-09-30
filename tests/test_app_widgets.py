@@ -662,6 +662,7 @@ def test_the_live_result_completes_the_card_found_by_its_call_id():
     branch = branch[:branch.index('if data.get("type") == "cancelled":')]
 
     assert "chat.tool_card_by_id(te.tool_call_id)" in branch
+    assert "card.update(" in branch            # the card is actually completed,
     assert "card.arguments" in branch          # the summaries read the card,
     assert "tool_args" not in branch           # not a dict that was popped
     assert "elapsed=elapsed" in branch         # and the duration reaches the selector
