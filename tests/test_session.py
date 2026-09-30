@@ -707,16 +707,57 @@ class TestSessionListSessions:
         assert s1.session_id in ids
         assert "s_manual_001" in ids
 
-    def test_list_sorted_by_created_at_desc(self, tmp_path):
-        """list_sessions() returns sessions sorted by created_at descending."""
-        s1 = Session.create(tmp_path)
-        s2 = Session.create(tmp_path)
+    def test_list_sorted_by_updated_at_desc(self, tmp_path):
+        """list_sessions() returns sessions sorted by last activity, descending.
+
+        Rant 2026-09-30T10:27:20: the key is `updated_at`, not `created_at` —
+        a session that is used daily must not sink below a newer, idle one.
+        """
+        import time
+
+        older = Session.create(tmp_path)
+        newer = Session.create(tmp_path)
+        time.sleep(0.01)
+        # The *older* session is the one that gets used last, so it must sort first.
+        older.append_message({"role": "user", "content": "still in use"})
 
         result = Session.list_sessions(tmp_path)
-        # s2 was created after s1, so it should appear first
-        s1_idx = next(i for i, r in enumerate(result) if r["session_id"] == s1.session_id)
-        s2_idx = next(i for i, r in enumerate(result) if r["session_id"] == s2.session_id)
-        assert s2_idx < s1_idx
+        older_idx = next(i for i, r in enumerate(result) if r["session_id"] == older.session_id)
+        newer_idx = next(i for i, r in enumerate(result) if r["session_id"] == newer.session_id)
+        assert older_idx < newer_idx, "the most recently active session must sort first"
+        assert result[older_idx]["updated_at"] > result[newer_idx]["updated_at"]
+
+    def test_list_sorted_by_created_at_when_updated_at_is_missing(self, tmp_path):
+        """A meta with no `updated_at` sorts by `created_at` — not dumped at the bottom.
+
+        Rant 2026-09-30T10:27:20 boundary: metas written before the key existed
+        must still list and still sort. The two sessions must differ in the key
+        the sort *falls back to*, or a stable sort makes this pass either way:
+        `recently_created` has no `updated_at` at all, `old_activity` has one
+        from long ago and so must rank below it.
+        """
+        import json
+
+        recent = Session.create(tmp_path)
+        old = Session.create(tmp_path)
+        metas = tmp_path / ".emrg" / "sessions"
+        (metas / recent.session_id / "meta.json").write_text(
+            json.dumps({"created_at": "2026-09-30T10:00:00", "session_id": recent.session_id}),
+            encoding="utf-8",
+        )
+        (metas / old.session_id / "meta.json").write_text(
+            json.dumps({
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-02T00:00:00",
+                "session_id": old.session_id,
+            }),
+            encoding="utf-8",
+        )
+
+        result = Session.list_sessions(tmp_path)
+        ids = [r["session_id"] for r in result]
+        assert recent.session_id in ids and old.session_id in ids
+        assert ids.index(recent.session_id) < ids.index(old.session_id)
 
     def test_list_includes_title(self, tmp_path):
         """list_sessions() includes the title field if set."""
