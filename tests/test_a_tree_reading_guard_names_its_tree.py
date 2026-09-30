@@ -41,6 +41,15 @@ What is asserted, and the two legs that keep it from being decoration
   reports the caller's cwd dies), while the citation guard must name the tree it was
   *given* — a tmp root, and explicitly **not** this repository (so a line hardcoded to
   the repository root dies).
+* **each runnable guard must report no defect about this checkout** — rc 0, or, for the
+  one member whose subject a bare checkout genuinely lacks, the documented
+  `could not measure` (the paragraph below the limits says which, and why). Naming the
+  tree is not the same as watching the answer, and the gap between the two is what
+  shipped v0.3.6: `check_nonlocal.py` printed `rc=1` about this very checkout on
+  v0.3.6's commit (the `_approval_pending` crash the host reported, issue #1759) while
+  every test in this file passed, because nothing here read an exit code. The leg is on
+  the *family* rather than on each guard's own test file so that the next guard to join
+  `RUN_HERE` cannot arrive without its verdict being asserted.
 
 Named limits. The middle bucket is **classified, not verified**: its guards read a
 working tree and name it, but cannot be run here (one needs the Node runners, which the
@@ -53,6 +62,27 @@ verified **here**" for that member rather than "not verified". The first line is
 subject rather than "anywhere in the output" because that is what the convention says
 and what a reader's eye reaches first — a line printed after a verdict has already been
 given answers a question the reader did not ask.
+
+The verdict leg reads each member's exit code against that member's *own* contract, and
+one contract has a second honest answer: `check-memory-index.py` reads the `.emrg/`
+indexes, which are gitignored, so a tree that carries none answers
+`could not measure: no memory index under …` with rc **2** — the code its own `--help`
+documents for "nothing could be measured", not a defect. That one member is therefore
+held to a pair: rc 0 while its subject is there, rc 2 with that reason while it is not —
+and the leg **measures the subject's presence itself** (`SUBJECT_MAY_BE_ABSENT`) instead
+of taking either answer on trust. Every other member must be rc 0 unconditionally. The
+member stays in the loop rather than being exempted, because "could not measure" is a
+value this repository insists on seeing, and rc 1 — the defect this leg exists for — is a
+failure in both environments.
+
+Corrected 2026-09-30 (`cyc20260930-074010`), and the correction is the lesson: the
+paragraph that stood here claimed this guard "exits 0" in a checkout without the indexes,
+and called that measurement. It exits 2. On that claim the leg was red in CI (run
+36645953605, `assert 2 == 0`) while green on the host's checkout, where the index exists —
+"a no-op in CI" was really "unchecked in CI", and the wrong half shipped. A claim about
+another tool's exit code is a reading, never a recollection: run it in the tree whose
+shape you are describing. A bare checkout is `git clone` with no `.emrg/` in it, and every
+member's code was re-measured there before this leg was rewritten.
 """
 
 from __future__ import annotations
@@ -77,7 +107,28 @@ RUN_HERE = (
     "check-memory-index.py",
     "check-rant-citations.py",
     "check_nonlocal.py",
+    "check_unbound_reads.py",
 )
+
+#: The one `RUN_HERE` member whose *subject* the tree under test can genuinely lack, and
+#: the places it looks for that subject when it is given no path — the guard's own message
+#: names both, and
+#: `tests/test_check_memory_index.py::test_the_default_subject_is_both_levels_the_tree_carries`
+#: pins them. They live under `.emrg/`, which is gitignored, so a bare checkout carries
+#: none of them and the guard answers `could not measure` (rc 2) rather than a verdict.
+#: Listed here so the leg below can *measure* the absence it reads that answer against,
+#: instead of assuming it: with a subject present, the same rc 2 is a failure.
+SUBJECT_MAY_BE_ABSENT = {
+    "check-memory-index.py": (
+        ".emrg/memory/MEMORY.md",
+        ".emrg/sessions/*/memory/MEMORY.md",
+    ),
+}
+
+
+def _carries(subjects: tuple[str, ...]) -> bool:
+    """Whether this checkout holds any of these subject paths."""
+    return any(next(REPO_ROOT.glob(pattern), None) is not None for pattern in subjects)
 
 #: The one guard run here that names a *given* tree rather than its own checkout, so it
 #: is asked a different question below: its line must follow its argument.
@@ -204,6 +255,50 @@ def test_every_guard_in_the_family_is_classified() -> None:
         f"these are classified above and no longer exist: {sorted(classified - on_disk)} "
         "- a stale entry would keep the rule looking wider than it is"
     )
+
+
+def test_every_runnable_guard_comes_back_clean_on_this_checkout() -> None:
+    """The leg that was missing when a released client crashed on every Enter.
+
+    `check_nonlocal.py` exists for exactly one defect class, was correct, and printed
+    `rc=1` about this checkout on v0.3.6's commit — the `_approval_pending` read that
+    made the TUI unusable (issue #1759). Nothing failed: no workflow ran the guard, and
+    no test read its exit code. Naming the tree (the assertions above) would not have
+    caught it either — the guard named its tree *correctly* while reporting the defect.
+
+    So this asks every runnable member for its verdict on the tree being tested, which is
+    the one question a guard exists to answer, and reads that verdict against the guard's
+    *own* contract rather than against a single expected number:
+
+    * rc 0 — no defect about this tree (every member, and the only acceptable answer for
+      all but one of them whatever this checkout holds);
+    * rc 2 with the guard's `could not measure` reason — accepted **only** from the member
+      listed in `SUBJECT_MAY_BE_ABSENT`, and **only** while this checkout really carries
+      none of its subjects. The absence is measured here (the same two paths the guard
+      looks at, per its own message and its own test file) so the allowance cannot become
+      a place a broken guard hides: the same rc 2 with an index present fails below.
+
+    rc 1 — a rule this family enforces violated by the tree under test — is a failure in
+    both environments, which is what keeps this leg biting on the defect it was written
+    for. See the module docstring for the exit code this leg got wrong once, and how.
+    """
+    for name in RUN_HERE:
+        proc = _run([str(SCRIPTS_DIR / name)], cwd=REPO_ROOT)
+        out = proc.stdout + proc.stderr
+        subjects = SUBJECT_MAY_BE_ABSENT.get(name)
+        if subjects and not _carries(subjects):
+            assert proc.returncode == 2 and "could not measure" in out, (
+                f"{name}: this checkout carries none of its subjects "
+                f"({', '.join(subjects)}), so the only honest verdict it can give here is "
+                "`could not measure` — rc 2, the code its own --help documents — and it "
+                f"must say so in words. Got rc={proc.returncode}:\n{out}"
+            )
+            continue
+        assert proc.returncode == 0, (
+            f"{name} reports a defect on this checkout (rc={proc.returncode}) — a rule "
+            "this family enforces is violated by the tree under test:\n"
+            f"{out}"
+        )
 
 
 def test_a_tree_reading_guard_names_its_own_checkout_whatever_the_cwd(tmp_path) -> None:

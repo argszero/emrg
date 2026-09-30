@@ -2055,6 +2055,12 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal _request_start, _last_center, _elapsed_task, _pending_images
         nonlocal turn_running
         nonlocal _skills_confirm
+        # The daemon is holding a tool call open on this answer; `handle_key`
+        # consumes it at the "next line is the answer" branch below. Declared
+        # here because it both reads and rebinds it: an undeclared name is
+        # local by assignment, so the read raised UnboundLocalError on every
+        # Enter (v0.3.6, issue #1759) — the whole TUI was unusable.
+        nonlocal _approval_pending
         if len(data) == 0: return True
         if data == b"\x1b[200~": paste_mode = True; return True
         if data == b"\x1b[201~":
@@ -2507,6 +2513,13 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     _last_center = "thinking..."
                     status.update(center=_last_center)
                     term.render()
+                    # Capture the pre-send busy state here, as the main submit
+                    # path does before ITS send: `was_busy` is this function's
+                    # own local (the assignment further down is what binds it),
+                    # so a read that does not follow one raises
+                    # UnboundLocalError — the /rant-with-project path crashed
+                    # on every Enter (issue #1759).
+                    was_busy = busy
                     rid = await conn.send_task(session_id=session_id, cwd=cwd,
                                                prompt=hint)
                     if was_busy:
@@ -2857,6 +2870,10 @@ Streaming
                     _last_center = "thinking..."
                     status.update(center=_last_center)
                     term.render()
+                    # Same capture as the other two send sites — `was_busy` is a
+                    # local of this function, so the read below needs a
+                    # preceding binding (issue #1759).
+                    was_busy = busy
                     rid = await conn.send_task(session_id=session_id, cwd=cwd,
                                                prompt=hint)
                     if was_busy:
