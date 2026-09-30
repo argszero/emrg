@@ -59,6 +59,26 @@ describe("Sidebar", () => {
     expect(items[1].querySelector(".conv-title")).toHaveTextContent("aitokenpool/s2");
   });
 
+  it("只给运行中的会话画 [m:ss]（rant 2026-09-30T09:47:11 requirement 5）", () => {
+    // 侧栏计时是 `turnStartBySid` 的纯展示：有基准才画，没有就不画。
+    // 基准只来自 daemon（`turn_start` 的 `started_at`，或打开会话时 `meta.turn` 的快照）
+    // —— 这一支钉住「有基准 → 画」与「无基准 → 不画」两侧，格式与 TUI 同源。
+    const { unmount } = setup({ turnStartBySid: { s1: Date.now() - 305_000 } });
+    const items = screen.getAllByTestId("open-session-item");
+    // 运行中的 s1：5 分 5 秒前开始 → [5:05]（分钟不补零，与 TUI divmod 一致；
+    // 秒位在断言与渲染之间会走一两秒，故只钉分钟）
+    const timer = items[0].querySelector(".open-session-timer");
+    expect(timer).not.toBeNull();
+    expect(timer!.textContent).toMatch(/^\[5:\d\d\]$/);
+    // 没有基准的 s2：一行都不画（不得从 0 起算，也不得留空壳）
+    expect(items[1].querySelector(".open-session-timer")).toBeNull();
+    unmount();
+
+    // 基准清空（轮结束）→ 计时消失，不残留
+    setup({ turnStartBySid: {} });
+    expect(screen.queryAllByTestId("open-session-timer")).toHaveLength(0);
+  });
+
   it("点击条目 → onSelect(sid)", async () => {
     const onSelect = vi.fn();
     setup({ onSelect });

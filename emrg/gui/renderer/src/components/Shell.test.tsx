@@ -705,6 +705,23 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     );
   });
 
+  it("turn_end → 头部计时消失（rant 2026-09-30T09:47:11 requirement 5，与 done/cancelled 幂等）", async () => {
+    // 上一支只走快照清空；这一支走**实时**关闭路径：轮结束时 daemon 广播 `turn_end`，
+    // 头部 [m:ss] 必须随之消失（不得停住、不得残留）。这条与下面那条 live 起点配对，
+    // 一起覆盖「起得来 + 停得掉」——中间层丢掉这两帧时它们一起变红。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    m.emit({ type: "turn_start", data: { started_at: Math.floor(Date.now() / 1000) - 305 }, sid: "s1" });
+    await waitFor(() => expect(screen.getByTestId("session-info").textContent).toMatch(/\[05:\d\d\]/));
+    m.emit({ type: "turn_end", data: {}, sid: "s1" });
+    await waitFor(() =>
+      expect(screen.getByTestId("session-info").textContent).not.toMatch(/\[\d\d:\d\d\]/),
+    );
+  });
+
   it("/model <name> → setModel 直切（对齐 TUI）；无参 → 设置面板", async () => {    const m = mockEmrg();
     render(wrapper(<Shell />));
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
