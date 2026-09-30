@@ -502,9 +502,11 @@ def test_a_row_whose_link_resolves_is_not_repaired(mod, tmp_path, capsys) -> Non
 def _table(rows: int, row_chars: int) -> list[str]:
     """A Markdown-table index's lines.
 
-    The shape that made this reading necessary: no line begins with `- `, so the two
-    row readings (count and bound) bind nothing here while the file's size is exactly
-    what the embed cap acts on.
+    The shape that made this reading necessary: no line begins with `- `, so before the
+    table shape was added the two row readings (count and bound) bound nothing here while
+    the file's size is exactly what the embed cap acts on. Both are measured now, so a
+    fixture here must also keep its rows inside the per-row bound, or the file exits 1
+    for that reason and the reading under test is not the one asserted.
     """
     return ["# Memory Index", "", "| id | note |", "| --- | --- |"] + [
         "| n | " + "x" * row_chars + " |" for _ in range(rows)
@@ -519,14 +521,18 @@ def test_the_budget_is_the_products_own(mod) -> None:
 
 
 def test_a_table_index_over_the_budget_is_reported(mod, tmp_path, capsys) -> None:
-    """The control: an index whose rows this tool cannot see is still measured.
+    """A table index is measured on every number, and its rows are read, not skipped.
 
-    Rows are found by shape (`- `) and a table has none, so before this reading such a
-    file was reported `rows 0, longest 0 chars` and `within`, with its size printed
-    nowhere, whatever it weighed. Measured 2026-09-28 on this host: `aitokenpool`'s
-    71-line index reads `lines 71 of 100 - within` (issue #1676 holds the reading).
+    The budget is the reading that answers for the file's *size*, whatever shape its rows
+    are in - measured 2026-09-28 on this host, `aitokenpool`'s 71-line index reads
+    `lines 71 of 100 - within` while the file is past the embed budget (issue #1676 holds
+    that reading). The row bound is the other half, and this file is where it used to be
+    skipped: with `- ` alone for a predicate, a table read `rows 0, longest 0 chars,
+    over 512: 0` and `OK` while 12 of its 25 rows were past the bound (measured
+    2026-09-30, longest 6,208 chars). Both are asserted here.
     """
-    lines = _table(rows=71, row_chars=745)
+    rows = 71
+    lines = _table(rows=rows, row_chars=745)
     path = _index(tmp_path, "table.md", lines)
     text = path.read_text(encoding="utf-8")
     assert len(lines) <= mod.MEMORY_INDEX_ROW_CAP, "under the line cap, on purpose"
@@ -538,11 +544,11 @@ def test_a_table_index_over_the_budget_is_reported(mod, tmp_path, capsys) -> Non
         f"chars {len(text)} of {mod.INDEX_SIZE_WARN} - over by "
         f"{len(text) - mod.INDEX_SIZE_WARN}" in out
     )
+    assert (
+        f"rows {rows + 1}, longest {len(lines[-1])} chars, "
+        f"over {mod.INDEX_TITLE_MAX_CHARS}: {rows}" in out
+    ), "a table's rows are rows: the header counts, the delimiter row does not"
     assert "OK:" not in out
-    assert "rows 0, longest 0 chars" in out, (
-        "the shape predicate cannot see this file's rows — that is why the size reading "
-        "has to answer for it"
-    )
 
 
 def test_a_table_index_within_the_budget_is_within(mod, tmp_path, capsys) -> None:
@@ -564,9 +570,14 @@ def test_the_budget_is_counted_in_characters_not_bytes(mod, tmp_path, capsys) ->
     (`tests/test_memory_index_thresholds.py` measures that pair). A CJK index is where
     they disagree, and this reading must take the cap's side: measuring bytes would
     report a file as over when the prompt carries it whole.
+
+    The rows are held inside the per-row bound on purpose (the first version of this
+    fixture used 900-char rows, which became a *second*, unrelated reason to exit 1 the
+    moment table rows were read): 90 rows of 500 CJK characters is 45,7xx chars /
+    135,7xx bytes, 94 lines, longest row 508.
     """
     lines = ["# 索引", "", "| 编号 | 说明 |", "| --- | --- |"] + [
-        "| n | " + "汉" * 900 + " |" for _ in range(20)
+        "| n | " + "汉" * 500 + " |" for _ in range(90)
     ]
     path = _index(tmp_path, "cjk-table.md", lines)
     text = path.read_text(encoding="utf-8")
