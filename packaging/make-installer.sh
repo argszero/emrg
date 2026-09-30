@@ -13,7 +13,8 @@
 #           到 dist/artifacts/（PR #391 —— 之前只产 tar.gz，Release 缺 AppImage）。
 #
 # Artifact naming (R103): EMRG-<ver>-macos-arm64.pkg / EMRG-<ver>-windows-x64.exe /
-# EMRG-<ver>-linux-x86_64.AppImage + .tar.gz
+# EMRG-<ver>-x86_64.AppImage (no `linux`: AppImage 只面向 Linux，官方目录的检查点名这一条，
+# rant 2026-09-30T11:42:41) + EMRG-<ver>-linux-x86_64.tar.gz
 #
 # Usage: bash packaging/make-installer.sh [darwin|linux|windows]
 #   darwin: needs pkgbuild (macOS). GUI from emrg/gui/dist/mac*/EMRG.app
@@ -198,9 +199,13 @@ EOF
     # R116: 收集 electron-builder 产出的 AppImage（emrg/gui/dist/*.AppImage）到
     # dist/artifacts/ —— 之前只生成 tar.gz，release 缺 linux AppImage（rant #13 Step 5）。
     # electron-builder 命名：<productName>-<version>-<arch>.AppImage（x86_64 / arm64）。
+    # 我们复制过去的名字**不含 `linux`**（rant 2026-09-30T11:42:41）：AppImage 本就只面向
+    # Linux，官方目录的自动检查按名字判这条 —— `EMRG-0.3.5-linux-x86_64.AppImage` 被点名
+    # 应为 `EMRG-0.3.5-x86_64.AppImage`。.tar.gz / .run 保留该中缀（那条规则只针对
+    # AppImage），名字由 tests/test_appimage_naming.py 按本行**执行**的结果钉住。
     APPIMAGE="$(ls "$ROOT"/emrg/gui/dist/*.AppImage 2>/dev/null | head -1 || true)"
     if [ -n "$APPIMAGE" ]; then
-      cp "$APPIMAGE" "$DIST/artifacts/EMRG-$VERSION-linux-$(uname -m).AppImage"
+      cp "$APPIMAGE" "$DIST/artifacts/EMRG-$VERSION-$(uname -m).AppImage"
       echo "==> AppImage collected: $(basename "$APPIMAGE")"
     else
       echo "!! AppImage not found in emrg/gui/dist — Linux release 缺 AppImage（有 tar.gz 兜底）" >&2
