@@ -19,7 +19,9 @@ The window a cycle spends blocking is the failure: the head it just pushed is on
 may neither vote on nor merge, so the verdict it waits ~10 minutes for is unusable by
 that window, and the window itself is gone. After the 2026-09-29 restructure (`cyc20260929-110933`) the rule has **one home** —
 rulebook §R4 — and the two sections a reader arrives from cite it: §1.1 takes the action
-`scripts/review-queue.py` names for a row, and §5 states the post-`gh pr create` rule. That
+`scripts/review-queue.py` names for a row, and §3.5 states the post-`gh pr create` rule.
+(§ numbers above are the ones reaching the shipped template; the 2026-09-30 restructure
+renamed §5 → §3.5 and moved the backlog reading to §2.2, and the constants below follow it.) That
 is what makes the negative scan below possible: while the rule was copied into three
 sections, no section-wide (let alone file-wide) scan could tell the rule's own words from a
 duplicate of them — this module's own docstring used to record exactly that limit.
@@ -45,7 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
 
 #: Verbatim substrings of the shipped wording, per section a reader arrives from. R4 is
-#: the rule's home; §5 is where a cycle has just pushed and is tempted to watch the run
+#: the rule's home; §3.5 is where a cycle has just pushed and is tempted to watch the run
 #: conclude; §1.1 is where the queue is worked.
 REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
     "#### R4. CI: three states, three actions": (
@@ -53,7 +55,7 @@ REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
         "park this PR and move on",                                  # the action
         "read it again next cycle",                                  # when it comes back
     ),
-    "### 5. Submit": (
+    "#### 3.5 Open the PR": (
         "Submitting ends at `gh pr create`",  # the rule
         '"CI pending"',                       # pending is never recorded as a pass
         'never "CI green"',                   # the misreading it forbids
@@ -64,7 +66,7 @@ REQUIRED_TERMS: dict[str, tuple[str, ...]] = {
 #: section a reader is in is the section they act in, so a rule stated only in a rulebook
 #: nobody is pointed at is a rule the reader never reaches.
 POINTER_TERMS: dict[str, str] = {
-    "#### 1.1 Repo management": "R4",
+    "#### 1.1 Every open PR and issue": "R4",
     "#### R3. Merging": "R4",
 }
 
@@ -132,8 +134,8 @@ def test_the_checks_can_report_absence() -> None:
     every term to come back missing.
     """
     stub = (
-        "#### 1.1 Repo Management\n\n- something else\n"
-        "### 5. Submit\n\n- something else\n"
+        "#### 1.1 Every open PR and issue\n\n- something else\n"
+        "#### 3.5 Open the PR\n\n- something else\n"
         "#### R3. Merging\n\n- something else\n"
         "#### R4. CI: three states, three actions\n\n- something else\n"
     )

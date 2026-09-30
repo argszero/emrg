@@ -286,8 +286,18 @@ def test_a_class_entry_listed_twice_is_reported(mod):
     names the file, and the inflation it prevents is measured rather than asserted.
     """
     assert mod.duplicated_files() == []
-    duplicated = tuple(list(mod.INSTRUCTION_FILES) + [HOST_OWNED])
-    assert mod.duplicated_files(duplicated) == [HOST_OWNED]
+    # The carrier doubled here must be one that *carries* sites, or the inflation this
+    # test exists to measure is invisible: `HOST_OWNED` (the evolution template) is the
+    # member a conflicted hunk is likeliest to duplicate, but a rewrite of that template
+    # can leave it citing no rant at all — measured 2026-09-30, the file sat at 0 sites
+    # and this assertion compared 49 to 49. `OTHER` is the other real member with sites,
+    # so the measurement holds whatever the host template's prose does.
+    doubled = OTHER
+    assert any(Path(str(site.path)).name == Path(doubled).name for site in mod.scan_tree(REPO_ROOT)[0]), (
+        f"{doubled} carries no citation site - this test would measure nothing"
+    )
+    duplicated = tuple(list(mod.INSTRUCTION_FILES) + [doubled])
+    assert mod.duplicated_files(duplicated) == [doubled]
 
     twice, _ = mod.scan_tree(REPO_ROOT, duplicated)
     once, _ = mod.scan_tree(REPO_ROOT, tuple(mod.INSTRUCTION_FILES))

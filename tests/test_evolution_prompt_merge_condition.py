@@ -81,12 +81,12 @@ STALE_ROUTE = "voids every vote standing on it"
 REGION_START = "#### R3. Merging"
 REGION_END = "#### R4. CI: three states, three actions"
 
-#: The two sections a reader arrives from — deciding whether to vote (§1.1) and deciding
-#: whether the merge may proceed (§5). Each must cite R3, or the rule is stated somewhere
+#: The two sections a reader arrives from — deciding whether to vote (§2.1) and deciding
+#: whether the merge may proceed (§3.1). Each must cite R3, or the rule is stated somewhere
 #: the reader is never sent.
 CITING_SECTIONS = {
-    "#### 1.1 Repo management": "#### 1.2 Follow up on your own PRs",
-    "### 5. Submit": "### 6. Record",
+    "#### 2.1 Every open PR": "#### 2.2 Every open issue and every rant",
+    "#### 3.1 Vote, merge, close": "#### 3.2 Follow up on your own PRs",
 }
 CITATION = "R3"
 

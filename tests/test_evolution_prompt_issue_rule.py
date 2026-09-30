@@ -16,14 +16,14 @@ worth a guard rather than a line of prose: 43 cycles / 32.3 hours (`cyc20260926-
 28 PRs while closing **0** issues, and four issues 99 cycles old had each been re-measured by
 later cycles and claimed by none.
 
-So §1.3 states the rule where a cycle reads the backlog — the state of the rule, the reading
+So §2.2 states the rule where a cycle reads the backlog — the state of the rule, the reading
 that answers it, and what "finished" means — and this module pins it there, so a later prompt
 edit cannot drop it in silence. It is the same shape as `tests/test_evolution_prompt_ci_parking.py`,
 which pins the sibling rule the host gave on 2026-09-24.
 
 Two pins, not one, because the chain has two ends and the redesign writes them in different
-places: R5 states the rule, and §5 carries the two commands that forge the link when a PR is
-created. Pin only the rule and the commands can be deleted with the prompt still reading as if
+places: R5 states the rule, and §3.5 carries the two commands that forge the link when a PR
+is created. Pin only the rule and the commands can be deleted with the prompt still reading as if
 it taught the chain; pin only the commands and the rule they enforce can go.
 
 Named limits
@@ -49,7 +49,8 @@ TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
 #: paragraph does not fail the guard, while a deletion of the rule does.
 #:
 #: The 2026-09-29 restructure (`cyc20260929-110933`) moved this rule out of §1.3 and into
-#: the rulebook as R5. §1.3 now reads the backlog and cites R5 — so the guard follows the
+#: the rulebook as R5; the 2026-09-30 restructure then made that backlog reading §2.2.
+#: §2.2 now reads the backlog and cites R5 — so the guard follows the
 #: rule to its one home instead of pinning a copy, which is also what makes the citation
 #: check below meaningful: a rule stated once, in a section no reader is sent to, is a rule
 #: nobody reads.
@@ -57,7 +58,7 @@ SECTION = "#### R5. The chain: rant → issue → PR"
 
 #: The section a reader arrives from when working the backlog, and the citation it must
 #: carry so the reader reaches the rule.
-ARRIVAL = "#### 1.1 Repo management"
+ARRIVAL = "#### 2.2 Every open issue and every rant"
 CITATION = "R5"
 
 REQUIRED_TERMS: tuple[str, ...] = (
@@ -82,7 +83,7 @@ REQUIRED_TERMS: tuple[str, ...] = (
 #: a declaration rather than a mention, and the companion comment is what keeps an issue from
 #: sitting `unclaimed` until some later cycle notices (measured before this: 7 of 13 subjects
 #: unlinked on 2026-09-28, every one a PR that named an issue and never declared it).
-CREATION = "### 5. Submit"
+CREATION = "#### 3.5 Open the PR"
 CREATION_TERMS: tuple[str, ...] = (
     "Closes #",       # the closing keyword, in the `gh pr create` body
     "Handled by #",   # the companion comment on the issue, in the same action
@@ -112,7 +113,7 @@ def test_the_issue_section_states_the_rule_and_its_reading() -> None:
     text = TEMPLATE.read_text(encoding="utf-8")
     missing = _missing_terms(_section(text, SECTION), REQUIRED_TERMS)
     assert not missing, (
-        "emrg/server/evolution_prompt.md §1.3 must state what finishes an issue — one PR, "
+        "emrg/server/evolution_prompt.md §2.2 must state what finishes an issue — one PR, "
         "named both ways, read with `scripts/check-issue-links.py`, and a re-measurement is "
         f"not progress (host rant 2026-09-26T18:52:47); missing: {missing}"
     )
@@ -128,7 +129,7 @@ def test_the_reading_is_not_quoted_as_a_pass_when_it_cannot_measure() -> None:
     """
     section = _section(TEMPLATE.read_text(encoding="utf-8"), SECTION)
     assert "never a pass" in section, (
-        "emrg/server/evolution_prompt.md §1.3 must say that the link reading's unmeasurable "
+        "emrg/server/evolution_prompt.md §2.2 must say that the link reading's unmeasurable "
         "answer (exit 2) is not a pass"
     )
 
@@ -179,9 +180,9 @@ def test_the_rule_is_stated_once() -> None:
 def test_the_submit_section_declares_the_issue() -> None:
     """The chain's last link is written where the act happens, not 200 lines away.
 
-    §5 is where a cycle has just pushed and is about to create the PR; the two commands that
+    §3.5 is where a cycle has just pushed and is about to create the PR; the two commands that
     forge the link have to be in that block, because the earlier shape stated "the two name
-    each other" only in the backlog-reading step and handed §5 a `gh pr create` with no
+    each other" only in the backlog-reading step and handed §3.5 a `gh pr create` with no
     `Closes` at all — which is how seven subjects came to be merged without ever declaring an
     issue (measured 2026-09-28, `scripts/check-issue-links.py`, 7 of 13 unlinked).
     """
@@ -195,9 +196,9 @@ def test_the_submit_section_declares_the_issue() -> None:
 
 
 def test_the_creation_terms_can_report_absence() -> None:
-    """The instrument's control for the §5 pin: a block without the terms reads as missing.
+    """The instrument's control for the §3.5 pin: a block without the terms reads as missing.
 
-    Without this, the §5 guard would go green over a section it never found the terms in —
+    Without this, the §3.5 guard would go green over a section it never found the terms in —
     the `_section` helper asserts the heading exists, but only this shows the *terms* are
     what is being read.
     """
