@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import {
+  formatToolArguments,
   type AssistantEntry,
   type AssistantSegment,
   type ToolGroup,
@@ -279,25 +280,46 @@ function ToolRowView({
     ok && row.elapsed !== undefined ? t("chat.elapsed", { s: row.elapsed.toFixed(1) + "s" }) : undefined;
   const content = row.content || "";
   const truncated = content.length > 2000 ? content.slice(0, 2000) + "…" : content;
-  const showExpand = content.length > 2000 && !row.fullExpanded;
+  // rant 2026-09-30T09:17:54 → #1787：折叠行 = 工具名称 + intent（与 TUI 一致），
+  // 展开 = 名称 / 输入 / 输出三段。名称此前从未渲染（row.toolName 存着却不用），
+  // 输入则被 handleToolStart 丢掉。入参超 2000 字沿用输出的同一套截断 + 展开全文
+  // （rant 明写「超过 2000 字沿用现有截断」），共用 fullExpanded 这个展开态。
+  const argsFull = formatToolArguments(row.arguments);
+  const args = argsFull.length > 2000 && !row.fullExpanded ? argsFull.slice(0, 2000) + "…" : argsFull;
+  const showExpand =
+    !row.fullExpanded && (content.length > 2000 || argsFull.length > 2000);
 
   return (
     <div
-      className={`tool-row ${row.status}`}
+      className={`tool-row ${row.status}${row.outputExpanded ? " expanded" : ""}`}
       title={title}
       onClick={() => store.toggleRowOutput(sid, row.callId)}
     >
       {row.status === "running" ? <span className="tool-spinner" /> : null}
       {ok ? <span className="tool-check">✓ </span> : null}
+      <span className="tool-name">{row.toolName}</span>
       <span className="tool-label">{label}</span>
       {row.intent ? <span className="tool-intent">{row.intent}</span> : null}
       {timeText ? <span className="tool-time">{timeText}</span> : null}
       <span className="tool-chevron">⌄</span>
-      {content ? (
-        <div className={`tool-output ${row.outputExpanded ? "" : "hidden"}`}>
-          {row.fullExpanded ? content : truncated}
+      <div className={`tool-output ${row.outputExpanded ? "" : "hidden"}`}>
+        <div className="tool-detail">
+          <span className="tool-detail-title">{t("tool.detailName")}</span>
+          <div className="tool-detail-body">{row.toolName}</div>
         </div>
-      ) : null}
+        {args ? (
+          <div className="tool-detail">
+            <span className="tool-detail-title">{t("tool.detailInput")}</span>
+            <pre className="tool-detail-body">{args}</pre>
+          </div>
+        ) : null}
+        {content ? (
+          <div className="tool-detail">
+            <span className="tool-detail-title">{t("tool.detailOutput")}</span>
+            <div className="tool-detail-body">{row.fullExpanded ? content : truncated}</div>
+          </div>
+        ) : null}
+      </div>
       {showExpand ? (
         <button
           type="button"

@@ -27,6 +27,14 @@ export interface ToolRow {
   toolName: string;
   status: "running" | "done" | "failed";
   intent?: string;
+  /**
+   * 工具入参（rant 2026-09-30T09:17:54 → #1787）。实时是 daemon 解析好的对象；回放那一路
+   * 记录里存的是 `function.arguments` 的 **JSON 字符串**，但 `historyReplay.toolCallArguments`
+   * 照 daemon 的规矩（解析失败落 `{}`）先归一，所以两条路存下来的是同一形状——这正是
+   * 「打开旧会话与一直开着逐项一致」那条断言能直接比对象的原因。类型仍写 unknown：
+   * 呈现统一走 `formatToolArguments`，它是最终的兜底。
+   */
+  arguments?: unknown;
   /** 仅成功且提供 elapsed 时记录（chat.js 只在 ok 时写 dataset.elapsed，供合并组摘要求和） */
   elapsed?: number;
   content?: string;
@@ -117,6 +125,8 @@ export interface ToolStartData {
   tool_call_id: string;
   tool_name: string;
   intent?: string;
+  /** daemon 的 `tool_start` 帧本就带 `arguments`（解析好的对象）——此前在这里被丢掉。 */
+  arguments?: unknown;
 }
 export interface ToolEndData {
   tool_call_id: string;
@@ -166,6 +176,44 @@ const SID_NULL = "__emrg_null_sid__";
 
 function assistantHasText(entry: AssistantEntry): boolean {
   return entry.segments.some((seg) => seg.hasText);
+}
+
+/**
+ * 工具入参的可读呈现（rant 2026-09-30T09:17:54 → #1787）。
+ *
+ * 两条来路都要能渲染，所以入参类型是 unknown：
+ * - **实时**：`tool_start.arguments` 是 daemon 解析好的对象 → 缩进 JSON；
+ * - **回放**：记录里的 `function.arguments` 是 JSON **字符串**（回放已按 daemon 的规矩归一成
+ *   对象，这里是第二道保险）→ 先试解析（成功则缩进，失败原样返回，绝不让一条坏记录把整屏拖垮）。
+ *
+ * 无参（undefined/null/空串/空对象）→ 空串，调用方据此不渲染「输入」段：daemon 对空载荷
+ * 与解析失败都发 `{}`（它自己的 `try/except` 落 `{}`），把它画成「输入 {}」是噪音，
+ * 而「没有输入」这件事由「没有这一段」表达得更准确 —— 与 TUI 的 `_format_args` 同口径
+ * （`if not args: return ""`），也与实时那一路一致（回放同样得 `{}`、同样不渲染）。
+ */
+export function formatToolArguments(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  let payload: unknown = value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    try {
+      payload = JSON.parse(trimmed);
+    } catch {
+      // 坏载荷（截断/非 JSON）：原样返回，能看见多少是多少
+      return value;
+    }
+  }
+  if (payload === null || payload === undefined) return "";
+  if (typeof payload === "object" && !Array.isArray(payload) && Object.keys(payload as object).length === 0) {
+    return "";
+  }
+  try {
+    const rendered = JSON.stringify(payload, null, 2);
+    return rendered === undefined ? String(payload) : rendered;
+  } catch {
+    return String(payload);
+  }
 }
 
 /** 更新工具合并组展示状态（chat.js updateToolGroup 数据化） */
@@ -357,6 +405,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         toolName: data.tool_name,
         status: "running",
         intent: data.intent,
+        arguments: data.arguments,
         outputExpanded: false,
         fullExpanded: false,
       };

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTranscriptStore, type TranscriptEntry, type TranscriptStore } from "./transcript";
+import { createTranscriptStore, formatToolArguments, type TranscriptEntry, type TranscriptStore } from "./transcript";
 import { replayHistoryRecords, replayHistoryRecordsPrepend, toolCallIntent, type HistoryRecord } from "./historyReplay";
 
 /**
@@ -9,9 +9,10 @@ import { replayHistoryRecords, replayHistoryRecordsPrepend, toolCallIntent, type
  * **对应落盘记录**（list_history include_records 的样子）经 `replayHistoryRecords`
  * 回放。两路产出的条目数组必须逐项相等（顺序、角色、文本、工具行、合并组）。
  *
- * 变异验证（本文件必须变红的两个方向，人工执行）：
+ * 变异验证（本文件必须变红的方向，人工执行）：
  *  - 把回放里的 `content` 换回 `preview`（截断）→ 长正文那条断言变红；
- *  - 去掉工具记录的配对（照落盘顺序 start/start/end/end）→ 合并组那条断言变红。
+ *  - 去掉工具记录的配对（照落盘顺序 start/start/end/end）→ 合并组那条断言变红；
+ *  - 回放里不传 `arguments`（只抽 intent，即 #1787 修复前的样子）→ 入参一致性那条变红。
  */
 
 const SID = "s1";
@@ -29,13 +30,28 @@ function comparable(entries: TranscriptEntry[]): unknown {
   return JSON.parse(JSON.stringify(entries, (k, v) => (k === "rid" ? undefined : v)));
 }
 
+/** 一条工具调用在两条来路上的公共来源：`args` 会以对象进实时帧、以 JSON 字符串进记录。 */
+type FixtureTool = {
+  id: string;
+  name: string;
+  intent: string;
+  output: string;
+  error?: boolean;
+  /** 工具入参（除 intent 外的字段也要覆盖，否则这条等价性只验到 intent） */
+  args?: Record<string, unknown>;
+};
+
+/** 实时帧里的 `arguments`（daemon 已解析）——与记录里的 JSON 字符串同源。 */
+const liveArgs = (tool: FixtureTool): Record<string, unknown> =>
+  tool.args ?? { intent: tool.intent };
+
 /** 实时那一路：与 daemon 的发送顺序一致（一轮一个 request_id，done 收尾）。 */
 function feedLive(
   store: TranscriptStore,
   sid: string,
   turn: {
     user: string;
-    rounds: Array<{ text: string; tools: Array<{ id: string; name: string; intent: string; output: string; error?: boolean }> }>;
+    rounds: Array<{ text: string; tools: FixtureTool[] }>;
   },
 ): void {
   const rid = `req-${turn.user}`;
@@ -43,7 +59,16 @@ function feedLive(
   for (const round of turn.rounds) {
     if (round.text) store.handleDelta([{ request_id: rid, content: round.text }], sid);
     for (const tool of round.tools) {
-      store.handleToolStart({ request_id: rid, tool_call_id: tool.id, tool_name: tool.name, intent: tool.intent }, sid);
+      store.handleToolStart(
+        {
+          request_id: rid,
+          tool_call_id: tool.id,
+          tool_name: tool.name,
+          intent: tool.intent,
+          arguments: liveArgs(tool),
+        },
+        sid,
+      );
       store.handleToolEnd({
         tool_call_id: tool.id,
         tool_name: tool.name,
@@ -59,7 +84,7 @@ function feedLive(
 function toRecords(
   turn: {
     user: string;
-    rounds: Array<{ text: string; tools: Array<{ id: string; name: string; intent: string; output: string; error?: boolean }> }>;
+    rounds: Array<{ text: string; tools: FixtureTool[] }>;
   },
   startIndex = 0,
 ): HistoryRecord[] {
@@ -76,7 +101,7 @@ function toRecords(
           ? {
               tool_calls: round.tools.map((tool) => ({
                 id: tool.id,
-                function: { name: tool.name, arguments: JSON.stringify({ intent: tool.intent }) },
+                function: { name: tool.name, arguments: JSON.stringify(liveArgs(tool)) },
               })),
             }
           : {}),
@@ -102,7 +127,8 @@ const TURN = {
     {
       text: "先看看目录。",
       tools: [
-        { id: "c1", name: "bash", intent: "list the files", output: "a\nb\n" },
+        // c1 带真实入参（command 等），不只 intent —— 否则「入参一致」这条只验到 intent。
+        { id: "c1", name: "bash", intent: "list the files", output: "a\nb\n", args: { command: "ls -a", intent: "list the files" } },
         { id: "c2", name: "read", intent: "read README", output: "# emrg\n" },
       ],
     },
@@ -285,5 +311,88 @@ describe("the record shape the daemon actually sends", () => {
     expect(sink.addUserMessage).toHaveBeenCalledWith("q", SID);
     expect(sink.handleDelta).toHaveBeenCalledWith([{ request_id: "hist-u", content: "a" }], SID);
     expect(sink.handleDone).toHaveBeenCalledWith({ request_id: "hist-u" }, SID);
+  });
+});
+
+/**
+ * rant 2026-09-30T09:17:54 → #1787（Part 2/2）：回放此前只从 `function.arguments` 里抽走
+ * intent，把剩下的丢掉 —— 于是「打开旧会话」看到的工具行与实时不一致。这一组钉住
+ * 「透传」与「两路呈现相同」。
+ */
+describe("工具入参的回放一致性（#1787）", () => {
+  const RECORDS: HistoryRecord[] = [
+    {
+      record_index: 0,
+      kind: "message",
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        { id: "c1", function: { name: "bash", arguments: '{"command":"ls -la","intent":"check"}' } },
+      ],
+    },
+    { record_index: 1, kind: "tool_result", tool_call_id: "c1", tool_name: "bash", content: "out" },
+  ];
+
+  it("把记录里的 arguments 归一成实时那一形状后交给 handleToolStart（不再只抽 intent）", () => {
+    const sink = {
+      addUserMessage: vi.fn(),
+      handleDelta: vi.fn(),
+      handleDone: vi.fn(),
+      handleToolStart: vi.fn(),
+      handleToolEnd: vi.fn(),
+    };
+    replayHistoryRecords(RECORDS, SID, sink);
+    expect(sink.handleToolStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool_call_id: "c1",
+        tool_name: "bash",
+        // daemon 的 tool_start.arguments 是解析好的对象，回放必须给同一种类型
+        arguments: { command: "ls -la", intent: "check" },
+      }),
+      SID,
+    );
+  });
+
+  it("坏载荷（截断/非 JSON）与实时同落 {}，不抛异常", () => {
+    const broken: HistoryRecord[] = [
+      {
+        record_index: 0,
+        kind: "message",
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "c1", function: { name: "bash", arguments: '{"command":"ls' } }],
+      },
+      { record_index: 1, kind: "tool_result", tool_call_id: "c1", tool_name: "bash", content: "out" },
+    ];
+    const store = createTranscriptStore();
+    expect(() => replayHistoryRecords(broken, SID, store)).not.toThrow();
+    const row = store.getEntries(SID).find((e) => e.kind === "tool-row") as { row: { arguments?: unknown } };
+    // daemon 对同一串也是 json.loads 失败 → {}，回放给同一个结果（实时那一路同样不渲染输入段）
+    expect(row.row.arguments).toEqual({});
+    expect(formatToolArguments(row.row.arguments)).toBe("");
+  });
+
+  it("同一份参数：回放建出的行与实时建出的行给出同一段输入文本", () => {
+    const live = createTranscriptStore();
+    live.handleToolStart(
+      {
+        request_id: "r1",
+        tool_call_id: "c1",
+        tool_name: "bash",
+        intent: "check",
+        arguments: { command: "ls -la", intent: "check" }, // 实时这一路：daemon 已解析
+      },
+      SID,
+    );
+    const replayed = createTranscriptStore();
+    replayHistoryRecords(RECORDS, SID, replayed);
+
+    const rowOf = (s: TranscriptStore) =>
+      (s.getEntries(SID).find((e) => e.kind === "tool-row") as { row: { arguments?: unknown } }).row;
+    // 两路存的原生类型不同（对象 / JSON 字符串），经同一个 formatToolArguments 后必须逐字相同
+    expect(formatToolArguments(rowOf(replayed).arguments)).toBe(
+      formatToolArguments(rowOf(live).arguments),
+    );
+    expect(formatToolArguments(rowOf(live).arguments)).toContain('"command": "ls -la"');
   });
 });

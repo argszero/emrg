@@ -52,7 +52,7 @@ export interface ReplaySink {
   handleDelta(chunks: Array<{ request_id?: string; content?: string }>, sid?: string | null): void;
   handleDone(data: { request_id?: string; content?: string }, sid?: string | null): void;
   handleToolStart(
-    data: { request_id?: string; tool_call_id: string; tool_name: string; intent?: string },
+    data: { request_id?: string; tool_call_id: string; tool_name: string; intent?: string; arguments?: unknown },
     sid?: string | null,
   ): void;
   handleToolEnd(
@@ -71,6 +71,27 @@ export function toolCallIntent(args?: string): string {
     // 参数不是合法 JSON（截断/非 JSON 载荷）：实时那一路同样拿不到 intent（daemon 也
     // 只在自己的 try 里取），这里同样留空，绝不让回放因一条坏记录整页失败。
     return "";
+  }
+}
+
+/**
+ * 助手记录的 `tool_calls[].function.arguments`（JSON 字符串）→ 实时帧里的那个形状。
+ *
+ * 实时那一路 daemon 已经解析好（`daemon.py`：`json.loads(tc_args_str) if tc_args_str else {}`，
+ * 失败也落在 `{}`），所以 `tool_start.arguments` 是**对象**。回放若把记录里的**字符串**
+ * 原样塞进行里，同一件事就有两种类型，「打开旧会话与一直开着逐项一致」这条不变式只能靠
+ * 比较时放水来维持——那是把守卫改软，不是修好（#1787）。
+ *
+ * 因此这里照 daemon 的规矩归一：解析成功 → 解析值；空/坏载荷 → `{}`（与实时同一结果）。
+ * 呈现仍统一走 `formatToolArguments`（它同时兜住字符串，多一层保险）。
+ */
+export function toolCallArguments(args?: string): unknown {
+  if (!args) return {};
+  try {
+    return JSON.parse(args);
+  } catch {
+    // 截断/非 JSON 载荷：实时那一路 daemon 同样落在 {}，这里给同一个结果。
+    return {};
   }
 }
 
@@ -120,7 +141,16 @@ export function replayHistoryRecords(
         const callId = tc?.id ?? "";
         const name = tc?.function?.name ?? "";
         sink.handleToolStart(
-          { request_id: rid, tool_call_id: callId, tool_name: name, intent: toolCallIntent(tc?.function?.arguments) },
+          {
+            request_id: rid,
+            tool_call_id: callId,
+            tool_name: name,
+            intent: toolCallIntent(tc?.function?.arguments),
+            // rant 2026-09-30T09:17:54 → #1787：这里此前只抽 intent，把 arguments 丢掉了，
+            // 于是「打开旧会话」的折叠行与展开详情与实时不一致。归一成实时那一形状后透传
+            // （截断/非法 JSON 由 toolCallArguments 与 formatToolArguments 兜底）。
+            arguments: toolCallArguments(tc?.function?.arguments),
+          },
           sid,
         );
         const res = results.get(callId);

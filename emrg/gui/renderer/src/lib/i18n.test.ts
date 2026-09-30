@@ -75,12 +75,13 @@ describe("getLocale / setLocale（localStorage 覆盖）", () => {
 describe("词典完整性守卫（防漂移）", () => {
   // 两个绝对数是有意钉住的：新增/删除 key 必须在这里显式改一次，
   // 否则一次手滑删掉几条词条不会有人发现（下一行的对齐断言只要求 zh/en 一致，
-  // 两边同时少一条它照样通过）。2026-09-23 由 `tool.pwsh.*`（Windows 方言，P8）从 397 改为 399。
-  it("zh/en 各 399 个 key 且完全对齐", () => {
+  // 两边同时少一条它照样通过）。2026-09-23 由 `tool.pwsh.*`（Windows 方言，P8）从 397 改为 399；
+  // 2026-09-30 由 `tool.detailName/-Input/-Output`（工具详情三段，rant 2026-09-30T09:17:54 → #1787）从 403 改为 406。
+  it("zh/en 各 406 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(403);
-    expect(enKeys.length).toBe(403);
+    expect(zhKeys.length).toBe(406);
+    expect(enKeys.length).toBe(406);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);
