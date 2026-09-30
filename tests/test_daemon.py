@@ -95,8 +95,8 @@ def test_build_prompt_all_variables_substituted():
     assert not braces, f"Unsubstituted placeholders: {braces}"
 
 
-def test_build_prompt_step22_uses_fetch_head():
-    """Step 2.2 must log FETCH_HEAD, not origin/master.
+def test_build_prompt_master_step_uses_fetch_head():
+    """The master reading step must log FETCH_HEAD, not origin/master.
 
     `git fetch origin master` always writes FETCH_HEAD even when the repo
     has no remote-tracking refs (e.g. after a workspace repair that
@@ -108,11 +108,12 @@ def test_build_prompt_step22_uses_fetch_head():
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
     prompt = handler._build_evolution_prompt()
-    # The actual Step 2.2 command block must log FETCH_HEAD, not origin/master.
-    step22 = prompt.split("#### 2.2 The latest on master", 1)[1].split("#### 2.3", 1)[0]
-    assert "git fetch origin master && git log FETCH_HEAD --oneline -10" in step22
-    assert "git fetch origin master && git log origin/master" not in step22
-    # Merge-conflict guidance must also merge FETCH_HEAD (line 148).
+    # The master-reading command block must log FETCH_HEAD, not origin/master. The
+    # 2026-09-30 restructure moved it to §1.4 (it was §2.2, "The latest on master").
+    master_step = prompt.split("#### 1.4 master", 1)[1].split("#### 1.5", 1)[0]
+    assert "git fetch origin master && git log FETCH_HEAD --oneline -10" in master_step
+    assert "git fetch origin master && git log origin/master" not in master_step
+    # Merge-conflict guidance (R3) must also merge FETCH_HEAD.
     assert "git merge FETCH_HEAD" in prompt
     assert "git merge origin/master" not in prompt
 

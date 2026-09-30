@@ -22,7 +22,7 @@ is not in the builder's context renders as the **empty string**: an id written a
 ``{{ cycle_id }}`` would ship as ``✅ LGTM — cycle `` — the same defect, with a
 file-level grep still passing. So these tests render through the *real builder* and
 hand the *rendered* body to the counter's own reader. The id is written as
-``{{ timestamp }}``, which is the variable §6 already uses for the cycle record's id,
+``{{ timestamp }}``, which is the variable §4 already uses for the cycle record's id,
 so the example names the same id the record is written with.
 
 Named limit
@@ -58,11 +58,11 @@ VOTE_EXAMPLE = re.compile(r'gh pr review <N> -R \S+ --comment --body "(?P<body>[
 #: also prints `gh pr review ... --body "✅ LGTM..."` lines, but those illustrate what may
 #: NOT be run, so they are deliberately not required to carry an id — hence the two
 #: regions rather than a scan of the whole prompt.
-REVIEW_BLOCK_START = "- Review every open PR"
-REVIEW_BLOCK_END = "- **Reviewing PRs IS evolution work**"
+REVIEW_BLOCK_START = "# approve"
+REVIEW_BLOCK_END = "# merge (conditions in R3)"
 FOLLOW_UP_ANCHOR = "If you are a Committer on this repo and there are currently <3"
 
-#: The id the same render tells the cycle to write its record with (§6 Record).
+#: The id the same render tells the cycle to write its record with (§4 Record).
 RECORD_ID = re.compile(r"`id`: `(?P<id>cyc\d{8}-\d{6})`")
 
 
