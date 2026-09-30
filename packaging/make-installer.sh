@@ -262,6 +262,17 @@ OutputDir=$DIST_WIN/artifacts
 OutputBaseFilename=EMRG-$VERSION-windows-x64
 SetupIconFile=$ROOT_WIN/packaging/assets/icon.ico
 UninstallDisplayIcon={app}\\bin\\emrg.cmd
+; R131: exe 版本资源不得为空（rant 2026-09-30T11:43:44）。缺这四项时「属性 → 详细信息」
+; 里公司/产品/说明全空，产物看起来是个匿名自解压包 —— 那是 Defender 判
+; Trojan:Win32/Sabsik.FL.A!ml 的诱因之一（WDSI 申诉 f9954caf…，2026-09-30 已撤销），
+; 也是 SignPath Foundation 对签名产物的硬性要求。唯一能证明「元数据真进了产物」的
+; 检查在 .github/workflows/test.yml 的 iscc 之后：它读编译出的 exe，不是读本文件。
+; VersionInfoVersion 必须是四位数字（Inno 要求 x.y.z.w），故由构建期版本补一位；
+; 值全部取自构建期的 VERSION，不手写死值。
+VersionInfoCompany=argszero
+VersionInfoProductName={#MyAppName}
+VersionInfoDescription=EMRG - self-evolving AI agent (Windows installer)
+VersionInfoVersion={#MyAppVersion}.0
 Compression=lzma2
 SolidCompression=yes
 [Files]

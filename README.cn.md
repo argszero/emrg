@@ -91,6 +91,16 @@ EMRG 不只是一个工具——它是一个**会听吐槽、会自我改进**�
 
 > **Windows SmartScreen 提示**：安装包未做 Authenticode 签名——如 SmartScreen 提示，点**保留** / **更多信息 → 仍要运行**。EMRG 完全开源，源码可审计。
 
+> **下载后安装包直接不见了？** 这跟上一条不是一回事：SmartScreen 是**可点「保留」**的提示，而**误报把文件删掉**时根本没有按钮可点。我们真的遇到过（`EMRG-0.3.4-windows-x64.exe` 被判 `Trojan:Win32/Sabsik.FL.A!ml`；申诉后微软已确认误报并于 2026-09-30 **移除该检测**）。恢复办法是刷新病毒库后重新下载——以**管理员**身份打开命令提示符：
+>
+> ```bat
+> cd "c:\Program Files\Windows Defender"
+> MpCmdRun.exe -removedefinitions -dynamicsignatures
+> MpCmdRun.exe -SignatureUpdate
+> ```
+>
+> 最新病毒库下载页：<https://www.microsoft.com/en-us/wdsi/defenderupdates>。也可以先给下载目录加一条排除项。若仍被删除，请[提交误报](https://www.microsoft.com/en-us/wdsi/filesubmission)——安装包带发布者元数据，每个产物也都公布了 SHA-256。
+
 **首次使用**：打开 **EMRG** → 引导配置 **API Key / 模型** → 开始对话。TUI 同步可用：任意终端运行 `emrg` 即可（配置共享）。
 
 > **自带 API Key** — EMRG 使用你自己的 LLM API Key 和额度/账单；软件本身免费、MIT 开源。
