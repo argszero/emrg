@@ -930,17 +930,28 @@ dialog::backdrop {
   margin-bottom: 4px;
 }
 .rant-md {
-  margin-top: 4px;
+  margin-top: 2px;
 }
-.rant-progress {
+/* 详情两个带标签区块（宿主 2026-09-30T09:36：内容与进度都完整展开） */
+.rant-section {
   margin-top: 8px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--border);
+}
+.rant-section-label {
   font-size: var(--fs-aux);
   color: var(--text-3);
-  word-break: break-all;
+  margin-bottom: 2px;
 }
-/* rant 10:41:43：rant 详情 markdown —— 【】标题预处理后的 h4 层次 + 嵌套列表缩进可见 */
+.rant-progress {
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+  font-size: var(--fs-secondary);
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* rant 10:41:43：rant 详情 markdown —— 【】标题预处理后的 h4 层次 + 嵌套列表缩进可见
+   （2026-09-30 起重新生效：React 版此前把 markdown 当纯文本，这两条是死代码；
+   见 rant 2026-09-30T09:06:16 / #1763） */
 .rant-md h4 {
   margin: 10px 0 4px;
   font-size: 13px;

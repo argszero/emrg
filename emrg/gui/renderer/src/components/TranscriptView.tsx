@@ -11,6 +11,7 @@ import {
 import { createMarkdownRenderer, type MarkdownRenderer, type StreamState } from "../lib/markdown";
 import { toolPhrases } from "../lib/copywriting";
 import { useI18n, type TranslateFn } from "../lib/i18n";
+import { MarkdownText } from "./MarkdownText";
 
 /**
  * TranscriptView — 聊天区 React 渲染组件（Batch 2，设计 §5 Batch 2 项 1–3）。
@@ -254,22 +255,8 @@ function AssistantSegmentView({
   );
 }
 
-/** done 后整体 markdown 渲染（与旧 done 渲染同源 renderMarkdown；✦ 标记剥离仅限助手消息） */
-function MarkdownText({ text, md, stripMark = true }: { text: string; md: MarkdownRenderer; stripMark?: boolean }) {
-  const [html, setHtml] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    const src = stripMark ? text.replace(/^✦\s*/, "") : text;
-    md.renderMarkdown(src).then((h) => {
-      if (!cancelled) setHtml(h);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [text, md, stripMark]);
-  if (html === null) return <span className="assistant-plain">{text}</span>;
-  return <span className="assistant-html" dangerouslySetInnerHTML={{ __html: html }} />;
-}
+/** done 后整体 markdown 渲染（与旧 done 渲染同源 renderMarkdown；✦ 标记剥离仅限助手消息）
+ *  实现已提为共用组件 MarkdownText（rant 2026-09-30T09:06:16 / #1763：Rant 详情同路径）。 */
 
 /** 工具友好状态行（进行中 → 完成/失败，默认折叠，点开展示原始输出） */
 function ToolRowView({
