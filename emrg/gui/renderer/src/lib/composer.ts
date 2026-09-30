@@ -171,6 +171,62 @@ export function normalizePlaceholders(md: string, labels: string[]): string {
   return out;
 }
 
+/** 事件里可能携带图片的两个面（DataTransfer 与 ClipboardEvent.clipboardData 同形） */
+export interface ImageCarrier {
+  files?: ArrayLike<File> | null;
+  items?: ArrayLike<{ kind?: string; getAsFile?: () => File | null }> | null;
+  /** 事件自己声明的类型（`cd.types` / `dt.types`）——「声明了却没取到」时用来出声 */
+  types?: ArrayLike<string> | null;
+}
+
+/**
+ * 从一次粘贴/拖拽事件里取图片文件 —— **两个面都取**：`files` 与 `items`。
+ *
+ * 为什么要两个面（rant 2026-09-30T09:35:04，宿主报障「GUI 输入框里 Cmd+V 现在没有任何
+ * 效果」，实现在且从未走到过一次 IPC）：
+ *
+ * - `DataTransfer.files` 是**拖拽**一路可靠的来源；
+ * - 粘贴一路在 Chromium 里由 `items`（kind="file" → getAsFile()）承载，只读 `files`
+ *   会得到空数组 —— 于是 `handlePaste` 里 `imgs.length === 0` 成立、处理器 `return
+ *   false` 把事件交回浏览器，浏览器对没有文本的图片剪贴板什么也不做 ⇒ 宿主看到的就是
+ *   「没有任何效果」，而且**一行日志都没有**（IPC 从未被调用）。
+ *
+ * 因此这里的取舍是：多读一个面是**纯增量**（`files` 里有的仍然会拿到），而少读一个面
+ * 是静默失效。返回顺序 = `files` 在前、`items` 补齐其后，按对象同一性去重。
+ *
+ * ⚠️ 诚实边界：本机无法实跑真实粘贴（见 PR 的「诚实边界」），所以这不是「实测到的根因」，
+ * 而是「两个面都收」——它对**任一面**为真的情况都成立，而调用方对空结果必须**出声**
+ * （见 Composer 的可见拒绝），所以下一个宿主复现会把真正的层直接写进日志。
+ */
+export function collectImageFiles(carrier: ImageCarrier | null | undefined): File[] {
+  if (!carrier) return [];
+  const out: File[] = [];
+  const take = (f: File | null | undefined): void => {
+    if (f && typeof f.type === "string" && f.type.startsWith("image/") && !out.includes(f)) {
+      out.push(f);
+    }
+  };
+  for (const f of Array.from(carrier.files ?? [])) take(f);
+  for (const it of Array.from(carrier.items ?? [])) {
+    if (it && it.kind === "file" && typeof it.getAsFile === "function") take(it.getAsFile());
+  }
+  return out;
+}
+
+/**
+ * 事件上声明的类型（`cd.types` / `dt.types`）——用于「声明了图片/文件，却一个都没取到」
+ * 时把**事件里到底有什么**写进提示与日志，而不是只说一句「没图片」。
+ */
+export function declaredTypes(carrier: { types?: ArrayLike<string> | null } | null | undefined): string[] {
+  if (!carrier || !carrier.types) return [];
+  return Array.from(carrier.types).map((s) => String(s));
+}
+
+/** 声明里有文件/图片的迹象（Files / image/*）——用于区分「本来是文字粘贴」与「图片丢了」 */
+export function declaresImageOrFile(types: readonly string[]): boolean {
+  return types.some((t) => /^image\//i.test(t) || t === "Files");
+}
+
 /**
  * 发送前收敛 pending 图片：占位符仍在文本中的保留（删了占位符即丢弃，TUI 同语义），
  * position = 字面占位符在文本中的字符偏移；返回按 position 升序的新数组。
