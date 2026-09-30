@@ -48,11 +48,15 @@ Behavior:
   * verifies the root tree sha matches the remote; if content objects are
     missing, fetches missing blobs/trees via the Git Data API (disable with
     --no-fetch-objects) and re-verifies - fail-loud only if still mismatched
-  * updates refs/heads/<ref> and refs/remotes/origin/<ref>; a `--ref` that is a
-    full 40-hex object name creates no ref at all - a ref named after a sha
-    shadows it, so `git rev-parse <sha>` answers ambiguously and the tools that
-    ask it break. Such a caller gets the commit materialized, which is what it
-    asked for.
+  * updates refs/heads/<ref> and refs/remotes/origin/<ref>, and - when that branch
+    is the one checked out - refreshes the index and worktree to match. A ref move
+    leaves the checkout a commit behind, so `git status` reports every commit just
+    synced as a **staged reversion of itself** (measured 2026-09-30, see
+    `_update_refs`). A worktree with local changes is left alone and the condition
+    is printed rather than silently produced; a `--ref` that is a full 40-hex
+    object name creates no ref at all - a ref named after a sha shadows it, so
+    `git rev-parse <sha>` answers ambiguously and the tools that ask it break.
+    Such a caller gets the commit materialized, which is what it asked for.
 
 Requirements: git on PATH; api.github.com reachable. Auth: optional for public
 repos (GH_TOKEN or gh CLI used if available, higher rate limit).
@@ -353,6 +357,65 @@ def rev_parse(ref: str) -> str:
     return r.stdout.decode().strip() if r.returncode == 0 else ""
 
 
+def _update_refs(branch: str, head: str, repo: str | None = None) -> None:
+    """Move refs/heads/<branch> (+ its origin tracking ref) to `head`, and refresh
+    the checkout when `branch` is the one checked out.
+
+    `git update-ref` moves a ref and nothing else. With `--ref master` - the
+    default, and the common call - while standing on master, HEAD then names
+    `head` while the index and worktree still hold the previous commit, so every
+    commit this sync just brought in is reported by `git status` as a **staged
+    reversion of itself**. Measured 2026-09-30: HEAD tree `24b51c38` against an
+    index tree one commit behind, and the next cycle read those rows as local
+    edits and repaired them by hand. The refresh is the `git checkout HEAD -- .`
+    a human runs there.
+
+    Cleanliness is read **before** the ref moves, because after it the index
+    differs from HEAD by construction: a check made afterwards would refuse in
+    exactly the state the refresh exists for. A worktree that really carries local
+    changes is left untouched - discarding them is not this script's to do - and
+    the condition is printed instead, so the caller is never left with a silent
+    half-state. Not standing on `branch` (a detached HEAD, another branch, a bare
+    repo) needs nothing: no index points at that ref.
+    """
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=repo or None,
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    root = top.stdout.strip() if top.returncode == 0 else ""
+    on_branch = False
+    dirty = ""
+    if root:
+        cur = subprocess.run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=root,
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace")
+        on_branch = cur.returncode == 0 and cur.stdout.strip() == branch
+        if on_branch:
+            st = subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                                capture_output=True, text=True, encoding="utf-8",
+                                errors="replace")
+            dirty = st.stdout.strip()
+
+    for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+        subprocess.run(["git", "update-ref", ref, head], check=True, cwd=root or None)
+    print(f"updated refs/heads/{branch} and refs/remotes/origin/{branch} -> {head[:7]}")
+
+    if not on_branch:
+        return
+    if dirty:
+        print(f"  HEAD is on {branch} and the worktree has local changes: the index and"
+              f" worktree stay at the previous commit, so `git status` will show the"
+              f" synced commits as staged reversions. Run `git checkout HEAD -- .` once"
+              f" the local changes are committed or stashed.")
+        return
+    r = subprocess.run(["git", "checkout", "HEAD", "--", "."], cwd=root,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode == 0:
+        print(f"  HEAD is on {branch}: index and worktree refreshed to {head[:7]}")
+    else:
+        print(f"  HEAD is on {branch} but the refresh failed"
+              f" ({r.stderr.strip() or 'no stderr'}) - the index still holds the previous"
+              f" commit; run `git checkout HEAD -- .` by hand.")
+
+
 def repo_from_origin() -> str:
     # encoding="utf-8": the origin URL is echoed back in SystemExit below, and a
     # clone directory may carry a non-ASCII byte; the locale codec would raise
@@ -455,9 +518,7 @@ def main() -> int:
               f"shadow it, so `git rev-parse` would answer ambiguously)")
         return 0
 
-    for ref in (f"refs/heads/{args.ref}", f"refs/remotes/origin/{args.ref}"):
-        subprocess.run(["git", "update-ref", ref, head], check=True)
-    print(f"updated refs/heads/{args.ref} and refs/remotes/origin/{args.ref} -> {head[:7]}")
+    _update_refs(args.ref, head)
     return 0
 
 

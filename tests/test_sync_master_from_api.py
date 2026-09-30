@@ -442,3 +442,107 @@ def test_an_object_name_ref_creates_no_ref():
     # A short hex string is a branch name, not an object name: it cannot be a full
     # object name, and refusing it would break a real branch called `deadbeef`.
     assert not mod._is_object_name("deadbeef")
+
+
+# ------------------------------------------------- ref advance + checkout state
+
+
+def _repo_on_master_with_a_next_commit(tmp_path):
+    """A repo standing clean on `master` at c1, plus a c2 the checkout never sees.
+
+    c2 is built with plumbing (`hash-object` / `mktree` / `commit-tree`) so
+    refs/heads/master is still c1 while the worktree is clean - the state
+    `--ref master` starts from before it moves the ref.
+    """
+    repo = _init_repo(tmp_path)
+    _git("symbolic-ref", "HEAD", "refs/heads/master", cwd=repo)
+    (repo / "f.txt").write_text("one\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "one", cwd=repo, env=GIT_ENV)
+    c1 = _git("rev-parse", "HEAD", cwd=repo).stdout.decode().strip()
+
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], input=b"two\n",
+                          capture_output=True, cwd=repo).stdout.decode().strip()
+    tree = subprocess.run(["git", "mktree"],
+                          input=f"100644 blob {blob}\tf.txt\n".encode("utf-8"),
+                          capture_output=True, cwd=repo).stdout.decode().strip()
+    env = dict(os.environ)
+    env.update(GIT_ENV)
+    c2 = subprocess.run(["git", "commit-tree", tree, "-p", c1, "-m", "two"],
+                        capture_output=True, cwd=repo, env=env).stdout.decode().strip()
+    return repo, c1, c2
+
+
+def test_advancing_the_checked_out_branch_refreshes_the_index(tmp_path, capsys):
+    """The trap this closes: `git update-ref` moves the ref, never the index.
+
+    Measured 2026-09-30: `--ref master` while standing on master left HEAD tree
+    `24b51c38` against an index tree one commit behind, so `git status` reported
+    every commit the sync had just brought in as a *staged reversion of itself* -
+    and the next cycle read those rows as local edits and repaired them by hand.
+    After the advance the checkout must be clean and hold the new content.
+    """
+    mod = _load_module()
+    repo, c1, c2 = _repo_on_master_with_a_next_commit(tmp_path)
+    assert _git("status", "--porcelain", cwd=repo).stdout.strip() == b""
+
+    mod._update_refs("master", c2, repo=str(repo))
+
+    out = capsys.readouterr().out
+    assert "index and worktree refreshed" in out
+    assert _git("rev-parse", "HEAD", cwd=repo).stdout.decode().strip() == c2
+    assert _git("rev-parse", "refs/remotes/origin/master", cwd=repo).stdout.decode().strip() == c2
+    assert (repo / "f.txt").read_text(encoding="utf-8") == "two\n"
+    # The reading that was broken: no staged reversion is left behind.
+    assert _git("status", "--porcelain", cwd=repo).stdout.strip() == b""
+    assert c1 != c2
+
+
+def test_a_dirty_worktree_is_reported_never_clobbered(tmp_path, capsys):
+    """Local changes are the caller's, not the script's to discard.
+
+    The refusal must still move the ref (the sync's job) and must *print* the
+    condition and its remedy, because a silent half-state is what the previous
+    cycle paid a repair for. The local edit survives.
+    """
+    mod = _load_module()
+    repo, _c1, c2 = _repo_on_master_with_a_next_commit(tmp_path)
+    (repo / "f.txt").write_text("mine\n", encoding="utf-8")
+
+    mod._update_refs("master", c2, repo=str(repo))
+
+    out = capsys.readouterr().out
+    assert "the worktree has local changes" in out
+    assert "git checkout HEAD -- ." in out          # the remedy is named, not implied
+    assert (repo / "f.txt").read_text(encoding="utf-8") == "mine\n"
+    assert _git("rev-parse", "HEAD", cwd=repo).stdout.decode().strip() == c2
+
+
+def test_a_branch_the_caller_is_not_on_is_not_refreshed(tmp_path, capsys):
+    """No index points at a ref the caller is not standing on, so nothing moves.
+
+    The ref advance still happens - it is the sync's job - but the worktree of the
+    checked-out branch is left untouched and no refresh is claimed.
+    """
+    mod = _load_module()
+    repo, c1, c2 = _repo_on_master_with_a_next_commit(tmp_path)
+
+    mod._update_refs("other", c2, repo=str(repo))
+
+    out = capsys.readouterr().out
+    assert "refreshed" not in out and "local changes" not in out
+    assert _git("rev-parse", "refs/heads/other", cwd=repo).stdout.decode().strip() == c2
+    assert _git("rev-parse", "HEAD", cwd=repo).stdout.decode().strip() == c1
+    assert _git("status", "--porcelain", cwd=repo).stdout.strip() == b""
+
+
+def test_main_advances_refs_through_the_refresh_helper():
+    """Text wiring: the ref-advance path is `_update_refs`, not an inline loop.
+
+    The behaviour tests above exercise the helper directly; this pins that main()
+    actually routes through it, so a later edit cannot restore the bare
+    `git update-ref` that left the index behind.
+    """
+    content = SCRIPT.read_text(encoding="utf-8")
+    assert "_update_refs(args.ref, head)" in content
+    assert 'for ref in (f"refs/heads/{args.ref}"' not in content
