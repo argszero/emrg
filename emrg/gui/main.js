@@ -396,17 +396,23 @@ vision = false
     // 文件名 hash 不同（同一图在 TUI/GUI 各贴一次会各存一份，功能无碍，仅存储），
     // GUI 自身去重自洽（同字节 → 同文件名 → 跳过写盘）。
     ipcMain.handle("emrg:saveImage", async (_e, { sessionId, data, label, mime } = {}) => {
-      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      if (typeof data !== "string" || !data || data.length > 28_000_000) throw new Error("invalid image data"); // ~21MB base64
-      if (typeof label !== "string" || !label || label.length > 200) throw new Error("invalid label");
+      // 每次拒绝都留一行日志（rant 2026-09-30T09:35:04 要求 3）：此前被 throw 拒绝时
+      // 一行都不写，于是「IPC 从未被走到」与「走到了但被拒」在日志里完全无法区分
+      const refuse = (why) => {
+        logger.warn(`[gui:saveImage] refused: ${why}`);
+        throw new Error(why);
+      };
+      if (!validateSessionId(sessionId)) refuse("invalid session_id");
+      if (typeof data !== "string" || !data || data.length > 28_000_000) refuse("invalid image data"); // ~21MB base64
+      if (typeof label !== "string" || !label || label.length > 200) refuse("invalid label");
       const mm = /^image\/([\w.+-]+)$/.exec(mime || "image/png");
-      if (!mm) throw new Error("invalid mime");
+      if (!mm) refuse("invalid mime");
       // 扩展名白名单（与 Composer SUPPORTED_IMAGE_MIME 一致）
       const EXT_BY_SUB = { png: "png", jpeg: "jpg", gif: "gif", webp: "webp", bmp: "bmp", "svg+xml": "svg" };
       const ext = EXT_BY_SUB[mm[1].toLowerCase()];
-      if (!ext) throw new Error("unsupported image type");
+      if (!ext) refuse(`unsupported image type ${mm[1].toLowerCase()}`);
       const buf = Buffer.from(data, "base64");
-      if (buf.length === 0) throw new Error("invalid image data");
+      if (buf.length === 0) refuse("invalid image data");
       const projectRoot = resolveSessionCwd(sessionId) || DEFAULT_CWD;
       const imagesDir = path.join(projectRoot, ".emrg", "sessions", sessionId, "images");
       fs.mkdirSync(imagesDir, { recursive: true });

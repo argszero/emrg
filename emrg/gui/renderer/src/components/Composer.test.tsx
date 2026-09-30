@@ -22,6 +22,9 @@ function setup(
     busy?: boolean;
     cancel?: (sessionId: string) => Promise<unknown>;
     onCommand?: (r: { type: "command" | "unknown"; cmd: string; args?: string[] }) => void;
+    saveImage?: (payload: { sessionId?: string | null; data: string; label: string; mime?: string }) =>
+      Promise<{ path: string; mime?: string }>;
+    logLine?: (level: string, msg: string) => void;
   } = {},
 ) {
   const editorRef: MutableRefObject<Editor | null> = { current: null };
@@ -735,5 +738,179 @@ describe("Composer — 草稿持久化（rant 2026-09-01T20:28:31）", () => {
     await waitFor(() => expect(editorRef.current!.getText()).toContain("draft for s2"));
     // 旧会话草稿仍在 store（切回 s1 可恢复）
     expect(store.getComposerDraft("s1")).toContain("draft for s1");
+  });
+});
+
+// ── 图片路径：粘贴/拖拽的落盘与可见拒绝（rant 2026-09-30T09:35:04） ────────────
+//
+// 宿主报障（2026-09-30T09:33）：「GUI 输入框里 Cmd+V， 现在没有任何效果」。
+// 实现自 2026-09-02 就在（e46c160a / PR #1109），但 ~/.emrg/emrg-gui.log 里
+// `[gui:saveImage]` 全量 0 命中 ⇒ 那条 IPC 一次都没被走到，而拒绝路径全是静默的
+// （不插占位符、不提示、不写日志），所以「图片被丢弃」与「粘贴本来就没内容」外部
+// 无从区分。下面这几条把两侧都钉住：**两个面都取**（files + items，粘贴一路由
+// Chromium 放在 items 里）与**每一次拒绝都出声**。
+
+type SaveImageArgs = { sessionId?: string | null; data: string; label: string; mime?: string };
+
+interface FakeCarrier {
+  files?: File[];
+  items?: { kind: string; type: string; getAsFile: () => File | null }[];
+  types?: string[];
+  text?: string;
+}
+
+/** clipboardData / dataTransfer 的替身（只实现被测代码读的那几个面） */
+function makeCarrier(init: FakeCarrier) {
+  return {
+    files: init.files ?? [],
+    items: init.items ?? [],
+    types: init.types ?? [],
+    getData: (t: string) => (t === "text/plain" ? init.text ?? "" : ""),
+  };
+}
+
+function fileItem(file: File | null, type?: string) {
+  return { kind: "file", type: type ?? file?.type ?? "", getAsFile: () => file };
+}
+
+/** 造一个真实 image/png File（jsdom 有 File + FileReader，base64 走真实路径） */
+function pngFile(name = "shot.png"): File {
+  return new File([new Uint8Array([137, 80, 78, 71])], name, { type: "image/png" });
+}
+
+/** 在编辑器 DOM 上派发一次 paste（ProseMirror 的 capturePaste → handlePaste，延迟 50ms） */
+async function firePaste(editor: Editor, clipboardData: unknown): Promise<void> {
+  const ev = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(ev, "clipboardData", { value: clipboardData });
+  act(() => {
+    editor.view.dom.dispatchEvent(ev);
+  });
+}
+
+/** 在 composer 容器上派发一次 drop（wrapper 的 onDrop，不经 ProseMirror） */
+async function fireDrop(el: HTMLElement, dataTransfer: unknown): Promise<void> {
+  const ev = new Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(ev, "dataTransfer", { value: dataTransfer });
+  act(() => {
+    el.dispatchEvent(ev);
+  });
+}
+
+describe("Composer — 图片粘贴/拖拽（rant 2026-09-30T09:35:04）", () => {
+  it("粘贴只带 items 的图片（Chromium 形态）会落盘并插入占位符", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/shot.png", mime: "image/png" }));
+    const logLine = vi.fn();
+    const s = setup(store, { saveImage, logLine });
+    const editor = await waitEditor(s);
+
+    // files 为空 —— 这正是「只读 cd.files」那个写法会得到空数组的形态
+    await firePaste(editor, makeCarrier({ files: [], items: [fileItem(pngFile())], types: ["Files"] }));
+
+    await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
+    expect(saveImage.mock.calls[0][0]).toMatchObject({ sessionId: "s1", mime: "image/png", label: "shot" });
+    await waitFor(() => expect(editor.getText()).toContain("[📷 shot]"));
+    expect(logLine).toHaveBeenCalledWith("info", expect.stringContaining("[composer:image] attach 1 file(s)"));
+    expect(screen.queryByTestId("composer-image-notice")).toBeNull();
+  });
+
+  it("粘贴既有文本又有图（items）时文本先落、图随后附上（对齐 TUI）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/shot.png", mime: "image/png" }));
+    const s = setup(store, { saveImage });
+    const editor = await waitEditor(s);
+
+    await firePaste(
+      editor,
+      makeCarrier({ files: [], items: [fileItem(pngFile())], types: ["Files", "text/plain"], text: "hello" }),
+    );
+
+    await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(editor.getText()).toContain("hello"));
+    expect(editor.getText()).toContain("[📷 shot]");
+  });
+
+  it("拖拽（dataTransfer.files）仍然工作", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/drop.png", mime: "image/png" }));
+    const s = setup(store, { saveImage });
+    await waitEditor(s);
+
+    await fireDrop(screen.getByTestId("composer"), makeCarrier({ files: [pngFile("drop.png")], types: ["Files"] }));
+
+    await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
+    expect(saveImage.mock.calls[0][0]).toMatchObject({ mime: "image/png", label: "drop" });
+  });
+
+  it("声明了 Files 却一个图片都没取到 → 出声（把事件里到底有什么写出来）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn();
+    const logLine = vi.fn();
+    const s = setup(store, { saveImage, logLine });
+    const editor = await waitEditor(s);
+
+    await firePaste(editor, makeCarrier({ files: [], items: [], types: ["Files"] }));
+
+    const notice = await screen.findByTestId("composer-image-notice");
+    expect(notice.textContent).toContain("Files");
+    expect(saveImage).not.toHaveBeenCalled();
+    expect(logLine).toHaveBeenCalledWith("warn", expect.stringContaining("[composer:image] refused:"));
+  });
+
+  it("白名单外的类型（macOS 菜单栏给的 TIFF）报出它的类型，而不是静默丢弃", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn();
+    const logLine = vi.fn();
+    const s = setup(store, { saveImage, logLine });
+    const editor = await waitEditor(s);
+
+    const tiff = new File([new Uint8Array([1, 2])], "shot.tiff", { type: "image/tiff" });
+    await firePaste(editor, makeCarrier({ files: [tiff], items: [fileItem(tiff)], types: ["Files"] }));
+
+    const notice = await screen.findByTestId("composer-image-notice");
+    expect(notice.textContent).toContain("image/tiff");
+    expect(saveImage).not.toHaveBeenCalled();
+  });
+
+  it("落盘被拒（IPC 报错）时把原因摆到输入框上", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => {
+      throw new Error("invalid session_id");
+    });
+    const logLine = vi.fn();
+    const s = setup(store, { saveImage, logLine });
+    const editor = await waitEditor(s);
+
+    await firePaste(editor, makeCarrier({ files: [pngFile()], types: ["Files"] }));
+
+    const notice = await screen.findByTestId("composer-image-notice");
+    expect(notice.textContent).toContain("invalid session_id");
+    expect(editor.getText()).not.toContain("[📷");
+    expect(logLine).toHaveBeenCalledWith("warn", expect.stringContaining("invalid session_id"));
+  });
+
+  it("没有会话时拒绝也要看得见（不再是静默 return）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn();
+    const s = setup(store, { sid: null, saveImage });
+    const editor = await waitEditor(s);
+
+    await firePaste(editor, makeCarrier({ files: [pngFile()], types: ["Files"] }));
+
+    const notice = await screen.findByTestId("composer-image-notice");
+    expect(notice.textContent).toContain("会话");
+    expect(saveImage).not.toHaveBeenCalled();
+  });
+
+  it("普通文本粘贴不报错（没有图就没有提示）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn();
+    const s = setup(store, { saveImage });
+    const editor = await waitEditor(s);
+
+    await firePaste(editor, makeCarrier({ types: ["text/plain"], text: "just text" }));
+
+    expect(screen.queryByTestId("composer-image-notice")).toBeNull();
+    expect(saveImage).not.toHaveBeenCalled();
   });
 });

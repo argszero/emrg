@@ -430,3 +430,271 @@ def test_session_selector_row_prefix_is_empty_string_when_no_updated_at():
     row = _row_text(lines, 1)
     assert "None" not in row, row
     assert "2026-05-01 08:30" in row, row
+
+
+# ── ToolCard + ToolSelector (rant 2026-09-30T09:17:54, the host's option C) ──
+#
+# The defect these pin: Tab expanded tool cards *in place*, and it could not work —
+# the terminal's viewport is write-only, so the card the handler picked (the earliest
+# unexpanded one) was almost always already in the scrollback and the keystroke
+# changed nothing. In-place expansion is gone; the detail lives in a selector that
+# re-renders on every keystroke, and with it gone the selector is the **only** way to
+# read a tool's output — hence the "whole output, not a prefix" guard below.
+
+from emrg.client.python_tui import ToolCard
+from emrg.client.widgets import ToolSelector, _format_tool_input
+
+
+def _text(line: Line) -> str:
+    return "".join(s.text for s in line.spans)
+
+
+def _rendered(widget, width: int = 80) -> list[str]:
+    return [_text(line) for line in widget.render(RenderContext(width=width))]
+
+
+def make_card(name: str = "bash", command: str = "ls -la", status: str = "done",
+              output: str = "", tool_call_id: str = "", arguments: dict | None = None,
+              elapsed: float = 0.0) -> ToolCard:
+    return ToolCard(
+        name=name, command=command, status=status, output=output,
+        tool_call_id=tool_call_id, arguments=arguments or {}, elapsed=elapsed,
+    )
+
+
+def test_tool_card_row_is_the_name_and_the_command_only():
+    """The collapsed row is `icon name: command`, with no expand affordance.
+
+    A chevron would promise an interaction the TUI no longer has — the same defect
+    the removed Tab handler was. The card has one line; everything else is read in
+    the selector.
+    """
+    card = make_card()
+
+    assert _rendered(card) == ["✓ bash: ls -la"]
+
+
+def test_tool_card_status_drives_its_glyph():
+    """One icon table, read by the row and by the selector."""
+    assert _rendered(make_card(status="failed"))[0].startswith("✗")
+    assert _rendered(make_card(status="running"))[0].startswith("◐")
+    assert make_card(status="failed").icon == "✗"
+
+
+def test_tool_card_without_a_command_shows_only_its_name():
+    assert _rendered(make_card(command="")) == ["✓ bash"]
+
+
+def test_tool_card_owns_its_arguments_and_elapsed():
+    """The card is the holder of the material the detail pane reads.
+
+    `app.py` used to park the arguments in a separate dict and pop them at
+    `tool_end`, so nothing was left on the card to show as input.
+    """
+    card = make_card(arguments={"command": "ls"}, elapsed=1.25)
+
+    assert card.arguments == {"command": "ls"}
+    assert card.elapsed == 1.25
+    card.update("done", output="out", elapsed=2.5)
+    assert (card.output, card.elapsed) == ("out", 2.5)
+
+
+def test_tool_selector_opens_on_the_most_recent_call():
+    """Tab is pressed about the tool that just ran; older ones are reached with ↑."""
+    sel = ToolSelector([make_card(command="one"), make_card(command="two")])
+
+    assert sel.selected_index == 1
+    assert sel.selected_card.command == "two"
+
+
+def test_tool_selector_navigation_stops_at_both_ends():
+    sel = ToolSelector([make_card(command="one"), make_card(command="two")])
+
+    sel.move_up(); sel.move_up()
+    assert sel.selected_index == 0
+    sel.move_down(); sel.move_down(); sel.move_down()
+    assert sel.selected_index == 1
+
+
+def test_tool_selector_shows_all_three_sections_of_the_selected_tool():
+    """Name, input and output — the information parity the ruling asked for."""
+    sel = ToolSelector([make_card(
+        name="bash", command="ls -la", tool_call_id="c1",
+        arguments={"command": "ls -la", "workdir": "/tmp"},
+        output="file1\nfile2", status="done", elapsed=0.4,
+    )])
+
+    text = _rendered(sel)
+
+    assert any("Tool details" in t for t in text)
+    assert any("tool:   bash" in t for t in text)
+    assert any("input:" in t for t in text)
+    assert any('"workdir": "/tmp"' in t for t in text)
+    assert any("output:" in t for t in text)
+    assert any("file1" in t for t in text)
+    assert any("file2" in t for t in text)
+
+
+def test_tool_selector_shows_the_whole_output_not_a_prefix():
+    """The invariant: with in-place expansion gone, this is the only view.
+
+    A truncated detail would leave a tool's result unreadable in the TUI, which is
+    what the removed Tab handler already amounted to.
+    """
+    body = "\n".join(f"line {i}" for i in range(120))
+    sel = ToolSelector([make_card(output=body)])
+
+    text = "\n".join(_rendered(sel))
+
+    assert "line 0\n" in text + "\n"
+    assert "line 119" in text
+    assert "…" not in text.split("output:")[1]
+
+
+def test_tool_selector_says_when_there_is_no_output_yet():
+    sel = ToolSelector([make_card(status="running", output="")])
+
+    assert any("(no output yet)" in t for t in _rendered(sel))
+
+
+def test_tool_selector_windows_a_long_list_and_keeps_the_selection_on_screen():
+    """A list longer than the window must still show the row that is selected.
+
+    Without a window, forty tool calls would push the selected row off the top of
+    the viewport — which is exactly the defect the old in-place expansion had.
+    """
+    cards = [make_card(command=f"cmd {i}") for i in range(40)]
+    sel = ToolSelector(cards)
+
+    # Opens on the last card, so everything hidden is *above* the window.
+    lines = _rendered(sel)
+    assert any("↑" in t and "more" in t for t in lines)
+    assert not any("↓" in t and "more" in t for t in lines)
+    assert any(f"cmd {sel.selected_index}" in t for t in lines)
+
+    # At the top of the list the markers swap sides — and the row is still shown.
+    sel.selected_index = 0
+    lines = _rendered(sel)
+    assert any("cmd 0" in t for t in lines)
+    assert any("↓" in t and "more" in t for t in lines)
+    assert not any("↑" in t and "more" in t for t in lines)
+
+
+def test_tool_selector_window_bounds_are_inside_the_list():
+    sel = ToolSelector([make_card(command=f"cmd {i}") for i in range(40)])
+    for index in (0, 1, 20, 38, 39):
+        sel.selected_index = index
+        start, end = sel.window()
+        assert 0 <= start < end <= 40
+        assert start <= index < end
+
+
+def test_tool_selector_of_an_empty_session_has_nothing_selected():
+    sel = ToolSelector([])
+
+    assert sel.selected_card is None
+    assert sel.selected_index == 0
+    assert any("Tool details" in t for t in _rendered(sel))
+
+
+def test_format_tool_input_reads_a_dict_and_admits_an_empty_one():
+    assert _format_tool_input({}) == ["(none)"]
+    assert '"command": "ls"' in "\n".join(_format_tool_input({"command": "ls"}))
+    # An unparsable argument reached the card as `_raw`; it is shown as it came.
+    assert "_raw" in "\n".join(_format_tool_input({"_raw": "not json"}))
+
+
+# ── The Tab wiring, which lives inside the key-handler closure ──────────
+#
+# `handle_key` and `run_client` are one closure, so the keystroke path cannot be
+# called from a test without a terminal and a socket. What is checkable is the
+# wiring's *shape* in the source — the same technique `test_session_sandbox.py`
+# uses for the tier boundary. It is a weaker guard than a behavioural one and this
+# comment is the statement of that limit: it pins that the branch is written the
+# way the requirement needs, not that a real keypress reaches it.
+
+from pathlib import Path
+
+
+def _app_source() -> str:
+    return (Path(__file__).resolve().parents[1] / "emrg" / "client" / "app.py").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_tab_opens_the_tool_selector_and_no_longer_expands_in_place():
+    """Tab's non-`/` branch opens the selector; the old toggle is gone."""
+    src = _app_source()
+    tab = src.index("# Tab: command completion (when / prefix) or the tool-detail selector")
+    branch = src[tab:tab + 2200]
+
+    assert "tool_sel.widget = ToolSelector(tool_cards)" in branch
+    # The removed affordance: no consumer may expand a card in place any more.
+    assert ".toggle()" not in branch
+    assert "tc.expanded" not in branch
+
+
+def test_the_card_row_has_no_expand_affordance_left():
+    """`ToolCard` keeps no state a keystroke could toggle."""
+    card_src = (
+        Path(__file__).resolve().parents[1]
+        / "emrg" / "client" / "python_tui" / "widgets" / "tool_card.py"
+    ).read_text(encoding="utf-8")
+
+    assert "def toggle" not in card_src
+    assert "self.expanded" not in card_src
+    assert "expanded:" not in card_src  # no such dataclass field
+    assert "arguments:" in card_src     # the card owns its arguments instead
+
+
+def test_the_live_result_completes_the_card_found_by_its_call_id():
+    """The live half of the pairing, pinned at the seam a unit test cannot reach.
+
+    A mutation that stops `tool_end` from completing its card leaves every other
+    guard green — the replay path is tested behaviourally, this one is inside the
+    stream handler and needs a socket. So its shape is pinned here: the card is
+    found by the daemon's id (`last_tool_card()` stays only as the fallback for a
+    stream that lost the start frame), the summaries read that card's arguments,
+    and the update carries the duration to the selector.
+    """
+    src = _app_source()
+    branch = src[src.index('if data.get("type") == "tool_end":'):]
+    branch = branch[:branch.index('if data.get("type") == "cancelled":')]
+
+    assert "chat.tool_card_by_id(te.tool_call_id)" in branch
+    assert "card.update(" in branch            # the card is actually completed,
+    assert "card.arguments" in branch          # the summaries read the card,
+    assert "tool_args" not in branch           # not a dict that was popped
+    assert "elapsed=elapsed" in branch         # and the duration reaches the selector
+
+
+def test_the_replay_caller_adds_a_card_as_the_widget_it_is():
+    """`_replay_rows` returning a card is worth nothing if the caller flattens it.
+
+    The mapping is unit-tested; the one line that puts its card on the chat is not,
+    because it needs a terminal. This pins that line's shape.
+    """
+    src = _app_source()
+    branch = src[src.index('elif kind == "tool_card":'):]
+    branch = branch[:branch.index("else:")]
+
+    assert "chat.add(content)" in branch
+
+
+def test_the_tool_selector_closes_on_esc_before_the_turn_cancel_can_see_it():
+    """Order is load-bearing: this panel is opened *during* a turn.
+
+    The Esc-interrupt for a busy turn fires before every other dialog, by design.
+    The tool panel is a read-only viewer whose whole point is to be opened while a
+    turn is running, so if it sat below that check, Esc would kill the turn the
+    host was reading about instead of closing the panel.
+    """
+    src = _app_source()
+    panel = src.index("if tool_sel.active and tool_sel.widget:")
+    cancel = src.index("# ── ESC interrupt when busy ──")
+
+    assert panel < cancel
+    block = src[panel:panel + 1200]
+    assert 'data == b"\\x1b"' in block          # Esc …
+    assert "tool_sel.active = False" in block   # … closes the panel,
+    assert "chat.remove(tool_sel.widget)" in block  # and takes it off the chat

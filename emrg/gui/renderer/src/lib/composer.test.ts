@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   CMD_MENU_CLOSED,
   clearQueued,
+  collectImageFiles,
+  declaredTypes,
+  declaresImageOrFile,
   imagePlaceholder,
   menuForPrefix,
   menuNavigate,
@@ -242,5 +245,69 @@ describe("resolveSendImages", () => {
   it("returns empty array when nothing remains", () => {
     expect(resolveSendImages([img("[📷 a]")], "no placeholders here")).toEqual([]);
     expect(resolveSendImages([], "text")).toEqual([]);
+  });
+});
+
+describe("collectImageFiles — 粘贴/拖拽事件的两个面都取", () => {
+  const png = new File(["x"], "shot.png", { type: "image/png" });
+  const tiff = new File(["x"], "shot.tiff", { type: "image/tiff" });
+
+  it("finds images in `files` (the drag shape)", () => {
+    expect(collectImageFiles({ files: [png] })).toEqual([png]);
+  });
+
+  it("finds images in `items` when `files` is empty (the paste shape Chromium delivers)", () => {
+    // 本文件守护的正是这一条：只读 files 会得到空数组，于是 handlePaste 静默 return false，
+    // 宿主看到「Cmd+V 没有任何效果」而日志里一行都没有（rant 2026-09-30T09:35:04）。
+    const carrier = {
+      files: [] as File[],
+      items: [{ kind: "file", type: "image/png", getAsFile: () => png }],
+    };
+    expect(collectImageFiles(carrier)).toEqual([png]);
+  });
+
+  it("unions both faces without duplicating the same File object", () => {
+    const carrier = {
+      files: [png],
+      items: [
+        { kind: "file", type: "image/png", getAsFile: () => png },
+        { kind: "file", type: "image/tiff", getAsFile: () => tiff },
+      ],
+    };
+    expect(collectImageFiles(carrier)).toEqual([png, tiff]);
+  });
+
+  it("ignores non-image carriers (string items, text kinds, nulls)", () => {
+    const carrier = {
+      files: [new File(["t"], "a.txt", { type: "text/plain" })],
+      items: [
+        { kind: "string", type: "text/plain", getAsFile: () => null },
+        { kind: "file", type: "text/plain", getAsFile: () => new File(["t"], "b.txt", { type: "text/plain" }) },
+        { kind: "file", type: "image/png", getAsFile: () => null },
+      ],
+    };
+    expect(collectImageFiles(carrier)).toEqual([]);
+  });
+
+  it("is null-safe and typeless-safe (a File with no type is not an image)", () => {
+    expect(collectImageFiles(null)).toEqual([]);
+    expect(collectImageFiles(undefined)).toEqual([]);
+    expect(collectImageFiles({})).toEqual([]);
+    expect(collectImageFiles({ files: [new File(["x"], "noext")] })).toEqual([]);
+  });
+});
+
+describe("declaredTypes / declaresImageOrFile — 「声明了却没取到」要说得出来", () => {
+  it("reads the declared types off the carrier", () => {
+    expect(declaredTypes({ types: ["Files", "text/plain"] })).toEqual(["Files", "text/plain"]);
+    expect(declaredTypes(null)).toEqual([]);
+    expect(declaredTypes({})).toEqual([]);
+  });
+
+  it("treats Files and image/* as an image-or-file declaration, text as none", () => {
+    expect(declaresImageOrFile(["Files"])).toBe(true);
+    expect(declaresImageOrFile(["image/tiff"])).toBe(true);
+    expect(declaresImageOrFile(["text/plain", "text/html"])).toBe(false);
+    expect(declaresImageOrFile([])).toBe(false);
   });
 });

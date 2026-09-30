@@ -403,6 +403,20 @@
   margin-top: var(--sp-2);
 }
 
+/* 图片路径的可见拒绝（rant 2026-09-30T09:35:04 要求 3：拒绝必须看得见）。
+   与成功路径（输入框里出现 [📷 …] 占位符）对称——在此之前每一次拒绝都是静默的，
+   所以「粘贴没效果」在外部无法与「粘贴本来就没内容」区分。 */
+.composer-notice {
+  margin-top: var(--sp-2);
+  padding: 6px var(--sp-3);
+  border: 1px solid var(--amber);
+  border-radius: var(--radius-sm);
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: var(--fs-aux);
+  line-height: 1.5;
+}
+
 /* ── Stage 2 mini 格式栏（rant 2026-08-28T14:07:29：粗体/斜体/删除线/代码/链接/列表/引用/标题） ── */
 .fmt-bar {
   display: flex;

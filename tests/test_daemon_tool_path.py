@@ -76,6 +76,24 @@ def _isdir_except(missing: set[str]):
     return exists
 
 
+def _isdir_only(existing: str, *more: str):
+    """An ``isdir`` that says **only** the named directories exist.
+
+    The list is no longer three entries (issue #1783 added the version-manager
+    shim directories), and on a machine like this one several of the absolute
+    prefixes really do exist — so an ``isdir`` that defaults to "everything
+    exists" makes an exact assertion about what was *added* unreadable, and one
+    that defaults to "nothing exists" makes it pass for the wrong reason. This
+    helper makes the fixture's world explicit.
+    """
+    present = {existing, *more}
+
+    def exists(path) -> bool:
+        return str(path) in present
+
+    return exists
+
+
 def _home_with(tmp_path: Path, *names: str) -> Path:
     home = tmp_path / "home"
     for name in names:
@@ -87,11 +105,11 @@ def test_a_tool_dir_is_appended_after_the_inherited_path():
     """The host's own PATH keeps priority; ours is added behind it."""
     env = {"PATH": "/usr/bin:/bin"}
 
-    # Only the home directory exists: the absolute prefixes are the machine's fact,
+    # Only `~/.local/bin` exists: the absolute prefixes are the machine's fact,
     # and naming them missing keeps this assertion about the augmentation itself.
     added = tool_path.augment_path(
         env, platform="linux", home=POSIX_HOME,
-        isdir=_isdir_except({"/opt/homebrew/bin", "/usr/local/bin"}),
+        isdir=_isdir_only("/home/host/.local/bin"),
     )
 
     assert [str(d) for d in added] == ["/home/host/.local/bin"]
@@ -117,7 +135,7 @@ def test_a_directory_already_on_the_path_is_not_added_again():
 
     added = tool_path.augment_path(
         env, platform="linux", home=POSIX_HOME,
-        isdir=_isdir_except({"/opt/homebrew/bin", "/usr/local/bin"}),
+        isdir=_isdir_only("/home/host/.local/bin"),
     )
 
     assert added == []
@@ -127,11 +145,25 @@ def test_a_directory_already_on_the_path_is_not_added_again():
 def test_only_the_prefixes_that_exist_are_offered():
     """The absolute prefixes are candidates, not assertions about the machine."""
     offered = {str(d) for d in tool_path.tool_dirs("linux", POSIX_HOME)}
-    assert offered == {"/home/host/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"}
+    assert offered == {
+        "/home/host/.local/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/home/host/.asdf/shims",
+        "/home/host/.mise/shims",
+        "/home/host/.local/share/mise/shims",
+        "/home/host/.pyenv/shims",
+        "/home/host/.volta/bin",
+        "/home/host/.bun/bin",
+        "/home/host/.cargo/bin",
+        "/home/host/Library/pnpm",
+        "/home/host/.local/share/pnpm",
+    }
 
     env = {"PATH": "/usr/bin"}
     added = tool_path.augment_path(
-        env, platform="linux", home=POSIX_HOME, isdir=_isdir_except({"/opt/homebrew/bin"})
+        env, platform="linux", home=POSIX_HOME,
+        isdir=_isdir_only("/home/host/.local/bin", "/usr/local/bin"),
     )
 
     assert [str(d) for d in added] == ["/home/host/.local/bin", "/usr/local/bin"]
@@ -170,7 +202,20 @@ def test_a_named_platform_spells_its_own_paths():
     is the only way a cross-platform claim can be checked from one machine.
     """
     linux = [str(d) for d in tool_path.tool_dirs("linux", POSIX_HOME)]
-    assert linux == ["/home/host/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+    assert linux == [
+        "/home/host/.local/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/home/host/.asdf/shims",
+        "/home/host/.mise/shims",
+        "/home/host/.local/share/mise/shims",
+        "/home/host/.pyenv/shims",
+        "/home/host/.volta/bin",
+        "/home/host/.bun/bin",
+        "/home/host/.cargo/bin",
+        "/home/host/Library/pnpm",
+        "/home/host/.local/share/pnpm",
+    ]
 
     windows = [str(d) for d in tool_path.tool_dirs("win32", WINDOWS_HOME)]
     assert windows == [r"C:\Users\host\.local\bin"]
@@ -180,6 +225,74 @@ def test_a_named_platform_spells_its_own_paths():
     assert tool_path.path_separator("win32") == ";"
     assert tool_path.path_flavour("linux") is PurePosixPath
     assert tool_path.path_flavour("win32") is PureWindowsPath
+
+
+def test_a_version_manager_shim_dir_is_a_candidate():
+    """The list is not installer-only (issue #1783).
+
+    Measured 2026-09-30: a daemon started from the Dock got launchd's minimal
+    `PATH` plus exactly the three installer directories, while `~/.asdf/shims`
+    on the same host holds 76 executables — `node`, `npm`, `python3`, `cargo`,
+    `java` among them. A terminal start saw all of them and a Dock start saw
+    none, which is the difference this module exists to remove.
+
+    Each name is asserted rather than the list's length, because the failure
+    that mattered was an *absent* entry and a count cannot see which one.
+    """
+    offered = {str(d) for d in tool_path.tool_dirs("linux", POSIX_HOME)}
+    for name in (
+        ".asdf/shims",
+        ".mise/shims",
+        ".local/share/mise/shims",
+        ".pyenv/shims",
+        ".volta/bin",
+        ".bun/bin",
+        ".cargo/bin",
+        "Library/pnpm",
+        ".local/share/pnpm",
+    ):
+        assert f"/home/host/{name}" in offered, f"{name} is not a candidate directory"
+
+
+def test_a_listed_tool_dir_is_appended_against_a_real_filesystem(tmp_path):
+    """The mechanism, measured on the real `isdir` rather than an injected one.
+
+    Two things this covers that no test above does: the directory really exists
+    on disk (so the existence branch is exercised by the filesystem, not by a
+    stub), and the appended entry is the one a minimal inherited `PATH` gains —
+    the Dock-start shape `~/.emrg/emrgd.log` recorded, where the daemon reached
+    only launchd's directories.
+
+    **The subject is taken from `tool_dirs()` and the platform is the running
+    one, and both are deliberate.** The list is per-platform (Windows offers
+    `~/.local/bin` alone), and `home` is a real `tmp_path` in the host's flavour,
+    so naming a platform here would join it with the wrong flavour's separator —
+    green on macOS and red on `test-windows`, which is the defect this file's own
+    docstring records and which this test shipped with once. What the *list*
+    contains is asserted by name in `test_a_version_manager_shim_dir_is_a_candidate`;
+    what this asserts is the arithmetic applied to whatever the list offers.
+    """
+    home = tmp_path / "home"
+    offered = tool_path.tool_dirs(home=home)
+    under_home = [d for d in offered if str(d).startswith(str(home))]
+    assert under_home, "the platform's list must offer a directory under the home"
+    target = under_home[0]
+    Path(target).mkdir(parents=True)
+
+    inherited = tool_path.path_separator().join(["/usr/bin", "/bin"])
+    env = {"PATH": inherited}
+
+    added = tool_path.augment_path(env, home=home)
+
+    assert str(target) in [str(d) for d in added]
+    assert env["PATH"].startswith(inherited), "the inherited PATH keeps priority"
+
+
+def test_a_version_keyed_directory_is_documented_as_out_of_reach():
+    """`nvm`'s layout cannot be a static entry — the gap is stated, not implied."""
+    assert tool_path.VERSION_KEYED_TOOL_DIRS == ("~/.nvm/versions/node/<version>/bin",)
+    offered = {str(d) for d in tool_path.tool_dirs("linux", POSIX_HOME)}
+    assert not any("nvm" in path for path in offered)
 
 
 def test_the_startup_helper_records_the_effective_path(monkeypatch, caplog, tmp_path):

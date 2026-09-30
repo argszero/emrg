@@ -5,8 +5,8 @@ name: Build Release
 #
 # matrix:
 #   macos-15(arm64)        → EMRG-<ver>-macos-arm64.pkg
-#   ubuntu-24.04(x86_64)   → EMRG-<ver>-linux-x86_64.AppImage + tar.gz + .run
-#   ubuntu-24.04-arm(aarch64) → EMRG-<ver>-linux-aarch64.AppImage + tar.gz + .run
+#   ubuntu-24.04(x86_64)   → EMRG-<ver>-x86_64.AppImage + EMRG-<ver>-linux-x86_64.tar.gz + .run
+#   ubuntu-24.04-arm(aarch64) → EMRG-<ver>-aarch64.AppImage + EMRG-<ver>-linux-aarch64.tar.gz + .run
 #   windows-2025(x64)      → EMRG-<ver>-windows-x64.exe
 #
 # 冒烟在无 Python runner 上跑（R111 验证干净机器承诺）；离线冒烟（R96）
@@ -88,10 +88,10 @@ jobs:
             artifact: EMRG-*-macos-arm64.pkg
           - os: ubuntu-24.04
             arch: x86_64
-            artifact: EMRG-*-linux-x86_64.AppImage
+            artifact: EMRG-*-x86_64.AppImage
           - os: ubuntu-24.04-arm
             arch: aarch64
-            artifact: EMRG-*-linux-aarch64.AppImage
+            artifact: EMRG-*-aarch64.AppImage
           - os: windows-2025
             arch: x64
             artifact: EMRG-*-windows-x64.exe

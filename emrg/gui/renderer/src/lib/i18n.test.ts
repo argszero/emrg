@@ -77,11 +77,13 @@ describe("词典完整性守卫（防漂移）", () => {
   // 否则一次手滑删掉几条词条不会有人发现（下一行的对齐断言只要求 zh/en 一致，
   // 两边同时少一条它照样通过）。2026-09-23 由 `tool.pwsh.*`（Windows 方言，P8）从 397 改为 399；
   // 2026-09-30 由 `tool.detailName/-Input/-Output`（工具详情三段，rant 2026-09-30T09:17:54 → #1787）从 403 改为 406。
-  it("zh/en 各 406 个 key 且完全对齐", () => {
+  // 2026-09-30 由 `composer.imageReason.*`（图片拒绝必须可见，rant 2026-09-30T09:35:04）从 403 改为 408。
+  // 两个改动各加各的 key，互不重叠：合并后是 403 + 3 + 5 = 411（既不是 406 也不是 408）。
+  it("zh/en 各 411 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(406);
-    expect(enKeys.length).toBe(406);
+    expect(zhKeys.length).toBe(411);
+    expect(enKeys.length).toBe(411);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);
