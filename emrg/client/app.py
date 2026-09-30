@@ -19,6 +19,7 @@ from emrg.client.widgets import (
     InputWidget, RewindSelector, SessionSelector, ProjectSelector,
     TaskSelector, ModelSelector, SandboxSelector, CommandDropdown, ChatHistory,
     SelectorState, _COMMAND_HELP,
+    ToolSelector,
 )
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import TaskResponse, ToolEnd, ToolStart
@@ -206,7 +207,51 @@ def _resume_target_from_resolution(
     return pending_sid, fallback_cwd
 
 
-def _replay_rows(messages) -> list[tuple[str, str]]:
+def _parse_arguments(raw) -> dict:
+    """A tool call's arguments as a dict, whether they arrive parsed or as JSON text.
+
+    A call that cannot be parsed keeps its text under `_raw` rather than becoming
+    an empty input: the detail pane shows what the provider actually sent, which
+    is the only honest thing to show for a call this cannot read.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return {"_raw": raw}
+        return parsed if isinstance(parsed, dict) else {"_raw": raw}
+    return {}
+
+
+def _cards_from_tool_calls(tool_calls) -> list[ToolCard]:
+    """One `ToolCard` per call in an assistant record's `tool_calls`.
+
+    The same fields the live stream fills, from the same material — the name and
+    the arguments (`function.arguments` is the provider's JSON *string*, hence
+    `_parse_arguments`). A call that carries nothing readable still becomes a card
+    with its name and no arguments: dropping it would put a resumed session back
+    on the flat-line path, which is the difference this removes.
+    """
+    cards: list[ToolCard] = []
+    for call in tool_calls or []:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = str(fn.get("name") or call.get("name") or "tool")
+        args = _parse_arguments(fn.get("arguments"))
+        cards.append(ToolCard(
+            name=name,
+            command=_format_args(args, name),
+            status="pending",
+            tool_call_id=str(call.get("id") or ""),
+            arguments=args,
+        ))
+    return cards
+
+
+def _replay_rows(messages) -> list[tuple[str, object]]:
     """The rows a resumed session replays, from the daemon's record list.
 
     Rant 2026-09-29T15:52:49, requirement 4. The TUI used to render a session by
@@ -218,17 +263,28 @@ def _replay_rows(messages) -> list[tuple[str, str]]:
     mapping from its records onto chat rows, kept pure so it is testable without a
     terminal (the same split `_task_session_target` uses for the picker).
 
-    The rows are `(kind, content)` pairs and `assistant` is deliberately its own
-    kind rather than pre-wrapped: the caller renders it through `StreamingMarkdown`
-    for colour, and a widget built here would make this function untestable for no
-    gain. What the daemon's records mode emits is its own contract and it is narrow:
-    `kind: "message"` for the user and assistant roles and `kind: "tool_result"`
-    for tool output. A record outside that pair is skipped rather than rendered as
-    a blank row — including a role the file on disk may hold and the records mode
-    does not project, because inventing it here would put the TUI and the GUI back
-    on two different content paths, which is the defect this requirement removes.
+    A tool becomes a **widget**, not a line (rant 2026-09-30T09:17:54, requirement
+    4): a resumed session has to behave exactly like a live one, and a live one has
+    a `ToolCard` per call with the detail selector reading it. Flattening a tool
+    record to one text line left a resumed session with no cards at all, so Tab
+    over it opened an empty list — a resumed session was quietly a different
+    client. The card is built from the **call** (the `tool_calls` on the assistant
+    message, which carries the arguments) and completed by the result that answers
+    it, matched by `tool_call_id` — the same pairing the live stream uses, never by
+    position.
+
+    The rows are `(kind, payload)` pairs; `assistant` is deliberately its own kind
+    rather than pre-wrapped, because the caller renders it through
+    `StreamingMarkdown` for colour. What the daemon's records mode emits is its own
+    contract and it is narrow: `kind: "message"` for the user and assistant roles
+    and `kind: "tool_result"` for tool output. A record outside that pair is
+    skipped rather than rendered as a blank row — including a role the file on disk
+    may hold and the records mode does not project, because inventing it here would
+    put the TUI and the GUI back on two different content paths, which is the
+    defect that requirement removes.
     """
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[str, object]] = []
+    calls: dict[str, ToolCard] = {}
     for record in messages or []:
         if not isinstance(record, dict):
             continue
@@ -237,11 +293,22 @@ def _replay_rows(messages) -> list[tuple[str, str]]:
             role = record.get("role")
             if role in ("user", "assistant"):
                 rows.append((str(role), str(record.get("content") or "")))
+            if role == "assistant":
+                for card in _cards_from_tool_calls(record.get("tool_calls")):
+                    rows.append(("tool_card", card))
+                    if card.tool_call_id:
+                        calls[card.tool_call_id] = card
         elif kind == "tool_result":
-            # The TUI's rendering of a tool record: which tool, and whether it
-            # failed — the two facts the live stream shows. The GUI may expand the
-            # same record into a full tool card; the difference is presentation
-            # only, which is the only difference the rule allows.
+            card = calls.get(str(record.get("tool_call_id") or ""))
+            if card is not None:
+                card.update(
+                    "failed" if record.get("error") else "done",
+                    output=str(record.get("content") or ""),
+                )
+                continue
+            # A result whose call is not in this page — a cursor can land inside a
+            # group the daemon's own cut guard normally keeps whole — is still
+            # shown, in the flat shape, rather than vanishing.
             name = str(record.get("tool_name") or "tool")
             body = str(record.get("content") or "").strip()
             mark = "error" if record.get("error") else "result"
@@ -942,7 +1009,6 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         if _elapsed_task is None or _elapsed_task.done():
             _elapsed_task = asyncio.create_task(_run_elapsed_timer())
 
-    tool_args: dict[str, dict] = {}  # track tool arguments by tool_call_id for diff rendering
     _tool_start_times: dict[str, float] = {}  # track tool start time by tool_call_id for timing logs
 
     # Selector state — each selector has an active flag, widget ref, and pending flag.
@@ -953,6 +1019,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     sandbox_sel = SelectorState()
     rewind_sel = SelectorState()
     task_sel = SelectorState()
+    tool_sel = SelectorState()  # Tab: the tool-detail selector (rant 2026-09-30T09:17:54)
     _rant_project: str | None = None  # Set after project selection, used on next Enter
     _skills_confirm: tuple | None = None  # (skill_name, install_cmd) — next Enter answers the prompt
     # (request_id, question, deadline) while the daemon is waiting on this
@@ -997,7 +1064,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
             term.render()
 
     async def read_server():
-        nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
+        nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, _welcomed
         nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, current_vision, current_sandbox
         nonlocal _last_center, _elapsed_task, conn
@@ -1143,17 +1210,22 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 # Tool lifecycle: create a ToolCard on start, update on end.
                 if data.get("type") == "tool_start":
                     ts = ToolStart.from_dict(data)
-                    tool_args[ts.tool_call_id] = ts.arguments  # track for diff rendering
                     _tool_start_times[ts.tool_call_id] = time.time()
                     # Rant 2026-08-19T10:35:24: display the agent's intent
                     # (why this call happened) as the card header when present;
                     # fall back to formatted args.
                     display = ts.intent if ts.intent else _format_args(ts.arguments, ts.tool_name)
+                    # The card carries the call's arguments and its id (rant
+                    # 2026-09-30T09:17:54): they used to live in a separate dict
+                    # that `tool_end` popped, so by the time the detail selector
+                    # ran there was nothing on the card to show as input. One
+                    # holder, not two.
                     card = ToolCard(
                         name=ts.tool_name,
                         command=display,
                         status="running",
-                        expanded=False,
+                        tool_call_id=ts.tool_call_id,
+                        arguments=ts.arguments,
                     )
                     chat.add(card)
                     _last_center = f"running {ts.tool_name}..."
@@ -1166,9 +1238,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     elapsed = time.time() - _tool_start_times.pop(te.tool_call_id, time.time())
                     logger.info("tool %s %s in %.2fs", te.tool_name,
                                 "FAILED" if te.error else "done", elapsed)
+                    # The card for this call, found by the daemon's id rather than
+                    # by position: it holds the arguments the summaries below read
+                    # (rant 2026-09-30T09:17:54), and `last_tool_card()` stays the
+                    # fallback for a stream that lost the start frame.
+                    card = chat.tool_card_by_id(te.tool_call_id) or chat.last_tool_card()
+                    args = card.arguments if (card is not None and card.name == te.tool_name) else {}
                     # Show diff for successful edit operations
-                    if te.tool_name == "edit" and not te.error and te.tool_call_id in tool_args:
-                        args = tool_args.pop(te.tool_call_id)
+                    if te.tool_name == "edit" and not te.error and args:
                         old_str = args.get("old_string", "")
                         new_str = args.get("new_string", "")
                         if old_str or new_str:
@@ -1181,19 +1258,16 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             )
                             chat.add(diff_widget)
                     # Show summary for successful write operations
-                    elif te.tool_name == "write" and not te.error and te.tool_call_id in tool_args:
-                        args = tool_args.pop(te.tool_call_id)
+                    elif te.tool_name == "write" and not te.error and args:
                         fp = args.get("file_path", "?")
                         short_fp = f"…/{PurePath(fp).name}" if len(fp) > 50 else fp
                         content_len = len(args.get("content", ""))
                         chat.add("system", f"✓ Wrote {content_len} bytes to {short_fp}")
-                    elif te.tool_call_id in tool_args:
-                        tool_args.pop(te.tool_call_id)  # cleanup non-edit tools
-                    card = chat.last_tool_card()
                     if card and card.name == te.tool_name:
                         card.update(
                             "failed" if te.error else "done",
                             output=te.content,
+                            elapsed=elapsed,
                         )
                     else:
                         # Fallback: no matching start card
@@ -1571,6 +1645,12 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                                 md = StreamingMarkdown()
                                 md.feed(content)
                                 chat.add(md)
+                            elif kind == "tool_card":
+                                # A widget, handed straight to the chat: a resumed
+                                # session's cards must be the same objects a live
+                                # one builds, or the detail selector would have
+                                # nothing to read (rant 2026-09-30T09:17:54).
+                                chat.add(content)
                             else:
                                 chat.add(kind, content)
                         title_extra = ""
@@ -2119,7 +2199,8 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal inp, status, history, paste_mode, stream_buffer, conn, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
         nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, project_name, current_sandbox
-        nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel, sandbox_sel
+        nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
+        nonlocal sandbox_sel, tool_sel
         nonlocal _task_list_intent, _task_open_pending
         nonlocal _resume_pending_sid
         nonlocal history_index, history_saved_input
@@ -2168,6 +2249,27 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     inp.insert(placeholder + "\n")
                     logger.info("clipboard image saved: %s", filename)
             term.render()
+            return True
+
+        # ── Tool-detail selector mode (rant 2026-09-30T09:17:54) ──
+        # Deliberately **above** the Esc-interrupt below, unlike every other
+        # selector: this one is a read-only viewer whose point is to be opened
+        # *during* a running turn, so its Esc must close the panel rather than
+        # kill the turn the user was reading about. Esc closes, ↑↓/j/k moves, and
+        # every other key is ignored while it is active — the same shape
+        # `session_sel` has, so a keystroke meant for the panel cannot reach the
+        # input line.
+        if tool_sel.active and tool_sel.widget:
+            if data == b"\x1b":  # Esc — close
+                tool_sel.active = False
+                chat.remove(tool_sel.widget)
+                tool_sel.widget = None
+                status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if _handle_selector_nav(data, tool_sel.widget):
+                chat.dirty = True; term.render()
+                return True
             return True
 
         # ── ESC interrupt when busy ──────────────────────────
@@ -2516,7 +2618,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
             if not paste_mode: term.render()
             return True
 
-        # Tab: command completion (when / prefix) or tool card toggle
+        # Tab: command completion (when / prefix) or the tool-detail selector
         if b == 0x09:
             text = inp.text.lstrip()
             if text.startswith("/"):
@@ -2527,17 +2629,23 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     pass
                 # else: full command typed, Tab does nothing (Enter to submit)
             else:
-                # Tool card toggle
+                # Tool details (rant 2026-09-30T09:17:54, the host's option C).
+                # In-place expansion is gone: the terminal's viewport is
+                # write-only, so the card the old handler picked — the earliest
+                # unexpanded one — was almost always already scrolled off-screen
+                # and pressing Tab changed nothing. The selector re-renders on
+                # every keystroke, so its detail lands at the bottom of the
+                # viewport, and its list reaches tools whose cards have scrolled
+                # away — which is the whole point of it existing.
                 tool_cards = [r for r in chat.rows if isinstance(r, ToolCard)]
-                if tool_cards:
-                    changed = False
-                    for tc in tool_cards:
-                        if tc.output and not tc.expanded:
-                            tc.toggle()
-                            changed = True
-                            break
-                    if not changed and tool_cards:
-                        tool_cards[-1].toggle()
+                if not tool_cards:
+                    chat.add("system", "No tool calls in this session yet.")
+                    chat.dirty = True; term.render()
+                else:
+                    tool_sel.active = True
+                    tool_sel.widget = ToolSelector(tool_cards)
+                    chat.add(tool_sel.widget)
+                    status.update(center="tool details")
                     chat.dirty = True; term.render()
             return True
 
@@ -2887,7 +2995,7 @@ Editing
 
 Navigation
   Scroll/mouse wheel   Browse history (terminal native)
-  Tab                  Complete command (/ prefix) or toggle tool card
+  Tab                  Complete command (/ prefix) or open tool details (↑↓, Esc)
   /                    Type / to show command menu (↑↓ to select, type to filter)
   j / k                Vim-style up/down in session picker
 
