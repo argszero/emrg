@@ -14,8 +14,9 @@
 
 因此本文件里没有一处把名字**重述**一遍再断言它：
 
-* 产物名由 `packaging/make-installer.sh` 的收集行**执行**得出（stub 掉 `uname`、
-  `DIST` 指向临时目录），断言的是 `artifacts/` 里真的出现了哪个文件名；
+* 产物名由 `packaging/make-installer.sh` 的收集行**执行**得出（架构用同名 shell 函数
+  注入，见 `_run_line` —— PATH 前缀那种替身在 Windows 上会被 `uname.exe` 盖掉），
+  断言的是 `artifacts/` 里真的出现了哪个文件名；
 * release workflow 的 `artifact:` glob 必须与这个执行结果 `fnmatch` 一致；
 * 两份 README 的 Linux 行必须写着这个形态，且不得残留旧形态。
 
@@ -73,36 +74,37 @@ def _line_of(branch: str, needle: str) -> str:
 # ── 执行它 ───────────────────────────────────────────────────────────────────
 
 
-def _stub_bin(tmp_path: Path, machine: str) -> Path:
-    """一个只有 `uname` 的 PATH 前缀：架构由本测试决定，不由宿主决定。"""
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    uname = bindir / "uname"
-    uname.write_text(f"#!/bin/sh\necho {machine}\n")
-    uname.chmod(0o755)
-    return bindir
-
-
-def _run_line(tmp_path: Path, line: str, machine: str, **env: str) -> list[str]:
-    """在临时目录里执行一行脚本，回它在 `$DIST/artifacts/` 里造出的文件名。
+def _run_line(tmp_path: Path, line: str, machine: str, **env: str) -> tuple[list[str], str]:
+    """在临时目录里执行一行脚本，回它在 `$DIST/artifacts/` 里造出的文件名，和它的输出。
 
     执行而不是解析：`cp` 的目标串由 shell 自己展开（`$(uname -m)` 也在内），所以断言
     的是 `make-installer.sh` **真的**会写出哪个名字。
+
+    架构用**同名 shell 函数**注入，不用 PATH 前缀 —— 后者在 Windows 上无声失效：那里的
+    可执行文件按扩展名解析，一个没有扩展名的 `uname` 脚本永远盖不住 `uname.exe`，于是
+    `uname -m` 回的是宿主自己的架构（实测：GitHub 的 `test-windows` 腿红在
+    `aarch64` 用例上，拿到的却是宿主 x64 的 `x86_64`，run 36683843964）。函数在 bash 里
+    优先于命令查找，与平台无关。
+
+    函数是否真的生效由**探针**回答（同一段脚本里 `echo "$(uname -m)"`），而不是假定：
+    一个没生效的替身会让本文件静默地量宿主，而不是量被测的那一行。
     """
     shell = shutil.which("bash")
     if shell is None:
         pytest.skip("no POSIX shell is available to execute the installer line")
     dist = tmp_path / "dist"
     (dist / "artifacts").mkdir(parents=True)
-    environ = dict(os.environ)
-    environ["PATH"] = f"{_stub_bin(tmp_path, machine)}:{environ['PATH']}"
-    environ.update(env)
+    script = f'uname() {{ echo "{machine}"; }}\necho "PROBE:$(uname -m)"\n{line}\n'
     proc = subprocess.run(
-        [shell, "-c", line], cwd=str(tmp_path), env=environ,
+        [shell, "-c", script], cwd=str(tmp_path), env={**os.environ, **env},
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
-    assert proc.returncode == 0, f"{line!r} 执行失败：{proc.stderr}"
-    return sorted(p.name for p in (dist / "artifacts").iterdir())
+    assert proc.returncode == 0, f"{script!r} 执行失败：{proc.stderr}"
+    assert f"PROBE:{machine}" in proc.stdout, (
+        f"架构替身没有生效：探针没看到 {machine}，实际输出 {proc.stdout!r} —— "
+        f"此时这一行量的是宿主架构，不是被测的那一行"
+    )
+    return sorted(p.name for p in (dist / "artifacts").iterdir()), proc.stdout
 
 
 def _appimage_name(tmp_path: Path, machine: str = "x86_64") -> str:
@@ -112,7 +114,7 @@ def _appimage_name(tmp_path: Path, machine: str = "x86_64") -> str:
     source_image = tmp_path / "emrg-gui-dist" / f"EMRG-{VERSION}-{machine}.AppImage"
     source_image.parent.mkdir(parents=True, exist_ok=True)
     source_image.write_bytes(b"not really an appimage")
-    produced = _run_line(
+    produced, _stdout = _run_line(
         tmp_path, line, machine, APPIMAGE=str(source_image), DIST=str(tmp_path / "dist"),
         VERSION=VERSION,
     )
