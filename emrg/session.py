@@ -650,7 +650,12 @@ class Session:
 
     @staticmethod
     def list_sessions(cwd: Path) -> list[dict]:
-        """List all sessions in cwd/.emrg/sessions/, sorted by created_at desc.
+        """List all sessions in cwd/.emrg/sessions/, sorted by last activity desc.
+
+        Last activity is ``updated_at`` — refreshed by append_message, rename,
+        compact and rewind (rant 2026-09-30T10:27:20) — with ``created_at`` as
+        the fallback for a meta written before that key existed. Sorting is the
+        single point both clients read, so TUI and GUI order agree.
 
         Returns a list of metadata dicts with keys:
             session_id, created_at, updated_at, cwd, message_count,
@@ -673,7 +678,13 @@ class Session:
             except (json.JSONDecodeError, OSError):
                 logger.warning("corrupt meta.json in %s, skipping", entry.name)
 
-        results.sort(key=lambda m: m.get("created_at", ""), reverse=True)
+        # Rant 2026-09-30T10:27:20：按「最后活动」排序。仅看 created_at 时，一个天天在用的
+        # 会话会随着新会话不断创建而沉到列表底部——顺序必须跟着它变的是哪一种「新」。
+        # `updated_at` 缺失（老 meta）时回退 `created_at`，不丢行也不抛错。
+        results.sort(
+            key=lambda m: m.get("updated_at") or m.get("created_at", ""),
+            reverse=True,
+        )
         return results
 
 

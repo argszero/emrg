@@ -329,7 +329,10 @@ class SessionSelector(Widget):
         for i, s in enumerate(self.sessions):
             sid = s.get("session_id", "?")
             title = s.get("title", "")
-            created = s.get("created_at", "")[:16].replace("T", " ")
+            # 显示列表**排序所依据**的时刻（rant 2026-09-30T10:27:20）：行序按最后活动
+            # 倒序，就显示最后活动 ⇒ 「越用越往下沉」在行内可见。老 meta 无 updated_at
+            # 时回退 created_at。创建时刻仍由 /resume 的提示行给出，信息不丢。
+            last_active = (s.get("updated_at") or s.get("created_at", ""))[:16].replace("T", " ")
             msgs = s.get("message_count", 0)
             compacts = s.get("compact_count", 0)
             extra = f" (compacted ×{compacts})" if compacts > 0 else ""
@@ -338,7 +341,7 @@ class SessionSelector(Widget):
                 label += f"  [{title}]"
             if self.current_session_id and sid == self.current_session_id:
                 label += "  (current)"
-            label += f"  |  {created}  |  {msgs} msgs{extra}"
+            label += f"  |  {last_active}  |  {msgs} msgs{extra}"
             if i == self.selected_index:
                 spans = [
                     Span("> ", style=pstyle),

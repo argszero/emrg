@@ -373,3 +373,60 @@ def test_input_widget_move_word():
     assert w.cursor == 11  # end
     w.move_word_right()
     assert w.cursor == 11  # already at end — no-op
+
+
+# ── SessionSelector tests (rant 2026-09-30T10:27:20) ──
+
+
+def make_session(sid: str, created: str, updated: str | None = "", title: str = "",
+                 msgs: int = 1) -> dict:
+    s = {"session_id": sid, "created_at": created, "message_count": msgs, "title": title}
+    if updated is not None:
+        s["updated_at"] = updated
+    return s
+
+
+def _row_text(lines, index: int) -> str:
+    return "".join(sp.text for sp in lines[index].spans)
+
+
+def test_session_selector_row_shows_last_activity():
+    """每行显示最后活动时刻（列表就是按它排序的），而不再是创建时刻。
+
+    Rant 2026-09-30T10:27:20：行序按 updated_at 倒序，行内却显示 created_at ⇒
+    「越用越往下沉」在界面上不可见。显示的必须是排序所依据的那一列。
+    """
+    from emrg.client.widgets import SessionSelector
+
+    sessions = [
+        make_session("s_active", "2026-07-27T11:03:00", "2026-09-30T10:26:00"),
+        make_session("s_idle", "2026-09-23T09:00:00", "2026-09-23T09:00:00"),
+    ]
+    ctx = RenderContext(width=120)
+    lines = SessionSelector(sessions).render(ctx)
+
+    active = _row_text(lines, 1)
+    assert "2026-09-30 10:26" in active, active
+    assert "2026-07-27 11:03" not in active, active  # 创建时刻不再占这一列
+    assert "2026-09-23 09:00" in _row_text(lines, 2)
+
+
+def test_session_selector_row_falls_back_to_created_at():
+    """老 meta 无 updated_at → 回退 created_at，不留空、不抛错。"""
+    from emrg.client.widgets import SessionSelector
+
+    ctx = RenderContext(width=120)
+    lines = SessionSelector([make_session("s_old", "2026-05-01T08:30:00", updated=None)]).render(ctx)
+    row = _row_text(lines, 1)
+    assert "2026-05-01 08:30" in row, row
+
+
+def test_session_selector_row_prefix_is_empty_string_when_no_updated_at():
+    """updated_at 显式为 None/"" 时不得让整行塌成 'None' 文本。"""
+    from emrg.client.widgets import SessionSelector
+
+    ctx = RenderContext(width=120)
+    lines = SessionSelector([make_session("s_empty", "2026-05-01T08:30:00", updated="")]).render(ctx)
+    row = _row_text(lines, 1)
+    assert "None" not in row, row
+    assert "2026-05-01 08:30" in row, row
