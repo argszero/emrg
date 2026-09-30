@@ -981,7 +981,32 @@ class DaemonClient {
       this._emit("pong", frame);
       return;
     }
-    this.logger.warn(`[gui] unknown frame: ${JSON.stringify(frame).slice(0, 200)}`);
+    // 权威 turn 生命周期广播（rant 2026-09-30T09:47:11）：daemon 在
+    // `_run_tool_loop_locked` 里发 `turn_start`（带 `started_at`）与 `turn_end`，
+    // 覆盖所有 turn 来源（本客户端、其他客户端、调度任务）。渲染层
+    // `daemonBridge.ts handleFrame` 的 `case "turn_start"/"turn_end"` 正是消费它们
+    // ——一份定时器基准（`turnStartBySid`）。中间层不转发，它们就落到下面的兜底：
+    // 只记日志、不发事件，于是 GUI 的会话计时既起不来也清不掉。
+    // 实测（`~/.emrg/emrg-gui.log`，176404 行）：turn_start 丢 703、turn_end 丢 704，
+    // 首丢 2026-09-02T07:26:10Z、末丢 2026-09-30T02:02:14Z——bug 一直活着。
+    // 与 done/cancelled 幂等（渲染层清计时也是幂等的），故直接按原名转发。
+    if (frame.type === "turn_start" || frame.type === "turn_end") {
+      this._emit(frame.type, frame);
+      return;
+    }
+    // 兜底——本函数恰好三个出口，缺一不可：
+    //   ① 已决命令响应（`_resolvePending`，按 `type` / `id` 配对）
+    //   ② 已知广播（按自己的名字转发，如上面的 turn 帧）
+    //   ③ 无人认领的帧（本支）
+    // ③ 必须**留痕**而不是静默丢弃：一个白名单不认识的广播，从每个客户端看都是
+    // 「什么都没发生」——rant 2026-09-30 这次的 turn 帧就是这么藏了一个月的。所以
+    // 日志以 `type=` 开头，下一次可以 `grep 'unknown frame type=' | sort | uniq -c`
+    // 直接数，而不必从截断的 JSON 里抠类型。
+    // 注意：本支对某些帧是**预期**的——daemon 会把 `templates_list` / `compact_result`
+    // / `projects_list` 广播给全部订阅者（`daemon.py:1518`），而这是别的会话发出的
+    // 命令的回执，本连接既不认领也不该转发。
+    const unknownType = frame.type === undefined ? "<no-type>" : String(frame.type);
+    this.logger.warn(`[gui] unknown frame type=${unknownType}: ${JSON.stringify(frame).slice(0, 200)}`);
   }
 
   // G104：tool_start 也触发建组（LLM 先出 tool_calls 后出文本）
