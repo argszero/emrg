@@ -93,6 +93,16 @@ Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and d
 
 > **Windows SmartScreen notice**: the installer isn't Authenticode-signed — if SmartScreen prompts, click **Keep** / **More info → Run anyway**. EMRG is fully open source and auditable.
 
+> **The installer vanished right after downloading?** That is not the prompt above — a SmartScreen warning is something you can click through, while a **false positive that deletes the file** leaves you nothing to click. It has happened to us (`Trojan:Win32/Sabsik.FL.A!ml` on `EMRG-0.3.4-windows-x64.exe`; our report was reviewed and **the detection removed** on 2026-09-30). To recover, refresh the definitions and download again — as **Administrator**:
+>
+> ```bat
+> cd "c:\Program Files\Windows Defender"
+> MpCmdRun.exe -removedefinitions -dynamicsignatures
+> MpCmdRun.exe -SignatureUpdate
+> ```
+>
+> Latest definitions: <https://www.microsoft.com/en-us/wdsi/defenderupdates>. Adding an exclusion for your downloads folder also works. If the file is still removed, please [report a false positive](https://www.microsoft.com/en-us/wdsi/filesubmission) — the installer carries publisher metadata and we publish a SHA-256 for every asset.
+
 **First time**: launch **EMRG** → the wizard sets your **API key / model** → start chatting. The TUI is ready too: run `emrg` in any terminal (config is shared).
 
 > **Bring your own key** — EMRG uses your LLM API key and your quota/billing; the software itself is free and MIT-licensed.

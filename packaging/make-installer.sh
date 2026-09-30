@@ -262,6 +262,22 @@ OutputDir=$DIST_WIN/artifacts
 OutputBaseFilename=EMRG-$VERSION-windows-x64
 SetupIconFile=$ROOT_WIN/packaging/assets/icon.ico
 UninstallDisplayIcon={app}\\bin\\emrg.cmd
+; R131: exe 版本资源不得为空（rant 2026-09-30T11:43:44）。缺这四项时「属性 → 详细信息」
+; 里公司/产品/说明全空，产物看起来是个匿名自解压包 —— 那是 Defender 判
+; Trojan:Win32/Sabsik.FL.A!ml 的诱因之一（WDSI 申诉 f9954caf…，2026-09-30 已撤销），
+; 也是 SignPath Foundation 对签名产物的硬性要求。唯一能证明「元数据真进了产物」的
+; 检查在 .github/workflows/test.yml 的 iscc 之后：它读编译出的 exe，不是读本文件。
+; VersionInfoVersion 是这四项里唯一**只收纯数字**的（Inno 要求 x.y.z.w，每段 0–65535）。
+; 裸写 {#MyAppVersion} 只在版本恰好是数字加点的形式时合法：CI 冒烟步骤用
+; VERSION=0.0.0-smoke 渲染，iscc 直接报 VersionInfoVersion is invalid 中止
+; （实测 GitHub run 36672826484 的 test-windows 因此红 —— 冒烟步骤用的就是
+; 非数字版本，这正是它该拦住的情形）。
+; 所以这里**推导**出一个数字四元组：取前四段数字，缺的补 0，非数字后缀丢弃；
+; 任何版本字串都能渲染出合法值，而值仍全部来自构建期变量，不手写死值。
+VersionInfoCompany=argszero
+VersionInfoProductName={#MyAppName}
+VersionInfoDescription=EMRG - self-evolving AI agent (Windows installer)
+VersionInfoVersion=$(printf '%s.0.0.0.0' "${VERSION}" | awk -F'[.]' '{printf "%d.%d.%d.%d", ($1+0)%65536, ($2+0)%65536, ($3+0)%65536, ($4+0)%65536}')
 Compression=lzma2
 SolidCompression=yes
 [Files]
