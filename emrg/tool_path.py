@@ -54,11 +54,42 @@ logger = logging.getLogger(__name__)
 #: ``~/.local/bin`` is where this product's installer puts ``emrg``/``emrgd``
 #: and where ``uv`` installs itself; the two absolute prefixes are the ones a
 #: Homebrew install uses (Apple silicon first, then Intel/Linux).
+#:
+#: The rest are **version-manager** directories, and they are here because the
+#: first three are where an *installer* writes (issue #1783, measured
+#: 2026-09-30). A host whose toolchain comes from a version manager keeps it
+#: behind a shim directory of the manager's own, so a list of installer
+#: directories alone left ``node``/``npm``/``python3``/``cargo``/``java``
+#: unreachable for a daemon started from the GUI — 76 executables in this host's
+#: ``~/.asdf/shims``, while a terminal start saw all of them. That is the same
+#: defect this module exists to close (#1673), one level down: the parent fix
+#: named the two directories *its* rant needed and closed.
+#:
+#: Shims are the stable path and that is why they are named rather than an
+#: install root: ``asdf``, ``mise`` and ``pyenv`` all expose ``<root>/shims``,
+#: which no version upgrade moves.
 POSIX_TOOL_DIRS: tuple[str, ...] = (
     "~/.local/bin",
     "/opt/homebrew/bin",
     "/usr/local/bin",
+    "~/.asdf/shims",
+    "~/.mise/shims",
+    "~/.local/share/mise/shims",
+    "~/.pyenv/shims",
+    "~/.volta/bin",
+    "~/.bun/bin",
+    "~/.cargo/bin",
+    "~/Library/pnpm",
+    "~/.local/share/pnpm",
 )
+
+#: Directories a static list **cannot** name, kept here so the gap is stated
+#: where the list is rather than rediscovered: ``nvm`` keeps its binaries at
+#: ``~/.nvm/versions/node/<version>/bin``. The path is version-keyed, so no
+#: entry above can stand for it and a host whose ``node`` comes only from
+#: ``nvm`` is still not reached. Named rather than implied, because a list that
+#: looks complete is how this defect survived its own fix once already.
+VERSION_KEYED_TOOL_DIRS: tuple[str, ...] = ("~/.nvm/versions/node/<version>/bin",)
 
 #: The same convention on Windows: ``~/.local/bin`` is still the user-script
 #: directory this project's own tooling names (``emrg/gui/main.js``). The
