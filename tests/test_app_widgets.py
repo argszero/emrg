@@ -647,6 +647,26 @@ def test_the_card_row_has_no_expand_affordance_left():
     assert "arguments:" in card_src     # the card owns its arguments instead
 
 
+def test_the_live_result_completes_the_card_found_by_its_call_id():
+    """The live half of the pairing, pinned at the seam a unit test cannot reach.
+
+    A mutation that stops `tool_end` from completing its card leaves every other
+    guard green — the replay path is tested behaviourally, this one is inside the
+    stream handler and needs a socket. So its shape is pinned here: the card is
+    found by the daemon's id (`last_tool_card()` stays only as the fallback for a
+    stream that lost the start frame), the summaries read that card's arguments,
+    and the update carries the duration to the selector.
+    """
+    src = _app_source()
+    branch = src[src.index('if data.get("type") == "tool_end":'):]
+    branch = branch[:branch.index('if data.get("type") == "cancelled":')]
+
+    assert "chat.tool_card_by_id(te.tool_call_id)" in branch
+    assert "card.arguments" in branch          # the summaries read the card,
+    assert "tool_args" not in branch           # not a dict that was popped
+    assert "elapsed=elapsed" in branch         # and the duration reaches the selector
+
+
 def test_the_replay_caller_adds_a_card_as_the_widget_it_is():
     """`_replay_rows` returning a card is worth nothing if the caller flattens it.
 
