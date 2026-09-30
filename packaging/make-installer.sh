@@ -267,12 +267,17 @@ UninstallDisplayIcon={app}\\bin\\emrg.cmd
 ; Trojan:Win32/Sabsik.FL.A!ml 的诱因之一（WDSI 申诉 f9954caf…，2026-09-30 已撤销），
 ; 也是 SignPath Foundation 对签名产物的硬性要求。唯一能证明「元数据真进了产物」的
 ; 检查在 .github/workflows/test.yml 的 iscc 之后：它读编译出的 exe，不是读本文件。
-; VersionInfoVersion 必须是四位数字（Inno 要求 x.y.z.w），故由构建期版本补一位；
-; 值全部取自构建期的 VERSION，不手写死值。
+; VersionInfoVersion 是这四项里唯一**只收纯数字**的（Inno 要求 x.y.z.w，每段 0–65535）。
+; 裸写 {#MyAppVersion} 只在版本恰好是数字加点的形式时合法：CI 冒烟步骤用
+; VERSION=0.0.0-smoke 渲染，iscc 直接报 VersionInfoVersion is invalid 中止
+; （实测 GitHub run 36672826484 的 test-windows 因此红 —— 冒烟步骤用的就是
+; 非数字版本，这正是它该拦住的情形）。
+; 所以这里**推导**出一个数字四元组：取前四段数字，缺的补 0，非数字后缀丢弃；
+; 任何版本字串都能渲染出合法值，而值仍全部来自构建期变量，不手写死值。
 VersionInfoCompany=argszero
 VersionInfoProductName={#MyAppName}
 VersionInfoDescription=EMRG - self-evolving AI agent (Windows installer)
-VersionInfoVersion={#MyAppVersion}.0
+VersionInfoVersion=$(printf '%s.0.0.0.0' "${VERSION}" | awk -F'[.]' '{printf "%d.%d.%d.%d", ($1+0)%65536, ($2+0)%65536, ($3+0)%65536, ($4+0)%65536}')
 Compression=lzma2
 SolidCompression=yes
 [Files]

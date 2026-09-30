@@ -18,17 +18,33 @@
 
 另钉 README（中英各一份）覆盖「包被 Defender 删除」的处置，与现有 SmartScreen
 提示区分开 —— 那是「提示可点保留」，这是「文件已被删，没有可点的按钮」。
+
+本文件的第一版把两件事钉反了，两处都是**实测**发现（GitHub run 36672826484 的
+`test-windows` 红），所以在这里写明，免得下一个人再钉一次：
+
+* `VersionInfoVersion` 当初断言的是 `…{#MyAppVersion}.0`（补一位凑四位）。那条
+  断言**把缺陷钉成了正确**：`.0` 只在版本是纯数字三段时才够用，而 CI 冒烟步骤渲染
+  用的正是 `VERSION=0.0.0-smoke` —— iscc 报 `VersionInfoVersion is invalid` 中止。
+  现在断言的是**性质**（值是推导出来的、且渲染后必然是四个数字段），不是某个写法。
+* 渲染是**执行**，不是读文本：同一轮里注释写了一对反引号作引用，而 `<<EOF` 是不带
+  引号的 heredoc —— 反引号被 bash 当命令替换**执行**了，引文在产出的 `.iss` 里凭空
+  消失。所以反引号也在下面被钉住（`$( … )` 是唯一有意的那一处）。
 """
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MAKE_INSTALLER = REPO_ROOT / "packaging" / "make-installer.sh"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 
-#: 四个字段 → Inno 指令名。`VersionInfoVersion` 是 Inno 唯一要求 x.y.z.w 数字形式的
-#: 一个，所以它必须由 `$VERSION` 补一位得到，而不能是裸 `$VERSION`。
+#: 四个字段 → Inno 指令名。`VersionInfoVersion` 是 Inno 唯一只收**纯数字**的一个
+#: （x.y.z.w，每段 0–65535），所以它必须由构建期变量推导，不能裸写宏。
 FIELDS = {
     "CompanyName": "VersionInfoCompany",
     "ProductName": "VersionInfoProductName",
@@ -84,14 +100,23 @@ def test_iss_setup_block_carries_every_publisher_field():
 
 
 def test_version_fields_derive_from_the_build_not_a_hand_written_number():
-    """版本值必须是构建期宏，不得手写死值：写死会在下一次 bump 后与 `$VERSION` 分叉，
-    而两处版本号不一致是 `tests/test_version_sync.py` 花大力气消灭的那类缺陷。"""
+    """版本值必须是构建期变量，不得手写死值：写死会在下一次 bump 后与构建期版本分叉，
+    而两处版本号不一致是 `tests/test_version_sync.py` 花大力气消灭的那类缺陷。
+
+    这里**只钉性质，不钉写法**：上一版钉的是 `{#MyAppVersion}.0`（补一位凑四位），
+    而那条断言本身就是缺陷 —— `.0` 只在版本是纯数字三段时够用，CI 冒烟的
+    `0.0.0-smoke` 直接让 iscc 中止。要求是「推导」，不是「补一位」。
+    """
     iss = _iss_template()
-    assert re.search(r"^VersionInfoVersion=\{#MyAppVersion\}", iss, re.M), (
-        "VersionInfoVersion 必须由 {#MyAppVersion} 派生（且补足 x.y.z.w 四位）"
+    line = re.search(r"^VersionInfoVersion=(.*)$", iss, re.M)
+    assert line, "[Setup] 里没有 VersionInfoVersion"
+    value = line.group(1).strip()
+    assert "$(" in value, (
+        "VersionInfoVersion 必须是渲染期推导出来的（命令替换），不能是宏的直接拼接："
+        "裸宏只在版本恰好是 x.y.z 时合法，而 CI 冒烟用 VERSION=0.0.0-smoke"
     )
-    assert re.search(r"^VersionInfoVersion=\{#[^}]+\}\.0$", iss, re.M), (
-        "VersionInfoVersion 必须是四位数字形式（Inno 要求 x.y.z.w），当前不是"
+    assert not re.fullmatch(r"\{#[^}]*\}(\.\d+)*", value), (
+        f"VersionInfoVersion 是宏的直接拼接（{value}）—— 非数字版本会渲染出非法值"
     )
     # 不得出现字面版本号：两处/三处版本号正是 test_version_sync 要消灭的分叉
     assert not re.search(r"^VersionInfoVersion=\d", iss, re.M), (
@@ -99,6 +124,113 @@ def test_version_fields_derive_from_the_build_not_a_hand_written_number():
     )
     assert "VersionInfoCompany=argszero" in iss, (
         "VersionInfoCompany 必须是对外主体（本仓 GitHub 账号 argszero），不是占位符"
+    )
+
+
+# ── 1b. 渲染：不带引号的 heredoc 会**执行**它读到的东西 ──────────────────────
+
+
+def _heredoc_lines() -> list:
+    """`cat > … emrg.iss <<EOF … EOF` 之间的行。
+
+    CI 的冒烟步骤用同一段界限把它抽出来单独 `bash` 执行（`sed -n '/cat > .*emrg\\.iss.*<</,/^EOF$/p'`），
+    所以**渲染只看得见这几行** —— 段外的赋值对冒烟步骤不可见，推导必须写在段内。
+    """
+    lines = MAKE_INSTALLER.read_text(encoding="utf-8").splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if re.search(r"cat > .*emrg\.iss.*<<", line)),
+        None,
+    )
+    assert start is not None, "make-installer.sh 不再用 heredoc 写 emrg.iss？"
+    end = next((i for i in range(start + 1, len(lines)) if lines[i] == "EOF"), None)
+    assert end is not None, "emrg.iss 的 heredoc 没有终止 EOF"
+    return lines[start:end + 1]
+
+
+def _render(tmp_path, version: str) -> str:
+    """渲染 heredoc 成 .iss 并读回 —— 与 CI 冒烟步骤同一条路径。
+
+    没有 POSIX shell 的主机测不到这一项，所以这里 `skip` 并说明原因：缺 shell 是
+    **测不到**，不是通过（这与「读文本」是两回事，也是本函数的全部价值）。
+    """
+    shell = shutil.which("bash")
+    if shell is None:
+        pytest.skip("本机没有 bash —— 渲染路径无法测量（CI 冒烟步骤用的正是 bash）")
+    script = tmp_path / "gen.sh"
+    script.write_text("\n".join(_heredoc_lines()) + "\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "VERSION": version,
+        "STAGE": tmp_path.as_posix(),
+        "DIST_WIN": "D",
+        "STAGE_WIN": "S",
+        "ROOT_WIN": "R",
+    }
+    proc = subprocess.run([shell, str(script)], capture_output=True, env=env)  # noqa: S603
+    stderr = proc.stderr.decode("utf-8", "replace")
+    assert proc.returncode == 0, stderr
+    out = tmp_path / "emrg.iss"
+    assert out.is_file(), f"heredoc 没有产出 emrg.iss：{stderr}"
+    return out.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [
+        ("0.3.7", "0.3.7.0"),
+        ("0.0.0-smoke", "0.0.0.0"),
+        ("0.3.7-dev", "0.3.7.0"),
+        ("1.2", "1.2.0.0"),
+    ],
+)
+def test_rendered_version_is_always_four_numeric_parts(tmp_path, version, expected):
+    """iscc 只收 x.y.z.w，所以**每一种**版本都必须渲染出合法值。
+
+    这就是 run 36672826484 的 `test-windows` 红掉的那条路径：`VERSION=0.0.0-smoke`
+    渲染出 `0.0.0-smoke.0`，iscc 报 `VersionInfoVersion is invalid` 并中止。断言读的
+    是**渲染产物**，不是模板文本 —— 模板文本只能证明写了指令。
+    """
+    rendered = _render(tmp_path, version)
+    match = re.search(r"^VersionInfoVersion=(.*)$", rendered, re.M)
+    assert match, "渲染产物里没有 VersionInfoVersion"
+    value = match.group(1).strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+\.\d+", value), (
+        f'VERSION="{version}" 渲染出 {value!r}，不是 x.y.z.w —— iscc 会中止'
+    )
+    assert value == expected
+
+
+def test_rendered_iss_keeps_its_comment_lines_verbatim(tmp_path):
+    """`.iss` 的注释是纯文本，渲染后必须与源文件**逐字节相同**。
+
+    这条不是洁癖，它是一条廉价的综合判据：`<<EOF` 不带引号，bash 在写文件时
+    **执行**它读到的一切（`$VAR` 展开、反引号与 `$( )` 命令替换）。本轮两次实测
+    都落在这里 —— 一次是多字节字符被折进变量名（值变空、产物不是合法 UTF-8），
+    一次是注释里一对反引号被当命令替换执行、引文在产物里凭空消失。两次都只有
+    「渲染出来比」才看得见，读文本与 pytest 静态断言都看不见。
+    """
+    rendered = _render(tmp_path, "0.3.7")
+    produced = set(rendered.splitlines())
+    lost = [line for line in _heredoc_lines() if line.startswith(";") and line not in produced]
+    assert not lost, (
+        "渲染改写了 .iss 的注释行 —— heredoc 不带引号，bash 执行了它读到的东西：\n"
+        + "\n".join(lost)
+    )
+
+
+def test_the_smoke_step_feeds_a_non_numeric_version():
+    """这条把「非数字版本也能渲染」的证据钉在 CI 上。
+
+    CI 冒烟步骤喂给渲染器的版本必须是**非纯数字**的：否则 iscc 永远只看到 x.y.z
+    一种输入，推导里的退化路径在 CI 里没有任何证据（这正是本轮红掉的那条路径，
+    它的价值就在于 CI 真的走了一次）。改成 `0.0.0` 等于拆掉这条守卫的证据来源。
+    """
+    step = _inno_smoke_step()
+    match = re.search(r'^\s*VERSION="?([^"\s]+)"?\s*$', step, re.M)
+    assert match, "冒烟步骤里找不到 VERSION= 赋值 —— 渲染的输入不见了"
+    value = match.group(1)
+    assert not re.fullmatch(r"\d+(\.\d+)*", value), (
+        f'冒烟步骤的 VERSION="{value}" 是纯数字版本 —— 非数字分支在 CI 里就没有证据了'
     )
 
 
