@@ -360,6 +360,15 @@ def _sibling(name: str, module_name: str):
 
 _counted: object | None = None
 _freshness: object | None = None
+_issue_links: object | None = None
+
+
+def issue_links():
+    """The sibling that owns the rant↔issue handle (`Origin: rant <timestamp>`, R5)."""
+    global _issue_links
+    if _issue_links is None:
+        _issue_links = _sibling("check-issue-links.py", "review_queue_issue_links")
+    return _issue_links
 
 
 def vote_counter():
@@ -435,6 +444,74 @@ def open_prs(repo: str = REPO) -> list[int]:
 
 
 # ── the reading ──────────────────────────────────────────────────────────────
+
+@dataclass
+class Rant:
+    """One open rant (`pending` / `in_progress`) and the issue that declares it.
+
+    Rendered because a rant appears in **no other row of this reading**: the PR rows,
+    the vote counts, the freshness lines and the issue link states can all be clean
+    while unstarted rants sit in the ledger, and this is the reading §1 of the
+    evolution prompt points at for "is there a row to move". Measured 2026-09-29: the
+    tool took no rant input at all (`grep -c rant` → 1, a quoted comment), and printed
+    `3 PR(s): measure-then-vote 2, park 1` while three pending rants with no issue
+    existed. A cycle trusting it concluded the honest-looking but wrong "nothing to
+    evolve". §2's rant curation reads the ledger directly, which is why the trap bit
+    only the cycles that read the queue alone.
+
+    `issues` is empty when no open issue declares this rant's timestamp as its origin —
+    rendered as `no issue yet`, which is R5's "the issue and its PR are born together"
+    seen from the queue's side. Several numbers mean several issues claim one rant, a
+    fault `check-issue-links.py` reports as a duplicate rather than something to merge
+    here, so this row names them all and picks none.
+    """
+
+    timestamp: str
+    status: str
+    message: str = ""
+    issues: list[int] = field(default_factory=list)
+
+
+def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
+    """Every `pending` / `in_progress` rant, newest first, with its declaring issue.
+
+    Only the ledger's open states are rows: `completed` is history (R6's cleanup keeps
+    the ten most recent), and rendering it would bury the work that is actually left.
+
+    The issue lookup is spent **only when an open rant exists**, because it costs a
+    second `gh` call and a queue with nothing pending should not pay for it. Raises the
+    sibling's `RuntimeError` when the ledger cannot be read — the caller reports that as
+    unmeasurable (exit 2), never as "no rants", which is the same rule `open_prs` follows
+    one direction over.
+    """
+    links = issue_links()
+    rows = links.load_rant_rows(links.rants_path(rants))
+    wanted = [
+        row for row in rows if str(row.get("status", "")) in ("pending", "in_progress")
+    ]
+    if not wanted:
+        return []
+
+    declared = links.declared_origins(links.load_queue(repo).issues)
+    by_timestamp: dict[str, list[int]] = {}
+    for number, stamps in declared.items():
+        for stamp in stamps:
+            by_timestamp.setdefault(stamp, []).append(number)
+
+    return sorted(
+        (
+            Rant(
+                timestamp=str(row.get("timestamp", "")),
+                status=str(row.get("status", "")),
+                message=str(row.get("message", "")),
+                issues=sorted(by_timestamp.get(str(row.get("timestamp", "")), [])),
+            )
+            for row in wanted
+        ),
+        key=lambda rant: rant.timestamp,
+        reverse=True,
+    )
+
 
 @dataclass
 class Reading:
@@ -828,6 +905,23 @@ def render(reading: Reading, action: Action) -> str:
     return "\n".join(lines)
 
 
+def render_rant(rant: Rant) -> str:
+    """One rant's row: its handle, its state, and the issue that declares it.
+
+    The excerpt is flattened to a single line and capped, because a rant body is prose
+    with headings and newlines and this row's job is to be *recognisable* in a list —
+    `submit_rant(action="list")` is the reading that shows it whole.
+    """
+    where = ", ".join(f"#{n}" for n in rant.issues) if rant.issues else "no issue yet"
+    excerpt = " ".join(rant.message.split())
+    if len(excerpt) > 110:
+        excerpt = excerpt[:109] + "…"
+    lines = [f"rant {rant.timestamp}  {rant.status}  {where}"]
+    if excerpt:
+        lines.append(f"    {excerpt}")
+    return "\n".join(lines)
+
+
 def local_tree() -> tuple[str, str, str]:
     """(this checkout, the branch it is on, its HEAD) — read, or said unreadable.
 
@@ -869,43 +963,60 @@ def local_tree() -> tuple[str, str, str]:
     return str(SCRIPTS_DIR.parent), branch, head
 
 
-def _as_json(readings: list[tuple[Reading, Action]]) -> str:
+def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = None) -> str:
     # The clone and its branch ride as *fields* on each reading, the way
     # `check-merge-landed.py` states its tree in `--json`: the document's shape is a
     # list, and a prose line ahead of it would be a second kind of line in a stream a
     # machine consumer parses.
+    #
+    # Rant rows join the same list rather than becoming a second document, for the same
+    # reason — one shape. `subject` is what tells the two apart, and it is on **every**
+    # row rather than only the rants: a consumer that had to infer "no `pr` key means a
+    # rant" would be reading a shape by absence.
     root, branch, _head = local_tree()
-    return json.dumps(
-        [
-            {
-                "tree": root,
-                "branch": branch,
-                "pr": reading.pr,
-                "head": reading.head,
-                "title": reading.title,
-                "votes": reading.votes,
-                "needed": reading.needed,
-                "mergeable": reading.mergeable,
-                "merge_state": reading.merge_state,
-                "block_reason": reading.block_reason,
-                "veto_at_head": reading.veto_at_head,
-                "voted_by_this_cycle": reading.voted_here,
-                "head_pushed_at": reading.head_pushed_at,
-                "head_pushed_exact": reading.head_pushed_exact,
-                "vote_window_start": reading.window_start or None,
-                "vote_window_source": reading.window_source,
-                "stale": reading.stale if reading.stale_read else None,
-                "stale_kind": reading.stale_kind,
-                "behind_by": reading.behind_by,
-                "unread": reading.unread,
-                "action": action.kind,
-                "why": action.why,
-                "command": action.command,
-            }
-            for reading, action in readings
-        ],
-        indent=2,
+    rows = [
+        {
+            "subject": "pr",
+            "tree": root,
+            "branch": branch,
+            "pr": reading.pr,
+            "head": reading.head,
+            "title": reading.title,
+            "votes": reading.votes,
+            "needed": reading.needed,
+            "mergeable": reading.mergeable,
+            "merge_state": reading.merge_state,
+            "block_reason": reading.block_reason,
+            "veto_at_head": reading.veto_at_head,
+            "voted_by_this_cycle": reading.voted_here,
+            "head_pushed_at": reading.head_pushed_at,
+            "head_pushed_exact": reading.head_pushed_exact,
+            "vote_window_start": reading.window_start or None,
+            "vote_window_source": reading.window_source,
+            "stale": reading.stale if reading.stale_read else None,
+            "stale_kind": reading.stale_kind,
+            "behind_by": reading.behind_by,
+            "unread": reading.unread,
+            "action": action.kind,
+            "why": action.why,
+            "command": action.command,
+        }
+        for reading, action in readings
+    ]
+    rows.extend(
+        {
+            "subject": "rant",
+            "tree": root,
+            "branch": branch,
+            "timestamp": rant.timestamp,
+            "status": rant.status,
+            "issues": rant.issues,
+            "message": rant.message,
+        }
+        for rant in (rants or [])
     )
+
+    return json.dumps(rows, indent=2)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -956,6 +1067,13 @@ def main(argv: list[str] | None = None) -> int:
              "before the counter refuses (only spent when it answers UNKNOWN)",
     )
     parser.add_argument(
+        "--rants",
+        default=None,
+        help="the rant ledger to read (default: $EMRG_RANTS, else ~/.emrg/rants.jsonl). "
+             "Open rants are rendered as rows of their own - a queue that showed only "
+             "PRs once read as 'nothing to move' while three pending rants had no issue",
+    )
+    parser.add_argument(
         "--json", action="store_true", help="emit the readings as JSON instead of prose"
     )
     args = parser.parse_args(argv)
@@ -993,6 +1111,16 @@ def main(argv: list[str] | None = None) -> int:
 
     unread = [reading.pr for reading, _ in readings if reading.votes is None]
 
+    # Read after the PR rows rather than before: an unreadable ledger is reported
+    # alongside the PR reading, not instead of it, so a cycle still gets the half that
+    # could be measured. `rants_unread` is why, and it is carried to the exit code the
+    # same way an unreadable PR is — "could not measure" is never rendered as "clean".
+    try:
+        rants = open_rant_rows(args.rants, args.repo)
+        rants_unread = ""
+    except Exception as exc:  # noqa: BLE001
+        rants, rants_unread = [], str(exc)
+
     root, branch, head = local_tree()
     if not args.json:
         # The family's convention — a guard that reads a working tree names it before it
@@ -1008,33 +1136,60 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     if args.json:
-        print(_as_json(readings))
-    elif not queue:
-        print(f"no open PRs in {args.repo} - nothing to review")
+        print(_as_json(readings, rants))
     else:
-        # Before the first row, never after it: this says how strong the reading below
-        # is, and a reader who has already copied a row's command has already acted.
-        note = window_note(window)
-        if note:
-            print(note)
-            print()
-        for reading, action in readings:
-            print(render(reading, action))
-            print()
-        tally: dict[str, int] = {}
-        for _reading, action in readings:
-            tally[action.kind] = tally.get(action.kind, 0) + 1
-        summary = ", ".join(f"{kind} {count}" for kind, count in sorted(tally.items()))
-        print(f"{len(readings)} PR(s): {summary}")
-        if unread:
-            print(
-                f"unmeasurable: {', '.join(f'#{pr}' for pr in unread)} - "
-                "read them before acting"
+        if not queue:
+            # Only claim "nothing" when there is nothing to report on — and that includes
+            # the half that could not be read. An unreadable ledger leaves `rants` empty
+            # for the same reason an unreadable `gh` does, so the sentence is gated on it
+            # too: "nothing to review" printed over a ledger nobody could open is the
+            # defect this file's sibling exists for, one level over.
+            if not rants and not rants_unread:
+                print(f"no open PRs in {args.repo} and no open rants - nothing to review")
+        else:
+            # Before the first row, never after it: this says how strong the reading
+            # below is, and a reader who has already copied a row's command has acted.
+            note = window_note(window)
+            if note:
+                print(note)
+                print()
+            for reading, action in readings:
+                print(render(reading, action))
+                print()
+            tally: dict[str, int] = {}
+            for _reading, action in readings:
+                tally[action.kind] = tally.get(action.kind, 0) + 1
+            summary = ", ".join(
+                f"{kind} {count}" for kind, count in sorted(tally.items())
             )
+            print(f"{len(readings)} PR(s): {summary}")
+            if unread:
+                print(
+                    f"unmeasurable: {', '.join(f'#{pr}' for pr in unread)} - "
+                    "read them before acting"
+                )
+
+        if rants:
+            # After the PR rows, and with its own header: a cycle that reads only the
+            # `N PR(s)` line above must not come away thinking the queue was the whole
+            # of what is open.
+            print()
+            print(
+                f"{len(rants)} open rant(s) - each needs an issue and its PR "
+                "(R5), and no PR row above carries this work:"
+            )
+            print()
+            for rant in rants:
+                print(render_rant(rant))
+                print()
+
+    if rants_unread:
+        print(f"unmeasurable: the rant ledger could not be read - {rants_unread}",
+              file=sys.stderr)
 
     # The same verdict however the reading is rendered: a row nobody could read is
-    # not a row that is fine.
-    return 2 if unread else 0
+    # not a row that is fine - and that includes the half that is not a PR.
+    return 2 if (unread or rants_unread) else 0
 
 
 if __name__ == "__main__":
