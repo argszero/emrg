@@ -1,6 +1,7 @@
 """Tests for the grep tool."""
 
 import asyncio
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -120,3 +121,151 @@ def test_grep_nonexistent_path():
     }))
     assert result.error
     assert "not found" in result.content.lower()
+
+
+# ── The reported count, and the truncation note ──────────────────────
+
+
+def _payload(content: str) -> list[str]:
+    """The printed match blocks: summary, blank lines and the notice removed."""
+    return [ln for ln in content.splitlines()[2:] if ln and not ln.startswith("...")]
+
+
+def _headers(payload: list[str]) -> list[str]:
+    """Block header lines — the ones a match produced, not a context line."""
+    return [ln for ln in payload if not ln.startswith(" ") and ln.endswith(":")]
+
+
+def _reported(content: str) -> int:
+    return int(re.search(r"Found (\d+) matches", content).group(1))
+
+
+class TestTheCountIsTheNumberOfMatches:
+    """Issue #1805 — asking for context used to *create* matches.
+
+    The count was re-derived from the rendered lines with "ends with a colon", and a
+    context line is emitted with its own text intact — so every YAML block key, code
+    label or `Term:` inside the window was counted as a match. Measured on master
+    `6b417c4`, 2026-10-02: one matching line with `first:` / `second:` / `third:`
+    around it printed **Found 4 matches** at `context_before=1, context_after=2` and
+    **Found 1 matches** for the same search without context.
+    """
+
+    def test_a_context_line_ending_in_a_colon_is_not_a_match(self, tmp_path):
+        f = tmp_path / "conf.yaml"
+        f.write_text("first:\nTARGET here\nsecond:\nthird:\n", encoding="utf-8")
+
+        result = _run(GrepTool().execute({
+            "pattern": "TARGET", "path": str(f),
+            "context_before": 1, "context_after": 2,
+        }))
+
+        assert not result.error
+        assert _reported(result.content) == 1, "a context line was counted as a match"
+        assert len(_headers(_payload(result.content))) == 1
+
+    def test_the_same_search_reports_the_same_count_with_and_without_context(self, tmp_path):
+        f = tmp_path / "conf.yaml"
+        f.write_text("first:\nTARGET here\nsecond:\nthird:\n", encoding="utf-8")
+
+        tool = GrepTool()
+        plain = _run(tool.execute({"pattern": "TARGET", "path": str(f)}))
+        with_ctx = _run(tool.execute({
+            "pattern": "TARGET", "path": str(f), "context_before": 1, "context_after": 2,
+        }))
+
+        assert _reported(plain.content) == _reported(with_ctx.content) == 1
+
+    def test_the_count_is_the_number_of_matching_lines(self, tmp_path):
+        (tmp_path / "a.yaml").write_text("k:\nTARGET one\nv:\n", encoding="utf-8")
+        (tmp_path / "b.yaml").write_text("w:\nTARGET two\nTARGET three\nx:\n", encoding="utf-8")
+
+        for context in (0, 1, 3):
+            result = _run(GrepTool().execute({
+                "pattern": "TARGET", "path": str(tmp_path),
+                "context_before": context, "context_after": context,
+            }))
+            assert _reported(result.content) == 3, f"context={context} changed the count"
+
+    def test_a_context_line_that_ends_in_a_colon_is_still_printed(self, tmp_path):
+        """The fix is the number, not the output — the context is what was asked for."""
+        f = tmp_path / "conf.yaml"
+        f.write_text("first:\nTARGET here\nsecond:\n", encoding="utf-8")
+
+        result = _run(GrepTool().execute({
+            "pattern": "TARGET", "path": str(f),
+            "context_before": 1, "context_after": 1,
+        }))
+
+        assert "  first:" in result.content
+        assert "  second:" in result.content
+        assert " >TARGET here" in result.content
+
+
+class TestTheTruncationNoteNamesWhatItMeasured:
+    """The old note named ``max_results`` "match blocks" while cutting at
+    ``max_results * 3`` **lines** — fewer blocks than it claimed, and the cut could
+    land inside a block, printing a header with nothing under it (measured on master
+    `6b417c4`: last payload line was a header; note said 10 blocks, 7 were printed).
+    """
+
+    MATCHES = 80
+
+    def _big_file(self, tmp_path) -> Path:
+        body = []
+        for i in range(self.MATCHES):
+            body += [f"TARGET {i}:", "  a: 1", "  b: 2", "  c: 3"]
+        f = tmp_path / "conf.yaml"
+        f.write_text("\n".join(body) + "\n", encoding="utf-8")
+        return f
+
+    def _run_truncated(self, path: Path, max_results: int = 10):
+        return _run(GrepTool().execute({
+            "pattern": "^TARGET ", "path": str(path),
+            "context_before": 1, "context_after": 2, "max_results": max_results,
+        }))
+
+    def test_the_output_ends_on_a_complete_block(self, tmp_path):
+        result = self._run_truncated(self._big_file(tmp_path))
+        payload = _payload(result.content)
+
+        assert payload, "the truncation printed nothing"
+        assert payload[0] in _headers(payload), "the payload no longer starts with a header"
+        assert payload[-1] not in _headers(payload), (
+            "the cut fell inside a block, so its header was printed with no lines under it"
+        )
+
+    def test_the_note_names_the_blocks_shown_and_the_blocks_found(self, tmp_path):
+        result = self._run_truncated(self._big_file(tmp_path))
+        payload = _payload(result.content)
+        match = re.search(r"\[output truncated: (\d+) of (\d+) match blocks shown\]", result.content)
+
+        assert match, result.content.splitlines()[-1]
+        shown, total = int(match.group(1)), int(match.group(2))
+        assert shown == len(_headers(payload)), "the note's 'shown' is not the number printed"
+        assert total == _reported(result.content), (
+            "the note's total is not the count the summary reported"
+        )
+        assert 0 < shown < total, "this fixture is meant to truncate"
+
+    def test_an_untruncated_search_carries_no_note(self, tmp_path):
+        f = tmp_path / "small.yaml"
+        f.write_text("k:\nTARGET one\n", encoding="utf-8")
+
+        result = _run(GrepTool().execute({
+            "pattern": "TARGET", "path": str(f), "context_before": 1, "context_after": 1,
+        }))
+
+        assert "output truncated" not in result.content
+        assert not _payload(result.content)[-1].startswith("...")
+
+    def test_a_budget_smaller_than_one_block_still_prints_the_first(self, tmp_path):
+        """The cut keeps at least one block: a note with no output under it is worse
+        than exceeding a soft line budget."""
+        result = self._run_truncated(self._big_file(tmp_path), max_results=1)
+        payload = _payload(result.content)
+
+        assert len(_headers(payload)) == 1, (
+            "a budget smaller than one block printed the notice with no match under it"
+        )
+        assert payload[-1] not in _headers(payload)

@@ -130,6 +130,10 @@ class GrepTool(ToolExecutor):
 
         # Search
         results: list[str] = []
+        #: Where each match block's header line landed in ``results``. The block count
+        #: is this list's length, and nothing downstream re-derives it from the
+        #: rendered text — see the summary below for what that cost.
+        block_starts: list[int] = []
         files_searched = 0
         stop = False
 
@@ -160,6 +164,7 @@ class GrepTool(ToolExecutor):
                     ctx_start = max(0, i - context_before)
                     ctx_end = min(len(lines), i + 1 + context_after)
 
+                    block_starts.append(len(results))
                     results.append(f"{rel}:{i + 1}:")
                     for ctx_i in range(ctx_start, ctx_end):
                         marker = ">" if ctx_i == i else " "
@@ -179,17 +184,48 @@ class GrepTool(ToolExecutor):
                 ),
             )
 
-        # Build output
-        actual_matches = sum(1 for r in results if r.endswith(":"))
+        # Build output. The count is the number of blocks appended above, not a
+        # re-reading of the rendered lines: a block header is ``f"{rel}:{i}:"`` and a
+        # context line is emitted with its own text intact (``" " + marker + text``),
+        # so the predicate "ends with a colon" cannot tell them apart — a YAML block
+        # key, a `public:` label or a Markdown `Term:` inside the window was counted as
+        # a match. Measured on master `6b417c4`, 2026-10-02: one matching line with
+        # `first:` / `second:` / `third:` around it printed **Found 4 matches** at
+        # `context_before=1, context_after=2` and **Found 1 matches** for the same
+        # search without context — asking for context created matches that do not
+        # exist, and the inflation grows with the amount of context requested.
+        matches_found = len(block_starts)
         summary = (
-            f"Found {actual_matches} matches for '{pattern}' "
+            f"Found {matches_found} matches for '{pattern}' "
             f"in {root} (searched {files_searched} files):\n\n"
         )
 
-        # Truncate if too many lines
-        if len(results) > max_results * 3:
-            results = results[: max_results * 3]
-            results.append(f"\n... [output truncated at ~{max_results} match blocks]")
+        # Truncate if too many lines — at a **block boundary**, and the note names the
+        # two numbers this actually measured. A cut at ``max_results * 3`` lines lands
+        # inside a block (a block is 1 header + the context window) and leaves context
+        # lines whose header is gone, i.e. output that reads as belonging to no match;
+        # and because a block is longer than one line, those same ``max_results * 3``
+        # lines are *fewer* than ``max_results`` blocks, which the note used to claim.
+        line_budget = max_results * 3
+        if len(results) > line_budget:
+            shown = 0
+            cut = 0
+            for index, start in enumerate(block_starts):
+                end = (
+                    block_starts[index + 1]
+                    if index + 1 < len(block_starts)
+                    else len(results)
+                )
+                # The first block is always kept: a budget smaller than one block would
+                # otherwise print nothing but the notice.
+                if end > line_budget and shown:
+                    break
+                shown += 1
+                cut = end
+            results = results[:cut]
+            results.append(
+                f"\n... [output truncated: {shown} of {matches_found} match blocks shown]"
+            )
 
         return ToolResult(name="grep", content=summary + "\n".join(results))
 
