@@ -171,6 +171,34 @@ def _read_for_write(rants_log: Path) -> RantRead:
         raise
 
 
+def lines_a_write_would_drop(rants_log: Path) -> tuple[int, ...]:
+    """The lines the next write will destroy, in 1-based file order.
+
+    Every writer here rewrites the file whole from what the read saw (`_write_rants`
+    emits `rants` and nothing else), so a line that did not become an entry is gone the
+    moment anything is appended, updated or cleaned up. This is that fact, read *before*
+    the write, for the callers that report it.
+
+    It is one home rather than one per caller because the two callers have already
+    disagreed once. Measured 2026-10-02 on this host, on a ledger holding one good row and
+    one `{not json …}` line:
+
+        submit_rant (tool)  -> warns, naming the line it is about to drop
+        msg_type="rant"     -> {"ok": True, "count": 2}; the line is gone, and the frame
+                               says nothing about it
+
+    The tool was not wrong and the daemon was not lying — it simply never asked. The
+    host's own client (GUI/TUI rant panel) writes through the second path, so the silence
+    fell exactly on the caller that cannot see the file.
+
+    A store that is not there answers `()` — there is nothing to lose, and this is the
+    state `append_rant` creates the file from. A store that exists but cannot be opened
+    raises, because "cannot read what is in there" and "nothing is in there" are the two
+    facts this module keeps apart everywhere else.
+    """
+    return _read_for_write(rants_log).unreadable
+
+
 def _write_rants(rants_log: Path, rants: list[dict]) -> None:
     """Sort by timestamp ascending and rewrite the file (dict 6-field order,
     ensure_ascii=False — the ONLY writer for rants.jsonl)."""

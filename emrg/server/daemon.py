@@ -199,7 +199,12 @@ from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
-from emrg.server.rants import RantStoreMissing, append_rant, read_rants
+from emrg.server.rants import (
+    RantStoreMissing,
+    append_rant,
+    lines_a_write_would_drop,
+    read_rants,
+)
 from emrg.server.scheduler import TaskScheduler
 from emrg.server import logcontext
 
@@ -2885,11 +2890,35 @@ class EmrgServer:
             # command and the submit_rant tool use the same append_rant, so
             # the file format / sort / daemon-authoritative timestamp stay
             # consistent no matter which path recorded the rant.
+            #
+            # Read what this write is about to destroy, *before* it destroys it: every
+            # writer rewrites the file whole from what the read could see, so a line that
+            # is not a rant row goes with the append. Measured 2026-10-02 on a ledger with
+            # one good row and one `{not json …}` line: this path dropped it and answered
+            # `{"ok": True, "count": 2}`, while the *tool* path warned and named the line —
+            # one behaviour, two homes, and the silent one is the one the host's own client
+            # writes through. The frame now carries the lines, so a client can show them,
+            # and the log carries them whatever the client does with them.
+            try:
+                dropped = lines_a_write_would_drop(self._rants_log)
+            except RantStoreMissing:
+                # A ledger that is not there has nothing to lose — the same "nothing to
+                # carry forward" `append_rant` itself reads it as.
+                dropped = ()
             count = append_rant(self._rants_log, rant_message, project)
 
             logger.info("rant recorded (%d total)%s: %s",
                 count, f" project={project}" if project else "", _redact_string(rant_message[:100]))
-            await self._send(ws, {"ok": True, "count": count})
+            frame = {"ok": True, "count": count}
+            if dropped:
+                lines = ", ".join(str(n) for n in dropped)
+                logger.warning(
+                    "rant recorded, but this write dropped %d unreadable line(s) (%s) "
+                    "of %s - the file is rewritten whole from what the reader could see",
+                    len(dropped), lines, self._rants_log,
+                )
+                frame["unreadable_lines"] = list(dropped)
+            await self._send(ws, frame)
 
         elif msg_type == "list_rants":
             # Rant panel (rant 2026-08-13T14:10:14 P4): read ~/.emrg/rants.jsonl,

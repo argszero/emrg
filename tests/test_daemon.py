@@ -4300,3 +4300,97 @@ def test_list_rants_is_still_an_empty_answer_over_an_empty_queue(tmp_path, monke
     assert not frame.get("error"), (
         f"an empty queue answered as a fault is the same collapse one direction over ({frame})"
     )
+
+
+def test_recording_a_rant_says_what_the_write_dropped(tmp_path, monkeypatch):
+    """The host's own client must not be told `ok` about a write that destroyed rows.
+
+    Every writer here rewrites the ledger whole from what the read could see, so a line
+    that is not a rant row goes with the append. Measured 2026-10-02 on this host, on a
+    ledger holding one good row and one `{not json …}` line:
+
+        submit_rant (tool)   -> warns, naming the line it is about to drop
+        msg_type="rant"      -> {"ok": True, "count": 2}; the line was gone and the frame
+                                said nothing about it
+
+    One behaviour with two homes, and the silent one is the path the GUI/TUI rant panel
+    writes through — the caller that cannot open the file to notice for itself.
+    """
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    ledger = tmp_path / "rants.jsonl"
+    good = {
+        "timestamp": "2026-10-01T10:00:00+08:00", "project": "emrg", "status": "pending",
+        "progress": None, "completed": None, "message": "an earlier rant",
+    }
+    ledger.write_text(json.dumps(good) + "\n{not json - unusable}\n", encoding="utf-8")
+
+    server = _make_server()
+    writer = _FakeWriter()
+    asyncio.run(server._process_message(
+        {"type": "rant", "message": "the host's new rant", "project": "emrg"},
+        writer,  # type: ignore[arg-type]
+    ))
+
+    frame = _last_frame(writer)
+    assert frame["ok"] is True
+    assert frame["count"] == 2
+    # The line really was destroyed — so this frame is about a fact, not a hypothetical.
+    assert "{not json" not in ledger.read_text(encoding="utf-8")
+    assert frame.get("unreadable_lines") == [2], (
+        "the write dropped line 2 and told the client nothing, so the host cannot tell "
+        f"a clean append from a destructive one ({frame})"
+    )
+
+
+def test_recording_a_rant_into_a_fresh_store_warns_about_nothing(tmp_path, monkeypatch, caplog):
+    """The discriminating leg: a first-ever rant destroys nothing and must not say it did.
+
+    Without this, a frame that always carried `unreadable_lines` would pass the test above
+    while telling every new user their write dropped something.
+    """
+    import asyncio
+    import logging
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    ledger = tmp_path / "rants.jsonl"
+    assert not ledger.exists()
+
+    server = _make_server()
+    writer = _FakeWriter()
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(server._process_message(
+            {"type": "rant", "message": "the very first rant", "project": "emrg"},
+            writer,  # type: ignore[arg-type]
+        ))
+
+    frame = _last_frame(writer)
+    assert frame["ok"] is True
+    assert frame["count"] == 1
+    assert "unreadable_lines" not in frame, frame
+    assert ledger.exists(), "the write path must still be able to create the store"
+    assert "dropped" not in caplog.text, caplog.text
+
+
+def test_recording_a_rant_into_an_empty_store_warns_about_nothing(
+    tmp_path, monkeypatch, caplog
+):
+    """The other half of the pair: an existing but empty store has nothing to lose."""
+    import asyncio
+    import logging
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    (tmp_path / "rants.jsonl").write_text("", encoding="utf-8")
+
+    server = _make_server()
+    writer = _FakeWriter()
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(server._process_message(
+            {"type": "rant", "message": "a rant", "project": "emrg"},
+            writer,  # type: ignore[arg-type]
+        ))
+
+    frame = _last_frame(writer)
+    assert "unreadable_lines" not in frame, frame
+    assert "dropped" not in caplog.text, caplog.text
