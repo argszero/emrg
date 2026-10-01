@@ -1851,3 +1851,127 @@ def test_the_ledger_path_is_overridable(mod, monkeypatch):
     monkeypatch.setenv("EMRG_RANTS", "/tmp/from-env.jsonl")
     assert mod.rants_path() == Path("/tmp/from-env.jsonl")
     assert mod.rants_path("/tmp/wins.jsonl") == Path("/tmp/wins.jsonl")
+
+
+# --- a legacy array row is still a row ---------------------------------------
+#
+# Measured on the live ledger 2026-10-01: `emrg.server.rants` — the format's own reader, and
+# the code behind the `submit_rant` writer — returned **2** rants while `load_rant_rows`
+# returned **1**. The dropped row was a 2026-08-18 format-drift array
+# (`[timestamp, project, status, progress, completed, message]`), the shape `_normalize_rant`
+# exists to convert and still converts.
+#
+# The defect is a *class*, not a row: the reader had one ending for two different things.
+# "The line is not JSON" and "the line is a shape I do not recognise" both fell off the end
+# of the loop, but the array shape **is** recognised — by the rule's own home — so skipping it
+# answered `origin-unresolved` for an issue the tool's own reader resolves, and left
+# `scripts/review-queue.py` (this reader's second consumer) with no row for an open rant. A
+# missing row is not tolerance: it is a fault invented for a ledger that holds the row.
+#
+# What the tests below pin, in both directions: the row is read (and read *identically* to the
+# tool's reader), a shape neither reader claims still falls out of both, and needing the rule
+# and not being able to reach it is reported as unmeasurable rather than as silence.
+
+LEGACY_TS = "2026-08-18T10:00:00+08:00"
+LEGACY_ROW = [LEGACY_TS, "emrg", "pending", None, None, "a legacy row"]
+
+
+def test_the_two_readers_agree_on_a_legacy_row(mod, tmp_path) -> None:
+    """One file, two readers, one answer — asserted as agreement, not as "this one's list".
+
+    `list_rants` is the reader the ledger's own tool exposes; `load_rant_rows` is the one both
+    scripts rest on. Comparing the two *readings* rather than a hard-coded expectation is what
+    makes the claim "the format has one answer" measurable: a hard-coded list would still pass
+    if the tool's reader changed shape, which is the drift this test is for.
+    """
+    from emrg.server.rants import list_rants
+
+    path = _ledger_lines(
+        tmp_path,
+        json.dumps(LEGACY_ROW),
+        "a half-written line",  # not JSON: still skipped, and still not a row
+        json.dumps(
+            {"timestamp": "2026-10-01T12:00:00+08:00", "project": "emrg", "status": "pending"}
+        ),
+    )
+
+    rows = mod.load_rant_rows(path)
+
+    assert [row.get("timestamp") for row in rows] == [LEGACY_TS, "2026-10-01T12:00:00+08:00"], rows
+    # The converted row carries the array's own fields, in the array's own order — the rule
+    # that was imported instead of re-spelled here.
+    assert rows[0].get("status") == "pending" and rows[0].get("message") == "a legacy row", rows[0]
+    assert {row.get("timestamp") for row in rows} == {
+        row.get("timestamp") for row in list_rants(path)
+    }, rows
+
+
+def test_an_origin_only_the_legacy_row_holds_resolves(mod, monkeypatch, capsys, tmp_path) -> None:
+    """The direction a reader acts on: the issue's handle resolves, so the row stays `linked`.
+
+    With the legacy row skipped, this queue read `#10 issue ORIGIN-UNRESOLVED` — a confident
+    claim that the rant does not exist, about a row the tool that writes the file returns. The
+    queue is otherwise clean (`_linked_issues` holds every link `ok`), so `OK` here is the whole
+    verdict and nothing but the origin reading can produce it.
+    """
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, LEGACY_TS)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger_lines(tmp_path, json.dumps(LEGACY_ROW)))])
+
+    assert rc == 0, out
+    assert "OK" in out and "ORIGIN-UNRESOLVED" not in out, out
+
+
+def test_a_row_shape_neither_reader_claims_is_skipped_by_both(mod, tmp_path) -> None:
+    """The other direction, so the widening cannot become a licence to read anything.
+
+    Tolerance and conversion are different things: a short array, a long array and a bare
+    string are not rants, and the arity is the rule (`_normalize_rant` returns None for each).
+    A reader that made a row of them would resolve origins the ledger never held — the failure
+    in the opposite direction from the one this section was written for, and just as silent.
+    """
+    from emrg.server.rants import list_rants
+
+    path = _ledger_lines(
+        tmp_path,
+        json.dumps(["2026-08-18T10:00:00+08:00", "emrg"]),
+        json.dumps([LEGACY_TS, "emrg", "pending", None, None, "six", "seven"]),
+        json.dumps("just a string"),
+        json.dumps({"status": "pending", "no_timestamp": True}),  # a dict is a row either way
+    )
+
+    assert [row.get("timestamp") for row in mod.load_rant_rows(path)] == [None]
+    assert [row.get("timestamp") for row in list_rants(path)] == [None]
+
+
+def test_a_legacy_row_and_no_way_to_read_it_is_unmeasurable(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """Needing the rule and not reaching it is exit 2, never the skip that inventing a fault.
+
+    The row is read by the format's own function, imported rather than re-spelled — so when
+    that home cannot be imported the reader has no way to answer "is this a row". Dropping it
+    would report `origin-unresolved`, a reading indistinguishable from one never taken, which
+    is what `test_a_ledger_that_cannot_be_read_is_unmeasurable` forbids for the file and this
+    test forbids for the shape.
+    """
+    path = _ledger_lines(tmp_path, json.dumps(LEGACY_ROW))
+    monkeypatch.setitem(sys.modules, "emrg.server.rants", None)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.load_rant_rows(path)
+    message = str(excinfo.value)
+    assert "rants.jsonl" in message and "could not be imported" in message, message
+
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, LEGACY_TS)]))
+    rc = mod.main(["--rants", str(path)])
+    captured = capsys.readouterr()
+
+    assert rc == 2, captured.out
+    # `main` reports a `RuntimeError` as the family's unmeasurable verdict, with the reader's
+    # own sentence after it — so what is pinned here is the shape (exit 2, nothing on stdout,
+    # the cause on stderr), not a wording this test would have to edit whenever the reader
+    # sharpens its message.
+    assert "OK" not in captured.out, captured.out
+    assert "cannot determine the issue/PR links" in captured.err, captured.err
+    assert "legacy array row" in captured.err and "could not be imported" in captured.err, captured

@@ -587,10 +587,27 @@ def load_rant_rows(path: Path) -> list[dict]:
     ledger simply is not there, a confident wrong verdict about a queue that may be fine.
 
     Rows are read with `json.loads` per line, the shape `submit_rant` writes
-    (`emrg/server/rants.py`). A line that is not JSON is skipped rather than fatal: the
-    ledger is appended to by a tool, and a half-written last line is not evidence that the
-    other timestamps are absent — the direction that matters here is the one that would
-    *invent* a fault, and skipping errs the other way.
+    (`emrg/server/rants.py`). **Two shapes end a line without a row, and they are not the
+    same thing** — the distinction this reader used to miss, measured 2026-10-01:
+
+    * a line that is not JSON is skipped rather than fatal: the ledger is appended to by a
+      tool, and a half-written last line is not evidence that the other timestamps are
+      absent — the direction that matters here is the one that would *invent* a fault, and
+      skipping errs the other way;
+    * a **legacy array row** — `[timestamp, project, status, progress, completed, message]`,
+      the 2026-08-18 format-drift shape `_normalize_rant` exists to convert, and which
+      `emrg.server.rants` still reads — is a **row**, and skipping it does invent a fault:
+      an issue whose `Origin: rant <that timestamp>` resolves in the tool's own view read
+      `origin-unresolved` here, and `scripts/review-queue.py` (this function's second
+      consumer) did not list that open rant at all. Measured with a one-row ledger: the
+      tool's reader returns **1** rant, this one returned **0**.
+
+    The conversion is the format's own function, imported from its home rather than
+    re-spelled here, because the array's field order is exactly the rule that must not have
+    two copies (the same reason `check-memory-index.py` imports its row predicate). The
+    import is deferred and the tree is put in front of `sys.path` first: the environment's
+    `PYTHONPATH` carries an **installed** copy of the package ahead of the checkout, and
+    this reading must take the rule from the tree it is standing in.
     """
     try:
         raw = path.read_text(encoding="utf-8")
@@ -607,9 +624,38 @@ def load_rant_rows(path: Path) -> list[dict]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(row, list):
+            row = _legacy_row_as_dict(row, path)
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def _legacy_row_as_dict(raw: list, path: Path) -> dict | None:
+    """One legacy array row, converted by the rule's own home.
+
+    Deferred and narrow on purpose: the package is imported only when a ledger actually
+    holds this shape, so a ledger written by the current tool keeps this reading
+    dependency-free, and a row shape neither reader claims still ends as a skip.
+
+    :param raw: the parsed line.
+    :param path: the ledger it came from, for the message when the rule cannot be reached.
+    :returns: the canonical dict, or None when the home does not recognise the row.
+    :raises RuntimeError: the row shape needs the rule and the rule could not be imported,
+        which is `could not measure` rather than a reading that silently drops the row.
+    """
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from emrg.server.rants import _normalize_rant
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        raise RuntimeError(
+            f"the rant ledger holds a legacy array row ({path}), whose shape is defined by "
+            f"emrg.server.rants, and that rule could not be imported ({type(exc).__name__}: "
+            f"{exc}) - reading the row without it would need a second copy of the field order"
+        ) from exc
+    return _normalize_rant(raw)
 
 
 def load_rants(path: Path) -> set[str]:
