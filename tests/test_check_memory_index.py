@@ -488,6 +488,45 @@ def test_a_url_and_an_anchor_are_not_rows_that_point_nowhere(
     assert "row links 3, unresolved: 0 (0 name a file, 3 a URL or an anchor)" in out
 
 
+def test_an_exempt_only_row_is_not_read_as_a_row_with_no_link(mod, tmp_path, capsys) -> None:
+    """Three exempt links and no link at all are different states, and read apart.
+
+    This is the both-directions leg of the coverage sentence. `NON_FILE_TARGET` is
+    the exemption, and it removes links the row *does* carry - so a reading that
+    derives "this index has no link to resolve" from the exempt-filtered list
+    reports a row carrying a URL, an anchor and a `mailto:` as carrying nothing.
+    Both files are built here, and the assertion is that their reports differ:
+    equality is the defect, whichever wording carries it.
+
+    Measured 2026-10-01 against a sibling implementation (PR #1794, which fixed the
+    code-span half of issue #1793 by the same sentence-over-a-zero shape): it prints
+    `no row carries a ](target) link` for the exempt-only file, byte for byte as it
+    does for the link-free one.
+    """
+    exempt = _index(
+        tmp_path,
+        "exempt-only.md",
+        ["- [a](https://example.com/x.md) and [b](#heading) and [c](mailto:x@y.z)"],
+    )
+    assert mod.main([str(exempt)]) == 0, capsys.readouterr().out
+    exempt_report = capsys.readouterr().out
+
+    nothing = _index(tmp_path, "link-free.md", ["- a table row names its file in prose"])
+    assert mod.main([str(nothing)]) == 0, capsys.readouterr().out
+    nothing_report = capsys.readouterr().out
+
+    assert "no row carries a `](target)` link" in nothing_report, nothing_report
+    assert "no row carries a `](target)` link" not in exempt_report, (
+        "the row carries three links; only the exemption removed them from the "
+        "resolution reading: " + exempt_report
+    )
+    assert "3 a URL or an anchor" in exempt_report, exempt_report
+    assert exempt_report.replace(str(exempt), "") != nothing_report.replace(str(nothing), ""), (
+        "the two states must not read the same: an index whose only links are "
+        "exempt is not an index that carries no link"
+    )
+
+
 def test_several_links_in_one_row_are_all_resolved(mod, tmp_path, capsys) -> None:
     """A hand-written pointer row carries several links; each is a thing to follow.
 
