@@ -345,7 +345,7 @@ class Reading(NamedTuple):
     :param row_links: every link a row carries, as `(file line number, target)`, in
         file order - a `](target)` outside a code span, exemption not yet applied.
         This is what the reading *read*, so a report can say when the answer is
-        "nothing": `row targets 0, unresolved 0` would read as a pass about a set
+        "nothing": a count of 0 beside `unresolved: 0` reads as a pass about a set
         that was never looked at (issue #1793's second half).
     """
 
