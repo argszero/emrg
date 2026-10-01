@@ -838,3 +838,87 @@ def test_the_two_readings_take_the_file_name_from_one_rule(mod) -> None:
     assert mod._target_file("detail.md#a-heading") == "detail.md"
     assert mod._target_file("./detail.md#x") == "./detail.md"
     assert mod._target_file("sub/detail.md#x") == "sub/detail.md"
+
+
+# ── a row names its file in prose as well as by a link ───────────────────────
+#
+# The reverse reading was built from **link targets** alone, and that is not the only
+# way a row names a file: the table shape `is_index_row` reads usually names its detail
+# file in prose. So on a table index the reading reported every file it named as
+# unnamed - on the very shape the resolution clause two lines above it describes
+# ("a table row names its detail file in prose, and this is not a statement that every
+# row link resolves"). Measured 2026-10-01: a 2-row table beside `arch.md` and
+# `rollout.md` printed "no row names: 2" for the two files it names.
+#
+# One rule now answers "does this row name this file" (`_names_a_file`): the row's own
+# text, scanned for name-shaped tokens. The pair below is the point - the prose shape
+# stops firing, and a file no row names still does.
+
+
+def test_a_table_row_that_names_its_file_in_prose_is_not_unindexed(mod, tmp_path, capsys) -> None:
+    """The table shape, whose rows name their files in prose rather than by a link.
+
+    The reading must not turn "this row names it in words" into "no row names it" -
+    that is a false claim about a correct index, and it is the shape this tool's own
+    report already says the resolution reading has no subject for.
+    """
+    _detail(tmp_path, "arch.md")
+    _detail(tmp_path, "rollout.md")
+    path = _index(
+        tmp_path,
+        "table.md",
+        [
+            "# Memory Index",
+            "",
+            "| id | note |",
+            "| --- | --- |",
+            "| a1 | the architecture decisions live in arch.md |",
+            "| a2 | the rollout plan lives in rollout.md |",
+        ],
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert _unindexed_line(out).endswith("no row names: 0"), _unindexed_line(out)
+
+
+def test_a_file_no_row_names_is_still_reported_in_the_table_shape(mod, tmp_path, capsys) -> None:
+    """The direction the fix must not swallow: a file the rows never mention still fires.
+
+    Written in the table shape on purpose, so this is the same reader as the test above
+    and not a second one: a fix that silenced the prose case by weakening the whole
+    reading would pass that test and fail this one.
+    """
+    _detail(tmp_path, "arch.md")
+    _detail(tmp_path, "orphan.md")
+    path = _index(
+        tmp_path,
+        "table-orphan.md",
+        ["| id | note |", "| --- | --- |", "| a1 | the decisions live in arch.md |"],
+    )
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "no row names: 1 (orphan.md)" in out, out
+
+
+def test_a_name_that_is_a_suffix_of_another_token_is_not_a_name(mod, tmp_path, capsys) -> None:
+    """`data.md` does not name `a.md`, which is why the rule scans for tokens.
+
+    A substring search for each known filename would read `a.md` inside `data.md` and
+    report the file as named when no row ever names it - a false negative, the direction
+    that makes the reading silently stop working. Asserted at the helper as well as in
+    the report, because this is a property of the rule rather than of one fixture.
+    """
+    assert "a.md" not in mod._names_a_file("- [x](data.md)")
+    assert "a.md" in mod._names_a_file("- [x](./a.md#the-section)")
+    assert "a.md" in mod._names_a_file("| a1 | the notes live in a.md |")
+    assert mod._names_a_file("| a1 | nothing named here |") == {"a1", "nothing", "named", "here"}
+
+    _detail(tmp_path, "data.md")
+    _detail(tmp_path, "a.md")
+    path = _index(tmp_path, "suffix.md", ["- [x](data.md)"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "no row names: 1 (a.md)" in out, out

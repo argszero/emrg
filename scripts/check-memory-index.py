@@ -408,6 +408,35 @@ class Reading(NamedTuple):
         return out
 
 
+#: The characters a file name is made of, for reading one out of a row's **prose**.
+#:
+#: Needed because a row names its detail file in either of the two shapes
+#: `is_index_row` reads: a `- ` list row usually links it (`- [x](arch.md)`), while a
+#: table row usually **names it in prose** (`| a1 | the decisions live in arch.md |`) -
+#: the shape this tool's own report already describes ("a table row names its detail
+#: file in prose, and this is not a statement that every row link resolves").
+#:
+#: Scanning the row's text for name-shaped tokens rather than matching each known
+#: filename is what keeps `data.md` from reading as a name for `a.md`: the token
+#: boundary is a character a name cannot contain, so a name that is a *suffix* of
+#: another token is not found.
+_FILENAME_TOKEN = re.compile(r"[A-Za-z0-9_.\-/]+")
+
+
+def _names_a_file(line: str) -> set[str]:
+    """Every file name one line names, by a link or in prose.
+
+    One rule for "a row names a file", so the reverse reading cannot drift from the
+    shape it is reasoning about. A link's target is a token like any other
+    (`- [x](./a.md#s)` yields `./a.md`, whose basename is the file), which is why the
+    fragment does not have to be stripped here - `#` cannot be part of a token.
+
+    :param line: one line of an index, already known to be a row.
+    :returns: the basenames it names, possibly empty.
+    """
+    return {Path(token).name for token in _FILENAME_TOKEN.findall(line)}
+
+
 def measure(path: Path) -> Reading:
     """Read one index and count what the rule counts.
 
@@ -415,7 +444,7 @@ def measure(path: Path) -> Reading:
     directory listing, which is the one thing the parsing above does not have. Its
     scope, stated rather than implied: the **`.md` files beside the index** (the
     same directory its rows resolve against, since a row names a sibling), minus
-    the index itself, minus any file a **row link** names. Three consequences, each
+    the index itself, minus any file a **row names**. Three consequences, each
     deliberate:
 
     * the index itself is the only exclusion. A retired archive protocol is **not**
@@ -424,11 +453,16 @@ def measure(path: Path) -> Reading:
       `RETIRED_TERMS`, issue #1551), so an exemption for it would be an exemption
       for a shape that no longer exists - and "an exemption that grows silently is
       how a check becomes vacuous";
-    * a name counts if a **row** carries it, not if prose mentions it. R9's rule is
-      about rows ("one short line per entry"); a `>` note naming a file does not
-      put that file in the index as an entry, and reading prose as a name would
-      make the reading answer a question nobody asked;
-    * a link with a fragment (`x.md#section`) or a `./` prefix names its basename.
+    * a name counts if a **row** names it - by a link **or in its prose**, because
+      both are how a row names its file (see `_names_a_file`). A line that is not a
+      row at all - a `>` note, a paragraph - names nothing: R9's rule is about rows
+      ("one short line per entry"), and counting prose *outside* a row would make
+      the reading answer a question nobody asked. This distinction is the one this
+      reading got wrong first: built from link targets alone it reported every file
+      a table index names in prose as unnamed, on the very shape the resolution
+      clause two lines up describes (measured 2026-10-01, `cyc20261001-214804`);
+    * a link with a fragment (`x.md#section`) or a `./` prefix names its basename -
+      the token boundary gives this, so no stripping is needed here.
 
     :param path: the index file to read.
     :returns: its readings.
@@ -442,14 +476,15 @@ def measure(path: Path) -> Reading:
     row_lines: list[int] = []
     row_lengths: list[int] = []
     row_targets: list[tuple[int, str]] = []
+    named: set[str] = set()
     for number, line in enumerate(lines, 1):
         if is_index_row(line):
             row_lines.append(number)
             row_lengths.append(len(line))
+            named |= _names_a_file(line)
             for target in LINK.findall(CODE_SPAN.sub(" ", line)):
                 if not NON_FILE_TARGET.match(target):
                     row_targets.append((number, target))
-    named = {Path(_target_file(target)).name for _, target in row_targets}
     try:
         beside = sorted(entry.name for entry in path.parent.glob("*.md"))
     except OSError:
