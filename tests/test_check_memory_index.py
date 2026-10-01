@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -514,6 +515,42 @@ def _link_reading(report: str) -> str:
     return "\n".join(keep)
 
 
+#: The count line's shape, which is the one format this tool had **before** the change
+#: under test (`row links N, unresolved: M`, and the exemption suffix the newer reading
+#: adds to it). Matching it is not matching the reading's wording - it is how a line that
+#: reports *numbers* is told apart from a line that makes a *claim*, and the distinction
+#: is the whole point of the helper below.
+_COUNT_LINE = re.compile(r"^\s*row links \d+(,|\s*$)")
+_SUMMARY_LINE = re.compile(r"^(OK:|could not measure|\d+ of \d+ index)")
+
+
+def _coverage_lines(report: str) -> set[str]:
+    """The report's non-count lines: what it *says* beyond the numbers it read.
+
+    `_link_reading` above compares two states, and that comparison is satisfied by the
+    counts alone - so it passes for a reading whose coverage sentence is **always** the
+    same, or always false. Measured 2026-10-01: making the no-link sentence print
+    unconditionally left every test in this file green as long as the sentence was
+    reworded to drop the literal ``](target)`` the one incidental leg matched on. A leg
+    that fires on the words cannot see a claim that is uniformly wrong.
+
+    So this helper isolates the other half: the lines that answer a question other than
+    "how many links", with the file-specific lines, the count line and the run's summary
+    masked out (the summary restates the counts, so it tracks them too). What is left is
+    the reading's *prose*, keyed by nothing in particular - which is what lets a test
+    compare the prose of two states without naming either one's words.
+
+    :param report: one run's stdout.
+    :returns: the set of lines that are neither numbers nor the summary.
+    """
+    keep = set()
+    for line in _link_reading(report).splitlines():
+        if _COUNT_LINE.match(line) or _SUMMARY_LINE.match(line):
+            continue
+        keep.add(line.strip())
+    return keep
+
+
 def test_an_exempt_only_row_is_not_read_as_a_row_with_no_link(mod, tmp_path, capsys) -> None:
     """Three exempt links and no link at all are different states, and read apart.
 
@@ -558,6 +595,49 @@ def test_an_exempt_only_row_is_not_read_as_a_row_with_no_link(mod, tmp_path, cap
         "exempt-only index carries three:\n"
         "--- exempt-only ---\n" + _link_reading(exempt_report)
         + "\n--- link-free ---\n" + _link_reading(nothing_report)
+    )
+
+
+def test_the_coverage_prose_follows_the_state_not_the_implementation(mod, tmp_path, capsys) -> None:
+    """The reading's *prose* must change between the two states, not just its numbers.
+
+    This is the leg that was missing here, and it was found by mutating this reader
+    rather than by reading it. Measured 2026-10-01, on this branch before the test
+    existed: taking the no-link sentence and printing it **unconditionally** - so it
+    asserts "no row carries a link" about an index whose rows carry three - left the
+    whole file green, because the one leg that happened to fire matched the literal
+    ``](target)`` inside the sentence, and rewording the sentence to drop that literal
+    made even that leg pass. A claim that is uniformly false was invisible.
+
+    So the assertion is not about any sentence: it requires the *non-count* lines of the
+    two states to differ (see `_coverage_lines`). The exempt-only index is the state the
+    claim is false in - its rows carry three links, all of them exempt - and the
+    link-free index is the state it is true in. An implementation that says the same
+    thing about both fails here whatever it says; one that distinguishes them passes
+    whatever words it chooses.
+
+    The pair is deliberately the one from `test_an_exempt_only_row_is_not_read_as_a_row_with_no_link`
+    above, which asserts the *counts* differ: together the two tests pin both halves of
+    "this reading answers about the links that were read", and neither can be satisfied
+    by the other's subject.
+    """
+    exempt = _index(
+        tmp_path,
+        "exempt-only.md",
+        ["- [a](https://example.com/x.md) and [b](#heading) and [c](mailto:x@y.z)"],
+    )
+    assert mod.main([str(exempt)]) == 0, capsys.readouterr().out
+    exempt_report = capsys.readouterr().out
+
+    nothing = _index(tmp_path, "link-free.md", ["- a table row names its file in prose"])
+    assert mod.main([str(nothing)]) == 0, capsys.readouterr().out
+    nothing_report = capsys.readouterr().out
+
+    assert _coverage_lines(exempt_report) != _coverage_lines(nothing_report), (
+        "the two states carry the same prose, so whatever the reading says about "
+        "coverage it says about both - and one of the two carries three links:\n"
+        "--- exempt-only ---\n" + exempt_report
+        + "\n--- link-free ---\n" + nothing_report
     )
 
 
