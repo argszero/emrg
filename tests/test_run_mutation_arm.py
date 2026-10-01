@@ -98,6 +98,11 @@ ALWAYS_HANGS_TEST_FILE = '''def test_never_returns():
 '''
 
 STEP = "i += 1"
+
+#: An anchor that spans two lines, written the way a shell heredoc writes it (LF). Over a
+#: CRLF file it matches only after newline normalization - the case the NO-MUTATION hint
+#: exists for.
+SPANNING_ANCHOR_LF = 'def greeting(name: str) -> str:\n    """Say hello."""'
 COUNTS_NODE = "tests/test_subject.py::test_counts"
 HANGING_NODE = "tests/test_subject.py::test_never_returns"
 HELLO_NODE = "tests/test_subject.py::TestGreeting::test_hello"
@@ -144,6 +149,32 @@ def hanging_tree(tmp_path: Path) -> Path:
     (tmp_path / "tests" / "test_subject.py").write_text(
         ALWAYS_HANGS_TEST_FILE, encoding="utf-8"
     )
+    (tmp_path / "tests" / "__init__.py").write_text("", encoding="utf-8")
+    return tmp_path
+
+
+@pytest.fixture()
+def crlf_tree(tmp_path: Path) -> Path:
+    """The same miniature checkout, with every file's line endings written as CRLF.
+
+    Nothing special is declared to make it CRLF: it is the ordinary shape of a checkout
+    on Windows, and it is what the byte-level snapshot has to survive.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "subject.py").write_bytes(SUBJECT.replace("\n", "\r\n").encode("utf-8"))
+    (tmp_path / "tests" / "test_subject.py").write_bytes(
+        TEST_FILE.replace("\n", "\r\n").encode("utf-8")
+    )
+    (tmp_path / "tests" / "__init__.py").write_bytes(b"")
+    return tmp_path
+
+
+@pytest.fixture()
+def binary_tree(tmp_path: Path) -> Path:
+    """A checkout whose subject is not valid UTF-8 - an encoding this tool cannot hold."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "subject.py").write_bytes(b'"""A subject."""\n\nx = "\xff\xfe latin-1 \xe9"\n')
+    (tmp_path / "tests" / "test_subject.py").write_text(TEST_FILE, encoding="utf-8")
     (tmp_path / "tests" / "__init__.py").write_text("", encoding="utf-8")
     return tmp_path
 
@@ -412,6 +443,89 @@ class TestTheRefusalsThatNeedNoRun:
         out = capsys.readouterr().out
         assert rc == mod.EXIT_UNJUDGEABLE, out
         assert "no such file" in out, out
+
+
+class TestTheSnapshotIsBytes:
+    """`restored byte-for-byte` is a claim about bytes, so it has to be checked in bytes.
+
+    Measured 2026-10-02 (`cyc20261002-020748`): a CRLF subject came back as LF - md5
+    `1771c5e5..` -> `15c13e5a..`, CRLF count `2 -> 0` - and the tool printed `restored
+    byte-for-byte: True`, because both the snapshot and the check went through
+    `read_text`, whose universal-newline translation turns CRLF into LF *before* anything
+    else sees the file. A claim measured in a different unit than the one it names cannot
+    be falsified by the thing it claims to detect.
+    """
+
+    def test_a_byte_change_the_text_view_cannot_see_is_not_a_restore(
+        self, mod, tmp_path: Path
+    ) -> None:
+        """The discriminating case: equal as text, different on disk."""
+        target = tmp_path / "subject.py"
+        target.write_bytes(b"a = 1\r\nb = 2\r\n")
+        snapshot = target.read_bytes()
+        target.write_bytes(b"a = 1\nb = 2\n")          # what `read_text` + `write_text` did
+        # Text-wise the two are indistinguishable once newlines are translated - which is
+        # exactly the comparison that called the changed file restored.
+        assert target.read_text(encoding="utf-8") == "a = 1\nb = 2\n"
+        assert mod._restored_from_snapshot(target, snapshot) is False
+
+    def test_the_same_bytes_are_a_restore(self, mod, tmp_path: Path) -> None:
+        """The other direction, so the check cannot pass by always saying no."""
+        target = tmp_path / "subject.py"
+        target.write_bytes(b"a = 1\r\n")
+        assert mod._restored_from_snapshot(target, b"a = 1\r\n") is True
+        assert mod._restored_from_snapshot(target, None) is False
+
+    def test_an_arm_over_a_crlf_file_leaves_every_byte_of_it_alone(
+        self, mod, crlf_tree, capsys
+    ) -> None:
+        """End to end: the file the arm was pointed at is the file that is still there."""
+        before = (crlf_tree / "subject.py").read_bytes()
+        assert b"\r\n" in before, "the fixture is only meaningful if it really is CRLF"
+        rc = _arm(mod, crlf_tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_KILLED, out
+        after = (crlf_tree / "subject.py").read_bytes()
+        assert after == before, "the arm converted the file's line endings"
+        # The claim and the reading agree - which is the point: they are the same unit.
+        assert "restored byte-for-byte: True" in out, out
+
+    def test_the_anchor_must_carry_the_files_own_newlines(
+        self, mod, crlf_tree, capsys
+    ) -> None:
+        """The deliberate consequence, with the reason printed rather than left to guess."""
+        rc = _arm(mod, crlf_tree, old=SPANNING_ANCHOR_LF, new="    return 0")
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_NO_MUTATION, out
+        assert "CRLF" in out, out
+        assert "0 time(s)" in out, out
+
+
+class TestATargetThatCannotBeHeldAsText:
+    """Not every unreadable target is a crash - and a crash is not a negative result.
+
+    Measured 2026-10-02 (`cyc20261002-020748`): a non-UTF-8 subject raised out of
+    `read_text`, the process exited **1** - the same code as `EXIT_SURVIVED` - and not one
+    line of verdict prose was printed. A reader scanning exit codes saw "the mutation is
+    not covered" where the truth was "nothing was judged".
+    """
+
+    def test_a_target_that_is_not_utf8_is_refused_with_prose_not_a_traceback(
+        self, mod, binary_tree, capsys
+    ) -> None:
+        before = (binary_tree / "subject.py").read_bytes()
+        rc = _arm(mod, binary_tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_UNJUDGEABLE, out
+        assert "not valid UTF-8" in out, out
+        # The refusal is a verdict, so it leaves through the same report as the others.
+        assert "verdict: UNJUDGEABLE" in out, out
+        # And it is a refusal, not a mutation: the file is untouched.
+        assert (binary_tree / "subject.py").read_bytes() == before
+
+    def test_the_refusal_is_not_the_survived_exit_code(self, mod) -> None:
+        """The two codes have to differ, or a refusal reads as "no coverage" forever."""
+        assert mod.EXIT_UNJUDGEABLE != mod.EXIT_SURVIVED
 
 
 class TestTheReportConventions:

@@ -23,6 +23,16 @@ killed" is wrong in ways that *look identical* to success:
 * **the restore is not a snapshot.** Restoring a mutated file with `git checkout --`
   silently reverts *uncommitted* work: an arm run inside a cycle, whose change is not
   committed yet, deletes the very change the next arm mutates.
+* **a snapshot taken as text is not a snapshot.** `read_text` translates newlines, so a
+  CRLF file read that way *becomes* an LF file the moment this tool writes it back - and
+  a restore check that reads text again compares equal and reports `byte-for-byte: True`
+  over a changed file (measured 2026-10-02: md5 `1771c5e5..` -> `15c13e5a..`, CRLF count
+  `2 -> 0`, verdict `restored byte-for-byte: True`). **A claim is only checkable in the
+  unit it names**: the snapshot is `read_bytes()`, the restore is `write_bytes()`, and the
+  check compares bytes. The consequence is deliberate - the anchor now matches the file's
+  *own* newlines, so an LF anchor does not match a CRLF file; that arm reports NO-MUTATION
+  with the reason (`the anchor must carry \r\n`), rather than matching and silently
+  converting the file.
 
 Measured exit codes, on this repository's pytest (2026-09-26), which is what the
 judgement below is built on:
@@ -71,7 +81,8 @@ expectation already matched, and for the refusals there is nothing to search for
 
 What it does, in order
 ----------------------
-1. snapshot the named file and resolve the mutation anchor (exactly one occurrence);
+1. snapshot the named file **as bytes** and resolve the mutation anchor against the
+   file's own text (exactly one occurrence);
 2. pre-flight: run the target unmutated - it must collect and pass (`--no-preflight`
    is the escape hatch for an arm whose target is already red, and says so in the
    verdict, because the attribution is then the reader's);
@@ -84,7 +95,8 @@ What it does, in order
    switched off and the mutated file's own `__pycache__` is purged, because a `.pyc`
    whose `(mtime, size)` header still matches can answer for the mutation
    (`scripts/check-merge-plan-suite.py` carries that measurement);
-5. restore from the snapshot and assert it came back **byte for byte**.
+5. restore from that byte snapshot and assert it came back **byte for byte** - the
+   check reads bytes too, so the claim and the measurement are the same unit.
 
 Why this is not in the `check*.py` family
 -----------------------------------------
@@ -109,7 +121,8 @@ Exit codes
     0  KILLED           the mutation made the target fail on the expected assertion
     1  SURVIVED         the target still passed with the mutation in place
     2  UNJUDGEABLE      the run does not separate the two (wrong node id, a mutation
-                        that does not parse, nothing collected, an unrelated failure)
+                        that does not parse, nothing collected, an unrelated failure,
+                        or a target that is not valid UTF-8)
     3  TARGET-BROKEN    before mutating, the target did not collect or did not pass
     4  NO-MUTATION      the replacement left the file byte-identical, or the anchor
                         does not occur exactly once
@@ -345,14 +358,35 @@ def _apply(text: str, old: str, new: str) -> str | None:
     return text.replace(old, new, 1)
 
 
+def _restored_from_snapshot(target: Path, snapshot: bytes | None) -> bool:
+    """Whether `target` holds exactly the bytes that were snapshotted.
+
+    Bytes, not text, because that is the unit the report's claim names. `read_text`
+    translates newlines, so a CRLF file and its LF copy compare **equal as text** while
+    differing on disk - which is how `restored byte-for-byte: True` was once printed over
+    a file whose md5 went `1771c5e5..` -> `15c13e5a..` (measured 2026-10-02). A check
+    that reads a different unit than the claim cannot falsify it.
+    """
+    return snapshot is not None and target.read_bytes() == snapshot
+
+
 class Arm:
     """One arm's state, so the verdict is computed before anything is printed."""
 
-    def __init__(self, args: argparse.Namespace, cwd: Path, target: Path, original: str):
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        cwd: Path,
+        target: Path,
+        original: str,
+        original_bytes: bytes | None = None,
+    ):
         self.args = args
         self.cwd = cwd
         self.target = target
         self.original = original
+        #: the file as it was, in the unit `restored byte-for-byte` is a claim about.
+        self.original_bytes = original_bytes
         self.preflight = "skipped" if args.no_preflight else "pending"
         self.failed_node = ""
         self.restored: bool | None = None
@@ -478,23 +512,63 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_absolute():
         target = cwd / target
 
-    original = target.read_text(encoding="utf-8") if target.is_file() else None
-    arm = Arm(args, cwd, target, original or "")
-    if original is None:
+    # The snapshot is **bytes**, and the working text is decoded from them, because
+    # `read_text` is not a snapshot: its universal-newline translation turns CRLF into
+    # LF before anything else sees the file, so a CRLF file was restored to an LF one
+    # while the check below - reading text again - compared equal and reported
+    # "byte-for-byte: True" (measured 2026-10-02: md5 1771c5e5.. -> 15c13e5a.., CRLF
+    # count 2 -> 0, verdict "restored byte-for-byte: True"). A claim is only checkable
+    # in the unit it names, so the claim and the check are both bytes now.
+    raw = target.read_bytes() if target.is_file() else None
+    original: str | None = None
+    decode_error = ""
+    if raw is not None:
+        try:
+            original = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            decode_error = f"byte {exc.start} is 0x{raw[exc.start]:02x}"
+    arm = Arm(args, cwd, target, original or "", raw)
+    if raw is None:
         # Every verdict leaves through `_report`, including this one: an exit code with
         # no prose is the failure this family keeps naming.
         arm.decide(UNJUDGEABLE, f"no such file: {target}", EXIT_UNJUDGEABLE)
+        _report(arm, args.json)
+        return arm.code
+    if original is None:
+        # A decode error used to escape as an unhandled traceback: rc=1, the same code as
+        # SURVIVED, and not one line of verdict prose - so a crash read as "the mutation
+        # is not covered" (measured 2026-10-02: rc=1, 0 verdict lines). Refusing in the
+        # open says the same thing a reader needs and keeps "no result" out of the
+        # "survived" bucket.
+        arm.decide(
+            UNJUDGEABLE,
+            f"{target.name} is not valid UTF-8 ({decode_error}). This tool matches text "
+            "anchors and restores what it snapshotted, so it cannot judge a target whose "
+            "bytes it cannot hold as text",
+            EXIT_UNJUDGEABLE,
+        )
         _report(arm, args.json)
         return arm.code
 
     mutated = _apply(original, args.old, args.new)
     if mutated is None:
         occurrences = original.count(args.old)
+        # A zero here is the one honest reason a working anchor can stop matching: the
+        # newline view this tool hands the anchor is the file's own, so an anchor written
+        # with LF does not match a CRLF file. Saying that much turns a dead end into a
+        # one-line fix (`\r\n` in `--old`), which is the same service the assertion
+        # candidates do for a missed `--expect`.
+        crlf_hint = ""
+        if occurrences == 0 and original.replace("\r\n", "\n").count(args.old) == 1:
+            crlf_hint = (
+                " - it matches once after newline normalization, so this file uses CRLF "
+                "and the anchor must carry it (write \\r\\n in --old)"
+            )
         arm.decide(
             NO_MUTATION,
-            f"the anchor occurs {occurrences} time(s) in {target.name}; a replacement "
-            "needs exactly one site, or the arm mutates something other than what it "
-            "names",
+            f"the anchor occurs {occurrences} time(s) in {target.name}{crlf_hint}; a "
+            "replacement needs exactly one site, or the arm mutates something other than "
+            "what it names",
             EXIT_NO_MUTATION,
         )
         _report(arm, args.json)
@@ -545,7 +619,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if not arm.verdict:
             try:
-                target.write_text(mutated, encoding="utf-8")
+                target.write_bytes(mutated.encode("utf-8"))
                 mutated_on_disk = True
                 _purge_bytecode(target)
                 proc = _run_target(args.node, cwd, home, limit)
@@ -574,11 +648,12 @@ def main(argv: list[str] | None = None) -> int:
                         EXIT_UNJUDGEABLE,
                     )
             finally:
+                # Restores from the byte snapshot and checks in bytes: the sentence
+                # below and the unit it is measured in have to be the same one, or the
+                # report is a claim no reading supports.
                 if mutated_on_disk:
-                    target.write_text(original, encoding="utf-8")
-                    arm.restored = target.read_text(encoding="utf-8") == original
-                else:
-                    arm.restored = target.read_text(encoding="utf-8") == original
+                    target.write_bytes(arm.original_bytes)  # type: ignore[arg-type]
+                arm.restored = _restored_from_snapshot(target, arm.original_bytes)
     except ArmTimedOut as exc:
         # Reached only from the judged run - the pre-flight has its own handler above,
         # because a pre-flight that times out has no mutation to report on. The inner
