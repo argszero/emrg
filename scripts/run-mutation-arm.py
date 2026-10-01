@@ -41,10 +41,17 @@ failure.** So `--expect` is not a nicety - without it, a mutation that breaks th
 loading of the module under test is indistinguishable from a mutation a test
 actually caught, and that is the whole failure mode this tool exists to remove.
 
-The judgement therefore has three states, not two:
+* **the run never finished.** A mutation can put the code into a loop, and a run
+  killed from *outside* this process never reaches the `finally:` that restores the
+  file - so the tree is left mutated. Measured 2026-10-01 (`cyc20261001-235923`): one
+  such arm spent 900 s of a cycle and left the mutation on disk. Bounded now by
+  `--timeout`, which kills the run **inside** the `try:`, so both halves fail safe.
+
+The judgement therefore has four states, not two:
 
     rc 0                                  -> SURVIVED   (the mutation is not covered)
     rc 1 and the expected assertion text  -> KILLED     (the arm is evidence)
+    the run exceeded --timeout            -> TIMEOUT    (no evidence, file restored)
     anything else                         -> UNJUDGEABLE, with the reason named
 
 The pre-flight is the other half of it: the target is run **before** the mutation, and
@@ -69,7 +76,8 @@ What it does, in order
    is the escape hatch for an arm whose target is already red, and says so in the
    verdict, because the attribution is then the reader's);
 3. apply the replacement and assert the file really changed;
-4. run the target: `HOME`/`TMPDIR`/`TMP`/`TEMP` are pinned to a fresh temporary
+4. run the target **under `--timeout`**: `HOME`/`TMPDIR`/`TMP`/`TEMP` are pinned to a
+   fresh temporary
    directory **for the child only** (`emrg/server/evolution_prompt.md` states the
    rule: a temp-root home is itself a writable zone, so a *process-wide* pinned `HOME`
    turns a sandbox test red - a false red, not a regression), bytecode writing is
@@ -106,8 +114,12 @@ Exit codes
     4  NO-MUTATION      the replacement left the file byte-identical, or the anchor
                         does not occur exactly once
     5  RESTORE-MISMATCH the file did not come back byte for byte
+    6  TIMEOUT          a run did not finish within --timeout; it was killed and the
+                        tree restored (no evidence was produced by this arm)
 
-The file is restored on every path, including a failure inside this tool.
+The file is restored on every path, including a failure inside this tool and a run
+killed for exceeding `--timeout` - which is precisely why the timeout exists: a run
+killed from outside this process is a path on which nothing is restored.
 """
 
 from __future__ import annotations
@@ -138,6 +150,22 @@ UNJUDGEABLE = "UNJUDGEABLE"
 TARGET_BROKEN = "TARGET-BROKEN"
 NO_MUTATION = "NO-MUTATION"
 RESTORE_MISMATCH = "RESTORE-MISMATCH"
+TIMEOUT = "TIMEOUT"
+
+#: How long one pytest run may take before it is killed and reported as `TIMEOUT`.
+#:
+#: Measured 2026-10-01 (`cyc20261001-235923`), before this existed: an arm whose
+#: mutation made a candidate loop forever **hung the run** - 900 s of the cycle spent
+#: on one arm, and, because the process was killed from outside, the `finally:` below
+#: never ran and **the mutation was left on disk**. Both halves are avoidable and this
+#: number is the bound on the first: an arm's target is a handful of tests (the arms in
+#: this repository's own history run in well under ten seconds), so minutes of silence
+#: mean the mutation put the code in a loop, not that the machine is slow.
+#:
+#: It is deliberately far above any honest arm so it never truncates real evidence, and
+#: a caller who truly needs longer passes `--timeout`. `0` means no limit, which is the
+#: behaviour this tool had before the bound existed.
+DEFAULT_TIMEOUT_SECONDS = 300
 
 EXIT_KILLED = 0
 EXIT_SURVIVED = 1
@@ -145,6 +173,7 @@ EXIT_UNJUDGEABLE = 2
 EXIT_TARGET_BROKEN = 3
 EXIT_NO_MUTATION = 4
 EXIT_RESTORE_MISMATCH = 5
+EXIT_TIMEOUT = 6
 
 #: `1 passed in 0.02s`, `3 passed, 1 warning in 0.10s` - the count pytest prints.
 _PASSED = re.compile(r"(\d+) passed")
@@ -189,12 +218,34 @@ def _purge_bytecode(target: Path) -> list[str]:
     return removed
 
 
-def _run_target(node: list[str], cwd: Path, home: Path) -> subprocess.CompletedProcess[str]:
+class ArmTimedOut(Exception):
+    """The target did not finish within the arm's time limit.
+
+    A distinct exception rather than a sentinel return, because the two callers owe the
+    reader different sentences: a pre-flight that times out never wrote a mutation, and
+    a judged run that times out wrote one and has to say it was put back.
+    """
+
+    def __init__(self, seconds: float, where: str):
+        super().__init__(f"the {where} ran longer than {seconds:g}s")
+        self.seconds = seconds
+        self.where = where
+
+
+def _run_target(
+    node: list[str], cwd: Path, home: Path, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run the named pytest target, with the child-only environment pinning.
 
     `HOME`/`TMPDIR`/`TMP`/`TEMP` are the *arm's* temp root and are passed to this child
     only - pinning them for the whole tool (or worse, for the whole suite) is the
     false-red `emrg/server/evolution_prompt.md` records.
+
+    :param timeout: seconds the run may take, or None for no limit. A run that exceeds
+        it is killed and reported by raising `ArmTimedOut` - **inside** the caller's
+        `try:`, so the `finally:` that restores the tree still runs. That placement is
+        the whole point: before this bound existed, a hanging arm was killed from
+        outside the process and the mutation stayed on disk.
     """
     env = dict(os.environ)
     env.update(
@@ -204,15 +255,19 @@ def _run_target(node: list[str], cwd: Path, home: Path) -> subprocess.CompletedP
         TEMP=str(home),
         PYTHONDONTWRITEBYTECODE="1",
     )
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", *node, "-q", "-p", "no:cacheprovider"],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", *node, "-q", "-p", "no:cacheprovider"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ArmTimedOut(timeout, "run") from exc
 
 
 def _combined(proc: subprocess.CompletedProcess[str]) -> str:
@@ -313,6 +368,11 @@ class Arm:
         #: `--expect` - printed when the verdict is UNJUDGEABLE, which is the one
         #: state where the caller has to retype the fragment.
         self.assertions: list[str] = []
+        #: whether a run was killed for exceeding `--timeout`. Kept beside the verdict
+        #: rather than folded into `mutated_rc`, because "no result" is not a result:
+        #: a reader scanning a JSON report has to be able to tell a timed-out arm from
+        #: one whose target returned a number.
+        self.timed_out = False
 
     def decide(self, verdict: str, why: str, code: int) -> None:
         self.verdict, self.why, self.code = verdict, why, code
@@ -329,6 +389,7 @@ class Arm:
             "mutated_rc": self.mutated_rc,
             "mutated_passed": self.mutated_passed,
             "assertions": list(self.assertions),
+            "timed_out": self.timed_out,
             "restored": self.restored,
             "verdict": self.verdict,
             "why": self.why,
@@ -395,6 +456,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--label", default="", help="what this arm breaks, for the report")
     parser.add_argument("--cwd", default="", help="the tree to run in (default: this checkout)")
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "how long one pytest run may take before it is killed and reported as "
+            f"TIMEOUT (default: {DEFAULT_TIMEOUT_SECONDS:g}; 0 means no limit)"
+        ),
+    )
+    parser.add_argument(
         "--no-preflight",
         action="store_true",
         help="skip the pre-mutation run (for an arm whose target is already red)",
@@ -435,33 +506,49 @@ def main(argv: list[str] | None = None) -> int:
 
     home = Path(tempfile.mkdtemp(prefix="emrg-arm-"))
     mutated_on_disk = False
+    # `0` is the documented "no limit", so it has to become None before it reaches
+    # `subprocess.run`, where 0 means "time out immediately".
+    limit = args.timeout if args.timeout and args.timeout > 0 else None
     try:
         if not args.no_preflight:
-            proc = _run_target(args.node, cwd, home)
-            passed = _passed_count(_combined(proc))
-            if proc.returncode != PYTEST_OK or passed < 1:
-                # A refusal is a verdict like any other, so it goes through the same
-                # report path: an unattributed non-zero exit is the failure this tool
-                # exists to prevent, and that includes this tool's own.
-                arm.preflight = f"refused (rc={proc.returncode}, {passed} passed)"
+            try:
+                proc = _run_target(args.node, cwd, home, limit)
+            except ArmTimedOut as exc:
+                arm.preflight = f"timed out after {exc.seconds:g}s"
+                arm.timed_out = True
                 arm.decide(
-                    TARGET_BROKEN,
-                    f"before any mutation the target exited {proc.returncode} with "
-                    f"{passed} passed. An arm can only attribute a failure to its "
-                    "mutation if the target collected and passed first - check the node "
-                    "id (a class method needs its class: "
-                    "tests/test_x.py::TestC::test_y)",
-                    EXIT_TARGET_BROKEN,
+                    TIMEOUT,
+                    f"the target did not finish within {exc.seconds:g}s, and no "
+                    "mutation had been written yet. Nothing judged anything, and the "
+                    "tree is untouched - pass a larger --timeout only if the target is "
+                    "honestly slow; a target that cannot finish cannot support an arm",
+                    EXIT_TIMEOUT,
                 )
             else:
-                arm.preflight = f"{passed} passed"
+                passed = _passed_count(_combined(proc))
+                if proc.returncode != PYTEST_OK or passed < 1:
+                    # A refusal is a verdict like any other, so it goes through the same
+                    # report path: an unattributed non-zero exit is the failure this tool
+                    # exists to prevent, and that includes this tool's own.
+                    arm.preflight = f"refused (rc={proc.returncode}, {passed} passed)"
+                    arm.decide(
+                        TARGET_BROKEN,
+                        f"before any mutation the target exited {proc.returncode} with "
+                        f"{passed} passed. An arm can only attribute a failure to its "
+                        "mutation if the target collected and passed first - check the node "
+                        "id (a class method needs its class: "
+                        "tests/test_x.py::TestC::test_y)",
+                        EXIT_TARGET_BROKEN,
+                    )
+                else:
+                    arm.preflight = f"{passed} passed"
 
         if not arm.verdict:
             try:
                 target.write_text(mutated, encoding="utf-8")
                 mutated_on_disk = True
                 _purge_bytecode(target)
-                proc = _run_target(args.node, cwd, home)
+                proc = _run_target(args.node, cwd, home, limit)
                 out = _combined(proc)
                 arm.mutated_rc = proc.returncode
                 arm.mutated_passed = _passed_count(out)
@@ -492,6 +579,21 @@ def main(argv: list[str] | None = None) -> int:
                     arm.restored = target.read_text(encoding="utf-8") == original
                 else:
                     arm.restored = target.read_text(encoding="utf-8") == original
+    except ArmTimedOut as exc:
+        # Reached only from the judged run - the pre-flight has its own handler above,
+        # because a pre-flight that times out has no mutation to report on. The inner
+        # `finally:` has already put the file back by the time this runs, which is what
+        # lets the sentence below be a statement about this tree rather than a hope.
+        arm.timed_out = True
+        arm.decide(
+            TIMEOUT,
+            f"the target did not finish within {exc.seconds:g}s with the mutation in "
+            "place, so the run separated nothing (a mutation that makes the code loop "
+            "is the usual cause). The file is put back by the same `finally:` that "
+            "restores every other path - check `restored byte-for-byte` above - and "
+            "this arm owes evidence it did not produce",
+            EXIT_TIMEOUT,
+        )
     finally:
         shutil.rmtree(home, ignore_errors=True)
 

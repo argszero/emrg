@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,43 @@ class TestGreeting:
 '''
 
 GREETING = 'return "hello " + name'
+
+#: A subject whose *mutation* loops: `while i < n: i += 1` becomes `i += 0`, so the
+#: loop never advances and the run never returns. This is the shape measured on
+#: 2026-10-01 (`cyc20261001-235923`), where one such arm spent 900 s of a cycle and
+#: left the mutation on disk because the kill came from outside this process.
+LOOPING_SUBJECT = '''"""A subject a mutation can set spinning."""
+
+
+def count_to(n: int) -> int:
+    """Count to n."""
+    i = 0
+    while i < n:
+        i += 1
+    return i
+'''
+
+LOOPING_TEST_FILE = '''import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from subject import count_to
+
+
+def test_counts():
+    assert count_to(3) == 3
+'''
+
+#: A target that never finishes *unmutated* - the shape the pre-flight meets.
+ALWAYS_HANGS_TEST_FILE = '''def test_never_returns():
+    while True:
+        pass
+'''
+
+STEP = "i += 1"
+COUNTS_NODE = "tests/test_subject.py::test_counts"
+HANGING_NODE = "tests/test_subject.py::test_never_returns"
 HELLO_NODE = "tests/test_subject.py::TestGreeting::test_hello"
 BARE_NODE = "tests/test_subject.py::test_hello"
 
@@ -88,8 +126,30 @@ def tree(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture()
+def looping_tree(tmp_path: Path) -> Path:
+    """A checkout whose target passes unmutated and spins once the step is broken."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "subject.py").write_text(LOOPING_SUBJECT, encoding="utf-8")
+    (tmp_path / "tests" / "test_subject.py").write_text(LOOPING_TEST_FILE, encoding="utf-8")
+    (tmp_path / "tests" / "__init__.py").write_text("", encoding="utf-8")
+    return tmp_path
+
+
+@pytest.fixture()
+def hanging_tree(tmp_path: Path) -> Path:
+    """A checkout whose target hangs before any mutation - the pre-flight's case."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "subject.py").write_text(SUBJECT, encoding="utf-8")
+    (tmp_path / "tests" / "test_subject.py").write_text(
+        ALWAYS_HANGS_TEST_FILE, encoding="utf-8"
+    )
+    (tmp_path / "tests" / "__init__.py").write_text("", encoding="utf-8")
+    return tmp_path
+
+
 def _arm(mod, tree: Path, *, old: str, new: str, node: str = HELLO_NODE, expect: str = "hello x",
-         json_out: bool = False) -> int:
+         json_out: bool = False, timeout: float | None = None) -> int:
     argv = [
         "--file", "subject.py",
         "--old", old,
@@ -98,6 +158,8 @@ def _arm(mod, tree: Path, *, old: str, new: str, node: str = HELLO_NODE, expect:
         "--expect", expect,
         "--cwd", str(tree),
     ]
+    if timeout is not None:
+        argv += ["--timeout", str(timeout)]
     if json_out:
         argv.append("--json")
     return mod.main(argv)
@@ -248,6 +310,78 @@ class TestTheFileTheArmMutates:
         """Saying nothing about the restore is how a silent revert goes unnoticed."""
         _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
         assert "restored byte-for-byte: True" in capsys.readouterr().out
+
+
+class TestARunThatNeverFinishes:
+    """The hole `--timeout` closes: a run killed from *outside* restores nothing.
+
+    The tool's contract is "the file is restored on every path". Before this bound there
+    was a path on which no path ran at all: a mutation that sets the code spinning left
+    the process alive until something outside killed it, and the `finally:` that puts the
+    file back was never reached - measured 2026-10-01, 900 s and a mutated file left on
+    disk. The bound is what makes that run *finish*, so the restore runs.
+    """
+
+    def test_a_mutation_that_loops_is_its_own_verdict(self, mod, looping_tree, capsys) -> None:
+        """Not a kill (no assertion proved anything) and not a survivor (nothing ran)."""
+        rc = _arm(mod, looping_tree, old=STEP, new="i += 0", node=COUNTS_NODE,
+                  expect="assert 0 == 3", timeout=2)
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_TIMEOUT, out
+        assert "verdict: TIMEOUT" in out, out
+        assert "did not finish" in out, out
+
+    def test_a_timed_out_arm_restores_the_file_anyway(self, mod, looping_tree, capsys) -> None:
+        """The guarantee the bound exists for, asserted on the arm that needs it."""
+        before = (looping_tree / "subject.py").read_text(encoding="utf-8")
+
+        _arm(mod, looping_tree, old=STEP, new="i += 0", node=COUNTS_NODE,
+             expect="assert 0 == 3", timeout=2)
+        out = capsys.readouterr().out
+
+        assert "restored byte-for-byte: True" in out, out
+        assert (looping_tree / "subject.py").read_text(encoding="utf-8") == before
+
+    def test_the_wait_is_bounded_by_the_timeout(self, mod, looping_tree, capsys) -> None:
+        """A verdict that takes unbounded time is not a verdict the cycle can use."""
+        started = time.monotonic()
+        _arm(mod, looping_tree, old=STEP, new="i += 0", node=COUNTS_NODE,
+             expect="assert 0 == 3", timeout=2)
+        capsys.readouterr()
+
+        assert time.monotonic() - started < 60, (
+            "the timeout did not bound the run: a hanging arm must not hold the cycle"
+        )
+
+    def test_a_preflight_timeout_says_no_mutation_was_written(
+        self, mod, hanging_tree, capsys
+    ) -> None:
+        """The other caller: nothing was mutated, so the sentence has to differ."""
+        rc = _arm(mod, hanging_tree, old=GREETING, new='return "goodbye " + name',
+                  node=HANGING_NODE, expect="never prints", timeout=2)
+        out = capsys.readouterr().out
+
+        assert rc == mod.EXIT_TIMEOUT, out
+        assert "no mutation had been written yet" in out, out
+        assert (hanging_tree / "subject.py").read_text(encoding="utf-8") == SUBJECT
+
+    def test_zero_means_no_limit_not_an_instant_timeout(self, mod, tree, capsys) -> None:
+        """`0` is the documented opt-out; if it reached `subprocess.run` it would mean
+        "time out immediately", which would turn every arm into a TIMEOUT."""
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name', timeout=0)
+        out = capsys.readouterr().out
+
+        assert rc == mod.EXIT_KILLED, out
+
+    def test_the_json_report_carries_the_timeout_flag(self, mod, looping_tree, capsys) -> None:
+        """A timed-out arm's `mutated_rc` is None, so the flag has to say why."""
+        _arm(mod, looping_tree, old=STEP, new="i += 0", node=COUNTS_NODE,
+             expect="assert 0 == 3", timeout=2, json_out=True)
+        report = json.loads(capsys.readouterr().out)
+
+        assert report["verdict"] == mod.TIMEOUT, report
+        assert report["timed_out"] is True, report
+        assert report["restored"] is True, report
 
 
 class TestTheRefusalsThatNeedNoRun:
