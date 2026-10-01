@@ -82,6 +82,7 @@ from emrg.memory import (
     INDEX_TITLE_MAX_CHARS,
     ProjectMemoryStore,
     SessionMemoryStore,
+    is_index_row,
 )
 from emrg.protocol import (
     EvolutionLog,
@@ -267,10 +268,11 @@ MEMORY_INDEX_ROW_CAP = 100
 # What makes a line a **row** of an index, for the one reading that needs the shape.
 # The line count and the size reading above are format-free on purpose (a hand-written
 # table answers them like a row-per-entry index); the per-row bound cannot be, because
-# the rule it enforces is a bound on a *row*, so this is the predicate by shape —
-# deliberately the whole of it, and the same one `scripts/check-memory-index.py`
-# applies (`ROW_PREFIX` there), so the trigger and the reading count the same lines.
-MEMORY_INDEX_ROW_PREFIX = "- "
+# the rule it enforces is a bound on a *row*, so the predicate is by shape — and it is
+# **one function with two readers**: `is_index_row` (`emrg/memory.py`) is called here and
+# by `scripts/check-memory-index.py`, so the trigger and the reading count the same lines.
+# It was spelled here as `"- "` alone, and a table index fell through both — the two
+# shapes, and the incident, are at `memory.is_index_row`.
 
 # How much of an over-budget index `_cap_memory_index` keeps from its **head**, in
 # characters. The rest of the budget goes to the **end** of the file, and the middle is
@@ -454,11 +456,7 @@ def _memory_index_compaction_note(paths) -> str:
         except (OSError, UnicodeDecodeError):
             continue
         lines = len(text.splitlines())
-        rows = [
-            len(line)
-            for line in text.splitlines()
-            if line.startswith(MEMORY_INDEX_ROW_PREFIX)
-        ]
+        rows = [len(line) for line in text.splitlines() if is_index_row(line)]
         # The trigger's condition is the cap's own (issue #1676, W): the cap cuts a file
         # whose **character** count is past `INDEX_SIZE_WARN`, so a file that large must
         # draw the note whatever its line count — the two were read against each other

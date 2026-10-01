@@ -193,6 +193,39 @@ INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 # both sides in `tests/test_memory_index_row_cap_fits_the_budget.py`.
 INDEX_SIZE_WARN = 51 * 1024
 
+# What makes a line a **row** of an index, by shape rather than by the store's entry
+# grammar. Two shapes, because the indexes this project carries are written in both: a
+# `- ` list line (the store's own render, `MemoryIndex._render_entry`, and the pointer
+# lines an agent's compaction writes), and a **Markdown-table body row** — a line opening
+# with `|` that is not the table's delimiter row (`| --- | --- |`, punctuation rather than
+# an entry). The header counts: it is a line the embed pays for, and "which lines are
+# entries" cannot be decided by position without a second rule to keep true.
+#
+# One home, two readers. The daemon's compaction trigger
+# (`daemon._memory_index_compaction_note`) and `scripts/check-memory-index.py` both call
+# `is_index_row` below, so the instruction an agent receives and the reading a host prints
+# count the same lines. Spelled separately once — both as `- ` — a table index fell between
+# them: measured 2026-10-01 on this host, `.emrg/memory/MEMORY.md` (a table) read `rows 0,
+# longest 0 chars, over 512: 0` and `OK` while four of its rows were past the bound, and
+# the trigger, seeing no rows either, drew no compaction note at all.
+INDEX_ROW_LIST_PREFIX = "- "
+_INDEX_ROW_TABLE = re.compile(r"^\|")
+_INDEX_ROW_TABLE_DELIMITER = re.compile(r"^\|[\s:|-]*\|?\s*$")
+
+
+def is_index_row(line: str) -> bool:
+    """Whether `line` is a row of a memory index, judged by shape.
+
+    The one predicate the daemon's compaction trigger and
+    `scripts/check-memory-index.py` both apply, so the trigger and the reading count the
+    same lines (the two shapes, and the incident that made the second one matter, are at
+    the constants above).
+    """
+    if line.startswith(INDEX_ROW_LIST_PREFIX):
+        return True
+    return bool(_INDEX_ROW_TABLE.match(line)) and not _INDEX_ROW_TABLE_DELIMITER.match(line)
+
+
 # Order of the `## type` sections when the index has to be rendered from
 # entries alone (a rebuild, or entries the document never had). The parser
 # accepts any `## <valid type>` heading; this only decides where new rows file.

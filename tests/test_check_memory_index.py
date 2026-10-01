@@ -109,6 +109,22 @@ def test_the_two_numbers_are_the_products_own(mod) -> None:
     assert mod.MEMORY_INDEX_ROW_CAP is MEMORY_INDEX_ROW_CAP
 
 
+def test_the_row_predicate_is_the_stores_own_function(mod) -> None:
+    """One predicate, two readers: the tool holds no spelling of its own.
+
+    Identity rather than agreement, for the same reason as the numbers above — and here
+    the second reader is the daemon's compaction trigger
+    (`daemon._memory_index_compaction_note`), so a shape one of them learns the other
+    counts too. Spelled apart once, both as `- `, a table index fell between them: the
+    trigger drew no note while four of that index's rows were past the bound
+    (`emrg/memory.py` carries the incident).
+    """
+    from emrg.memory import is_index_row
+
+    assert mod.THRESHOLD_ERROR == "", mod.THRESHOLD_ERROR
+    assert mod.is_index_row is is_index_row
+
+
 def test_the_numbers_come_from_the_tree_the_report_names(mod) -> None:
     """`tree:` and the two numbers answer about one tree.
 

@@ -56,6 +56,13 @@ so a reading that used the parser's grammar would exempt exactly the rows only a
 agent writes. A table row is the same story: no store mechanism parses the
 index's table, and one prompt embeds every line of it.
 
+The predicate is **one function with two readers**: `emrg.memory.is_index_row`,
+imported above with the rule's numbers and called by the daemon's compaction
+trigger (`_memory_index_compaction_note`) as well. That is not tidiness - spelled
+apart, the two both read `- ` and a table index fell between them, so the trigger
+drew no note at all while four of that index's rows were past the bound (measured
+2026-10-01 on this host).
+
 Four readings, each from its own source
 ---------------------------------------
 The line **cap** is `MEMORY_INDEX_ROW_CAP` and the row **bound** is
@@ -217,6 +224,11 @@ try:
     INDEX_TITLE_MAX_CHARS = _memory_module.INDEX_TITLE_MAX_CHARS
     INDEX_SIZE_WARN = _memory_module.INDEX_SIZE_WARN
     MEMORY_INDEX_ROW_CAP = _daemon_module.MEMORY_INDEX_ROW_CAP
+    # The row predicate is the store's own function, not a copy of it: the daemon's
+    # compaction trigger (`_memory_index_compaction_note`) calls the same one, so the
+    # reading this tool prints and the instruction an agent receives count the same
+    # lines. Spelled separately once - both as `- ` - a table index fell between them.
+    is_index_row = _memory_module.is_index_row
     THRESHOLD_SOURCE = str(Path(_memory_module.__file__).resolve())
     if not Path(THRESHOLD_SOURCE).is_relative_to(REPO_ROOT):
         THRESHOLD_ERROR = (
@@ -227,24 +239,17 @@ except Exception as exc:  # noqa: BLE001 - reported by main(), never swallowed
     INDEX_TITLE_MAX_CHARS = 0
     INDEX_SIZE_WARN = 0
     MEMORY_INDEX_ROW_CAP = 0
+
+    def is_index_row(line: str) -> bool:  # pragma: no cover - main() returns first
+        """Unreachable: `main()` reports the import failure before any index is read."""
+        raise RuntimeError(THRESHOLD_ERROR)
+
     THRESHOLD_ERROR = f"{type(exc).__name__}: {exc}"
 
-#: What makes a line a row, part one: a list line. Deliberately the whole
-#: predicate for that shape, so "why is that line counted" has an answer a reader
-#: can apply to a file by eye (see the docstring's "What a row is, and why by
-#: shape").
-ROW_PREFIX = "- "
-
-#: Part two: a Markdown-table body row. The index on this host is a table, and a
-#: predicate that knew only `- ` reported such a file as having no rows at all -
-#: a number that reads like a pass (see the docstring).
-TABLE_ROW = re.compile(r"^\|")
-
-#: The table's delimiter row (`| --- | --- |`), which is punctuation rather than an
-#: entry and so is not a row. The header is counted: it is a line the embed pays for,
-#: it is far inside the bound, and "which lines are entries" cannot be decided by
-#: position without a second rule to keep true.
-TABLE_DELIMITER = re.compile(r"^\|[\s:|-]*\|?\s*$")
+# The row predicate itself is `emrg.memory.is_index_row`, imported above with the rule's
+# numbers and shared with the daemon's compaction trigger, so the two count the same lines.
+# Its docstring carries the two shapes; the docstring below carries why a *shape* - rather
+# than the store's entry grammar - is the thing read.
 
 #: A row's detail-file link: `](target)`. The same shape the store renders
 #: (`MemoryIndex._render_entry`) and the one the memory instructions tell an
@@ -354,9 +359,7 @@ def measure(path: Path) -> Reading:
     row_lengths: list[int] = []
     row_targets: list[tuple[int, str]] = []
     for number, line in enumerate(lines, 1):
-        if line.startswith(ROW_PREFIX) or (
-            TABLE_ROW.match(line) and not TABLE_DELIMITER.match(line)
-        ):
+        if is_index_row(line):
             row_lines.append(number)
             row_lengths.append(len(line))
             for target in LINK.findall(line):

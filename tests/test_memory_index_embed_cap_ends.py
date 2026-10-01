@@ -226,6 +226,31 @@ def test_the_trigger_fires_for_a_row_past_the_bound(tmp_path: Path) -> None:
     )
 
 
+def test_the_trigger_counts_a_table_row(tmp_path: Path) -> None:
+    """A table's rows are rows to the *trigger*, not only to the script.
+
+    Both readers call `memory.is_index_row`; each spelled `- ` before it existed, so a
+    table index's per-row breach was invisible to both. Measured 2026-10-01 on this host:
+    `.emrg/memory/MEMORY.md` (a table, 36 lines, 13,398 chars) drew no note at all while
+    four of its rows were past the bound.
+    """
+    path = tmp_path / "MEMORY.md"
+    row = "| f2a71c04 | decision | " + "z" * (INDEX_TITLE_MAX_CHARS + 40) + " | active |"
+    path.write_text(
+        "# Memory Index\n\n| ID | Type | Title | Status | Updated |\n|---|---|---|---|---|\n"
+        f"{row}\n",
+        encoding="utf-8",
+    )
+    text = path.read_text(encoding="utf-8")
+    assert len(text.splitlines()) <= MEMORY_INDEX_ROW_CAP, "under the line cap, on purpose"
+    assert len(text) <= INDEX_SIZE_WARN, "under the budget, on purpose"
+
+    note = _memory_index_compaction_note([path])
+    assert note, "a table row past the bound drew no compaction note"
+    assert f"row(s) past {INDEX_TITLE_MAX_CHARS} chars" in note
+    assert str(len(row)) in note, "the note must print the longest row it counted"
+
+
 def test_a_compliant_index_draws_nothing(tmp_path: Path) -> None:
     """The direction that keeps the note worth reading: silence when nothing is over."""
     path = tmp_path / "MEMORY.md"
