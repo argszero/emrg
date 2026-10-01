@@ -107,6 +107,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 RUN_HERE = (
     "check-doc-count.py",
     "check-memory-index.py",
+    "check-memory-timestamps.py",
     "check-rant-citations.py",
     "check_nonlocal.py",
     "check_unbound_reads.py",
@@ -125,6 +126,20 @@ SUBJECT_MAY_BE_ABSENT = {
         ".emrg/memory/MEMORY.md",
         ".emrg/sessions/*/memory/MEMORY.md",
     ),
+    "check-memory-timestamps.py": (
+        ".emrg/memory/*.md",
+        ".emrg/sessions/*/memory/*.md",
+    ),
+}
+
+#: Each `SUBJECT_MAY_BE_ABSENT` member's own finding line, for the leg below. A table
+#: rather than one sentence, because the leg loops over every member: the assertion used
+#: to spell `check-memory-index.py`'s wording for all of them, so a second member would
+#: have been asked to print another tool's words — and the red would have named the
+#: wrong defect (a missing phrase, not the finding the guard had actually made).
+FINDING_LINE = {
+    "check-memory-index.py": "over a number the rule names",
+    "check-memory-timestamps.py": "is in the future",
 }
 
 
@@ -333,9 +348,10 @@ def test_every_runnable_guard_comes_back_clean_on_this_checkout() -> None:
             f"{'says the indexes are within the rule' if within else 'carries no OK line'} "
             f"— the exit code and the reading must be one answer:\n{out}"
         )
-        assert proc.returncode == 0 or "over a number the rule names" in out, (
-            f"{name}: rc=1 must carry that guard's own finding line, or the exit code is "
-            f"not a verdict this leg can read:\n{out}"
+        finding = FINDING_LINE[name]
+        assert proc.returncode == 0 or finding in out, (
+            f"{name}: rc=1 must carry that guard's own finding line ({finding!r}), or the "
+            f"exit code is not a verdict this leg can read:\n{out}"
         )
 
 
