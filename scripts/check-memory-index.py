@@ -282,6 +282,37 @@ CODE_SPAN = re.compile(r"`[^`]*`")
 #: that grows silently is how a check becomes vacuous.
 NON_FILE_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#)", re.IGNORECASE)
 
+#: The fragment separator in a Markdown link target. `[x](detail.md#a-heading)` is a
+#: **file link with a fragment** - the standard form for pointing at a heading inside
+#: another document - and the fragment is not part of the filename.
+_FRAGMENT = "#"
+
+
+def _target_file(target: str) -> str:
+    """The file a row target names, with any fragment removed.
+
+    One rule, two readers: the resolution reading (`Reading.unresolved`) joins this
+    onto the index's directory, and the reverse reading (`Reading.unindexed`) takes
+    its basename as the name a row gives a file. They disagreed about exactly this
+    case before the rule existed here, which is the disagreement that found it.
+
+    Measured 2026-10-01, on the guard's own fixture: with `detail.md` written beside
+    the index and a row reading `- [a](./detail.md#the-section)`, the resolution
+    reading reported `row links 1, unresolved: 1` and the run **exited 1** -
+    `os.path.exists("./detail.md#the-section")` is false because the fragment is not
+    a filename. A correct row, and a merge gate made red by it. Latent rather than
+    live **on this host**: 0 of the targets across its three indexes carry a
+    fragment, so no failure had been observed - the same honest boundary issue
+    #1797 recorded for an indented row.
+
+    :param target: a row link's target, as written.
+    :returns: the target with everything from the first `#` removed. A bare
+        `#anchor` is not a file target and `NON_FILE_TARGET` has already excluded
+        it, so this never has to answer for one.
+    """
+    return target.split(_FRAGMENT, 1)[0]
+
+
 RUNNER = "uv run --no-sync python3"
 
 
@@ -306,6 +337,14 @@ class Reading(NamedTuple):
     :param row_targets: every file link a row carries, as
         `(file line number, target)`, in file order - the resolution reading's
         subject. Excludes what `NON_FILE_TARGET` names.
+    :param unindexed: the `.md` files beside this index that **no row names**, by
+        name, sorted. The direction the readings above do not have: they ask
+        whether each row's link resolves, and a memory file that no row mentions is
+        invisible to them - it is not in the index, the index is what the prompt
+        embeds, so the memory is unreachable from every session. Read as a
+        **reading and never as a fault** - see `_report` and `main`'s `findings`
+        for why the exit code does not move, and `measure` for what counts as a
+        name.
     """
 
     path: Path
@@ -314,6 +353,7 @@ class Reading(NamedTuple):
     row_lines: tuple[int, ...]
     row_lengths: tuple[int, ...]
     row_targets: tuple[tuple[int, str], ...] = ()
+    unindexed: tuple[str, ...] = ()
 
     @property
     def rows(self) -> int:
@@ -352,18 +392,43 @@ class Reading(NamedTuple):
         resolves is a file for this purpose, and a broken one is not (a broken
         symlink is exactly the state a reader cannot follow).
 
+        What is joined is `_target_file(target)`, not the raw target — see that
+        function for the defect that made the distinction: a row linking
+        `detail.md#a-heading` names a file that is there, and joining the
+        fragment onto the path reported it unresolved and turned this merge gate
+        red on a correct row.
+
         :returns: one pair per unresolved link, in file order.
         """
         base = self.path.parent
         out: list[tuple[int, str]] = []
         for line, target in self.row_targets:
-            if not os.path.exists(os.path.join(base, target)):
+            if not os.path.exists(os.path.join(base, _target_file(target))):
                 out.append((line, target))
         return out
 
 
 def measure(path: Path) -> Reading:
     """Read one index and count what the rule counts.
+
+    The reverse reading (`unindexed`) is computed here because it needs the
+    directory listing, which is the one thing the parsing above does not have. Its
+    scope, stated rather than implied: the **`.md` files beside the index** (the
+    same directory its rows resolve against, since a row names a sibling), minus
+    the index itself, minus any file a **row link** names. Three consequences, each
+    deliberate:
+
+    * the index itself is the only exclusion. A retired archive protocol is **not**
+      exempt: `cycle-archive-*.md` was deleted with its script and is asserted
+      absent from the prompt (`tests/test_evolution_prompt_index_rule.py`'s
+      `RETIRED_TERMS`, issue #1551), so an exemption for it would be an exemption
+      for a shape that no longer exists - and "an exemption that grows silently is
+      how a check becomes vacuous";
+    * a name counts if a **row** carries it, not if prose mentions it. R9's rule is
+      about rows ("one short line per entry"); a `>` note naming a file does not
+      put that file in the index as an entry, and reading prose as a name would
+      make the reading answer a question nobody asked;
+    * a link with a fragment (`x.md#section`) or a `./` prefix names its basename.
 
     :param path: the index file to read.
     :returns: its readings.
@@ -384,9 +449,20 @@ def measure(path: Path) -> Reading:
             for target in LINK.findall(CODE_SPAN.sub(" ", line)):
                 if not NON_FILE_TARGET.match(target):
                     row_targets.append((number, target))
+    named = {Path(_target_file(target)).name for _, target in row_targets}
+    try:
+        beside = sorted(entry.name for entry in path.parent.glob("*.md"))
+    except OSError:
+        # A directory that cannot be listed leaves the reverse reading unanswered,
+        # and an empty tuple would print "0" - a reading taken over nothing looks
+        # exactly like a clean one. `unresolved()` resolves inside the same
+        # directory and reports what it cannot reach, so the directory being
+        # unreadable is already this run's problem to report, not a pass here.
+        beside = []
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
-        tuple(row_targets)
+        tuple(row_targets),
+        tuple(name for name in beside if name != path.name and name not in named),
     )
 
 
@@ -456,6 +532,20 @@ def _report(reading: Reading) -> list[str]:
             f"  row at line {number} names {target}, "
             f"which is not beside {reading.path.name}"
         )
+    # The reverse reading, printed and deliberately not counted as a fault: R9's
+    # rule text says what a row is and how long it may be, and does not say "every
+    # memory file beside an index must be named by one". Enforcing that here would
+    # be this tool inventing a rule - the failure `check-memory-index.py`'s own
+    # docstring calls out. So the difference is *printed* (a reading, which a cycle
+    # or a host can act on) and `main`'s `findings` does not read it.
+    if reading.unindexed:
+        out.append(
+            f"  memory file(s) beside it that no row names: {len(reading.unindexed)} "
+            f"({', '.join(reading.unindexed)}) - the prompt embeds this index, not the "
+            "directory, so a file here that no row names reaches no session"
+        )
+    else:
+        out.append("  memory file(s) beside it that no row names: 0")
     return out
 
 
@@ -562,6 +652,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
+    # `reading.unindexed` is deliberately **not** in the condition below. R9's rule
+    # text says what a row is, how long it may be and how many lines the file may
+    # have; it does not say "every memory file beside an index must be named by a
+    # row". A tool that turned that difference into exit 1 would be enforcing a rule
+    # nobody wrote down - and the printed line in `_report` is the reading that makes
+    # the difference visible without inventing the rule. If the rule is ever stated
+    # in a carrier, adding `or reading.unindexed` here is the one-line change.
     findings = [
         reading
         for reading in readings

@@ -686,3 +686,155 @@ def test_an_index_over_the_cap_is_not_rewritten(mod, tmp_path, capsys) -> None:
     assert mod.main([str(path)]) == 1
     assert path.read_bytes() == before
     capsys.readouterr()
+
+
+# ── the reverse reading: a memory file no row names ───────────────────────────
+#
+# The readings above all run index → file: does each row's link resolve? The other
+# direction has no reader, and its failure is silent in a way theirs is not. The
+# prompt embeds the index, not the directory, so a detail file beside an index that
+# no row names is a memory **no session can reach** - the knowledge exists on disk
+# and in no prompt, and every reading above still prints `OK`.
+#
+# It is a **reading and not a fault** on purpose: R9's rule text says what a row is,
+# how long it may be and how many lines the file may hold, and never says "every
+# memory file beside an index must be named by a row". A tool that turned this
+# difference into exit 1 would be enforcing a rule nobody wrote down, which is the
+# failure the module docstring calls out. So the tests below assert **both** halves:
+# the number is printed, and the exit code does not move.
+
+
+def _unindexed_line(out: str) -> str:
+    """The report's reverse-reading line, so an assertion can be scoped to it."""
+    for line in out.splitlines():
+        if "no row names" in line:
+            return line
+    return ""
+
+
+def test_a_detail_file_no_row_names_is_reported(mod, tmp_path, capsys) -> None:
+    """The reading fires, and the verdict does not move - the pair is the point.
+
+    `unreachable.md` is written beside the index and no row mentions it, which is
+    the state the reading exists to make visible. Exit 0 is asserted as hard as the
+    line is: folding this into a fault would invent a rule.
+    """
+    _detail(tmp_path, "reachable.md")
+    _detail(tmp_path, "unreachable.md")
+    path = _index(tmp_path, "reverse.md", ["- [a](reachable.md)"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "memory file(s) beside it that no row names: 1 (unreachable.md)" in out, out
+    assert "reaches no session" in out, out
+
+
+def test_an_index_that_names_every_file_beside_it_reads_zero(mod, tmp_path, capsys) -> None:
+    """The control: an instrument that only ever fires cannot be told from one that
+    fires on everything, so the clean state is asserted positively rather than left
+    to be inferred from a missing line."""
+    _detail(tmp_path, "a.md")
+    _detail(tmp_path, "b.md")
+    path = _index(tmp_path, "all-named.md", ["- [a](a.md)", "- [b](b.md)"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert _unindexed_line(out).endswith("no row names: 0"), _unindexed_line(out)
+
+
+def test_the_index_itself_is_never_an_unindexed_file(mod, tmp_path, capsys) -> None:
+    """The one exclusion, which needs no exemption list to hold.
+
+    An index is a `.md` beside itself, so a naive reading reports every index as
+    unindexed - a line that fires on the ordinary state is noise, and noise is how a
+    reading stops being read. This also pins that a fragment and a `./` prefix count
+    as naming the file, so a row written either way does not produce a false entry.
+    """
+    _detail(tmp_path, "a.md")
+    path = _index(tmp_path, "self.md", ["- [a](./a.md#the-section)"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    # The line, not the whole report: the report's first line is this index's own
+    # absolute path, so a whole-output `"self.md" not in out` fails for a reason that
+    # has nothing to do with the reading (measured the first time this test ran).
+    line = _unindexed_line(out)
+    assert line.endswith("no row names: 0"), line
+
+
+def test_prose_naming_a_file_does_not_index_it(mod, tmp_path, capsys) -> None:
+    """Scope, stated as a test: a **row** names a file; a `>` note does not.
+
+    R9's rule is about rows, so a directory whose file is merely mentioned in prose
+    is still a file no row names. Reading prose as a name would answer a question
+    nobody asked, and would hide the case this reading is for.
+    """
+    _detail(tmp_path, "mentioned.md")
+    path = _index(
+        tmp_path,
+        "prose.md",
+        ["# Index", "> the detail lives in mentioned.md", "- [x](other.md)"],
+    )
+    _detail(tmp_path, "other.md")
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "no row names: 1 (mentioned.md)" in out, out
+
+
+# ── a target's fragment is not part of the filename ──────────────────────────
+#
+# Found while building the reverse reading above, by the two readings disagreeing
+# about one link: the reverse reading took `a.md` as the name a row gives a file,
+# and the resolution reading joined the whole `a.md#the-section` onto the directory
+# and called it unresolved. The resolution reading was wrong, and wrong in the
+# direction that costs a merge: `os.path.exists("./detail.md#the-section")` is
+# false, so a **correct** row made the gate exit 1.
+#
+# Both readings now take the file name from one function (`_target_file`), so they
+# cannot disagree about it again. The pair below is the whole point: the same link
+# shape must **resolve** when the file is there and must still be **reported** when
+# it is not - a fix that swallowed the second case would be worse than the bug.
+
+
+def test_a_row_linking_a_file_with_a_fragment_resolves(mod, tmp_path, capsys) -> None:
+    """`[x](detail.md#a-heading)` is the standard form for pointing into a document.
+
+    The file is there; the fragment names a heading inside it. Reported unresolved
+    before `_target_file` existed, and the run exited 1 on it.
+    """
+    _detail(tmp_path, "detail.md")
+    path = _index(tmp_path, "fragment.md", ["- [a](detail.md#a-heading)"])
+
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "row links 1, unresolved: 0" in out, out
+    assert "1 row link(s) read, none resolving to a missing file" in out, out
+
+
+def test_a_fragment_does_not_hide_a_file_that_is_really_missing(mod, tmp_path, capsys) -> None:
+    """The other direction, and the reason the fix is a strip and not a skip.
+
+    A target whose file is genuinely absent is still the fault the resolution
+    reading exists for. Dropping every target carrying a `#` would have made this
+    case pass, which is the shape of "fix" that removes the reading instead of the
+    false positive.
+    """
+    path = _index(tmp_path, "missing.md", ["- [a](gone.md#a-heading)"])
+
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "unresolved: 1" in out, out
+    assert "row at line 1 names gone.md#a-heading, which is not beside missing.md" in out, out
+
+
+def test_the_two_readings_take_the_file_name_from_one_rule(mod) -> None:
+    """`_target_file` is the one spelling, and both readings are built on it.
+
+    Asserted at the function so a later edit to either reading that re-spells the
+    rule fails here rather than in the disagreement it would recreate.
+    """
+    assert mod._target_file("detail.md") == "detail.md"
+    assert mod._target_file("detail.md#a-heading") == "detail.md"
+    assert mod._target_file("./detail.md#x") == "./detail.md"
+    assert mod._target_file("sub/detail.md#x") == "sub/detail.md"
