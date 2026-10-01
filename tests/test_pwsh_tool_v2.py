@@ -626,6 +626,114 @@ def test_the_two_twins_cut_a_long_stderr_the_same_way():
     assert "head+tail kept" in ours, "and the notice says which end the reader got"
 
 
+#: One ``ShellRunResult``-shaped case: the fields ``render_result`` reads, as a dict
+#: so the *same* row can be built for each dialect's own class (the two modules each
+#: define their own, and that duplication is deliberate — design §14.5 item 1).
+_RENDER_CASES = {
+    "plain output":            dict(stdout="hello\n", exit_code=0),
+    "no output at all":        dict(stdout="", stderr="", exit_code=0),
+    "stderr only":             dict(stderr="boom\n", exit_code=1),
+    "both streams":            dict(stdout="out", stderr="err", exit_code=0),
+    "non-zero exit":           dict(stdout="", exit_code=3),
+    "signal, no exit":         dict(stdout="", exit_code=None, signal=9),
+    "signal and exit":         dict(stdout="", exit_code=137, signal=9),
+    "timeout":                 dict(stdout="", exit_code=None, timed_out=True, timeout_ms=1500),
+    "timeout and signal":      dict(stdout="", exit_code=None, timed_out=True,
+                                    timeout_ms=1500, signal=9),
+    "denied, no hop":          dict(stdout="", exit_code=0,
+                                    sandbox={"mode": "read-only", "denied": True}),
+    "denied, advertised hop":  dict(stdout="", exit_code=0,
+                                    sandbox={"mode": "read-only", "denied": True}),
+    "unconfined":              dict(stdout="ok\n", exit_code=0,
+                                    sandbox={"mode": "danger-full-access", "denied": False}),
+}
+
+
+def _result_for(module, fields: dict):
+    """One dialect's own ``ShellRunResult`` from the shared case dict."""
+    return module.ShellRunResult(**fields)
+
+
+def test_the_two_twins_render_the_same_text():
+    """The half of the pair the two tests above never reached.
+
+    ``test_the_two_twins_agree_on_the_framing_contract`` compares **constants** and
+    ``test_the_two_twins_cut_a_long_stderr_the_same_way`` measures **one helper**.
+    ``render_result`` — the function that produces the text the model actually reads
+    — was in neither, and it had drifted in four measured ways on master `bc114ab9`,
+    2026-10-02.  Same inputs, both dialects:
+
+    * a denied call printed the denial marker **twice** on pwsh (the hardcoded line
+      plus `sandbox_denial_marker(mode)`, which returns that exact string) and once
+      on bash;
+    * a clean success carried `[exit code: 0]` on pwsh and nothing on bash, though
+      both docstrings say "non-zero exits are reported" — the code contradicted the
+      sentence above it;
+    * a command with no output read as `(no output)` on bash and as the marker alone
+      (or the empty string) on pwsh;
+    * a run that both timed out and was signalled reported both markers on bash and
+      only the timeout on pwsh, because the signal check was an `elif`.
+
+    Fed through both, the diff is one line; that is the reading that keeps them in
+    step, and it is why this asserts **equality of the whole text** rather than the
+    presence of each marker.
+    """
+    from emrg.tools import bash_tool_v2 as bash
+
+    for label, fields in _RENDER_CASES.items():
+        hop = ("workspace-write",) if "advertised" in label else ()
+        theirs = bash.render_result(_result_for(bash, dict(fields)), escalation_modes=hop)
+        ours = pwsh.render_result(_result_for(pwsh, dict(fields)), escalation_modes=hop)
+        assert ours == theirs, (
+            f"{label}: the dialects render differently\n"
+            f"  bash: {theirs!r}\n  pwsh: {ours!r}"
+        )
+
+
+def test_the_twins_render_the_denial_exactly_once():
+    """The reading with its own failing case, so it cannot be satisfied by accident.
+
+    Counting the marker is what would have caught the duplication on the day it
+    arrived; the equality above would also have caught it, but this names the
+    defect so a future reader sees what the assertion is for.  Both halves are
+    present: once, and not never — a rendering that dropped the marker entirely
+    would satisfy a "at most one" reading.
+    """
+    from emrg.tools import bash_tool_v2 as bash
+    from emrg.sandbox.contract import sandbox_denial_marker
+
+    marker = sandbox_denial_marker("read-only")
+    denied = dict(stdout="", exit_code=0,
+                  sandbox={"mode": "read-only", "denied": True})
+
+    for module, name in ((bash, "bash"), (pwsh, "pwsh")):
+        text = module.render_result(_result_for(module, dict(denied)))
+        assert text.count(marker) == 1, f"{name} rendered the denial {text.count(marker)}x: {text!r}"
+
+    # The control: a run that was NOT denied carries no denial marker at all, so
+    # the assertion above is a reading of the denial path and not of every text.
+    for module, name in ((bash, "bash"), (pwsh, "pwsh")):
+        text = module.render_result(_result_for(module, dict(stdout="ok\n", exit_code=0)))
+        assert marker not in text, f"{name} invented a denial: {text!r}"
+
+
+def test_the_twins_agree_that_a_clean_run_carries_no_exit_marker():
+    """The contract both docstrings state, read off the text instead of the code.
+
+    "Non-zero exits are reported" — so a run that exited 0 must not be annotated
+    with the number 0, which is what one dialect did while its own docstring said
+    otherwise.  Paired with the non-zero case, so the assertion distinguishes
+    "silent for 0" from "silent always".
+    """
+    from emrg.tools import bash_tool_v2 as bash
+
+    for module, name in ((bash, "bash"), (pwsh, "pwsh")):
+        clean = module.render_result(_result_for(module, dict(stdout="ok\n", exit_code=0)))
+        assert "[exit code: 0]" not in clean, f"{name}: {clean!r}"
+        failed = module.render_result(_result_for(module, dict(stdout="", exit_code=3)))
+        assert "[exit code: 3]" in failed, f"{name}: {failed!r}"
+
+
 def test_the_pwsh_module_does_not_import_the_bash_executor():
     """The peers are peers: layering one dialect on the other is the shape rejected.
 

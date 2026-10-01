@@ -370,6 +370,14 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
     reported as ``[exit code: 1]`` with no signal marker — a fact about the
     platform, not a second rendering rule (blueprint §14.2 layer 5).
 
+    This body is the bash twin's, deliberately and now measurably: this function
+    is the model-facing contract, and a peer that restates it is a peer that can
+    drift from it.  It had.  ``tests/test_pwsh_tool_v2.py::
+    test_the_two_twins_render_the_same_text`` runs both on one matrix and is the
+    reading that keeps them in step; the paragraph above says why the same text
+    is right for a process that settles differently, rather than licensing a
+    second rule.
+
     :param result: the completed run.
     :param escalation_modes: the escalation targets the composition advertises
         for the tier this run used (design §1.5 A5, phase P5 —
@@ -385,11 +393,17 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
         if body and not body.endswith("\n"):
             body += "\n"
         body += f"[stderr]\n{stderr}"
+    if not body:
+        body = "(no output)"
 
     markers: list[str] = []
     if result.sandbox.get("denied"):
         mode = result.sandbox.get("mode", "")
-        markers.append(f"[sandbox: file access denied under {mode} mode]")
+        # ONE append. The marker used to be written twice — this hardcoded line
+        # plus `sandbox_denial_marker(mode)`, which returns that exact string —
+        # so every denied call on Windows showed the model the denial twice,
+        # while bash showed it once. Measured on master `bc114ab9`, 2026-10-02:
+        # `render_result(denied read-only)` gave bash one line and pwsh two.
         markers.append(
             with_retry_hint(
                 sandbox_denial_marker(mode), mode=mode, advertised=escalation_modes,
@@ -397,14 +411,19 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
         )
     if result.timed_out:
         markers.append(f"[timed out after {result.timeout_ms}ms]")
-    elif result.signal is not None:
+    # `if`, not `elif`: a run that both timed out and was killed reports both,
+    # exactly as bash reports both. `elif` made the signal invisible whenever a
+    # timeout preceded it.
+    if result.signal is not None:
         markers.append(f"[killed by signal: {result.signal}]")
-    if result.exit_code is not None:
+    elif result.exit_code != 0:
         markers.append(f"[exit code: {result.exit_code}]")
 
     if not markers:
         return body
-    return body + "\n" + "\n".join(markers) if body else "\n".join(markers)
+    if not body.endswith("\n"):
+        body += "\n"
+    return body + "\n".join(markers)
 
 
 def _fit_streams(stdout: str, stderr: str) -> tuple[str, str]:
