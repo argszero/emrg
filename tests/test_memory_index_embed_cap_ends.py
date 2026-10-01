@@ -251,39 +251,6 @@ def test_the_trigger_counts_a_table_row(tmp_path: Path) -> None:
     assert str(len(row)) in note, "the note must print the longest row it counted"
 
 
-def test_the_trigger_does_not_count_a_fenced_row(tmp_path: Path) -> None:
-    """The trigger reads its rows through the same fence-aware split as the script.
-
-    One rule, two readers: `memory.index_lines` and `memory.is_index_row` are what both
-    the note and the report count lines with, and a fence is the second question shape
-    alone cannot answer — a `- ` line inside a fenced code block is literal text (the
-    block is the index documenting its own format), so it is not a row and its length is
-    not a breach.
-
-    Both directions, because a trigger that never fires is as wrong as one that always
-    does: the same row draws a note when it is written outside the fence, and none when
-    it is inside. Without the fix the fenced arm fires — an instruction to compact a file
-    about a line that is not an entry.
-    """
-    row = "- [x](x.md) " + "y" * (INDEX_TITLE_MAX_CHARS + 10)
-    fenced = tmp_path / "fenced.md"
-    fenced.write_text(
-        "# Memory Index\n\n```markdown\n" + row + "\n```\n", encoding="utf-8"
-    )
-    assert len(fenced.read_text(encoding="utf-8").splitlines()) <= MEMORY_INDEX_ROW_CAP
-    assert len(fenced.read_text(encoding="utf-8")) <= INDEX_SIZE_WARN
-    assert _memory_index_compaction_note([fenced]) == "", (
-        "a fenced example is not a row, so it cannot breach the per-row bound"
-    )
-
-    plain = tmp_path / "plain.md"
-    plain.write_text("# Memory Index\n\n" + row + "\n", encoding="utf-8")
-    note = _memory_index_compaction_note([plain])
-    assert f"row(s) past {INDEX_TITLE_MAX_CHARS} chars" in note, (
-        "the same row outside a fence is a row, and must still draw the note: " + note
-    )
-
-
 def test_a_compliant_index_draws_nothing(tmp_path: Path) -> None:
     """The direction that keeps the note worth reading: silence when nothing is over."""
     path = tmp_path / "MEMORY.md"
@@ -317,3 +284,36 @@ def test_every_index_the_cap_cuts_draws_the_note(tmp_path: Path) -> None:
             f"{name}: the cap cuts this file ({len(text)} chars, "
             f"{len(text.splitlines())} lines) and nothing asks the agent to compact it"
         )
+
+
+def test_the_trigger_does_not_count_a_fenced_row(tmp_path: Path) -> None:
+    """The trigger reads its rows through the same fence-aware split as the script.
+
+    One rule, two readers: `memory.index_lines` and `memory.is_index_row` are what both
+    the note and the report count lines with, and a fence is the second question shape
+    alone cannot answer — a `- ` line inside a fenced code block is literal text (the
+    block is the index documenting its own format), so it is not a row and its length is
+    not a breach.
+
+    Both directions, because a trigger that never fires is as wrong as one that always
+    does: the same row draws a note when it is written outside the fence, and none when
+    it is inside. Without the fix the fenced arm fires — an instruction to compact a file
+    about a line that is not an entry.
+    """
+    row = "- [x](x.md) " + "y" * (INDEX_TITLE_MAX_CHARS + 10)
+    fenced = tmp_path / "fenced.md"
+    fenced.write_text(
+        "# Memory Index\n\n```markdown\n" + row + "\n```\n", encoding="utf-8"
+    )
+    assert len(fenced.read_text(encoding="utf-8").splitlines()) <= MEMORY_INDEX_ROW_CAP
+    assert len(fenced.read_text(encoding="utf-8")) <= INDEX_SIZE_WARN
+    assert _memory_index_compaction_note([fenced]) == "", (
+        "a fenced example is not a row, so it cannot breach the per-row bound"
+    )
+
+    plain = tmp_path / "plain.md"
+    plain.write_text("# Memory Index\n\n" + row + "\n", encoding="utf-8")
+    note = _memory_index_compaction_note([plain])
+    assert f"row(s) past {INDEX_TITLE_MAX_CHARS} chars" in note, (
+        "the same row outside a fence is a row, and must still draw the note: " + note
+    )
