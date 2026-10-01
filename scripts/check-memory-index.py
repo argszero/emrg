@@ -34,14 +34,34 @@ index within its rule" is a command instead of a hand-rolled probe.
 
 What a row is, and why by shape
 -------------------------------
-A row is a line whose first two characters are ``- ``. That is measured by shape
-rather than by the store's entry grammar, and the difference is not academic:
-this host's evolution index read 75 lines on 2026-09-26, **67** of them list
-lines, of which `MemoryIndex.from_text` recognises only **21**. The other 46 are
-pointer lines an agent's compaction wrote, each carrying several `[id](file.md)`
-references on one line. Those are rows the rule binds, the prompt pays for, and
-every store mechanism is blind to - so a reading that used the parser's grammar
-would exempt exactly the rows only an agent writes.
+A row is a line in one of **two** shapes, because this project's indexes are
+written in both:
+
+* a ``- `` list line - the store's own render (`MemoryIndex._render_entry`) and
+  the pointer lines an agent's compaction writes;
+* a **Markdown-table body row** - a line beginning with ``|`` that is not the
+  delimiter row (``| --- | --- |``, punctuation rather than an entry). This is
+  the shape the evolution index on this host is written in, and the reason the
+  shape rule is stated as two shapes rather than one: measured 2026-09-30, the
+  table index read ``rows 0, longest 0 chars, over 512: 0`` and ``OK`` while its
+  real longest row was **6,208 chars** and 12 of its 25 rows were past the bound.
+
+Both shapes are measured by *shape* rather than by the store's entry grammar,
+and the difference is not academic: this host's evolution index read 75 lines on
+2026-09-26, **67** of them list lines, of which `MemoryIndex.from_text`
+recognises only **21**. The other 46 are pointer lines an agent's compaction
+wrote, each carrying several `[id](file.md)` references on one line. Those are
+rows the rule binds, the prompt pays for, and every store mechanism is blind to -
+so a reading that used the parser's grammar would exempt exactly the rows only an
+agent writes. A table row is the same story: no store mechanism parses the
+index's table, and one prompt embeds every line of it.
+
+The predicate is **one function with two readers**: `emrg.memory.is_index_row`,
+imported above with the rule's numbers and called by the daemon's compaction
+trigger (`_memory_index_compaction_note`) as well. That is not tidiness - spelled
+apart, the two both read `- ` and a table index fell between them, so the trigger
+drew no note at all while four of that index's rows were past the bound (measured
+2026-10-01 on this host).
 
 Four readings, each from its own source
 ---------------------------------------
@@ -70,12 +90,14 @@ the file whole. Reading bytes here would report that file as over when nothing i
 dropped, which is a false alarm about the reader's own prompt; so this reading is the
 cap's, and the report says which unit it used.
 
-This reading also answers for an index whose rows this tool cannot see: rows are found
-by shape (`- `) and a Markdown-*table* index has none, so the two row readings (count,
-bound) do not bind it - the budget still does, and so does the line cap. Measured before
-this reading existed, on the same 71-line file: `lines 71 of 100 - within` · `rows 0,
-longest 0 chars, over 512: 0` · rc=0, with the file's size printed nowhere - so nothing
-in that report could tell a reader whether the file would survive the embed at all.
+This reading is why the row readings had to grow a second shape. Measured 2026-09-30 on
+this host: `.emrg/memory/MEMORY.md` is a Markdown table, so the `- ` predicate saw no row
+at all and the report read `rows 0, longest 0 chars, over 512: 0` · `OK` while 12 of its
+25 rows were past the bound (longest **6,208 chars**) and the file was 27,885 chars - i.e.
+a clean verdict about rows the tool had not looked at. A reading that cannot see a file's
+rows must not print a number that reads like all of them are within the bound; the two
+shapes above are what closes it, and the budget reading below is what covers the file
+whatever shape its rows are in.
 
 Scope, named rather than implied
 --------------------------------
@@ -202,6 +224,11 @@ try:
     INDEX_TITLE_MAX_CHARS = _memory_module.INDEX_TITLE_MAX_CHARS
     INDEX_SIZE_WARN = _memory_module.INDEX_SIZE_WARN
     MEMORY_INDEX_ROW_CAP = _daemon_module.MEMORY_INDEX_ROW_CAP
+    # The row predicate is the store's own function, not a copy of it: the daemon's
+    # compaction trigger (`_memory_index_compaction_note`) calls the same one, so the
+    # reading this tool prints and the instruction an agent receives count the same
+    # lines. Spelled separately once - both as `- ` - a table index fell between them.
+    is_index_row = _memory_module.is_index_row
     THRESHOLD_SOURCE = str(Path(_memory_module.__file__).resolve())
     if not Path(THRESHOLD_SOURCE).is_relative_to(REPO_ROOT):
         THRESHOLD_ERROR = (
@@ -212,12 +239,17 @@ except Exception as exc:  # noqa: BLE001 - reported by main(), never swallowed
     INDEX_TITLE_MAX_CHARS = 0
     INDEX_SIZE_WARN = 0
     MEMORY_INDEX_ROW_CAP = 0
+
+    def is_index_row(line: str) -> bool:  # pragma: no cover - main() returns first
+        """Unreachable: `main()` reports the import failure before any index is read."""
+        raise RuntimeError(THRESHOLD_ERROR)
+
     THRESHOLD_ERROR = f"{type(exc).__name__}: {exc}"
 
-#: What makes a line a row. Deliberately the whole predicate, so "why is that
-#: line counted" has an answer a reader can apply to a file by eye (see the
-#: docstring's "What a row is, and why by shape").
-ROW_PREFIX = "- "
+# The row predicate itself is `emrg.memory.is_index_row`, imported above with the rule's
+# numbers and shared with the daemon's compaction trigger, so the two count the same lines.
+# Its docstring carries the two shapes; the docstring below carries why a *shape* - rather
+# than the store's entry grammar - is the thing read.
 
 #: A row's detail-file link: `](target)`. The same shape the store renders
 #: (`MemoryIndex._render_entry`) and the one the memory instructions tell an
@@ -327,7 +359,7 @@ def measure(path: Path) -> Reading:
     row_lengths: list[int] = []
     row_targets: list[tuple[int, str]] = []
     for number, line in enumerate(lines, 1):
-        if line.startswith(ROW_PREFIX):
+        if is_index_row(line):
             row_lines.append(number)
             row_lengths.append(len(line))
             for target in LINK.findall(line):

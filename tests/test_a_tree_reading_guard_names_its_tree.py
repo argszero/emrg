@@ -64,16 +64,18 @@ and what a reader's eye reaches first — a line printed after a verdict has alr
 given answers a question the reader did not ask.
 
 The verdict leg reads each member's exit code against that member's *own* contract, and
-one contract has a second honest answer: `check-memory-index.py` reads the `.emrg/`
-indexes, which are gitignored, so a tree that carries none answers
+one contract has three honest answers: `check-memory-index.py` reads the `.emrg/`
+indexes, which are gitignored **host data**, so a tree that carries none answers
 `could not measure: no memory index under …` with rc **2** — the code its own `--help`
-documents for "nothing could be measured", not a defect. That one member is therefore
-held to a pair: rc 0 while its subject is there, rc 2 with that reason while it is not —
-and the leg **measures the subject's presence itself** (`SUBJECT_MAY_BE_ABSENT`) instead
-of taking either answer on trust. Every other member must be rc 0 unconditionally. The
-member stays in the loop rather than being exempted, because "could not measure" is a
-value this repository insists on seeing, and rc 1 — the defect this leg exists for — is a
-failure in both environments.
+documents for "nothing could be measured" — and a host whose index is over the rule
+answers rc **1**, a true statement about data this repository neither ships nor controls.
+That member is therefore held to its own contract rather than to rc 0: rc 0 while its
+subject is there and within the rule, rc 1 with its own finding line while it is over,
+rc 2 with that reason while it is absent — and the leg **measures the subject's presence
+itself** (`SUBJECT_MAY_BE_ABSENT`) rather than taking any answer on trust, then checks the
+exit code against the report the guard printed, so a crash cannot pass as a verdict. Every
+other member must be rc 0 unconditionally: for them rc 1 is the defect this leg exists
+for, and it is a failure in both environments.
 
 Corrected 2026-09-30 (`cyc20260930-074010`), and the correction is the lesson: the
 paragraph that stood here claimed this guard "exits 0" in a checkout without the indexes,
@@ -266,27 +268,54 @@ def test_every_runnable_guard_comes_back_clean_on_this_checkout() -> None:
     no test read its exit code. Naming the tree (the assertions above) would not have
     caught it either — the guard named its tree *correctly* while reporting the defect.
 
-    So this asks every runnable member for its verdict on the tree being tested, which is
-    the one question a guard exists to answer, and reads that verdict against the guard's
-    *own* contract rather than against a single expected number:
+    So this asks every runnable member for its verdict on the tree being tested, and reads
+    that verdict against the guard's *own* contract rather than against a single expected
+    number:
 
-    * rc 0 — no defect about this tree (every member, and the only acceptable answer for
-      all but one of them whatever this checkout holds);
-    * rc 2 with the guard's `could not measure` reason — accepted **only** from the member
-      listed in `SUBJECT_MAY_BE_ABSENT`, and **only** while this checkout really carries
-      none of its subjects. The absence is measured here (the same two paths the guard
-      looks at, per its own message and its own test file) so the allowance cannot become
-      a place a broken guard hides: the same rc 2 with an index present fails below.
+    * **rc 0** — no defect about this tree. The only acceptable answer for a member whose
+      subject is this repository's own source, whatever the checkout holds;
+    * **rc 2 with `could not measure`** — accepted **only** from the one member in
+      `SUBJECT_MAY_BE_ABSENT`, and **only** while this checkout really carries none of its
+      subjects. The absence is measured here (the same two paths the guard looks at, per
+      its own message and its own test file) so the allowance cannot become a place a
+      broken guard hides: the same rc 2 with an index present fails below;
+    * **rc 1 with its own finding line** — accepted, for that same member and only while
+      its subject is present, because that member's subject is **gitignored host data**:
+      `check-memory-index.py` reads the `.emrg/` indexes, which this repository neither
+      ships nor controls, so "the indexes under this checkout are within the rule" is a
+      claim about the host rather than about the tree this family guards. Its exit code is
+      still read for internal consistency — rc 0 must carry the `OK:` line and rc 1 the
+      finding line — so a crash, a half-run, or a guard whose report disagrees with its
+      exit code still fails. The member's *boundary* behaviour (a row of exactly
+      `INDEX_TITLE_MAX_CHARS` then one past it, `cap` lines then one more) is read in full
+      by `tests/test_check_memory_index.py`, which builds both states from the constants;
+      this leg is about the family's verdicts, not a second home for that.
 
-    rc 1 — a rule this family enforces violated by the tree under test — is a failure in
-    both environments, which is what keeps this leg biting on the defect it was written
-    for. See the module docstring for the exit code this leg got wrong once, and how.
+    rc 1 from any other member — a rule this family enforces violated by the tree under
+    test — is a failure in both environments, which is what keeps this leg biting on the
+    defect it was written for. See the module docstring for the exit code this leg got
+    wrong once, and how.
+
+    Corrected 2026-10-01 (`cyc20261001-095229`): the third answer was added when the row
+    predicate stopped reading only `- ` — the fix that lets `check-memory-index.py` read a
+    Markdown-table index at all. With `- ` alone the guard could not report rc 1 for a
+    table index under *any* host data, so this contract had no third case to state; now
+    it can, and this host's own index really is over the row bound (four rows, the
+    longest 1,139 chars), which made this leg red here while CI — a bare clone, no
+    `.emrg/`, rc 2 — stayed green.
     """
     for name in RUN_HERE:
         proc = _run([str(SCRIPTS_DIR / name)], cwd=REPO_ROOT)
         out = proc.stdout + proc.stderr
         subjects = SUBJECT_MAY_BE_ABSENT.get(name)
-        if subjects and not _carries(subjects):
+        if subjects is None:
+            assert proc.returncode == 0, (
+                f"{name} reports a defect on this checkout (rc={proc.returncode}) — a rule "
+                "this family enforces is violated by the tree under test:\n"
+                f"{out}"
+            )
+            continue
+        if not _carries(subjects):
             assert proc.returncode == 2 and "could not measure" in out, (
                 f"{name}: this checkout carries none of its subjects "
                 f"({', '.join(subjects)}), so the only honest verdict it can give here is "
@@ -294,10 +323,19 @@ def test_every_runnable_guard_comes_back_clean_on_this_checkout() -> None:
                 f"must say so in words. Got rc={proc.returncode}:\n{out}"
             )
             continue
-        assert proc.returncode == 0, (
-            f"{name} reports a defect on this checkout (rc={proc.returncode}) — a rule "
-            "this family enforces is violated by the tree under test:\n"
-            f"{out}"
+        assert proc.returncode in (0, 1), (
+            f"{name}: with its subject present, the two verdicts it documents for itself "
+            f"are 0 (within the rule) and 1 (over it). Got rc={proc.returncode}:\n{out}"
+        )
+        within = "OK:" in out
+        assert within == (proc.returncode == 0), (
+            f"{name}: rc={proc.returncode} while its report "
+            f"{'says the indexes are within the rule' if within else 'carries no OK line'} "
+            f"— the exit code and the reading must be one answer:\n{out}"
+        )
+        assert proc.returncode == 0 or "over a number the rule names" in out, (
+            f"{name}: rc=1 must carry that guard's own finding line, or the exit code is "
+            f"not a verdict this leg can read:\n{out}"
         )
 
 
