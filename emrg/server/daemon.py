@@ -2219,6 +2219,18 @@ class EmrgServer:
         # Global config dir (~/.emrg) — injected so system.j2 can reference the
         # cross-project sessions index and other global data files by path.
         ctx["config_dir"] = str(config_dir())
+        # The memory index's per-row bound. It is a bound on a line of a file the
+        # *agent* writes, so its carrier has to be one every session reads — and the
+        # number was in `evolution_prompt.md` R9 alone, which only an evolution cycle
+        # reads. Measured 2026-10-01 on this host: `system.j2` said "one short line per
+        # entry" with no number, the promote session's own `system.md` carried exactly
+        # that, and `.emrg/memory/MEMORY.md` grew four rows past the bound (600-1,139
+        # characters) with each compaction written back within hours — a rule with no
+        # number has no edge. Injected from the store's constant rather than written
+        # into the template, so `check-memory-index.py` (which measures rows against
+        # `INDEX_TITLE_MAX_CHARS`) and the instruction an agent is given cannot drift:
+        # one number, one home, two readers.
+        ctx["index_title_max_chars"] = INDEX_TITLE_MAX_CHARS
 
         # ── Working Directory ──
         if session:
