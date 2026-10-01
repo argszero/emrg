@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, expand_braces
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,8 @@ class GlobTool(ToolExecutor):
                         "description": (
                             "Glob pattern relative to the project root. "
                             "Examples: '**/*.py', 'src/**/*.rs', '**/*test*.py', "
-                            "'*.md', 'emrg/tools/*.py'"
+                            "'*.md', 'emrg/tools/*.py', '**/*.{py,rs}'. "
+                            "A '{a,b}' alternation matches either spelling."
                         ),
                     },
                     "workdir": {
@@ -76,10 +77,11 @@ class GlobTool(ToolExecutor):
         logger.debug("glob: pattern=%r in %s", pattern, cwd)
 
         try:
-            matches = sorted(
-                p for p in cwd.glob(pattern)
+            matches = sorted({
+                p for pat in expand_braces(pattern)
+                for p in cwd.glob(pat)
                 if not self._is_hidden_or_ignored(p, cwd)
-            )
+            })
         except (OSError, ValueError) as e:
             return ToolResult(
                 name="glob", content=f"Error: invalid pattern: {e}", error=True

@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, expand_braces
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,8 @@ class GrepTool(ToolExecutor):
                         "type": "string",
                         "description": (
                             "Only search files matching this glob pattern. "
-                            "Examples: '*.py', '*.{py,rs}', 'src/**/*.ts'. "
+                            "Examples: '*.py', '*.{py,rs}', 'src/**/*.ts' "
+                            "(a '{a,b}' alternation matches either spelling). "
                             "Default: all text files."
                         ),
                     },
@@ -197,18 +198,25 @@ class GrepTool(ToolExecutor):
     def _collect_files(root: Path, file_glob: str | None) -> list[Path]:
         """Collect files recursively, skipping hidden/ignored dirs."""
         skip_dirs = {"__pycache__", "node_modules", ".git", ".venv"}
-        glob_pattern = file_glob or "*"
 
-        # Filter first (cheap), then sort (expensive on large repos)
+        # Filter first (cheap), then sort (expensive on big repos).
+        # `file_glob` may carry a `{a,b}` alternation — the schema offers one as an
+        # example — and pathlib has no brace support, so it is expanded here rather
+        # than handed to rglob, where it matched nothing and answered "No matches".
         files: list[Path] = []
-        for path in root.rglob(glob_pattern):
-            parts = path.relative_to(root).parts
-            if any(p.startswith(".") and p not in (".emrg",) for p in parts):
-                continue
-            if any(p in skip_dirs for p in parts):
-                continue
-            if path.is_file():
-                files.append(path)
+        seen: set[Path] = set()
+        for pattern in (expand_braces(file_glob) if file_glob else ["*"]):
+            for path in root.rglob(pattern):
+                if path in seen:
+                    continue
+                seen.add(path)
+                parts = path.relative_to(root).parts
+                if any(p.startswith(".") and p not in (".emrg",) for p in parts):
+                    continue
+                if any(p in skip_dirs for p in parts):
+                    continue
+                if path.is_file():
+                    files.append(path)
 
         files.sort()
         return files
