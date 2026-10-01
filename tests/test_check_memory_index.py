@@ -413,7 +413,7 @@ def test_a_row_that_names_a_file_beside_the_index_resolves(mod, tmp_path, capsys
     assert mod.main([str(path)]) == 0
     out = capsys.readouterr().out
     assert "row links 1, unresolved: 0" in out
-    assert "every row link resolves" in out
+    assert "1 row link(s) read, none resolving to a missing file" in out
 
 
 def test_a_row_that_names_no_file_is_reported_with_its_line_and_target(
@@ -510,6 +510,71 @@ def test_a_row_whose_link_resolves_is_not_repaired(mod, tmp_path, capsys) -> Non
     assert mod.main([str(path)]) == 1
     assert path.read_bytes() == before
     capsys.readouterr()
+
+
+def test_a_link_quoted_inside_a_code_span_is_not_a_link(mod, tmp_path, capsys) -> None:
+    """A row that *documents* the link shape does not carry one.
+
+    Measured 2026-10-01 on this host: the evolution index's row at line 8 writes the
+    shape inside an inline code span while describing it, and the reading reported
+    `target` as a row link resolving to no file beside the index - a guard firing on
+    its own subject's documentation, which is how a check trains its reader to ignore
+    it. In Markdown an inline code span is literal text, not a link, so the span is
+    removed before the links are read.
+    """
+    path = _index(
+        tmp_path, "links.md", ["- the shape is `](target)` and that is all"]
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "row links 0, unresolved: 0" in out
+    assert "names target" not in out, out
+
+
+def test_a_real_link_beside_a_code_span_is_still_read(mod, tmp_path, capsys) -> None:
+    """The control: removing the code span must not hide a genuine link.
+
+    A row can quote the shape and use it at the same time, and the reading has to
+    keep the second one - the direction that tells "the span is skipped" apart from
+    "the whole line is skipped".
+    """
+    path = _index(
+        tmp_path,
+        "links.md",
+        ["- the shape is `](target)` and a real one is [a](gone.md)"],
+    )
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row links 1, unresolved: 1" in out
+    assert "row at line 1 names gone.md" in out, out
+
+
+def test_an_index_whose_rows_carry_no_link_says_so(mod, tmp_path, capsys) -> None:
+    """A zero must not read as a pass.
+
+    A table row names its detail file in prose, not with the store's `](target)`
+    shape, so the resolution reading has no subject in a table index. Measured
+    2026-10-01 on this host: `.emrg/memory/MEMORY.md` printed `row links 0,
+    unresolved: 0` while its summary claimed every row link resolved - a clean verdict
+    about links the reading had not looked at. The report now states the coverage, and
+    the summary names how many links were read.
+    """
+    path = _index(
+        tmp_path,
+        "table.md",
+        [
+            "# Memory Index",
+            "",
+            "| id | note |",
+            "| --- | --- |",
+            "| a1 | see detail.md |",
+        ],
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "row links 0, unresolved: 0" in out
+    assert "the resolution reading had no subject here" in out, out
+    assert "0 row link(s) read" in out, out
 
 
 # ── the embed budget, both directions ─────────────────────────────────────────

@@ -131,6 +131,13 @@ What the resolution reading does not cover
 * A target that exists but is not a *detail file* (a directory, an unrelated
   file) resolves, and is not reported. "This row points somewhere that holds what
   the row claims" is a different rule with a different remedy.
+* **A link the row only quotes.** An inline code span is literal text in Markdown, so
+  a `](target)` written inside one is the row *showing* the shape rather than using it,
+  and is not read (the `CODE_SPAN` constant carries the measurement). Measured
+  2026-10-01: the row that documents this shape was reported as naming a missing file.
+* **A row that carries no link at all.** An index whose rows name their files in prose -
+  the table shape `is_index_row` also reads - has no subject for this reading, and the
+  report says so rather than printing a count that reads as a pass.
 * A target with a URL-escape spelling (`%20`) is resolved as written: this tool
   does not guess a second spelling of a name the author wrote, and
   `check-citation-resolves.py`'s own limit section is the precedent for saying so
@@ -256,6 +263,18 @@ except Exception as exc:  # noqa: BLE001 - reported by main(), never swallowed
 #: agent to write, so a row that carries several links is read as several.
 LINK = re.compile(r"\]\(([^)]+)\)")
 
+#: An inline code span, removed from a line before its links are read. A row that
+#: *documents* the link shape writes it inside backticks, and in Markdown an inline
+#: code span is literal text, not a link - a regular expression cannot tell a link
+#: from a quotation of one. Measured 2026-10-01 on this host: the evolution index's
+#: row at line 8 quotes the shape while describing it, and the reading reported
+#: `target` as a row link resolving to no file beside the index, i.e. a guard firing
+#: on its own subject's documentation. The store's own render writes no code span, so
+#: no link the store produces is hidden by this. Deliberately single-backtick (the
+#: form the indexes here use); a nested or multi-backtick span is not a shape this
+#: repository's memory files carry, and one rule stated is one rule to keep true.
+CODE_SPAN = re.compile(r"`[^`]*`")
+
 #: Targets that are not a file in the index's directory, and so are excluded
 #: from the resolution reading rather than reported as missing: an external URL
 #: is not this tree's to resolve, and a bare `#anchor` names a heading in the
@@ -362,7 +381,7 @@ def measure(path: Path) -> Reading:
         if is_index_row(line):
             row_lines.append(number)
             row_lengths.append(len(line))
-            for target in LINK.findall(line):
+            for target in LINK.findall(CODE_SPAN.sub(" ", line)):
                 if not NON_FILE_TARGET.match(target):
                     row_targets.append((number, target))
     return Reading(
@@ -426,6 +445,12 @@ def _report(reading: Reading) -> list[str]:
     out.append(
         f"  row links {len(reading.row_targets)}, unresolved: {len(unresolved)}"
     )
+    if reading.rows and not reading.row_targets:
+        out.append(
+            "  no row carries a ](target) link, so the resolution reading had no "
+            "subject here - a table row names its detail file in prose, and this is "
+            "not a statement that every row link resolves"
+        )
     for number, target in unresolved:
         out.append(
             f"  row at line {number} names {target}, "
@@ -546,10 +571,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         or reading.unresolved()
     ]
     if not findings:
+        links_read = sum(len(reading.row_targets) for reading in readings)
         print(
             f"OK: {len(readings)} index(es) within the three numbers the rule names "
             f"({MEMORY_INDEX_ROW_CAP} lines, {INDEX_SIZE_WARN} chars, "
-            f"{INDEX_TITLE_MAX_CHARS} chars per row), and every row link resolves"
+            f"{INDEX_TITLE_MAX_CHARS} chars per row); {links_read} row link(s) read, "
+            "none resolving to a missing file"
         )
         return 0
 
