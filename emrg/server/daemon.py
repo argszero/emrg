@@ -2219,6 +2219,28 @@ class EmrgServer:
         # Global config dir (~/.emrg) — injected so system.j2 can reference the
         # cross-project sessions index and other global data files by path.
         ctx["config_dir"] = str(config_dir())
+        # The memory index's per-row bound. It is a bound on a line of a file the
+        # *agent* writes, so its carrier has to be one every session reads — and the
+        # number was in `evolution_prompt.md` R9 alone, which only an evolution cycle
+        # reads. Measured 2026-10-01 on this host: `system.j2` said "one short line per
+        # entry" with no number, the promote session's own `system.md` carried exactly
+        # that, and `.emrg/memory/MEMORY.md` grew four rows past the bound (600-1,139
+        # characters) with each compaction written back within hours — a rule with no
+        # number has no edge. Injected from the store's constant rather than written
+        # into the template, so `check-memory-index.py` (which measures rows against
+        # `INDEX_TITLE_MAX_CHARS`) and the instruction an agent is given cannot drift:
+        # one number, one home, two readers.
+        ctx["index_title_max_chars"] = INDEX_TITLE_MAX_CHARS
+        # The index's *line* bound — the other of the two numbers R9 names ("those two
+        # numbers are why 100 lines fit the embed budget"). Same defect shape as the row
+        # bound above, one number over: `MEMORY_INDEX_ROW_CAP` lived in
+        # `evolution_prompt.md` alone, while the prompt **every** session renders said
+        # only "if a memory index has grown long" — a threshold with no number, read as a
+        # licence to keep appending. Injected from the same constant the daemon's own
+        # compaction trigger measures lines against (`_memory_index_compaction_note`), so
+        # the trigger and the instruction an agent is given cannot disagree about where
+        # the edge is: one number, one home, two readers.
+        ctx["memory_index_row_cap"] = MEMORY_INDEX_ROW_CAP
 
         # ── Working Directory ──
         if session:
