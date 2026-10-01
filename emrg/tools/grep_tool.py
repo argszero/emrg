@@ -128,13 +128,25 @@ class GrepTool(ToolExecutor):
         else:
             files = self._collect_files(root, file_glob)
 
-        # Search
-        results: list[str] = []
+        # Search. Blocks are collected **whole** — one per matching line, header first —
+        # so the returned output can never end inside a context window, and the count is
+        # taken where the matches are found rather than re-derived from the rendered text.
+        # Both of those are measured defects, not tidiness (issue #1805): the count used to
+        # be `sum(1 for r in results if r.endswith(":"))`, which the *context* lines that
+        # happen to end in a colon also satisfy, so asking for context invented matches:
+        # one matching line reported `Found 1 matches` with no context and `Found 4 matches`
+        # with `context_before=1, context_after=2`. Measured 2026-10-02 on a file holding
+        # `first:` / `second:` / `TARGET line` / `third:` / `fourth:`.
+        blocks: list[list[str]] = []
+        matches_found = 0
         files_searched = 0
-        stop = False
+        #: Whether the scan stopped because it had already seen one match more than
+        #: `max_results` returns. When set, `matches_found` is a **lower bound**: the
+        #: remaining files were never read, so no honest total exists to print.
+        scan_capped = False
 
         for filepath in files:
-            if stop:
+            if scan_capped:
                 break
             files_searched += 1
 
@@ -154,22 +166,26 @@ class GrepTool(ToolExecutor):
             rel = str(filepath.relative_to(root.parent if root.is_file() else root))
 
             for i, line in enumerate(lines):
-                if stop:
+                if not regex.search(line):
+                    continue
+                matches_found += 1
+                if len(blocks) >= max_results:
+                    # `max_results` is documented as "Maximum matches to return", so the cap
+                    # is on matches. Reaching it with a match still in hand is what proves
+                    # there is at least one more — the one measured fact about the rest of
+                    # the tree this scan is allowed to have.
+                    scan_capped = True
                     break
-                if regex.search(line):
-                    ctx_start = max(0, i - context_before)
-                    ctx_end = min(len(lines), i + 1 + context_after)
 
-                    results.append(f"{rel}:{i + 1}:")
-                    for ctx_i in range(ctx_start, ctx_end):
-                        marker = ">" if ctx_i == i else " "
-                        results.append(f" {marker}{lines[ctx_i]}")
+                ctx_start = max(0, i - context_before)
+                ctx_end = min(len(lines), i + 1 + context_after)
+                block = [f"{rel}:{i + 1}:"]
+                for ctx_i in range(ctx_start, ctx_end):
+                    marker = ">" if ctx_i == i else " "
+                    block.append(f" {marker}{lines[ctx_i]}")
+                blocks.append(block)
 
-                    if len(results) > max_results * (2 + context_before + context_after):
-                        stop = True
-                        break
-
-        if not results:
+        if not blocks:
             return ToolResult(
                 name="grep",
                 content=(
@@ -179,19 +195,25 @@ class GrepTool(ToolExecutor):
                 ),
             )
 
-        # Build output
-        actual_matches = sum(1 for r in results if r.endswith(":"))
-        summary = (
-            f"Found {actual_matches} matches for '{pattern}' "
-            f"in {root} (searched {files_searched} files):\n\n"
+        # Build output. Two measured numbers, and the reader is told which kind of claim
+        # each one is: an exact count, or a lower bound with the reason it is one.
+        if scan_capped:
+            summary = (
+                f"Found at least {matches_found} matches for '{pattern}' in {root} "
+                f"(searched {files_searched} files); returning the first {len(blocks)} - "
+                "the search stopped once it had more than `max_results` matches, so the "
+                "rest of the tree was not read and the total is not known\n\n"
+            )
+        else:
+            summary = (
+                f"Found {matches_found} matches for '{pattern}' "
+                f"in {root} (searched {files_searched} files):\n\n"
+            )
+
+        return ToolResult(
+            name="grep",
+            content=summary + "\n".join(line for block in blocks for line in block),
         )
-
-        # Truncate if too many lines
-        if len(results) > max_results * 3:
-            results = results[: max_results * 3]
-            results.append(f"\n... [output truncated at ~{max_results} match blocks]")
-
-        return ToolResult(name="grep", content=summary + "\n".join(results))
 
     @staticmethod
     def _collect_files(root: Path, file_glob: str | None) -> list[Path]:
