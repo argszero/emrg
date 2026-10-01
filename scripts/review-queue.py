@@ -464,12 +464,22 @@ class Rant:
     seen from the queue's side. Several numbers mean several issues claim one rant, a
     fault `check-issue-links.py` reports as a duplicate rather than something to merge
     here, so this row names them all and picks none.
+
+    `project` is the ledger row's own field, carried because it is what §2.2 decides on:
+    a rant belongs to this cycle when it names this task's project or its `owner/repo`,
+    and to somebody else when it names another one. Measured 2026-10-01 on this host, the
+    queue rendered **39** open rants — every one of them `silicon-science-cs` — as work
+    the emrg cycle owed an issue and a PR, while the emrg rows in that ledger were all
+    `completed`; the field was in the row the parser had just read and was dropped here,
+    so the reading that exists for a cycle which reads it *alone* could not be filtered by
+    the rule the template gives that cycle.
     """
 
     timestamp: str
     status: str
     message: str = ""
     issues: list[int] = field(default_factory=list)
+    project: str = ""
 
 
 def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
@@ -505,6 +515,7 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
                 status=str(row.get("status", "")),
                 message=str(row.get("message", "")),
                 issues=sorted(by_timestamp.get(str(row.get("timestamp", "")), [])),
+                project=str(row.get("project", "") or ""),
             )
             for row in wanted
         ),
@@ -906,17 +917,24 @@ def render(reading: Reading, action: Action) -> str:
 
 
 def render_rant(rant: Rant) -> str:
-    """One rant's row: its handle, its state, and the issue that declares it.
+    """One rant's row: its handle, its state, the issue that declares it, and its project.
 
     The excerpt is flattened to a single line and capped, because a rant body is prose
     with headings and newlines and this row's job is to be *recognisable* in a list —
     `submit_rant(action="list")` is the reading that shows it whole.
+
+    The project is last and keyed rather than bare, so it cannot be read as part of the
+    status or as an issue number, and so a row without one is visible as such: §2.2 makes
+    a rant that names no project *(nor this task's)* one to ignore entirely.
     """
     where = ", ".join(f"#{n}" for n in rant.issues) if rant.issues else "no issue yet"
     excerpt = " ".join(rant.message.split())
     if len(excerpt) > 110:
         excerpt = excerpt[:109] + "…"
-    lines = [f"rant {rant.timestamp}  {rant.status}  {where}"]
+    lines = [
+        f"rant {rant.timestamp}  {rant.status}  {where}  "
+        f"project={rant.project or '(none)'}"
+    ]
     if excerpt:
         lines.append(f"    {excerpt}")
     return "\n".join(lines)
@@ -1012,6 +1030,7 @@ def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = 
             "status": rant.status,
             "issues": rant.issues,
             "message": rant.message,
+            "project": rant.project,
         }
         for rant in (rants or [])
     )
@@ -1174,9 +1193,20 @@ def main(argv: list[str] | None = None) -> int:
             # `N PR(s)` line above must not come away thinking the queue was the whole
             # of what is open.
             print()
+            counts: dict[str, int] = {}
+            for rant in rants:
+                name = rant.project or "(no project)"
+                counts[name] = counts.get(name, 0) + 1
+            across = ", ".join(
+                f"{name} {count}"
+                for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            )
             print(
-                f"{len(rants)} open rant(s) - each needs an issue and its PR "
-                "(R5), and no PR row above carries this work:"
+                f"{len(rants)} open rant(s) across {len(counts)} project(s) - {across} - "
+                "each needs an issue and its PR (R5) once it is this task's; the prompt's "
+                "rant section matches a rant to a task by `project` (this task's project, "
+                "or its owner/repo), so a row naming another project - or none - is not "
+                "this cycle's work:"
             )
             print()
             for rant in rants:
