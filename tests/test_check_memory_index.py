@@ -413,7 +413,7 @@ def test_a_row_that_names_a_file_beside_the_index_resolves(mod, tmp_path, capsys
     assert mod.main([str(path)]) == 0
     out = capsys.readouterr().out
     assert "row links 1, unresolved: 0" in out
-    assert "every row link resolves" in out
+    assert "1 row link(s) read" in out
 
 
 def test_a_row_that_names_no_file_is_reported_with_its_line_and_target(
@@ -481,7 +481,11 @@ def test_a_url_and_an_anchor_are_not_rows_that_point_nowhere(
     )
     assert mod.main([str(path)]) == 0, capsys.readouterr().out
     out = capsys.readouterr().out
-    assert "row links 0, unresolved: 0" in out
+    # The three shapes were read; none of them is a file, so resolution has no
+    # subject. The count is what was read, and the parenthetical says what the
+    # reading did with it - a bare `unresolved: 0` would answer for links that
+    # the exemption, not the filesystem, removed.
+    assert "row links 3, unresolved: 0 (0 name a file, 3 a URL or an anchor)" in out
 
 
 def test_several_links_in_one_row_are_all_resolved(mod, tmp_path, capsys) -> None:
@@ -510,6 +514,114 @@ def test_a_row_whose_link_resolves_is_not_repaired(mod, tmp_path, capsys) -> Non
     assert mod.main([str(path)]) == 1
     assert path.read_bytes() == before
     capsys.readouterr()
+
+
+# ── what counts as a link, and what a reading with no link says ───────────────
+#
+# Issue #1793, measured 2026-10-01 against a sibling instance's index: a row that
+# documents the store's own link shape by writing it inside an inline code span was
+# read as a row pointing at a file called `target`, and reported as a broken link -
+# the guard firing on its own subject's documentation. The second half of that
+# issue is the reading with no subject at all: an index whose rows name their files
+# in prose printed `row links 0, unresolved: 0` and a summary claiming every row
+# link resolves, which is a pass-shaped answer about a set that was never read.
+#
+# Both directions are asserted for each, because a reader that suppresses too much
+# is the same defect as one that invents a link: the code span alone must be silent,
+# and a genuine broken link beside it must still be reported.
+
+
+def test_a_link_shape_inside_a_code_span_is_not_a_link(mod, tmp_path, capsys) -> None:
+    """A code span is literal text, so the shape it quotes is not a link.
+
+    The row here is the one the issue was filed about: it documents the store's
+    link shape by writing it in an inline code span. Markdown renders that span as
+    text, and this reading must agree - the alternative is a guard that fires on
+    the documentation of the thing it checks.
+    """
+    _detail(tmp_path, "detail.md")
+    path = _index(
+        tmp_path,
+        "quoted.md",
+        ["- [a](detail.md) - rows are written as " + "`" + "](target)" + "`"],
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "row links 1, unresolved: 0" in out, out
+    assert "target" not in out, (
+        "the code span's content was read as a row link: " + out
+    )
+
+
+def test_a_genuine_link_beside_a_code_span_is_still_reported(mod, tmp_path, capsys) -> None:
+    """The other direction: suppressing the span must not suppress the row.
+
+    A row may both quote the shape and carry a real link. Only the quoted one is
+    not a link, so the genuine broken one is named with its line - a reading that
+    dropped the whole row on seeing a backtick would pass an index whose rows point
+    at files that are gone.
+    """
+    path = _index(
+        tmp_path,
+        "quoted-and-broken.md",
+        ["- [a](gone.md) and " + "`" + "](target)" + "`" + " documents the shape"],
+    )
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row links 1, unresolved: 1" in out, out
+    assert "row at line 1 names gone.md" in out, out
+    assert "names target" not in out, out
+
+
+def test_a_closed_code_span_does_not_swallow_the_rest_of_the_row(mod, tmp_path, capsys) -> None:
+    """A span ends at its closing backticks; what follows is Markdown again.
+
+    The pair here is `` `x` `` twice, and the link sits between them - outside both
+    spans, so it is a link. A reader that cut the line at the first backtick would
+    miss it.
+    """
+    path = _index(tmp_path, "spans.md", ["- `a` [x](gone.md) `b`"])
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row at line 1 names gone.md" in out, out
+
+
+def test_an_index_whose_rows_carry_no_link_says_so(mod, tmp_path, capsys) -> None:
+    """No link read is reported as such, never as `unresolved: 0`.
+
+    An index whose rows name their detail files in prose is not a fault - the
+    store does not render that shape either - but `row links 0, unresolved: 0`
+    answers for a set with no members, and the summary beside it claimed that every
+    row link resolves. The reading must name its subject instead.
+    """
+    path = _index(
+        tmp_path,
+        "table.md",
+        [
+            "# Memory Index",
+            "",
+            "| id | note |",
+            "| --- | --- |",
+            "| a1b2 | Detail in `x.md` |",
+        ],
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "no row carries a `](target)` link" in out, out
+    assert "no row link was read" in out, (
+        "the summary must not claim a resolution it did not perform: " + out
+    )
+    assert "and every row link resolves" not in out
+
+
+def test_the_summary_names_how_many_row_links_were_read(mod, tmp_path, capsys) -> None:
+    """The count is of links *read*, so a clean run states how much it checked."""
+    _detail(tmp_path, "one.md")
+    _detail(tmp_path, "two.md")
+    path = _index(tmp_path, "links.md", ["- [a](one.md) - [b](two.md)"])
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "2 row link(s) read (2 naming a file beside their index), unresolved: 0" in out, out
 
 
 # ── the embed budget, both directions ─────────────────────────────────────────

@@ -123,6 +123,31 @@ Scope, named rather than implied
 * An index with no rows (a title and prose only) is measured, not failed: it has
   nothing for the bound to bind and nothing to resolve.
 
+What counts as a row's link, and what a reading with no link says
+-----------------------------------------------------------------
+A row's link is the `](target)` shape **outside an inline code span**. In Markdown a
+code span is literal text, and that shape is exactly the one a row documents when it
+explains the index's own format: measured 2026-10-01, a row writing `` `](target)` ``
+to describe what the store renders was read as a row pointing at a file named
+`target` and reported as a broken link - a guard firing on its own subject's
+documentation, which is the fastest way to teach its reader to ignore it. A code span
+is therefore excluded from the reading, not rewritten in the file: the row carries no
+link there.
+
+The other half of that reading is what it says when it read nothing. `row links 0,
+unresolved: 0` is a pass-shaped number about a set with no members, and the summary
+sentence used to repeat the claim ("and every row link resolves") for an index whose
+rows name their detail files in prose - a shape the store does not render either, so
+it is a state this tool must report rather than fail. Both now name their subject:
+the report says no row carries a `](target)` link when none was read, and the summary
+says how many links were actually read, so `0 unresolved` can never be read as "every
+one of them resolved". The obvious remedy - reading a backticked `*.md` basename as
+the row's target - is *not* taken: run over this host's two live indexes 2026-10-01 it
+yields three false positives, each a file a row names correctly (`evolution_prompt.md`
+cited in prose, `promote_state.md` recorded as replaced and therefore absent by design,
+and the `cycle-<ts>.md` placeholder the index documents). A second shape would be a
+second way to be wrong; naming what was read is the fix.
+
 What the resolution reading does not cover
 ------------------------------------------
 * **Which** link is the row's own. A row carrying several `[x](file.md)`
@@ -145,8 +170,10 @@ derived from that root, so the two lines answer about one tree.
 
 Exit codes
 ----------
-``0``  every index read is within every number of the rule, and every row link
-       resolves.
+``0``  every index read is within every number of the rule, and every row link it
+       read resolves - the summary names how many that was, so an index carrying no
+       link at all is reported as having none read rather than as all of them
+       resolving.
 ``1``  at least one index is over a number the rule names (the line cap, the embed
        budget, or a row past the bound), or carries a row link that resolves to no
        file; each finding is printed with the line it is on.
@@ -256,6 +283,16 @@ except Exception as exc:  # noqa: BLE001 - reported by main(), never swallowed
 #: agent to write, so a row that carries several links is read as several.
 LINK = re.compile(r"\]\(([^)]+)\)")
 
+#: An inline code span: a run of backticks, its content, and the same run again.
+#: Its content is literal text in Markdown, so a `](target)` inside one is not a
+#: link - and the row most likely to write one is the row documenting the shape
+#: this tool reads (measured 2026-10-01: a row writing `` `](target)` `` to
+#: describe the store's link was reported as pointing at a file named `target`).
+#: `.+?` requires at least one character, so an empty span (`` `` ``) is not a
+#: span - it holds no link either way. A single unpaired backtick is not a span,
+#: because an unclosed one delimits nothing.
+CODE_SPAN = re.compile(r"(`+)(.+?)\1")
+
 #: Targets that are not a file in the index's directory, and so are excluded
 #: from the resolution reading rather than reported as missing: an external URL
 #: is not this tree's to resolve, and a bare `#anchor` names a heading in the
@@ -264,6 +301,27 @@ LINK = re.compile(r"\]\(([^)]+)\)")
 NON_FILE_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#)", re.IGNORECASE)
 
 RUNNER = "uv run --no-sync python3"
+
+
+def link_targets(line: str) -> list[str]:
+    """Every `](target)` on `line` that is a link, in order, exemption not applied.
+
+    A match inside an inline code span is not a link: Markdown renders the span's
+    content literally, so a row writing `` `](target)` `` is documenting the shape,
+    not carrying it. Only that one exclusion is made here - the URL/anchor
+    exemption belongs to the *resolution* reading and is applied by
+    `Reading.row_targets`, so what was read stays reportable on its own.
+
+    :param line: one line of an index.
+    :returns: each link target, as written.
+    """
+    spans = [match.span() for match in CODE_SPAN.finditer(line)]
+    out: list[str] = []
+    for match in LINK.finditer(line):
+        if any(start <= match.start() < end for start, end in spans):
+            continue
+        out.append(match.group(1))
+    return out
 
 
 class Reading(NamedTuple):
@@ -284,9 +342,11 @@ class Reading(NamedTuple):
         index fires one and not the other - `tests/test_memory_index_thresholds.py`).
     :param row_lines: the 1-based file line number of each row.
     :param row_lengths: each row's length in characters, in the same order.
-    :param row_targets: every file link a row carries, as
-        `(file line number, target)`, in file order - the resolution reading's
-        subject. Excludes what `NON_FILE_TARGET` names.
+    :param row_links: every link a row carries, as `(file line number, target)`, in
+        file order - a `](target)` outside a code span, exemption not yet applied.
+        This is what the reading *read*, so a report can say when the answer is
+        "nothing": `row targets 0, unresolved 0` would read as a pass about a set
+        that was never looked at (issue #1793's second half).
     """
 
     path: Path
@@ -294,12 +354,26 @@ class Reading(NamedTuple):
     chars: int
     row_lines: tuple[int, ...]
     row_lengths: tuple[int, ...]
-    row_targets: tuple[tuple[int, str], ...] = ()
+    row_links: tuple[tuple[int, str], ...] = ()
 
     @property
     def rows(self) -> int:
         """How many rows the file holds."""
         return len(self.row_lengths)
+
+    @property
+    def row_targets(self) -> tuple[tuple[int, str], ...]:
+        """The links that name a file beside the index - resolution's subject.
+
+        `NON_FILE_TARGET` is applied here rather than at read time, so the count of
+        what was read (`row_links`) and the count resolution acts on stay separable
+        in the report.
+        """
+        return tuple(
+            (line, target)
+            for line, target in self.row_links
+            if not NON_FILE_TARGET.match(target)
+        )
 
     @property
     def longest(self) -> int:
@@ -357,17 +431,16 @@ def measure(path: Path) -> Reading:
     lines = text.splitlines()
     row_lines: list[int] = []
     row_lengths: list[int] = []
-    row_targets: list[tuple[int, str]] = []
+    row_links: list[tuple[int, str]] = []
     for number, line in enumerate(lines, 1):
         if is_index_row(line):
             row_lines.append(number)
             row_lengths.append(len(line))
-            for target in LINK.findall(line):
-                if not NON_FILE_TARGET.match(target):
-                    row_targets.append((number, target))
+            for target in link_targets(line):
+                row_links.append((number, target))
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
-        tuple(row_targets)
+        tuple(row_links)
     )
 
 
@@ -423,9 +496,26 @@ def _report(reading: Reading) -> list[str]:
             f"over the {INDEX_TITLE_MAX_CHARS} bound"
         )
     unresolved = reading.unresolved()
-    out.append(
-        f"  row links {len(reading.row_targets)}, unresolved: {len(unresolved)}"
-    )
+    if not reading.row_links:
+        # No pass-shaped number for a set with no members: `row links 0, unresolved: 0`
+        # reads as "every one resolved" while the reading looked at no link at all -
+        # and an index whose rows name their files in prose is not a fault, so the
+        # honest answer is to say what was read (issue #1793).
+        out.append(
+            f"  row links 0 - no row carries a `](target)` link, so there was "
+            f"nothing to resolve"
+        )
+    else:
+        exempt = len(reading.row_links) - len(reading.row_targets)
+        out.append(
+            f"  row links {len(reading.row_links)}, unresolved: {len(unresolved)}"
+            + (
+                f" ({len(reading.row_targets)} name a file, {exempt} a URL or an "
+                f"anchor)"
+                if exempt
+                else ""
+            )
+        )
     for number, target in unresolved:
         out.append(
             f"  row at line {number} names {target}, "
@@ -546,10 +636,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         or reading.unresolved()
     ]
     if not findings:
+        links = sum(len(reading.row_links) for reading in readings)
+        targets = sum(len(reading.row_targets) for reading in readings)
+        # The summary names what was read, because "every row link resolves" is a
+        # claim an index with no links cannot support: 0 unresolved is the same
+        # number whether every link resolved or none was ever followed (issue #1793).
+        if not links:
+            tail = (
+                "no row on these indexes carries a `](target)` link, so no row link "
+                "was read"
+            )
+        else:
+            tail = (
+                f"{links} row link(s) read ({targets} naming a file beside their "
+                f"index), unresolved: 0"
+            )
         print(
             f"OK: {len(readings)} index(es) within the three numbers the rule names "
             f"({MEMORY_INDEX_ROW_CAP} lines, {INDEX_SIZE_WARN} chars, "
-            f"{INDEX_TITLE_MAX_CHARS} chars per row), and every row link resolves"
+            f"{INDEX_TITLE_MAX_CHARS} chars per row); {tail}"
         )
         return 0
 
