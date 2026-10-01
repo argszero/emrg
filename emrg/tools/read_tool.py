@@ -229,9 +229,25 @@ class ReadTool(ToolExecutor):
             result_lines.append(f"{start + i + 1:6d}\t{line}")
 
         if not result_lines:
+            # The only way to get here is `start_line` past the file's last line:
+            # `end = min(start + effective_limit, total_lines)` and `effective_limit >= 1`,
+            # so whenever `start < total_lines` the slice holds at least one line. Which
+            # means the message this replaced — `lines {start+1}-{end} of {total}` — could
+            # **never** be right: it always printed a range that ends before it starts.
+            # Measured on master `bc114ab9`, 2026-10-02: a 5-line file with
+            # `start_line=99` answered `(empty range: lines 99-5 of 5)` and an empty file
+            # with `start_line=2` answered `(empty range: lines 2-1 of 1)`, both with
+            # `error=False` — a number the caller cannot act on, on the success path.
+            #
+            # The answer is still empty and still not an error (a start past the end is a
+            # legitimate request with an empty result), but it names what actually
+            # happened: where the caller asked to start, and how long the file is.
             return ToolResult(
                 name="read",
-                content=f"(empty range: lines {start + 1}-{end} of {total_lines})",
+                content=(
+                    f"(no lines: start_line={start_line} is past the end of "
+                    f"{path} — the file has {total_lines} line(s))"
+                ),
             )
 
         truncated = end < total_lines

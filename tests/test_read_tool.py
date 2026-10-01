@@ -1,6 +1,7 @@
 """Tests for the read tool."""
 
 import asyncio
+import re
 import tempfile
 from pathlib import Path
 
@@ -107,11 +108,91 @@ def test_read_binary_fails(temp_file):
 
 
 def test_read_start_line_beyond_eof(temp_file):
+    """The message must state a fact, not just carry the right *prefix*.
+
+    This assertion used to be `"(empty range" in result.content or "empty range" in
+    result.content` — the second arm is implied by the first, so only the prefix was
+    ever read, and the numbers after it were free. They were wrong every time: the
+    branch is reachable **only** when `start_line` is past the file's last line, so
+    `lines {start+1}-{end}` always named a range ending before it began. Measured on
+    master `bc114ab9`, 2026-10-02: `(empty range: lines 100-6 of 6)`.
+    """
     tool = ReadTool()
     f, _ = temp_file
-    # 6 lines (5 + trailing newline), start_line=100 is way beyond
+    total = len(f.read_text(encoding="utf-8").split("\n"))
     result = _run(tool.execute({"file_path": str(f), "start_line": 100}))
-    assert "(empty range" in result.content or "empty range" in result.content
+
+    assert not result.error
+    assert "start_line=100" in result.content, "the request must be named"
+    assert f"the file has {total} line" in result.content, (
+        f"the file's real length must be named: {result.content!r}"
+    )
+    assert not _RANGE_RE.search(result.content), (
+        f"a range was printed for an empty answer: {result.content!r}"
+    )
+
+
+# Every fact the read tool prints about line numbers, read back out of its message.
+# `_RANGE_RE` is the range shape, which must never run backwards; `_START_RE`/`_TOTAL_RE`
+# are what an empty answer must carry *instead*. All three are needed: on the fixed tree
+# no message prints a range any more, so a sweep that only looked for one would read no
+# numbers at all and pass by not looking — a guard made of air.
+_RANGE_RE = re.compile(r"lines (\d+)-(\d+) of (\d+)")
+_START_RE = re.compile(r"start_line=(\d+)")
+_TOTAL_RE = re.compile(r"the file has (\d+) line")
+
+
+def test_a_read_never_names_a_range_that_ends_before_it_starts(temp_file):
+    """The invariant, over the whole domain — not the one input that was reported.
+
+    `start = start_line - 1`, `end = min(start + effective_limit, total_lines)` and
+    `effective_limit >= 1`, so `all_lines[start:end]` is empty **only** when
+    `start_line > total_lines`; that is what made the old message always wrong. The sweep
+    covers the boundary from both sides (last line, last+1, far past) on four file shapes.
+
+    Two readings of every message, so the test cannot pass by not looking: any range the
+    tool prints must run forwards and stay inside the file, **and** an empty answer — only
+    reachable past the end — must name the line the caller asked for and the file's real
+    length. A reverted message fails both: it prints the backwards range *and* names no
+    `start_line`.
+    """
+    tool = ReadTool()
+    _, d = temp_file
+    shapes = {
+        "empty.txt": "",
+        "one.txt": "only\n",
+        "four.txt": "a\nb\nc\nd\n",
+        "no_trailing.txt": "a\nb\nc",
+    }
+    for name, text in shapes.items():
+        path = d / name
+        path.write_text(text, encoding="utf-8")
+        total = len(text.split("\n"))  # the tool's own reading of "how many lines"
+        for start in range(1, total + 4):
+            result = _run(tool.execute({"file_path": str(path), "start_line": start}))
+            assert not result.error, (name, start, result.content)
+
+            for lo, hi, size in _RANGE_RE.findall(result.content):
+                assert int(lo) <= int(hi), (
+                    f"{name} start_line={start}: named a backwards range {lo}-{hi}"
+                )
+                assert int(hi) <= int(size), (
+                    f"{name} start_line={start}: range goes past the file's {size} lines"
+                )
+
+            if start > total:
+                # The empty branch. An answer with no lines is still an answer, so it
+                # has to say where the caller asked to start and how long the file is.
+                named = _START_RE.search(result.content)
+                assert named and int(named.group(1)) == start, (
+                    f"{name} start_line={start}: the request is not named in "
+                    f"{result.content!r}"
+                )
+                length = _TOTAL_RE.search(result.content)
+                assert length and int(length.group(1)) == total, (
+                    f"{name} start_line={start}: the file's real length ({total}) is "
+                    f"not named in {result.content!r}"
+                )
 
 
 def test_read_truncation_message(temp_file):
