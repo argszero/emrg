@@ -251,6 +251,34 @@ def test_the_trigger_counts_a_table_row(tmp_path: Path) -> None:
     assert str(len(row)) in note, "the note must print the longest row it counted"
 
 
+def test_the_trigger_reads_a_row_indented_up_to_three_spaces(tmp_path: Path) -> None:
+    """The indent is the second half of "where a row starts", and it is the same for both.
+
+    Measured 2026-10-01 on `890bf02`: with the predicate matching only at column 0, an index
+    whose rows are indented by 2 spaces reported no over-bound row to *either* reader, so the
+    note was silent about the same file the script was silent about. Four spaces is an
+    indented code block and stays out — asserted here in the same breath, because a trigger
+    that fires on any indent at all would be a different (and wrong) reading.
+    """
+    row = "  - [x](x.md) " + "z" * (INDEX_TITLE_MAX_CHARS + 40)
+    path = tmp_path / "MEMORY.md"
+    path.write_text(f"# Memory Index\n\n{row}\n", encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    assert len(text.splitlines()) <= MEMORY_INDEX_ROW_CAP, "under the line cap, on purpose"
+    assert len(text) <= INDEX_SIZE_WARN, "under the budget, on purpose"
+
+    note = _memory_index_compaction_note([path])
+    assert note, "a row indented 2 spaces drew no compaction note"
+    assert str(len(row)) in note, "the note must print the longest row it counted"
+
+    block = tmp_path / "four.md"
+    block.write_text(f"# Memory Index\n\n    {row.strip()}\n", encoding="utf-8")
+    assert _memory_index_compaction_note([block]) == "", (
+        "four spaces is a code block, not a row: the per-row bound is not about it"
+    )
+
+
+
 def test_a_compliant_index_draws_nothing(tmp_path: Path) -> None:
     """The direction that keeps the note worth reading: silence when nothing is over."""
     path = tmp_path / "MEMORY.md"
