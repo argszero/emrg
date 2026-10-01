@@ -413,7 +413,7 @@ def test_a_row_that_names_a_file_beside_the_index_resolves(mod, tmp_path, capsys
     assert mod.main([str(path)]) == 0
     out = capsys.readouterr().out
     assert "row links 1, unresolved: 0" in out
-    assert "1 row link(s) read" in out
+    assert "row at line" not in out, "a resolving row was reported as unresolved: " + out
 
 
 def test_a_row_that_names_no_file_is_reported_with_its_line_and_target(
@@ -482,26 +482,61 @@ def test_a_url_and_an_anchor_are_not_rows_that_point_nowhere(
     assert mod.main([str(path)]) == 0, capsys.readouterr().out
     out = capsys.readouterr().out
     # The three shapes were read; none of them is a file, so resolution has no
-    # subject. The count is what was read, and the parenthetical says what the
-    # reading did with it - a bare `unresolved: 0` would answer for links that
-    # the exemption, not the filesystem, removed.
-    assert "row links 3, unresolved: 0 (0 name a file, 3 a URL or an anchor)" in out
+    # subject. What is asserted is that count - the links the reading *read* - and
+    # not the sentence around it: an assertion on the exact wording fails a correct
+    # implementation that words it differently, which is how a guard teaches its
+    # reader to ignore it (measured 2026-10-01, below).
+    assert "row links 3, unresolved: 0" in out, out
+
+
+def _link_reading(report: str) -> str:
+    """A report's lines about row links, with what is about the *file* masked out.
+
+    Two fixtures differ in size and name, so comparing their reports means removing
+    the lines that answer about the file rather than about the reading: the `tree:`
+    line, the path line, and the three number lines (`lines`/`chars`/`rows`), whose
+    values differ because the fixtures differ. What survives is the part that answers
+    about row links - the row-link line, any coverage sentence, the unresolved
+    findings and the run's summary - which is the part under test.
+
+    Masking is what makes the comparison a test of the *reading* and not of its
+    wording: an assertion on a sentence passes only for the implementation that wrote
+    it, and the reading under test is "does this distinguish the two states".
+    """
+    keep = []
+    for line in report.splitlines():
+        stripped = line.strip()
+        if line.startswith("tree: ") or stripped.endswith(".md"):
+            continue
+        if stripped.startswith(("lines ", "chars ", "rows ")):
+            continue
+        keep.append(line)
+    return "\n".join(keep)
 
 
 def test_an_exempt_only_row_is_not_read_as_a_row_with_no_link(mod, tmp_path, capsys) -> None:
     """Three exempt links and no link at all are different states, and read apart.
 
-    This is the both-directions leg of the coverage sentence. `NON_FILE_TARGET` is
-    the exemption, and it removes links the row *does* carry - so a reading that
-    derives "this index has no link to resolve" from the exempt-filtered list
-    reports a row carrying a URL, an anchor and a `mailto:` as carrying nothing.
-    Both files are built here, and the assertion is that their reports differ:
-    equality is the defect, whichever wording carries it.
+    `NON_FILE_TARGET` is an exemption, and it removes links the row *does* carry - so
+    a reading that derives "this index carries no link to resolve" from the
+    exempt-filtered list reports a row carrying a URL, an anchor and a `mailto:` as
+    carrying nothing. Both files are built here and their link readings are compared
+    with the file-specific lines masked (`_link_reading`), so what is asserted is that
+    the reading *distinguishes the two states* - not that it says it in my words.
 
     Measured 2026-10-01 against a sibling implementation (PR #1794, which fixed the
-    code-span half of issue #1793 by the same sentence-over-a-zero shape): it prints
-    `no row carries a ](target) link` for the exempt-only file, byte for byte as it
-    does for the link-free one.
+    code-span half of issue #1793 and checked coverage against the exempt-filtered
+    list): the exempt-only and the link-free index produce byte-identical link
+    readings, and the first version of this test caught that only by accident - it
+    asserted my exact sentence, so it went red on a punctuation difference (their
+    sentence carries no backticks) while the defect it was written for went
+    unread. A guard whose red is cosmetic is a guard that will be ignored; the
+    comparison below is the assertion that has to hold.
+
+    The counts are asserted too, in the format the tool already had before this
+    change (`row links N, unresolved: M`): the exempt-only index read three links and
+    the link-free one none, and a reading that reports 0 for both has stopped
+    answering the question it was asked.
     """
     exempt = _index(
         tmp_path,
@@ -515,15 +550,14 @@ def test_an_exempt_only_row_is_not_read_as_a_row_with_no_link(mod, tmp_path, cap
     assert mod.main([str(nothing)]) == 0, capsys.readouterr().out
     nothing_report = capsys.readouterr().out
 
-    assert "no row carries a `](target)` link" in nothing_report, nothing_report
-    assert "no row carries a `](target)` link" not in exempt_report, (
-        "the row carries three links; only the exemption removed them from the "
-        "resolution reading: " + exempt_report
-    )
-    assert "3 a URL or an anchor" in exempt_report, exempt_report
-    assert exempt_report.replace(str(exempt), "") != nothing_report.replace(str(nothing), ""), (
-        "the two states must not read the same: an index whose only links are "
-        "exempt is not an index that carries no link"
+    assert "row links 3" in exempt_report, exempt_report
+    assert "row links 0" in nothing_report, nothing_report
+    assert _link_reading(exempt_report) != _link_reading(nothing_report), (
+        "the two states read the same, so the coverage sentence is answering about "
+        "the links the exemption removed rather than the links that were read - the "
+        "exempt-only index carries three:\n"
+        "--- exempt-only ---\n" + _link_reading(exempt_report)
+        + "\n--- link-free ---\n" + _link_reading(nothing_report)
     )
 
 
@@ -625,13 +659,21 @@ def test_a_closed_code_span_does_not_swallow_the_rest_of_the_row(mod, tmp_path, 
     assert "row at line 1 names gone.md" in out, out
 
 
-def test_an_index_whose_rows_carry_no_link_says_so(mod, tmp_path, capsys) -> None:
-    """No link read is reported as such, never as `unresolved: 0`.
+def test_an_index_whose_rows_carry_no_link_does_not_claim_a_resolution(
+    mod, tmp_path, capsys
+) -> None:
+    """No link read must not be reported as a resolution performed.
 
-    An index whose rows name their detail files in prose is not a fault - the
-    store does not render that shape either - but `row links 0, unresolved: 0`
-    answers for a set with no members, and the summary beside it claimed that every
-    row link resolves. The reading must name its subject instead.
+    An index whose rows name their detail files in prose is not a fault - the store
+    does not render that shape either - but the reading used to print
+    `row links 0, unresolved: 0` under a summary claiming that every row link
+    resolves, which is a statement about a set with no members.
+
+    The assertion is the **defect's own words**, and that is deliberate: the
+    sentence this test forbids is the one master printed, so the test says "this
+    claim may not come back" without saying what the replacement must be. Asserting a
+    replacement sentence instead would fail every correct implementation that words
+    it differently - the mistake the sibling test in this section records.
     """
     path = _index(
         tmp_path,
@@ -646,21 +688,44 @@ def test_an_index_whose_rows_carry_no_link_says_so(mod, tmp_path, capsys) -> Non
     )
     assert mod.main([str(path)]) == 0, capsys.readouterr().out
     out = capsys.readouterr().out
-    assert "no row carries a `](target)` link" in out, out
-    assert "no row link was read" in out, (
-        "the summary must not claim a resolution it did not perform: " + out
+    assert "and every row link resolves" not in out, (
+        "the summary claims a resolution the reading did not perform: " + out
     )
-    assert "and every row link resolves" not in out
+    # And the positive half: the reading must still distinguish a file whose rows
+    # carry no link from one whose rows carry links, which is what the claim above
+    # was covering up for.
+    _detail(tmp_path, "one.md")
+    with_links = _index(tmp_path, "links.md", ["- [a](one.md)"])
+    assert mod.main([str(with_links)]) == 0, capsys.readouterr().out
+    assert _link_reading(capsys.readouterr().out) != _link_reading(out), (
+        "an index with no row link and one with a row link read the same"
+    )
 
 
-def test_the_summary_names_how_many_row_links_were_read(mod, tmp_path, capsys) -> None:
-    """The count is of links *read*, so a clean run states how much it checked."""
+def test_the_summary_answers_about_the_links_that_were_read(mod, tmp_path, capsys) -> None:
+    """A clean run's last line must be sensitive to how much it checked.
+
+    The claim that has to die is a summary that reads the same whether the run read
+    two row links or none: "every row link resolves" is a sentence about a set with
+    no members when nothing was read. So the assertion compares the **last line** of
+    two clean runs - one over an index whose rows carry links, one over an index
+    whose rows carry none - and requires them to differ. Wording is not pinned, only
+    sensitivity: a summary that ignores the count fails, whatever it says.
+    """
     _detail(tmp_path, "one.md")
     _detail(tmp_path, "two.md")
-    path = _index(tmp_path, "links.md", ["- [a](one.md) - [b](two.md)"])
-    assert mod.main([str(path)]) == 0, capsys.readouterr().out
-    out = capsys.readouterr().out
-    assert "2 row link(s) read (2 naming a file beside their index), unresolved: 0" in out, out
+    with_links = _index(tmp_path, "links.md", ["- [a](one.md) - [b](two.md)"])
+    assert mod.main([str(with_links)]) == 0, capsys.readouterr().out
+    read_two = capsys.readouterr().out.splitlines()[-1]
+
+    no_links = _index(tmp_path, "no-links.md", ["- a table row names its file in prose"])
+    assert mod.main([str(no_links)]) == 0, capsys.readouterr().out
+    read_none = capsys.readouterr().out.splitlines()[-1]
+
+    assert read_two != read_none, (
+        "the summary is the same whether the run read two row links or none, so it "
+        "answers about neither:\n  " + read_two
+    )
 
 
 # ── the embed budget, both directions ─────────────────────────────────────────
