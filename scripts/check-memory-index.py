@@ -146,8 +146,9 @@ What the resolution reading does not cover
   the row claims" is a different rule with a different remedy.
 * **A link the row only quotes.** An inline code span is literal text in Markdown, so
   a `](target)` written inside one is the row *showing* the shape rather than using it,
-  and is not read (the `CODE_SPAN` constant carries the measurement). Measured
-  2026-10-01: the row that documents this shape was reported as naming a missing file.
+  and is not read (`emrg.memory.row_links` is where that rule lives, with the
+  measurement). Measured 2026-10-01: the row that documents this shape was reported as
+  naming a missing file.
 * **A row that carries no link at all.** An index whose rows name their files in prose -
   the table shape `is_index_row` also reads - has no subject for this reading, and the
   report says so rather than printing a count that reads as a pass.
@@ -253,6 +254,10 @@ try:
     # a row whatever its shape, and both readers ask that question of this function.
     is_index_row = _memory_module.is_index_row
     index_lines = _memory_module.index_lines
+    # The third step of the same reading, imported for the same reason: which links a
+    # row carries is one rule, and this tool spelled it itself until it drifted from
+    # the parser's copy (the measurement is on the function).
+    row_links = _memory_module.row_links
     THRESHOLD_SOURCE = str(Path(_memory_module.__file__).resolve())
     if not Path(THRESHOLD_SOURCE).is_relative_to(REPO_ROOT):
         THRESHOLD_ERROR = (
@@ -275,22 +280,11 @@ except Exception as exc:  # noqa: BLE001 - reported by main(), never swallowed
 # Its docstring carries the two shapes; the docstring below carries why a *shape* - rather
 # than the store's entry grammar - is the thing read.
 
-#: A row's detail-file link: `](target)`. The same shape the store renders
-#: (`MemoryIndex._render_entry`) and the one the memory instructions tell an
-#: agent to write, so a row that carries several links is read as several.
-LINK = re.compile(r"\]\(([^)]+)\)")
-
-#: An inline code span, removed from a line before its links are read. A row that
-#: *documents* the link shape writes it inside backticks, and in Markdown an inline
-#: code span is literal text, not a link - a regular expression cannot tell a link
-#: from a quotation of one. Measured 2026-10-01 on this host: the evolution index's
-#: row at line 8 quotes the shape while describing it, and the reading reported
-#: `target` as a row link resolving to no file beside the index, i.e. a guard firing
-#: on its own subject's documentation. The store's own render writes no code span, so
-#: no link the store produces is hidden by this. Deliberately single-backtick (the
-#: form the indexes here use); a nested or multi-backtick span is not a shape this
-#: repository's memory files carry, and one rule stated is one rule to keep true.
-CODE_SPAN = re.compile(r"`[^`]*`")
+# The link rule is **not** spelled here either: `emrg.memory.row_links` is its one home,
+# imported above beside the other two steps of reading a row. It was spelled in this file
+# and in `MemoryIndex.from_text`, and the two drifted exactly as a rule with two homes does
+# - measured 2026-10-01, one line, two answers about which link the row carries (the
+# measurement travels with the function).
 
 #: Targets that are not a file in the index's directory, and so are excluded
 #: from the resolution reading rather than reported as missing: an external URL
@@ -430,7 +424,7 @@ def measure(path: Path) -> Reading:
     lines = text.splitlines()
     row_lines: list[int] = []
     row_lengths: list[int] = []
-    row_links: list[tuple[int, str]] = []
+    links: list[tuple[int, str]] = []
     # Rows are read out of the *unfenced* lines: a line inside a fenced code block is
     # literal text, and a `- ` line or a `](target)` link in one is the index showing its
     # own format rather than carrying a row. The cap above stays the file's line count,
@@ -440,15 +434,15 @@ def measure(path: Path) -> Reading:
         if is_index_row(line):
             row_lines.append(number)
             row_lengths.append(len(line))
-            for target in LINK.findall(CODE_SPAN.sub(" ", line)):
+            for target in row_links(line):
                 # Every link is recorded here, exemption included: this is what the
                 # reading *read*, and `Reading.row_targets` is the subset the
                 # resolution had a subject for. Filtering at the read is what made
                 # the report unable to tell "no link" from "three links, none a file".
-                row_links.append((number, target))
+                links.append((number, target))
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
-        tuple(row_links), len(split.fenced)
+        tuple(links), len(split.fenced)
     )
 
 

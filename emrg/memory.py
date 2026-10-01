@@ -360,6 +360,71 @@ def index_lines(text: str) -> IndexLines:
     return IndexLines(tuple(unfenced), tuple(fenced))
 
 
+#: A row's detail-file link: `](target)`. The same shape the store renders
+#: (`MemoryIndex._render_entry`) and the one the memory instructions tell an agent to
+#: write, so a row carrying several links is read as several.
+ROW_LINK = re.compile(r"\]\(([^)]+)\)")
+
+#: An inline code span, removed from a line before its links are read. A row that
+#: *documents* the link shape writes it inside backticks, and in Markdown an inline code
+#: span is literal text, not a link — a regular expression cannot tell a link from a
+#: quotation of one. Measured 2026-10-01 on this host: the evolution index's row at line
+#: 8 quotes the shape while describing it, and the reading reported that quotation as a
+#: row link resolving to no file beside the index, i.e. a guard firing on its own
+#: subject's documentation. Deliberately single-backtick (the form the indexes here use);
+#: a nested or multi-backtick span is not a shape this repository's memory files carry,
+#: and one rule stated is one rule to keep true.
+CODE_SPAN = re.compile(r"`[^`]*`")
+
+
+def _mask_code_spans(line: str) -> str:
+    """`line` with every code span blanked — **at the same length**.
+
+    Blanking rather than deleting, because a caller that has to report *where* the link
+    it read sits (`MemoryIndex.from_text` slices a row's label out of the original line)
+    cannot map offsets through a substitution that changes the string's length.
+    """
+    return CODE_SPAN.sub(lambda m: " " * len(m.group(0)), line)
+
+
+def row_links(line: str) -> list[str]:
+    """The links a row carries: every `](target)` outside a code span, in order.
+
+    The third step of reading a row, beside `is_index_row` (whether a line *is* a row) and
+    `index_lines` (whether it is literal text): what a row that passed both *says*. One
+    home, two readers, by the same argument as its two companions — `MemoryIndex.from_text`
+    takes a row's target from here, and so does the link reading in
+    `scripts/check-memory-index.py`, which used to spell the rule itself.
+
+    **That second reader is why this exists.** Spelled twice, the two drifted, which is
+    what a rule with two homes does. Measured 2026-10-01, one line, two answers:
+
+    ```
+    - [how `](t.md)` is read](real.md) — rec: 26-10-01
+    ```
+
+    the guard read the link outside the code span — `real.md`, the file the row means —
+    while the parser's own regex, having no code-span rule, took the first `](` it saw and
+    filed the memory under `` `](t.md)` is read](real.md ``: a name no file has, so the
+    memory left the index and every later write appended a second row for it. The same
+    pair disagreed about fences — `index_lines` was shared, the parser built its entries
+    from every line, so a fenced *example* of the row shape became an entry naming
+    `gone.md`. Two readers answering differently about one line is the defect; one home
+    is the fix.
+    """
+    return ROW_LINK.findall(_mask_code_spans(line))
+
+
+#: The shape of a full row — `- [label](target) [status] — rec: …, evt: …` — matched
+#: against a line with its code spans blanked, so the label may quote the delimiter
+#: without being read as one (`row_links` carries the measurement). The label is
+#: non-greedy and the target stops at the first `)`, which is what makes this and
+#: `ROW_LINK` the same reading: both answer with the first link that is not a code span.
+_INDEX_ROW_RE = re.compile(
+    r"^-\s+\[(.+?)\]\((.+?)\)(?:\s+\[(\w+)\])?\s*[-—]\s*(.+)"
+)
+
+
 # Order of the `## type` sections when the index has to be rendered from
 # entries alone (a rebuild, or entries the document never had). The parser
 # accepts any `## <valid type>` heading; this only decides where new rows file.
@@ -906,8 +971,16 @@ class MemoryIndex:
             idx._lines = lines
         entries: list[_IndexEntry] = []
         current_type = "reference"
+        # Both questions about a row are asked of the shared functions — `index_lines`
+        # for whether a line may carry one at all, `row_links` for what it says — because
+        # this parser used to answer both itself and so disagreed with
+        # `scripts/check-memory-index.py` about the same file (the measurements are at
+        # `row_links`). A fenced example of the row shape is documentation, not an entry.
+        fenced = set(index_lines(text).fenced)
 
         for i, line in enumerate(lines):
+            if (i + 1) in fenced:
+                continue
             stripped = line.strip()
 
             # Detect type heading: ## user
@@ -917,13 +990,19 @@ class MemoryIndex:
                 continue
 
             # Detect entry: - [Title](file.md) [status] — rec: ..., evt: ...
-            em = re.match(
-                r"^-\s+\[(.+?)\]\((.+?)\)(?:\s+\[(\w+)\])?\s*[-—]\s*(.+)",
-                stripped,
-            )
-            if em:
-                title = em.group(1)
-                filename = em.group(2)
+            # Matched against the line with its code spans blanked, so a label quoting
+            # the delimiter is not read as one; the target itself comes from the shared
+            # rule rather than from the group beside the label.
+            masked = _mask_code_spans(line)
+            body = masked.strip()
+            offset = masked.index(body) if body else 0
+            em = _INDEX_ROW_RE.match(body)
+            targets = row_links(line)
+            if em and targets:
+                # The label as *written*: blanking keeps the length, so the match's
+                # offsets still index this line.
+                title = line[offset + em.start(1) : offset + em.end(1)]
+                filename = targets[0]
                 status = em.group(3) or "active"
                 rest = em.group(4)
 
