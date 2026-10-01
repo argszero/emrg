@@ -14,11 +14,20 @@ to drift, which is exactly what had happened:
 * **a fenced example.** The guard reads rows off `index_lines`' unfenced lines; the parser
   built entries from every line, so a fenced example of the row shape became an entry
   naming a file that does not exist.
+* **a row the predicate counts and the parser's grammar cannot see.** `is_index_row` counts
+  a row by shape — a `- ` list line, or a table body row — and `row_links` finds the file it
+  names; the parser matched a *fuller* grammar (`- [label](target) [status] — rec: …`), so a
+  hand-written pointer row (`- [Hand written](f.md)`, no `rec:` tail) and a table row parsed
+  to **zero** entries. A row that names a file the model cannot see is a duplicate waiting to
+  be written: `add_entry` de-duplicates by filename, so the next `create()`/`update()` of that
+  same file appended a **second row** for it (measured 2026-10-01: lines 4 → 5, two rows naming
+  one file — the line count a hygiene rule is stated in).
 
-Both are fixed by giving the rule one home (`emrg.memory.row_links`) and having both
-readers ask it — the same shape `is_index_row` and `index_lines` already had. So the load
-bearing test here is the last one: not "the parser reads this shape", but "the two readers
-answer the same file for every shape".
+All three are fixed by giving the rule one home (`emrg.memory.row_links`) and having both
+readers ask it — the same shape `is_index_row` and `index_lines` already had, and the third
+divergence is the parser asking `is_index_row` and `row_links` instead of deciding for
+itself. So the load bearing test here is the last one: not "the parser reads this shape", but
+"the two readers answer the same file for every shape".
 """
 
 from __future__ import annotations
@@ -172,6 +181,10 @@ ROWS = [
     "- [a label with [brackets] in it](c.md) — rec: 26-10-01",
     "- [status tag](d.md) [superseded] — rec: 26-10-01",
     "- [parens (and) parens](e.md) — rec: 26-10-01",
+    # The shapes the store's own grammar does not produce and the predicate counts
+    # anyway: what an agent's compaction writes by hand, and a table index.
+    "- [Hand written](f.md)",
+    "| [Table row](g.md) | note |",
 ]
 
 
@@ -181,7 +194,7 @@ def test_both_readers_name_the_same_file_for_every_shape(tmp_path, guard):
     Not "the parser reads this shape" but "the parser and the guard answer the same file"
     — a case can be added here without knowing which reader a future change moves.
     """
-    _touch(tmp_path, "a.md", "b.md", "c.md", "d.md", "e.md")
+    _touch(tmp_path, "a.md", "b.md", "c.md", "d.md", "e.md", "f.md", "g.md")
     _write_index(tmp_path, ROWS)
 
     reading = guard.measure(tmp_path / "MEMORY.md")
@@ -212,4 +225,42 @@ def test_both_readers_skip_the_same_fenced_line(tmp_path, guard):
 
     assert parser_targets == guard_targets == ["real.md"], (
         f"the two readers disagree about the fenced line: {parser_targets} vs {guard_targets}"
+    )
+
+
+# ── what the disagreement costs ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "template",
+    ["- [Hand written]({f})", "| [Table row]({f}) | note |"],
+    ids=["list-line", "table-row"],
+)
+def test_a_row_the_parser_cannot_read_is_duplicated_by_the_next_write(tmp_path, template):
+    """The invariant above, measured at the store: a row read twice is a row written once.
+
+    `add_entry` de-duplicates by filename, so a row the parser cannot see is a file the
+    store cannot find — and the next write of that file appends a **second row** for it.
+    That is why the two readers agreeing is not tidiness: the model's reading is what
+    the writer consults before it appends.
+    """
+    from emrg.memory import MemoryStore
+
+    store = MemoryStore(tmp_path, scope="project")
+    mem = store.create("project", "The memory", "body")
+
+    index = store.directory / "MEMORY.md"
+    index.write_text(HEAD + template.format(f=mem.filename) + "\n", encoding="utf-8")
+    before = index.read_text(encoding="utf-8").splitlines()
+
+    store.update(mem.id, body="edited")
+
+    after = index.read_text(encoding="utf-8").splitlines()
+    naming = [line for line in after if mem.filename in line]
+    assert len(naming) == 1, (
+        f"the write added a second row naming {mem.filename}: {after}"
+    )
+    assert len(after) == len(before), (
+        f"the write grew the index by {len(after) - len(before)} line(s): "
+        f"{before} -> {after}"
     )

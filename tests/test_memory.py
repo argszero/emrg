@@ -551,6 +551,28 @@ class TestMemoryIndexRoundTripFidelity:
         twice = MemoryIndex.from_text(once).to_markdown()
         assert twice == once
 
+    def test_a_long_pointer_row_keeps_every_link_it_carries(self):
+        """A row past the bound is re-rendered — and a pointer row carries several links.
+
+        `_IndexEntry` models one target, so rendering a multi-link row from its entry
+        names the first file and drops the rest: the other files stay on disk and leave
+        the index, which is the loss the row's verbatim carry prevents. Only a row
+        *past* the bound reaches the renderer (`entry.raw` is emitted while it fits), so
+        the row here is built to cross it — measured 2026-10-02, this is the shape that
+        separates the two behaviours: the rendered form kept `f00.md` and lost the other
+        four links.
+        """
+        n = INDEX_TITLE_MAX_CHARS // len("[id00](f00.md) ") + 2
+        row = "- " + " ".join(f"[id{i:02d}](f{i:02d}.md)" for i in range(n))
+        assert len(row) > INDEX_TITLE_MAX_CHARS, "the row must cross the bound to be rendered"
+        text = "# Memory Index\n\n## project\n" + row + "\n"
+
+        out = MemoryIndex.from_text(text).to_markdown()
+
+        assert out == text, "the pointer row came back rewritten"
+        for i in range(n):
+            assert f"(f{i:02d}.md)" in out, f"link {i} was dropped from the row"
+
     def test_store_create_preserves_hand_written_rows(self, temp_cwd):
         """The store's write path: create → load index → add_entry → save."""
         store = SessionMemoryStore(temp_cwd)

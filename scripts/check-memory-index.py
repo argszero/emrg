@@ -47,14 +47,28 @@ written in both:
   real longest row was **6,208 chars** and 12 of its 25 rows were past the bound.
 
 Both shapes are measured by *shape* rather than by the store's entry grammar,
-and the difference is not academic: this host's evolution index read 75 lines on
-2026-09-26, **67** of them list lines, of which `MemoryIndex.from_text`
-recognises only **21**. The other 46 are pointer lines an agent's compaction
-wrote, each carrying several `[id](file.md)` references on one line. Those are
-rows the rule binds, the prompt pays for, and every store mechanism is blind to -
-so a reading that used the parser's grammar would exempt exactly the rows only an
-agent writes. A table row is the same story: no store mechanism parses the
-index's table, and one prompt embeds every line of it.
+because the scope is the lines the embed pays for, and that scope is not the
+parser's to set: the index is hand-edited, so a row an agent's compaction wrote is
+a line this reading binds whatever the store models.
+
+The two readers now agree **by construction**: since 2026-10-02
+`MemoryIndex.from_text` asks the same two functions this file asks - `is_index_row`
+for whether a line is a row, `row_links` for what it names - and
+`tests/test_a_row_has_one_reading.py` holds them to naming the same file for every
+shape. Measured on this host's evolution index that day: **32** rows by shape,
+**32** entries, **0** rows the parser made no entry for, round trip byte-stable.
+The same file read 75 lines / 67 list lines / **21** entries on 2026-09-26, when
+the parser decided by a grammar of its own while this rule counted every row - and
+that gap was a defect, not a justification: a row naming a file the model could not
+see got a **second** row on the next write of that file (measured 2026-10-01:
+`- [Hand written](f.md)`, no `rec:` tail, parsed to zero entries and then to two
+rows naming `f.md`).
+
+What stays outside the parser's model is a `- ` line carrying no `](target)`
+outside a code span. This rule counts it, because it is a line the embed pays for;
+the parser makes no entry, because an entry is a model *of a target*. A table row
+is counted for the same reason whichever way it names its file: no store mechanism
+wrote the index's table, and one prompt embeds every line of it.
 
 The predicate is **one function with two readers**: `emrg.memory.is_index_row`,
 imported above with the rule's numbers and called by the daemon's compaction

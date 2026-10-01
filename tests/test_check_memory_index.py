@@ -254,28 +254,55 @@ def test_a_row_is_a_list_line_by_shape(mod, tmp_path, capsys) -> None:
 def test_a_pointer_row_counts_even_though_the_store_parses_no_entry(
     mod, tmp_path, capsys
 ) -> None:
-    """The justification for the shape rule, as a reading rather than a claim.
+    """The shape rule's reason, as a reading rather than a claim.
 
-    A row may be one an agent's compaction wrote: several `[id](file.md)`
-    references on one line. `MemoryIndex.from_text` recognises no entry in it,
-    which is exactly why a reading built on the parser's grammar would exempt the
-    rows only an agent writes. Asserted both ways round - the parser sees nothing
-    and the tool still counts the row.
+    This test used to carry the *opposite* half: it asserted that
+    `MemoryIndex.from_text` recognised no entry in a pointer row, and its failure
+    message said the tool's shape rule would need its reason restated if that ever
+    changed. It changed on 2026-10-02 - the parser now asks `is_index_row` and
+    `row_links`, so a pointer row *is* an entry (that is what stopped the duplicate
+    row the tool's own docstring cites) - and this is the restatement.
+
+    The reason the bound is read by shape survives, and it is now the honest one:
+    the scope is the lines the embed pays for, and a `- ` line carrying no
+    `](target)` outside a code span is such a line whether or not the store can
+    model it. The parser cannot: an entry is a model of a target, and this row
+    quotes its links rather than using them. Asserted both ways round - the parser
+    sees nothing and the tool still counts the row.
     """
     from emrg.memory import MemoryIndex
 
     bound = mod.INDEX_TITLE_MAX_CHARS
-    unit = "[id1](id1.md) "
+    unit = "`[id1](id1.md)` "  # quoted, so no link the reading may follow
     pointer = "- " + unit * (bound // len(unit) + 2)
     assert len(pointer) > bound
     assert MemoryIndex.from_text(pointer + "\n").entries == [], (
-        "the claim this test makes is that the store's parser sees no entry in a "
-        "pointer row - if it now does, the tool's shape rule needs its reason "
-        "restated, and this failure is where that is noticed"
+        "the claim this test makes is that a row quoting its links is no entry for "
+        "the store's parser - if it now is one, the tool's shape rule needs its "
+        "reason restated again, and this failure is where that is noticed"
     )
     path = _index(tmp_path, "pointer.md", [pointer])
     assert mod.main([str(path)]) == 1
     assert "row at line 1" in capsys.readouterr().out
+
+
+def test_a_hand_written_pointer_row_is_an_entry_now(mod, tmp_path, capsys) -> None:
+    """The other half of the restatement: the row an agent writes *is* read.
+
+    A row the store's grammar cannot produce and the predicate counts - the
+    hand-written pointer line - is the one that used to leave a file invisible to
+    the model and cost a duplicate row on the next write. Both readers name it, and
+    the tool counts it.
+    """
+    from emrg.memory import MemoryIndex
+
+    pointer = "- [Hand written](f.md)"
+    (tmp_path / "f.md").write_text("# f\n", encoding="utf-8")
+    assert [e.filename for e in MemoryIndex.from_text(pointer + "\n").entries] == ["f.md"]
+    path = _index(tmp_path, "pointer.md", [pointer])
+    assert mod.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "rows 1," in out
 
 
 # ── unmeasurable is never a pass ──────────────────────────────────────────────

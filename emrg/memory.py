@@ -932,7 +932,17 @@ class MemoryIndex:
             if filename in placed and not entry.raw:
                 continue  # a rewritten entry renders once, however many rows it had
             placed.add(filename)
-            if entry.raw and len(entry.raw) <= INDEX_TITLE_MAX_CHARS:
+            if len(row_links(line)) > 1:
+                # A row that names **more than one** file is carried, never rewritten.
+                # An entry models one target, so rendering this line from it would drop
+                # every reference after the first — the rows an agent's compaction writes
+                # (`- [id1](id1.md) [id2](id2.md) …`) are exactly this shape, and the
+                # other files would silently leave the index while staying on disk.
+                # Carried *and* placed: the file this line names is not appended again
+                # either, which is the duplicate `from_text`'s carry step exists to
+                # prevent. The line is the document's; the store does not own it.
+                out.append(line)
+            elif entry.raw and len(entry.raw) <= INDEX_TITLE_MAX_CHARS:
                 out.append(entry.raw)
             else:
                 out.append(self._render_entry(entry))
@@ -1063,29 +1073,55 @@ class MemoryIndex:
                 filename = targets[0]
                 status = em.group(3) or "active"
                 rest = em.group(4)
+            elif targets and is_index_row(line):
+                # A row the shared predicate counts, in a shape this file's own grammar
+                # does not produce: a hand-written `- ` row without the ` — rec:` tail, or
+                # a table row. It *is* a row — `is_index_row` is what the daemon's
+                # compaction trigger counts and what `scripts/check-memory-index.py` reads
+                # its links out of — so the model has to carry it, or the same file gets a
+                # second row on the next write. Measured 2026-10-01: an index carrying
+                # `- [Hand written](project-the-memory.md)` and a later `update()` of that
+                # memory left **two rows naming one file** and grew the file by a line
+                # (the number the hygiene rule is stated in); the same for a table row.
+                # Nothing is guessed that the line does not carry: absent dates stay
+                # absent, and a status tag is read only where one stands after the link.
+                filename = targets[0]
+                marker = f"]({filename})"
+                at = masked.find(marker)
+                opened = masked.rfind("[", 0, at) if at != -1 else -1
+                title = line[opened + 1 : at].strip() if opened != -1 else line.strip()
+                status = "active"
+                after = masked[at + len(marker) :] if at != -1 else ""
+                st = re.match(r"\s*\[(\w+)\]", after)
+                if st:
+                    status = st.group(1)
+                # The whole line, so a `rec:`/`evt:` anywhere on it is still read.
+                rest = masked
+            else:
+                continue
 
-                created_at = ""
-                event_at = ""
-                rec_m = re.search(r"rec:\s*([\d\-T:]+)", rest)
-                if rec_m:
-                    created_at = _normalize_date(rec_m.group(1))
-                evt_m = re.search(r"evt:\s*([\d\-T:]+)", rest)
-                if evt_m:
-                    event_at = _normalize_date(evt_m.group(1))
+            created_at = ""
+            event_at = ""
+            rec_m = re.search(r"rec:\s*([\d\-T:]+)", rest)
+            if rec_m:
+                created_at = _normalize_date(rec_m.group(1))
+            evt_m = re.search(r"evt:\s*([\d\-T:]+)", rest)
+            if evt_m:
+                event_at = _normalize_date(evt_m.group(1))
 
-                entries.append(
-                    _IndexEntry(
-                        title=title,
-                        filename=filename,
-                        type=current_type,
-                        status=status,
-                        created_at=created_at,
-                        event_at=event_at,
-                        updated_at=created_at,
-                        raw=line,
-                    )
+            entries.append(
+                _IndexEntry(
+                    title=title,
+                    filename=filename,
+                    type=current_type,
+                    status=status,
+                    created_at=created_at,
+                    event_at=event_at,
+                    updated_at=created_at,
+                    raw=line,
                 )
-                idx._src[i] = filename
+            )
+            idx._src[i] = filename
 
         idx.entries = entries
         return idx
