@@ -50,6 +50,57 @@ def slugify(title: str) -> str:
     return slug.strip("-") or "memory"
 
 
+#: The longest a memory's filename may be, counted in **bytes**.
+#:
+#: Measured 2026-10-01 on this host: `os.pathconf(dir, "PC_NAME_MAX")` answers 255, and
+#: that is exactly where the boundary is — a 255-character name is accepted, 256 raises
+#: `OSError: [Errno 63] File name too long`. Nothing capped the derived name, so a long
+#: title produced a bare OS error out of `_resolve_filename`'s `.exists()` (measured with
+#: a 250-character title): the memory could not be written **at all**, and the failure
+#: named a temp path rather than the length.
+#:
+#: Bytes, not characters, because the unit is the platform's: this filesystem counts
+#: **characters** (255 CJK characters = 765 bytes are accepted here, measured), while
+#: Linux's `NAME_MAX = 255` counts **bytes**. UTF-8 length is never below character
+#: count, so capping in bytes is the safe side of both — and `PC_NAME_MAX` being 255
+#: under either reading is why one number works for both.
+FILENAME_MAX_BYTES = 255
+
+
+def _truncate_bytes(text: str, budget: int) -> str:
+    """`text` cut to at most `budget` bytes, **on a character boundary**.
+
+    A filename is text; cutting a UTF-8 sequence in half produces a name no reader can
+    open, and the byte cap is the one place where bytes and characters can disagree.
+    """
+    if budget <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= budget:
+        return text
+    cut = encoded[:budget]
+    while cut:
+        try:
+            return cut.decode("utf-8")
+        except UnicodeDecodeError:
+            cut = cut[:-1]
+    return ""
+
+
+def fit_filename(stem: str, suffix: str) -> str:
+    """`stem + suffix` shortened so the whole name fits, keeping `suffix` **whole**.
+
+    One function for the three sites that build a memory's name (`MemoryFile.filename`,
+    `MemoryStore._resolve_filename`, `promote_to_project`), because the alternative —
+    each site truncating its own way — is how the collision suffix gets cut off, and the
+    suffix is load-bearing: `_resolve_filename` finds a free name by counting upwards,
+    so a name that no longer changes with the counter is the same name forever, i.e. a
+    loop that never ends. Keeping the suffix whole is what makes that loop terminate.
+    """
+    budget = FILENAME_MAX_BYTES - len(suffix.encode("utf-8"))
+    return _truncate_bytes(stem, budget) + suffix
+
+
 def now_iso() -> str:
     """Return current local time as ISO 8601 string."""
     return datetime.now().isoformat()
@@ -465,10 +516,17 @@ class MemoryFile:
 
         Does NOT include the id — the id lives in frontmatter only.
         This keeps filenames human-readable.
+
+        Bounded by `FILENAME_MAX_BYTES`: a title longer than the filesystem's name limit
+        used to derive a name no filesystem accepts, so `create()` failed with a bare
+        `OSError` from a path operation (`_truncate_bytes` carries the measurement). The
+        bound belongs here rather than at the write, because this is what the index row,
+        the server's memory frame and the collision counter all read — a name that only
+        the write path shortened would be a second name for the same memory.
         """
         prefix = f"{self.type}-" if self.type != "reference" else ""
         slug = slugify(self.title)
-        return f"{prefix}{slug}.md"
+        return fit_filename(f"{prefix}{slug}", ".md")
 
     # ── Parsing ────────────────────────────────────────────────
 
@@ -1221,7 +1279,10 @@ class MemoryStore:
             except (OSError, ValueError):
                 pass
             counter += 1
-            candidate = f"{stem}-{counter}.md"
+            # Fitted with the suffix kept whole: the counter must survive the byte cap,
+            # because this loop ends by the name changing — a name truncated down to a
+            # constant would be the same candidate forever (`fit_filename`).
+            candidate = fit_filename(stem, f"-{counter}.md")
         return candidate
 
     # ── CRUD ───────────────────────────────────────────────────
@@ -1485,11 +1546,13 @@ class MemoryStore:
         mem.updated_at = now_iso()
 
         new_path = project_store.directory / mem.filename
-        # Handle filename conflicts in project store
+        # Handle filename conflicts in project store. Fitted the same way `_resolve_filename`
+        # fits its candidates — same bound, same suffix-kept-whole rule — so the copy's name
+        # cannot overflow the filesystem's limit here either.
+        base_stem = Path(mem.filename).stem
         counter = 1
         while new_path.exists():
-            stem = Path(mem.filename).stem
-            new_path = project_store.directory / f"{stem}-{counter}.md"
+            new_path = project_store.directory / fit_filename(base_stem, f"-{counter}.md")
             counter += 1
 
         mem.save(new_path)
@@ -1508,8 +1571,12 @@ class MemoryStore:
         )
         mem_original.save(path)
 
-        # Create .promoted marker
-        marker = path.with_suffix(".promoted")
+        # Create .promoted marker. Fitted like every other name built from a memory's
+        # filename: `.promoted` is six bytes longer than `.md`, so on a name already at
+        # the bound `with_suffix` overflowed it — measured 2026-10-01 with a 400-character
+        # title, whose promotion wrote the copy and then failed here with
+        # `OSError: [Errno 63] File name too long` on the marker.
+        marker = self.directory / fit_filename(Path(path.name).stem, ".promoted")
         marker.write_text(
             f"promoted_at: {now_iso()}\n"
             f"target: {new_path}\n"
