@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, relative_pattern_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,11 @@ class GrepTool(ToolExecutor):
             return ToolResult(
                 name="grep", content=f"Error: path not found: {root}", error=True
             )
+
+        if file_glob:
+            refusal = relative_pattern_refusal("grep", file_glob)
+            if refusal is not None:
+                return refusal
 
         logger.debug(
             "grep: pattern=%r path=%s glob=%s ignore_case=%s",
