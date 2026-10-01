@@ -14,7 +14,7 @@ The index rule EMRG's cycles obey is two numbers and one place to act:
     index past 100 lines is compacted in place, by yourself ... shorten a row
     past INDEX_TITLE_MAX_CHARS (512) to one line.
 
-(`emrg/server/evolution_prompt.md` §6, in this checkout.) Nothing reads those
+(`emrg/server/evolution_prompt.md` §R9, in this checkout.) Nothing reads those
 numbers off an index. The two mechanisms that do look at one are both elsewhere,
 and each covers a different file: the reflection round's compaction note counts
 the session cwd's project index and the session's own index

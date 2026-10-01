@@ -3,7 +3,7 @@
 What this file holds
 --------------------
 The tool measures a `MEMORY.md` against the two numbers `emrg/server/evolution_prompt.md`
-§6 names - an index past `MEMORY_INDEX_ROW_CAP` lines is compacted in place, and no
+§R9 names - an index past `MEMORY_INDEX_ROW_CAP` lines is compacted in place, and no
 row is past `INDEX_TITLE_MAX_CHARS` chars - and nothing else does: the reflection
 round's compaction note counts two *other* files, and the store's write-time
 advisory fires only on a store write, which the `write`/`edit` path a cycle uses

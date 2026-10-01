@@ -107,6 +107,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 RUN_HERE = (
     "check-doc-count.py",
     "check-memory-index.py",
+    "check-prompt-citations.py",
     "check-rant-citations.py",
     "check_nonlocal.py",
     "check_unbound_reads.py",

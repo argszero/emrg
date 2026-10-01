@@ -2660,7 +2660,7 @@ class TaskHandler:
 
         cycle_ts = cycle_time.isoformat()
         # Rant 2026-08-12T18:03:26: cycle records are now memory entries
-        # (memory/cycle-<ts>.md, written by the agent per evolution_prompt §6),
+        # (memory/cycle-<ts>.md, written by the agent per evolution_prompt §4),
         # not standalone evolution-cycle-*.md files — keep the impact tag
         # aligned with the new naming.
         impact = [

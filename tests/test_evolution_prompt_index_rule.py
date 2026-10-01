@@ -30,7 +30,7 @@ and read what a cycle is actually sent.
 Why the absence test asserts the block is still there
 -----------------------------------------------------
 A test that says "these strings are gone from the prompt" passes for the wrong reason
-if someone deletes the whole §6 hygiene block — an absent block contains none of them.
+if someone deletes the whole §R9 hygiene block — an absent block contains none of them.
 So the negative test first requires the block's own opening words in the rendered
 prompt, and fails saying it cannot measure rather than passing quietly.
 
@@ -127,7 +127,7 @@ def rendered(tmp_path_factory) -> str:
 
 
 def _hygiene_block(rendered: str) -> str:
-    """The §6 index-hygiene block as shipped, or a failure to measure — never a pass."""
+    """The §R9 index-hygiene block as shipped, or a failure to measure — never a pass."""
     start = rendered.find(BLOCK_START)
     assert start != -1, (
         f"the rendered prompt no longer contains the {BLOCK_START!r} block — this test "
@@ -148,7 +148,7 @@ def test_the_retired_protocol_is_gone_from_the_shipped_prompt(rendered: str) -> 
     block = _hygiene_block(rendered)
     survivors = [term for term in RETIRED_TERMS if term in block]
     assert not survivors, (
-        f"emrg/server/evolution_prompt.md §6 still carries the retired archive "
+        f"emrg/server/evolution_prompt.md §R9 still carries the retired archive "
         f"protocol: {survivors}. The host retired it by design (§4) because it moved "
         "rows out of the index without shortening it — reinstating it means a cycle "
         "archives again instead of compacting"
@@ -171,7 +171,7 @@ def test_the_prompt_states_the_replacement_ruler_where_a_cycle_reads_it(rendered
 
     stated = LINE_THRESHOLD.findall(block)
     assert stated, (
-        "the §6 block states no line threshold for the memory index (anchor: "
+        "the §R9 block states no line threshold for the memory index (anchor: "
         "'**N lines**') — the retired protocol is gone and nothing names the ruler that "
         "replaced it, so a cycle has no target"
     )
@@ -196,7 +196,7 @@ def test_the_row_bound_the_prompt_states_is_the_bound_the_writer_enforces(render
     block = _hygiene_block(rendered)
     stated = ROW_BOUND.findall(block)
     assert stated, (
-        "the §6 block no longer states a per-row character bound beside "
+        "the §R9 block no longer states a per-row character bound beside "
         "`INDEX_TITLE_MAX_CHARS` — the two numbers together are why 100 lines fit the "
         "embed budget, so one without the other is half a rule"
     )
