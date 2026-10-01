@@ -627,7 +627,7 @@ class BashToolV2(ToolExecutor):
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default: 30).",
+                        "description": "Timeout in seconds (default: 30). A value that is not a positive number uses the default.",
                     },
                     "workdir": {
                         "type": "string",
@@ -706,14 +706,38 @@ class BashToolV2(ToolExecutor):
 def _as_timeout(value: object) -> float:
     """Read the timeout argument, falling back to the default.
 
+    A bound must be a **positive** duration, and this is where that is decided.
+    Measured 2026-10-02 on this host: the tool accepted a non-positive value and turned it
+    into an instant kill, so `echo hi` with `timeout=0` answered
+
+        (no output) [timed out after 0ms] [killed by signal: 9]
+
+    and `timeout=-1` answered `[timed out after -1000ms]` — a **negative duration**, a claim
+    about a wait that cannot exist, printed in the marker the model reads. Nothing failed
+    loudly: the caller got a killed run and a number that could not be true.
+    (`0` also reads as "no limit" in this repository's own
+    `scripts/run-mutation-arm.py`, so the same spelling meant opposite things in two
+    tools — but a *bash* run with no bound is the hazard the default exists to prevent,
+    so the rule here is the positive one, not the unbounded one.)
+
+    Unusable and non-positive are therefore the same outcome — the documented default —
+    which is what this function already did for `"abc"`. The value is never clamped to a
+    guess like `0.001`: that would invent a bound the caller did not ask for and still
+    kill the process.
+
     :param value: whatever the model sent.
-    :returns: the timeout in seconds (30 when unusable, as the schema documents).
+    :returns: the timeout in seconds; always positive (the documented default otherwise).
     """
     if isinstance(value, bool) or value is None:
         return 30.0
     if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return float(str(value))
-    except (TypeError, ValueError):
-        return 30.0
+        seconds = float(value)
+    else:
+        try:
+            seconds = float(str(value))
+        except (TypeError, ValueError):
+            return 30.0
+    # Not `> 0` on the way in only: `inf` and `nan` reach here too, and both must fail
+    # this test rather than reach `asyncio.wait` (`nan` compares false, `inf` would wait
+    # forever — the unbounded run this rule refuses).
+    return seconds if seconds > 0 and seconds != float("inf") else 30.0

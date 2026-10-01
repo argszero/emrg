@@ -730,7 +730,7 @@ class PwshToolV2(ToolExecutor):
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default: 30).",
+                        "description": "Timeout in seconds (default: 30). A value that is not a positive number uses the default.",
                     },
                     "workdir": {
                         "type": "string",
@@ -813,14 +813,34 @@ class PwshToolV2(ToolExecutor):
 def _as_timeout(value: object) -> float:
     """Read the timeout argument, falling back to the default.
 
+    A bound must be a **positive** duration, and this is where that is decided. This
+    function and `bash_tool_v2._as_timeout` are two copies of one rule (the pwsh module is
+    a sibling of the bash one, not a subclass), so they were fixed in the same change and
+    `tests/test_shell_timeout_is_a_duration.py` asserts they still agree — a rule with two
+    homes is a rule free to drift apart, which is how the measured defect below lasted.
+
+    Measured 2026-10-02 on this host (the bash copy; this one is byte-identical): the tool
+    accepted a non-positive value and turned it into an instant kill, so `echo hi` with
+    `timeout=0` answered
+
+        (no output) [timed out after 0ms] [killed by signal: 9]
+
+    and `timeout=-1` answered `[timed out after -1000ms]` — a **negative duration**, a claim
+    about a wait that cannot exist, printed in the marker the model reads.
+
+    Unusable and non-positive are therefore the same outcome — the documented default —
+    which is what this function already did for `"abc"`.
+
     :param value: whatever the model sent.
-    :returns: the timeout in seconds (30 when unusable, as the schema documents).
+    :returns: the timeout in seconds; always positive (the documented default otherwise).
     """
     if isinstance(value, bool) or value is None:
         return 30.0
     if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return float(str(value))
-    except (TypeError, ValueError):
-        return 30.0
+        seconds = float(value)
+    else:
+        try:
+            seconds = float(str(value))
+        except (TypeError, ValueError):
+            return 30.0
+    return seconds if seconds > 0 and seconds != float("inf") else 30.0
