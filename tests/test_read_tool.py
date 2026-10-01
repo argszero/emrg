@@ -171,7 +171,16 @@ def test_read_with_start_line_byte_offset(temp_file):
 
 
 def test_read_start_line_byte_offset_at_eol(temp_file):
-    """byte_offset beyond line length yields empty first line."""
+    """An offset past the line's end shows none of the line, and says so.
+
+    This test used to assert `"     3\\t" in lines[0] or lines[0].strip().startswith("3")`
+    under the docstring "byte_offset beyond line length yields empty first line" — an
+    assertion that passes for the empty line *and* for the full line, so it could not
+    tell its own claim from its opposite. Measured 2026-10-02: the code returned the
+    **whole line**, and this test stayed green. The claim is now measurable: what comes
+    back for line 3 is empty, it does not contain line 3's text, and a note names the
+    length. (`tests/test_a_line_offset_says_its_unit.py` carries the rest.)
+    """
     tool = ReadTool()
     f, _ = temp_file
     result = _run(tool.execute({
@@ -180,10 +189,11 @@ def test_read_start_line_byte_offset_at_eol(temp_file):
         "start_line_byte_offset": 999,
     }))
     assert not result.error
-    # First line (line 3) should be empty or skipped
-    lines = result.content.split("\n")
-    # line 3 should be empty (byte offset beyond its length)
-    assert "     3\t" in lines[0] or lines[0].strip().startswith("3")
+    first = result.content.split("\n")[0]
+    assert first.startswith("     3\t"), first
+    assert first.strip() == "3", f"the line was not empty: {first!r}"
+    assert "line 3" not in first, f"the whole line came back instead: {first!r}"
+    assert "past its end" in result.content
 
 
 def test_read_image_returns_vision_ref(temp_file):

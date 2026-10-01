@@ -79,11 +79,13 @@ class ReadTool(ToolExecutor):
                             f"Alias: limit."
                         ),
                     },
-                    "start_line_byte_offset": {
+                    "start_line_char_offset": {
                         "type": "integer",
                         "description": (
-                            "Byte offset within the first line to begin reading "
-                            "(default: 0). Use to resume within a truncated line."
+                            "Characters of the first selected line to skip "
+                            "(default: 0) — use it to resume part-way into a long "
+                            "line. Alias: start_line_byte_offset (the legacy name; "
+                            "the unit is characters, and always has been)."
                         ),
                     },
                     "intent": {
@@ -116,18 +118,22 @@ class ReadTool(ToolExecutor):
             except (TypeError, ValueError):
                 line_limit = None
 
-        # ── Resolve start_line_byte_offset ──
-        raw_byte_off = arguments.get("start_line_byte_offset", 0) or 0
+        # ── Resolve the intra-line offset: `start_line_char_offset`, with
+        # `start_line_byte_offset` as its legacy alias. The two names are the same
+        # number in the same unit — see the parameter's description and the note where
+        # it is applied below.
+        raw_char_off = (arguments.get("start_line_char_offset")
+                        or arguments.get("start_line_byte_offset", 0) or 0)
         try:
-            start_line_byte_offset = max(0, int(raw_byte_off))
+            start_line_char_offset = max(0, int(raw_char_off))
         except (TypeError, ValueError):
-            start_line_byte_offset = 0
+            start_line_char_offset = 0
 
         if not file_path:
             return ToolResult(name="read", content="Error: no file_path provided", error=True)
 
         path = Path(file_path).expanduser().resolve()
-        logger.debug("read: %s (start_line=%d, byte_offset=%d)", path, start_line, start_line_byte_offset)
+        logger.debug("read: %s (start_line=%d, char_offset=%d)", path, start_line, start_line_char_offset)
 
         if not path.exists():
             return ToolResult(
@@ -148,7 +154,7 @@ class ReadTool(ToolExecutor):
         file_size = path.stat().st_size
         user_specified_range = (line_limit is not None
                                 or start_line > 1
-                                or start_line_byte_offset > 0)
+                                or start_line_char_offset > 0)
 
         # ── Image files → structured vision reference (rant 2026-08-24T14:36:01) ──
         # The daemon converts this JSON ref into an OpenAI vision content block
@@ -217,11 +223,32 @@ class ReadTool(ToolExecutor):
         end = min(start + effective_limit, total_lines)
         selected = all_lines[start:end]
 
-        # Apply start_line_byte_offset to the first selected line
-        if start_line_byte_offset > 0 and selected:
+        # Apply the intra-line offset to the first selected line. The unit is
+        # **characters**: that is what the code has always done, and it is the only unit
+        # the caller can count — nothing here ever reports a byte position, and the
+        # read tool's whole view of a file is text. The parameter's old name said
+        # "byte", so a model following the description passed a number the tool read in
+        # a different unit; the name now states the unit it means, and the old spelling
+        # is still accepted (`start_line_byte_offset`).
+        #
+        # An offset at or past the end of the line is **reported, not absorbed**.
+        # Measured 2026-10-02, before this: `start_line_byte_offset=999` on a 6-char line
+        # returned the **whole line** — the guard below used to be `if off < len(line)`,
+        # so a request the tool could not honour was answered with something else, and
+        # the caller had no way to tell. The tool already has the shape for "this
+        # contributes nothing" (an empty range is named rather than printed blank), and
+        # the offset case takes it: the line is shown empty and a note names the length.
+        notes: list[str] = []
+        if start_line_char_offset > 0 and selected:
             first_line = selected[0]
-            if start_line_byte_offset < len(first_line):
-                selected[0] = first_line[start_line_byte_offset:]
+            if start_line_char_offset >= len(first_line):
+                notes.append(
+                    f"(line {start + 1} is {len(first_line)} char(s): char offset "
+                    f"{start_line_char_offset} is past its end, so none of it is shown)"
+                )
+                selected[0] = ""
+            else:
+                selected[0] = first_line[start_line_char_offset:]
 
         # Format with line numbers
         result_lines: list[str] = []
@@ -234,12 +261,14 @@ class ReadTool(ToolExecutor):
                 content=f"(empty range: lines {start + 1}-{end} of {total_lines})",
             )
 
+        result_lines.extend(notes)
+
         truncated = end < total_lines
         if truncated:
             # Exact continuation hint so LLM can copy-paste directly
             result_lines.append(
                 f"\ntruncated at start_line={end + 1}, "
-                f"start_line_byte_offset=0 — "
+                f"start_line_char_offset=0 — "
                 f"total {total_lines} lines"
             )
 
