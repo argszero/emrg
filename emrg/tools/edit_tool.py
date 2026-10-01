@@ -9,6 +9,7 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.tools import newlines
 from emrg.tools.base import ToolExecutor
 from emrg.tools.file_policy import resolve_file_target
 
@@ -32,6 +33,9 @@ class EditTool(ToolExecutor):
                 "read tool first to see the exact content. "
                 "The match is exact (whitespace, indentation, and newlines "
                 "must all match precisely). "
+                "Only the text old_string named is rewritten: the file's own "
+                "line endings (LF or CRLF) are kept, so a file's terminator is "
+                "never changed by an edit that did not ask for it. "
                 "For multiple replacements, set replace_all to true. "
                 "Prefer edit over write for modifying existing files — "
                 "it is safer and displays a diff in the UI."
@@ -112,13 +116,20 @@ class EditTool(ToolExecutor):
         logger.debug("edit: %s (replace_all=%s)", path, replace_all)
 
         try:
-            content = path.read_text(encoding="utf-8")
+            # Bytes, not `read_text`: the tool writes this file back, and a text-mode
+            # read would hand the writer a normalised string with the file's own line
+            # endings already gone (issue #1803 — an edit to one word of a CRLF file
+            # rewrote every line of it; `emrg/tools/newlines.py` carries the measurement
+            # and the rule).
+            raw = path.read_bytes().decode("utf-8")
         except UnicodeDecodeError:
             return ToolResult(
                 name="edit", content=f"Error: cannot read {path} as text", error=True
             )
+        except OSError as e:
+            return ToolResult(name="edit", content=f"Error reading file: {e}", error=True)
 
-        count = content.count(old)
+        new_content, count = newlines.replace(raw, old, new, replace_all=replace_all)
         if count == 0:
             return ToolResult(
                 name="edit",
@@ -140,9 +151,8 @@ class EditTool(ToolExecutor):
                 error=True,
             )
 
-        new_content = content.replace(old, new) if replace_all else content.replace(old, new, 1)
         try:
-            path.write_text(new_content, encoding="utf-8")
+            path.write_bytes(new_content.encode("utf-8"))
         except OSError as e:
             return ToolResult(
                 name="edit", content=f"Error writing file: {e}", error=True
