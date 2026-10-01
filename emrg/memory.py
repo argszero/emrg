@@ -212,6 +212,42 @@ INDEX_ROW_LIST_PREFIX = "- "
 _INDEX_ROW_TABLE = re.compile(r"^\|")
 _INDEX_ROW_TABLE_DELIMITER = re.compile(r"^\|[\s:|-]*\|?\s*$")
 
+#: How far a row may be indented and still be a row. CommonMark's block-level limit:
+#: up to three leading spaces belong to the enclosing block, so a `- ` or `|` line
+#: indented 1–3 spaces is still the item or the table row it looks like; four or more
+#: start an **indented code block**, whose content is literal text — the same reason an
+#: inline code span is not a link. Measured 2026-10-01 (issue #1797): a table index
+#: whose two rows were each indented two spaces read `rows 1, longest 13 chars, over
+#: 512: 0` and `OK` while the 604-char row was still in the file, and a
+#: two-space-indented list row naming a missing file was never followed (the file read
+#: `row links 1` for a file carrying two rows). Both readers share this predicate, so
+#: the daemon's compaction trigger was blind to the same lines.
+#:
+#: The store's own parser (`MemoryIndex.from_text`) is **looser** than this and stays
+#: so: it reads `line.strip()`, so it parses a row at any indent, including four spaces
+#: and beyond. That is deliberate — its job is round-tripping what an agent hand-wrote,
+#: not judging markdown — and the asymmetry is stated rather than closed, because
+#: narrowing the parser would drop rows from a document the store promises to keep
+#: verbatim. So for an indent of 4+ the predicate says "not a row" while the store
+#: still holds an entry; measured 2026-10-01, and recorded as a difference between two
+#: readers with two jobs, not as a defect in either.
+INDEX_ROW_MAX_INDENT = 3
+
+
+def _row_body(line: str) -> str:
+    """`line` with up to `INDEX_ROW_MAX_INDENT` leading spaces removed.
+
+    Removing *at most* that many is the whole point, and why `lstrip(" ")` is not used
+    here: stripping every space would turn a four-space-indented example — markdown's
+    indented code block, literal text — into a row, which is the opposite error from the
+    one this fixes. `line[:n].lstrip(" ")` removes only the spaces that are actually
+    there, and leaves the character at index `n` alone.
+
+    :param line: one line of an index, as read.
+    :returns: the line as markdown's block level sees it.
+    """
+    return line[:INDEX_ROW_MAX_INDENT].lstrip(" ") + line[INDEX_ROW_MAX_INDENT:]
+
 
 def is_index_row(line: str) -> bool:
     """Whether `line` is a row of a memory index, judged by shape.
@@ -220,10 +256,16 @@ def is_index_row(line: str) -> bool:
     `scripts/check-memory-index.py` both apply, so the trigger and the reading count the
     same lines (the two shapes, and the incident that made the second one matter, are at
     the constants above).
+
+    The shape is judged after `_row_body` removes up to `INDEX_ROW_MAX_INDENT` leading
+    spaces, because markdown gives up to three of them to the enclosing block: an
+    indented row is a row, and a reading that passed over it would print `OK` about a
+    bound it never applied (issue #1797, measured there and here).
     """
-    if line.startswith(INDEX_ROW_LIST_PREFIX):
+    body = _row_body(line)
+    if body.startswith(INDEX_ROW_LIST_PREFIX):
         return True
-    return bool(_INDEX_ROW_TABLE.match(line)) and not _INDEX_ROW_TABLE_DELIMITER.match(line)
+    return bool(_INDEX_ROW_TABLE.match(body)) and not _INDEX_ROW_TABLE_DELIMITER.match(body)
 
 
 # Order of the `## type` sections when the index has to be rendered from

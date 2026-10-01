@@ -251,6 +251,43 @@ def test_the_trigger_counts_a_table_row(tmp_path: Path) -> None:
     assert str(len(row)) in note, "the note must print the longest row it counted"
 
 
+def test_the_trigger_counts_an_indented_row(tmp_path: Path) -> None:
+    """The second reader inherits the indentation limit, so an indented row draws a note.
+
+    The trigger calls the same `memory.is_index_row`, so this is the same fix read
+    through the other reader - and the reason the fix belongs in the predicate rather
+    than in the script: a script-side strip would leave the daemon's compaction note
+    silent about an index the guard would now flag. Measured on `890bf02d` 2026-10-01:
+    a two-space-indented row past the bound drew no note.
+    """
+    path = tmp_path / "MEMORY.md"
+    row = "  - [x](x.md) " + "y" * (INDEX_TITLE_MAX_CHARS + 10)
+    path.write_text("# Index\n" + row + "\n", encoding="utf-8")
+    assert len(path.read_text(encoding="utf-8")) <= INDEX_SIZE_WARN, "under the budget, on purpose"
+
+    note = _memory_index_compaction_note([path])
+    assert note, "an indented row past the bound drew no compaction note"
+    assert f"row(s) past {INDEX_TITLE_MAX_CHARS} chars" in note
+    assert str(len(row)) in note, "the note must print the longest row it counted"
+
+
+def test_the_trigger_leaves_a_four_space_line_alone(tmp_path: Path) -> None:
+    """And the boundary holds for the second reader too: four spaces draws nothing.
+
+    Both readers share one predicate, so the control has to be asserted on both sides
+    or the pair proves nothing about the predicate: this is the same fixture as the test
+    above with two more spaces, and it must be silent.
+    """
+    path = tmp_path / "MEMORY.md"
+    path.write_text(
+        "# Index\n    - [x](x.md) " + "y" * (INDEX_TITLE_MAX_CHARS + 10) + "\n",
+        encoding="utf-8",
+    )
+    assert _memory_index_compaction_note([path]) == "", (
+        "a four-space line is an indented code block, not a row"
+    )
+
+
 def test_a_compliant_index_draws_nothing(tmp_path: Path) -> None:
     """The direction that keeps the note worth reading: silence when nothing is over."""
     path = tmp_path / "MEMORY.md"

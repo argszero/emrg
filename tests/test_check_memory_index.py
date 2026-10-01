@@ -226,6 +226,129 @@ def test_one_char_past_the_bound_names_the_row(mod, tmp_path, capsys) -> None:
     assert f"row at line 2 is {bound + 1} chars" in out
 
 
+def test_an_indented_row_is_still_a_row(mod, tmp_path, capsys) -> None:
+    """Up to three leading spaces, and the row is the row it looks like.
+
+    Markdown gives up to three spaces of indentation to the enclosing block, so a `- `
+    or `|` line written that way is still the item or the table row. The predicate
+    tested the shape at column 0, so an indented index read as if it had no rows and
+    the reading whose whole job is to bound them printed `OK` (issue #1797, reproduced
+    on `890bf02d` 2026-10-01: a table index whose rows were indented two spaces read
+    `rows 1, longest 13 chars, over 512: 0` while the 604-char row was still there).
+
+    All three indents the block limit allows are asserted, not one: a fix that happened
+    to strip exactly two spaces would pass a single-indent fixture.
+    """
+    bound = mod.INDEX_TITLE_MAX_CHARS
+    for indent in (1, 2, 3):
+        path = _index(
+            tmp_path,
+            f"indented-{indent}.md",
+            ["# Memory Index", "", " " * indent + _row("tail", bound + 1)],
+        )
+        assert mod.main([str(path)]) == 1, f"indent {indent}: " + capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert f"row at line 3 is {bound + 1 + indent} chars" in out, (
+            f"indent {indent}: the row must be named with its own length, indent "
+            f"included, because the indent is paid for by the embed too:\n" + out
+        )
+
+
+def test_an_indented_table_row_is_still_a_row(mod, tmp_path, capsys) -> None:
+    """The shape the issue was measured on: a table whose rows are indented.
+
+    Both row shapes have to be re-read after the indent is removed, and the list shape
+    alone does not prove it — a fix that stripped for the `- ` test and left the table
+    test at column 0 passes every list-shaped leg. This is issue #1797's own fixture,
+    the one whose `rows 1, longest 13 chars, over 512: 0` + `OK` was the report.
+    """
+    bound = mod.INDEX_TITLE_MAX_CHARS
+    long_cell = "z" * (bound - 10)
+    path = _index(
+        tmp_path,
+        "indented-table.md",
+        [
+            "# Memory Index",
+            "",
+            "| id | note |",
+            "| --- | --- |",
+            "  | a1 | short |",
+            f"  | b2 | {long_cell} |",
+        ],
+    )
+    assert mod.main([str(path)]) == 1, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "rows 3" in out, out
+    assert "row at line 6 is" in out, (
+        "the indented table row past the bound must be named:\n" + out
+    )
+
+
+def test_an_indented_table_delimiter_is_not_a_row(mod, tmp_path, capsys) -> None:
+    """The delimiter row is punctuation at any indent, and the indent does not hide it.
+
+    `|---|` is not an entry, and an indented one is not one either. Pinned separately
+    because the two halves of the shape test can drift apart: a fix that read the
+    `|`-opening from the stripped line but tested the delimiter against the raw line
+    would count an indented `  | --- | --- |` as a row — caught by no other leg here,
+    which is how this test was found (deliberate-break arms, 2026-10-01).
+    """
+    real = _row("tail", 30)
+    path = _index(
+        tmp_path,
+        "indented-delimiter.md",
+        ["# Memory Index", "", "  | --- | --- |", "  " + real],
+    )
+    _detail(tmp_path, "f.md")
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "rows 1" in out, "only the real row counts here:\n" + out
+
+
+def test_four_spaces_is_an_indented_code_block_not_a_row(mod, tmp_path, capsys) -> None:
+    """The other side of the same limit: four spaces is literal text, so not a row.
+
+    The control for the test above, and the reason the fix is "strip up to three" and
+    not "strip": an indented code block's content is an example, exactly as an inline
+    code span's is (the same class of defect, one level up - issue #1793). A predicate
+    that stripped every space would read this line as a row and fail a document that is
+    correct, which is a worse error than the one being fixed: it would make the guard
+    fire on an index quoting its own format.
+    """
+    bound = mod.INDEX_TITLE_MAX_CHARS
+    path = _index(
+        tmp_path,
+        "code-block.md",
+        ["- [short](f.md)", "    " + _row("tail", bound + 1)],
+    )
+    _detail(tmp_path, "f.md")
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "rows 1" in out, out
+    assert "over the" not in out, "a four-space line is not a row: " + out
+
+
+def test_an_indented_row_link_is_followed(mod, tmp_path, capsys) -> None:
+    """The link half of the same defect, which the bound half cannot see.
+
+    An indented row was invisible to every reading, so its `](target)` was never
+    resolved either: measured on `890bf02d` 2026-10-01, an index whose second row named
+    a file that is not beside it read `rows 1, row links 1` and exit 0. Pinned here as
+    its own leg because a fix that counted the row but still scanned it at column 0 for
+    links would satisfy every length assertion above and keep this hole.
+    """
+    path = _index(
+        tmp_path,
+        "indented-link.md",
+        ["- [a](here.md)", "  - [b](gone.md)"],
+    )
+    _detail(tmp_path, "here.md")
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row links 2" in out, out
+    assert "row at line 2 names gone.md" in out, out
+
+
 def test_a_row_is_a_list_line_by_shape(mod, tmp_path, capsys) -> None:
     """The predicate is `- `, so a long line that is not one is not a row.
 
