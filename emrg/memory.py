@@ -681,13 +681,23 @@ class MemoryIndex:
 
     # ── Mutation ───────────────────────────────────────────────
 
-    def add_entry(self, mem: MemoryFile) -> None:
+    def add_entry(self, mem: MemoryFile, *, filename: str | None = None) -> None:
         """Add or update a memory entry.
 
         Identifies entries by filename (since id is not in the index).
+
+        :param filename: the name to file this entry under, when it differs from the one
+            `mem` derives from its own title (`MemoryFile.filename` → `<type>-<slug>.md`).
+            That derived name is what the store's `create` *writes*, so the two agree for
+            a memory the store wrote — and disagree for every file named any other way,
+            which is most of them: a memory file can be written by hand, by an agent's
+            `write` tool, or under an older naming rule. An index row's link is a claim
+            about a **file**, so the caller that knows the on-disk name passes it;
+            `_rebuild_index` is that caller, the only one that walks the directory.
         """
+        stored = filename or mem.filename
         # Remove existing entry with same filename
-        self.entries = [e for e in self.entries if e.filename != mem.filename]
+        self.entries = [e for e in self.entries if e.filename != stored]
 
         # Rant 2026-08-23T08:04:26 — write-time truncation (primary guard):
         # keep the stored index title bounded; the full title lives in the
@@ -697,7 +707,7 @@ class MemoryIndex:
         self.entries.append(
             _IndexEntry(
                 title=title,
-                filename=mem.filename,
+                filename=stored,
                 type=mem.type,
                 status=mem.status,
                 created_at=mem.created_at,
@@ -711,6 +721,24 @@ class MemoryIndex:
     def remove_entry(self, filename: str) -> None:
         """Remove an entry by filename."""
         self.entries = [e for e in self.entries if e.filename != filename]
+
+    def carry_line(self, line: str, filename: str) -> None:
+        """Keep one row **as written**: the line verbatim, filed under `filename`.
+
+        For a caller that holds the row's text but not the file behind it — `_rebuild_index`
+        carrying the row of a memory file it could not read. The line joins the document
+        skeleton, which `to_markdown` emits as written, and the entry registered against it
+        is what keeps the line from being dropped (`to_markdown` skips a line whose filename
+        no entry claims) and what stops a second row being appended for the same file.
+
+        Re-deriving the row from parsed fields instead is not equivalent, and the difference
+        was measured: a row written `rec: 26-10-01` parses to a two-digit year, and
+        `_render_entry`'s `_short_date` slice turns it into `rec: 26-10-01T0` — the row comes
+        back with a date that is not a date. A row nobody could verify is kept, not rewritten.
+        """
+        self._lines.append(line)
+        self._src[len(self._lines) - 1] = filename
+        self.entries.append(_IndexEntry(filename=filename, raw=line))
 
     # ── Rendering ──────────────────────────────────────────────
 
@@ -959,17 +987,53 @@ class MemoryStore:
             logger.debug("memory index threshold check skipped", exc_info=True)
 
     def _rebuild_index(self) -> MemoryIndex:
-        """Rebuild the entire index by scanning all .md files."""
+        """The index the files on disk make, and the files the walk could not read.
+
+        Two things this walk must not do, both measured 2026-10-01 on this repo's own
+        memory directory (27 entries, every file named by hand or by an earlier rule):
+
+        * **Name a row after anything but the file.** The entry's filename used to be
+          `MemoryFile.filename`, i.e. `<type>-<slug>.md` derived from the *title* — the
+          name `create` writes, and not the name a file written by hand has. Measured on
+          that directory: the rebuild re-rendered every row with a target that exists
+          nowhere, **27 of 27 links dead after it ran**, so the repair path for a broken
+          index turned a working index into a set of links that resolve to nothing. The
+          name to file an entry under is the one the file has.
+        * **Drop the row of a file it could not read.** The tolerant catch here is
+          `(OSError, ValueError)` and `UnicodeDecodeError` is a `ValueError` subclass, so a
+          file another writer is mid-rewrite is skipped — the shape `_scan` documents at
+          length (measured there: 37 of 121 reads raised while a 200-KB index was being
+          rewritten, because `MemoryIndex.save` truncates and then writes). Skipping such a
+          file here is not a skip: the whole index is rewritten from this walk, so the row
+          goes with it, and the file is still on disk with nothing left naming it. The row
+          the current index holds for it is therefore **carried over verbatim** — the file
+          is there, it is the *read* that failed — and the file is reported to the caller.
+
+        What a rebuild may still drop is a row whose file is **gone**: that pruning is what
+        a rebuild is for, and the one case where the old row is a claim about something
+        that is no longer there.
+
+        :returns: the rebuilt index, and `(path, exception name)` per file that could not
+            be read — the second half is what lets a caller say the rebuild was partial
+            rather than report a walk it did not complete.
+        """
+        previous = {entry.filename: entry for entry in self._load_index().entries}
         idx = MemoryIndex()
+        unreadable: list[tuple[Path, str]] = []
         for path in sorted(self.directory.glob("*.md")):
             if path.name == "MEMORY.md":
                 continue
             try:
                 mem = MemoryFile.from_file(path)
-                idx.add_entry(mem)
-            except (OSError, ValueError):
-                logger.debug("Skipping unparseable memory: %s", path, exc_info=True)
-        return idx
+            except (OSError, ValueError) as exc:
+                unreadable.append((path, type(exc).__name__))
+                logger.debug("memory file could not be read: %s", path, exc_info=True)
+                carried = previous.get(path.name)
+                if carried is not None and carried.raw:
+                    idx.carry_line(carried.raw, path.name)
+                continue
+            idx.add_entry(mem, filename=path.name)
+        return idx, unreadable
 
     # ── File lookup ────────────────────────────────────────────
 
@@ -1238,16 +1302,31 @@ class MemoryStore:
 
     # ── Maintenance ────────────────────────────────────────────
 
-    def rebuild_index(self) -> None:
+    def rebuild_index(self) -> int:
         """Rebuild MEMORY.md from all .md files on disk.
 
         Useful if the index gets out of sync or corrupted.
+
+        The rebuild is a **rewrite**, so what the walk missed is what the file loses; a
+        file it could not read keeps the row the replaced index had for it (the reasons
+        are in `_rebuild_index`), and the files it could not read are named in a warning —
+        a partial walk is reported rather than passed off as a complete rebuild.
+
+        :returns: the number of rows the rebuilt index holds.
         """
-        index = self._rebuild_index()
+        index, unreadable = self._rebuild_index()
         self._save_index(index, "rebuild_index")
         logger.info(
             "index rebuilt: %d entries in %s", len(index.entries), self.index_path
         )
+        if unreadable:
+            logger.warning(
+                "index rebuilt from a partial read: %d memory file(s) could not be read "
+                "and their rows were carried over — %s",
+                len(unreadable),
+                ", ".join(f"{path.name} ({why})" for path, why in unreadable),
+            )
+        return len(index.entries)
 
     @property
     def count(self) -> int:
