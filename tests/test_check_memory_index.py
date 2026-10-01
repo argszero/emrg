@@ -643,6 +643,55 @@ def test_a_table_index_within_the_budget_is_within(mod, tmp_path, capsys) -> Non
     assert "OK:" in out
 
 
+def test_a_row_indented_up_to_three_spaces_is_still_a_row(mod, tmp_path, capsys) -> None:
+    """An indented row is a row: markdown's block-level limit is 3 spaces, for both shapes.
+
+    Both shapes may carry it (`  | a | b |` is still a table row, `  - row` is still a list
+    item). Measured 2026-10-01 on `890bf02`, with the predicate matching only at column 0: a
+    table whose rows were the only indented thing read `rows 1, longest 31 chars, over 512: 0`
+    and `OK`, four bytes longer than the same file at column 0 and with its 604-char row still
+    in it — the "clean verdict about rows the tool never looked at" this reading exists to
+    remove, one indentation level out.
+    """
+    table = ["# Memory Index", "", "  | id | note |", "  | --- | --- |"] + [
+        "  | n | " + "x" * 600 + " |" for _ in range(3)
+    ]
+    listing = ["# Memory Index", ""] + ["  - " + "y" * 600 for _ in range(3)]
+
+    # The header counts and the delimiter row does not, so the table's three entries read as
+    # four rows — but only the three *entries* are past the bound: the header is short. A list
+    # has no header, so its three rows all are. The guard must exit 1 and say both numbers.
+    for name, lines, rows, over in (
+        ("indent-table.md", table, 4, 3),
+        ("indent-list.md", listing, 3, 3),
+    ):
+        path = _index(tmp_path, name, lines)
+        assert mod.main([str(path)]) == 1, f"{name}: an indented row went unseen"
+        out = capsys.readouterr().out
+        assert f"rows {rows}, longest {len(lines[-1])} chars" in out, f"{name}: {out}"
+        assert f"over {mod.INDEX_TITLE_MAX_CHARS}: {over}" in out, f"{name}: {out}"
+        assert "OK:" not in out, f"{name}: an over-bound index was called OK"
+
+
+def test_a_four_space_indented_block_is_not_a_row(mod, tmp_path, capsys) -> None:
+    """Where the limit stops, so "strip the indent" is not the reading that shipped.
+
+    Four spaces is an indented code block: a line the embed pays for, but not a row, and not
+    a line the per-row bound is about. Asserted on both sides of the one byte that decides
+    it, or the fix above would be "strip whatever the indent is".
+    """
+    body = "- " + "y" * 600
+    for name, indent, rows in (("three.md", "   ", 1), ("four.md", "    ", 0)):
+        path = _index(tmp_path, name, ["# Memory Index", "", indent + body])
+        assert mod.main([str(path)]) == (1 if rows else 0), f"{name}: {indent!r} rows {rows}"
+        out = capsys.readouterr().out
+        assert f"rows {rows}, longest {len(body) + len(indent) if rows else 0} chars" in out, (
+            f"{name}: {out}"
+        )
+        assert (f"over {mod.INDEX_TITLE_MAX_CHARS}: 1" in out) is bool(rows), f"{name}: {out}"
+
+
+
 def test_the_budget_is_counted_in_characters_not_bytes(mod, tmp_path, capsys) -> None:
     """The unit is the cap's, and its divergence from the advisory is deliberate.
 
