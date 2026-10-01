@@ -11,33 +11,12 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, as_count
 
 logger = logging.getLogger(__name__)
 
 MAX_RESULTS = 200  # Cap matches to prevent excessive result volume
 MAX_FILE_SIZE = 512 * 1024  # 512KB — skip files larger than this
-
-
-def _as_count(value, default: int) -> int:
-    """`value` as a non-negative int, or `default` when it is not one.
-
-    One home for the domain this tool's three numeric arguments share, so the three
-    cannot drift apart. The rule is the read tool's (`emrg/tools/read_tool.py`): junk
-    falls back to the documented default, and it never reaches the search.
-
-    The value comes from a model's tool call, so it is untrusted input. Measured on
-    master `6b417c45`, 2026-10-02: `context_before=-1` is not a smaller window, it is
-    a window starting *after* the match (`range(i + 1, i + 1)`), so a one-match file
-    answered ``Found 1 matches ... one.txt:2:`` with an **empty block body** — a
-    successful result (`error=False`) whose summary claims a match it never shows.
-    `"two"` raised `TypeError` out of `execute()` instead.
-    """
-    try:
-        count = int(value)
-    except (TypeError, ValueError):
-        return default
-    return count if count >= 0 else default
 
 
 class GrepTool(ToolExecutor):
@@ -118,11 +97,11 @@ class GrepTool(ToolExecutor):
         file_glob = arguments.get("glob")
         ignore_case = arguments.get("ignore_case", False)
         # ── The numeric domains, decided where the untrusted value enters ──
-        context_before = _as_count(arguments.get("context_before"), 0)
-        context_after = _as_count(arguments.get("context_after"), 0)
+        context_before = as_count(arguments.get("context_before"), 0, minimum=0)
+        context_after = as_count(arguments.get("context_after"), 0, minimum=0)
         # `max_results` counts matches, so 0 is not a request for none: the schema's
         # default is MAX_RESULTS and 0 has always meant it (`... or MAX_RESULTS`).
-        max_results = _as_count(arguments.get("max_results"), MAX_RESULTS) or MAX_RESULTS
+        max_results = as_count(arguments.get("max_results"), MAX_RESULTS)
 
         if not pattern:
             return ToolResult(

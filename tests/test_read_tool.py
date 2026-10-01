@@ -257,3 +257,119 @@ def test_read_tool_description_mentions_images():
     desc = tool.definition().description
     assert "vision-format image block" in desc
     assert ".png" in desc
+
+
+# ── A count argument's domain is decided where the untrusted value enters ──────
+#
+# Measured on master `256400f4`, 2026-10-02. A negative `line_limit` is not a smaller
+# read, it is a different one: it became the slice bound `all_lines[start:limit]`, which
+# drops the *last* lines, and the continuation hint printed a line number that cannot
+# exist (`start_line=-4`). `start_line=8, line_limit=-2` selected nothing at all and
+# reported `(empty range: lines 8-5 of 11)` — a backwards range. All `error=False`.
+
+import re as _re
+
+
+def _note(content: str) -> str | None:
+    """The continuation hint the caller may copy-paste, or None when absent."""
+    m = _re.search(r"truncated at start_line=(-?\d+)", content)
+    return m.group(1) if m else None
+
+
+@pytest.fixture
+def ten_lines(tmp_path):
+    f = tmp_path / "ten.txt"
+    f.write_text("\n".join(f"L{n}" for n in range(1, 11)) + "\n", encoding="utf-8")
+    return f
+
+
+def _read(path, **kw):
+    return _run(ReadTool().execute({"file_path": str(path), "intent": "probe", **kw}))
+
+
+class TestTheCountArgumentsHaveADomain:
+    """Every count accepts its domain or takes the documented default.
+
+    Both directions matter: a nonsense value must not change the reading compared with
+    the same call without it, and a *valid* value must not be flattened by the same code
+    that rejects the nonsense ones.
+    """
+
+    @pytest.mark.parametrize("limit", [-1, -2, -5, -100])
+    def test_a_negative_line_limit_reads_the_whole_file(self, ten_lines, limit):
+        assert _read(ten_lines, line_limit=limit).content == _read(ten_lines).content
+
+    #: Every shape `read` prints a line number in. A mutation arm is what found this
+    #: list has to be complete: removing the helper's `>= minimum` check did not remove
+    #: the bad number, it moved it from the continuation note
+    #: (``truncated at start_line=0``) to the empty-range message
+    #: (``(empty range: lines 0--2 of 11)``) — and a test that parsed only the first
+    #: shape passed, so the arm read SURVIVED while the defect was still there.
+    _NAMES_A_LINE = (
+        _re.compile(r"start_line=(-?\d+)"),
+        _re.compile(r"empty range: lines (-?\d+)-(-?\d+) of (\d+)"),
+    )
+
+    def _numbers_named(self, content: str) -> list[int]:
+        """Every line number the message states, from every shape it states one in."""
+        found: list[int] = []
+        for pattern in self._NAMES_A_LINE:
+            for m in pattern.finditer(content):
+                found.extend(int(g) for g in m.groups())
+        # `total N lines` is a count, not a line the caller may jump to; it is the last
+        # group of the empty-range pattern and is always >= 1 for a non-empty file.
+        return found
+
+    @pytest.mark.parametrize("kw", [
+        {"line_limit": -1}, {"line_limit": -2}, {"line_limit": -5}, {"line_limit": -100},
+        {"line_limit": "three"}, {"line_limit": 0}, {"line_limit": 2.7},
+        {"start_line": -3}, {"start_line": 0}, {"start_line": "x"},
+        {"start_line": 8, "line_limit": -2}, {"start_line": 3, "line_limit": -1},
+        {"start_line": 99}, {"start_line_byte_offset": -4},
+        {},
+    ])
+    def test_no_message_names_a_line_below_one(self, ten_lines, kw):
+        """The invariant: a line number the caller may use is never < 1, in any shape.
+
+        A call may name no line at all (an untruncated read prints the file and no
+        message) — the invariant is on the numbers *when* one is stated.
+        """
+        content = _read(ten_lines, **kw).content
+        named = self._numbers_named(content)
+        assert all(n >= 1 for n in named), (
+            f"the message at {kw} names a line below 1:\n{content}"
+        )
+
+    @pytest.mark.parametrize("kw", [{"line_limit": -1}, {"line_limit": -5},
+                                    {"start_line": 8, "line_limit": -2},
+                                    {"start_line": 0}])
+    def test_no_range_is_printed_backwards(self, ten_lines, kw):
+        """`(empty range: lines 8-5 of 11)` was reachable before the domain existed."""
+        content = _read(ten_lines, **kw).content
+        for m in _re.finditer(r"empty range: lines (\d+)-(\d+)", content):
+            assert int(m.group(1)) <= int(m.group(2)), content
+
+    @pytest.mark.parametrize("kw", [{"line_limit": -1}, {"line_limit": -5},
+                                    {"line_limit": "three"}, {"line_limit": 0},
+                                    {"start_line": -3}, {"start_line": "x"}])
+    def test_a_nonsense_value_is_the_same_reading_as_no_value(self, ten_lines, kw):
+        assert _read(ten_lines, **kw).content == _read(ten_lines).content
+
+    def test_a_positive_limit_is_still_honoured(self, ten_lines):
+        """The other direction: the domain check must not flatten valid values."""
+        three = _read(ten_lines, line_limit=3)
+        assert _note(three.content) == "4", three.content
+        assert "L3" in three.content and "L4" not in three.content, three.content
+
+    def test_a_start_line_after_the_limit_still_starts_there(self, ten_lines):
+        """`start_line=8, line_limit=-2` used to select nothing at all."""
+        result = _read(ten_lines, start_line=8, line_limit=-2)
+        assert not result.error
+        assert "L8" in result.content, result.content
+        assert "L7" not in result.content, result.content
+
+    def test_the_domain_helper_is_the_only_home(self):
+        """The rule lives in `base`, and both consumers import it rather than respell it."""
+        from emrg.tools import base, grep_tool, read_tool
+        assert read_tool.as_count is base.as_count
+        assert grep_tool.as_count is base.as_count

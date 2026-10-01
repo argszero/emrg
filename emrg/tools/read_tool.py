@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, as_count
 
 logger = logging.getLogger(__name__)
 
@@ -100,28 +100,21 @@ class ReadTool(ToolExecutor):
         file_path = arguments.get("file_path", "")
 
         # ── Resolve start_line: support both start_line (new) and offset (legacy alias) ──
-        raw_start = (arguments.get("start_line")
-                     or arguments.get("offset", 0) or 0)
-        try:
-            start_line = max(1, int(raw_start))
-        except (TypeError, ValueError):
-            start_line = 1
+        start_line = as_count(
+            arguments.get("start_line") or arguments.get("offset", 0) or 0, 1, minimum=1
+        )
 
         # ── Resolve line_limit: support both line_limit (new) and limit (legacy alias) ──
-        raw_limit = arguments.get("line_limit") or arguments.get("limit")
-        line_limit: int | None = None
-        if raw_limit is not None:
-            try:
-                line_limit = int(raw_limit)
-            except (TypeError, ValueError):
-                line_limit = None
+        # A limit of 0 or less is not a smaller read, it is a different one: it became the
+        # slice bound `all_lines[start:limit]`, which drops the *last* lines and printed a
+        # continuation hint naming a line that cannot exist (`start_line=-4`). `minimum=1`
+        # sends 0 and every negative to the default, which is what 0 already did.
+        line_limit = as_count(arguments.get("line_limit") or arguments.get("limit"), None)
 
         # ── Resolve start_line_byte_offset ──
-        raw_byte_off = arguments.get("start_line_byte_offset", 0) or 0
-        try:
-            start_line_byte_offset = max(0, int(raw_byte_off))
-        except (TypeError, ValueError):
-            start_line_byte_offset = 0
+        start_line_byte_offset = as_count(
+            arguments.get("start_line_byte_offset", 0) or 0, 0, minimum=0
+        )
 
         if not file_path:
             return ToolResult(name="read", content="Error: no file_path provided", error=True)
