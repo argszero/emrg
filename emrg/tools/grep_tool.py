@@ -136,6 +136,11 @@ class GrepTool(ToolExecutor):
         block_starts: list[int] = []
         files_searched = 0
         stop = False
+        #: Set when the loop stopped at the result budget rather than at the end of the
+        #: tree. The count is then a **floor**, and the summary has to say so: a number
+        #: produced by a budget reads exactly like a number produced by counting, and
+        #: this is the reading an agent answers "how many places does this happen?" from.
+        search_cut = False
 
         for filepath in files:
             if stop:
@@ -172,6 +177,7 @@ class GrepTool(ToolExecutor):
 
                     if len(results) > max_results * (2 + context_before + context_after):
                         stop = True
+                        search_cut = True
                         break
 
         if not results:
@@ -195,10 +201,28 @@ class GrepTool(ToolExecutor):
         # search without context — asking for context created matches that do not
         # exist, and the inflation grows with the amount of context requested.
         matches_found = len(block_starts)
-        summary = (
-            f"Found {matches_found} matches for '{pattern}' "
-            f"in {root} (searched {files_searched} files):\n\n"
-        )
+        if search_cut:
+            # The second half of the same claim (measured on master `6b417c4`, 2026-10-02):
+            # the loop above stops once the rendered lines pass
+            # ``max_results * (2 + context_before + context_after)`` — i.e. at about
+            # ``max_results`` matches — and the summary printed that number as if it were
+            # the number in the tree. A file holding 4000 matching lines came back as
+            # "Found 11 matches ... (searched 1 files)" with **no** indication that the
+            # search had stopped, so the floor read as a total. It is the same claim this
+            # action's count makes, one cause upstream, and the same reader: an agent
+            # answering "how many places does this happen?" from a budget.
+            summary = (
+                f"Found {matches_found} matches for '{pattern}' in {root}, where the "
+                f"search stopped at its result budget (max_results={max_results}) after "
+                f"{files_searched} file(s) - so this count is a floor and the tree may "
+                f"hold more. Narrow the pattern or the path, or raise max_results, to "
+                f"count them all:\n\n"
+            )
+        else:
+            summary = (
+                f"Found {matches_found} matches for '{pattern}' "
+                f"in {root} (searched {files_searched} files):\n\n"
+            )
 
         # Truncate if too many lines — at a **block boundary**, and the note names the
         # two numbers this actually measured. A cut at ``max_results * 3`` lines lands

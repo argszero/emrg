@@ -269,3 +269,78 @@ class TestTheTruncationNoteNamesWhatItMeasured:
             "a budget smaller than one block printed the notice with no match under it"
         )
         assert payload[-1] not in _headers(payload)
+
+
+class TestTheCountSaysWhenItIsAFloor:
+    """Issue #1805, second cause — the search itself stops at a budget and said nothing.
+
+    ``max_results`` bounds a **line** budget (``max_results * (2 + cb + ca)``, about
+    ``max_results`` matches) and the summary printed the number it reached as if it were
+    the number in the tree. Measured on master `6b417c4`, 2026-10-02: a file holding
+    **4000** matching lines came back as ``Found 11 matches ... (searched 1 files)`` with
+    no indication that the search had stopped — a 364x undercount that reads as a total.
+    """
+
+    LINES = 4000
+    HITS = "HIT"
+
+    def _big_file(self, tmp_path) -> Path:
+        f = tmp_path / "big.txt"
+        f.write_text(f"{self.HITS}\n" * self.LINES, encoding="utf-8")
+        return f
+
+    def _search(self, path: Path, max_results: int = 10, context: int = 0):
+        return _run(GrepTool().execute({
+            "pattern": self.HITS, "path": str(path), "max_results": max_results,
+            "context_before": context, "context_after": context,
+            "intent": "floor probe",
+        }))
+
+    def test_a_capped_search_says_the_count_is_a_floor(self, tmp_path):
+        result = self._search(self._big_file(tmp_path))
+
+        assert "floor" in result.content, (
+            f"{self.LINES} matches in the file, and the summary reported the budget "
+            f"as a total: {result.content.splitlines()[0]}"
+        )
+        assert "max_results=10" in result.content, "the note does not name the budget"
+
+    def test_the_note_and_the_count_name_the_same_number(self, tmp_path):
+        result = self._search(self._big_file(tmp_path))
+        reported = _reported(result.content)
+        named = int(re.search(r"max_results=(\d+)\)", result.content).group(1))
+
+        assert reported == len(_headers(_payload(result.content))), (
+            "the count is not the number of blocks printed"
+        )
+        assert named == 10, "the note names a budget the call did not use"
+        assert reported <= 10 + 1, "the cap is meant to stop the search near max_results"
+
+    def test_a_bigger_budget_finds_more_of_the_same_file(self, tmp_path):
+        """The number was produced by the budget, so raising it must raise the count —
+        this is what a reader tells apart from a real total only if it is said."""
+        f = self._big_file(tmp_path)
+
+        assert _reported(self._search(f, max_results=10).content) < _reported(
+            self._search(f, max_results=50).content
+        )
+
+    def test_an_uncapped_search_keeps_the_plain_summary(self, tmp_path):
+        f = tmp_path / "small.txt"
+        f.write_text("one\nHIT here\ntwo\n", encoding="utf-8")
+
+        result = self._search(f)
+
+        assert "floor" not in result.content
+        assert "(searched 1 files)" in result.content
+        assert _reported(result.content) == 1
+
+    def test_the_floor_note_survives_the_print_truncation(self, tmp_path):
+        """Both notes can be true at once: the search stopped, and the print was cut."""
+        result = self._search(self._big_file(tmp_path), max_results=3, context=2)
+
+        assert "floor" in result.content, "the floor note was lost"
+        assert "output truncated" in result.content, "the print note was lost"
+        assert result.content.index("floor") < result.content.index("output truncated"), (
+            "the summary has to carry its own caveat, not depend on the note at the end"
+        )
