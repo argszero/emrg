@@ -199,7 +199,7 @@ from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
-from emrg.server.rants import append_rant, read_rants
+from emrg.server.rants import RantStoreMissing, append_rant, read_rants
 from emrg.server.scheduler import TaskScheduler
 from emrg.server import logcontext
 
@@ -2924,7 +2924,14 @@ class EmrgServer:
                     "type": "rants_list",
                     "rants": rants,
                 })
-            except OSError as e:
+            except (OSError, RantStoreMissing) as e:
+                # `RantStoreMissing` is a `RuntimeError`, so an `except OSError` would let a
+                # missing queue escape this handler and send **no frame at all** — the same
+                # "the panel is told nothing" failure the legacy-row crash produced, reached
+                # by the other route. Measured 2026-10-02 on this host: `~/.emrg/rants.jsonl`
+                # is absent while the file held 39 rows the day before, which is exactly the
+                # state that used to be answered `No rants match.` — the panel now names it
+                # instead, and the error field is what the client renders.
                 logger.exception("list_rants: failed to read %s", self._rants_log)
                 await self._send(ws, {"type": "rants_list", "rants": [], "error": str(e)})
 

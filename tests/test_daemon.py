@@ -4248,3 +4248,55 @@ def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkey
         "a genuinely completed round no longer stamps the marker the #1114 alarm "
         "measures — the empty-answer guard must not have swallowed it"
     )
+
+
+def test_list_rants_sends_a_frame_when_the_queue_is_not_there(tmp_path, monkeypatch):
+    """A missing queue is answered, not ignored — the panel must not go silent.
+
+    Measured 2026-10-02 on this host: `~/.emrg/rants.jsonl` did not exist, and the reader
+    behind this handler answered that state with an empty list, so the panel rendered the
+    same thing it renders for a host whose rants are all handled. The reader now raises
+    (`rants.RantStoreMissing`) rather than answering, and a `RuntimeError` is not an
+    `OSError` — so the handler's own `except OSError` would let it escape and send **no
+    frame at all**, which is the "the panel is told nothing" failure this half of the file
+    was just fixed for, reached by the other route. Both must therefore be caught, and the
+    frame must carry the reason.
+    """
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    writer = _FakeWriter()
+    assert not (tmp_path / "rants.jsonl").exists()
+
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))  # type: ignore[arg-type]
+
+    frame = _last_frame(writer)
+    assert frame["type"] == "rants_list"
+    assert frame["rants"] == []
+    assert frame.get("error"), (
+        "an empty list with no error is the reading this test exists to refuse: the "
+        f"panel cannot tell it from a queue with nothing pending ({frame})"
+    )
+    assert "rants.jsonl" in frame["error"], (
+        f"the reason has to name the store it could not read ({frame})"
+    )
+
+
+def test_list_rants_is_still_an_empty_answer_over_an_empty_queue(tmp_path, monkeypatch):
+    """The discriminating pair: an existing, empty queue is a reading, not a fault."""
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    (tmp_path / "rants.jsonl").write_text("", encoding="utf-8")
+    server = _make_server()
+    writer = _FakeWriter()
+
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))  # type: ignore[arg-type]
+
+    frame = _last_frame(writer)
+    assert frame["type"] == "rants_list"
+    assert frame["rants"] == []
+    assert not frame.get("error"), (
+        f"an empty queue answered as a fault is the same collapse one direction over ({frame})"
+    )

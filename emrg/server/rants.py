@@ -76,6 +76,41 @@ class RantRead(NamedTuple):
     unreadable: tuple[int, ...]
 
 
+class RantStoreMissing(RuntimeError):
+    """The queue file is not there — which is **not** the same as a queue with no rants.
+
+    A file that exists and holds no rows answers "no rants" honestly: the store was read
+    and it was empty. A file that is *missing* answers nothing, and the two used to be
+    collapsed into that one answer here. Measured 2026-10-02 on this host: `~/.emrg/rants.jsonl`
+    did not exist, and `submit_rant(action="list")` — the reading the evolution prompt
+    mandates for the queue — replied `No rants match.`, while the sibling reader
+    `scripts/check-issue-links.py::load_rant_rows` raised for that identical state and its
+    caller reported *unmeasurable* (exit 2). One file, two readers, two opposite answers,
+    each written down as the rule: the guard's docstring said an empty answer here "would
+    print 'no rants' on a host whose ledger simply is not there, a confident wrong verdict
+    about a queue that may be fine", and this module's said the opposite.
+
+    The cost is asymmetric, which is why the guard's rule is the one kept: a missing store
+    answered as an empty queue tells a cycle "nothing pending" — the honest-looking wrong
+    "nothing to evolve" that `review-queue.py` exists to prevent — and the host never learns
+    the queue is gone (on this host it had held 39 rows the day before). Answered as
+    unmeasurable, a genuinely fresh host is told the store is not there and loses nothing.
+
+    The write path is deliberately *not* strict: `append_rant` must be able to create the
+    file, so its pre-read goes through `_read_for_write`, which states that difference
+    where it is made rather than by an `if` at the call site.
+    """
+
+    def __init__(self, rants_log: Path, cause: OSError | None = None):
+        self.rants_log = rants_log
+        self.cause = cause
+        reason = f": {cause}" if cause else " (it does not exist)"
+        super().__init__(
+            f"the rant queue could not be read ({rants_log}){reason} - this is not "
+            "\"no rants\": a store that is not there has not answered anything"
+        )
+
+
 def read_rants(rants_log: Path) -> RantRead:
     """Read the queue, reporting the lines that did not become entries.
 
@@ -87,29 +122,53 @@ def read_rants(rants_log: Path) -> RantRead:
     readers, and the second one crashed where the first tolerated — so the rule lives
     here and the panel reads through it.
 
-    :param rants_log: the queue file; a missing file reads as no rants, not as an error.
+    A store that is missing or unreadable **raises** rather than reading as empty: the
+    question every caller asks is what the queue *holds*, and a store that is not there
+    leaves it unanswered. An empty answer would be indistinguishable from a queue whose
+    rants are all handled, which is a verdict no reading supports.
+
+    :param rants_log: the queue file.
+    :raises RantStoreMissing: the file is not there, or cannot be opened.
     :returns: the entries and the unreadable line numbers.
     """
     rants: list[dict] = []
     unreadable: list[int] = []
-    if not rants_log.exists():
-        return RantRead(rants, ())
-    with open(rants_log, encoding="utf-8") as f:
-        for number, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                unreadable.append(number)
-                continue
-            entry = _normalize_rant(raw)
-            if entry is None:
-                unreadable.append(number)
-                continue
-            rants.append(entry)
+    try:
+        with open(rants_log, encoding="utf-8") as f:
+            for number, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    unreadable.append(number)
+                    continue
+                entry = _normalize_rant(raw)
+                if entry is None:
+                    unreadable.append(number)
+                    continue
+                rants.append(entry)
+    except OSError as exc:
+        # Missing and unreadable are one state for this reader: neither one answered.
+        raise RantStoreMissing(rants_log, exc) from exc
     return RantRead(rants, tuple(unreadable))
+
+
+def _read_for_write(rants_log: Path) -> RantRead:
+    """The write path's pre-read: a store that is not there yet holds no rows to keep.
+
+    The only caller is `append_rant`, whose whole job is to create the file when the host
+    submits the first rant — so "missing" here means "nothing to carry forward", not
+    "nothing was measured". A store that exists but cannot be *opened* still raises: that
+    one is never a licence to overwrite whatever is in it.
+    """
+    try:
+        return read_rants(rants_log)
+    except RantStoreMissing as exc:
+        if isinstance(exc.cause, FileNotFoundError):
+            return RantRead([], ())
+        raise
 
 
 def _write_rants(rants_log: Path, rants: list[dict]) -> None:
@@ -148,7 +207,7 @@ def append_rant(rants_log: Path, message: str, project: str = "") -> int:
     # message last, so status fields stay visible when scanning the file
     entry["message"] = message
 
-    rants = read_rants(rants_log).rants
+    rants = _read_for_write(rants_log).rants
     rants.append(entry)
     _write_rants(rants_log, rants)
 

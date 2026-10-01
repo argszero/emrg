@@ -11,13 +11,16 @@ curates rants.jsonl through the tool instead of hand-written rewrites.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
 from emrg.server.rants import (
+    RantStoreMissing,
     append_rant,
     cleanup_rants,
     list_rants,
+    read_rants,
     update_rant,
 )
 from emrg.tools.submit_rant_tool import SubmitRantTool
@@ -719,17 +722,23 @@ def test_read_rants_reports_the_lines_that_did_not_become_entries(tmp_path):
 
 
 def test_read_rants_is_complete_when_every_line_is_a_rant(tmp_path):
-    """The other state: nothing unreadable, and a missing file is not a fault either.
+    """The other state: nothing unreadable.
 
     Without this leg the note could fire always and the assertions above would still
     pass — a reading that reports a fault unconditionally is not a reading.
+
+    This test used to end `assert read_rants(absent).unreadable == ()` under the sentence
+    "a missing file is not a fault either" — the wrong rule, pinned. A file that is not
+    there has not answered the question, and answering it `()` is what let the tool print
+    `No rants match.` over a queue it never read (measured 2026-10-02; the file on this
+    host had held 39 rows the day before). The missing-store case is now its own test in
+    `TestAStoreThatIsNotThereIsNotAnEmptyQueue`, in both directions.
     """
     from emrg.server.rants import read_rants
 
     f = tmp_path / "rants.jsonl"
     f.write_text(json.dumps(_canonical("only rant")) + "\n", encoding="utf-8")
     assert read_rants(f).unreadable == ()
-    assert read_rants(tmp_path / "absent.jsonl").unreadable == ()
 
 
 def test_a_partial_read_says_so_and_a_complete_one_does_not(tmp_path, monkeypatch):
@@ -801,3 +810,162 @@ def test_a_write_that_drops_unread_lines_says_so_and_names_them(tmp_path, monkey
     assert all(json.loads(line) for line in remaining), (
         "every remaining line is a rant — so the note is about a line that really went"
     )
+
+
+class TestAStoreThatIsNotThereIsNotAnEmptyQueue:
+    """`~/.emrg/rants.jsonl` missing is a *state*, and it is not "no rants".
+
+    Measured 2026-10-02 on this host: the file did not exist (it had held 39 rows the day
+    before) and `submit_rant(action="list")` — the reading the evolution prompt mandates
+    for the queue — answered `No rants match.` A cycle reading only the queue would have
+    recorded a clean, empty, confident "nothing pending" about a queue that had answered
+    nothing at all. The sibling reader `scripts/check-issue-links.py::load_rant_rows` was
+    asked the same question about the same file and raised, and its caller reported
+    *unmeasurable* (exit 2) — one file, two readers, two opposite answers, each written
+    down as the rule.
+
+    Both directions are pinned here, because either one alone is satisfiable by a reader
+    that is simply wrong: a missing store must be unreadable, and an existing-but-empty
+    store must still read as an empty queue (a fresh host, before its first rant).
+    """
+
+    def test_a_missing_store_is_unreadable_not_empty(self, tmp_path: Path) -> None:
+        from emrg.server.rants import RantStoreMissing
+
+        absent = tmp_path / "rants.jsonl"
+        assert not absent.exists()
+        with pytest.raises(RantStoreMissing) as caught:
+            read_rants(absent)
+        # The reading has to name what it could not read, or the caller cannot act.
+        assert str(absent) in str(caught.value)
+
+    def test_an_empty_store_is_still_read_as_an_empty_queue(self, tmp_path: Path) -> None:
+        """The other leg: the fix must not turn a fresh host into a fault.
+
+        An existing, empty file *has* answered — it holds no rows — and that is the state
+        a host is in before it submits its first rant.
+        """
+        empty = tmp_path / "rants.jsonl"
+        empty.write_text("", encoding="utf-8")
+        assert read_rants(empty).rants == []
+        assert read_rants(empty).unreadable == ()
+
+    def test_a_store_that_exists_but_cannot_be_opened_is_unreadable(
+        self, tmp_path: Path
+    ) -> None:
+        """A directory in the file's place answers nothing either — and must not be read
+        as an empty queue, which would let a later write treat it as "nothing to keep"."""
+        from emrg.server.rants import RantStoreMissing
+
+        wrong_shape = tmp_path / "rants.jsonl"
+        wrong_shape.mkdir()
+        with pytest.raises(RantStoreMissing):
+            read_rants(wrong_shape)
+
+    @pytest.mark.parametrize("call", ["list", "cleanup"])
+    def test_the_read_apis_report_a_missing_store_rather_than_answering(
+        self, tmp_path: Path, call: str
+    ) -> None:
+        """`list_rants` and `cleanup_rants` are the two the tool calls without a guard of
+        their own; both must carry the fault out rather than swallow it."""
+        from emrg.server.rants import RantStoreMissing
+
+        absent = tmp_path / "rants.jsonl"
+        with pytest.raises(RantStoreMissing):
+            list_rants(absent) if call == "list" else cleanup_rants(absent)
+
+    def test_update_says_the_store_is_missing_not_that_the_rant_is(
+        self, tmp_path: Path
+    ) -> None:
+        """`rant not found: <ts>` is a claim about the queue's contents. Over a store that
+        is not there it is a claim nothing supports."""
+        from emrg.server.rants import RantStoreMissing
+
+        with pytest.raises(RantStoreMissing):
+            update_rant(tmp_path / "rants.jsonl", "2026-08-18T10:00:00+08:00",
+                        status="in_progress")
+
+    def test_the_write_path_still_creates_a_store_that_is_not_there(
+        self, tmp_path: Path
+    ) -> None:
+        """The fix must not cost the host the ability to submit the first rant ever."""
+        absent = tmp_path / "rants.jsonl"
+        assert append_rant(absent, "the host's first rant", "emrg") == 1
+        assert absent.exists()
+        assert [r["message"] for r in read_rants(absent).rants] == ["the host's first rant"]
+
+    def test_the_tool_does_not_answer_no_rants_over_a_missing_store(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """End to end through the action the prompt mandates."""
+        import asyncio
+
+        monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+        absent = tmp_path / "rants.jsonl"
+        assert not absent.exists()
+
+        result = asyncio.run(SubmitRantTool().execute({"action": "list"}))
+
+        assert result.error is True, (
+            "an unmeasurable queue must not be reported as a successful reading: "
+            f"{result.content}"
+        )
+        assert "No rants match." not in result.content, (
+            "the empty answer is the defect this pins:\n" + result.content
+        )
+        assert str(absent) in result.content, (
+            "the answer has to name the store it could not read:\n" + result.content
+        )
+
+    def test_the_tool_still_answers_no_rants_over_an_empty_store(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The discriminating pair for the test above — without it, a tool that failed on
+        every read would pass just as well."""
+        import asyncio
+
+        monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+        (tmp_path / "rants.jsonl").write_text("", encoding="utf-8")
+
+        result = asyncio.run(SubmitRantTool().execute({"action": "list"}))
+
+        assert result.error is False
+        assert "No rants match." in result.content
+
+    def test_the_two_readers_of_the_queue_agree_on_both_states(self, tmp_path: Path) -> None:
+        """The two homes of the rule, asked the same questions about the same file.
+
+        This is the assertion that keeps them from drifting apart again: the guard that
+        reads the queue for the link check and the module that reads it for the tool used
+        to answer a missing store differently, and each said so in a docstring as though
+        it were settled. A shared answer is the only thing that makes one of them
+        redundant rather than a second opinion.
+        """
+        import importlib.util
+        import sys
+
+        spec = importlib.util.spec_from_file_location(
+            "check_issue_links_probe", Path(__file__).resolve().parent.parent
+            / "scripts" / "check-issue-links.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        # Registered before exec: the module defines dataclasses, and `dataclasses`
+        # resolves string annotations through `sys.modules[cls.__module__]`, which is
+        # absent for a module that was never registered (measured 2026-10-02: the first
+        # cut of this test raised `AttributeError: 'NoneType' object has no attribute
+        # '__dict__'` out of the dataclass machinery, not out of the code under test).
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+
+        absent = tmp_path / "rants.jsonl"
+        with pytest.raises(Exception) as guard_says:
+            mod.load_rant_rows(absent)
+        with pytest.raises(Exception) as module_says:
+            read_rants(absent)
+        assert type(guard_says.value).__name__ == "RuntimeError"
+        assert type(module_says.value).__name__ == "RantStoreMissing"
+
+        empty = tmp_path / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+        assert mod.load_rant_rows(empty) == []
+        assert read_rants(empty).rants == []
