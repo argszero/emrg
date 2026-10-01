@@ -223,6 +223,78 @@ describe("TranscriptView", () => {
     expect(output).not.toHaveClass("hidden");
   });
 
+  it("折叠行 = 工具名称 + intent；展开 = 名称/输入/输出三段（rant 2026-09-30T09:17:54 → #1787）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleToolStart(
+      {
+        tool_call_id: "t1",
+        tool_name: "bash",
+        request_id: "r1",
+        intent: "check config",
+        arguments: { command: "ls -la", intent: "check config" },
+      },
+      "s1",
+    );
+    store.handleToolEnd({ tool_call_id: "t1", tool_name: "bash", elapsed: 0.4, content: "out" }, "s1");
+    const { container } = setup(store, "s1");
+    const row = container.querySelector(".tool-row")!;
+
+    // 折叠行本身就该看得见名称与 intent（宿主裁定：两端一致）
+    expect(row.querySelector(".tool-name")).toHaveTextContent("bash");
+    expect(row.querySelector(".tool-intent")).toHaveTextContent("check config");
+
+    // 面板默认隐藏，但三段都在（标题文案来自字典，与 TUI 同语）
+    const output = container.querySelector(".tool-output")!;
+    expect(output).toHaveClass("hidden");
+    const titles = [...output.querySelectorAll(".tool-detail-title")].map((e) => e.textContent);
+    expect(titles).toEqual(["名称", "输入", "输出"]);
+    const bodies = [...output.querySelectorAll(".tool-detail-body")].map((e) => e.textContent);
+    expect(bodies[0]).toBe("bash");
+    expect(bodies[1]).toContain('"command": "ls -la"');
+    expect(bodies[2]).toContain("out");
+
+    // 点击行 → 展开（同时挂上 expanded，chevron 规则不再是死代码）
+    act(() => {
+      (row as HTMLElement).click();
+    });
+    expect(output).not.toHaveClass("hidden");
+    expect(row).toHaveClass("expanded");
+  });
+
+  it("无入参的工具行不渲染「输入」段（daemon 对空载荷发 {}，画成一段噪音不如不画）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleToolStart(
+      { tool_call_id: "t1", tool_name: "read", request_id: "r1", arguments: {} },
+      "s1",
+    );
+    store.handleToolEnd({ tool_call_id: "t1", tool_name: "read", elapsed: 0.1, content: "body" }, "s1");
+    const { container } = setup(store, "s1");
+    const titles = [...container.querySelectorAll(".tool-detail-title")].map((e) => e.textContent);
+    expect(titles).toEqual(["名称", "输出"]);
+  });
+
+  it("入参超 2000 字沿用同一套截断，展开全文按钮同时服务输入与输出", () => {
+    const long = `{"command":"x${"y".repeat(2500)}"}`;
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleToolStart(
+      { tool_call_id: "t1", tool_name: "bash", request_id: "r1", arguments: long },
+      "s1",
+    );
+    store.handleToolEnd({ tool_call_id: "t1", tool_name: "bash", content: "out" }, "s1");
+    const { container } = setup(store, "s1");
+    const body = container.querySelectorAll(".tool-detail-body")[1]!;
+    expect(body.textContent!.length).toBeLessThan(2100);
+    expect(body.textContent!.endsWith("…")).toBe(true);
+    // 展开全文后完整（输入自身超限，输出没超——按钮不能只认输出）
+    const btn = container.querySelector(".tool-expand-btn")!;
+    act(() => {
+      (btn as HTMLElement).click();
+    });
+    const full = container.querySelectorAll(".tool-detail-body")[1]!;
+    expect(full.textContent!.length).toBeGreaterThan(2500);
+    expect(full.textContent!.endsWith("…")).toBe(false);
+  });
+
   it("失败工具行：failed label（tool.failText）且无耗时", () => {
     const store = createTranscriptStore({ t: (k) => k });
     store.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1" }, "s1");

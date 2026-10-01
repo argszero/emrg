@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createTranscriptStore,
+  formatToolArguments,
   type AssistantEntry,
   type ToolGroup,
   type TranscriptEntry,
@@ -307,5 +308,57 @@ describe("Composer 草稿与主版本解耦（#1100 次要项：击键不重渲�
     s.setComposerDraft("d", "s1");
     expect(s.getVersion()).toBe(1);
     expect(s.getDraftVersion()).toBe(1);
+  });
+});
+
+/**
+ * rant 2026-09-30T09:17:54 → #1787（Part 2/2）：工具入参此前在 handleToolStart 被丢掉，
+ * 于是 GUI 的展开详情里没有「输入」可看。这两组测试钉住「存下来」与「能渲染」两件事，
+ * 两者缺一，视图那一段就只能是空的。
+ */
+describe("工具入参：卡片持有 + 可读呈现（#1787）", () => {
+  it("handleToolStart 把 arguments 存到行上（不再丢弃）", () => {
+    const s = store();
+    s.handleToolStart(
+      {
+        tool_call_id: "t1",
+        tool_name: "bash",
+        request_id: "r1",
+        intent: "check config",
+        arguments: { command: "ls -la", intent: "check config" },
+      },
+      "s1",
+    );
+    const entry = (s.getEntries("s1") as TranscriptEntry[])[0];
+    expect(entry.kind).toBe("tool-row");
+    const row = (entry as { row: ToolRow }).row;
+    expect(row.toolName).toBe("bash");
+    expect(row.arguments).toEqual({ command: "ls -la", intent: "check config" });
+  });
+
+  it("无 arguments 的两条来路都不炸（缺省 undefined）", () => {
+    const s = store();
+    s.handleToolStart({ tool_call_id: "t1", tool_name: "read", request_id: "r1" }, "s1");
+    const row = ((s.getEntries("s1") as TranscriptEntry[])[0] as { row: ToolRow }).row;
+    expect(row.arguments).toBeUndefined();
+    expect(formatToolArguments(row.arguments)).toBe("");
+  });
+
+  it("实时的对象入参 → 缩进 JSON", () => {
+    expect(formatToolArguments({ a: 1, b: "x" })).toBe('{\n  "a": 1,\n  "b": "x"\n}');
+  });
+
+  it("回放的 JSON 字符串入参 → 解析后缩进（与实时同一形态）", () => {
+    expect(formatToolArguments('{"a":1,"b":"x"}')).toBe('{\n  "a": 1,\n  "b": "x"\n}');
+  });
+
+  it("截断/非法 JSON 的字符串 → 原样返回，不让一条坏记录把整屏拖垮", () => {
+    expect(formatToolArguments('{"a": 1, "b"')).toBe('{"a": 1, "b"');
+  });
+
+  it("undefined / null / 空串 → 空串（视图据此不渲染「输入」段）", () => {
+    expect(formatToolArguments(undefined)).toBe("");
+    expect(formatToolArguments(null)).toBe("");
+    expect(formatToolArguments("   ")).toBe("");
   });
 });
