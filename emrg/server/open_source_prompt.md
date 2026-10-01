@@ -170,9 +170,7 @@ If the history is silent or ambiguous, re-check reality (`gh pr list --author "@
 
 **Rants are the host's development work orders.** A rant whose `project` field equals this task's `config.project` (tasks.yml) is a development instruction for THIS repository.
 
-```bash
-cat ~/.emrg/rants.jsonl 2>/dev/null || echo "[no rants.jsonl — skip rant scan]"
-```
+**The queue is read through the tool — `submit_rant(action="list")` — not by opening `~/.emrg/rants.jsonl`.** The tool is the file's reader: it renders every row as `timestamp | project | status | progress | completed` plus the message, and it converts the legacy array rows the raw file still holds. A recipe that opens the file hands you rows whose field order is the store's to interpret, not the reader's — and the filter below reads the `project` field, which the tool's row spells out.
 
 Filter rules (aligned with evolution_prompt.md):
 

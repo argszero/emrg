@@ -120,9 +120,7 @@ Durable lessons (a direction that proved barren, a policy reading the journal se
 
 **Rants are the host's work orders.** A rant whose `project` field equals this task's `config.project` (tasks.yml) is an instruction for THIS journal.
 
-```bash
-cat ~/.emrg/rants.jsonl 2>/dev/null || echo "[no rants.jsonl — skip rant scan]"
-```
+**The queue is read through the tool — `submit_rant(action="list")` — not by opening `~/.emrg/rants.jsonl`.** The tool is the file's reader: it renders every row as `timestamp | project | status | progress | completed` plus the message, and it converts the legacy array rows the raw file still holds. A recipe that opens the file hands you rows whose field order is the store's to interpret, not the reader's.
 
 Filter rules (same as open-source tasks):
 - Match rant's `project` against exactly `{{ task.project }}` — equal counts, anything else does not
