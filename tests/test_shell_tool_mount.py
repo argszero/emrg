@@ -176,9 +176,44 @@ def test_glob_receives_the_cwd_too(injected, tmp_path):
     assert injected("glob", {"pattern": "*.py"})["workdir"] == str(tmp_path)
 
 
+def test_glob_keeps_a_workdir_the_model_named(injected, tmp_path):
+    """The other direction, and the one that was missing.
+
+    ``glob``'s schema advertises ``workdir`` ("Working directory for the pattern
+    (default: project root)"), so a caller may scope a search with it. That was
+    true until ``8246b691`` mounted the process-boundary bash tool and dropped the
+    ``and "workdir" not in args`` from the line the two tools shared — whose
+    comment read "Inject session cwd as default for filesystem tools" — leaving
+    glob pinned like a shell tool. A model that asked about ``src`` was answered
+    about the session root instead, in the shape of a real answer.
+    """
+    args = injected("glob", {"pattern": "*.py", "workdir": "/elsewhere"})
+    assert args["workdir"] == "/elsewhere"
+
+
 def test_grep_receives_the_cwd_only_as_a_default(injected, tmp_path):
     assert injected("grep", {"pattern": "x"})["path"] == str(tmp_path)
     assert injected("grep", {"pattern": "x", "path": "/elsewhere"})["path"] == "/elsewhere"
+
+
+def test_the_pinned_class_is_the_tools_that_run_a_command(injected, tmp_path):
+    """What separates the two classes is what the value decides, not which tool it is.
+
+    A shell tool's ``workdir`` is the directory it runs in and may write under, so
+    the model cannot name it. A discovery tool's is a preference. Stated as one
+    assertion over both so a future tool cannot be added to either group by
+    adjacency — which is exactly how ``glob`` lost the default.
+    """
+    from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
+
+    for tool in sorted(SHELL_TOOL_NAMES):
+        assert injected(tool, {"command": "ls", "workdir": "/named"})["workdir"] == str(tmp_path), (
+            f"{tool} runs a command, so its workdir is pinned"
+        )
+    for tool, key in (("glob", "workdir"), ("grep", "path")):
+        assert injected(tool, {key: "/named"})[key] == "/named", (
+            f"{tool} reads only, so what it was given stands"
+        )
 
 
 def test_the_tier_comes_from_the_task_and_carries_the_boundary_with_it(injected, tmp_path):
