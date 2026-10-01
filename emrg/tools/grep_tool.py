@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.tools import ignored_paths
 from emrg.tools.base import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,8 @@ class GrepTool(ToolExecutor):
                 "Supports -i (case-insensitive), context lines before/after matches, "
                 "file glob filtering, and output truncation caps. "
                 "Use this instead of 'bash grep' for cross-platform pattern search "
-                "with automatic binary/hidden file skipping."
+                "with automatic binary/hidden file skipping — a hidden path you name "
+                "in 'glob' (or in 'path') is still searched."
             ),
             parameters={
                 "type": "object",
@@ -195,17 +197,21 @@ class GrepTool(ToolExecutor):
 
     @staticmethod
     def _collect_files(root: Path, file_glob: str | None) -> list[Path]:
-        """Collect files recursively, skipping hidden/ignored dirs."""
-        skip_dirs = {"__pycache__", "node_modules", ".git", ".venv"}
+        """Collect files recursively, skipping what is noise for this walk.
+
+        Which paths those are is one rule, in `emrg/tools/ignored_paths.py`, read
+        here and by `glob` — it was two copies of the same two clauses before, and
+        they had already drifted from what a caller can name (measured 2026-10-02:
+        `glob('.gitignore')` answered "No files matched" for a file at the root
+        while `read('.gitignore')` returned it). The file's own glob is what the
+        rule answers about, because that is what the caller spelled.
+        """
         glob_pattern = file_glob or "*"
 
         # Filter first (cheap), then sort (expensive on large repos)
         files: list[Path] = []
         for path in root.rglob(glob_pattern):
-            parts = path.relative_to(root).parts
-            if any(p.startswith(".") and p not in (".emrg",) for p in parts):
-                continue
-            if any(p in skip_dirs for p in parts):
+            if ignored_paths.is_ignored(path.relative_to(root).parts, glob_pattern):
                 continue
             if path.is_file():
                 files.append(path)

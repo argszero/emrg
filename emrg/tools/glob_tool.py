@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.tools import ignored_paths
 from emrg.tools.base import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,9 @@ class GlobTool(ToolExecutor):
                 "Use this to discover files in a project by name pattern — e.g., "
                 "'**/*.py' for all Python files, 'src/**/*.ts' for TypeScript, "
                 "'**/*test*' for test files. "
+                "Hidden paths are skipped unless the pattern names them — "
+                "'.github/workflows/*.yml' works, while a wildcard such as '**/*' "
+                "does not descend into them. "
                 "Results are capped at 500 matches, sorted by path."
             ),
             parameters={
@@ -78,7 +82,7 @@ class GlobTool(ToolExecutor):
         try:
             matches = sorted(
                 p for p in cwd.glob(pattern)
-                if not self._is_hidden_or_ignored(p, cwd)
+                if not ignored_paths.is_ignored(p.relative_to(cwd).parts, pattern)
             )
         except (OSError, ValueError) as e:
             return ToolResult(
@@ -107,16 +111,3 @@ class GlobTool(ToolExecutor):
             )
 
         return ToolResult(name="glob", content=result)
-
-    @staticmethod
-    def _is_hidden_or_ignored(path: Path, root: Path) -> bool:
-        """Skip hidden files/dirs and common ignore paths."""
-        # Skip hidden files/dirs (starting with .)
-        parts = path.relative_to(root).parts
-        for part in parts:
-            if part.startswith(".") and part not in (".emrg",):
-                return True
-        # Skip common noise
-        if any(p in parts for p in ("__pycache__", "node_modules", ".git", ".venv")):
-            return True
-        return False
