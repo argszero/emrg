@@ -76,6 +76,45 @@ def _truncate_index_title(title: str, max_len: int | None = None) -> str:
     return title[: max_len - 1] + "…"
 
 
+# A run of whitespace, a line break included — every character that cannot
+# appear in a line of a file.
+_ROW_LABEL_WHITESPACE = re.compile(r"\s+")
+
+
+def _index_row_label(title: str) -> str:
+    """The label an index row can carry: one line, and one delimiter.
+
+    A row is a **line** of the index, and both readers of one — ``MemoryIndex.from_text``
+    and ``scripts/check-memory-index.py`` — take the target from the first ``](``
+    after the opening ``[``. A title is neither of those: it is whatever the
+    memory's first heading says, so it may hold a line break or the delimiter
+    itself, and either makes the row unreadable to the readers the index exists
+    for. Measured 2026-10-01 on a store this module's own API built:
+
+    * a title holding a newline wrote the row as **two lines**. ``MemoryIndex``
+      parsed the index as **zero entries** — the memory the index exists to point
+      at was gone from it — while ``is_index_row`` still counted the first line
+      as a row, so ``scripts/check-memory-index.py`` read ``row links 0 - no row
+      carries a ](target) link`` and **passed, rc=0**. The file also gained a
+      line, and the line count is the number the hygiene rule is stated in; a
+      later ``update()`` of that same memory then appended a second row naming
+      ``project-line1.md``, a file that does not exist.
+    * a title holding ``](`` parsed its row with the filename
+      ``' in it](project-has-in-it.md'`` — not a file — so the row named nothing
+      and the guard exited 1. And because ``add_entry`` de-duplicates by the
+      **real** filename while the stored row parsed to a different one, every
+      later write appended another identical row: measured one memory, two rows.
+
+    Both are the writer's to prevent — the label is ours to render, and being one
+    line with one delimiter is what makes a row renderable and readable at all.
+    """
+    label = _ROW_LABEL_WHITESPACE.sub(" ", title).strip()
+    # Break the *sequence*, not the bracket: escaping `]` alone leaves `](` in
+    # the label (backslash, bracket, paren — the same two characters both
+    # readers search for). `\(` is a Markdown escape, and renders as `(`.
+    return label.replace("](", "]\\(")
+
+
 # A frontmatter line that declares a top-level key. Indented lines (a nested
 # value or a continuation) and comments deliberately do not match: they are not
 # keys, so a save must carry them through untouched.
@@ -793,7 +832,13 @@ class MemoryIndex:
         rec = f"rec: {_short_date(e.created_at)}" if e.created_at else ""
         evt = f"evt: {_short_date(e.event_at)}" if e.event_at else ""
         date_part = ", ".join(p for p in [rec, evt] if p)
-        line = f"- [{e.title}]({e.filename}){status_tag} — {date_part}"
+        # The label, not the title: a title may hold a line break or the row's
+        # own delimiter, and a row carrying either is a row neither reader can
+        # read (`_index_row_label` has the measurements). A title that renders to
+        # nothing falls back to the filename, because an empty `[]` is not a row
+        # `MemoryIndex.from_text` parses either.
+        label = _index_row_label(e.title) or e.filename
+        line = f"- [{label}]({e.filename}){status_tag} — {date_part}"
         if len(line) <= INDEX_TITLE_MAX_CHARS:
             return line
         # Rant 2026-08-23T08:04:26 — render-time fallback for legacy dirty
@@ -801,12 +846,12 @@ class MemoryIndex:
         # so the detail file stays reachable.
         logger.warning(
             "memory index line exceeds %d chars (title=%d chars) — truncating",
-            INDEX_TITLE_MAX_CHARS, len(e.title),
+            INDEX_TITLE_MAX_CHARS, len(label),
         )
         other = len(f"- []({e.filename}){status_tag} — {date_part}")
         budget = max(1, INDEX_TITLE_MAX_CHARS - other)
         return (
-            f"- [{_truncate_index_title(e.title, budget)}]"
+            f"- [{_truncate_index_title(label, budget)}]"
             f"({e.filename}){status_tag} — {date_part}"
         )
 
