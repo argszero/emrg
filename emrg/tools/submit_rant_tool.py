@@ -30,6 +30,7 @@ from emrg.server.rants import (
     append_rant,
     cleanup_rants,
     list_rants,
+    read_rants,
     update_rant,
 )
 from emrg.server.tool_types import ToolDefinition, ToolResult
@@ -241,6 +242,12 @@ class SubmitRantTool(ToolExecutor):
                 ),
                 error=True,
             )
+        # Measured *before* the write, because the write is what destroys them: the queue
+        # is rewritten whole from what the read could see, so a line the read could not
+        # parse is gone once `append_rant` returns. Measured 2026-10-01: two such lines on
+        # disk before the append, absent after it, with the tool reporting only the new
+        # count.
+        unread = self._unread_note(destroyed=True)
         try:
             count = append_rant(self._rants_log(), message, project)
         except Exception as e:  # noqa: BLE001 — tool errors must never crash the loop
@@ -267,7 +274,52 @@ class SubmitRantTool(ToolExecutor):
             warning = ""
         return ToolResult(
             name="submit_rant",
-            content=f"Rant recorded{target}. Total rants: {count}.{warning}",
+            content=f"Rant recorded{target}. Total rants: {count}.{warning}{unread}",
+        )
+
+    def _unread_note(self, destroyed: bool) -> str:
+        """What the queue's read could not read, as a note for the caller — or "".
+
+        The read of this file is tolerant on purpose (a corrupt line must not break the
+        queue), so a read can come back with fewer rants than the file holds and say
+        nothing. `read_rants` reports the line numbers instead, and this is where the
+        caller is told. Two wordings, because the consequence differs:
+
+        * **`destroyed=True`** — a write is about to rewrite the file whole from what was
+          read, so those lines are dropped by *this* call. Measured 2026-10-01: two
+          unreadable lines on disk before `append_rant`, gone after it, with nothing
+          printed either way.
+        * **`destroyed=False`** — a read, so the list the caller is about to see is
+          partial. This is the wording that keeps `No rants match.` from standing for a
+          file whose every line failed to parse.
+
+        Non-blocking, like the unregistered-project warning beside it: the note names the
+        lines and the remedy, and the action it describes has already happened.
+
+        :param destroyed: whether the caller is writing (True) or only reading (False).
+        :returns: the note, ending in a newline, or an empty string when the read was
+            complete.
+        """
+        try:
+            unreadable = read_rants(self._rants_log()).unreadable
+        except Exception:  # noqa: BLE001 — a note must never break the action it annotates
+            return ""
+        if not unreadable:
+            return ""
+        lines = ", ".join(str(n) for n in unreadable)
+        count = len(unreadable)
+        if destroyed:
+            return (
+                f"\n⚠ rants.jsonl line(s) {lines} could not be read as a rant "
+                f"({count} line(s)). This write rewrites the file whole from what the "
+                f"read could see, so it has just dropped them — repair or remove them "
+                f"before the next write if they matter."
+            )
+        return (
+            f"\n⚠ rants.jsonl line(s) {lines} could not be read as a rant ({count} "
+            f"line(s)), so this reading is partial: it does not cover them, and their "
+            f"text is not shown above. A write (append/update/cleanup) will drop them — "
+            f"repair or remove them to keep them."
         )
 
     def _registered_project_names(self) -> list[str]:
@@ -316,6 +368,11 @@ class SubmitRantTool(ToolExecutor):
                     "No rants match."
                     + (f" (status={status})" if status else "")
                     + (f" (project={project})" if project else "")
+                    # The most misleading answer this action can give: a queue read
+                    # through a tolerant reader prints this for a file whose every line
+                    # failed to parse. The note says which lines were not read, so the
+                    # sentence never stands for a reading that did not happen.
+                    + self._unread_note(destroyed=False)
                 ),
             )
         # The message is the rant: `[…][:100]` used to be all of it that this action
@@ -381,7 +438,14 @@ class SubmitRantTool(ToolExecutor):
                 lines.append(_indented(progress, "      "))
         return ToolResult(
             name="submit_rant",
-            content=f"{len(rants)} rant(s):\n" + "\n".join(lines),
+            # The note goes on **both** answers, because a partial read is misleading in
+            # both: the empty case is where it is most misleading (`No rants match.` over a
+            # file whose every line failed to parse), and this one is where a reader is
+            # most likely to trust the row count as the queue. Measured 2026-10-01, the
+            # first cut of this change put it only on the empty branch: a queue with one
+            # readable rant and two unreadable lines printed the one row and said nothing.
+            content=f"{len(rants)} rant(s):\n" + "\n".join(lines)
+            + self._unread_note(destroyed=False),
         )
 
     def _execute_update(self, arguments: dict) -> ToolResult:
@@ -400,6 +464,7 @@ class SubmitRantTool(ToolExecutor):
             status = str(status).strip() or None
         progress = arguments.get("progress")
         completed = arguments.get("completed")
+        unread = self._unread_note(destroyed=True)
         try:
             ok, msg = update_rant(
                 self._rants_log(),
@@ -420,9 +485,14 @@ class SubmitRantTool(ToolExecutor):
                 content=f"Error: {msg}",
                 error=True,
             )
-        return ToolResult(name="submit_rant", content=msg)
+        return ToolResult(name="submit_rant", content=msg + unread)
 
     def _execute_cleanup(self, arguments: dict) -> ToolResult:
+        # `cleanup` is the action that keeps only the 10 most recent completed rants, so a
+        # line the read could not see is not merely dropped here — it is dropped by the
+        # action whose whole job is pruning. Measured 2026-10-01: unreadable lines do not
+        # survive it.
+        unread = self._unread_note(destroyed=True)
         try:
             count = cleanup_rants(self._rants_log())
         except Exception as e:  # noqa: BLE001
@@ -434,5 +504,5 @@ class SubmitRantTool(ToolExecutor):
         return ToolResult(
             name="submit_rant",
             content=f"Rant cleanup done — {count} entries kept "
-            "(all pending/in_progress + 10 most recent completed).",
+            "(all pending/in_progress + 10 most recent completed)." + unread,
         )

@@ -199,7 +199,7 @@ from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
-from emrg.server.rants import append_rant
+from emrg.server.rants import append_rant, read_rants
 from emrg.server.scheduler import TaskScheduler
 from emrg.server import logcontext
 
@@ -2872,24 +2872,32 @@ class EmrgServer:
         elif msg_type == "list_rants":
             # Rant panel (rant 2026-08-13T14:10:14 P4): read ~/.emrg/rants.jsonl,
             # optional status filter (pending/in_progress/completed/"" = all).
+            #
+            # The read goes through `rants.read_rants` — the one reader for this file —
+            # rather than a second inline `json.loads` loop, which is what used to be
+            # here. Measured 2026-10-01: that copy had a different rule and it crashed the
+            # panel. `json.loads` returns whatever the line holds, so a legacy array row
+            # (the exact shape `_normalize_rant` exists to convert, and which
+            # `test_read_tolerates_legacy_array_rows` pins as a supported input) arrived
+            # as a *list*; the sort below then called `.get` on it and raised
+            # `AttributeError: 'list' object has no attribute 'get'` — on the unfiltered
+            # path as well as the filtered one, because the sort touches every row. Only
+            # `OSError` was caught, so the frame was never sent. One file, two readers,
+            # and the second one raised where the first tolerated; the rule now has one
+            # home and the panel gets the converted rows the tool path already shows.
             try:
                 filter_status = str(msg.get("status", "") or "").strip()
-                rants = []
-                if self._rants_log.exists():
-                    with open(self._rants_log, encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                r = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            if filter_status and r.get("status", "pending") != filter_status:
-                                continue
-                            rants.append(r)
+                # `or "pending"`, not `.get("status", "pending")`: the filter has always
+                # read a row with no status field as pending, and `_normalize_rant` gives
+                # such a row `None`. Preserved deliberately — a missing field is not a
+                # new state.
+                rants = [
+                    r for r in read_rants(self._rants_log).rants
+                    if not filter_status
+                    or (r.get("status") or "pending") == filter_status
+                ]
                 # 时间倒序（最新在前，面板列表惯例）
-                rants.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+                rants.sort(key=lambda r: r.get("timestamp", "") or "", reverse=True)
                 await self._send(ws, {
                     "type": "rants_list",
                     "rants": rants,

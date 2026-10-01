@@ -660,3 +660,144 @@ def test_tool_definition_exposes_actions():
     assert "project" in d.parameters["properties"]
     assert "consent" in d.description.lower() or "confirm" in d.description.lower()
 
+
+
+# ── the read says what it could not read ──────────────────────────────────────
+#
+# The queue's reader is tolerant on purpose — a corrupt line must not break the queue,
+# and two tests above pin that. Tolerance has a second half that was never read: every
+# writer rewrites the file *whole* from what the read returned (`_write_rants`), so a
+# line the read skipped is a line the next write deletes. Measured 2026-10-01: a file
+# with one rant and two unread lines answers `list_rants()` with **1** entry, and
+# `append_rant` leaves 2 lines on disk where there were 3. Nothing printed either way.
+#
+# So `read_rants` reports the line numbers it could not turn into entries, and the tool
+# says so on a read (the list is partial) and on a write (this call dropped them).
+
+
+def _canonical(message: str, status: str = "pending") -> dict:
+    """A row in the canonical 6-field shape, for fixtures."""
+    return {
+        "timestamp": "2026-10-01T10:00:00+08:00",
+        "project": "emrg",
+        "status": status,
+        "progress": None,
+        "completed": None,
+        "message": message,
+    }
+
+
+def test_read_rants_reports_the_lines_that_did_not_become_entries(tmp_path):
+    """Both ways a line fails to become a rant are reported, by line number.
+
+    `not-json` raises `JSONDecodeError`; `123` parses fine and then fails
+    `_normalize_rant` (neither a dict nor a legacy array row). They are different
+    failures and the same silence, so both numbers must come back. A blank line is not
+    a fault and must not be reported — otherwise the note would fire on every file that
+    ends with a newline.
+    """
+    from emrg.server.rants import read_rants
+
+    f = tmp_path / "rants.jsonl"
+    f.write_text(
+        json.dumps(_canonical("the host's rant")) + "\n"
+        "not-json\n"
+        "123\n"
+        "\n"
+        + json.dumps(_canonical("a second rant")) + "\n",
+        encoding="utf-8",
+    )
+
+    reading = read_rants(f)
+    assert [r["message"] for r in reading.rants] == [
+        "the host's rant", "a second rant",
+    ]
+    assert reading.unreadable == (2, 3), (
+        "the unreadable lines are the two that are not rants (2, 3); the blank line 4 "
+        "is not one of them"
+    )
+
+
+def test_read_rants_is_complete_when_every_line_is_a_rant(tmp_path):
+    """The other state: nothing unreadable, and a missing file is not a fault either.
+
+    Without this leg the note could fire always and the assertions above would still
+    pass — a reading that reports a fault unconditionally is not a reading.
+    """
+    from emrg.server.rants import read_rants
+
+    f = tmp_path / "rants.jsonl"
+    f.write_text(json.dumps(_canonical("only rant")) + "\n", encoding="utf-8")
+    assert read_rants(f).unreadable == ()
+    assert read_rants(tmp_path / "absent.jsonl").unreadable == ()
+
+
+def test_a_partial_read_says_so_and_a_complete_one_does_not(tmp_path, monkeypatch):
+    """The list answer must not stand for a reading that did not cover the file.
+
+    `No rants match.` is the most misleading answer this action can give over a file
+    whose every line failed to parse, and a row count is the most trusted one; both
+    carry the note, and neither does when the read was whole.
+    """
+    import asyncio
+
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    log = tmp_path / "rants.jsonl"
+    tool = SubmitRantTool()
+
+    log.write_text("not-json\n", encoding="utf-8")
+    empty_partial = asyncio.run(tool.execute({"action": "list"})).content
+    assert "No rants match." in empty_partial
+    assert "could not be read as a rant" in empty_partial, (
+        "an empty answer over an unreadable file is a partial reading reported as an "
+        f"empty queue:\n{empty_partial}"
+    )
+    assert "line(s) 1" in empty_partial, "the note must name the line"
+
+    log.write_text(
+        json.dumps(_canonical("readable")) + "\nnot-json\n", encoding="utf-8"
+    )
+    nonempty_partial = asyncio.run(tool.execute({"action": "list"})).content
+    assert "1 rant(s):" in nonempty_partial
+    assert "could not be read as a rant" in nonempty_partial, (
+        "a row count over a partially read file answers for the whole file:\n"
+        f"{nonempty_partial}"
+    )
+
+    log.write_text(json.dumps(_canonical("readable")) + "\n", encoding="utf-8")
+    complete = asyncio.run(tool.execute({"action": "list"})).content
+    assert "could not be read as a rant" not in complete, (
+        f"a complete read must not carry the note:\n{complete}"
+    )
+
+
+def test_a_write_that_drops_unread_lines_says_so_and_names_them(tmp_path, monkeypatch):
+    """The write is where the loss happens, so that is where it must be said.
+
+    Measured 2026-10-01: with one rant and one unreadable line on disk, `submit` left the
+    unreadable line gone and reported only `Total rants: 2`. The assertion is the pair —
+    the note names the line *and* the file no longer has it — because either half alone
+    is compatible with the defect (a note about nothing, or a silent drop).
+    """
+    import asyncio
+
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    log = tmp_path / "rants.jsonl"
+    log.write_text(
+        json.dumps(_canonical("the host's rant")) + "\nnot-json\n", encoding="utf-8"
+    )
+
+    result = asyncio.run(SubmitRantTool().execute(
+        {"action": "submit", "message": "a new rant", "project": "emrg"}
+    ))
+    assert result.error is False
+    assert "could not be read as a rant" in result.content, (
+        f"the write dropped a line without saying so:\n{result.content}"
+    )
+    assert "line(s) 2" in result.content, "the note must name the line it dropped"
+
+    remaining = log.read_text(encoding="utf-8").strip().splitlines()
+    assert len(remaining) == 2, "the dropped line is gone from disk, which is the point"
+    assert all(json.loads(line) for line in remaining), (
+        "every remaining line is a rant — so the note is about a line that really went"
+    )

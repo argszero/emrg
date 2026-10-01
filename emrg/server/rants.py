@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 # Canonical field order: timestamp → project → status → progress → completed → message
 # (project right after timestamp per user feedback; message last)
@@ -46,24 +47,69 @@ def _normalize_rant(raw) -> dict | None:
     return None
 
 
-def _read_rants(rants_log: Path) -> list[dict]:
-    """Read all rant entries, tolerantly converting legacy array rows to dicts."""
+class RantRead(NamedTuple):
+    """One read of the queue, and what it could not read.
+
+    A result type rather than two functions, because the entries and the lines that
+    failed to become entries come out of *one* pass: a caller that asked separately
+    could be wrong about the same file twice.
+
+    The tolerance above is deliberate (a corrupt line must not crash the queue), and it
+    is also why this type exists. `_normalize_rant` returns None for a line that is not
+    a dict and not a legacy array, and `json.JSONDecodeError` is caught per line — so a
+    read can come back with *fewer* rants than the file has, silently. Measured
+    2026-10-01: a file with one good rant and two unread lines answers `list_rants()`
+    with **1** entry and the tool prints `No rants match.`-shaped output with no mention
+    of the other two. Every writer rewrites the file whole from what was read
+    (`_write_rants`), so the next `append` / `update` / `cleanup` **deletes** those lines
+    — measured on the same fixture: two lines on disk before the append, gone after it.
+    That deletion is a state the host has to be able to see, which is what `unreadable`
+    is for; whether the write should also refuse is a separate question and a separate
+    change.
+
+    :param rants: the entries that were read, in file order.
+    :param unreadable: the 1-based file line numbers that could not become an entry
+        (unparseable JSON, or JSON that is neither a dict nor a legacy array row).
+    """
+
+    rants: list[dict]
+    unreadable: tuple[int, ...]
+
+
+def read_rants(rants_log: Path) -> RantRead:
+    """Read the queue, reporting the lines that did not become entries.
+
+    The one reader for this file. The daemon's rant panel used to carry its own inline
+    `json.loads` loop beside this one, with a different rule — `r.get("status")` on a row
+    that parsed to a *list* raised `AttributeError` inside the message handler (measured
+    2026-10-01: a legacy array row, the exact shape `_normalize_rant` exists to convert,
+    made the panel raise on both the filtered and the unfiltered path). One file, two
+    readers, and the second one crashed where the first tolerated — so the rule lives
+    here and the panel reads through it.
+
+    :param rants_log: the queue file; a missing file reads as no rants, not as an error.
+    :returns: the entries and the unreadable line numbers.
+    """
     rants: list[dict] = []
+    unreadable: list[int] = []
     if not rants_log.exists():
-        return rants
+        return RantRead(rants, ())
     with open(rants_log, encoding="utf-8") as f:
-        for line in f:
+        for number, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError:
+                unreadable.append(number)
                 continue
             entry = _normalize_rant(raw)
-            if entry is not None:
-                rants.append(entry)
-    return rants
+            if entry is None:
+                unreadable.append(number)
+                continue
+            rants.append(entry)
+    return RantRead(rants, tuple(unreadable))
 
 
 def _write_rants(rants_log: Path, rants: list[dict]) -> None:
@@ -102,7 +148,7 @@ def append_rant(rants_log: Path, message: str, project: str = "") -> int:
     # message last, so status fields stay visible when scanning the file
     entry["message"] = message
 
-    rants = _read_rants(rants_log)
+    rants = read_rants(rants_log).rants
     rants.append(entry)
     _write_rants(rants_log, rants)
 
@@ -116,7 +162,7 @@ def list_rants(
 ) -> list[dict]:
     """Return rant entries, optionally filtered by status and/or project."""
     return [
-        r for r in _read_rants(rants_log)
+        r for r in read_rants(rants_log).rants
         if (status is None or r.get("status") == status)
         and (project is None or r.get("project") == project)
     ]
@@ -140,7 +186,7 @@ def update_rant(
         ``(ok, message)`` — ok=False with a reason on invalid transition /
         unknown timestamp.
     """
-    rants = _read_rants(rants_log)
+    rants = read_rants(rants_log).rants
     for r in rants:
         if r.get("timestamp") != timestamp:
             continue
@@ -173,7 +219,7 @@ def cleanup_rants(rants_log: Path, keep: int = 10) -> int:
     """Prune old completed rants, keeping all pending/in_progress plus the
     ``keep`` most recent completed (by completed timestamp, fallback
     timestamp). Returns the total number of entries kept."""
-    rants = _read_rants(rants_log)
+    rants = read_rants(rants_log).rants
     active = [r for r in rants if r.get("status") != "completed"]
     completed = [
         r for r in rants if r.get("status") == "completed"

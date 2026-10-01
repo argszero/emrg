@@ -2387,6 +2387,80 @@ def test_list_rants_filter_and_order(tmp_path, monkeypatch):
     assert len(frame["rants"]) == 3  # 损坏行被跳过
 
 
+def test_list_rants_converts_a_legacy_array_row_instead_of_raising(tmp_path, monkeypatch):
+    """The panel reads the queue with the same rule the tool path does.
+
+    Measured 2026-10-01: this half of the file had **its own** reader — an inline
+    `json.loads` loop — and a different rule. `json.loads` hands back whatever the line
+    holds, so a legacy array row (the shape `_normalize_rant` exists to convert, pinned
+    as a supported input by `test_read_tolerates_legacy_array_rows`) arrived as a *list*,
+    and the newest-first sort then called `.get` on it:
+
+        AttributeError: 'list' object has no attribute 'get'
+
+    Raised on the unfiltered path as well as the filtered one, because the sort touches
+    every row, and the handler only catches `OSError` — so the frame was never sent and
+    the panel had nothing to show. One file, two readers, the second raising where the
+    first tolerated: the rule now lives in `rants.read_rants` and both callers read it.
+    """
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    writer = _FakeWriter()
+
+    legacy = ["2026-08-18T10:00:00+08:00", "emrg", "pending", None, None, "legacy"]
+    canonical = {
+        "timestamp": "2026-08-19T10:00:00+08:00", "project": "emrg",
+        "status": "completed", "progress": None,
+        "completed": "2026-08-19T12:00:00+08:00", "message": "canonical",
+    }
+    with open(tmp_path / "rants.jsonl", "w", encoding="utf-8") as f:
+        f.write(json.dumps(legacy) + "\n" + json.dumps(canonical) + "\n")
+
+    # Both paths: the sort runs either way, which is why the crash needed no filter.
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))
+    frame = _last_frame(writer)
+    assert [r["message"] for r in frame["rants"]] == ["canonical", "legacy"], (
+        "newest first, and the legacy row converted rather than passed through raw: "
+        + repr(frame["rants"])
+    )
+    assert all(isinstance(r, dict) for r in frame["rants"])
+
+    asyncio.run(server._process_message(
+        {"type": "list_rants", "status": "pending"}, writer
+    ))
+    frame = _last_frame(writer)
+    assert [r["message"] for r in frame["rants"]] == ["legacy"], (
+        "the filter reads the converted row's status"
+    )
+
+
+def test_list_rants_reads_a_row_with_no_status_as_pending(tmp_path, monkeypatch):
+    """The filter's default is preserved across the reader change.
+
+    The inline loop used `r.get("status", "pending")`, so a row with no status field
+    counted as pending; `_normalize_rant` gives such a row ``None`` for every canonical
+    field, and `None != "pending"` would have silently emptied this filter. Pinned
+    because the change was one line away from losing it.
+    """
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    writer = _FakeWriter()
+
+    with open(tmp_path / "rants.jsonl", "w", encoding="utf-8") as f:
+        f.write(json.dumps({"timestamp": "2026-08-20T10:00:00+08:00",
+                            "message": "no status field"}) + "\n")
+
+    asyncio.run(server._process_message(
+        {"type": "list_rants", "status": "pending"}, writer
+    ))
+    frame = _last_frame(writer)
+    assert [r["message"] for r in frame["rants"]] == ["no status field"]
+
+
 def test_list_rants_missing_file_returns_empty(tmp_path, monkeypatch):
     """list_rants with no rants.jsonl → empty list (no crash)."""
     import asyncio
