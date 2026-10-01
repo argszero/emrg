@@ -413,7 +413,7 @@ def test_a_row_that_names_a_file_beside_the_index_resolves(mod, tmp_path, capsys
     assert mod.main([str(path)]) == 0
     out = capsys.readouterr().out
     assert "row links 1, unresolved: 0" in out
-    assert "every row link resolves" in out
+    assert "1 row link(s) read, none resolving to a missing file" in out
 
 
 def test_a_row_that_names_no_file_is_reported_with_its_line_and_target(
@@ -512,6 +512,71 @@ def test_a_row_whose_link_resolves_is_not_repaired(mod, tmp_path, capsys) -> Non
     capsys.readouterr()
 
 
+def test_a_link_quoted_inside_a_code_span_is_not_a_link(mod, tmp_path, capsys) -> None:
+    """A row that *documents* the link shape does not carry one.
+
+    Measured 2026-10-01 on this host: the evolution index's row at line 8 writes the
+    shape inside an inline code span while describing it, and the reading reported
+    `target` as a row link resolving to no file beside the index - a guard firing on
+    its own subject's documentation, which is how a check trains its reader to ignore
+    it. In Markdown an inline code span is literal text, not a link, so the span is
+    removed before the links are read.
+    """
+    path = _index(
+        tmp_path, "links.md", ["- the shape is `](target)` and that is all"]
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "row links 0, unresolved: 0" in out
+    assert "names target" not in out, out
+
+
+def test_a_real_link_beside_a_code_span_is_still_read(mod, tmp_path, capsys) -> None:
+    """The control: removing the code span must not hide a genuine link.
+
+    A row can quote the shape and use it at the same time, and the reading has to
+    keep the second one - the direction that tells "the span is skipped" apart from
+    "the whole line is skipped".
+    """
+    path = _index(
+        tmp_path,
+        "links.md",
+        ["- the shape is `](target)` and a real one is [a](gone.md)"],
+    )
+    assert mod.main([str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "row links 1, unresolved: 1" in out
+    assert "row at line 1 names gone.md" in out, out
+
+
+def test_an_index_whose_rows_carry_no_link_says_so(mod, tmp_path, capsys) -> None:
+    """A zero must not read as a pass.
+
+    A table row names its detail file in prose, not with the store's `](target)`
+    shape, so the resolution reading has no subject in a table index. Measured
+    2026-10-01 on this host: `.emrg/memory/MEMORY.md` printed `row links 0,
+    unresolved: 0` while its summary claimed every row link resolved - a clean verdict
+    about links the reading had not looked at. The report now states the coverage, and
+    the summary names how many links were read.
+    """
+    path = _index(
+        tmp_path,
+        "table.md",
+        [
+            "# Memory Index",
+            "",
+            "| id | note |",
+            "| --- | --- |",
+            "| a1 | see detail.md |",
+        ],
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "row links 0, unresolved: 0" in out
+    assert "the resolution reading had no subject here" in out, out
+    assert "0 row link(s) read" in out, out
+
+
 # ── the embed budget, both directions ─────────────────────────────────────────
 
 
@@ -576,6 +641,55 @@ def test_a_table_index_within_the_budget_is_within(mod, tmp_path, capsys) -> Non
     out = capsys.readouterr().out
     assert f"chars {len(text)} of {mod.INDEX_SIZE_WARN} - within" in out
     assert "OK:" in out
+
+
+def test_a_row_indented_up_to_three_spaces_is_still_a_row(mod, tmp_path, capsys) -> None:
+    """An indented row is a row: markdown's block-level limit is 3 spaces, for both shapes.
+
+    Both shapes may carry it (`  | a | b |` is still a table row, `  - row` is still a list
+    item). Measured 2026-10-01 on `890bf02`, with the predicate matching only at column 0: a
+    table whose rows were the only indented thing read `rows 1, longest 31 chars, over 512: 0`
+    and `OK`, four bytes longer than the same file at column 0 and with its 604-char row still
+    in it — the "clean verdict about rows the tool never looked at" this reading exists to
+    remove, one indentation level out.
+    """
+    table = ["# Memory Index", "", "  | id | note |", "  | --- | --- |"] + [
+        "  | n | " + "x" * 600 + " |" for _ in range(3)
+    ]
+    listing = ["# Memory Index", ""] + ["  - " + "y" * 600 for _ in range(3)]
+
+    # The header counts and the delimiter row does not, so the table's three entries read as
+    # four rows — but only the three *entries* are past the bound: the header is short. A list
+    # has no header, so its three rows all are. The guard must exit 1 and say both numbers.
+    for name, lines, rows, over in (
+        ("indent-table.md", table, 4, 3),
+        ("indent-list.md", listing, 3, 3),
+    ):
+        path = _index(tmp_path, name, lines)
+        assert mod.main([str(path)]) == 1, f"{name}: an indented row went unseen"
+        out = capsys.readouterr().out
+        assert f"rows {rows}, longest {len(lines[-1])} chars" in out, f"{name}: {out}"
+        assert f"over {mod.INDEX_TITLE_MAX_CHARS}: {over}" in out, f"{name}: {out}"
+        assert "OK:" not in out, f"{name}: an over-bound index was called OK"
+
+
+def test_a_four_space_indented_block_is_not_a_row(mod, tmp_path, capsys) -> None:
+    """Where the limit stops, so "strip the indent" is not the reading that shipped.
+
+    Four spaces is an indented code block: a line the embed pays for, but not a row, and not
+    a line the per-row bound is about. Asserted on both sides of the one byte that decides
+    it, or the fix above would be "strip whatever the indent is".
+    """
+    body = "- " + "y" * 600
+    for name, indent, rows in (("three.md", "   ", 1), ("four.md", "    ", 0)):
+        path = _index(tmp_path, name, ["# Memory Index", "", indent + body])
+        assert mod.main([str(path)]) == (1 if rows else 0), f"{name}: {indent!r} rows {rows}"
+        out = capsys.readouterr().out
+        assert f"rows {rows}, longest {len(body) + len(indent) if rows else 0} chars" in out, (
+            f"{name}: {out}"
+        )
+        assert (f"over {mod.INDEX_TITLE_MAX_CHARS}: 1" in out) is bool(rows), f"{name}: {out}"
+
 
 
 def test_the_budget_is_counted_in_characters_not_bytes(mod, tmp_path, capsys) -> None:
