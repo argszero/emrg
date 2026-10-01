@@ -82,6 +82,7 @@ from emrg.memory import (
     INDEX_TITLE_MAX_CHARS,
     ProjectMemoryStore,
     SessionMemoryStore,
+    index_lines,
     is_index_row,
 )
 from emrg.protocol import (
@@ -272,7 +273,10 @@ MEMORY_INDEX_ROW_CAP = 100
 # **one function with two readers**: `is_index_row` (`emrg/memory.py`) is called here and
 # by `scripts/check-memory-index.py`, so the trigger and the reading count the same lines.
 # It was spelled here as `"- "` alone, and a table index fell through both — the two
-# shapes, and the incident, are at `memory.is_index_row`.
+# shapes, and the incident, are at `memory.is_index_row`. The same pair reads those rows
+# through `memory.index_lines`, because "is this line a row" is not answerable from the
+# line alone: inside a fenced code block it is literal text (that helper carries the
+# measurement).
 
 # How much of an over-budget index `_cap_memory_index` keeps from its **head**, in
 # characters. The rest of the budget goes to the **end** of the file, and the middle is
@@ -456,7 +460,15 @@ def _memory_index_compaction_note(paths) -> str:
         except (OSError, UnicodeDecodeError):
             continue
         lines = len(text.splitlines())
-        rows = [len(line) for line in text.splitlines() if is_index_row(line)]
+        # Rows are read through `memory.index_lines` first: a fenced code block's
+        # content is literal text, and a `- ` line inside one is the index *documenting*
+        # a row rather than carrying one. The line count above stays the file's own,
+        # because the embed budget is spent on every line the file has.
+        rows = [
+            len(line)
+            for _, line in index_lines(text).unfenced
+            if is_index_row(line)
+        ]
         # The trigger's condition is the cap's own (issue #1676, W): the cap cuts a file
         # whose **character** count is past `INDEX_SIZE_WARN`, so a file that large must
         # draw the note whatever its line count — the two were read against each other

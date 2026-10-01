@@ -728,6 +728,164 @@ def test_the_summary_answers_about_the_links_that_were_read(mod, tmp_path, capsy
     )
 
 
+# ── a fence's content is not a row ────────────────────────────────────────────
+#
+# The row predicate judges a line by its shape, and shape cannot answer this question on
+# its own: inside a fenced code block a `- ` line is literal text, which is what an index
+# is made of when it documents the format it is written in. Measured 2026-10-01; the same
+# defect the inline code span had (issue #1793), one scale up.
+#
+# Both directions matter here for the usual reason: the fence must hide what is inside it
+# **and** hide nothing else - an ordinary row beside the fence is still read, and a file
+# with no fence reports exactly what it reported before (no new line, no new number).
+
+
+def test_a_fenced_example_is_not_read_as_a_row_or_a_link(mod, tmp_path, capsys) -> None:
+    """The fenced half is not a row, and the row outside it still is.
+
+    The fixture is the shape that made this necessary: an index that documents its own
+    format inside a fence, plus one real row with a link that resolves to nothing. A
+    reading that counted the example would report two rows and two unresolved links; the
+    right answer is the real row alone, with its link followed - so the assertion is on
+    the row the report names *and* on the row it does not.
+    """
+    _detail(tmp_path, "real.md")
+    path = _index(
+        tmp_path,
+        "fenced-example.md",
+        [
+            "# Memory Index",
+            "",
+            "A row is written like this:",
+            "",
+            "```markdown",
+            "- [title](not-a-file.md) - one row per memory",
+            "```",
+            "",
+            "- [real](real.md) - the index's one row",
+        ],
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "rows 1," in out, out
+    assert "row links 1, unresolved: 0" in out, out
+    assert "1 line(s) inside a fenced code block" in out, (
+        "the lines the reading declined to read as rows must be accounted for: " + out
+    )
+    assert "not-a-file.md" not in out, (
+        "the fenced example's link was followed as if the row carried it: " + out
+    )
+
+
+def test_the_hidden_line_count_does_not_include_the_fence_markers(
+    mod, tmp_path, capsys
+) -> None:
+    """One line inside a fence is one hidden line, not one per marker plus content.
+
+    Written after the first version of this reading got it wrong: it took the count as
+    `lines - len(unfenced)`, which also subtracts the opening and closing markers, so a
+    one-line example was reported as three hidden lines - a number about the file that no
+    reader could reconcile with the file. The fixture is small enough to count by eye.
+    """
+    path = _index(
+        tmp_path,
+        "one-line-fence.md",
+        ["# Memory Index", "", "```", "- [a](a.md)", "```", ""],
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "1 line(s) inside a fenced code block" in out, out
+    assert "rows 0," in out, out
+
+
+def test_a_file_with_no_fence_reports_no_fenced_lines(mod, tmp_path, capsys) -> None:
+    """The direction that keeps the line worth reading: silence when nothing was skipped.
+
+    A coverage sentence printed for every file would be noise, and a reader who sees it
+    always stops believing it - the same reason the coverage sentence for row links only
+    appears when there was nothing to resolve.
+    """
+    _detail(tmp_path, "a.md")
+    path = _index(tmp_path, "plain.md", ["- [a](a.md) - one row"])
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "fenced code block" not in out, out
+
+
+def test_an_unclosed_fence_is_read_as_ordinary_text(mod, tmp_path, capsys) -> None:
+    """A fence the file never closes hides nothing - the conservative direction.
+
+    CommonMark runs an unclosed fence to the end of the document, and a reading that did
+    the same would stop counting rows at the opener: for an index whose author simply
+    forgot the closing line, it would print `rows 1 - within` about a file with forty
+    rows, which is the pass-shaped answer this whole tool exists to prevent. So an
+    unclosed fence is ordinary text: the rows below it are read, and the report says
+    nothing about hidden lines because it hid none.
+    """
+    path = _index(
+        tmp_path,
+        "unclosed.md",
+        ["# Memory Index", "", "```markdown", "- [x](x.md) - a row below an unclosed fence"],
+    )
+    assert mod.main([str(path)]) == 1, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "rows 1," in out, out
+    assert "row at line 4 names x.md" in out, out
+    assert "fenced code block" not in out, (
+        "the reading hid nothing here, so it must not claim it did: " + out
+    )
+
+
+def test_only_a_matching_fence_closes(mod, tmp_path, capsys) -> None:
+    """The closer is the same character and at least as long; anything else is content.
+
+    Two fixtures whose inner lines are only hidden if the pairing is right: a `~~~` block
+    opened with three backticks and a four-backtick block containing a three-backtick
+    line. A reader that closed on *any* fence-marker line would call the first file's
+    body one line short, and a reader that closed on any *length* would end the second
+    block early - both are under-counts of what it read, which is how a reading starts
+    reporting a number that is not about the file.
+    """
+    tilde_inside = _index(
+        tmp_path,
+        "tilde-inside.md",
+        [
+            "# Memory Index",
+            "",
+            "```markdown",
+            "~~~",
+            "- [a](a.md)",
+            "~~~",
+            "```",
+        ],
+    )
+    assert mod.main([str(tilde_inside)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "3 line(s) inside a fenced code block" in out, out
+    assert "rows 0," in out, out
+
+    shorter_inside = _index(
+        tmp_path,
+        "shorter-inside.md",
+        [
+            "# Memory Index",
+            "",
+            "````markdown",
+            "```",
+            "- [a](a.md)",
+            "```",
+            "````",
+            "",
+            "- [b](b.md)",
+        ],
+    )
+    _detail(tmp_path, "b.md")
+    assert mod.main([str(shorter_inside)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "3 line(s) inside a fenced code block" in out, out
+    assert "rows 1," in out, out
+
+
 # ── the embed budget, both directions ─────────────────────────────────────────
 
 

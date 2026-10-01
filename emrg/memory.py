@@ -28,7 +28,7 @@ import yaml
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import ClassVar, Optional
+from typing import ClassVar, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +224,90 @@ def is_index_row(line: str) -> bool:
     if line.startswith(INDEX_ROW_LIST_PREFIX):
         return True
     return bool(_INDEX_ROW_TABLE.match(line)) and not _INDEX_ROW_TABLE_DELIMITER.match(line)
+
+
+# A **fenced code block**: three or more backticks or tildes, indented at most three
+# spaces (CommonMark). The run itself is captured, because a closer is *the same
+# character, at least as long* — `~~~` inside a ``` block is literal text, and a shorter
+# run does not close a longer one.
+#
+# Why the row reading needs this at all: a fence's content is literal text, which is
+# exactly what a row that *documents* the index's own format is made of. Measured
+# 2026-10-01 on a fixture: an index whose only `- ` line and only `](target)` link were
+# inside a fenced example read `rows 1`, `row links 1, unresolved: 1` and exited **1** —
+# a reading that fires on the documentation of its own subject, which is how a check
+# teaches its reader to ignore it (issue #1793 measured the same defect for an *inline*
+# code span). The store's own render (`MemoryIndex._render_entry`) writes no fence, so no
+# row the store produces is hidden by this.
+#
+# **Only a closed fence hides anything.** An opening fence the file never closes is read
+# as ordinary text, which is the conservative direction: CommonMark would run it to the
+# end of the document, and a reading that did the same would print `rows 3 - within`
+# about a file whose rows it had stopped looking at — the pass-shaped answer this
+# family exists to prevent. A typo therefore costs a possible false alarm (today's
+# behaviour) and never a silent gap.
+_INDEX_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_INDEX_FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+
+
+class IndexLines(NamedTuple):
+    """An index's lines, split by whether a row can be written on them.
+
+    A result type rather than a second function, because the two halves come out of *one*
+    pass and a reader that asked separately could be wrong about the same file twice.
+
+    :param unfenced: `(line number, line)` for every line outside a fence, in file order.
+    :param fenced: the line numbers inside a **closed** fence - the lines read as literal
+        text, and so never candidates for a row. The fence markers themselves are in
+        neither half: a marker is not a row (no shape reaches it) and not the literal text
+        either, which is why the count of hidden lines is this tuple's length and **not**
+        `lines - len(unfenced)` - that arithmetic also counts the markers, and a report
+        built on it says a file hides two lines for every one it does.
+    """
+
+    unfenced: tuple[tuple[int, str], ...]
+    fenced: tuple[int, ...]
+
+
+def index_lines(text: str) -> IndexLines:
+    """An index's lines, split by what a reader may read a row out of.
+
+    The companion of `is_index_row`, and there for the same reason: a fence's content is
+    literal text, so a `- ` line or a `](target)` link inside one is a row or a link the
+    *documentation* carries, not the index. The daemon's compaction trigger
+    (`daemon._memory_index_compaction_note`) and `scripts/check-memory-index.py` both read
+    their rows through this, so the note and the report count the same lines — the
+    property `is_index_row` alone could not give them, because "is this line literal
+    text" is a question about the lines *around* it.
+
+    :param text: the index's whole text.
+    :returns: the split described at `IndexLines`.
+    """
+    unfenced: list[tuple[int, str]] = []
+    fenced: list[int] = []
+    open_fence: Optional[str] = None
+    body: list[tuple[int, str]] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if open_fence is None:
+            opener = _INDEX_FENCE_OPEN.match(line)
+            if opener is None:
+                unfenced.append((number, line))
+                continue
+            open_fence = opener.group(1)
+            body = []
+            continue
+        closer = _INDEX_FENCE_CLOSE.match(line)
+        if closer is not None:
+            run = closer.group(1)
+            if run[0] == open_fence[0] and len(run) >= len(open_fence):
+                open_fence = None
+                fenced.extend(number for number, _ in body)
+                continue
+        body.append((number, line))
+    if open_fence is not None:
+        # Never closed: read as ordinary text, and the docstring above says why.
+        unfenced.extend(body)
+    return IndexLines(tuple(unfenced), tuple(fenced))
 
 
 # Order of the `## type` sections when the index has to be rendered from

@@ -63,6 +63,19 @@ apart, the two both read `- ` and a table index fell between them, so the trigge
 drew no note at all while four of that index's rows were past the bound (measured
 2026-10-01 on this host).
 
+A row is a line **outside a fenced code block**, and that half of the question is
+`emrg.memory.index_lines`, imported beside the predicate and called by the same two
+readers. A fence's content is literal text, which is what an index is made of when it
+*documents* the format it is written in - so the same defect the inline code span had
+(issue #1793) applies one scale up: measured 2026-10-01 on a fixture, an index whose only
+`- ` line and only `](target)` link were inside a fenced example read `rows 1`,
+`row links 1, unresolved: 1` and exited **1**, a verdict about its own documentation.
+Only a **closed** fence hides anything: an opener the file never closes is read as
+ordinary text, because CommonMark would run it to the end of the file and a reading that
+did the same would print `within` about rows it had stopped looking at. The lines skipped
+this way are counted and printed, so a reader who knows their file's shape can account for
+every line. The store's render writes no fence, so no row the store produces is hidden.
+
 Four readings, each from its own source
 ---------------------------------------
 The line **cap** is `MEMORY_INDEX_ROW_CAP` and the row **bound** is
@@ -255,7 +268,11 @@ try:
     # compaction trigger (`_memory_index_compaction_note`) calls the same one, so the
     # reading this tool prints and the instruction an agent receives count the same
     # lines. Spelled separately once - both as `- ` - a table index fell between them.
+    # `index_lines` is imported next to it for the same reason and is the same rule
+    # one step earlier: a line inside a fenced code block is literal text, so it is not
+    # a row whatever its shape, and both readers ask that question of this function.
     is_index_row = _memory_module.is_index_row
+    index_lines = _memory_module.index_lines
     THRESHOLD_SOURCE = str(Path(_memory_module.__file__).resolve())
     if not Path(THRESHOLD_SOURCE).is_relative_to(REPO_ROOT):
         THRESHOLD_ERROR = (
@@ -347,6 +364,9 @@ class Reading(NamedTuple):
         This is what the reading *read*, so a report can say when the answer is
         "nothing": a count of 0 beside `unresolved: 0` reads as a pass about a set
         that was never looked at (issue #1793's second half).
+    :param fenced: how many of the file's lines sit inside a fenced code block, and so
+        were never candidates for a row - printed only when it is not zero, so the
+        ordinary report is unchanged and a report that *did* skip lines says so.
     """
 
     path: Path
@@ -355,6 +375,7 @@ class Reading(NamedTuple):
     row_lines: tuple[int, ...]
     row_lengths: tuple[int, ...]
     row_links: tuple[tuple[int, str], ...] = ()
+    fenced: int = 0
 
     @property
     def rows(self) -> int:
@@ -432,7 +453,12 @@ def measure(path: Path) -> Reading:
     row_lines: list[int] = []
     row_lengths: list[int] = []
     row_links: list[tuple[int, str]] = []
-    for number, line in enumerate(lines, 1):
+    # Rows are read out of the *unfenced* lines: a line inside a fenced code block is
+    # literal text, and a `- ` line or a `](target)` link in one is the index showing its
+    # own format rather than carrying a row. The cap above stays the file's line count,
+    # because every line the file has is a line the embed pays for.
+    split = index_lines(text)
+    for number, line in split.unfenced:
         if is_index_row(line):
             row_lines.append(number)
             row_lengths.append(len(line))
@@ -440,7 +466,7 @@ def measure(path: Path) -> Reading:
                 row_links.append((number, target))
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
-        tuple(row_links)
+        tuple(row_links), len(split.fenced)
     )
 
 
@@ -490,6 +516,13 @@ def _report(reading: Reading) -> list[str]:
         f"  rows {reading.rows}, longest {reading.longest} chars, "
         f"over {INDEX_TITLE_MAX_CHARS}: {len(over)}"
     )
+    if reading.fenced:
+        # Stated, not silent: these lines were skipped as row candidates, and a reader
+        # comparing this number against their file has to be able to account for them.
+        out.append(
+            f"  {reading.fenced} line(s) inside a fenced code block - read as literal "
+            f"text, so not rows and their links not followed"
+        )
     for number, length in over:
         out.append(
             f"  row at line {number} is {length} chars, "
