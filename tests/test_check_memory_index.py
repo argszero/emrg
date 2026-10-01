@@ -728,6 +728,45 @@ def test_the_summary_answers_about_the_links_that_were_read(mod, tmp_path, capsy
     )
 
 
+def test_help_does_not_claim_what_the_report_disowns(mod, capsys) -> None:
+    """Exit 0's claim about links has three homes, and all three must agree.
+
+    The homes are the `--help` description, the `--help` epilog, and the module
+    docstring's *Exit codes* section — all three hand-written, nothing tying them
+    together. Measured 2026-10-01, on this branch before this assertion and on PR
+    #1794 before it: the report was changed to stop claiming "every row link
+    resolves" — the sentence that is false for an index whose rows carry no link, or
+    only exempt ones — while `--help` went on claiming it. The tool then explained
+    itself with the sentence it had just removed from its own output, which is the
+    "a claim wider than the reading" defect one step out from the reading.
+
+    The first assertion is the behavioural one, and the order is deliberate: on a
+    tool that still claims it, the red is this line and says so. The others hold the
+    one spelling (`LINK_CLAIM`) in place, including the docstring home, which no
+    constant can reach — hence the comparison against the rendered text rather than
+    a sentence of this file's own.
+    """
+    with pytest.raises(SystemExit) as exit_code:
+        mod.main(["--help"])
+    assert exit_code.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+
+    assert "every row link resolves" not in help_text, (
+        "`--help` claims what the report disowns:\n  " + help_text
+    )
+    assert "row link" in help_text, (
+        "the sensitivity leg: a help text that dropped the topic entirely would pass "
+        "the line above for the wrong reason:\n  " + help_text
+    )
+    assert help_text.count(mod.LINK_CLAIM) == 2, (
+        "both `--help` homes state the claim, through the one spelling:\n  " + help_text
+    )
+    assert mod.LINK_CLAIM in " ".join((mod.__doc__ or "").split()), (
+        "the docstring's *Exit codes* section is the claim's third home, and the one "
+        "no constant reaches"
+    )
+
+
 # ── a fence's content is not a row ────────────────────────────────────────────
 #
 # The row predicate judges a line by its shape, and shape cannot answer this question on

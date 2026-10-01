@@ -317,6 +317,19 @@ CODE_SPAN = re.compile(r"(`+)(.+?)\1")
 #: that grows silently is how a check becomes vacuous.
 NON_FILE_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#)", re.IGNORECASE)
 
+#: What exit 0 claims about a row's links, spelled **once**. The claim has three
+#: homes - the `--help` description, the `--help` epilog, and the module docstring's
+#: *Exit codes* section - and prose with three homes drifts. Measured 2026-10-01 on
+#: this branch, and on PR #1794 before it: the report was changed to stop claiming
+#: "every row link resolves" (it is exactly what an index carrying no link, or only
+#: exempt links, made false), while `--help` went on claiming it - so the tool
+#: explained itself with the sentence it had just removed from its output. The two
+#: `--help` homes interpolate this constant; the docstring cannot, which is why
+#: `tests/test_check_memory_index.py` asserts all three carry the same words.
+#: The wording is deliberate: *it read* is the whole of the fix, because the claim
+#: is about the links the reading looked at, not about every link the file has.
+LINK_CLAIM = "every row link it read resolves"
+
 RUNNER = "uv run --no-sync python3"
 
 
@@ -585,11 +598,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 else "the rule's numbers are unreadable from this interpreter, so "
                 "every run reports that instead of a count"
             )
-            + ", and every row link resolving to a file beside it."
+            + f", and {LINK_CLAIM} to a file beside it."
         ),
         epilog=(
-            f"Exit 0: every index is within every number and every row link "
-            f"resolves. Exit 1: at least one is over one of them, or points at a "
+            f"Exit 0: every index is within every number and {LINK_CLAIM}. Exit 1: "
+            f"at least one is over one of them, or points at a "
             f"file that is not there. Exit 2: nothing could be measured (no index "
             f"under the tree, or a named index could not be read). Example: "
             f"{RUNNER} scripts/check-memory-index.py "
