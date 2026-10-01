@@ -90,6 +90,41 @@ def test_a_mixed_file_keeps_the_endings_it_had_outside_the_match(tmp_path):
     assert path.read_bytes() == b"a\r\nB\nc\r\n"
 
 
+def test_a_bash_append_does_not_make_a_later_edit_lf_only(tmp_path):
+    """How a mixed file actually arrives — and what the next edit must not do to it.
+
+    `>>` from a shell appends a *bare LF* line to whatever the file uses, so appending to
+    one of `.gitattributes`' CRLF files produces exactly the shape `tests/test_cmd_crlf.py`
+    calls "LF-only or mixed endings". The edit that follows names one line; the failure this
+    test forbids is the quiet one — rewriting the file's own CRLF lines as bare LF, which is
+    the LF-only `.cmd` that `cmd.exe` misparses (the installer "exit code 1" series).
+
+    The distinction is the whole point of reading the file's bytes instead of a normalised
+    string: a mixed file is a file the tool has no business normalising, and after an edit
+    naming one line, its CRLF lines are still CRLF.
+    """
+    path = tmp_path / "emrgd.cmd"
+    path.write_bytes(b"@echo off\r\nset EMRG=1\r\n")
+    with open(path, "ab") as handle:  # what `printf 'rem added\n' >> file` writes
+        handle.write(b"rem added\n")
+
+    mixed = path.read_bytes()
+    assert mixed.count(b"\r\n") == 2 and mixed.count(b"\n") - mixed.count(b"\r\n") == 1, (
+        f"the fixture is not the mixed shape this test is about: {mixed!r}"
+    )
+
+    _edit(path, "set EMRG=1", "set EMRG=2")
+
+    after = path.read_bytes()
+    assert after == b"@echo off\r\nset EMRG=2\r\nrem added\n", (
+        f"the edit normalised a mixed file instead of carrying it: {after!r}"
+    )
+    assert after.count(b"\r\n") == 2, (
+        "the edit turned the file's CRLF lines into bare LF — the LF-only .cmd shape "
+        f"cmd.exe misparses: {after!r}"
+    )
+
+
 def test_the_named_region_is_the_only_thing_that_changed(tmp_path):
     """Prefix and suffix survive exactly — the contract the tool's name promises."""
     path = tmp_path / "f.txt"
