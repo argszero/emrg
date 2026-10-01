@@ -9,6 +9,7 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.tools import newlines
 from emrg.tools.base import ToolExecutor
 from emrg.tools.file_policy import resolve_file_target
 
@@ -111,29 +112,28 @@ class EditTool(ToolExecutor):
 
         logger.debug("edit: %s (replace_all=%s)", path, replace_all)
 
-        # Read the file's own bytes, with no newline translation, because the write
-        # below has to put the file's line endings back (issue #1803). The string the
-        # match runs against is normalised the way the *read* tool shows a file — that
-        # is the only view the caller has, so its ``old_string`` carries "\n" even when
-        # the file on disk is CRLF — and reading with the default instead destroyed
-        # exactly that: `read_text()` turned every `\r\n` into `\n` and `write_text()`
-        # wrote the `\n` back out, so an edit naming one line changed every line of the
-        # file. The class this costs: `.gitattributes` pins `*.cmd`/`*.bat`/`*.ps1` to
-        # CRLF on every platform and LF-only `.cmd` files are the v0.2.25–v0.2.27
-        # installer failure `tests/test_cmd_crlf.py` guards (rant 2026-08-12T12:30:41).
-        # A file whose lines are *uniformly* CRLF gets them back; one that is LF takes
-        # the same bytes it did before; a mixed file is written LF-only, which is what
-        # this tool already did to it.
+        # Read the file's own bytes, with no newline translation (issue #1803). The
+        # match runs against the *view* the read tool shows the caller — every break
+        # reads as "\n", so an ``old_string`` copied from a read matches a CRLF file —
+        # and the splice puts the bytes back, so the file's own endings survive and
+        # only the region ``old_string`` named changes. ``emrg/tools/newlines.py``
+        # carries the measurement, the rule, and what a newly written line joins.
+        #
+        # What this replaced, measured 2026-10-02 on `bc114ab9`: the version that
+        # landed with #1804 decided the endings with a per-file boolean, so (a) a file
+        # with *mixed* endings was still rewritten LF-only — issue #1803's acceptance
+        # item 1, a mixed file's untouched lines keeping their terminators byte for
+        # byte — and (b) ``new_string`` was never read the way the file is read, so a
+        # replacement carrying "\r\n" came out as "\r\r\n", a lone CR this tool never
+        # produced before that commit.
         try:
             raw = path.open("r", encoding="utf-8", newline="").read()
         except UnicodeDecodeError:
             return ToolResult(
                 name="edit", content=f"Error: cannot read {path} as text", error=True
             )
-        crlf_file = raw.count("\r\n") > 0 and raw.count("\r\n") == raw.count("\n")
-        content = raw.replace("\r\n", "\n").replace("\r", "\n")
 
-        count = content.count(old)
+        new_content, count = newlines.replace(raw, old, new, replace_all=replace_all)
         if count == 0:
             return ToolResult(
                 name="edit",
@@ -155,9 +155,6 @@ class EditTool(ToolExecutor):
                 error=True,
             )
 
-        new_content = content.replace(old, new) if replace_all else content.replace(old, new, 1)
-        if crlf_file:
-            new_content = new_content.replace("\n", "\r\n")
         try:
             with path.open("w", encoding="utf-8", newline="") as handle:
                 handle.write(new_content)
