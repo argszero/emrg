@@ -211,6 +211,16 @@ INDEX_SIZE_WARN = 51 * 1024
 INDEX_ROW_LIST_PREFIX = "- "
 _INDEX_ROW_TABLE = re.compile(r"^\|")
 _INDEX_ROW_TABLE_DELIMITER = re.compile(r"^\|[\s:|-]*\|?\s*$")
+# The indent both shapes may carry and still be what they are: **up to 3 spaces** of leading
+# whitespace (CommonMark's block-level limit, the same one `check-vote-count.py`'s `_FENCE_RE`
+# reads for a fence). Four spaces is an indented code block instead — a line the embed pays
+# for, but not a row, and not a line this predicate's two readers should bound per row.
+#
+# Without this, both shapes fell out of the predicate one indentation level away from the
+# incident above: measured 2026-10-01 on `890bf02`, a table whose rows were the *only* thing
+# indented by 2 spaces read `rows 1, longest 31 chars, over 512: 0` and `OK` while a 604-char
+# row sat in the same file, and an indented list row's link was not resolved at all.
+_INDEX_ROW_INDENT = re.compile(r"^ {0,3}")
 
 
 def is_index_row(line: str) -> bool:
@@ -218,9 +228,10 @@ def is_index_row(line: str) -> bool:
 
     The one predicate the daemon's compaction trigger and
     `scripts/check-memory-index.py` both apply, so the trigger and the reading count the
-    same lines (the two shapes, and the incident that made the second one matter, are at
-    the constants above).
+    same lines (the two shapes, the indent they may carry, and the incident that made the
+    second shape matter are at the constants above).
     """
+    line = _INDEX_ROW_INDENT.sub("", line, count=1)
     if line.startswith(INDEX_ROW_LIST_PREFIX):
         return True
     return bool(_INDEX_ROW_TABLE.match(line)) and not _INDEX_ROW_TABLE_DELIMITER.match(line)
