@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -481,7 +482,169 @@ def test_a_url_and_an_anchor_are_not_rows_that_point_nowhere(
     )
     assert mod.main([str(path)]) == 0, capsys.readouterr().out
     out = capsys.readouterr().out
-    assert "row links 0, unresolved: 0" in out
+    # The three shapes were read; none of them is a file, so the resolution has no
+    # subject. What is asserted is the count of the links the reading *read*, and not
+    # the sentence around it: an assertion on the exact wording fails a correct
+    # implementation that words it differently, which is how a guard teaches its
+    # reader to ignore it (measured 2026-10-01).
+    assert "row links 3, unresolved: 0" in out, out
+
+
+def _link_reading(report: str) -> str:
+    """A report's lines about row links, with what is about the *file* masked out.
+
+    Two fixtures differ in size and name, so comparing their reports means removing
+    the lines that answer about the file rather than about the reading: the `tree:`
+    line, the path line, and the three number lines (`lines`/`chars`/`rows`), whose
+    values differ because the fixtures differ. What survives is the part that answers
+    about row links - the row-link line, any coverage sentence, the unresolved
+    findings and the run's summary - which is the part under test.
+
+    Masking is what makes the comparison a test of the *reading* and not of its
+    wording: an assertion on a sentence passes only for the implementation that wrote
+    it, and the reading under test is "does this distinguish the two states".
+    """
+    keep = []
+    for line in report.splitlines():
+        stripped = line.strip()
+        if line.startswith("tree: ") or stripped.endswith(".md"):
+            continue
+        if stripped.startswith(("lines ", "chars ", "rows ")):
+            continue
+        keep.append(line)
+    return "\n".join(keep)
+
+
+#: The count line's shape, which is the one format this tool had **before** the change
+#: under test (`row links N, unresolved: M`, and the exemption suffix the newer reading
+#: adds to it). Matching it is not matching the reading's wording - it is how a line that
+#: reports *numbers* is told apart from a line that makes a *claim*, and the distinction
+#: is the whole point of the helper below.
+_COUNT_LINE = re.compile(r"^\s*row links \d+(,|\s*$)")
+_SUMMARY_LINE = re.compile(r"^(OK:|could not measure|\d+ of \d+ index)")
+
+
+def _coverage_lines(report: str) -> set[str]:
+    """The report's non-count lines: what it *says* beyond the numbers it read.
+
+    `_link_reading` above compares two states, and that comparison is satisfied by the
+    counts alone - so it passes for a reading whose coverage sentence is **always** the
+    same, or always false. Measured 2026-10-01: making the no-link sentence print
+    unconditionally left every test in this file green as long as the sentence was
+    reworded to drop the literal ``](target)`` the one incidental leg matched on. A leg
+    that fires on the words cannot see a claim that is uniformly wrong.
+
+    So this helper isolates the other half: the lines that answer a question other than
+    "how many links", with the file-specific lines, the count line and the run's summary
+    masked out (the summary restates the counts, so it tracks them too). What is left is
+    the reading's *prose*, keyed by nothing in particular - which is what lets a test
+    compare the prose of two states without naming either one's words.
+
+    :param report: one run's stdout.
+    :returns: the set of lines that are neither numbers nor the summary.
+    """
+    keep = set()
+    for line in _link_reading(report).splitlines():
+        if _COUNT_LINE.match(line) or _SUMMARY_LINE.match(line):
+            continue
+        keep.add(line.strip())
+    return keep
+
+
+
+
+def test_an_exempt_only_row_is_not_read_as_a_row_with_no_link(mod, tmp_path, capsys) -> None:
+    """Three exempt links and no link at all are different states, and read apart.
+
+    `NON_FILE_TARGET` is an exemption, and it removes links the row *does* carry - so
+    a reading that derives "this index carries no link to resolve" from the
+    exempt-filtered list reports a row carrying a URL, an anchor and a `mailto:` as
+    carrying nothing. Both files are built here and their link readings are compared
+    with the file-specific lines masked (`_link_reading`), so what is asserted is that
+    the reading *distinguishes the two states* - not that it says it in my words.
+
+    Measured 2026-10-01 against a sibling implementation (PR #1794, which fixed the
+    code-span half of issue #1793 and checked coverage against the exempt-filtered
+    list): the exempt-only and the link-free index produce byte-identical link
+    readings, and the first version of this test caught that only by accident - it
+    asserted my exact sentence, so it went red on a punctuation difference (their
+    sentence carries no backticks) while the defect it was written for went
+    unread. A guard whose red is cosmetic is a guard that will be ignored; the
+    comparison below is the assertion that has to hold.
+
+    The counts are asserted too, in the format the tool already had before this
+    change (`row links N, unresolved: M`): the exempt-only index read three links and
+    the link-free one none, and a reading that reports 0 for both has stopped
+    answering the question it was asked.
+    """
+    exempt = _index(
+        tmp_path,
+        "exempt-only.md",
+        ["- [a](https://example.com/x.md) and [b](#heading) and [c](mailto:x@y.z)"],
+    )
+    assert mod.main([str(exempt)]) == 0, capsys.readouterr().out
+    exempt_report = capsys.readouterr().out
+
+    nothing = _index(tmp_path, "link-free.md", ["- a table row names its file in prose"])
+    assert mod.main([str(nothing)]) == 0, capsys.readouterr().out
+    nothing_report = capsys.readouterr().out
+
+    assert "row links 3" in exempt_report, exempt_report
+    assert "row links 0" in nothing_report, nothing_report
+    assert _link_reading(exempt_report) != _link_reading(nothing_report), (
+        "the two states read the same, so the coverage sentence is answering about "
+        "the links the exemption removed rather than the links that were read - the "
+        "exempt-only index carries three:\n"
+        "--- exempt-only ---\n" + _link_reading(exempt_report)
+        + "\n--- link-free ---\n" + _link_reading(nothing_report)
+    )
+
+
+
+
+def test_the_coverage_prose_follows_the_state_not_the_implementation(mod, tmp_path, capsys) -> None:
+    """The reading's *prose* must change between the two states, not just its numbers.
+
+    This is the leg that was missing here, and it was found by mutating this reader
+    rather than by reading it. Measured 2026-10-01, on this branch before the test
+    existed: taking the no-link sentence and printing it **unconditionally** - so it
+    asserts "no row carries a link" about an index whose rows carry three - left the
+    whole file green, because the one leg that happened to fire matched the literal
+    ``](target)`` inside the sentence, and rewording the sentence to drop that literal
+    made even that leg pass. A claim that is uniformly false was invisible.
+
+    So the assertion is not about any sentence: it requires the *non-count* lines of the
+    two states to differ (see `_coverage_lines`). The exempt-only index is the state the
+    claim is false in - its rows carry three links, all of them exempt - and the
+    link-free index is the state it is true in. An implementation that says the same
+    thing about both fails here whatever it says; one that distinguishes them passes
+    whatever words it chooses.
+
+    The pair is deliberately the one from `test_an_exempt_only_row_is_not_read_as_a_row_with_no_link`
+    above, which asserts the *counts* differ: together the two tests pin both halves of
+    "this reading answers about the links that were read", and neither can be satisfied
+    by the other's subject.
+    """
+    exempt = _index(
+        tmp_path,
+        "exempt-only.md",
+        ["- [a](https://example.com/x.md) and [b](#heading) and [c](mailto:x@y.z)"],
+    )
+    assert mod.main([str(exempt)]) == 0, capsys.readouterr().out
+    exempt_report = capsys.readouterr().out
+
+    nothing = _index(tmp_path, "link-free.md", ["- a table row names its file in prose"])
+    assert mod.main([str(nothing)]) == 0, capsys.readouterr().out
+    nothing_report = capsys.readouterr().out
+
+    assert _coverage_lines(exempt_report) != _coverage_lines(nothing_report), (
+        "the two states carry the same prose, so whatever the reading says about "
+        "coverage it says about both - and one of the two carries three links:\n"
+        "--- exempt-only ---\n" + exempt_report
+        + "\n--- link-free ---\n" + nothing_report
+    )
+
+
 
 
 def test_several_links_in_one_row_are_all_resolved(mod, tmp_path, capsys) -> None:
@@ -527,7 +690,7 @@ def test_a_link_quoted_inside_a_code_span_is_not_a_link(mod, tmp_path, capsys) -
     )
     assert mod.main([str(path)]) == 0, capsys.readouterr().out
     out = capsys.readouterr().out
-    assert "row links 0, unresolved: 0" in out
+    assert "row links 0" in out, out
     assert "names target" not in out, out
 
 
@@ -572,9 +735,254 @@ def test_an_index_whose_rows_carry_no_link_says_so(mod, tmp_path, capsys) -> Non
     )
     assert mod.main([str(path)]) == 0, capsys.readouterr().out
     out = capsys.readouterr().out
-    assert "row links 0, unresolved: 0" in out
-    assert "the resolution reading had no subject here" in out, out
+    assert "row links 0" in out, out
+    # The defect's own words, and deliberately: "no row carries a ](target) link ... a
+    # table row names its detail file in prose" was printed here while the fixture is a
+    # table row, so it was the one sentence the reading owed this state - and it was
+    # also printed for a `- ` row carrying three exempt links (the `_coverage_lines`
+    # leg above). Asserting a *replacement* sentence instead would fail every correct
+    # implementation that words it differently.
+    assert "a table row names its detail file in prose" not in out, out
     assert "0 row link(s) read" in out, out
+
+
+def test_the_summary_answers_about_the_links_that_were_read(mod, tmp_path, capsys) -> None:
+    """A clean run's last line must be sensitive to how much it checked.
+
+    The claim that has to die is a summary that reads the same whether the run read
+    two row links or none: "every row link resolves" is a sentence about a set with
+    no members when nothing was read. So the assertion compares the **last line** of
+    two clean runs - one over an index whose rows carry links, one over an index
+    whose rows carry none - and requires them to differ. Wording is not pinned, only
+    sensitivity: a summary that ignores the count fails, whatever it says.
+    """
+    _detail(tmp_path, "one.md")
+    _detail(tmp_path, "two.md")
+    with_links = _index(tmp_path, "links.md", ["- [a](one.md) - [b](two.md)"])
+    assert mod.main([str(with_links)]) == 0, capsys.readouterr().out
+    read_two = capsys.readouterr().out.splitlines()[-1]
+
+    no_links = _index(tmp_path, "no-links.md", ["- a table row names its file in prose"])
+    assert mod.main([str(no_links)]) == 0, capsys.readouterr().out
+    read_none = capsys.readouterr().out.splitlines()[-1]
+
+    assert read_two != read_none, (
+        "the summary is the same whether the run read two row links or none, so it "
+        "answers about neither:\n  " + read_two
+    )
+
+
+
+
+def test_help_does_not_claim_what_the_report_disowns(mod, capsys) -> None:
+    """Exit 0's claim about links has three homes, and all three must agree.
+
+    The homes are the `--help` description, the `--help` epilog, and the module
+    docstring's *Exit codes* section — all three hand-written, nothing tying them
+    together. Measured 2026-10-01, on this branch before this assertion and on PR
+    #1794 before it: the report was changed to stop claiming "every row link
+    resolves" — the sentence that is false for an index whose rows carry no link, or
+    only exempt ones — while `--help` went on claiming it. The tool then explained
+    itself with the sentence it had just removed from its own output, which is the
+    "a claim wider than the reading" defect one step out from the reading.
+
+    The first assertion is the behavioural one, and the order is deliberate: on a
+    tool that still claims it, the red is this line and says so. The others hold the
+    one spelling (`LINK_CLAIM`) in place, including the docstring home, which no
+    constant can reach — hence the comparison against the rendered text rather than
+    a sentence of this file's own.
+    """
+    with pytest.raises(SystemExit) as exit_code:
+        mod.main(["--help"])
+    assert exit_code.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+
+    assert "every row link resolves" not in help_text, (
+        "`--help` claims what the report disowns:\n  " + help_text
+    )
+    assert "row link" in help_text, (
+        "the sensitivity leg: a help text that dropped the topic entirely would pass "
+        "the line above for the wrong reason:\n  " + help_text
+    )
+    assert help_text.count(mod.LINK_CLAIM) == 2, (
+        "both `--help` homes state the claim, through the one spelling:\n  " + help_text
+    )
+    assert mod.LINK_CLAIM in " ".join((mod.__doc__ or "").split()), (
+        "the docstring's *Exit codes* section is the claim's third home, and the one "
+        "no constant reaches"
+    )
+
+
+# ── a fence's content is not a row ────────────────────────────────────────────
+#
+# The row predicate judges a line by its shape, and shape cannot answer this question on
+# its own: inside a fenced code block a `- ` line is literal text, which is what an index
+# is made of when it documents the format it is written in. Measured 2026-10-01; the same
+# defect the inline code span had (issue #1793), one scale up.
+#
+# Both directions matter here for the usual reason: the fence must hide what is inside it
+# **and** hide nothing else - an ordinary row beside the fence is still read, and a file
+# with no fence reports exactly what it reported before (no new line, no new number).
+
+
+
+
+# ── a fence's content is not a row ────────────────────────────────────────────
+#
+# The row predicate judges a line by its shape, and shape cannot answer this question on
+# its own: inside a fenced code block a `- ` line is literal text, which is what an index
+# is made of when it documents the format it is written in. Measured 2026-10-01; the same
+# defect the inline code span had (issue #1793), one scale up.
+#
+# Both directions matter here for the usual reason: the fence must hide what is inside it
+# **and** hide nothing else - an ordinary row beside the fence is still read, and a file
+# with no fence reports exactly what it reported before (no new line, no new number).
+
+
+def test_a_fenced_example_is_not_read_as_a_row_or_a_link(mod, tmp_path, capsys) -> None:
+    """The fenced half is not a row, and the row outside it still is.
+
+    The fixture is the shape that made this necessary: an index that documents its own
+    format inside a fence, plus one real row with a link that resolves to nothing. A
+    reading that counted the example would report two rows and two unresolved links; the
+    right answer is the real row alone, with its link followed - so the assertion is on
+    the row the report names *and* on the row it does not.
+    """
+    _detail(tmp_path, "real.md")
+    path = _index(
+        tmp_path,
+        "fenced-example.md",
+        [
+            "# Memory Index",
+            "",
+            "A row is written like this:",
+            "",
+            "```markdown",
+            "- [title](not-a-file.md) - one row per memory",
+            "```",
+            "",
+            "- [real](real.md) - the index's one row",
+        ],
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "rows 1," in out, out
+    assert "row links 1, unresolved: 0" in out, out
+    assert "1 line(s) inside a fenced code block" in out, (
+        "the lines the reading declined to read as rows must be accounted for: " + out
+    )
+    assert "not-a-file.md" not in out, (
+        "the fenced example's link was followed as if the row carried it: " + out
+    )
+
+
+def test_the_hidden_line_count_does_not_include_the_fence_markers(
+    mod, tmp_path, capsys
+) -> None:
+    """One line inside a fence is one hidden line, not one per marker plus content.
+
+    Written after the first version of this reading got it wrong: it took the count as
+    `lines - len(unfenced)`, which also subtracts the opening and closing markers, so a
+    one-line example was reported as three hidden lines - a number about the file that no
+    reader could reconcile with the file. The fixture is small enough to count by eye.
+    """
+    path = _index(
+        tmp_path,
+        "one-line-fence.md",
+        ["# Memory Index", "", "```", "- [a](a.md)", "```", ""],
+    )
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "1 line(s) inside a fenced code block" in out, out
+    assert "rows 0," in out, out
+
+
+def test_a_file_with_no_fence_reports_no_fenced_lines(mod, tmp_path, capsys) -> None:
+    """The direction that keeps the line worth reading: silence when nothing was skipped.
+
+    A coverage sentence printed for every file would be noise, and a reader who sees it
+    always stops believing it - the same reason the coverage sentence for row links only
+    appears when there was nothing to resolve.
+    """
+    _detail(tmp_path, "a.md")
+    path = _index(tmp_path, "plain.md", ["- [a](a.md) - one row"])
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "fenced code block" not in out, out
+
+
+def test_an_unclosed_fence_is_read_as_ordinary_text(mod, tmp_path, capsys) -> None:
+    """A fence the file never closes hides nothing - the conservative direction.
+
+    CommonMark runs an unclosed fence to the end of the document, and a reading that did
+    the same would stop counting rows at the opener: for an index whose author simply
+    forgot the closing line, it would print `rows 1 - within` about a file with forty
+    rows, which is the pass-shaped answer this whole tool exists to prevent. So an
+    unclosed fence is ordinary text: the rows below it are read, and the report says
+    nothing about hidden lines because it hid none.
+    """
+    path = _index(
+        tmp_path,
+        "unclosed.md",
+        ["# Memory Index", "", "```markdown", "- [x](x.md) - a row below an unclosed fence"],
+    )
+    assert mod.main([str(path)]) == 1, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "rows 1," in out, out
+    assert "row at line 4 names x.md" in out, out
+    assert "fenced code block" not in out, (
+        "the reading hid nothing here, so it must not claim it did: " + out
+    )
+
+
+def test_only_a_matching_fence_closes(mod, tmp_path, capsys) -> None:
+    """The closer is the same character and at least as long; anything else is content.
+
+    Two fixtures whose inner lines are only hidden if the pairing is right: a `~~~` block
+    opened with three backticks and a four-backtick block containing a three-backtick
+    line. A reader that closed on *any* fence-marker line would call the first file's
+    body one line short, and a reader that closed on any *length* would end the second
+    block early - both are under-counts of what it read, which is how a reading starts
+    reporting a number that is not about the file.
+    """
+    tilde_inside = _index(
+        tmp_path,
+        "tilde-inside.md",
+        [
+            "# Memory Index",
+            "",
+            "```markdown",
+            "~~~",
+            "- [a](a.md)",
+            "~~~",
+            "```",
+        ],
+    )
+    assert mod.main([str(tilde_inside)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "3 line(s) inside a fenced code block" in out, out
+    assert "rows 0," in out, out
+
+    shorter_inside = _index(
+        tmp_path,
+        "shorter-inside.md",
+        [
+            "# Memory Index",
+            "",
+            "````markdown",
+            "```",
+            "- [a](a.md)",
+            "```",
+            "````",
+            "",
+            "- [b](b.md)",
+        ],
+    )
+    _detail(tmp_path, "b.md")
+    assert mod.main([str(shorter_inside)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "3 line(s) inside a fenced code block" in out, out
+    assert "rows 1," in out, out
 
 
 # ── the embed budget, both directions ─────────────────────────────────────────

@@ -63,6 +63,19 @@ apart, the two both read `- ` and a table index fell between them, so the trigge
 drew no note at all while four of that index's rows were past the bound (measured
 2026-10-01 on this host).
 
+A row is a line **outside a fenced code block**, and that half of the question is
+`emrg.memory.index_lines`, imported beside the predicate and called by the same two
+readers. A fence's content is literal text, which is what an index is made of when it
+*documents* the format it is written in - so the same defect the inline code span had
+(issue #1793) applies one scale up: measured 2026-10-01 on a fixture, an index whose only
+`- ` line and only `](target)` link were inside a fenced example read `rows 1`,
+`row links 1, unresolved: 1` and exited **1**, a verdict about its own documentation.
+Only a **closed** fence hides anything: an opener the file never closes is read as
+ordinary text, because CommonMark would run it to the end of the file and a reading that
+did the same would print `within` about rows it had stopped looking at. The lines skipped
+this way are counted and printed, so a reader who knows their file's shape can account for
+every line. The store's render writes no fence, so no row the store produces is hidden.
+
 Four readings, each from its own source
 ---------------------------------------
 The line **cap** is `MEMORY_INDEX_ROW_CAP` and the row **bound** is
@@ -152,8 +165,8 @@ derived from that root, so the two lines answer about one tree.
 
 Exit codes
 ----------
-``0``  every index read is within every number of the rule, and every row link
-       resolves.
+``0``  every index read is within every number of the rule, and every row link it
+       read resolves.
 ``1``  at least one index is over a number the rule names (the line cap, the embed
        budget, or a row past the bound), or carries a row link that resolves to no
        file; each finding is printed with the line it is on.
@@ -235,7 +248,11 @@ try:
     # compaction trigger (`_memory_index_compaction_note`) calls the same one, so the
     # reading this tool prints and the instruction an agent receives count the same
     # lines. Spelled separately once - both as `- ` - a table index fell between them.
+    # `index_lines` is imported next to it for the same reason and is the same rule
+    # one step earlier: a line inside a fenced code block is literal text, so it is not
+    # a row whatever its shape, and both readers ask that question of this function.
     is_index_row = _memory_module.is_index_row
+    index_lines = _memory_module.index_lines
     THRESHOLD_SOURCE = str(Path(_memory_module.__file__).resolve())
     if not Path(THRESHOLD_SOURCE).is_relative_to(REPO_ROOT):
         THRESHOLD_ERROR = (
@@ -284,6 +301,18 @@ NON_FILE_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#)", re.IGNORECASE)
 
 RUNNER = "uv run --no-sync python3"
 
+#: What exit 0 claims about a row's links, spelled **once**. The claim has three
+#: homes - the `--help` description, the `--help` epilog, and the module docstring's
+#: *Exit codes* section - and prose with three homes drifts. Measured 2026-10-01 on the
+#: landed tree: the report was changed to stop claiming "every row link resolves" (it
+#: is exactly what an index carrying no link, or only exempt links, made false), while
+#: `--help` went on claiming it in both homes - so the tool explained itself with the
+#: sentence it had just removed from its own output. The two `--help` homes interpolate
+#: this constant; the docstring cannot, which is why the test asserts all three carry
+#: the same words. The wording is deliberate: *it read* is the whole of the fix, because
+#: the claim is about the links the reading looked at, not about every link the file has.
+LINK_CLAIM = "every row link it read resolves"
+
 
 class Reading(NamedTuple):
     """One index's readings, every one of them taken from the file at `path`.
@@ -303,9 +332,14 @@ class Reading(NamedTuple):
         index fires one and not the other - `tests/test_memory_index_thresholds.py`).
     :param row_lines: the 1-based file line number of each row.
     :param row_lengths: each row's length in characters, in the same order.
-    :param row_targets: every file link a row carries, as
-        `(file line number, target)`, in file order - the resolution reading's
-        subject. Excludes what `NON_FILE_TARGET` names.
+    :param row_links: every link a row carries, as `(file line number, target)`, in
+        file order - a `](target)` outside a code span, exemption not yet applied.
+        This is what the reading *read*, so a report can say when the answer is
+        "nothing": a count of 0 beside `unresolved: 0` reads as a pass about a set
+        that was never looked at (issue #1793's second half).
+    :param fenced: how many of the file's lines sit inside a fenced code block, and so
+        were never candidates for a row - printed only when it is not zero, so the
+        ordinary report is unchanged and a report that *did* skip lines says so.
     """
 
     path: Path
@@ -313,12 +347,32 @@ class Reading(NamedTuple):
     chars: int
     row_lines: tuple[int, ...]
     row_lengths: tuple[int, ...]
-    row_targets: tuple[tuple[int, str], ...] = ()
+    row_links: tuple[tuple[int, str], ...] = ()
+    fenced: int = 0
 
     @property
     def rows(self) -> int:
         """How many rows the file holds."""
         return len(self.row_lengths)
+
+    @property
+    def row_targets(self) -> tuple[tuple[int, str], ...]:
+        """The links that name a file beside the index - the resolution's subject.
+
+        A **property of** `row_links`, not a second field: the two are one reading
+        taken once and read two ways, and the defect measured on this tree 2026-10-01
+        was exactly a report that confused them - a row carrying three links, all a
+        URL or an anchor, printed `row links 0, unresolved: 0` under "no row carries
+        a ](target) link ... a table row names its detail file in prose". The count
+        came from the filtered list while the sentence asserted what the unfiltered
+        one held. Kept as a derived value so the filter cannot drift from the set it
+        filters.
+        """
+        return tuple(
+            (number, target)
+            for number, target in self.row_links
+            if not NON_FILE_TARGET.match(target)
+        )
 
     @property
     def longest(self) -> int:
@@ -376,17 +430,25 @@ def measure(path: Path) -> Reading:
     lines = text.splitlines()
     row_lines: list[int] = []
     row_lengths: list[int] = []
-    row_targets: list[tuple[int, str]] = []
-    for number, line in enumerate(lines, 1):
+    row_links: list[tuple[int, str]] = []
+    # Rows are read out of the *unfenced* lines: a line inside a fenced code block is
+    # literal text, and a `- ` line or a `](target)` link in one is the index showing its
+    # own format rather than carrying a row. The cap above stays the file's line count,
+    # because every line the file has is a line the embed pays for.
+    split = index_lines(text)
+    for number, line in split.unfenced:
         if is_index_row(line):
             row_lines.append(number)
             row_lengths.append(len(line))
             for target in LINK.findall(CODE_SPAN.sub(" ", line)):
-                if not NON_FILE_TARGET.match(target):
-                    row_targets.append((number, target))
+                # Every link is recorded here, exemption included: this is what the
+                # reading *read*, and `Reading.row_targets` is the subset the
+                # resolution had a subject for. Filtering at the read is what made
+                # the report unable to tell "no link" from "three links, none a file".
+                row_links.append((number, target))
     return Reading(
         path, len(lines), len(text), tuple(row_lines), tuple(row_lengths),
-        tuple(row_targets)
+        tuple(row_links), len(split.fenced)
     )
 
 
@@ -436,20 +498,43 @@ def _report(reading: Reading) -> list[str]:
         f"  rows {reading.rows}, longest {reading.longest} chars, "
         f"over {INDEX_TITLE_MAX_CHARS}: {len(over)}"
     )
+    if reading.fenced:
+        # Stated, not silent: these lines were skipped as row candidates, and a reader
+        # comparing this number against their file has to be able to account for them.
+        out.append(
+            f"  {reading.fenced} line(s) inside a fenced code block - read as literal "
+            f"text, so not rows and their links not followed"
+        )
     for number, length in over:
         out.append(
             f"  row at line {number} is {length} chars, "
             f"over the {INDEX_TITLE_MAX_CHARS} bound"
         )
     unresolved = reading.unresolved()
-    out.append(
-        f"  row links {len(reading.row_targets)}, unresolved: {len(unresolved)}"
-    )
-    if reading.rows and not reading.row_targets:
+    # The count and the sentence come from the same set, and the set is `row_links` -
+    # what the reading read - not `row_targets`, which the exemption has already
+    # shrunk. Measured 2026-10-01 on the landed tree: a row carrying three links, all
+    # of them a URL or an anchor, printed
+    #     row links 0, unresolved: 0
+    #     no row carries a ](target) link, so the resolution reading had no subject
+    #     here - a table row names its detail file in prose, ...
+    # under exit code 0. Both halves were false about that file: it is a `- ` row, and
+    # it carries three. An exemption is not an absence, so the two are counted apart.
+    if not reading.row_links:
         out.append(
-            "  no row carries a ](target) link, so the resolution reading had no "
-            "subject here - a table row names its detail file in prose, and this is "
-            "not a statement that every row link resolves"
+            "  row links 0 - no row carries a ](target) link, so there was "
+            "nothing to resolve"
+        )
+    else:
+        exempt = len(reading.row_links) - len(reading.row_targets)
+        out.append(
+            f"  row links {len(reading.row_links)}, unresolved: {len(unresolved)}"
+            + (
+                f" ({len(reading.row_targets)} name a file, {exempt} a URL or an "
+                f"anchor)"
+                if exempt
+                else ""
+            )
         )
     for number, target in unresolved:
         out.append(
@@ -487,11 +572,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 else "the rule's numbers are unreadable from this interpreter, so "
                 "every run reports that instead of a count"
             )
-            + ", and every row link resolving to a file beside it."
+            + f", and {LINK_CLAIM}."
         ),
         epilog=(
-            f"Exit 0: every index is within every number and every row link "
-            f"resolves. Exit 1: at least one is over one of them, or points at a "
+            f"Exit 0: every index is within every number and {LINK_CLAIM}. "
+            f"Exit 1: at least one is over one of them, or points at a "
             f"file that is not there. Exit 2: nothing could be measured (no index "
             f"under the tree, or a named index could not be read). Example: "
             f"{RUNNER} scripts/check-memory-index.py "
@@ -571,7 +656,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         or reading.unresolved()
     ]
     if not findings:
-        links_read = sum(len(reading.row_targets) for reading in readings)
+        links_read = sum(len(reading.row_links) for reading in readings)
         print(
             f"OK: {len(readings)} index(es) within the three numbers the rule names "
             f"({MEMORY_INDEX_ROW_CAP} lines, {INDEX_SIZE_WARN} chars, "
