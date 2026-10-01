@@ -8,11 +8,14 @@ evolution cycle reads — while the one prompt **every** session is rendered und
 no number has no edge, and the measurement that says so is the promote session's own
 `system.md`: it carried the sentence without the number.
 
-So the bound is stated in `system.j2` and **injected** from the store's constant rather than
-written into the template, and this file measures both halves — that the shared template
-states it, and that a session which really renders that template receives the constant's
-value. The second half is the one that matters: the number is a bound on a line of a file
-the *agent* writes, so a statement that never reaches the writer's prompt fixes nothing.
+R9 names **two** numbers for the same file — the per-row bound and the line cap ("those two
+numbers are why 100 lines fit the embed budget") — and the every-session template carried
+*neither*: it said "one short line per entry" and "if a memory index has grown long". So both
+are stated in `system.j2` and **injected** from the constant the daemon also measures with,
+rather than written into the template, and this file measures each in both halves — that the
+shared template states it, and that a session which really renders that template receives the
+constant's value. The second half is the one that matters: the number is a bound on a file the
+*agent* writes, so a statement that never reaches the writer's prompt fixes nothing.
 
 The *other* half of this defect — the daemon's compaction trigger, which reads the same rows
 — is `tests/test_memory_index_embed_cap_ends.py`; the guard that prints the reading is
@@ -26,7 +29,7 @@ from pathlib import Path
 
 from emrg.config import LlmConfig
 from emrg.memory import INDEX_TITLE_MAX_CHARS
-from emrg.server.daemon import EmrgServer, _get_jinja_env
+from emrg.server.daemon import MEMORY_INDEX_ROW_CAP, EmrgServer, _get_jinja_env
 from emrg.session import Session
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +47,14 @@ BOUND_MARKER = "pure index"
 #: The variable the template must use. Named here so the assertion and the template cannot
 #: disagree about which name is the one.
 BOUND_VAR = "{{ index_title_max_chars }}"
+
+#: The line cap's identity: the sentence that asks for compaction. Chosen as a phrase that
+#: survives rewording of the number, so this file keeps measuring the *cap's* carrier rather
+#: than one spelling of the sentence.
+LINE_CAP_MARKER = "consolidate: merge redundant memories"
+
+#: The variable the line-cap sentence must use — the same name/value pairing as `BOUND_VAR`.
+LINE_CAP_VAR = "{{ memory_index_row_cap }}"
 
 
 def _hygiene_block(text: str) -> str:
@@ -78,6 +89,14 @@ def _bound_line(text: str) -> str:
     """
     for line in text.splitlines():
         if BOUND_MARKER in line:
+            return line
+    return ""
+
+
+def _line_cap_line(text: str) -> str:
+    """The one line of `text` that states the line cap, or `""`. The row bound's sibling."""
+    for line in text.splitlines():
+        if LINE_CAP_MARKER in line:
             return line
     return ""
 
@@ -124,6 +143,23 @@ def test_the_shared_template_states_the_bound() -> None:
     )
 
 
+def test_the_shared_template_states_the_line_cap() -> None:
+    """R9 names two numbers for the file and the every-session carrier said neither.
+
+    The row bound's sibling: `MEMORY_INDEX_ROW_CAP` was stated in `evolution_prompt.md` alone
+    (a carrier only an evolution cycle reads), while `system.j2` left the compaction sentence
+    at "if a memory index has grown long" — a threshold no writer could measure against. The
+    same injection, for the same reason.
+    """
+    block = _hygiene_block(SYSTEM_PROMPT.read_text(encoding="utf-8"))
+    assert block, "emrg/server/prompts/system.j2 must carry the memory-hygiene block"
+    assert LINE_CAP_VAR in block, (
+        f"the hygiene block must state the line cap as `{LINE_CAP_VAR}`, injected from the "
+        "daemon's own constant; 'if a memory index has grown long' is a threshold with no "
+        "number, and R9's second number therefore reached no session but an evolution cycle"
+    )
+
+
 def test_the_rendered_prompt_carries_the_stores_number(tmp_path: Path) -> None:
     """The artifact the writer receives, measured through the daemon's own builder.
 
@@ -146,28 +182,58 @@ def test_the_rendered_prompt_carries_the_stores_number(tmp_path: Path) -> None:
     )
 
 
+def test_the_rendered_prompt_carries_the_stores_line_cap(tmp_path: Path) -> None:
+    """The line cap, read at the same level as the row bound: the render a session receives."""
+    server = _make_server()
+    rendered = server._build_system_prompt(_session_with_an_index(tmp_path))
+    line = _line_cap_line(rendered)
+    assert line, (
+        "the rendered session prompt must state the line cap: the marker is present in "
+        "system.j2 but no render a session receives carries it"
+    )
+    assert str(MEMORY_INDEX_ROW_CAP) in line, (
+        f"the rendered cap must be the daemon's number ({MEMORY_INDEX_ROW_CAP}); the line "
+        f"reads: {line!r} — an empty value here means `_build_system_prompt` supplies no key "
+        "for it"
+    )
+
+
 def test_the_number_is_injected_not_written_in_the_template() -> None:
-    """Both directions: the render's number follows its context, so there is one home for it.
+    """Both directions, for both numbers: the render follows its context, so one home each.
 
     A number written into the template would pass every check above and still be a second
-    copy of a derived value — free to drift from `INDEX_TITLE_MAX_CHARS` the moment either
-    moves, with the guard (`scripts/check-memory-index.py`) measuring the other one. Driving
-    a value the constant does not have is what tells the two apart: it can only appear in the
-    render if the template reads its context.
+    copy of a derived value — free to drift from the constant the guard (or the daemon's own
+    compaction trigger) measures, the moment either moves. Driving a value the constant does
+    not have is what tells the two apart: it can only appear in the render if the template
+    reads its context. Measured for the row bound and the line cap together, because they
+    share one carrier and a fix that reached only one of them is the state this file exists
+    to prevent.
     """
-    probe = 4096
-    assert probe != INDEX_TITLE_MAX_CHARS, "the probe must be a value the constant is not"
+    row_probe = 4096
+    cap_probe = 977
+    assert row_probe != INDEX_TITLE_MAX_CHARS, "the probe must be a value the constant is not"
+    assert cap_probe != MEMORY_INDEX_ROW_CAP, "the probe must be a value the constant is not"
     rendered = _get_jinja_env().get_template("system.j2").render(
         os_name="test", config_dir="/nonexistent", has_memories=True,
-        index_title_max_chars=probe,
+        index_title_max_chars=row_probe, memory_index_row_cap=cap_probe,
     )
-    line = _bound_line(rendered)
-    assert line, "the hygiene block must render when memories exist"
-    assert str(probe) in line, (
-        f"the bound must come from the render context, not a literal in the template; with "
-        f"the context set to {probe} the line reads: {line!r}"
+    bound_line = _bound_line(rendered)
+    cap_line = _line_cap_line(rendered)
+    assert bound_line, "the hygiene block must render when memories exist"
+    assert str(row_probe) in bound_line, (
+        f"the row bound must come from the render context, not a literal in the template; "
+        f"with the context set to {row_probe} the line reads: {bound_line!r}"
     )
-    assert str(INDEX_TITLE_MAX_CHARS) not in line, (
-        f"the line still carries {INDEX_TITLE_MAX_CHARS} with the context set to {probe} — "
-        "that number is written into the template, and two copies of it can drift"
+    assert str(INDEX_TITLE_MAX_CHARS) not in bound_line, (
+        f"the line still carries {INDEX_TITLE_MAX_CHARS} with the context set to {row_probe} "
+        "— that number is written into the template, and two copies of it can drift"
+    )
+    assert cap_line, "the line-cap sentence must render when memories exist"
+    assert str(cap_probe) in cap_line, (
+        f"the line cap must come from the render context, not a literal in the template; "
+        f"with the context set to {cap_probe} the line reads: {cap_line!r}"
+    )
+    assert str(MEMORY_INDEX_ROW_CAP) not in cap_line, (
+        f"the line still carries {MEMORY_INDEX_ROW_CAP} with the context set to {cap_probe} "
+        "— that number is written into the template, and two copies of it can drift"
     )

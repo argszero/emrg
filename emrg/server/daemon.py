@@ -2231,6 +2231,16 @@ class EmrgServer:
         # `INDEX_TITLE_MAX_CHARS`) and the instruction an agent is given cannot drift:
         # one number, one home, two readers.
         ctx["index_title_max_chars"] = INDEX_TITLE_MAX_CHARS
+        # The index's *line* bound — the other of the two numbers R9 names ("those two
+        # numbers are why 100 lines fit the embed budget"). Same defect shape as the row
+        # bound above, one number over: `MEMORY_INDEX_ROW_CAP` lived in
+        # `evolution_prompt.md` alone, while the prompt **every** session renders said
+        # only "if a memory index has grown long" — a threshold with no number, read as a
+        # licence to keep appending. Injected from the same constant the daemon's own
+        # compaction trigger measures lines against (`_memory_index_compaction_note`), so
+        # the trigger and the instruction an agent is given cannot disagree about where
+        # the edge is: one number, one home, two readers.
+        ctx["memory_index_row_cap"] = MEMORY_INDEX_ROW_CAP
 
         # ── Working Directory ──
         if session:
