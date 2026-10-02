@@ -319,3 +319,132 @@ def test_a_p12_without_a_private_key_still_gets_the_original_diagnosis(tmp_path)
     assert "could not be imported at all" not in r.stdout, (
         f"an import that succeeded is not a refused import: {r.stdout!r}"
     )
+
+
+# ── the notarize step ─────────────────────────────────────────────────────────
+#
+# The guard above covers only the `2>&1` shape, because that is the one it can decide
+# precisely (see its docstring). These captures are the other shape — `2>/dev/null`, the
+# value is what matters — so they are covered by running the step rather than by a rule.
+# That is a deliberate boundary, not an oversight: a rule broad enough to catch them
+# ("any assignment whose value a later `::error::` branch tests") was measured against
+# this workflow and reported 7 further sites, every one of which must abort on an empty
+# value — the four `gh api` reads whose emptiness would print a definite claim about a
+# release (`still a DRAFT (draft=)`), and the two `find … | head -1` reads that cannot
+# fail at all.
+
+NOTARY_STEP = "Notarize pkg (macOS only)"
+
+_NOTARY_STUB = '''#!/bin/sh
+# Stand in for `xcrun notarytool`, answering the way the scenario says.
+sub=""
+for a in "$@"; do case "$a" in submit|log|info) sub="$a"; break;; esac; done
+case "$sub" in
+  submit)
+    case "$NOTARY_SCENARIO" in
+      noisy-json)
+        # SUCCEEDS, but `2>&1` mixes a progress line into the JSON document, so the
+        # output is not parseable as one document. This is the measured shape: the
+        # step used to die at the parse with no cause printed.
+        printf 'Conducting pre-submission checks for EMRG.pkg...\\n'
+        printf '{"id": "sub-1", "message": "uploaded", "status": "Accepted"}\\n'
+        exit 0 ;;
+      no-fields)
+        # Parses fine, but Apple's reply carries neither field.
+        printf '{"message": "uploaded"}\\n'; exit 0 ;;
+      invalid)
+        printf '{"id": "sub-1", "message": "see log", "status": "Invalid"}\\n'; exit 0 ;;
+      *)
+        printf '{"id": "sub-1", "message": "uploaded", "status": "Accepted"}\\n'; exit 0 ;;
+    esac ;;
+  log) printf 'no rejection detail\\n'; exit 0 ;;
+esac
+exit 0
+'''
+
+
+def _notary_body() -> str:
+    jobs = yaml.safe_load(_read(WORKFLOW)).get("jobs")
+    assert isinstance(jobs, dict) and "build" in jobs, "build-release.yml has no `build` job"
+    named = [
+        s for s in jobs["build"].get("steps", [])
+        if isinstance(s, dict) and s.get("name") == NOTARY_STEP
+    ]
+    assert len(named) == 1, f"expected exactly one {NOTARY_STEP!r} step, got {len(named)}"
+    return _body(named[0])
+
+
+def _run_notary_step(tmp_path, scenario: str):
+    shell = shutil.which("bash")
+    if shell is None:
+        pytest.skip("no POSIX shell is available for the ground-truth run")
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "xcrun"
+    stub.write_text(_NOTARY_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    (tmp_path / "dist" / "artifacts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "dist" / "artifacts" / "EMRG-0.3.8-macos-arm64.pkg").write_bytes(b"pkg")
+
+    script = tmp_path / "step.sh"
+    script.write_text(_notary_body(), encoding="utf-8")
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    env.update({
+        "APPLE_ID": "a@b.c", "MACOS_NOTARY_APP_PASSWORD": "pw",
+        "MACOS_NOTARY_TEAM_ID": "TEAMID", "NOTARY_SCENARIO": scenario,
+        "HOME": str(tmp_path / "home"),
+    })
+    return subprocess.run(
+        [shell, *RUNNER_SHELL, str(script)],
+        cwd=tmp_path, env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
+
+
+def test_a_successful_submit_whose_output_is_unparseable_says_so(tmp_path) -> None:
+    """The silent case: `submit` exits 0, the output is not JSON, and nobody said why.
+
+    Measured on this tree by running the body under the runner's flags: `rc=1`, the raw
+    output on stdout, and **no** `::error::` at all — the parse assignment aborted the
+    step before the branch written for that state. An operator reading that log learns
+    the step failed and nothing else, which is the v0.3.8 signature again.
+    """
+    r = _run_notary_step(tmp_path, "noisy-json")
+
+    assert r.returncode != 0, "an unreadable verdict must still fail the step"
+    assert "could not be parsed as JSON" in r.stdout, (
+        "the step must name the state it is in rather than dying at an assignment: "
+        f"{r.stdout!r}"
+    )
+    assert "still a DRAFT" not in r.stdout and "DRAFT" not in r.stdout, (
+        f"nothing here is a verdict about the release: {r.stdout!r}"
+    )
+
+
+def test_output_that_parses_but_lacks_the_fields_is_a_different_message(tmp_path) -> None:
+    """The two states are separate, and this arm is what keeps them so.
+
+    "The parser could not read it" and "it read fine and the fields were absent" have
+    different remedies (notarytool emitted something unexpected / Apple's reply lacked
+    the field), so a single message for both would name the wrong cause for one of them
+    — the defect §112 records, one branch over.
+    """
+    r = _run_notary_step(tmp_path, "no-fields")
+
+    assert r.returncode != 0, "a reply with no id/status must fail the step"
+    assert "输出解析失败" in r.stdout, (
+        f"the missing-fields diagnosis must still be reachable: {r.stdout!r}"
+    )
+    assert "could not be parsed as JSON" not in r.stdout, (
+        f"it parsed fine — that is not this state: {r.stdout!r}"
+    )
+
+
+def test_a_clean_accepted_reply_still_reports_success(tmp_path) -> None:
+    """The control: the happy path must not be shadowed by the two new branches."""
+    r = _run_notary_step(tmp_path, "ok")
+
+    assert r.returncode == 0, f"an Accepted reply must pass: {r.stdout!r}{r.stderr!r}"
+    assert "公证通过" in r.stdout, f"and say so: {r.stdout!r}"
+    assert "could not be parsed as JSON" not in r.stdout
