@@ -199,7 +199,7 @@ from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
-from emrg.server.rants import append_rant
+from emrg.server.rants import append_rant, list_rants
 from emrg.server.scheduler import TaskScheduler
 from emrg.server import logcontext
 
@@ -2894,22 +2894,22 @@ class EmrgServer:
         elif msg_type == "list_rants":
             # Rant panel (rant 2026-08-13T14:10:14 P4): read ~/.emrg/rants.jsonl,
             # optional status filter (pending/in_progress/completed/"" = all).
+            #
+            # Read through ``rants.list_rants`` — the module's own reader, and the
+            # one `submit_rant`'s list action already uses — rather than parsing the
+            # ledger again here. Measured 2026-10-02: the inline copy this replaced
+            # raised ``AttributeError: 'list' object has no attribute 'get'`` on a
+            # legacy ARRAY row (the 2026-08-18 format-drift shape that
+            # ``_normalize_rant`` exists to convert), so the panel delivered nothing
+            # while ``submit_rant list`` listed that same row happily — two readers
+            # of one file returning two answers, which is exactly what the module's
+            # "single source of truth for rants.jsonl" docstring forbids. The
+            # status filter is passed to that reader rather than applied here for
+            # the same reason: a second copy of it is a second place that can
+            # disagree about what an unset status means.
             try:
                 filter_status = str(msg.get("status", "") or "").strip()
-                rants = []
-                if self._rants_log.exists():
-                    with open(self._rants_log, encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                r = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            if filter_status and r.get("status", "pending") != filter_status:
-                                continue
-                            rants.append(r)
+                rants = list_rants(self._rants_log, status=filter_status or None)
                 # 时间倒序（最新在前，面板列表惯例）
                 rants.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
                 await self._send(ws, {

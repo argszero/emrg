@@ -2400,6 +2400,64 @@ def test_list_rants_missing_file_returns_empty(tmp_path, monkeypatch):
     assert frame["rants"] == []
 
 
+def test_the_rant_panel_and_the_tool_read_the_ledger_the_same_way(tmp_path, monkeypatch):
+    """One file, one answer: the panel must not disagree with `submit_rant list`.
+
+    Measured 2026-10-02, on this handler's own body: the hand-written reader it
+    carried asked ``line → json.loads → r.get("status")``, and a **legacy ARRAY
+    row** — the 2026-08-18 format-drift shape that ``rants._normalize_rant`` exists
+    to convert — made that ``.get`` raise ``AttributeError: 'list' object has no
+    attribute 'get'``. The panel delivered nothing for a file the ``submit_rant``
+    tool listed happily, because the tool reads through ``rants.list_rants`` and
+    the daemon did not. A second reader of one ledger is a second answer.
+
+    The assertion is the invariant rather than a transcript: whatever the tool's
+    reader says the ledger holds, that is what the panel sends — for a legacy row,
+    for a line that parses to a non-object, and for a line that does not parse.
+    """
+    import asyncio
+
+    from emrg.server import rants as rants_mod
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    writer = _FakeWriter()
+
+    ledger = tmp_path / "rants.jsonl"
+    with open(ledger, "w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "timestamp": "2026-08-18T16:42:52+08:00", "project": "emrg",
+            "status": "pending", "progress": None, "completed": None,
+            "message": "canonical dict row",
+        }, ensure_ascii=False) + "\n")
+        # The format-drift shape: an ARRAY row, which the module's normalizer
+        # converts back to the canonical dict and a bare `.get` cannot read.
+        f.write(json.dumps([
+            "2026-08-17T11:51:59+08:00", "emrg", "pending", None, None,
+            "legacy array row",
+        ], ensure_ascii=False) + "\n")
+        # Parses fine, is not an object — `json.loads` raises nothing to catch.
+        f.write("5\n")
+        # Does not parse at all (the shape the old test already covered).
+        f.write("{not json}\n")
+
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "rants_list"
+
+    panel = [r["message"] for r in frame["rants"]]
+    tool = [r["message"] for r in rants_mod.list_rants(ledger)]
+    assert panel, "the panel delivered nothing — the reader raised instead of reading"
+    assert panel == tool, (
+        "the panel and the tool disagree about the same ledger: panel="
+        f"{panel!r}, submit_rant list={tool!r}"
+    )
+    assert "legacy array row" in panel, (
+        f"the legacy row is a rant the module converts — it must be listed: {panel!r}"
+    )
+    assert len(panel) == 2, f"the unparseable and non-object lines are skipped: {panel!r}"
+
+
 # ── Token-file self-heal (rant 2026-08-09T13:16:36 root cause) ─────────
 # G43 stale-port logic once deleted a healthy daemon's emrgd.token after a
 # transient ws failure → daemon's own scheduler lost the file (93× "cannot
