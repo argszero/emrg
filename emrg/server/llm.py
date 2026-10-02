@@ -23,7 +23,7 @@ import httpx
 
 from emrg import __version__
 from emrg.config import LlmConfig
-from emrg.server.tool_types import tool_call_shape_problem
+from emrg.server.tool_types import shape_of, tool_call_shape_problem
 
 
 # ── 错误信息脱敏（20260807-0107）────────────────────────────
@@ -407,6 +407,120 @@ def tool_call_unreadable_error(position: int, problem: str) -> SelfExplainingLlm
     )
 
 
+def completion_shape_problem(data: object) -> str | None:
+    """Why a non-streaming 200 body is not a completion, or ``None`` when it is.
+
+    The streaming path reads its answer as a sequence of deltas (``chat_stream``);
+    this path reads one object, and until now it read it as if the provider had
+    obeyed the contract: ``choice = data["choices"][0]``, ``choice.get("message",
+    {})``. Measured on this host 2026-10-03 (``cyc20261003-051925``) by calling
+    the real ``chat()`` over a stub transport — every shape below parses as JSON:
+
+    ==================================  =========================================
+    body sent                           what the caller got
+    ==================================  =========================================
+    ``[]``                              ``TypeError: list indices must be integers``
+    ``"x"``                             ``TypeError: string indices must be integers``
+    ``{"id": "1"}``                     ``KeyError: 'choices'``
+    ``{"choices": null}``               ``TypeError: 'NoneType' object is not subscriptable``
+    ``{"choices": {…}}``                ``KeyError: 0``
+    ``{"choices": []}``                 ``IndexError: list index out of range``
+    ``{"choices": [null]}``             ``AttributeError: 'NoneType' object has no attribute 'get'``
+    ``{"choices": ["x"]}``              ``AttributeError: 'str' object has no attribute 'get'``
+    ``{"choices": [{"message": null}]}``  ``AttributeError: 'NoneType' object has no attribute 'get'``
+    ``{"choices": [{"message": "ok"}]}``  ``AttributeError: 'str' object has no attribute 'get'``
+    ``{"choices": [{"message": {"content": ["a"]}}]}``  *returned* — a list reaches the callers
+    ``{"choices": [{"message": {"content": 5}}]}``      *returned* — an int reaches the callers
+    ``{"choices": [{"finish_reason": "stop"}]}``  ``RuntimeError`` — the existing refusal below
+    ==================================  =========================================
+
+    Ten bodies, ten raw Python exceptions, none of which names the provider, the
+    field or the shape — and none of which any caller can act on. Two more do not
+    raise at all and hand a payload no caller can read to whoever asked. Every one
+    of them is a *gateway* artefact (a proxy answering 200 with its own envelope, a
+    truncated upstream response), which is the same class the unparseable-body
+    branch above already retries; this rule closes the same door one step later,
+    where the JSON happens to parse.
+
+    The rule
+    --------
+    The body is an object; it carries a ``choices`` that is a **non-empty list**;
+    ``choices[0]`` is an object; ``message``, when the choice carries the key, is
+    an object; and ``message.content``, when that object carries the key, is a
+    string or null — the shape every caller reads it as.
+
+    Three deliberate boundaries:
+
+    * **A missing ``message`` is not this rule's question.** ``{}`` for the
+      message is what the read already falls back to, and the existing
+      "returned no answer at all" refusal below names ``finish_reason`` for it —
+      a better sentence than a shape complaint about a key that is absent.
+    * **Null ``content`` is not a wrong string.** It is the contract's own value
+      for a tool-call answer, and the existing empty-answer branch reads it.
+    * **A non-string ``content`` is refused**, and that one is worth its reason:
+      ``{"choices": [{"message": {"content": ["a", "b"]}}]}`` is *accepted* today
+      and does not raise at all. Two callers then misuse it — ``_do_compact``
+      stores it as the session's summary (``msg.get("content", "Summary
+      unavailable.")``) and broadcasts it, and the title path calls ``.strip()``
+      on it. A shape the callers cannot read is a refusal here, where the reason
+      is still available to say, rather than a corrupt summary three steps later.
+
+    :param data: the parsed body of a 200 response, whatever shape it arrived in.
+    :returns: a refusal sentence naming the part and the shape it received, or
+        ``None`` when the body is a completion.
+    """
+    if not isinstance(data, dict):
+        return f"the response body is not an object; got {shape_of(data)}"
+    if "choices" not in data:
+        return "the response carries no `choices`"
+    choices = data["choices"]
+    if not isinstance(choices, list):
+        return f"`choices` is not a list; got {shape_of(choices)}"
+    if not choices:
+        return "`choices` is empty — there is no completion in the response"
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return f"`choices[0]` is not an object; got {shape_of(choice)}"
+    if "message" not in choice:
+        return None
+    message = choice["message"]
+    if not isinstance(message, dict):
+        return f"`choices[0].message` is not an object; got {shape_of(message)}"
+    if "content" not in message:
+        return None
+    content = message["content"]
+    if content is None or isinstance(content, str):
+        return None
+    return (
+        "`choices[0].message.content` is not a string; "
+        f"got {shape_of(content)}"
+    )
+
+
+def completion_unreadable_error(problem: str) -> SelfExplainingLlmError:
+    """The failure raised when a 200 body parses and is not a completion.
+
+    Retried, then reported — the same treatment, and for the same reason, as the
+    unparseable-body branch in :meth:`LlmClient.chat`: both are "the answer did
+    not arrive in the form the wire contract declares", both are documented
+    gateway/proxy artefacts, and a provider asked again a second later very often
+    answers properly.
+
+    Named, and carrying no word from the overlong or content-risk vocabularies,
+    for the reason :func:`tool_call_unreadable_error` is: this sentence is what
+    the host reads, and a classifier that mistook it for a length problem would
+    hand it to the chunker, which re-sends the very request the provider could
+    not answer in the expected shape.
+    """
+    return SelfExplainingLlmError(
+        f"the provider's answer is not a completion: {problem} — nothing was "
+        "recorded from this request. A 200 whose body is not the object the "
+        "OpenAI-compatible contract declares is a bug in the provider or in the "
+        "gateway in front of it, not in this session: retry, or use a different "
+        "model."
+    )
+
+
 def content_risk_retry(stage: int, original: list[dict]) -> tuple[str, list[dict]] | None:
     """The next rung for a content refusal, or ``None`` when the ladder is spent.
 
@@ -642,6 +756,27 @@ class LlmClient:
                     raise RuntimeError(
                         f"LLM response body unparseable: {type(exc).__name__}"
                     ) from exc
+
+                # …and a body that parses and is still not a completion is the
+                # same class of fault one step later (measured 2026-10-03,
+                # `cyc20261003-051925`: nine such bodies, eight raw exceptions —
+                # see `completion_shape_problem`). Same treatment as above, and
+                # for the same reason: this is a gateway artefact, not a bad
+                # request, so it is worth re-asking once.
+                problem = completion_shape_problem(data)
+                if problem is not None:
+                    if attempt < MAX_RETRIES:
+                        delay = RETRY_BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            "LLM response is not a completion (%s), retrying in "
+                            "%.1fs (attempt %d/%d)",
+                            problem, delay, attempt + 1, MAX_RETRIES,
+                        )
+                        await asyncio.sleep(delay)
+                        last_error = completion_unreadable_error(problem)
+                        continue
+                    raise completion_unreadable_error(problem)
+
                 choice = data["choices"][0]
                 message = choice.get("message", {})
                 # ── The provider refused the model's OWN output ───────
