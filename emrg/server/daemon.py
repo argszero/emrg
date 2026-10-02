@@ -2875,7 +2875,15 @@ class EmrgServer:
             # Store user rant/feedback for evolution analysis
             rant_message = msg.get("message", "").strip()
             if not rant_message:
-                await self._send(ws, {"error": "rant requires a message"})
+                # Named like every other command result: the GUI pairs a reply to
+                # its command by the reply's own `type` (daemon_client.js
+                # RESPONSE_TYPES), and a typeless `{"ok": ...}` matched nothing —
+                # so the host's `/rant` reported a failure after its 5s timeout
+                # while the daemon had written the rant (measured 2026-10-02).
+                await self._send(ws, {
+                    "type": "rant_result",
+                    "error": "rant requires a message",
+                })
                 return
 
             # Optional project targeting (multi-project support)
@@ -2889,7 +2897,7 @@ class EmrgServer:
 
             logger.info("rant recorded (%d total)%s: %s",
                 count, f" project={project}" if project else "", _redact_string(rant_message[:100]))
-            await self._send(ws, {"ok": True, "count": count})
+            await self._send(ws, {"type": "rant_result", "ok": True, "count": count})
 
         elif msg_type == "list_rants":
             # Rant panel (rant 2026-08-13T14:10:14 P4): read ~/.emrg/rants.jsonl,

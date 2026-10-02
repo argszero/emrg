@@ -126,6 +126,12 @@ const RESPONSE_TYPES = {
   github_disconnect: "github_disconnect_result", // Windows GCM rant Stage 2：断开（daemon.py github_disconnect）
   github_connect_web: "github_connect_web_result", // Stage 2b：device flow（daemon.py github_connect_web）
   list_files: "files_list", // 右栏工作区面板 P1：目录树（daemon.py list_files）
+  // 补缺（2026-10-02）：这两条**等不到答复**——`rant` 的回执原本连 type 都没有，
+  // `remove_project` 的回执叫 project_removed 而映射表里没有它，于是 sendCommandAndWait
+  // 永远配不上，命令在超时里失败（而 daemon 那边早就做完了）。配对的身份只能是
+  // 回执自己的 type，映射表就是它的一个家。
+  rant: "rant_result", // daemon.py rant（回执已带 type）
+  remove_project: "project_removed", // daemon.py remove_project
   read_file: "file_content", // 右栏工作区面板 P1：文件查看器（daemon.py read_file）
   // rant 2026-08-12T18:23:15 P2/P3：任务 + 自定义类型 CRUD（daemon.py task_create 等）
   task_create: "task_result",
@@ -861,24 +867,39 @@ class DaemonClient {
   }
 
   _resolvePending(frame) {
-    // G103：error 帧无 type——FIFO reject 最早未决；无未决 → 返回 false 走广播
-    if (frame.error) {
-      const entry = this._pendingFifo.shift();
-      if (entry) {
-        this._pending.delete(entry.frameType);
-        clearTimeout(entry.timer);
-        entry.reject(new Error(frame.error));
+    // 命令-响应配对（G93/G103）。两条规则，顺序就是规则本身：
+    //
+    // ① 帧自己的 `type` 先说话，**带不带 `error` 都一样**——命令结果帧的身份就是它的
+    //    type（`list_sessions → sessions_list`，经 RESPONSE_TYPES 映射），所以
+    //    `compact` 的失败答复落在 `compact` 上，而不是落在最早未决的那条命令上。
+    //    原来的顺序是「先看 error、再 FIFO 顶掉最早未决」，于是两条命令同时在飞时
+    //    （list_sessions 后 compact），compact 的失败记在 list_sessions 头上，compact
+    //    自己等到超时；实测 2026-10-02。
+    // ② 只有**没有 type** 的 `error` 帧才走 FIFO：那是 daemon 对某条命令的直接答复
+    //    （`{"error": "task requires session_id and cwd"}`），线缆上不带任何标识，最早
+    //    未决是唯一能认的形状。
+    // ③ 其余 → 返回 false 走广播。这一支正是会话级失败广播该去的地方：`_handle_compact`
+    //    把 `compact_result`（失败分支也带 `error`）广播给会话**每个**订阅者，而 `compact`
+    //    没有 busy 检查 ⇒ 同一个会话里别的客户端的失败压缩会落到这条连接上。它不是本连接
+    //    任何命令的答复，既不能 reject 命令、也不该被吞掉——渲染层要能看见「这个会话的
+    //    压缩失败了」。
+    const matched = frame.type === undefined ? undefined : this._pending.get(frame.type);
+    if (matched) {
+      this._pending.delete(matched.frameType);
+      this._pendingFifo = this._pendingFifo.filter((p) => p !== matched);
+      clearTimeout(matched.timer);
+      if (frame.error) matched.reject(new Error(frame.error));
+      else matched.resolve(frame);
+      return true;
+    }
+    if (frame.error && frame.type === undefined) {
+      const oldest = this._pendingFifo.shift();
+      if (oldest) {
+        this._pending.delete(oldest.frameType);
+        clearTimeout(oldest.timer);
+        oldest.reject(new Error(frame.error));
         return true;
       }
-      return false;
-    }
-    const entry = this._pending.get(frame.type);
-    if (entry) {
-      this._pending.delete(frame.type);
-      this._pendingFifo = this._pendingFifo.filter((p) => p !== entry);
-      clearTimeout(entry.timer);
-      entry.resolve(frame);
-      return true;
     }
     return false;
   }

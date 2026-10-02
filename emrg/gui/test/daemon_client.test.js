@@ -972,6 +972,85 @@ test("error 帧 FIFO reject 最早未决（G103）；无未决 error → 广播"
   assert.ok(seen.some(([t, d]) => t === "error" && d.error === "broadcast error"));
 });
 
+test("带 type 的 error 帧回答它自己那条命令，不是「最早未决」（G103 的反面）", async () => {
+  // 两条命令同时在飞时，失败答复属于哪一条由帧自己的 `type` 说话：
+  // `compact → compact_result`（RESPONSE_TYPES）。原来的顺序「先看 error 再 FIFO
+  // 顶掉最早未决」会把 compact 的失败记在 list_sessions 头上，compact 自己等到超时。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  const p2 = client.sendCommandAndWait("compact", { session_id: "s1", cwd: tmpHome }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+
+  send({ type: "compact_result", session_id: "s1", messages_compacted: 0, error: "Compact failed: provider refused" });
+  await assert.rejects(p2, /Compact failed/, "compact 自己的失败答复应落在 compact 上");
+  assert.strictEqual(client._pending.has("sessions_list"), true, "list_sessions 的命令答复还该在路上");
+
+  send({ type: "sessions_list", sessions: [] });
+  const r = await p1;
+  assert.strictEqual(r.type, "sessions_list");
+});
+
+test("不属于任何未决命令的 error 广播不能顶掉别人的命令（会话级广播）", async () => {
+  // `_handle_compact` 把 `compact_result` 广播给会话**每个**订阅者（失败分支也带
+  // error），而 `compact` 没有 busy 检查 ⇒ 同一个会话里别的客户端的失败压缩会落到
+  // 这条连接上。它不是本连接任何命令的答复，因此既不能 reject 命令，也不该被吞掉：
+  // 渲染层要能看见「这个会话的压缩失败了」。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((t, d) => seen.push([t, d]));
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+
+  send({ type: "compact_result", session_id: "s1", messages_compacted: 0, error: "Compact failed: provider refused" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(client._pending.has("sessions_list"), true, "别人的错误顶掉了 list_sessions");
+  assert.ok(
+    seen.some(([t, d]) => t === "error" && /Compact failed/.test(d.error)),
+    "会话级失败广播必须到达渲染层，而不是被配对逻辑吞掉",
+  );
+
+  send({ type: "sessions_list", sessions: [] });
+  const r = await p1;
+  assert.strictEqual(r.type, "sessions_list");
+});
+
+test("配对的身份是回执自己的 type：rant 与 remove_project 等得到答复（2026-10-02）", async () => {
+  // 这两条命令原本永远配不上：`rant` 的回执连 type 都没有（`{"ok": true, "count": n}`），
+  // `remove_project` 的回执叫 `project_removed` 而 RESPONSE_TYPES 里没有它。于是宿主在
+  // GUI 里提交吐槽 / 移除项目时，daemon 早做完了，界面却在 5s 超时后报失败。
+  // 帧的字符串与 daemon 侧一致（daemon.py 的两处 rant 回执、_handle_remove_project），
+  // 两边各有一条测试钉住同一个字面量。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+
+  const pRant = client.sendCommandAndWait("rant", { message: "x", project: "emrg" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "rant_result", ok: true, count: 3 });
+  const rant = await pRant;
+  assert.strictEqual(rant.count, 3, "吐槽提交必须等到它自己的回执");
+
+  const pRantBad = client.sendCommandAndWait("rant", { message: "" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "rant_result", error: "rant requires a message" });
+  await assert.rejects(pRantBad, /rant requires a message/);
+
+  const pRm = client.sendCommandAndWait("remove_project", { name: "proj" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "project_removed", removed: true, name: "proj" });
+  const rm = await pRm;
+  assert.strictEqual(rm.removed, true, "移除项目必须等到它自己的回执");
+
+  const pRmMissing = client.sendCommandAndWait("remove_project", { name: "" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "project_removed", removed: false, error: "remove_project requires name" });
+  await assert.rejects(pRmMissing, /requires name/);
+});
+
 test("分组生命周期（G83+G104）：建组 → done 清理；>20 丢最老", async () => {
   const client = new DaemonClient();
   await connectClient(client);

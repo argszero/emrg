@@ -2338,6 +2338,45 @@ def test_rant_field_order(tmp_path, monkeypatch):
     assert abs((_dt.datetime.now(ts.tzinfo) - ts).total_seconds()) < 60
 
 
+def test_both_rant_replies_name_their_command(tmp_path, monkeypatch):
+    """A command result says which command it answers — the GUI pairs on `type`.
+
+    Measured 2026-10-02: the successful reply was `{"ok": true, "count": n}` and
+    the failure `{"error": ...}`, neither carrying a `type` — so the GUI's
+    `/rant` matched nothing, the command waited out its 5s timeout and the host
+    was told their rant failed while the daemon had written it. The client's
+    pairing map (`daemon_client.js` RESPONSE_TYPES) keys on this exact string,
+    and `emrg/gui/test/daemon_client.test.js` pins the same literal from the
+    other side, so the two cannot drift apart silently.
+    """
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+
+    import asyncio
+
+    ok_writer = _FakeWriter()
+    asyncio.run(server._process_message({
+        "type": "rant", "message": "a rant", "project": "emrg",
+    }, ok_writer))  # type: ignore[arg-type]
+    ok = _last_frame(ok_writer)
+    assert ok.get("type") == "rant_result", f"the success reply is unnamed: {ok}"
+    assert ok.get("ok") is True and isinstance(ok.get("count"), int), ok
+
+    bad_writer = _FakeWriter()
+    asyncio.run(server._process_message({
+        "type": "rant", "message": "   ", "project": "emrg",
+    }, bad_writer))  # type: ignore[arg-type]
+    bad = _last_frame(bad_writer)
+    assert bad.get("type") == "rant_result", f"the failure reply is unnamed: {bad}"
+    assert "rant requires a message" in str(bad.get("error")), bad
+
+    ledger = (tmp_path / "rants.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(ledger) == 1, (
+        "the refused rant must not reach the ledger — only the accepted one is "
+        f"there: {ledger}"
+    )
+
+
 def _last_frame(writer: "_FakeWriter") -> dict:
     """Parse the last WebSocket frame the daemon sent (daemon._send → ws.send → _frames)."""
     import json as _json
