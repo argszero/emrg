@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from emrg.tools.grep_tool import GrepTool
+from emrg.tools.grep_tool import MAX_FILE_SIZE, GrepTool
 
 
 @pytest.fixture
@@ -380,3 +380,87 @@ class TestTheCountSaysWhenItIsAFloor:
         assert result.content.index("floor") < result.content.index("output truncated"), (
             "the summary has to carry its own caveat, not depend on the note at the end"
         )
+
+
+class TestTheSearchedCountClaimsOnlyFilesItRead:
+    """The count is the files the search *read*, not the files it walked past.
+
+    `files_searched` was incremented at the top of the loop, before the three
+    `continue` sites that pass a file over — over `MAX_FILE_SIZE`, `stat`
+    unreadable, or not UTF-8 (which is what a binary file does). The summary then
+    claimed a scope wider than the one it measured, and its reader is an agent
+    asking "did you look everywhere?". Measured on master `dfa124a8`, 2026-10-03
+    (`cyc20261003-001316`): a tree of three candidates holding **one** readable file
+    reported ``(searched 3 files)`` — counting a 512KB+ file and a binary file that
+    were never read.
+
+    The binary file's bytes contain the needle on purpose: if it were ever read, the
+    search would report a second match, so "1 match" is the reading that proves the
+    pass-over was real rather than merely uncounted.
+    """
+
+    NEEDLE = "NEEDLE"
+
+    def _tree(self, tmp_path: Path) -> Path:
+        (tmp_path / "a_normal.txt").write_text(f"{self.NEEDLE} here\n", encoding="utf-8")
+        (tmp_path / "b_over_limit.txt").write_text(
+            "x" * (MAX_FILE_SIZE + 1), encoding="utf-8"
+        )
+        (tmp_path / "c_binary.bin").write_bytes(
+            b"\xff\xfe\x00\x01" + self.NEEDLE.encode() + b"\x00\xff"
+        )
+        return tmp_path
+
+    def _search(self, path: Path, pattern: str | None = None):
+        return _run(GrepTool().execute({
+            "pattern": pattern or self.NEEDLE,
+            "path": str(path),
+            "intent": "searched-count probe",
+        }))
+
+    def test_a_file_that_was_not_read_is_not_counted_as_searched(self, tmp_path):
+        result = self._search(self._tree(tmp_path))
+
+        assert "searched 1 files" in result.content, (
+            f"the report claims files it never read: {result.content.splitlines()[0]}"
+        )
+
+    def test_the_files_it_passed_over_are_named(self, tmp_path):
+        result = self._search(self._tree(tmp_path))
+
+        assert "passed over 2" in result.content, (
+            "a silent pass-over leaves the count reading as full coverage"
+        )
+
+    def test_the_note_names_what_passed_them_over(self, tmp_path):
+        head = self._search(self._tree(tmp_path)).content.splitlines()[0]
+
+        assert "binary" in head, f"the note does not say why: {head}"
+        assert f"{MAX_FILE_SIZE // 1024}KB" in head, (
+            f"the note does not name the size rule it applied: {head}"
+        )
+
+    def test_the_passed_over_file_really_was_not_searched(self, tmp_path):
+        """The other direction: its needle is never found, so the skip is real."""
+        content = self._search(self._tree(tmp_path)).content
+
+        assert "c_binary.bin" not in content, "the binary file's needle was matched"
+        assert "b_over_limit.txt" not in content, "the oversized file was matched"
+
+    def test_nothing_passed_over_keeps_the_plain_summary(self, tmp_path):
+        """The near miss: the common report must not grow a warning it does not need."""
+        (tmp_path / "only.txt").write_text(f"{self.NEEDLE} here\n", encoding="utf-8")
+
+        content = self._search(tmp_path).content
+
+        assert "(searched 1 files)" in content, content.splitlines()[0]
+        assert "passed over" not in content, (
+            "a tree with nothing to pass over reported a pass-over"
+        )
+
+    def test_the_no_matches_branch_counts_the_same_way(self, tmp_path):
+        head = self._search(self._tree(tmp_path), "ABSENT").content.splitlines()[0]
+
+        assert "No matches" in head, head
+        assert "searched 1 files" in head, head
+        assert "passed over 2" in head, head

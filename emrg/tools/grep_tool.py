@@ -19,6 +19,28 @@ MAX_RESULTS = 200  # Cap matches to prevent excessive result volume
 MAX_FILE_SIZE = 512 * 1024  # 512KB — skip files larger than this
 
 
+def _passed_over_note(files_skipped: int) -> str:
+    """Name the files this search did not read, or nothing when it read them all.
+
+    A file is passed over inside the loop — over `MAX_FILE_SIZE`, `stat` unreadable,
+    or not UTF-8 (which is what a binary file does) — and passed over is not
+    searched, so counting it as searched states a scope wider than the one measured.
+    The number this appears in is the one an agent answers "did you look everywhere?"
+    from, so the two have to be told apart. Measured on master `dfa124a8`,
+    2026-10-03 (`cyc20261003-001316`): a tree of 4440 candidates reported "searched
+    4440 files" while 129 of them were never read.
+
+    The clause is empty when nothing was passed over, so the common report is
+    unchanged and this cannot be read as a new warning on every search.
+    """
+    if not files_skipped:
+        return ""
+    return (
+        f", and passed over {files_skipped} it could not read "
+        f"(binary, unreadable, or over {MAX_FILE_SIZE // 1024}KB)"
+    )
+
+
 class GrepTool(ToolExecutor):
     """Search file contents using regex patterns with optional context lines.
 
@@ -135,6 +157,11 @@ class GrepTool(ToolExecutor):
         #: rendered text — see the summary below for what that cost.
         block_starts: list[int] = []
         files_searched = 0
+        #: Files the loop passed over — over `MAX_FILE_SIZE`, unreadable, or not UTF-8.
+        #: Kept apart from `files_searched` because the two answer different questions:
+        #: "how much did you read?" and "how much did you not?". The old code counted
+        #: these as searched, which made the report a claim it had not measured.
+        files_skipped = 0
         stop = False
         #: Set when the loop stopped at the result budget rather than at the end of the
         #: tree. The count is then a **floor**, and the summary has to say so: a number
@@ -145,20 +172,26 @@ class GrepTool(ToolExecutor):
         for filepath in files:
             if stop:
                 break
-            files_searched += 1
 
             # Skip large files
             try:
                 if filepath.stat().st_size > MAX_FILE_SIZE:
+                    files_skipped += 1
                     continue
             except OSError:
+                files_skipped += 1
                 continue
 
             # Read and search
             try:
                 text = filepath.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
+                files_skipped += 1
                 continue
+
+            # Counted here, past every `continue` above: a file this loop passed over
+            # was not searched, and the report may only claim the files it read.
+            files_searched += 1
 
             # A file that ends with a newline splits into one element more than it has
             # lines: the trailing '' is the position *after* the last terminator, not a
@@ -199,7 +232,7 @@ class GrepTool(ToolExecutor):
                 name="grep",
                 content=(
                     f"No matches for '{pattern}' in {root} "
-                    f"(searched {files_searched} files)"
+                    f"(searched {files_searched} files{_passed_over_note(files_skipped)})"
                     + (f" matching '{file_glob}'" if file_glob else "")
                 ),
             )
@@ -228,14 +261,14 @@ class GrepTool(ToolExecutor):
             summary = (
                 f"Found {matches_found} matches for '{pattern}' in {root}, where the "
                 f"search stopped at its result budget (max_results={max_results}) after "
-                f"{files_searched} file(s) - so this count is a floor and the tree may "
+                f"{files_searched} file(s){_passed_over_note(files_skipped)} - so this count is a floor and the tree may "
                 f"hold more. Narrow the pattern or the path, or raise max_results, to "
                 f"count them all:\n\n"
             )
         else:
             summary = (
                 f"Found {matches_found} matches for '{pattern}' "
-                f"in {root} (searched {files_searched} files):\n\n"
+                f"in {root} (searched {files_searched} files{_passed_over_note(files_skipped)}):\n\n"
             )
 
         # Truncate if too many lines — at a **block boundary**, and the note names the
