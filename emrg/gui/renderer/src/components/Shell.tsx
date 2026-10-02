@@ -6,6 +6,7 @@ import { createProdMarkdownRenderer } from "../lib/vendorMarkdown";
 import { dialogReducer, initialDialogState } from "../lib/dialog";
 import { sessionFailureText } from "../lib/sessionFailure";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { ContextMenu } from "./ContextMenu";
 import { ApprovalDialog } from "./ApprovalDialog";
 import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
 import { RantDialog } from "./RantDialog";
@@ -62,6 +63,13 @@ interface WorkspaceBridge {
   listTasks(): Promise<TaskRec[]>;
   listRants(p: { status?: string }): Promise<RantRec[]>;
   switchSession(p: { sessionId: string; projectPath?: string }): Promise<unknown>;
+  /**
+   * 关闭会话（**保留磁盘数据**，与 deleteSession 删数据区分）。
+   * 通道一直存在——`preload.js:20` 暴露、`main.js` 的 `emrg:closeSession` 实现
+   * （断连 + 移出 openSessions 簿记 + 持久化），但**渲染层从未调用过它**：
+   * vanilla 的入口是打开会话右键菜单里的「关闭」，那个菜单随 #1024 一起没了。
+   */
+  closeSession?(p: { sessionId: string }): Promise<{ ok?: boolean; closed?: boolean }>;
   pickProjectDir(): Promise<{ path?: string } | null>;
   registerProject(p: { path: string }): Promise<{ ok?: boolean; path?: string }>;
   removeProject(p: { name: string; path?: string }): Promise<{ ok?: boolean; error?: string; protected?: boolean }>;
@@ -415,6 +423,36 @@ export function Shell() {
     if (sid) void loadHistory(sid);
   }
 
+  /** 右键菜单：被点会话 + 被点元素的右下角（vanilla 用 rect.right/rect.bottom 定位） */
+  const [ctxMenu, setCtxMenu] = useState<{ sid: string; x: number; y: number } | null>(null);
+
+  /**
+   * 关闭会话（**保留数据**）——vanilla `app.js closeOpenSession`：断连 + 移出列表。
+   *
+   * 在此之前渲染层根本没有这个动作，而它有个直接的后果：main 进程的 20 个会话上限
+   * 拒绝时说的那句「先关掉几个」**没有可关的地方**（唯一能移除列表项的是删除，而删除
+   * 会删掉数据）。失败时照 `app.closeFailed` 说话（vanilla :965 的 catch）。
+   */
+  async function closeSession(sid: string): Promise<void> {
+    const b = wsBridge();
+    if (!b?.closeSession) return;
+    try {
+      await b.closeSession({ sessionId: sid });
+    } catch (e) {
+      transcript.addSystemMessage(sessionFailureText(t, "close", e), activeSid);
+      return;
+    }
+    // 关掉的正是激活会话 → 交回给「无激活会话」那条既有规则（Shell 顶部的 effect 自动
+    // 选剩余列表的第一个；都不剩就是欢迎屏），而不是自己在这里挑一个
+    if (sid === activeSid) setActiveSid(null);
+  }
+
+  /** 会话条目右键（vanilla `showOpenSessionsMenu`：关闭 / 重命名 / 删除） */
+  function openSessionMenu(entry: { sid: string }, ev: React.MouseEvent): void {
+    const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+    setCtxMenu({ sid: entry.sid, x: rect.right, y: rect.bottom });
+  }
+
   // ── 历史按需加载（rant 2026-09-01T20:19:40：GUI 打开会话不显示历史——链路从未接线）──
   // 切会话加载最近一页（limit 50），滚动到顶加载更早一页；游标是绝对 record_index
   // （daemon before_index），不再是「距最新的 offset」（rant 2026-09-20T18:58:44：offset
@@ -691,6 +729,7 @@ export function Shell() {
             activeView={activeView}
             turnStartBySid={appState.turnStartBySid}
             onSelect={selectSession}
+            onContextMenu={openSessionMenu}
             onSwitchView={switchView}
             onNewChat={() => dialogHost.current?.openNewSession()}
             onOpenChat={() => dialogHost.current?.openSessions()}
@@ -755,6 +794,23 @@ export function Shell() {
           onSwitchSession={selectSession}
         />
         <ConfirmDialog request={dialogState.confirm} onDismiss={() => dispatch({ type: "close-confirm" })} />
+        {/* 打开会话右键菜单（vanilla showOpenSessionsMenu：关闭 / 重命名 / 删除） */}
+        {ctxMenu && (
+          <ContextMenu
+            x={ctxMenu.x}
+            y={ctxMenu.y}
+            onDismiss={() => setCtxMenu(null)}
+            items={[
+              { label: t("app.closeSession"), onSelect: () => void closeSession(ctxMenu.sid) },
+              { label: t("app.rename"), onSelect: () => dialogHost.current?.openRename(ctxMenu.sid) },
+              {
+                label: t("app.deleteConv"),
+                danger: true,
+                onSelect: () => dialogHost.current?.openDelete(ctxMenu.sid),
+              },
+            ]}
+          />
+        )}
         {/*
           daemon 的提权提问（rant 2026-09-29T15:52:38）。它渲染在 DialogHost 之外、
           与 ConfirmDialog 并列：提问属于**连接**而不属于某个对话框状态机，daemon

@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { Shell } from "./Shell";
 import { DaemonBridgeProvider } from "./DaemonBridgeProvider";
 import { I18nProvider } from "../lib/i18n";
+import * as i18n from "../lib/i18n";
 import type { DaemonEventFrame } from "../lib/daemonBridge";
 
 /**
@@ -41,6 +42,8 @@ function mockEmrg() {
   const setModel = vi.fn().mockResolvedValue({ ok: true });
   const triggerTask = vi.fn().mockResolvedValue({ ok: true });
   const switchSession = vi.fn().mockResolvedValue({ ok: true });
+  // 关闭会话（保留数据）：通道一直在，渲染层此前从未调用过它
+  const closeSession = vi.fn().mockResolvedValue({ ok: true, closed: true });
   (window as unknown as { emrg?: unknown }).emrg = {
     onEvent,
     sendMessage,
@@ -61,6 +64,7 @@ function mockEmrg() {
     setModel,
     triggerTask,
     switchSession,
+    closeSession,
   };
   return {
     listeners,
@@ -80,6 +84,7 @@ function mockEmrg() {
     setModel,
     triggerTask,
     switchSession,
+    closeSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -526,6 +531,88 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     );
     await waitFor(() => expect(screen.getByTestId("project-session-row")).toBeInTheDocument());
     expect(screen.getByTestId("project-session-row")).toHaveTextContent("会话一");
+  });
+
+  // ── 打开会话右键菜单（vanilla showOpenSessionsMenu：关闭 / 重命名 / 删除） ──
+
+  describe("会话右键菜单", () => {
+    const en = (k: string) => i18n.t(k, undefined, "en");
+
+    async function twoSessions(m: ReturnType<typeof mockEmrg>) {
+      render(wrapper(<Shell />));
+      await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+      m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }]));
+      await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(2));
+      return screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2") as HTMLElement;
+    }
+
+    it("右键一个会话 → 菜单出现，三项与词典一致（此前右键什么都不发生）", async () => {
+      const m = mockEmrg();
+      const s2 = await twoSessions(m);
+      expect(screen.queryByTestId("ctx-menu")).toBeNull();
+      fireEvent.contextMenu(s2);
+      const items = screen.getAllByTestId("ctx-item");
+      expect(items.map((b) => b.textContent)).toEqual([
+        en("app.closeSession"),
+        en("app.rename"),
+        en("app.deleteConv"),
+      ]);
+    });
+
+    it("点「关闭会话」→ closeSession(sid)，并把激活会话交回既有规则（→ 相邻会话）", async () => {
+      const m = mockEmrg();
+      const s2 = await twoSessions(m);
+      fireEvent.click(s2); // s2 成为激活会话
+      await waitFor(() => expect(s2.className).toContain("active"));
+      fireEvent.contextMenu(s2);
+      fireEvent.click(screen.getAllByTestId("ctx-item")[0]);
+      await waitFor(() => expect(m.closeSession).toHaveBeenCalledWith({ sessionId: "s2" }));
+      // 关掉的正是激活会话 → 不再显示它是 active（交回给 open_sessions 那条规则）
+      expect(screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2")?.className).not.toContain(
+        "active",
+      );
+    });
+
+    it("关掉的**不是**激活会话 → 激活会话不动（别顺手切走宿主正在看的会话）", async () => {
+      const m = mockEmrg();
+      const s2 = await twoSessions(m);
+      const s1 = screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s1") as HTMLElement;
+      expect(s1.className).toContain("active"); // 自动选中的第一个
+      fireEvent.contextMenu(s2);
+      fireEvent.click(screen.getAllByTestId("ctx-item")[0]);
+      await waitFor(() => expect(m.closeSession).toHaveBeenCalledWith({ sessionId: "s2" }));
+      expect(screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s1")?.className).toContain("active");
+    });
+
+    it("关闭失败 → 说 app.closeFailed（vanilla app.js:965 的 catch），不假装关掉了", async () => {
+      const m = mockEmrg();
+      const s2 = await twoSessions(m);
+      m.closeSession.mockRejectedValue(new Error("invalid session_id"));
+      fireEvent.contextMenu(s2);
+      fireEvent.click(screen.getAllByTestId("ctx-item")[0]);
+      await waitFor(() =>
+        expect(screen.getByTestId("transcript-view").textContent).toContain(
+          en("app.closeFailed").replace("{msg}", "invalid session_id"),
+        ),
+      );
+    });
+
+    it("「重命名」交给 DialogHost（打开重命名框），不自己实现一个", async () => {
+      const m = mockEmrg();
+      const s2 = await twoSessions(m);
+      fireEvent.contextMenu(s2);
+      fireEvent.click(screen.getAllByTestId("ctx-item")[1]);
+      await waitFor(() => expect(screen.getByTestId("rename-dialog")).toBeInTheDocument());
+    });
+
+    it("「删除会话」走确认框（danger 那一项不会直接删）", async () => {
+      const m = mockEmrg();
+      const s2 = await twoSessions(m);
+      fireEvent.contextMenu(s2);
+      fireEvent.click(screen.getAllByTestId("ctx-item")[2]);
+      await waitFor(() => expect(screen.getByTestId("confirm-dialog")).toBeInTheDocument());
+      expect(m.sendMessage).not.toHaveBeenCalled();
+    });
   });
 
   it("项目面板点会话失败 → 说为什么，且不激活那个会话（vanilla app.js:690 的 catch）", async () => {

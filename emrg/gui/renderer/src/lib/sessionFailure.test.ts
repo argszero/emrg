@@ -3,7 +3,7 @@ import { sessionFailure, sessionFailureText } from "./sessionFailure";
 import { t } from "./i18n";
 
 /**
- * sessionFailure.test.ts — 失败的会话操作该说哪一句（vanilla `app.js` 三个 catch）。
+ * sessionFailure.test.ts — 失败的会话操作该说哪一句（vanilla `app.js` 四个 catch）。
  *
  * 这些断言读的是**词典里的那条串**，不是写死的英文——否则「串没人读」这个缺陷
  * 会在测试里被复制一份（测试自己成为唯一的读者，宿主的界面仍是空的）。
@@ -30,9 +30,12 @@ describe("sessionFailure 的规则（vanilla app.js:690 / 905 / 930）", () => {
     expect(f.msg).toBe("invalid session_id");
   });
 
-  it("new → app.newFailed；delete → app.deleteFailed（各自一句，不共用）", () => {
+  it("new → app.newFailed；delete → app.deleteFailed；close → app.closeFailed（各自一句，不共用）", () => {
     expect(sessionFailure("new", new Error("boom")).key).toBe("app.newFailed");
     expect(sessionFailure("delete", new Error("boom")).key).toBe("app.deleteFailed");
+    // 关闭＝断连 + 移出列表（**保留数据**），与删除不是同一件事，所以也不是同一句话
+    expect(sessionFailure("close", new Error("boom")).key).toBe("app.closeFailed");
+    expect(sessionFailure("close", new Error("boom")).msg).toBe("boom");
   });
 
   it("抛出物不是 Error 也能读出一句话（vanilla 读 e.message，这里也要有兜底）", () => {
@@ -48,6 +51,12 @@ describe("sessionFailure 的规则（vanilla app.js:690 / 905 / 930）", () => {
     expect(cap).not.toBe(en("app.switchFailed", { msg: "too many open sessions (20)" }));
   });
 
+  it("渲染关闭失败：用的是词典里那句（此前 app.closeFailed 一个读者都没有）", () => {
+    expect(sessionFailureText(en, "close", new Error("invalid session_id"))).toBe(
+      en("app.closeFailed", { msg: "invalid session_id" }),
+    );
+  });
+
   it("渲染普通失败：词典模板 + 原话插值", () => {
     expect(sessionFailureText(en, "delete", new Error("daemon down"))).toBe(
       en("app.deleteFailed", { msg: "daemon down" }),
@@ -55,10 +64,9 @@ describe("sessionFailure 的规则（vanilla app.js:690 / 905 / 930）", () => {
     expect(sessionFailureText(en, "new", new Error("no project"))).toContain("no project");
   });
 
-  it("三种操作的句子互不相同（一句话有两个家的那一天，就是它们开始漂移的那一天）", () => {
-    const keys = ["switch", "new", "delete"].map(
-      (op) => sessionFailure(op as "switch" | "new" | "delete", new Error("x")).key,
-    );
-    expect(new Set(keys).size).toBe(3);
+  it("四种操作的句子互不相同（一句话有两个家的那一天，就是它们开始漂移的那一天）", () => {
+    const ops = ["switch", "new", "delete", "close"] as const;
+    const keys = ops.map((op) => sessionFailure(op, new Error("x")).key);
+    expect(new Set(keys).size).toBe(4);
   });
 });

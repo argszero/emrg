@@ -9,6 +9,7 @@
  *   （**不带** `{msg}`），否则 `app.switchFailed`（带 `{msg}`）
  * - `newSession`    (:905) → `app.newFailed`
  * - `deleteSession` (:930) → `app.deleteFailed`
+ * - `closeOpenSession` (:965) → `app.closeFailed`（关闭＝断连 + 移出列表，**保留磁盘数据**）
  *
  * 纯函数：只决定「哪一句 + 什么参数」，渲染交给调用点的 `t()`——这样三个调用点
  * 不会各自拼一次同一句话（同一句话有两个拼写就是两个未来）。
@@ -18,7 +19,7 @@
  * `err.message`，与 vanilla 读 `e.message` 同一把尺。
  */
 
-export type SessionOp = "switch" | "new" | "delete";
+export type SessionOp = "switch" | "new" | "delete" | "close";
 
 export interface SessionFailure {
   key: string;
@@ -46,7 +47,8 @@ export function sessionFailure(op: SessionOp, err: unknown): SessionFailure {
     // 超限不是「切换失败」——它有自己的一句话，因为宿主该做的动作不同（先关掉几个）
     return CAP_RE.test(msg) ? { key: "app.tooManyOpenSessions" } : { key: "app.switchFailed", msg };
   }
-  return { key: op === "new" ? "app.newFailed" : "app.deleteFailed", msg };
+  const key = op === "new" ? "app.newFailed" : op === "delete" ? "app.deleteFailed" : "app.closeFailed";
+  return { key, msg };
 }
 
 /** 渲染成一句话：三个调用点共用，免得各拼一次 */
