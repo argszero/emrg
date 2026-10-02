@@ -314,6 +314,34 @@ def _about_this_requests_queue(frame: dict, request_id: str) -> bool:
     return frame.get("request_id") == request_id
 
 
+def _names_another_request(frame: dict, request_id: str) -> bool:
+    """Whether `frame` names a request that is **not** this cycle's.
+
+    A session's frames are broadcasts — `daemon.py::_broadcast` reaches every
+    subscriber of the session, the originator included — so the turn that holds
+    the session reports itself on this socket too. It does so *before* the daemon
+    answers this cycle, because the answer travels the same socket and the
+    holding turn is a separate task: measured 2026-10-02, a holding turn's `done`
+    that landed ahead of the `task_queued` answer ended this cycle as a
+    completion it never performed (`reason=done`, one EvolutionLog appended), and
+    its `tool_start`/`tool_end` pair was counted into this cycle's `tool_count`
+    and mirrored into the heartbeat.
+
+    So the question is asked of **every** frame, not only of the frames that
+    arrive once this cycle already knows it is queued: whatever a frame names, it
+    is not this cycle's unless it names this cycle — and that is a fact even
+    while the answer has not arrived yet. `queued_requeue` carries the ids in a
+    list (`daemon.py`), every other frame that answers for a request carries one
+    id in `request_id`; a frame with neither names nobody, which is not this
+    predicate's business (the caller's next guard reads those).
+    """
+    if frame.get("type") == "queued_requeue":
+        ids = frame.get("request_ids")
+        return isinstance(ids, list) and bool(ids) and request_id not in ids
+    other = frame.get("request_id")
+    return isinstance(other, str) and other != "" and other != request_id
+
+
 def _queue_was_dropped(frame: dict) -> bool:
     """Whether `frame` is the daemon saying the session's pending queue was discarded.
 
@@ -2635,8 +2663,9 @@ class TaskHandler:
                 tool_deadline = None
                 # Every frame of a turn names the request it belongs to (`delta`,
                 # `tool_start`, `tool_end`, `done`, `task_queued`,
-                # `steer_committed` all carry `request_id` — measured in
-                # `daemon.py`), and these frames are session **broadcasts**
+                # `steer_committed`, and — since 2026-10-02 — `turn_start` and
+                # both error exits; `tests/test_turn_terminal_frame.py` holds the
+                # rule mechanically), and these frames are session **broadcasts**
                 # (`_broadcast` reaches every subscriber "including the
                 # originator"). So while this cycle's request sits in the
                 # session's pending queue, the turn that holds the session
@@ -2651,15 +2680,22 @@ class TaskHandler:
                 # never began. `_QUEUED` documents the contract it breaks: "a
                 # queued request never gets a `done` of its own".
                 #
-                # The holding turn's frames that carry **no** request id are the
-                # same rule's other half (`turn_end`, and the wrapper's error
-                # frame): they are not about this request either, so they may
-                # not clear the flag nor be taken as this cycle's error. Measured
-                # 2026-10-02: on `13329a23` a queued cycle that met its holder's
-                # `turn_end` reported `stalled` ("the turn stopped reporting
-                # without closing the socket"), and one that met the holder's
-                # error frame reported `server-error` — the holding turn's
-                # trouble filed as this cycle's.
+                # Two guards, because a broadcast is not always named. A frame
+                # that names another request is never this cycle's — at any
+                # moment, including the window before the daemon answers, when
+                # the holding turn is already reporting here (its `done` there
+                # ended the cycle as a completed evolution, and its tool frames
+                # became this cycle's progress; measured 2026-10-02 on
+                # `1269ed9b`). And while this cycle waits in the queue, a frame
+                # that answers nothing about this request — `turn_end`, the
+                # `queued_cancelled` drop, a requeue naming somebody else — is
+                # not evidence either: it may not clear the flag nor be taken as
+                # this cycle's error. Measured 2026-10-02 on `13329a23`: the
+                # holder's `turn_end` made a queued cycle report `stalled` ("the
+                # turn stopped reporting without closing the socket"), and its
+                # error frame was filed as this cycle's `server-error`.
+                if _names_another_request(resp, request_id):
+                    continue
                 if queued and not _about_this_requests_queue(resp, request_id):
                     if _queue_was_dropped(resp):
                         # The one exception, because it is a fact about the

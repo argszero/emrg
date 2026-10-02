@@ -1534,7 +1534,8 @@ def _make_cycle_handler(tmp_path, frames):
 
         async def recv(self):
             if self._frames:
-                return _json.dumps(self._frames.pop(0), ensure_ascii=False)
+                frame = _as_this_cycles_frame(self._frames.pop(0), self.sent)
+                return _json.dumps(frame, ensure_ascii=False)
             raise _Closed(_Close(1000, ""), None)
 
         async def close(self):
@@ -1573,7 +1574,7 @@ def test_evolution_cycle_truncated_not_empty_not_complete(tmp_path):
     state untouched (no vibe signal from a truncated round)."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"tool_name": "bash"},
-        {"request_id": "r1", "content": "Exceeded maximum tool call rounds (270).",
+        {"request_id": "self", "content": "Exceeded maximum tool call rounds (270).",
          "done": True, "delta": False, "session_id": "s"},
     ])
     asyncio.run(handler._run_evolution_cycle())
@@ -1590,7 +1591,7 @@ def test_evolution_cycle_complete_agent_recommends_no_slowdown(tmp_path):
     cadence maintained, work stays empty (rant 2026-08-20T10:58:55: the vibe
     check's recommend_slowdown is the ONLY slowdown switch)."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"work": "", "recommend_slowdown": False,
@@ -1613,7 +1614,7 @@ def test_evolution_cycle_agent_work_restores_normal_cadence(tmp_path):
     restored to normal cadence; the work is persisted (rant 2026-08-20T10:58:55
     — recommend=false is the restore signal, no counter/vote machinery)."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Analyzed the issue and wrote memory",
+        {"request_id": "self", "content": "Analyzed the issue and wrote memory",
          "done": True, "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"work": "分析了 scheduler 空转判定 bug，写了 memory 记录",
@@ -1637,7 +1638,7 @@ def test_evolution_cycle_log_work_no_completion_fallback(tmp_path):
     check "work" field — NO fallback to the completion first line. Empty stays
     empty (GUI renders "-"), never a machine/rough fallback."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Reviewed PR and posted LGTM",
+        {"request_id": "self", "content": "Reviewed PR and posted LGTM",
          "done": True, "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"work": "", "recommend_slowdown": False,
@@ -1651,7 +1652,7 @@ def test_evolution_cycle_log_work_no_completion_fallback(tmp_path):
 
     # vibe check entirely unavailable → work stays empty, flags False
     handler2, captured2 = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
     ])
     asyncio.run(handler2._run_evolution_cycle())
@@ -1668,7 +1669,7 @@ def test_evolution_cycle_log_work_not_truncated(tmp_path):
     long_work = ("完成。" + "详细产出说明。" * 120)  # ~600 chars > old 500 cap
     assert len(long_work) > 500
     handler, captured = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"work": long_work, "recommend_slowdown": False,
@@ -1697,7 +1698,7 @@ def test_evolution_cycle_vibe_unavailable_state_unchanged(tmp_path):
     Conservative: a failed question must not cause a wrong throttle NOR a
     wrong restore (rant 2026-08-20T10:58:55)."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         # no vibe_check_result frame → helper times out / connection closed
     ])
@@ -1715,7 +1716,7 @@ def test_evolution_cycle_recommend_slowdown_throttles(tmp_path):
     the next cycle's recommend=false restores normal cadence (rant
     2026-08-20T10:58:55 — the vibe flag is the single switch)."""
     handler, _ = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"work": "", "recommend_slowdown": True,
@@ -1729,7 +1730,7 @@ def test_evolution_cycle_recommend_slowdown_throttles(tmp_path):
 
     # second cycle: agent says value again → restore
     handler2, captured2 = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"work": "merged PR #880", "recommend_slowdown": False,
@@ -1779,7 +1780,7 @@ def test_cycle_heartbeat_tracks_progress_and_clears(tmp_path):
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"tool_name": "bash"},
         {"tool_name": "read"},
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"work": "", "recommend_slowdown": False,
@@ -1927,7 +1928,7 @@ def test_cycle_clean_end_leaves_no_record(tmp_path):
     for the next start to report.
     """
     handler, _ = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
     ])
     asyncio.run(handler._run_cycle_bounded())
@@ -2094,7 +2095,7 @@ def test_a_terminal_frame_still_ends_cleanly(tmp_path):
     """
     handler, _ = _make_cycle_handler(tmp_path, frames=[
         {"tool_name": "bash"},
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
     ])
     reason = asyncio.run(handler._run_cycle_bounded())
@@ -2229,7 +2230,7 @@ def test_evolution_cycle_connect_failure_resets_on_success(tmp_path, caplog):
         assert handler._connect_failures == 1
         # 成功连接 → 计数归零
         async def _fake_connect():
-            return _FakeWsForCycle([{"request_id": "r1", "content": "Done", "done": True,
+            return _FakeWsForCycle([{"request_id": "self", "content": "Done", "done": True,
                                      "delta": False, "session_id": "s"}])
         mod.connect_to_server = _fake_connect
         asyncio.run(handler._run_evolution_cycle())
@@ -2289,6 +2290,46 @@ def test_connect_backoff_floor_30s_for_small_interval(tmp_path):
     assert handler._connect_backoff() == 30.0
 
 
+def _as_this_cycles_frame(frame, sent):
+    """`"self"` in a frame's ids means *this cycle's* request — one home for it.
+
+    The cycle's request id is `evolution-<the instant the cycle began>`, which a
+    test cannot spell; the daemon's `id` is the one field that says whose a
+    broadcast is (`daemon.py::_broadcast` reaches every subscriber of the
+    session, the originator included, so the session's other requests land on
+    this socket too). A harness with no way to say "mine" would make every test
+    of that distinction unwritable — and a fixture that spells an id no daemon
+    would ever put there tests a frame that never arrives, which is exactly the
+    difference `_names_another_request` now turns into a verdict.
+
+    The id is read from the first message the handler sent (its own `task`
+    frame), not from the last: the vibe check sends on the same socket with no
+    `id` of its own.
+    """
+    if not isinstance(frame, dict):
+        return frame
+    import json as _json
+
+    mine = ""
+    for raw in sent:
+        try:
+            data = _json.loads(raw)
+        except Exception:  # noqa: BLE001 — a non-JSON payload says nothing here
+            continue
+        if isinstance(data, dict) and isinstance(data.get("id"), str):
+            mine = data["id"]
+            break
+    if not mine:
+        return frame
+    if frame.get("request_id") == "self":
+        frame = {**frame, "request_id": mine}
+    ids = frame.get("request_ids")
+    if isinstance(ids, list) and "self" in ids:
+        frame = {**frame,
+                 "request_ids": [mine if i == "self" else i for i in ids]}
+    return frame
+
+
 class _FakeWsForCycle:
     """Minimal ws stand-in for the reset-on-success test."""
     def __init__(self, frames):
@@ -2302,7 +2343,8 @@ class _FakeWsForCycle:
         self.sent.append(msg)
     async def recv(self):
         if self._frames:
-            return self._json.dumps(self._frames.pop(0), ensure_ascii=False)
+            frame = _as_this_cycles_frame(self._frames.pop(0), self.sent)
+            return self._json.dumps(frame, ensure_ascii=False)
         raise self._Closed()
     async def close(self):
         pass
@@ -2356,7 +2398,7 @@ def test_saturation_heartbeat_log_message_no_skip(tmp_path, caplog):
     import logging
 
     handler, captured = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"work": "", "recommend_slowdown": True,
@@ -2399,7 +2441,7 @@ def test_throttled_tick_still_runs_full_cycle(tmp_path):
     """Throttled handler runs a full cycle (never skipped) at heartbeat; a
     recommend=false vibe result clears the throttle afterwards."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"work": "reviewed PR #879", "recommend_slowdown": False,
@@ -3414,24 +3456,8 @@ def _silence_frames(handler, tmp_path, monkeypatch, frames, *, delays=None):
                     await asyncio.sleep(pause)
                 self._index += 1
                 frame = self._frames.pop(0)
-                # `"self"` in a frame's `request_id` means *this cycle's* request —
-                # the id is `evolution-<the instant the cycle began>`, which a test
-                # cannot spell. The daemon's `id` is the one field that says whose
-                # a broadcast is (`_broadcast` reaches every subscriber of the
-                # session, so the session's other requests land on this socket
-                # too), so a harness that had no way to say "mine" would make
-                # every test of that distinction unwritable. `queued_requeue`
-                # carries the ids in a list rather than in `request_id`, so the
-                # same word works there.
-                if isinstance(frame, dict):
-                    mine = _json.loads(self.sent[-1])["id"]
-                    if frame.get("request_id") == "self":
-                        frame = {**frame, "request_id": mine}
-                    ids = frame.get("request_ids")
-                    if isinstance(ids, list) and "self" in ids:
-                        frame = {**frame,
-                                 "request_ids": [mine if i == "self" else i for i in ids]}
-                return _json.dumps(frame, ensure_ascii=False)
+                return _json.dumps(_as_this_cycles_frame(frame, self.sent),
+                                   ensure_ascii=False)
             await asyncio.sleep(3600)  # open, and never another frame
 
         async def close(self):
@@ -3457,7 +3483,7 @@ def test_a_silent_turn_ends_as_a_stall_not_as_a_completion(tmp_path, monkeypatch
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
-        {"request_id": "r1", "content": "thinking", "done": False,
+        {"request_id": "self", "content": "thinking", "done": False,
          "delta": True, "session_id": "s"},
     ])
 
@@ -3496,7 +3522,7 @@ def test_a_tool_call_is_bounded_by_its_own_declared_timeout(tmp_path, monkeypatc
         {"type": "tool_start", "tool_name": "bash",
          "arguments": {"command": "sleep 3000", "timeout": 3700}},
         {"type": "tool_end", "tool_name": "bash", "content": "ok", "error": False},
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
     ], delays={1: 0.3})
 
@@ -3554,7 +3580,7 @@ def test_a_stalled_cycle_frees_the_slot_and_records_why(tmp_path, monkeypatch, c
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
-        {"request_id": "r1", "content": "thinking", "done": False,
+        {"request_id": "self", "content": "thinking", "done": False,
          "delta": True, "session_id": "s"},
     ])
     handler._cycle_running = True
@@ -3798,7 +3824,7 @@ def test_a_silent_daemon_after_the_terminal_frame_does_not_wedge_the_handler(
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
-        {"request_id": "r1", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
     ])
 
@@ -4195,4 +4221,177 @@ def test_the_holding_turns_error_is_not_this_cycles_error(tmp_path, monkeypatch,
     messages = [r.getMessage() for r in caplog.records]
     assert not any("server error" in m for m in messages), (
         f"and it must not be reported as one: {messages}"
+    )
+
+
+def test_a_holding_turns_done_before_the_answer_is_not_this_cycles_done(
+    tmp_path, monkeypatch, caplog,
+):
+    """The window between our `send` and the daemon's answer is not a safe one.
+
+    `_broadcast` reaches every subscriber of the session, the originator
+    included, and the daemon's answer to this cycle travels the same socket as
+    the holding turn's frames — so a frame of the *holding* turn can arrive
+    before `task_queued` does, at which point this loop does not yet know it is
+    queued. Measured 2026-10-02 on `1269ed9b`: the holding turn's `done` there
+    ended the cycle as `done`, with an EvolutionLog appended — a cycle counted as
+    a completed evolution whose own turn never began, which is the defect #1815
+    fixed one round later in the same sequence.
+
+    The frames are the daemon's own shapes: its `delta` and `done` both carry the
+    request they belong to (`daemon.py`).
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"request_id": "host-1", "content": "thinking", "delta": True,
+         "session_id": "s"},
+        {"request_id": "host-1", "content": "All done", "done": True,
+         "session_id": "s"},
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
+         "position": 1},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._QUEUED, (
+        "the holding turn's completion is not this cycle's completion — this "
+        f"cycle never ran — got {reason!r}"
+    )
+    assert handler.evolutions == [], (
+        "and it must not be counted as evolution: "
+        f"{[e.get('cycle') if isinstance(e, dict) else e for e in handler.evolutions]}"
+    )
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("complete (tools=" in m for m in messages), (
+        f"nothing here was completed: {messages}"
+    )
+
+
+def test_a_holding_turns_tools_before_the_answer_are_not_this_cycles_progress(
+    tmp_path, monkeypatch, caplog,
+):
+    """The same window, one frame smaller: the holder's tools are not our tools.
+
+    `tool_count` is the cycle's progress measure and is mirrored into the
+    heartbeat file, so counting the holding turn's calls writes somebody else's
+    activity into this cycle's persisted state. Measured 2026-10-02 on
+    `1269ed9b`: the pair below set `tool_count` to 2 for a cycle that ran no tool
+    at all.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "tool_start", "request_id": "host-1", "tool_name": "bash",
+         "arguments": {"command": "true"}, "session_id": "s"},
+        {"type": "tool_end", "request_id": "host-1", "tool_name": "bash",
+         "content": "ok", "error": False, "session_id": "s"},
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
+         "position": 1},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._QUEUED, f"got {reason!r}"
+    assert handler._cycle_progress.get("tool_count") in (None, 0), (
+        "the holding turn's two tool calls became this cycle's progress: "
+        f"{handler._cycle_progress}"
+    )
+
+
+def test_a_holding_turns_error_before_the_answer_is_not_this_cycles_error(
+    tmp_path, monkeypatch, caplog,
+):
+    """And the rule holds for the frame that follows it: the wrapper's error.
+
+    `daemon.py` names the request on this frame too (the wrapper's fallback and
+    the loop's own LLM-error exit both carry `request_id`, so a client cannot tell
+    which spoke), which is what lets a cycle that has not been answered yet
+    ignore the *holding* turn's failure. Without the name, this sequence reports
+    `server-error` for this cycle — the holder's trouble filed as this request's.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"request_id": "host-1",
+         "error": "Turn ended without reporting: CancelledError: "},
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
+         "position": 1},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._QUEUED, (
+        "the holding turn's failure is not this cycle's — this cycle has no turn "
+        f"here — got {reason!r}"
+    )
+    assert not any("server error" in r.getMessage() for r in caplog.records)
+
+
+def test_this_cycles_own_error_is_still_its_own(tmp_path, monkeypatch, caplog):
+    """The other direction: the guard must not swallow *our* failure.
+
+    A rule that ignored every frame naming a request would make this cycle blind
+    to its own error frame — the failure would be reported nowhere and the cycle
+    would end on the silence bound instead, which is a different lie.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"request_id": "self", "error": "LLM error: boom. Check config..."},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == "server-error", (
+        f"our own error frame is still ours — got {reason!r}"
+    )
+    assert any("server error" in r.getMessage() for r in caplog.records)
+
+
+def test_a_frame_naming_another_request_is_never_this_cycles():
+    """The predicate, over the shapes the daemon puts on the wire.
+
+    Not the same question as `_about_this_requests_queue`: this one asks
+    "is this somebody else's frame", which is a fact at any moment — including
+    before the daemon has answered this cycle at all.
+    """
+    from emrg.server import scheduler as mod
+
+    theirs = mod._names_another_request
+    assert theirs({"request_id": "host-1"}, "me") is True
+    assert theirs({"type": "tool_end", "request_id": "host-1"}, "me") is True
+    assert theirs({"request_id": "me"}, "me") is False
+    assert theirs({"type": "task_queued", "request_id": "me"}, "me") is False
+    assert theirs({"type": "queued_requeue", "request_ids": ["host-1"]}, "me") is True
+    assert theirs({"type": "queued_requeue", "request_ids": ["me"]}, "me") is False
+    assert theirs({"type": "queued_requeue", "request_ids": ["host-1", "me"]}, "me") is False, (
+        "a requeue naming this request as well is still partly about it"
+    )
+    assert theirs({"type": "turn_end", "session_id": "s"}, "me") is False, (
+        "an id-less frame names nobody; the queued guard is what reads those"
+    )
+    assert theirs({"type": "queued_cancelled", "session_id": "s"}, "me") is False
+    assert theirs({"request_id": ""}, "me") is False, (
+        "an empty id is not a claim about somebody else"
     )

@@ -307,6 +307,11 @@ def test_the_turn_start_frame_carries_the_tier_the_turn_runs_at(tmp_path):
     starts = [f for f in ws.sent if f.get("type") == "turn_start"]
     assert starts, ws.sent
     assert starts[0]["sandbox"] == "workspace-write"
+    assert starts[0]["request_id"] == req.id, (
+        "the frame that opens a turn names the request it runs — it is a session "
+        "broadcast, so every other request in the session reads it too "
+        f"(measured 2026-10-02): {starts[0]}"
+    )
     assert ran == ["workspace-write"]
 
 

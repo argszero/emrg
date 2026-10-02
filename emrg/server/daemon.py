@@ -3525,6 +3525,11 @@ class EmrgServer:
         self._session_terminal_frame.pop(session_id, None)
         await self._broadcast(session_id, {
             "type": "turn_start",
+            # The request this turn is running. Every frame about a turn names
+            # it, so a session's *other* requests can tell whose turn this is —
+            # the broadcast reaches every subscriber of the session, and the
+            # scheduler's read loop is one of them (`_names_another_request`).
+            "request_id": req.id,
             "session_id": session_id,
             "started_at": started_at,
             # The tier this turn actually runs at (rant 2026-09-30T09:30:16),
@@ -3584,6 +3589,12 @@ class EmrgServer:
                     # so a client cannot tell this from that, and neither is
                     # silent.
                     await self._broadcast(session_id, {
+                        # Named, like every other frame about a turn: this one is
+                        # the *wrapper's* fallback for `req`, and a session's other
+                        # requests receive it too — unnamed, a queued cycle read it
+                        # as its own failure (`server-error`) while the turn it
+                        # described belonged to somebody else (measured 2026-10-02).
+                        "request_id": req.id,
                         "error": f"Turn ended without reporting: {type(failure).__name__}: "
                                  f"{str(failure)[:200]}",
                     })
@@ -4119,6 +4130,10 @@ class EmrgServer:
                         ),
                     )
                 await self._broadcast(session.session_id, {
+                    # Named for the same reason as the wrapper's fallback above,
+                    # and kept identical to it so a client cannot tell which of
+                    # the two spoke.
+                    "request_id": req.id,
                     "error": error_text,
                 })
                 # Send done so the client knows the stream is over.

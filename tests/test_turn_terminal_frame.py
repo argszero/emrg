@@ -112,6 +112,12 @@ def test_a_turn_whose_loop_dies_still_tells_the_client_it_is_over(tmp_path):
     assert errors and "_LoopDied" in errors[0]["error"], (
         f"the reason must reach the client, not just the daemon log: {ws.sent}"
     )
+    assert errors[0].get("request_id") == "req-terminal", (
+        "and it must name the turn it is about: this frame is broadcast to the "
+        "whole session, so a session's other requests receive it too — unnamed, "
+        "a request waiting in the pending queue read the *holding* turn's "
+        f"failure as its own (measured 2026-10-02): {errors[0]}"
+    )
     assert ws.sent[-1].get("type") == "turn_end", (
         "the terminal frame belongs before the turn's own end marker"
     )
@@ -284,3 +290,62 @@ def test_a_done_frame_from_outside_a_turn_does_not_silence_the_next_one(tmp_path
     )
     assert terminal[-1].get("request_id") == "req-terminal"
     assert [f for f in ws.sent if f.get("error")], "the turn's failure was silent"
+
+
+def _broadcast_payloads(source: str) -> list[tuple[int, dict]]:
+    """Every `_broadcast(...)` payload written as a dict literal, with its line."""
+    import ast
+
+    found: list[tuple[int, dict]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call)
+                and getattr(node.func, "attr", "") == "_broadcast"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Dict)):
+            continue
+        keys = [k.value if isinstance(k, ast.Constant) else "<**>"
+                for k in node.args[1].keys]
+        found.append((node.lineno, {k: True for k in keys}))
+    return found
+
+
+def test_every_frame_about_a_turn_names_the_request_it_is_about():
+    """The invariant the scheduler's read loop now leans on, made mechanical.
+
+    A session's frames are broadcasts: `daemon.py::_broadcast` reaches every
+    subscriber of the session, the originator included. So a frame about a turn
+    is read by *every* request in that session, and only the name on it says
+    whose turn it is. `turn_start`, the wrapper's fallback error and the loop's
+    own LLM-error exit were the three that did not — measured 2026-10-02: a
+    cycle whose request sat in the pending queue read the holding turn's `done`
+    as its own completion (an EvolutionLog appended for a turn that never ran),
+    counted its tool calls into its own progress, and filed its failure as its
+    own `server-error`.
+
+    The rule is the one a reader can check without running anything: a payload
+    that carries a turn's own words — `done`, `delta`, `tool_name` — or that
+    carries no `type` at all (the shape every turn frame has) must name its
+    request. Session-level frames (`turn_end`, `queued_*`, `messages_compacted`,
+    `session_cancelled`) carry a `type` and no request, and are exempt by the
+    same sentence.
+    """
+    from emrg.server import daemon as daemon_mod
+
+    # The file of the module under test, not a relative path: a relative one
+    # resolves against the cwd and, in a probe run as a script, against the
+    # *installed* copy rather than this tree (measured 2026-10-02).
+    source = Path(daemon_mod.__file__).read_text()
+    payloads = _broadcast_payloads(source)
+    assert len(payloads) > 20, (
+        "the scan found almost no broadcast payloads — the file it read is not "
+        f"the daemon: {len(payloads)}"
+    )
+    unnamed = [
+        (line, keys) for line, keys in payloads
+        if "request_id" not in keys
+        and ("type" not in keys or any(k in keys for k in ("done", "delta", "tool_name")))
+    ]
+    assert not unnamed, (
+        "these broadcast payloads are about a turn but do not name it, so any "
+        f"request in the session may read them as its own: {unnamed}"
+    )

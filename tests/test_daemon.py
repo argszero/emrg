@@ -4034,6 +4034,11 @@ def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame
     dones = [f for f in frames if f.get("done")]
     assert len(errors) == 1, frames
     assert len(dones) == 1, frames
+    assert errors[0].get("request_id") == "req-filter", (
+        "the error frame names the turn it is about: it is broadcast to the whole "
+        "session, and a request waiting behind a busy turn otherwise reads this "
+        f"failure as its own (measured 2026-10-02): {errors[0]}"
+    )
     assert "content filter" in errors[0]["error"]
     assert "spaced out" in errors[0]["error"], (
         "the error must say which retries were already spent"
