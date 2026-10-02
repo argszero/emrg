@@ -225,6 +225,109 @@ describe("SettingsPanel", () => {
     );
   });
 
+  /**
+   * GitHub 状态行有三种结局，而不是两种。
+   *
+   * vanilla `dialogs.js:refreshGithubStatus` 先写 `settings.githubChecking`，拿到结果写
+   * 已连接/未连接，**catch 里写 `settings.githubStatusFailed`**——「问不出来」是它自己的一格。
+   * React 移植把它压成两种：`null` 渲染成字面 `"—"`，catch 置 `authenticated:false` ⇒ 渲染
+   * **「未连接」**——一个没有量过的断言（`.emrg` 的规矩：量不到就报量不到，不能报成通过）。
+   * 那两条词典串因此再没有读者。下面四条各钉一格，第五条钉 placeholder 确实来自词典。
+   */
+  describe("github 状态行说的是它量到的东西", () => {
+    const en = (k: string) => i18n.t(k, undefined, "en");
+
+    it("读取失败 → 印失败那一条，而不是「未连接」", async () => {
+      const failing = vi.fn().mockRejectedValue(new Error("daemon not connected"));
+      setup({ githubStatus: failing });
+      fireEvent.click(screen.getByTestId("settings-tab-github"));
+      await waitFor(() =>
+        expect(screen.getByTestId("github-status").textContent).toBe(en("settings.githubStatusFailed")),
+      );
+      // 反面读数：它**没有**替宿主断一个它没量过的状态
+      expect(screen.getByTestId("github-status").textContent).not.toBe(en("settings.githubNotConnected"));
+      expect(failing).toHaveBeenCalledTimes(1);
+    });
+
+    it("根本没有桥可问 → 也是失败，不是一个破折号", async () => {
+      render(
+        <I18nProvider lang="en">
+          <SettingsPanel />
+        </I18nProvider>,
+      );
+      fireEvent.click(screen.getByTestId("settings-tab-github"));
+      await waitFor(() =>
+        expect(screen.getByTestId("github-status").textContent).toBe(en("settings.githubStatusFailed")),
+      );
+      expect(screen.getByTestId("github-status").textContent).not.toBe("—");
+    });
+
+    it("还在读 → 印「检查中」，读完才换成结果", async () => {
+      let release: (v: unknown) => void = () => {};
+      const pending = vi.fn().mockImplementation(
+        () => new Promise((r) => { release = r; }),
+      );
+      setup({ githubStatus: pending });
+      fireEvent.click(screen.getByTestId("settings-tab-github"));
+      await waitFor(() =>
+        expect(screen.getByTestId("github-status").textContent).toBe(en("settings.githubChecking")),
+      );
+      release({ authenticated: false, user: null });
+      await waitFor(() =>
+        expect(screen.getByTestId("github-status").textContent).toBe(en("settings.githubNotConnected")),
+      );
+    });
+
+    it("连接在飞 → 按钮说「连接中」，断线按钮不替它说", async () => {
+      let release: (v: unknown) => void = () => {};
+      const pendingConnect = vi.fn().mockImplementation(
+        () => new Promise((r) => { release = r; }),
+      );
+      setup({ githubConnect: pendingConnect });
+      fireEvent.click(screen.getByTestId("settings-tab-github"));
+      fireEvent.change(screen.getByTestId("set-github-token"), { target: { value: "ghp_x" } });
+      fireEvent.click(screen.getByTestId("github-connect-btn"));
+      await waitFor(() =>
+        expect(screen.getByTestId("github-connect-btn").textContent).toBe(en("settings.githubConnecting")),
+      );
+      expect(screen.getByTestId("github-disconnect-btn").textContent).toBe(en("settings.githubDisconnect"));
+      release({ ok: true, user: "argszero" });
+      await waitFor(() =>
+        expect(screen.getByTestId("github-connect-btn").textContent).toBe(en("settings.githubConnect")),
+      );
+    });
+
+    it("断线在飞 → 连接按钮**不**替它说「连接中」（反向腿：busy 不能是一个 bool）", async () => {
+      let release: (v: unknown) => void = () => {};
+      const pendingDisconnect = vi.fn().mockImplementation(
+        () => new Promise((r) => { release = r; }),
+      );
+      setup({ githubDisconnect: pendingDisconnect });
+      fireEvent.click(screen.getByTestId("settings-tab-github"));
+      fireEvent.click(screen.getByTestId("github-disconnect-btn"));
+      await waitFor(() =>
+        expect((screen.getByTestId("github-disconnect-btn") as HTMLButtonElement).disabled).toBe(true),
+      );
+      expect(screen.getByTestId("github-connect-btn").textContent).toBe(en("settings.githubConnect"));
+      release({ ok: true });
+      await waitFor(() =>
+        expect((screen.getByTestId("github-disconnect-btn") as HTMLButtonElement).disabled).toBe(false),
+      );
+    });
+
+    it("token 输入框的 placeholder 来自词典，不是写死的英文字面量", async () => {
+      mockEmrg();
+      render(
+        // 注入一个哨兵值：写死的字面量不会跟着词典变
+        <I18nProvider lang="en" dicts={{ en: { "settings.githubTokenPlaceholder": "PAT-SENTINEL" } }}>
+          <SettingsPanel />
+        </I18nProvider>,
+      );
+      fireEvent.click(screen.getByTestId("settings-tab-github"));
+      expect((screen.getByTestId("set-github-token") as HTMLInputElement).placeholder).toBe("PAT-SENTINEL");
+    });
+  });
+
   it("applies theme option to documentElement and persists via saveSettings", async () => {
     const { calls } = setup();
     await screen.findByTestId("settings-tab-appearance");

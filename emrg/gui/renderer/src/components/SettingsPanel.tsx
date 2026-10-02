@@ -83,9 +83,18 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
   const [extraModels, setExtraModels] = useState<ModelRec[]>([]);
   // 主题 / GitHub 状态
   const [theme, setTheme] = useState<string>("system");
-  const [github, setGithub] = useState<{ authenticated: boolean; user: string | null } | null>(null);
+  // GitHub 连接状态：**三种结局**——还没问出来 / 问到了 / 没问出来。
+  // vanilla `dialogs.js:refreshGithubStatus` 就是三种（`settings.githubChecking` → 结果 /
+  // `settings.githubStatusFailed`）；React 移植压成两种（`null` → 字面 `"—"`，失败 → 置
+  // `authenticated:false`），于是**「问不出来」被印成「未连接」**——一个没量过的断言。
+  // #1024 删掉 vanilla 后，那两条词典串再没有读者（这正是扫描把它们筛出来的原因）。
+  const [github, setGithub] = useState<
+    { kind: "checking" } | { kind: "ok"; authenticated: boolean; user: string | null } | { kind: "failed" }
+  >({ kind: "checking" });
   const [githubToken, setGithubToken] = useState("");
-  const [busy, setBusy] = useState(false);
+  // 哪个操作在飞。vanilla 只把「连接中…」给 connect 按钮（dialogs.js:367），
+  // 所以一个 bool 不够——它会替 disconnect/save 也说「连接中…」。
+  const [busy, setBusy] = useState<null | "save" | "connect" | "disconnect">(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   // model 行内表单态（vanilla openModelForm/saveModelForm）
   const [formOpen, setFormOpen] = useState(false);
@@ -107,6 +116,9 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
   // 打开 settings 面板 → 加载设置（vanilla showSettings）
   useEffect(() => {
     const b = bridge();
+    // 状态探针**先于** getSettings 的守卫：没有桥时它自己会落到「没问出来」，
+    // 而不该停在「检查中…」（那是一个永不发生的读取）。
+    void refreshGithubStatus();
     if (!b?.getSettings) return;
     b.getSettings()
       .then((s) => {
@@ -126,7 +138,6 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
         if (s.lang) setLocale(s.lang as "" | Locale);
       })
       .catch((e: Error) => setMsg({ kind: "err", text: t("settings.readFailed", { msg: e.message }) }));
-    void refreshGithubStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -138,12 +149,17 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
 
   async function refreshGithubStatus() {
     const b = bridge();
-    if (!b?.githubStatus) return;
+    if (!b?.githubStatus) {
+      // 没有桥就没有可问的对象：这是「没问出来」，不是「未连接」
+      setGithub({ kind: "failed" });
+      return;
+    }
+    setGithub({ kind: "checking" });
     try {
       const s = await b.githubStatus();
-      setGithub({ authenticated: Boolean(s.authenticated), user: s.user || null });
+      setGithub({ kind: "ok", authenticated: Boolean(s.authenticated), user: s.user || null });
     } catch {
-      setGithub({ authenticated: false, user: null });
+      setGithub({ kind: "failed" });
     }
   }
 
@@ -240,7 +256,7 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
       setMsg({ kind: "ok", text: t("dlg.saved") });
       return;
     }
-    setBusy(true);
+    setBusy("save");
     try {
       await b.saveSettings({
         apiKey: apiKey.trim(),
@@ -258,7 +274,7 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     } catch (e: unknown) {
       setMsg({ kind: "err", text: t("settings.saveFailed", { msg: (e as Error).message }) });
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
@@ -266,12 +282,12 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
   async function connectGithub() {
     const b = bridge();
     if (!b?.githubConnect) return;
-    setBusy(true);
+    setBusy("connect");
     try {
       const res = await b.githubConnect({ token: githubToken });
       if (res.ok) {
         setMsg({ kind: "ok", text: t("settings.githubConnected", { user: res.user || "" }) });
-        setGithub({ authenticated: true, user: res.user || null });
+        setGithub({ kind: "ok", authenticated: true, user: res.user || null });
         setGithubToken("");
       } else {
         setMsg({ kind: "err", text: t("settings.githubConnectFailed", { msg: res.error || t("app.unknownError") }) });
@@ -279,22 +295,22 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     } catch (e: unknown) {
       setMsg({ kind: "err", text: t("settings.githubConnectFailed", { msg: (e as Error).message }) });
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
   async function disconnectGithub() {
     const b = bridge();
     if (!b?.githubDisconnect) return;
-    setBusy(true);
+    setBusy("disconnect");
     try {
       await b.githubDisconnect();
       setMsg({ kind: "ok", text: t("settings.githubDisconnected") });
-      setGithub({ authenticated: false, user: null });
+      setGithub({ kind: "ok", authenticated: false, user: null });
     } catch (e: unknown) {
       setMsg({ kind: "err", text: t("settings.githubDisconnectFailed", { msg: (e as Error).message }) });
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
@@ -532,16 +548,18 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
           <div className="panel-tab-body" data-settings-body="github" data-testid="settings-body-github">
             <div className="settings-group">
               <div className="hint" style={{ marginBottom: 6 }} data-testid="github-status">
-                {github === null
-                  ? "—"
-                  : github.authenticated
-                    ? t("settings.githubConnectedStatus", { user: github.user || "" })
-                    : t("settings.githubNotConnected")}
+                {github.kind === "checking"
+                  ? t("settings.githubChecking")
+                  : github.kind === "failed"
+                    ? t("settings.githubStatusFailed")
+                    : github.authenticated
+                      ? t("settings.githubConnectedStatus", { user: github.user || "" })
+                      : t("settings.githubNotConnected")}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <input
                   type="password"
-                  placeholder="GitHub Personal Access Token"
+                  placeholder={t("settings.githubTokenPlaceholder")}
                   style={{ flex: 1, minWidth: 0 }}
                   data-testid="set-github-token"
                   value={githubToken}
@@ -551,16 +569,16 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
                   type="button"
                   className="btn btn-primary"
                   data-testid="github-connect-btn"
-                  disabled={busy || !githubToken.trim()}
+                  disabled={busy !== null || !githubToken.trim()}
                   onClick={connectGithub}
                 >
-                  {t("settings.githubConnect")}
+                  {busy === "connect" ? t("settings.githubConnecting") : t("settings.githubConnect")}
                 </button>
                 <button
                   type="button"
                   className="btn btn-ghost"
                   data-testid="github-disconnect-btn"
-                  disabled={busy}
+                  disabled={busy !== null}
                   onClick={disconnectGithub}
                 >
                   {t("settings.githubDisconnect")}
@@ -740,7 +758,7 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
         )}
 
         <div className="panel-actions" style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
-          <button type="button" className="btn btn-primary" data-testid="settings-save" disabled={busy} onClick={saveSettings}>
+          <button type="button" className="btn btn-primary" data-testid="settings-save" disabled={busy !== null} onClick={saveSettings}>
             {t("settings.save")}
           </button>
         </div>
