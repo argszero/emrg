@@ -521,6 +521,124 @@ def completion_unreadable_error(problem: str) -> SelfExplainingLlmError:
     )
 
 
+def chunk_shape_problem(chunk: object) -> str | None:
+    """Why one streamed chunk is not a chunk, or ``None`` when it is.
+
+    The streaming twin of :func:`completion_shape_problem`, on the path every
+    ordinary conversation takes: ``chat_stream`` reads one object per SSE line,
+    and until now it read each one with ``chunk.get`` / ``choices[0].get`` as if
+    the provider had obeyed the contract. Measured on this host 2026-10-03
+    (``cyc20261003-054214``) by driving the real ``chat_stream`` over a stub
+    transport — every chunk below is valid JSON:
+
+    ==================================  =========================================
+    chunk sent                          what the caller got
+    ==================================  =========================================
+    ``[...]`` (a list)                  ``AttributeError: 'list' object has no attribute 'get'``
+    ``"x"`` / ``5``                     ``AttributeError: 'str' / 'int' object has no attribute 'get'``
+    ``{"choices": {"delta": …}}``       ``KeyError: 0`` — the message is the number ``0``
+    ``{"choices": "x"}``                ``AttributeError: 'str' object has no attribute 'get'``
+    ``{"choices": ["x"]}``              ``AttributeError: 'str' object has no attribute 'get'``
+    ``{"choices": [null]}``             ``AttributeError: 'NoneType' object has no attribute 'get'``
+    ``{"choices": [{"delta": null}]}``  ``AttributeError: 'NoneType' object has no attribute 'get'``
+    ``{"choices": [{"delta": "x"}]}``   ``AttributeError: 'str' object has no attribute 'get'``
+    ``{"usage": "x"}``                  ``AttributeError: 'str' object has no attribute 'get'``
+    ==================================  =========================================
+
+    and, one step further out, a chunk the reader *accepts* and whose content it
+    cannot join — ``{"delta": {"content": ["a"]}}`` was yielded as-is, and the
+    round then died in ``"".join(content_parts)`` with
+    ``TypeError: sequence item 0: expected str instance, list found`` **and no
+    frame of any kind**: no error, no ``done``, so the client's busy flag is
+    never cleared (the wedge PR #1669 exists for).
+
+    The rule
+    --------
+    The chunk is an object; ``choices``, when it is read, is a list;
+    ``choices[0]`` is an object; ``delta``, when the key is present, is an
+    object; a delta's ``content`` / ``reasoning_content`` / ``reasoning``, when
+    read, are strings; and ``usage``, when read, is an object.
+
+    The boundary is **measured, not derived from the types**: the reader already
+    skips the *empty* values, so those are left alone — a rule that refused them
+    would invent a failure for a chunk that runs today (the same lesson
+    ``emrg/tools/argument_shape.py`` records for an optional null). Measured the
+    same way: ``{"choices": {}}``, ``{"choices": ""}``, ``{"choices": 0}``,
+    ``{"delta": {"content": []}}``, ``{"delta": {"content": 0}}``,
+    ``{"delta": {"reasoning_content": []}}``, ``{"usage": []}``,
+    ``{"usage": null}`` and ``{"usage": 0}`` all pass through untouched today —
+    each one is falsy, and each read is written ``if not choices: continue`` or
+    ``if text_content:``.
+
+    **One field does not follow that pattern, and the reason is mechanical:**
+    ``delta``. ``choice.get("delta", {})`` supplies its default only when the key
+    is *absent*, so an explicit ``null`` — or any other falsy non-object — is
+    read as it is and breaks. ``{"delta": null}``, ``{"delta": []}`` and
+    ``{"delta": 0}`` are therefore refused although they are empty, and the
+    measurement is what says so.
+
+    ``finish_reason`` is deliberately **not** checked: ``5`` and ``[]`` both pass
+    through today and neither breaks a read — the value is only ever compared to
+    two strings — so a rule about it would be a behaviour change dressed as a
+    defect fix.
+
+    :param chunk: one decoded SSE ``data:`` payload, whatever shape it arrived in.
+    :returns: a refusal sentence naming the part and the shape it received, or
+        ``None`` when the chunk is readable.
+    """
+    if not isinstance(chunk, dict):
+        return f"the stream chunk is not an object; got {shape_of(chunk)}"
+
+    choices = chunk.get("choices")
+    if choices and not isinstance(choices, list):
+        return f"the chunk's `choices` is not a list; got {shape_of(choices)}"
+
+    for choice in choices or []:
+        if not isinstance(choice, dict):
+            return f"`choices[0]` is not an object; got {shape_of(choice)}"
+        if "delta" not in choice:
+            continue
+        delta = choice["delta"]
+        if not isinstance(delta, dict):
+            # Read even when empty: see the docstring's measured boundary.
+            return f"`choices[0].delta` is not an object; got {shape_of(delta)}"
+        for field in ("content", "reasoning_content", "reasoning"):
+            value = delta.get(field)
+            if value and not isinstance(value, str):
+                return (
+                    f"`choices[0].delta.{field}` is not a string; "
+                    f"got {shape_of(value)}"
+                )
+
+    usage = chunk.get("usage")
+    if usage and not isinstance(usage, dict):
+        return f"the chunk's `usage` is not an object; got {shape_of(usage)}"
+    return None
+
+
+def chunk_unreadable_error(problem: str) -> SelfExplainingLlmError:
+    """The failure raised when the provider's stream carries a chunk this client
+    cannot read.
+
+    Same treatment family as :func:`completion_unreadable_error`, with the one
+    difference the streaming path imposes: a stream that has already yielded a
+    delta cannot be re-sent, because the client is showing that text (the rule
+    ``yielded_delta`` already enforces for transport failures). So the retry is
+    taken only while nothing has reached the caller, and the sentence says what
+    arrived either way.
+
+    No word from the overlong or content-risk vocabularies, for the reason given
+    on its two siblings.
+    """
+    return SelfExplainingLlmError(
+        f"the provider's stream is not a stream this client can read: {problem} — "
+        "the answer was cut off, and nothing from it was recorded as this round's "
+        "result. A stream that carries a chunk unlike the one the OpenAI-compatible "
+        "contract declares is a bug in the provider or in the gateway in front of "
+        "it, not in this session: retry, or use a different model."
+    )
+
+
 def content_risk_retry(stage: int, original: list[dict]) -> tuple[str, list[dict]] | None:
     """The next rung for a content refusal, or ``None`` when the ladder is spent.
 
@@ -985,6 +1103,12 @@ class LlmClient:
                     # on after it (rant 2026-09-28T16:58:08).
                     blocked = False
 
+                    # The shape refusal for the chunk that ended this attempt's
+                    # read, or None. Collected the same way and for the same
+                    # reason as `blocked`: the reaction is a retry, and a `continue`
+                    # cannot be taken from inside the nested read.
+                    chunk_problem: str | None = None
+
                     async for line in resp.aiter_lines():
                         line = line.strip()
                         if not line or line == "[DONE]" or not line.startswith("data: "):
@@ -996,6 +1120,16 @@ class LlmClient:
                         except json.JSONDecodeError:
                             logger.debug("SSE parse skip: %s", json_str[:80])
                             continue
+
+                        # The chunk's own shape, before anything is read out of
+                        # it — measured 2026-10-03 (`cyc20261003-054214`): nine
+                        # such chunks raised nine raw sentences naming neither
+                        # the provider nor the field, and a tenth was accepted
+                        # and killed the round in `"".join(...)` with no frame at
+                        # all. One home states the rule.
+                        chunk_problem = chunk_shape_problem(chunk)
+                        if chunk_problem is not None:
+                            break
 
                         choices = chunk.get("choices", [])
                         if not choices:
@@ -1125,6 +1259,28 @@ class LlmClient:
                             streaming=True,
                         )
                         continue
+
+                    if chunk_problem is not None:
+                        # A gateway that answers with a chunk unlike the one the
+                        # contract declares is the streaming form of the body
+                        # `chat()` refuses (`completion_shape_problem`), and it
+                        # gets the same treatment — with the one limit a stream
+                        # imposes: an attempt that has already yielded a delta
+                        # cannot be re-sent, because the client is showing that
+                        # text, so the retry is taken only while nothing has
+                        # reached the caller (the rule `yielded_delta` enforces).
+                        if not yielded_delta and attempt < MAX_RETRIES:
+                            delay = RETRY_BASE_DELAY * (2 ** attempt)
+                            logger.warning(
+                                "LLM stream chunk is not a chunk (%s), retrying "
+                                "in %.1fs (attempt %d/%d): %s",
+                                chunk_problem, delay, attempt + 1, MAX_RETRIES,
+                                chunk_problem,
+                            )
+                            await asyncio.sleep(delay)
+                            last_error = chunk_unreadable_error(chunk_problem)
+                            continue
+                        raise chunk_unreadable_error(chunk_problem)
             except httpx.TransportError as exc:
                 # Transient transport failure while streaming — httpx.ReadTimeout
                 # (no data block for the 120s read timeout), ConnectError,
