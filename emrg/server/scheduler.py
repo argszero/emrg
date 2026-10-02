@@ -2605,9 +2605,13 @@ class TaskHandler:
         #: The stall watchdog's two clocks (rant 2026-09-29T15:52:43). Both are
         #: `monotonic`, so a wall-clock adjustment mid-cycle cannot make a live
         #: cycle look stalled nor a stalled one look alive. `last_frame_at` is
-        #: this cycle's own liveness and moves only when a frame arrives — which
-        #: is precisely what a wedged turn stops doing; `tool_deadline` is the
-        #: instants an in-flight tool call said it expected to still be running.
+        #: this cycle's own liveness and moves only when a frame **of this
+        #: cycle's** arrives — not for the holding turn's frames, which reach
+        #: this socket too and would otherwise keep a queued cycle waiting for as
+        #: long as the neighbour talks (measured 2026-10-02; the reset sits after
+        #: the guards in the read loop, and that placement is the rule);
+        #: `tool_deadline` is the instants an in-flight tool call said it
+        #: expected to still be running.
         last_frame_at = time.monotonic()
         tool_deadline: float | None = None
         #: Set when the daemon answers this cycle with `task_queued` (the session
@@ -2647,8 +2651,9 @@ class TaskHandler:
                         end_reason = self._QUEUED
                         error = (
                             f"queued behind a busy session: the daemon held this "
-                            f"cycle's request (position {queued_position}) and no "
-                            f"frame followed for {int(now - last_frame_at)}s "
+                            f"cycle's request (position {queued_position}) and then "
+                            f"no frame of its own followed for "
+                            f"{int(now - last_frame_at)}s "
                             f"(bound {int(deadline - last_frame_at)}s, "
                             f"tools={tool_count}) - this cycle never ran as its "
                             f"own turn here"
@@ -2686,11 +2691,6 @@ class TaskHandler:
                     # the daemon side has the mirror-image contract (exactly one
                     # terminal frame per turn, issue #1669).
                     break
-                last_frame_at = time.monotonic()
-                # Cleared on every frame, then re-armed below: a `tool_end` is a
-                # frame like any other, so the round bound covers the gap after a
-                # tool returns until the next round's first token.
-                tool_deadline = None
                 # Every frame of a turn names the request it belongs to (`delta`,
                 # `tool_start`, `tool_end`, `done`, `task_queued`,
                 # `steer_committed`, and — since 2026-10-02 — `turn_start` and
@@ -2749,6 +2749,23 @@ class TaskHandler:
                         )
                         break
                     continue
+                # Only now does a frame count as this cycle's liveness. The reset
+                # belongs **after** the two guards above, and that placement is
+                # the difference between a bound and a suggestion: measured
+                # 2026-10-02, with the reset before them, a holding turn's stream
+                # kept a queued cycle's clock alive — six foreign frames spaced
+                # well inside a 1s bound took the cycle 4.03s to end instead of
+                # ~1s, and the handler held `_cycle_running` (and the task's next
+                # run) for as long as the neighbour kept talking. The bound is
+                # `_QUEUED`'s only way out, so a frame that is not this cycle's
+                # must not extend it.
+                last_frame_at = time.monotonic()
+                # Cleared on every frame of this cycle's, then re-armed below: a
+                # `tool_end` is a frame like any other, so the round bound covers
+                # the gap after a tool returns until the next round's first token.
+                # A foreign `tool_end` must not clear it either — a tool returning
+                # in somebody else's turn does not mean this cycle's tool did.
+                tool_deadline = None
                 # `task_queued` and `steer_committed` are the daemon's two words
                 # for "your request is not a turn yet, it is inside someone
                 # else's"; any other frame is this cycle's own turn reporting.

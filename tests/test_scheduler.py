@@ -3445,6 +3445,7 @@ def _silence_frames(handler, tmp_path, monkeypatch, frames, *, delays=None):
             self._frames = list(frames)
             self.sent = []
             self._index = 0
+            self.consumed = 0
 
         async def send(self, msg):
             self.sent.append(msg)
@@ -3455,6 +3456,7 @@ def _silence_frames(handler, tmp_path, monkeypatch, frames, *, delays=None):
                 if pause:
                     await asyncio.sleep(pause)
                 self._index += 1
+                self.consumed += 1
                 frame = self._frames.pop(0)
                 return _json.dumps(_as_this_cycles_frame(frame, self.sent),
                                    ensure_ascii=False)
@@ -3464,7 +3466,14 @@ def _silence_frames(handler, tmp_path, monkeypatch, frames, *, delays=None):
             pass
 
     async def _fake_connect():
-        return _SilentWS()
+        ws = _SilentWS()
+        # Kept on the handler so a test can read what the loop did with the
+        # script: `consumed` is how many frames it took in. The silence bound is
+        # about *this cycle's* liveness, so "how far into somebody else's stream
+        # did it get before giving up" is a reading a test has to be able to
+        # take — see `test_a_holding_turns_stream_does_not_extend_...`.
+        handler._silence_ws = ws
+        return ws
 
     handler._build_evolution_prompt = lambda: "test prompt"
     monkeypatch.setattr(mod, "connect_to_server", _fake_connect)
@@ -4494,4 +4503,169 @@ def test_an_error_frame_belongs_to_the_request_it_names():
     assert mine({"request_id": "", "error": "boom"}, "me") is True, (
         "an empty id is 'not stated', so the frame is read by its shape — the "
         "same reading `_names_another_request` gives it"
+    )
+
+
+# ── the liveness clock belongs to this cycle (measured 2026-10-02) ──────────
+#
+# The three tests below are one mechanism read in both directions: the silence
+# bound must fire for a frame that is not this cycle's, and must *not* fire for
+# one that is. The middle one is the defect (a queued cycle waiting for as long
+# as the holding turn talks); the third is the over-fix it invites (a live turn
+# killed for streaming).
+
+
+def _run_spaced(tmp_path, monkeypatch, caplog, frames, n_spaced, bound, spacing,
+                level=logging.WARNING):
+    """Run a cycle whose `n_spaced` frames each arrive `spacing` after the last.
+
+    Returns (reason, consumed, elapsed): `consumed` is how many frames the loop
+    took in, which is the reading that distinguishes "the bound fired" from "the
+    neighbour's stream kept it alive".
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", bound)
+    delays = {i: spacing for i in range(len(frames) - n_spaced, len(frames))}
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=frames, delays=delays)
+    import time as _time
+
+    started = _time.monotonic()
+    with caplog.at_level(level):
+        reason = asyncio.run(handler._run_evolution_cycle())
+    return reason, handler._silence_ws.consumed, _time.monotonic() - started
+
+
+def test_a_holding_turns_stream_does_not_extend_a_queued_cycles_bound(
+    tmp_path, monkeypatch, caplog,
+):
+    """The bound is a queued cycle's only way out, so it must not be extendable.
+
+    `_QUEUED` is reached on a timeout, and the holding turn reports itself on this
+    socket the whole time it runs — so with the liveness reset before the guards,
+    every one of its frames pushed the deadline back. Measured 2026-10-02 on
+    `31834cc9`: with a 1s bound and six foreign frames spaced 0.5s apart, the
+    cycle took **4.03s** to end (it consumed the whole stream) instead of the ~1s
+    the bound promises, and it held `_cycle_running` — and the task's next run —
+    for as long as the neighbour kept talking. Requirement 5 is exactly that no
+    handler holds the slot on an open socket.
+
+    The numbers here are shrunken so the test is fast; what it asserts is the
+    shape: the cycle gives up at *its own* bound, not at the end of somebody
+    else's stream.
+    """
+    from emrg.server import scheduler as mod
+
+    frames = [{"type": "task_queued", "request_id": "self", "session_id": "s",
+               "position": 1}]
+    for _ in range(6):
+        frames.append({"request_id": "host-1", "content": "…", "delta": True,
+                       "session_id": "s"})
+    reason, consumed, elapsed = _run_spaced(
+        tmp_path, monkeypatch, caplog, frames, n_spaced=6,
+        bound=0.3, spacing=0.15,
+    )
+
+    assert reason == mod.TaskHandler._QUEUED, f"got {reason!r}"
+    assert consumed <= 3, (
+        "the cycle walked into the holding turn's stream instead of ending at "
+        f"its own bound: it took in {consumed} of 7 frames"
+    )
+    assert elapsed < 0.6, (
+        f"the bound is 0.3s and the cycle waited {elapsed:.2f}s — a frame that "
+        "is not this cycle's extended its liveness clock"
+    )
+
+
+def test_a_holding_turns_stream_does_not_keep_a_wedged_turn_alive(
+    tmp_path, monkeypatch, caplog,
+):
+    """The same clock, without the queue: this cycle's turn went quiet.
+
+    A neighbour's traffic in the session — another client's failed `compact`,
+    say — is not evidence that *this* cycle's turn is alive, so a turn that
+    stopped reporting must still be reported as `stalled` at its own bound. With
+    the reset before the guards the neighbour's stream is what the watchdog
+    measured, and the wedge it exists to find is the thing it never sees.
+    """
+    from emrg.server import scheduler as mod
+
+    frames = [{"request_id": "self", "content": "…", "delta": True,
+               "session_id": "s"}]
+    for _ in range(6):
+        frames.append({"request_id": "host-1", "content": "…", "delta": True,
+                       "session_id": "s"})
+    reason, consumed, elapsed = _run_spaced(
+        tmp_path, monkeypatch, caplog, frames, n_spaced=6,
+        bound=0.3, spacing=0.15, level=logging.ERROR,
+    )
+
+    assert reason == mod.TaskHandler._STALLED, f"got {reason!r}"
+    assert consumed <= 3, f"the wedged turn waited through a foreign stream: {consumed}"
+    assert elapsed < 0.6, f"the watchdog fired after {elapsed:.2f}s, not at 0.3s"
+
+
+def test_this_cycles_own_stream_still_extends_it(tmp_path, monkeypatch, caplog):
+    """The discriminating direction: our own frames must keep the cycle alive.
+
+    A long turn streams `delta` frames for minutes, and the watchdog exists for
+    the case where they *stop*. A fix that measured wall-clock time, or that
+    reset the clock only on terminal frames, would kill every healthy long turn
+    as `stalled` — so the frames here are this cycle's own, and the cycle must
+    take every one of them before giving up.
+    """
+    from emrg.server import scheduler as mod
+
+    frames = [{"request_id": "self", "content": "…", "delta": True,
+               "session_id": "s"} for _ in range(5)]
+    reason, consumed, elapsed = _run_spaced(
+        tmp_path, monkeypatch, caplog, frames, n_spaced=5,
+        bound=0.2, spacing=0.1, level=logging.ERROR,
+    )
+
+    assert consumed == 5, (
+        "this cycle's own frames stopped counting as liveness: it took in "
+        f"{consumed} of 5"
+    )
+    assert elapsed > 0.5, (
+        f"the cycle gave up after {elapsed:.2f}s while its own turn was still "
+        "streaming — the bound must measure this cycle's silence"
+    )
+    assert reason == mod.TaskHandler._STALLED, f"got {reason!r}"
+
+
+def test_a_foreign_frame_does_not_cancel_this_cycles_tool_bound(
+    tmp_path, monkeypatch, caplog,
+):
+    """The tool bound survives a neighbour's frame, for the same reason.
+
+    `tool_deadline` is the *longer* of the two clocks while a tool runs — a call
+    that declared how long it needs. The reset that clears it belongs with the
+    liveness reset, and both belong after the guards: cleared by a foreign frame,
+    the deadline collapses back to the round bound, and a cycle whose tool is
+    legitimately still running is torn down as `stalled` with the tool call
+    abandoned (measured shape 2026-10-02; the placement is the fix).
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.2)
+    monkeypatch.setattr(mod, "_TOOL_SILENCE_GRACE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "tool_start", "request_id": "self", "tool_name": "bash",
+         "arguments": {"command": "sleep 1", "timeout": 1.2}, "session_id": "s"},
+        {"request_id": "host-1", "content": "…", "delta": True, "session_id": "s"},
+    ], delays={1: 0.3})
+    import time as _time
+
+    started = _time.monotonic()
+    with caplog.at_level(logging.ERROR):
+        reason = asyncio.run(handler._run_evolution_cycle())
+    elapsed = _time.monotonic() - started
+
+    assert reason == mod.TaskHandler._STALLED, f"got {reason!r}"
+    assert elapsed > 0.9, (
+        f"the cycle gave up after {elapsed:.2f}s: the declared 1.2s tool bound was "
+        "replaced by the round bound when somebody else's frame arrived"
     )
