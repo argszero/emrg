@@ -241,6 +241,7 @@ from pathlib import Path
 # is not. `merge_tree.py` is a module of this repo, not a dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import merge_tree  # noqa: E402  (needs the path above)
+import pr_numbers  # noqa: E402  (needs the path above)
 
 # The guard is judged by its exit code, but its own report line names the
 # numbers, so it is captured and quoted rather than re-derived. Same constants
@@ -611,20 +612,17 @@ def _refresh_base(base: str) -> None:
 
 
 def _open_pr_numbers(repo: str) -> list[int]:
-    """Every open PR number, ascending - the source the default plan is drawn from."""
-    proc = _run(
-        [
-            "gh", "pr", "list", "-R", repo,
-            "--limit", "100", "--state", "open",
-            "--json", "number", "--jq", ".[].number",
-        ]
-    )
-    if proc.returncode != 0:
-        raise MeasurementError(f"gh pr list failed: {proc.stderr.strip()}")
-    numbers = [int(line) for line in proc.stdout.split() if line.strip()]
-    if not numbers:
-        raise MeasurementError("no open PRs reported - nothing to check")
-    return sorted(numbers)
+    """Every open PR number, ascending - the source the default plan is drawn from.
+
+    The reading is `pr_numbers.open_pr_numbers`'s, and so is the rule for the third
+    answer `gh` can give - and this is the copy `check-merge-pairs.py` borrows, so
+    the shared reader is what both of them ask now. The copy that used to be here
+    parsed `stdout` with `int()`, so an answer that was neither numbers nor an error
+    reached it as a bare `ValueError` and left at exit **1**, the code this table
+    reserves for "at least one clean step landed a tree that FAILS it". Measured
+    2026-10-03 (`cyc20261003-023102`).
+    """
+    return pr_numbers.open_pr_numbers(repo, run=_run)
 
 
 def _fetch_head(number: int) -> str:

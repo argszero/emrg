@@ -167,6 +167,7 @@ from pathlib import Path
 # it is not. `merge_tree.py` is a module of this repo, not a dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import merge_tree  # noqa: E402  (needs the path above)
+import pr_numbers  # noqa: E402  (needs the path above)
 
 # Pinned, not read from the clock: a commit's sha contains its committer date, so an
 # unpinned synthetic commit is not a function of its inputs. The constant is
@@ -387,30 +388,17 @@ def _refresh_base(base: str) -> None:
 
 
 def _open_pr_numbers(repo: str) -> list[int]:
-    """The open PR numbers, ascending - the default subject of the check."""
-    proc = _run(
-        [
-            "gh",
-            "pr",
-            "list",
-            "-R",
-            repo,
-            "--limit",
-            "100",
-            "--state",
-            "open",
-            "--json",
-            "number",
-            "--jq",
-            ".[].number",
-        ]
-    )
-    if proc.returncode != 0:
-        raise MeasurementError(f"gh pr list failed: {proc.stderr.strip()}")
-    numbers = [int(line) for line in proc.stdout.split() if line.strip()]
-    if not numbers:
-        raise MeasurementError("no open PRs reported - nothing to check")
-    return sorted(numbers)
+    """The open PR numbers, ascending - the default subject of the check.
+
+    The reading is `pr_numbers.open_pr_numbers`'s, and so is the rule for the third
+    answer `gh` can give. The copy that used to be here parsed `stdout` with `int()`,
+    so an answer that was neither numbers nor an error reached it as a bare
+    `ValueError` - which `main` below does not catch, so it left as a traceback at
+    exit **1**, the code this table reserves for *the finding* ("at least one path
+    reads backwards"), with no finding measured. Measured 2026-10-03
+    (`cyc20261003-023102`).
+    """
+    return pr_numbers.open_pr_numbers(repo, run=_run)
 
 
 def _fetch_head(number: int) -> str:

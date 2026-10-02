@@ -2380,9 +2380,21 @@ def test_this_tool_cannot_read_a_per_pr_signal() -> None:
             "no per-PR signal) was written while no code path here could obtain one, so "
             "widen the paragraph and this test together"
         )
-    # The one `gh` call it does make is the open-PR list, which carries no verdict.
-    assert '"gh",' in source and '"--json",' in source, (
-        "the gh call this test reasons about is gone - re-read the paragraph's rule"
+    # It makes no `gh` call of its own. The open-PR list comes from
+    # `pr_numbers.open_pr_numbers`, whose answer is a list of numbers and nothing else,
+    # so no verdict can travel with it - and the tool reaching for `gh` directly again
+    # is the state this half exists to catch. The premise used to be spelled "the one
+    # `gh` call it does make is the open-PR list" and asserted on the literals `"gh",`
+    # / `"--json",` in this file's source; moving that read into the shared module
+    # (2026-10-03, `cyc20261003-023102`) made the sentence false and this test red,
+    # which is it working. The premise is restated rather than deleted.
+    assert "pr_numbers.open_pr_numbers" in source, (
+        "the shared open-PR reader is no longer what this tool asks - re-read the "
+        "paragraph's rule (it may claim no per-PR signal)"
+    )
+    assert '"gh",' not in source, (
+        "this tool makes its own `gh` call again - a per-PR signal may now be "
+        "reachable, so widen the paragraph and this test together"
     )
 
 

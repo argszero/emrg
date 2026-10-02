@@ -293,6 +293,7 @@ from pathlib import Path
 # it is not. `merge_tree.py` is a module of this repo, not a dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import merge_tree  # noqa: E402  (needs the path above)
+import pr_numbers  # noqa: E402  (needs the path above)
 
 # There is deliberately **no** plan-tip ref. The tip `build_plan_tip` returns is a
 # commit this process just made, and a commit is an immutable name already: the
@@ -517,30 +518,16 @@ def _tree_of(commit: str, what: str) -> str:
 
 
 def _open_pr_numbers(repo: str) -> list[int]:
-    """The open PR numbers, ascending - the default subject of the check."""
-    proc = _run(
-        [
-            "gh",
-            "pr",
-            "list",
-            "-R",
-            repo,
-            "--limit",
-            "100",
-            "--state",
-            "open",
-            "--json",
-            "number",
-            "--jq",
-            ".[].number",
-        ]
-    )
-    if proc.returncode != 0:
-        raise MeasurementError(f"gh pr list failed: {proc.stderr.strip()}")
-    numbers = [int(line) for line in proc.stdout.split() if line.strip()]
-    if not numbers:
-        raise MeasurementError("no open PRs reported - nothing to judge")
-    return sorted(numbers)
+    """The open PR numbers, ascending - the default subject of the check.
+
+    The reading is `pr_numbers.open_pr_numbers`'s, and so is the rule for the third
+    answer `gh` can give. The copy that used to be here parsed `stdout` with `int()`,
+    so an answer that was neither numbers nor an error reached it as a bare
+    `ValueError` - which `main` does not catch - and left at exit **1**, the code
+    this table reserves for "the plan's final tree was built and its suite FAILED",
+    though no tree had been built. Measured 2026-10-03 (`cyc20261003-023102`).
+    """
+    return pr_numbers.open_pr_numbers(repo, run=_run)
 
 
 def _fetch_head(number: int) -> str:
