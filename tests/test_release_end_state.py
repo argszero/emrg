@@ -204,6 +204,12 @@ def test_the_release_job_verifies_its_own_end_state_after_publishing() -> None:
     )
 
 
+#: What `gh` writes when a read fails rather than answers — the shape of a bad token, a
+#: rate limit or a network break. It is the only thing that can separate this state from a
+#: tag that carries no release, so the arm below asserts it reaches the log.
+API_ERROR = "gh: HTTP 401: Bad credentials (https://api.github.com/repos/argszero/emrg)"
+
+
 _GH_STUB = '''#!/usr/bin/env python3
 """Answer the end-state check's API reads, and record what it asked."""
 import json, os, pathlib, sys
@@ -225,6 +231,13 @@ if "releases/latest" in url:
     emit(os.environ.get("GH_LATEST_TAG", tag))
 elif "releases/tags/" in url:
     if scenario == "missing":
+        sys.exit(1)
+    if scenario == "apifail":
+        # The read itself fails, the way a bad token, a rate limit or a network break does:
+        # gh writes its own message and exits non-zero. This is the state the executed arm
+        # below needs, because "missing" alone cannot distinguish it — and the step used to
+        # report both of them as "the action created nothing".
+        sys.stderr.write(os.environ["GH_API_ERROR"] + "\\n")
         sys.exit(1)
     if expr == ".tag_name":
         emit(tag)
@@ -304,6 +317,7 @@ def test_the_end_state_check_refuses_every_way_a_release_can_be_incomplete(tmp_p
             "GH_SCENARIO": scenario,
             "GH_TAG": "v9.9.9",
             "GH_ASSETS": json.dumps(carried),
+            "GH_API_ERROR": API_ERROR,
         }
         if latest:
             env["GH_LATEST_TAG"] = latest
@@ -330,11 +344,48 @@ def test_the_end_state_check_refuses_every_way_a_release_can_be_incomplete(tmp_p
     # and reach opposite verdicts. That pair is what makes the outer comparison load-bearing:
     # with `newest == tag` the Latest assertion must be made (and fails here), with
     # `newest != tag` it must be skipped (and passes here), on identical everything else.
+    # The state that was missing, and the one defect this pair exists for. A release whose
+    # read FAILS (bad token, rate limit, network) and a tag that carries no release at all
+    # reach the same branch, so a message that names one of them as the cause is naming a
+    # fact it did not measure. Measured 2026-10-02 (`cyc20261002-115120`) against a `gh`
+    # that answers `HTTP 401: Bad credentials`: the step printed, verbatim,
+    #   `::error::no release exists for tag v9.9.9 — the action created nothing`
+    # and `2>/dev/null` had already thrown away the one line that could tell the reader
+    # otherwise. The host-side counterpart of this check
+    # (`scripts/check-release-published.py`) states the rule it was breaking: a question
+    # the instrument cannot answer is reported unmeasured, never as a definite fault.
+    absent = run("missing", full)
+    failed = run("apifail", full)
+
+    assert absent.returncode != 0 and failed.returncode != 0, (
+        "both states must still FAIL the release: this is a diagnostic fix, not a "
+        f"relaxation. rc={absent.returncode}/{failed.returncode}"
+    )
+    for name, result in (("missing", absent), ("apifail", failed)):
+        assert "the action created nothing" not in result.stdout + result.stderr, (
+            f"the {name} run still asserts a cause it did not measure — the step read "
+            "'no answer', and that is all it knows: "
+            f"{result.stdout}{result.stderr}"
+        )
+    assert API_ERROR in failed.stdout + failed.stderr, (
+        "the failed-read run does not carry gh's own answer, so the log still cannot tell "
+        f"a broken read from a missing release: {failed.stdout}{failed.stderr}"
+    )
+    # The discriminating half: the two states are indistinguishable by exit code, so the
+    # only thing that can separate them is what the message carries — and the pair above
+    # must therefore differ in exactly that.
+    assert "no readable release" in absent.stdout + failed.stdout, (
+        f"the refusal no longer names the reading: {absent.stdout}{failed.stdout}"
+    )
+
     for scenario, carried, latest, marker in (
         ("draft", full, "", "DRAFT"),
         ("partial", full[:-1], "", "does not carry"),
         ("notlatest", full, "v9.9.8", "reports Latest="),
-        ("missing", full, "", "no release exists"),
+        # The marker moved with the message: a step that cannot tell "the tag carries no
+        # release" from "the read itself failed" must not name either as the cause, so the
+        # refusal reports the reading ("no readable release") and carries gh's own answer.
+        ("missing", full, "", "no readable release"),
     ):
         result = run(scenario, carried, latest=latest)
         assert result.returncode != 0, (

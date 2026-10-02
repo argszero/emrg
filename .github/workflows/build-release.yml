@@ -497,17 +497,32 @@ jobs:
           expected="$(printf '%s\n' "${found[@]#artifacts/}" | sort)"
           n="${#found[@]}"
           api() { gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq "$1"; }
+          # ⚠️ 重试循环读到的是「这次读**有没有**得到答案」，不是「为什么没有」——而下面那句
+          # 结论曾经把一个没测过的成因写死成事实（实测 2026-10-02，cyc20261002-115120）：把
+          # gh 换成「HTTP 401 Bad credentials」的桩，输出与「tag 确实没有 release」**逐字相同**，
+          # 都收在 `::error::no release exists for tag v9.9.9 — the action created nothing`。
+          # 而 `2>/dev/null` 又把 gh 自己的话丢了（那是唯一能分辨两者的东西）。同一仓的宿主侧
+          # 对应物 `scripts/check-release-published.py` 为此立过规矩（"A question the instrument
+          # cannot answer had been reported as a definite fault"），并真的先把 release 问一遍再
+          # 下判决；这里曾没有它。改法：`2>&1` 把 gh 的话带进变量并随消息打印，结论只说读到了什么。
           exists=""
+          read_err=""
           for attempt in 1 2 3 4 5 6; do
-            exists="$(api .tag_name 2>/dev/null || true)"
-            [ -n "$exists" ] && break
-            echo "the release for ${tag} is not readable yet (attempt ${attempt}/6)"
+            if exists="$(api .tag_name 2>&1)"; then break; fi
+            read_err="$exists"
+            exists=""
+            echo "the release for ${tag} is not readable yet (attempt ${attempt}/6): ${read_err}"
             sleep 10
           done
           if [ -z "$exists" ]; then
-            echo "::error::no release exists for tag ${tag} — the action created nothing"
+            echo "::error::no readable release for tag ${tag} after 6 attempts — gh's own answer was: ${read_err}"
+            echo "::error::that reading covers two states this check cannot tell apart by itself: the tag carries no release, or the read itself failed (token scope, rate limit, network). gh's message above is what separates them — the check reports what it read, not a cause it did not measure."
             exit 1
           fi
+          # 注意：下面几条读**不能**照搬这套写法。这里要的信号是「拿到了答案吗」（空值
+          # 就是答案），而 `draft` 读到的空值不是答案 —— 加 `|| true` 放它过去，下一行
+          # 会把「读失败」印成 `still a DRAFT (draft=)` 这种**假**结论。此处让 -e 中止
+          # 反而安全：gh 自己的错话已经在 stderr 上，读者拿到的是真原因而不是编的原因。
           draft="$(api .draft)"
           if [ "$draft" != "false" ]; then
             echo "::error::the release for ${tag} is still a DRAFT (draft=${draft}) — it is invisible to releases/latest, so no host can upgrade to it"
