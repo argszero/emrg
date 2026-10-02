@@ -21,9 +21,16 @@ probes tore the connection down** before the fix. Two homes produced all of them
 * the **dispatcher** — a handler that indexes or path-ifies an unvalidated field
   (`read_file.path`, `list_files.path`, `set_model.model`, `rant.project`,
   `trigger_task.name`, `compact.session_id`, …).
+* the three branches the read loop handles **inline**, keyed off
+  `data.get("type") ==` instead of dispatching on `msg_type ==` (`task`, `cancel`,
+  `approval_response`). A whole-surface probe that enumerated field names with the
+  regex `msg_type == "..."` never saw them — 41 branches against 44 — so the first
+  fix left them dying; probed directly, **8 of 15** messages over these three closed
+  the socket, and one of them (`task` with a number `prompt`) died a whole screen
+  below the branch, at `req.prompt[:60]` in the `task received:` log line.
 
-Both are fixed, and this file measures both directions for each: the malformed message
-is answered **and** the well-formed ones still behave exactly as before.
+All three are fixed, and this file measures both directions for each: the malformed
+message is answered **and** the well-formed ones still behave exactly as before.
 
 The harness is the repo's own: the in-process server from `tests/test_ws_e2e.py`
 (mocked LLM, isolated config dir, upgrade tick forced off) — the same reuse
@@ -77,6 +84,28 @@ NEEDS_THE_FIELD = [
 ]
 
 
+#: The fields the read loop's three **inline** branches read, each with a wrong type.
+#: The second element says what a correct daemon does with it: a `task` missing a
+#: usable `session_id`/`cwd` is *refused* (the branch already had a refusal path, it
+#: just never got a usable value to test), while the rest are read and the message is
+#: handled — so there liveness is the only thing to assert.
+INLINE_BRANCH_FIELDS = [
+    ("task.session_id as a list", {"type": "task", "session_id": [1], "cwd": "/tmp", "prompt": "hi"}, "refused"),
+    ("task.session_id as a dict", {"type": "task", "session_id": {"a": 1}, "cwd": "/tmp", "prompt": "hi"}, "refused"),
+    ("task.session_id as a number", {"type": "task", "session_id": 5, "cwd": "/tmp", "prompt": "hi"}, "refused"),
+    ("task.cwd as a list", {"type": "task", "session_id": "s", "cwd": [1], "prompt": "hi"}, "refused"),
+    ("task.cwd as a number", {"type": "task", "session_id": "s", "cwd": 5, "prompt": "hi"}, "refused"),
+    ("task.prompt as a number", {"type": "task", "session_id": "s", "cwd": "/tmp", "prompt": 5}, "handled"),
+    ("cancel.session_id as a list", {"type": "cancel", "session_id": [1]}, "handled"),
+    ("cancel.session_id as a dict", {"type": "cancel", "session_id": {"a": 1}}, "handled"),
+    (
+        "approval_response.request_id as a list",
+        {"type": "approval_response", "request_id": [1], "approved": True},
+        "handled",
+    ),
+]
+
+
 async def _send(ws, payload: dict | str) -> dict:
     """Send one raw payload and return the next frame, failing if the socket dies."""
     await ws.send(payload if isinstance(payload, str) else json.dumps(payload))
@@ -90,6 +119,34 @@ async def _send(ws, payload: dict | str) -> dict:
     except asyncio.TimeoutError:
         pytest.fail(f"no frame came back for {payload!r} — the message was swallowed")
     return json.loads(frame)
+
+
+async def _drain_until_pong(ws, payload: dict) -> dict:
+    """Send a message that may legitimately answer with *nothing*, then prove the
+    connection still works: read frames until the ping's pong arrives.
+
+    `cancel` and `approval_response` are quiet by contract (they change state, they do
+    not narrate), and a `task` that survives starts a turn whose frames arrive on their
+    own schedule — so "no frame" is not the assertion here and a bare `recv()` would
+    read the wrong one. The failing direction is still `ConnectionClosed`, which is
+    exactly the defect: the socket dies and the ping can never be answered.
+    """
+    await ws.send(json.dumps(payload))
+    await ws.send(json.dumps({"type": "ping"}))
+    for _ in range(60):
+        try:
+            frame = await asyncio.wait_for(ws.recv(), timeout=10)
+        except ConnectionClosed as exc:  # the defect's own shape
+            pytest.fail(
+                f"the daemon closed the connection on {payload!r} ({exc}) — a malformed "
+                "message must be answered with a frame, not by dropping the client"
+            )
+        except asyncio.TimeoutError:
+            pytest.fail(f"the ping never came back after {payload!r} — the connection is wedged")
+        data = json.loads(frame)
+        if data.get("type") == "pong":
+            return data
+    pytest.fail(f"no pong within 60 frames after {payload!r}")
 
 
 def test_every_malformed_message_is_answered_and_the_connection_survives() -> None:
@@ -253,6 +310,46 @@ def test_the_well_formed_paths_still_answer_as_before() -> None:
                             )
                 finally:
                     await ws.close()
+            finally:
+                await cleanup()
+
+    asyncio.run(_test())
+
+
+def test_the_inline_branches_answer_a_wrong_typed_field() -> None:
+    """`task` / `cancel` / `approval_response` are part of the same rule.
+
+    They are the read loop's own branches (`data.get("type") ==`), not dispatcher
+    handlers, and the first fix — written against a field enumeration that could not
+    see them — left all three dying: 8 of 15 wrong-typed messages over these branches
+    closed the socket with code 1000 and no frame.
+
+    A fresh connection per case, because a `task` that is *accepted* starts a turn and
+    this test is about the branches that must not; the control is that the same socket
+    still answers a ping afterwards.
+    """
+
+    async def _test() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, _, cleanup = await _boot_server(root)
+            try:
+                for label, msg, expectation in INLINE_BRANCH_FIELDS:
+                    ws = await connect_to_server()
+                    try:
+                        if expectation == "refused":
+                            frame = await _send(ws, msg)
+                            assert msg["type"] in frame.get("error", ""), (
+                                f"{label}: a task without a usable session_id/cwd must be "
+                                f"refused by name, not started; got {frame!r}"
+                            )
+                            pong = await _send(ws, {"type": "ping"})
+                            assert pong.get("type") == "pong", f"{label}: {pong!r}"
+                        else:
+                            pong = await _drain_until_pong(ws, msg)
+                            assert pong.get("type") == "pong", f"{label}: {pong!r}"
+                    finally:
+                        await ws.close()
             finally:
                 await cleanup()
 

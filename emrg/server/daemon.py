@@ -153,6 +153,31 @@ _INLINE_SECRET_PATTERNS = (
 )
 
 
+def _as_str(value) -> str:
+    """A protocol field that must be a string, or `""` — never a crash.
+
+    The read loop's own `except Exception` belongs to the **connection**, not to the
+    message (see `_process_message`), so one non-string field drops the whole client
+    with close code 1000 and no frame — at the client, indistinguishable from a
+    network drop. Measured 2026-10-02 over a real WebSocket: of 15 messages carrying a
+    wrong-typed field into the three branches the read loop handles **inline**
+    (`data.get("type") == …` — `task`, `cancel`, `approval_response`), **8 closed the
+    socket**, and the fix brings that to 0.
+
+    The failure is never where the field is read: `task`'s `prompt` died a screen
+    below its branch, at `req.prompt[:60]` in the `task received:` log line, and
+    `session_id` died as a **dict key** while `cwd` died in `os.path.realpath`. That is
+    why the rule is applied where the value *enters*, not where it is used.
+
+    `""` means "not usable", which every call site already handles: `or last_session_id`
+    in the cancel branch, the `if not session_id or not cwd` refusal in the task branch,
+    and the `session_id`/`cwd` bookkeeping above the dispatcher. The rule is stated once
+    here because five call sites ask it (and a fourth spelling of `isinstance(x, str)`
+    is how this class has drifted before).
+    """
+    return value if isinstance(value, str) else ""
+
+
 def _redact_string(s: str) -> str:
     """遮蔽字符串值内联的凭据模式；base64-JSON 含敏感键时整段遮蔽。"""
     out = s
@@ -1356,12 +1381,8 @@ class EmrgServer:
                 # two shapes of that one bug; a value that cannot be used is simply not
                 # recorded, and a message whose handler *needs* the field still answers
                 # for it (see `_process_message`).
-                new_cwd = data.get("cwd")
-                if not isinstance(new_cwd, str):
-                    new_cwd = ""
-                new_sid = data.get("session_id")
-                if not isinstance(new_sid, str):
-                    new_sid = ""
+                new_cwd = _as_str(data.get("cwd"))
+                new_sid = _as_str(data.get("session_id"))
                 if new_sid:
                     if new_sid != last_session_id:
                         if last_session_id:  # unsubscribe from previous session
@@ -1388,7 +1409,7 @@ class EmrgServer:
                     # client's Esc interrupts the same turn the originator's would; the
                     # connection's locals are only the fallback for a frame that carries
                     # no session_id (that is what the TUI sends today).
-                    cancel_sid = data.get("session_id") or last_session_id or ""
+                    cancel_sid = _as_str(data.get("session_id")) or last_session_id or ""
                     event = self._session_cancel.get(cancel_sid) or _cancel_event
                     if event:
                         event.set()
@@ -1428,8 +1449,8 @@ class EmrgServer:
 
                 # ── Task: run tool loop in background (non-blocking) ─
                 if data.get("type") == "task":
-                    session_id = data.get("session_id", "")
-                    cwd = data.get("cwd", "")
+                    session_id = _as_str(data.get("session_id"))
+                    cwd = _as_str(data.get("cwd"))
                     if not session_id or not cwd:
                         await self._send(ws, {
                             "error": "task requires session_id and cwd",
@@ -1445,7 +1466,7 @@ class EmrgServer:
                             id=data.get("id", ""),
                             session_id=session_id,
                             cwd=cwd,
-                            prompt=data.get("prompt", ""),
+                            prompt=_as_str(data.get("prompt")),
                             timestamp=data.get("timestamp", ""),
                             images=data.get("images"),
                             sandbox=data.get("sandbox"),
