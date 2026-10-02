@@ -6587,11 +6587,30 @@ class EmrgServer:
 
                         tool = self.tools.get(tc_name)
                         if tool:
-                            try:
-                                result = await tool.execute(args)
-                                result_text = result.content
-                            except Exception as e:
-                                result_text = f"Error: {e}"
+                            # This is the second of the kernel's two tool
+                            # dispatch sites, and the argument-shape rule has to
+                            # be asked at both: measured 2026-10-03
+                            # (`cyc20261003-041426`), a `read` whose
+                            # `file_path` arrived as a list was answered here
+                            # with `Error: argument should be a str or an
+                            # os.PathLike object where __fspath__ returns a
+                            # str, not 'list'` — the same leak the main loop had,
+                            # from the same registry and the same schema. A rule
+                            # asserted at one of two sites is one a green suite
+                            # cannot see; `tests/test_a_tool_call_is_checked_
+                            # wherever_it_is_dispatched.py` now pins the
+                            # population so a third site cannot appear unguarded.
+                            refusal = argument_shape_problem(
+                                tool.definition(), args,
+                            )
+                            if refusal is not None:
+                                result_text = refusal
+                            else:
+                                try:
+                                    result = await tool.execute(args)
+                                    result_text = result.content
+                                except Exception as e:
+                                    result_text = f"Error: {e}"
                         else:
                             result_text = f"Unknown tool: {tc_name}"
 
