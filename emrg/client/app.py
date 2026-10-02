@@ -516,6 +516,28 @@ def resume_turn_instant(meta: dict) -> float | None:
     return None
 
 
+def the_failure_a_frame_reports(data: dict) -> str:
+    """The sentence this frame reports as a failure, or ``""`` when it reports none.
+
+    An error is a **value**, not a key. The frame that makes this a rule is
+    ``tool_end``: ``ToolResult.error`` is a ``bool``, so the key is present on
+    every successful tool call, and the presence test it replaces
+    (``"error" in data``) called each of them an error and would have rendered
+    ``Error: False`` (measured 2026-10-02). So ``""``, ``None``, ``False`` and
+    ``0`` all mean "no failure", while a non-string value is reported as its text
+    rather than dropped.
+
+    Whose failure it is stays the caller's question, and the answer is a
+    placement rather than a field: a frame a typed branch has already rendered
+    never reaches the generic row, which is why that row sits below every branch
+    (pinned by ``tests/test_app_error_rows.py``).
+    """
+    err = data.get("error")
+    if not err:
+        return ""
+    return err if isinstance(err, str) else str(err)
+
+
 # ── Clipboard image support (platform-adaptive) ─────────────
 
 # Reading a clipboard *file path* must not go through the console locale codec.
@@ -1412,9 +1434,6 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # Spent either way: a held receipt is about one ending, and a
                     # cancel that arrived too late must not narrate under the next one.
                     cancel_receipt_held = False
-                if "error" in data:
-                    err = data["error"]; logger.error("server error: %s", err)
-                    chat.add("system", f"Error: {err}"); term.render()
 
                 # Clear result
                 if data.get("type") == "clear_result":
@@ -2089,6 +2108,25 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         status.update(center=server_id or "emrg")
                     term.render()
                     continue
+
+                # A frame's error belongs to the reader that knows the frame. Every
+                # typed branch above renders its own failure in the context of what
+                # failed ("Clear failed: …", "Model switch failed: …", "Install
+                # failed for `x`: …") and ends in `continue`, so this row is the
+                # last thing the dispatch does **on purpose**: it is what is left
+                # for a frame no branch claimed — the turn-failure broadcasts
+                # (`{request_id, error}`, the only report of a turn that died) and
+                # the daemon's untyped direct replies ("unknown message type",
+                # "compact requires session_id and cwd").
+                #
+                # It used to sit *above* those branches, and its test was `"error"
+                # in data` — so every one of the 19 typed replies a TUI can be
+                # answered with printed this row *and* its own: one failure, two
+                # rows, the first stripped of what failed (measured 2026-10-02).
+                err = the_failure_a_frame_reports(data)
+                if err:
+                    logger.error("server error: %s", err)
+                    chat.add("system", f"Error: {err}"); term.render()
 
             except json.JSONDecodeError: pass
 
