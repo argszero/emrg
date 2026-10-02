@@ -76,6 +76,52 @@ def _make_fake_chat_stream():
     return fake_chat_stream
 
 
+def _fake_stream_with_arguments(arguments):
+    """A fake LLM stream whose one tool call carries `arguments` verbatim.
+
+    Deliberately *not* through `json.dumps`: the value goes into the delta as
+    itself, which is what a provider that answers with a dict in the `arguments`
+    field really does, and what the accumulator's `+=` used to refuse.
+    """
+    state = {"round": 0}
+
+    async def fake_chat_stream(messages, tools=None):
+        state["round"] += 1
+        if state["round"] == 1:
+            yield {"content": "calling", "tool_calls": None,
+                   "finish_reason": None, "usage": None}
+            yield {
+                "content": None,
+                "tool_calls": [{
+                    "index": 0, "id": "call_args",
+                    "function": {"name": _SHELL, "arguments": arguments},
+                }],
+                "finish_reason": "tool_calls", "usage": None,
+            }
+        else:
+            yield {"content": "done", "tool_calls": None, "finish_reason": "stop",
+                   "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+    return fake_chat_stream
+
+
+async def _recv_until_or_fail(ws, pred, what, arguments):
+    """Read frames until `pred`, failing with the turn's own error if it died first.
+
+    Without this the defect's shape is a bare `asyncio.TimeoutError` — the frame
+    that would have matched simply never arrives — which says nothing about why.
+    """
+    for _ in range(50):
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        if pred(frame):
+            return frame
+        if frame.get("error"):
+            pytest.fail(
+                f"arguments={arguments!r}: the turn died before {what}: {frame['error']}"
+            )
+    pytest.fail(f"arguments={arguments!r}: {what} never arrived in 50 frames")
+
+
 async def _boot_server(tmp: Path):
     """Boot a real EmrgServer in the isolated config dir.
 
@@ -526,6 +572,93 @@ class TestWSProtocol:
                         await ws.close()
                 finally:
                     await cleanup()
+        asyncio.run(_test())
+
+    def test_a_tool_calls_arguments_never_end_the_turn(self):
+        """A tool call whose `arguments` is not an object is still a tool call.
+
+        Measured 2026-10-02 over a real turn: of the eleven values a tool call's
+        `arguments` can carry, **seven ended the turn** with a raw Python exception
+        printed at the client, and the call the model had just made was never even
+        announced — no `tool_start` frame at all:
+
+        * five valid-JSON non-objects (`'null'`, `'[]'`, `'5'`, `'"x"'`, `'true'`)
+          reached `args.get("intent")`, because the parse guarded only
+          `json.JSONDecodeError` and never checked the *result* was an object;
+        * a dict or a list — off-contract from an OpenAI-compatible endpoint, but
+          the shape `llm.py` refused with `TypeError: can only concatenate str`.
+
+        **What this covers, and what it does not.** Replacing `chat_stream` hands the
+        daemon the provider's *raw* value, so this pins the daemon's reader on its
+        own, dict and list included. The writer's half — what the streaming
+        accumulator does with the same values — is `test_llm.py`'s
+        `test_stream_accumulates_any_arguments_shape_without_raising`, because this
+        harness never runs it (a mutation of `tool_arguments_text` survives here and
+        is caught there; measured, so the two are not redundant).
+
+        Two directions, so the fix cannot pass by dropping the call: the turn must
+        end normally, **and** the `tool_start`/`tool_end` pair must be there with
+        the tool actually executed. Unparseable JSON takes the same road (that one
+        already worked — it is the control that shows the rule, not the exception
+        list, is what changed).
+        """
+        async def _test():
+            cases = [
+                ("a proper object", '{"command": "echo hi"}', True),
+                ("the text 'null'", "null", False),
+                ("the text '[]'", "[]", False),
+                ("the text '5'", "5", False),
+                ("the text '\"x\"'", '"x"', False),
+                ("the text 'true'", "true", False),
+                ("unparseable text (already worked)", "{not json", False),
+                ("a dict", {"command": "echo hi"}, True),
+                ("a list", ["echo hi"], False),
+            ]
+            for label, arguments, runs in cases:
+                with tempfile.TemporaryDirectory() as tmp:
+                    cwd = Path(tmp)
+                    server, _, cleanup = await _boot_server(cwd)
+                    server.llm.chat_stream = _fake_stream_with_arguments(arguments)
+                    try:
+                        ws = await connect_to_server()
+                        try:
+                            await ws.send(json.dumps({
+                                "type": "task", "id": "t-args", "session_id": "s_args",
+                                "cwd": str(cwd), "prompt": "hi",
+                            }))
+                            frame = await _recv_until_or_fail(
+                                ws, lambda f: f.get("type") == "tool_start",
+                                "announcing its tool call", arguments)
+                            assert frame.get("tool_name") == _SHELL, frame
+                            started = frame
+                            ended = await _recv_until_or_fail(
+                                ws, lambda f: f.get("type") == "tool_end",
+                                "the tool's result", arguments)
+                            # A readable object reaches the tool; anything else is
+                            # "no arguments" — which the shell tool answers for by
+                            # name, rather than the turn dying.
+                            body = json.dumps(ended)
+                            if runs:
+                                assert "no command" not in body.lower(), (
+                                    f"{label}: the arguments were dropped on the way "
+                                    f"to the tool: {ended!r}"
+                                )
+                            else:
+                                assert "no command" in body.lower(), (
+                                    f"{label}: expected the tool's own missing-field "
+                                    f"answer, got {ended!r}"
+                                )
+                            assert "Turn ended without reporting" not in json.dumps(ended)
+                            assert started.get("arguments") is not None
+                            done = await _recv_until_or_fail(
+                                ws,
+                                lambda f: f.get("done") and f.get("request_id") == "t-args",
+                                "the turn's final frame", arguments)
+                            assert "Turn ended without reporting" not in json.dumps(done), done
+                        finally:
+                            await ws.close()
+                    finally:
+                        await cleanup()
         asyncio.run(_test())
 
     def test_streaming_task_with_tool_calls(self):

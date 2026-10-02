@@ -78,7 +78,11 @@ from emrg.sandbox import escalation
 from emrg.sandbox.policy import DEFAULT_MODE as DEFAULT_SANDBOX_MODE
 from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.server import content_risk_probe
-from emrg.server.tool_types import ToolResult, tool_call_shape_problem
+from emrg.server.tool_types import (
+    ToolResult,
+    tool_arguments_object,
+    tool_call_shape_problem,
+)
 from emrg.memory import (
     INDEX_COUNT_WARN,
     INDEX_SIZE_WARN,
@@ -4378,10 +4382,12 @@ class EmrgServer:
                     tc_name = tc["function"]["name"]
                     tc_args_str = tc["function"]["arguments"]
 
-                    try:
-                        args = json.loads(tc_args_str) if tc_args_str else {}
-                    except json.JSONDecodeError:
-                        args = {}
+                    # The call's arguments, or none — never a crash (measured
+                    # 2026-10-02: `json.loads` under `except JSONDecodeError`
+                    # alone let five valid-JSON non-objects through, and refused
+                    # the two non-string shapes with a TypeError that except did
+                    # not catch; seven of eleven shapes ended the turn).
+                    args = tool_arguments_object(tc_args_str)
 
                     # Rant 2026-08-19T10:35:24: log the tool's intent (why this
                     # call happened, written by the agent) instead of the
@@ -6622,10 +6628,6 @@ class EmrgServer:
                         tc_id = tc.get("id", "")
                         tc_name = fn.get("name", "")
                         tc_args_str = fn.get("arguments", "")
-                        try:
-                            args = json.loads(tc_args_str) if tc_args_str else {}
-                        except json.JSONDecodeError:
-                            args = {}
 
                         openai_tool_calls.append({
                             "id": tc_id, "type": "function",
@@ -6642,10 +6644,10 @@ class EmrgServer:
                         tc_id = tc.get("id", "")
                         tc_name = fn.get("name", "")
                         tc_args_str = fn.get("arguments", "")
-                        try:
-                            args = json.loads(tc_args_str) if tc_args_str else {}
-                        except json.JSONDecodeError:
-                            args = {}
+
+                        # The same rule as the main loop's, from the same home: a
+                        # reflection turn's tool call is a tool call.
+                        args = tool_arguments_object(tc_args_str)
 
                         tool = self.tools.get(tc_name)
                         if tool:
