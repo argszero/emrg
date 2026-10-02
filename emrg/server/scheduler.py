@@ -289,6 +289,37 @@ def _silence_deadline(now: float, last_frame_at: float, tool_deadline: float | N
                tool_deadline if tool_deadline is not None else 0.0)
 
 
+def _names_another_request(frame: dict, request_id: str) -> bool:
+    """Whether `frame` is a broadcast about some *other* request than this cycle's.
+
+    Every frame of a turn names the request it belongs to — `delta`,
+    `tool_start`, `tool_end`, `done`, `task_queued` and `steer_committed` all
+    carry `request_id` (`daemon.py`) — and a turn's frames are session
+    broadcasts, so a session's *other* requests land on this socket as well.
+
+    A frame with no `request_id` is not this predicate's business: the
+    turn-wrapper's own error frame has none, and neither do two of the tests'
+    fixtures, so an absent id means "not stated" rather than "somebody else's".
+    """
+    other = frame.get("request_id")
+    return bool(other) and other != request_id
+
+
+def _requeue_names_this_request(frame: dict, request_id: str) -> bool:
+    """Whether `frame` is the daemon's `queued_requeue` naming this request.
+
+    `daemon.py` ends a turn with `queued_requeue` carrying the ids still in that
+    session's pending queue, and it sends it after clearing the cwd filter, so
+    every subscriber receives it — this is the frame a queued cycle reliably
+    gets. It says the request is *still* pending, not that this cycle's turn
+    started.
+    """
+    if frame.get("type") != "queued_requeue":
+        return False
+    ids = frame.get("request_ids")
+    return isinstance(ids, list) and request_id in ids
+
+
 #: The table seeded when the file does not exist. `interval` is 600, not the 60 the
 #: old self-heal hardcoded — 600 is what this host actually ran (`~/.emrg/tasks.yml`),
 #: so the seed reproduces the working state rather than a third number.
@@ -2440,10 +2471,16 @@ class TaskHandler:
             # silent ending (see `_end_heartbeat`).
             return self._NOT_STARTED
 
+        #: The id this cycle sends is the id it answers to: the daemon echoes a
+        #: request's `id` as `request_id` on every frame of its turn, and on the
+        #: two queue frames, so "whose is this frame" is a value this loop can
+        #: read rather than assume — the assumption is what let the session's
+        #: *other* requests answer for this one (issue #1815's family).
+        request_id = f"evolution-{cycle_time.isoformat()}"
         task_msg = json.dumps(
             {
                 "type": "task",
-                "id": f"evolution-{cycle_time.isoformat()}",
+                "id": request_id,
                 "session_id": self._session_id,
                 "cwd": self._source_dir,
                 "prompt": prompt,
@@ -2559,13 +2596,46 @@ class TaskHandler:
                 # frame like any other, so the round bound covers the gap after a
                 # tool returns until the next round's first token.
                 tool_deadline = None
+                # Every frame of a turn names the request it belongs to (`delta`,
+                # `tool_start`, `tool_end`, `done`, `task_queued`,
+                # `steer_committed` all carry `request_id` — measured in
+                # `daemon.py`), and these frames are session **broadcasts**
+                # (`_broadcast` reaches every subscriber "including the
+                # originator"). So while this cycle's request sits in the
+                # session's pending queue, the turn that holds the session
+                # reports itself on this socket too, and none of it is this
+                # cycle's turn.
+                #
+                # Read as ours, the other turn's terminal frame ends this cycle
+                # as a completion it never performed — measured 2026-10-02: a
+                # cycle whose request was queued (`task_queued`) saw the holding
+                # turn's `done` and returned `done` with an EvolutionLog
+                # appended, i.e. a cycle counted as evolution whose own turn
+                # never began. `_QUEUED` documents the contract it breaks: "a
+                # queued request never gets a `done` of its own".
+                if queued and _names_another_request(resp, request_id):
+                    continue
                 # `task_queued` and `steer_committed` are the daemon's two words
                 # for "your request is not a turn yet, it is inside someone
                 # else's"; any other frame is this cycle's own turn reporting.
                 if resp.get("type") in ("task_queued", "steer_committed"):
+                    # Only a frame naming *this* request says anything about
+                    # this request: a foreign position would be reported as the
+                    # evidence for what happened to ours.
+                    if resp.get("request_id") == request_id:
+                        queued = True
+                        if resp.get("type") == "task_queued":
+                            queued_position = resp.get("position")
+                elif _requeue_names_this_request(resp, request_id):
+                    # The daemon's own sentence about this request: the turn that
+                    # held the session ended and this request is *still* in its
+                    # pending queue (`daemon.py` broadcasts `queued_requeue` to
+                    # every subscriber once the turn's cwd filter is cleared, so
+                    # this is the frame a queued cycle reliably receives). It is
+                    # not the cycle's turn coming back, and reading it as one
+                    # files a busy session as `_STALLED` — the misattribution
+                    # issue #1815 reported, on the path that actually occurs.
                     queued = True
-                    if resp.get("type") == "task_queued":
-                        queued_position = resp.get("position")
                 else:
                     queued = False
                 if resp.get("done"):

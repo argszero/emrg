@@ -3413,7 +3413,25 @@ def _silence_frames(handler, tmp_path, monkeypatch, frames, *, delays=None):
                 if pause:
                     await asyncio.sleep(pause)
                 self._index += 1
-                return _json.dumps(self._frames.pop(0), ensure_ascii=False)
+                frame = self._frames.pop(0)
+                # `"self"` in a frame's `request_id` means *this cycle's* request —
+                # the id is `evolution-<the instant the cycle began>`, which a test
+                # cannot spell. The daemon's `id` is the one field that says whose
+                # a broadcast is (`_broadcast` reaches every subscriber of the
+                # session, so the session's other requests land on this socket
+                # too), so a harness that had no way to say "mine" would make
+                # every test of that distinction unwritable. `queued_requeue`
+                # carries the ids in a list rather than in `request_id`, so the
+                # same word works there.
+                if isinstance(frame, dict):
+                    mine = _json.loads(self.sent[-1])["id"]
+                    if frame.get("request_id") == "self":
+                        frame = {**frame, "request_id": mine}
+                    ids = frame.get("request_ids")
+                    if isinstance(ids, list) and "self" in ids:
+                        frame = {**frame,
+                                 "request_ids": [mine if i == "self" else i for i in ids]}
+                return _json.dumps(frame, ensure_ascii=False)
             await asyncio.sleep(3600)  # open, and never another frame
 
         async def close(self):
@@ -3577,7 +3595,7 @@ def test_a_cycle_queued_behind_a_busy_session_is_not_a_stall(tmp_path, monkeypat
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
-        {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
          "position": 1},
     ])
 
@@ -3620,12 +3638,12 @@ def test_a_queued_request_that_is_served_inside_the_wait_is_a_normal_cycle(
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
-        {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
          "position": 1},
-        {"type": "steer_committed", "request_id": "evolution-x", "session_id": "s"},
+        {"type": "steer_committed", "request_id": "self", "session_id": "s"},
         {"type": "tool_start", "tool_name": "bash", "arguments": {"command": "true"}},
         {"type": "tool_end", "tool_name": "bash", "content": "ok", "error": False},
-        {"request_id": "evolution-x", "content": "Done", "done": True,
+        {"request_id": "self", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
     ])
 
@@ -3651,7 +3669,7 @@ def test_silence_after_a_queued_cycle_started_is_a_stall_again(tmp_path, monkeyp
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
-        {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
          "position": 1},
         {"type": "tool_start", "tool_name": "bash", "arguments": {"command": "true"}},
         {"type": "tool_end", "tool_name": "bash", "content": "ok", "error": False},
@@ -3684,7 +3702,7 @@ def test_a_queued_cycle_leaves_a_marker_that_names_the_busy_session(
     monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
-        {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
          "position": 2},
     ])
     handler._cycle_running = True
@@ -3793,3 +3811,233 @@ def test_a_silent_daemon_after_the_terminal_frame_does_not_wedge_the_handler(
         "the completion text, and no slowdown state is invented from silence"
     )
     assert handler._slowdown_active is False, "silence is not a slowdown signal"
+
+
+def test_a_queued_cycle_is_not_ended_by_the_holding_turns_terminal_frame(
+    tmp_path, monkeypatch, caplog,
+):
+    """The measured defect: a queued cycle counted as a completed evolution.
+
+    Measured 2026-10-02 on `main` before this change: with the request in the
+    session's pending queue, the frames that follow are the **holding** turn's —
+    every one names its request, and they are session broadcasts — and the first
+    terminal frame among them ended this cycle as `done`, appending an
+    EvolutionLog for a cycle whose own turn never began.
+
+    The frames are the ones the daemon really emits, in its order
+    (`daemon.py`): `task_queued`, the holding turn's stream, its `done`, the
+    turn's `turn_end`, and `queued_requeue` — which is the frame a queued cycle
+    is *guaranteed* to receive, because it is sent after the turn's cwd filter
+    is cleared.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
+         "position": 1},
+        # the holding turn reporting itself — none of it is this cycle's
+        {"request_id": "host-1", "content": "thinking", "delta": True,
+         "session_id": "s"},
+        {"type": "tool_start", "request_id": "host-1", "tool_name": "bash",
+         "arguments": {"command": "true"}},
+        {"type": "tool_end", "request_id": "host-1", "tool_name": "bash",
+         "content": "ok", "error": False},
+        {"request_id": "host-1", "content": "all done", "done": True,
+         "delta": False, "session_id": "s"},
+        {"type": "turn_end", "session_id": "s"},
+        # …and the daemon saying this request is still pending
+        {"type": "queued_requeue", "session_id": "s", "request_ids": ["self"]},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._QUEUED, (
+        "this cycle's request never became its own turn, so the holding turn's "
+        f"terminal frame is not this cycle's ending — got {reason!r}"
+    )
+    assert handler.evolutions == [], (
+        "a cycle whose own turn never began was counted as an evolution: "
+        f"{[getattr(e, 'impact', None) for e in handler.evolutions]}"
+    )
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("tools=0" in m for m in messages), (
+        "the holding turn's tool frames are not this cycle's tools: " + str(messages)
+    )
+    assert not any("complete (tools=" in m for m in messages), (
+        f"nothing here completed: {messages}"
+    )
+
+
+def test_a_requeue_naming_another_request_does_not_hold_this_cycle_open(
+    tmp_path, monkeypatch, caplog,
+):
+    """The rule reads the id, not the frame type.
+
+    `queued_requeue` carries the ids still pending; only this cycle's own id in
+    that list says anything about this cycle's request. A helper test as well as
+    an executed one, because the executed shape (a foreign requeue after our own)
+    is the direction the *fix* must not over-reach into.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    assert mod._requeue_names_this_request(
+        {"type": "queued_requeue", "request_ids": ["me"]}, "me") is True
+    assert mod._requeue_names_this_request(
+        {"type": "queued_requeue", "request_ids": ["other"]}, "me") is False
+    assert mod._requeue_names_this_request(
+        {"type": "queued_requeue"}, "me") is False
+    assert mod._requeue_names_this_request(
+        {"type": "queued_cancelled", "request_ids": ["me"]}, "me") is False, (
+        "only the requeue frame is this rule's business"
+    )
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
+         "position": 1},
+        # somebody else's request is requeued; ours is not in the list
+        {"type": "queued_requeue", "session_id": "s", "request_ids": ["host-1"]},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason != handler._QUEUED, (
+        "another request's requeue is not evidence that this cycle is still "
+        f"waiting — got {reason!r}"
+    )
+
+
+def test_a_foreign_frames_never_become_this_cycles_turn(tmp_path, monkeypatch, caplog):
+    """The predicate, both ways, and the two frame shapes it must not touch.
+
+    A frame with no `request_id` says "not stated", not "somebody else's": the
+    turn-wrapper's own error frame carries none, and the loop's existing tests
+    write frames without one.
+    """
+    from emrg.server import scheduler as mod
+
+    assert mod._names_another_request({"request_id": "host-1"}, "mine") is True
+    assert mod._names_another_request({"request_id": "mine"}, "mine") is False
+    assert mod._names_another_request({}, "mine") is False, (
+        "an absent request_id is not a claim about somebody else"
+    )
+    assert mod._names_another_request({"request_id": ""}, "mine") is False
+
+
+def test_a_cycle_that_ran_its_own_turn_still_counts(tmp_path, monkeypatch, caplog):
+    """The control: the ordinary path must be untouched by the id rule.
+
+    Without this arm, a body that never recognised its own frames — or one that
+    treated every `done` as foreign — would satisfy the test above and leave
+    every real cycle hanging until the silence bound.
+    """
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "self", "content": "thinking", "delta": True,
+         "session_id": "s"},
+        {"type": "tool_start", "request_id": "self", "tool_name": "bash",
+         "arguments": {"command": "true"}},
+        {"type": "tool_end", "request_id": "self", "tool_name": "bash",
+         "content": "ok", "error": False},
+        {"request_id": "self", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ])
+
+    reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._CLEAN_END, (
+        f"this cycle's own terminal frame must still end it — got {reason!r}"
+    )
+    assert len(handler.evolutions) == 1, "it ran, so it counts"
+    assert captured["log"].tool_count == 2, (
+        "and its own tool frames are counted (the counter advances once per frame "
+        "carrying `tool_name` — `tool_start` and `tool_end` both carry it, so one "
+        f"call is two): {captured['log'].tool_count}"
+    )
+
+
+def test_another_requests_queue_frame_does_not_relabel_this_cycles_silence(
+    tmp_path, monkeypatch, caplog,
+):
+    """The frames are a session broadcast; `request_id` is what says whose.
+
+    `daemon._broadcast` targets **every** subscriber of the session ("including
+    the originator"), so the session's other requests — the host's own message,
+    another client's, another task's — land on this socket too. Read as this
+    cycle's own, the first such frame turns the stall watchdog off: our turn had
+    begun (it emitted frames), the host then typed something into the busy
+    session, and our turn then stopped reporting. That silence is the wedge
+    `_STALLED` exists to name, and relabelling it `queued` files a real stall as
+    "a busy session, nothing to see" — the exact misreading this ending was
+    added to prevent, mirrored.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        # this cycle's own turn is running
+        {"type": "tool_start", "tool_name": "bash", "arguments": {"command": "true"}},
+        {"type": "tool_end", "tool_name": "bash", "content": "ok", "error": False},
+        # the host's message goes into the pending queue while our turn runs
+        {"type": "task_queued", "request_id": "host-1", "session_id": "s",
+         "position": 1},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._STALLED, (
+        "a frame naming another request says nothing about this cycle's turn, so "
+        f"the silence after our own frames is still a stall — got {reason!r}"
+    )
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("stalled: no frame for" in m for m in messages), messages
+    assert not any("queued behind a busy session" in m for m in messages), (
+        f"and nothing may claim the daemon held *this* request: {messages}"
+    )
+
+
+def test_a_foreign_queue_frame_never_becomes_the_position_reported(
+    tmp_path, monkeypatch, caplog,
+):
+    """The position in the message must be this cycle's, not the neighbour's.
+
+    Same broadcast, read as ours: the message would name a queue position that
+    belongs to somebody else's request as the evidence for what happened to
+    this one — a reading that is precise, checkable, and about the wrong thing.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
+         "position": 3},
+        # …and *after* it, the neighbour's, which is the ordering that matters:
+        # a flag holding the last position it saw would report the neighbour's
+        {"type": "task_queued", "request_id": "host-1", "session_id": "s",
+         "position": 7},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._QUEUED
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("position 3" in m for m in messages), messages
+    assert not any("position 7" in m for m in messages), (
+        f"the neighbour's queue position is not evidence about this request: {messages}"
+    )
