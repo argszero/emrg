@@ -3,6 +3,7 @@ import { createRef, type RefObject } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { DialogHost, type DialogHostHandle } from "./DialogHost";
 import { I18nProvider } from "../lib/i18n";
+import * as i18n from "../lib/i18n";
 import { createTranscriptStore, type TranscriptStore } from "../lib/transcript";
 import type { DaemonAppState, SessionSummary } from "../lib/daemonBridge";
 
@@ -235,6 +236,86 @@ describe("DialogHost (Batch 5 slice 4)", () => {
     await waitFor(() => expect(calls.newSession.length).toBe(1));
     expect(calls.newSession[0][0]).toMatchObject({ projectPath: "/p/demo" });
     expect(onSwitchSession).toHaveBeenCalledWith("s-new");
+  });
+
+  /**
+   * 会话操作的失败路径（vanilla `app.js` 三个 catch）。
+   *
+   * #1024 删渲染层时，读者与代码一起走了，词典里留下 `app.deleteFailed` /
+   * `app.newFailed` / `app.switchFailed` / `app.tooManyOpenSessions` 四条没人读的串。
+   * 后果不是「少一句文案」：delete 的 reject 被 `ConfirmDialog` 吞进 console 并把
+   * 框关掉 ⇒ 宿主看到的是**一次没发生过的成功**。
+   */
+  describe("会话操作失败时会说话", () => {
+    const en = (k: string, p?: Record<string, unknown>) => i18n.t(k, p, "en");
+
+    it("deleteSession 抛 → 写 app.deleteFailed，且**不**当成功去切会话", async () => {
+      const { ref, store, onSwitchSession } = setup({
+        sid: "s1",
+        over: { deleteSession: vi.fn().mockRejectedValue(new Error("daemon down")) },
+      });
+      ref.current?.openDelete();
+      await waitFor(() => expect(screen.getByTestId("confirm-dialog")).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId("confirm-ok"));
+      await waitFor(() =>
+        expect(sysMsgs(store, "s1")).toContain(en("app.deleteFailed", { msg: "daemon down" })),
+      );
+      // 反面：删除没成功，就不该把激活会话换成相邻的
+      expect(onSwitchSession).not.toHaveBeenCalled();
+    });
+
+    it("newSession 抛 → 写 app.newFailed，且不切到不存在的会话", async () => {
+      const { ref, store, onSwitchSession } = setup({
+        sid: "s1",
+        over: { newSession: vi.fn().mockRejectedValue(new Error("invalid project path")) },
+      });
+      ref.current?.openNewSession();
+      await waitFor(() => expect(screen.getByTestId("new-session-dialog")).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText("demo")).toBeInTheDocument());
+      fireEvent.click(screen.getByText("demo"));
+      await waitFor(() =>
+        expect(sysMsgs(store, "s1")).toContain(en("app.newFailed", { msg: "invalid project path" })),
+      );
+      expect(onSwitchSession).not.toHaveBeenCalled();
+      // vanilla 先关框再建（dialogs.js:1596）：失败也不该把框留在屏幕上
+      expect(screen.queryByTestId("new-session-dialog")).toBeNull();
+    });
+
+    it("打开会话时 switchSession 抛 → 写 app.switchFailed，且不激活该会话", async () => {
+      const { ref, store, onSwitchSession } = setup({
+        sid: "s1",
+        over: { switchSession: vi.fn().mockRejectedValue(new Error("invalid session_id")) },
+      });
+      ref.current?.openSessions();
+      await waitFor(() => expect(screen.getByText("demo")).toBeInTheDocument());
+      fireEvent.click(screen.getByText("demo"));
+      await waitFor(() => expect(screen.getByText("Demo session")).toBeInTheDocument());
+      fireEvent.click(screen.getByText("Demo session"));
+      await waitFor(() =>
+        expect(sysMsgs(store, "s1")).toContain(en("app.switchFailed", { msg: "invalid session_id" })),
+      );
+      expect(onSwitchSession).not.toHaveBeenCalled();
+      // vanilla 先关框（dialogs.js:1323）：失败也不是「框还开着等你再点一次」
+      expect(screen.queryByTestId("open-session-dialog")).toBeNull();
+    });
+
+    it("切换撞上 20 个会话上限 → 说超限那一句，不是通用那句", async () => {
+      const { ref, store } = setup({
+        sid: "s1",
+        over: {
+          switchSession: vi
+            .fn()
+            .mockRejectedValue(new Error("too many open sessions (20) — close some first")),
+        },
+      });
+      ref.current?.openSessions();
+      await waitFor(() => expect(screen.getByText("demo")).toBeInTheDocument());
+      fireEvent.click(screen.getByText("demo"));
+      await waitFor(() => expect(screen.getByText("Demo session")).toBeInTheDocument());
+      fireEvent.click(screen.getByText("Demo session"));
+      await waitFor(() => expect(sysMsgs(store, "s1")).toContain(en("app.tooManyOpenSessions")));
+      expect(sysMsgs(store, "s1").some((m) => m.startsWith("Failed to switch"))).toBe(false);
+    });
   });
 
   it("/version 在 transcript 写入版本信息", async () => {

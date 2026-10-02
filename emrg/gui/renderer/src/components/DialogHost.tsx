@@ -11,6 +11,7 @@ import {
   type SessionRow,
 } from "../lib/openSession";
 import { dialogReducer, initialDialogState } from "../lib/dialog";
+import { sessionFailureText } from "../lib/sessionFailure";
 import type { TranscriptStore } from "../lib/transcript";
 import type { DaemonAppState, SessionSummary } from "../lib/daemonBridge";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -250,7 +251,15 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
         danger: true,
         onOk: async () => {
           const b = bridge();
-          if (b) await b.deleteSession({ sessionId: target });
+          if (!b) return;
+          try {
+            await b.deleteSession({ sessionId: target });
+          } catch (e) {
+            // 不 catch 的话 ConfirmDialog 会把 reject 吞进 console 并把对话框关掉——
+            // 宿主看到的是「确认框消失了」，也就是**一次没发生过的成功**
+            transcript.addSystemMessage(sessionFailureText(t, "delete", e), sid);
+            return;
+          }
           if (target === sid) onSwitchSession(null); // 删除激活会话 → Shell 自动选相邻
         },
       },
@@ -325,13 +334,21 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
     }
   }
 
-  /** 新建会话：在选中项目创建 → 切到新会话并关闭 */
+  /** 新建会话：在选中项目创建 → 切到新会话（vanilla 先关框、失败写系统消息） */
   async function createSession(projectPath: string): Promise<void> {
     const b = bridge();
+    closeDialog("newSession"); // vanilla：点项目即关框，成败与关框无关
     if (!b) return;
-    const res = await b.newSession({ projectPath });
+    let res: { session_id?: string } | undefined;
+    try {
+      res = await b.newSession({ projectPath });
+    } catch (e) {
+      // vanilla `app.js:905` 的 catch —— 移植时丢了：失败时框关掉、没有任何话，
+      // 而 `void createSession(...)` 让 reject 变成一条没人看的 unhandled rejection
+      transcript.addSystemMessage(sessionFailureText(t, "new", e), sid);
+      return;
+    }
     if (res?.session_id) onSwitchSession(res.session_id);
-    closeDialog("newSession");
   }
 
   /** /clear /compact /version /image：直接执行（无需对话框） */
@@ -453,10 +470,18 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
         error={sessionsError}
         onPickProject={pickProject}
         onPickSession={async (s) => {
-          const b = bridge();
-          if (b) await b.switchSession({ sessionId: s.session_id });
-          onSwitchSession(s.session_id);
+          // vanilla 先关框再切（dialogs.js:1323）——关框与成败无关，失败的话由
+          // switchSession 自己的 catch 写进聊天区
           closeDialog("sessions");
+          const b = bridge();
+          if (!b) return;
+          try {
+            await b.switchSession({ sessionId: s.session_id });
+          } catch (e) {
+            transcript.addSystemMessage(sessionFailureText(t, "switch", e), sid);
+            return;
+          }
+          onSwitchSession(s.session_id);
         }}
         onDeleteProject={deleteProject}
         onNewProject={newProject}

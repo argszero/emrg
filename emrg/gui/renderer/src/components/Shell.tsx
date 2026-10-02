@@ -4,6 +4,7 @@ import { useSnapshotStore } from "../hooks/useSnapshotStore";
 import { useDaemonBridge } from "./DaemonBridgeProvider";
 import { createProdMarkdownRenderer } from "../lib/vendorMarkdown";
 import { dialogReducer, initialDialogState } from "../lib/dialog";
+import { sessionFailureText } from "../lib/sessionFailure";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ApprovalDialog } from "./ApprovalDialog";
 import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
@@ -270,7 +271,16 @@ export function Shell() {
 
   async function selectProjectSession(p: ProjectRec, sid: string) {
     const b = wsBridge();
-    if (b?.switchSession) await b.switchSession({ sessionId: sid });
+    if (b?.switchSession) {
+      try {
+        await b.switchSession({ sessionId: sid });
+      } catch (e) {
+        // vanilla `app.js:690` 在这里写一条系统消息（超限另有一句）；移植时连读者
+        // 一起丢了 ⇒ 切换失败时点会话**什么都不发生**，宿主无从知道为什么
+        transcript.addSystemMessage(sessionFailureText(t, "switch", e), activeSid);
+        return;
+      }
+    }
     setActiveSid(sid);
     setActiveView("sessions");
     void loadHistory(sid);

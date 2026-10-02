@@ -528,6 +528,37 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.getByTestId("project-session-row")).toHaveTextContent("会话一");
   });
 
+  it("项目面板点会话失败 → 说为什么，且不激活那个会话（vanilla app.js:690 的 catch）", async () => {
+    const m = mockEmrg();
+    m.listProjects.mockResolvedValue([{ name: "p1", path: "/p/p1" }]);
+    (window as unknown as { emrg: { listProjectSessions?: unknown } }).emrg.listProjectSessions =
+      vi.fn().mockResolvedValue({ sessions: [{ session_id: "s-target", title: "会话一" }] });
+    // 宿主有 20 个会话时的原话（main 进程 `too many open sessions (20)`）
+    m.switchSession.mockRejectedValue(new Error("too many open sessions (20) — close some first"));
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+
+    fireEvent.click(screen.getByTestId("nav-projects"));
+    await waitFor(() => expect(screen.getByTestId("project-row")).toBeInTheDocument());
+    const row = screen.getByTestId("project-row");
+    fireEvent.click(row.querySelector('button[title="Sessions"]') as HTMLButtonElement);
+    await waitFor(() => expect(screen.getByTestId("project-session-row")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("project-session-row"));
+    await waitFor(() => expect(m.switchSession).toHaveBeenCalled());
+
+    // 失败 → 留在面板、激活会话不变（反面：不是「点了没反应」）
+    expect(screen.getByTestId("panel-projects")).toBeInTheDocument();
+    expect(screen.getAllByTestId("open-session-item")[0].className).toContain("active");
+    // 回会话视图 → 那句理由在转写里（写给的是激活会话）
+    fireEvent.click(screen.getByTestId("nav-projects"));
+    await waitFor(() =>
+      expect(screen.getByTestId("transcript-view").textContent).toContain("Too many open sessions"),
+    );
+  });
+
   // ── Batch 5 slice 8：任务表单 + Rant 对话框接线 ──
 
   it("任务面板激活时每 5s 轮询 listTasks（vanilla startTaskPoll 语义）", async () => {
