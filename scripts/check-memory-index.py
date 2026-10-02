@@ -169,6 +169,13 @@ What the resolution reading does not cover
 * A target that exists but is not a *detail file* (a directory, an unrelated
   file) resolves, and is not reported. "This row points somewhere that holds what
   the row claims" is a different rule with a different remedy.
+* **A link the row only quotes.** An inline code span is literal text in Markdown, so
+  a `](target)` written inside one is the row *showing* the shape rather than using it,
+  and is not read (the `CODE_SPAN` constant carries the measurement). Measured
+  2026-10-01: the row that documents this shape was reported as naming a missing file.
+* **A row that carries no link at all.** An index whose rows name their files in prose -
+  the table shape `is_index_row` also reads - has no subject for this reading, and the
+  report says so rather than printing a count that reads as a pass.
 * A target with a URL-escape spelling (`%20`) is resolved as written: this tool
   does not guess a second spelling of a name the author wrote, and
   `check-citation-resolves.py`'s own limit section is the precedent for saying so

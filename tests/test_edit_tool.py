@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from emrg.tools.edit_tool import EditTool
+from emrg.tools.read_tool import ReadTool
 
 
 @pytest.fixture
@@ -256,3 +257,120 @@ def test_edit_workspace_write_blocks_a_protected_daemon_file(tmp_path, monkeypat
     assert result.error
     assert "protected daemon file" in result.content
     assert target.read_text() == "sentinel = true\n"
+
+
+class TestTheFileKeepsItsOwnLineEndings:
+    """An edit changes what ``old_string`` named and nothing else — issue #1803.
+
+    The read tool shows a file with newline translation, so the caller's
+    ``old_string`` carries ``\\n`` whatever the file holds on disk. Reading with the
+    default and writing it back applied the same translation in reverse: a CRLF file
+    came back LF-only, i.e. *every* line of it changed. Measured on master `6b417c4`,
+    2026-10-02, with these two tools: ``b'first\\r\\nsecond\\r\\nthird\\r\\n'`` in,
+    ``b'first\\nSECOND\\nthird\\n'`` out.
+
+    What that costs is not hypothetical: `.gitattributes` pins ``*.cmd``/``*.bat``/
+    ``*.ps1`` to CRLF on every platform, and an LF-only ``.cmd`` is the
+    v0.2.25–v0.2.27 installer failure `tests/test_cmd_crlf.py` exists for.
+    """
+
+    def _crlf(self, tmp_path: Path, name: str = "install.cmd") -> Path:
+        f = tmp_path / name
+        f.write_bytes(b"first\r\nsecond\r\nthird\r\n")
+        return f
+
+    def test_a_crlf_file_stays_crlf(self, tmp_path):
+        f = self._crlf(tmp_path)
+        result = _run(EditTool().execute({
+            "file_path": str(f),
+            "old_string": "second",
+            "new_string": "SECOND",
+        }))
+        assert not result.error
+        assert f.read_bytes() == b"first\r\nSECOND\r\nthird\r\n", (
+            "every line's terminator has to survive an edit that named one line"
+        )
+
+    def test_the_edit_still_matches_what_the_read_tool_showed(self, tmp_path):
+        """The caller's view is the read tool's, so its old_string carries LF."""
+        f = self._crlf(tmp_path)
+        shown = _run(ReadTool().execute({"file_path": str(f), "intent": "read it"}))
+
+        result = _run(EditTool().execute({
+            "file_path": str(f),
+            "old_string": "first\nsecond",  # exactly the two lines as shown
+            "new_string": "first\nSECOND",
+        }))
+
+        assert not result.error
+        assert "second" in shown.content and "\n" in shown.content
+        assert f.read_bytes() == b"first\r\nSECOND\r\nthird\r\n"
+
+    def test_replace_all_keeps_the_endings_too(self, tmp_path):
+        f = self._crlf(tmp_path)
+        result = _run(EditTool().execute({
+            "file_path": str(f),
+            "old_string": "r",
+            "new_string": "R",
+            "replace_all": True,
+        }))
+        assert not result.error
+        assert f.read_bytes() == b"fiRst\r\nsecond\r\nthiRd\r\n"
+
+    def test_an_lf_file_is_byte_identical_to_before(self, tmp_path):
+        f = tmp_path / "notes.md"
+        f.write_bytes(b"first\nsecond\nthird\n")
+        result = _run(EditTool().execute({
+            "file_path": str(f),
+            "old_string": "second",
+            "new_string": "SECOND",
+        }))
+        assert not result.error
+        assert f.read_bytes() == b"first\nSECOND\nthird\n"
+
+    def test_a_file_with_no_newline_at_all_stays_one_line(self, tmp_path):
+        f = tmp_path / "one.txt"
+        f.write_bytes(b"only line")
+        result = _run(EditTool().execute({
+            "file_path": str(f),
+            "old_string": "line",
+            "new_string": "LINE",
+        }))
+        assert not result.error
+        assert f.read_bytes() == b"only LINE"
+
+    def test_a_multi_line_insertion_takes_the_files_endings(self, tmp_path):
+        """A replacement that adds lines must not leave the file half-CRLF."""
+        f = self._crlf(tmp_path)
+        result = _run(EditTool().execute({
+            "file_path": str(f),
+            "old_string": "second",
+            "new_string": "second\ninserted",
+        }))
+        assert not result.error
+        assert f.read_bytes() == b"first\r\nsecond\r\ninserted\r\nthird\r\n"
+        assert b"\n" not in f.read_bytes().replace(b"\r\n", b""), (
+            "a bare LF left in a CRLF file is the mixed shape this must not produce"
+        )
+
+    def test_the_error_paths_still_read_the_file_the_way_they_did(self, tmp_path):
+        """Not-found and not-unique are decided on the caller's view, unchanged."""
+        f = self._crlf(tmp_path)
+        tool = EditTool()
+        missing = _run(tool.execute({
+            "file_path": str(f),
+            "old_string": "nothing like this",
+            "new_string": "x",
+        }))
+        assert missing.error and "old_string not found" in missing.content
+
+        ambiguous = _run(tool.execute({
+            "file_path": str(f),
+            "old_string": "ir",
+            "new_string": "x",
+        }))
+        assert ambiguous.error and "found 2 times" in ambiguous.content
+
+        assert f.read_bytes() == b"first\r\nsecond\r\nthird\r\n", (
+            "a refused edit must not rewrite the file"
+        )

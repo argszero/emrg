@@ -121,19 +121,23 @@ class FakeLedger:
 def rants_of(mod, monkeypatch, *specs, boom=None):
     """Install ledger rows on the seam and hand back the fake, for its `calls`.
 
-    Each `spec` is `(timestamp, status)` or `(timestamp, status, issues)` — the shape a
-    caller varies one axis of, so the tests below read as one line each.
+    Each `spec` is `(timestamp, status)`, `(timestamp, status, issues)` or
+    `(timestamp, status, issues, project)` — the shape a caller varies one axis of, so the
+    tests below read as one line each. A spec that names no project installs a row without
+    one, which is the state §2.2 tells a cycle to ignore entirely, so it must be reachable.
     """
     rows = []
     for spec in specs:
         stamp, status = spec[0], spec[1]
         issues = list(spec[2]) if len(spec) > 2 else []
+        project = spec[3] if len(spec) > 3 else ""
         rows.append(
             mod.Rant(
                 timestamp=stamp,
                 status=status,
                 message=f"the ledger row for {stamp}",
                 issues=issues,
+                project=project,
             )
         )
     fake = FakeLedger(rows, boom)
@@ -1298,6 +1302,61 @@ def test_the_rant_rows_are_after_the_pr_rows_and_under_their_own_header(
     assert "1 PR(s)" in out
 
 
+def test_a_rant_row_names_the_project_it_belongs_to(mod, monkeypatch, capsys):
+    """§2.2 decides membership by `project`, so the row has to carry it.
+
+    The reading exists for the cycle that reads the queue *alone* (the tool's own reason for
+    adding these rows), and that reader cannot apply a rule whose field is not printed: it
+    would have to open the ledger again — the cost the row was added to save. Measured
+    2026-10-01 on this host, the queue rendered 39 open rants and every one belonged to
+    another project, while this task's ledger rows were all `completed`.
+    """
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], ""),
+    )
+    mod.main([])
+    out = capsys.readouterr().out
+
+    assert "project=silicon-science-cs" in out
+    assert "project=(none)" in out, (
+        "a row that names no project must say so: §2.2 makes it one to ignore entirely, "
+        "and a row that prints nothing there is a row with no such state"
+    )
+
+
+def test_the_rant_section_counts_the_ledger_by_project(mod, monkeypatch, capsys):
+    """The number heading the section is the ledger's, not this task's, and it says which.
+
+    The trap this closes: a cycle reads "39 open rant(s) - each needs an issue and its PR"
+    as priority 1 (R8.1) and opens an issue in its own repo for another project's work —
+    the cross-project contamination §2.2's filter exists to prevent. Two projects, so the
+    grouping is read rather than inferred from a single name.
+    """
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "emrg"),
+        ("2026-09-30T09:34:00+08:00", "pending", [], "emrg"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], "silicon-science-cs"),
+    )
+    mod.main([])
+    out = capsys.readouterr().out
+
+    header = next(line for line in out.splitlines() if "open rant(s)" in line)
+    assert "3 open rant(s) across 2 project(s) - emrg 2, silicon-science-cs 1" in header, header
+    assert "once it is this task's" in header, (
+        "the sentence must not claim every row's issue and PR unconditionally"
+    )
+    assert "matched to a task by" in header or "matches a rant to a task by" in header, (
+        "the header must say how membership is decided, so the reader can apply it"
+    )
+
+
 def test_the_ledger_read_is_spent_only_when_a_rant_is_open(mod, monkeypatch, capsys):
     """The seam is the tool's own function, so this test also pins the *arguments*: the
     `--rants` override is what a host with a ledger elsewhere has to be able to move."""
@@ -1354,6 +1413,21 @@ def test_the_json_document_carries_both_subjects_in_one_list(mod, monkeypatch, c
     assert rant["issues"] == [1771]
     assert rant["tree"] == "/checkout"
     assert rant["branch"] == "some-branch"
+    assert rant["project"] == "", (
+        "the two renderings must not disagree: whatever the text row shows, the document "
+        "carries the same field"
+    )
+
+
+def test_the_json_rant_row_carries_the_project(mod, monkeypatch, capsys):
+    """The document's half of the same fix, with a project set rather than absent."""
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    monkeypatch.setattr(mod, "local_tree", lambda: ("/checkout", "some-branch", "b" * 40))
+    rants_of(mod, monkeypatch, ("2026-09-30T09:17:54+08:00", "pending", [], "emrg"))
+    _run(mod, monkeypatch, votes, fresh, ["1", "--json"])
+    out = capsys.readouterr().out
+
+    assert json.loads(out)[-1]["project"] == "emrg"
 
 
 def test_the_json_document_keeps_its_shape_with_no_rants(mod, monkeypatch, capsys):
@@ -1470,6 +1544,34 @@ def test_the_issue_lookup_is_not_spent_when_no_rant_is_open(monkeypatch):
 
     assert tool.open_rant_rows(None, tool.REPO) == []
     assert links.queue_calls == [], "the queue must not be listed for a closed ledger"
+
+
+def test_a_rants_project_is_carried_from_the_row_the_ledger_parsed(monkeypatch):
+    """The field comes from the row the sibling handed over, and nothing else.
+
+    A missing `project` is **not** an error and not a default: §2.2 makes a rant that names
+    no project one to ignore, so the difference between "names none" and "names another" has
+    to survive the parse — a `row["project"]` reached for directly would raise here, and a
+    fallback to the reading's own repo would invent a membership the ledger never claimed.
+    """
+    tool = _fresh_tool()
+    _links(
+        monkeypatch,
+        tool,
+        [
+            _row("2026-09-30T09:17:54+08:00"),
+            {"timestamp": "2026-09-30T09:30:16+08:00", "status": "pending", "message": "m"},
+            {"timestamp": "2026-09-30T09:35:04+08:00", "status": "pending", "project": None},
+        ],
+    )
+
+    rows = {row.timestamp: row.project for row in tool.open_rant_rows(None, tool.REPO)}
+
+    assert rows == {
+        "2026-09-30T09:17:54+08:00": "emrg",
+        "2026-09-30T09:30:16+08:00": "",
+        "2026-09-30T09:35:04+08:00": "",
+    }, rows
 
 
 def test_an_issue_declaring_a_rant_is_attached_to_that_rants_row(monkeypatch):

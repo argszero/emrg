@@ -74,8 +74,8 @@ Index: `{{ session_memory_index_path }}`
 - **Self-review before writing**: before creating or updating any memory, review how the existing memories are organized. Ask: "what is the optimal organization of these fragments right now?" — there is always an answer; never skip with "no consolidation needed".
 - **Digest-style, two phases**: 化零为整 — absorb several fragments on one topic into a single holistic memory (edit the target file, mark the old ones `status: superseded` / `merged`); 化整为零 — split an overgrown memory into searchable entries by topic.
 - Prefer **updating existing entries in place** over appending new ones when new info refines an existing memory.
-- MEMORY.md must stay a **pure index**: one short line per entry, never duplicated content.
-- If a memory index has grown long, consolidate: merge redundant memories and keep only the most relevant entries in the index.
+- MEMORY.md must stay a **pure index**: one short line per entry, **at most {{ index_title_max_chars }} characters per line** — anything longer moves into that entry's own `.md` file — never duplicated content.
+- If a memory index has grown past **{{ memory_index_row_cap }} lines**, consolidate: merge redundant memories and keep only the most relevant entries in the index.
 - Detail `.md` files are the source of truth and may be much longer; only the index needs trimming.
 {% else %}
 ## Memory

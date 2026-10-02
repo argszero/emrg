@@ -111,12 +111,27 @@ class EditTool(ToolExecutor):
 
         logger.debug("edit: %s (replace_all=%s)", path, replace_all)
 
+        # Read the file's own bytes, with no newline translation, because the write
+        # below has to put the file's line endings back (issue #1803). The string the
+        # match runs against is normalised the way the *read* tool shows a file — that
+        # is the only view the caller has, so its ``old_string`` carries "\n" even when
+        # the file on disk is CRLF — and reading with the default instead destroyed
+        # exactly that: `read_text()` turned every `\r\n` into `\n` and `write_text()`
+        # wrote the `\n` back out, so an edit naming one line changed every line of the
+        # file. The class this costs: `.gitattributes` pins `*.cmd`/`*.bat`/`*.ps1` to
+        # CRLF on every platform and LF-only `.cmd` files are the v0.2.25–v0.2.27
+        # installer failure `tests/test_cmd_crlf.py` guards (rant 2026-08-12T12:30:41).
+        # A file whose lines are *uniformly* CRLF gets them back; one that is LF takes
+        # the same bytes it did before; a mixed file is written LF-only, which is what
+        # this tool already did to it.
         try:
-            content = path.read_text(encoding="utf-8")
+            raw = path.open("r", encoding="utf-8", newline="").read()
         except UnicodeDecodeError:
             return ToolResult(
                 name="edit", content=f"Error: cannot read {path} as text", error=True
             )
+        crlf_file = raw.count("\r\n") > 0 and raw.count("\r\n") == raw.count("\n")
+        content = raw.replace("\r\n", "\n").replace("\r", "\n")
 
         count = content.count(old)
         if count == 0:
@@ -141,8 +156,11 @@ class EditTool(ToolExecutor):
             )
 
         new_content = content.replace(old, new) if replace_all else content.replace(old, new, 1)
+        if crlf_file:
+            new_content = new_content.replace("\n", "\r\n")
         try:
-            path.write_text(new_content, encoding="utf-8")
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                handle.write(new_content)
         except OSError as e:
             return ToolResult(
                 name="edit", content=f"Error writing file: {e}", error=True
