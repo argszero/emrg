@@ -264,8 +264,8 @@ def test_the_ci_readme_is_in_the_scanned_class(mod):
 
 def test_the_ci_readme_sites_are_resolved_in_the_real_tree(mod):
     """The membership is only a claim until the file's own sites are scanned."""
-    sites, missing = mod.scan_tree(REPO_ROOT)
-    assert missing == []
+    sites, unreadable = mod.scan_tree(REPO_ROOT)
+    assert unreadable == []
     readme = [s for s in sites if s.path == ".github/workflows/README.md"]
     assert len(readme) == 2, [s.path for s in readme]
     assert all(s.has_record for s in readme), "a README citation without a public record"
@@ -318,8 +318,8 @@ def test_a_duplicated_class_entry_fails_the_guard(mod, monkeypatch, capsys):
 
 
 def test_the_real_tree_has_no_unresolved_citation(mod):
-    sites, missing = mod.scan_tree(REPO_ROOT)
-    assert missing == [], f"unmeasurable: {missing}"
+    sites, unreadable = mod.scan_tree(REPO_ROOT)
+    assert unreadable == [], f"unmeasurable: {unreadable}"
     assert mod.problems(sites) == []
     # This assertion was the opposite until 2026-09-16: it required the real tree to
     # carry *some* frozen-debt site (`any(s.exempt())`). The host's ruling on issue

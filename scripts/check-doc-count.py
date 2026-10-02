@@ -486,7 +486,14 @@ def _resolve_conflict_mode() -> int:
     target = REPO_ROOT / "Agent.md"
     try:
         text = target.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # The same one word `offenders()` above gets right, and for the same reason:
+        # `UnicodeDecodeError` is not an `OSError`, so a doc that is present but not
+        # UTF-8 escaped this handler as a traceback at exit **1** — this tool's "the
+        # tree states a count it must not". In *this* mode that is the worst possible
+        # reading, because the mode exists to rewrite `Agent.md`: a host resolving a
+        # conflicted count line was told the line was the problem when the file was
+        # never read (measured 2026-10-03, `cyc20261003-005224`).
         print(f"error: cannot read {target}: {exc}", file=sys.stderr)
         return 2
 

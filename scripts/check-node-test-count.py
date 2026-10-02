@@ -179,6 +179,27 @@ class NodeCountError(Exception):
     """The doc or the tree is not in a shape this tool can act on."""
 
 
+def _read_text(path: Path) -> str:
+    """Read one UTF-8 file, or raise the tool's own error naming it.
+
+    **`UnicodeDecodeError` is not an `OSError`**, so a file that exists and can be
+    opened but is not UTF-8 slips past the handler that exists for "cannot read"
+    and leaves `main()` as a traceback — exit **1**, which this tool uses for
+    "the doc and the runner disagree". A host whose `Agent.md` (or a GUI test
+    file) is UTF-16 or GBK was told to go correct numbers that had never been
+    read (measured 2026-10-03, `cyc20261003-005224`, on a tree whose `Agent.md`
+    was `b"\\xff\\xfe..."`).
+
+    The sibling guard that states this rule in the family is `check-doc-count.py`
+    (`except (OSError, UnicodeDecodeError)`), and the sweep that keeps every
+    reader in the family honest is `tests/test_a_read_that_cannot_decode_is_not_a_verdict.py`.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise NodeCountError(f"cannot read {path}: {exc}") from exc
+
+
 def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
     """Run a Node test runner and return its decoded output.
 
@@ -270,7 +291,7 @@ def module_skip_entries() -> int:
     base = GUI_ROOT / "test"
     files = sorted(base.glob(f"*{GUI_TEST_SUFFIX}"))
     assert files, f"no GUI test files found under {base}"
-    return sum(len(MODULE_SKIP_ENTRY.findall(f.read_text(encoding="utf-8"))) for f in files)
+    return sum(len(MODULE_SKIP_ENTRY.findall(_read_text(f))) for f in files)
 
 
 def measured_gui() -> int:
@@ -356,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"tree: {REPO_ROOT}")
 
     try:
-        text = DOC.read_text(encoding="utf-8")
+        text = _read_text(DOC)
         renderer_doc, gui_doc = documented_counts(text)
         renderer_real = measured_renderer()
         gui_real = measured_gui()
@@ -364,7 +385,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except OSError as exc:
-        print(f"error: cannot read {DOC}: {exc}", file=sys.stderr)
+        # Not "cannot read Agent.md": reads go through `_read_text` and never reach
+        # here. What is left is the runner itself failing to start (the
+        # `FileNotFoundError` this file's `_run` docstring keeps for a name `which`
+        # could not resolve), and a message that named the doc would send a reader
+        # to look for the fault in a file that was read fine.
+        print(f"error: could not measure this tree: {exc}", file=sys.stderr)
         return 2
 
     drift = []

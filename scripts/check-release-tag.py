@@ -88,7 +88,13 @@ def declared_version(root: Path) -> str | None:
     """
     try:
         text = (root / VERSION_SOURCE).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # `UnicodeDecodeError` is not an `OSError`: a `__init__.py` that exists but is
+        # not UTF-8 used to escape as a traceback at exit **1**, which this tool
+        # reserves for "the tag and the declared version disagree" - a release-blocking
+        # mismatch reported about a declaration that was never read (measured
+        # 2026-10-03, `cyc20261003-005224`, on a staged tree). `None` is what every
+        # caller already treats as unmeasurable.
         return None
     found = _DECLARATION.findall(text)
     if len(found) != 1:
@@ -105,8 +111,9 @@ def check(tag: str, root: Path) -> int:
     if declared is None:
         print(
             f"not measurable: no single `__version__ = \"...\"` declaration could "
-            f"be read from {VERSION_SOURCE} -- the tag cannot be compared with a "
-            f"version this tree does not declare"
+            f"be read from {VERSION_SOURCE} -- absent, unreadable, or not exactly one "
+            f"declaration. The tag cannot be compared with a version this tool could "
+            f"not read"
         )
         return 2
     print(f"declared: {declared} ({VERSION_SOURCE})")

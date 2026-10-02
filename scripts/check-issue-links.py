@@ -594,7 +594,13 @@ def load_rant_rows(path: Path) -> list[dict]:
     """
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # The docstring above already says "missing **or unparseable** is not a store
+        # with no rants in it"; a file that is present but not UTF-8 is the third
+        # shape of the same thing, and it used to leave `main()` as a traceback at
+        # exit **1** - a link fault invented about a ledger that was never read
+        # (measured 2026-10-03, `cyc20261003-005224`). `UnicodeDecodeError` is not an
+        # `OSError`, which is the whole of the defect.
         raise RuntimeError(
             f"the rant ledger could not be read ({path}): {exc}"
         ) from exc

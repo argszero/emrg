@@ -312,7 +312,11 @@ def duplicated_files(files: tuple[str, ...] | None = None) -> list[str]:
 
 
 def scan_tree(root: Path, files: tuple[str, ...] | None = None) -> tuple[list[Site], list[str]]:
-    """Sites in `root`, plus the names of files that could not be read.
+    """Sites in `root`, plus the names of instruction files that could not be read.
+
+    "Could not be read" covers both an absent file and one that is present but is
+    not UTF-8: the caller's options are the same for both (report unmeasurable),
+    and the second shape is the one a name like `missing` used to hide.
 
     `files` defaults to `INSTRUCTION_FILES` by lookup at call time rather than by
     binding at definition time: a test that sets the class list has to reach the
@@ -322,16 +326,24 @@ def scan_tree(root: Path, files: tuple[str, ...] | None = None) -> tuple[list[Si
     """
     files = INSTRUCTION_FILES if files is None else files
     sites: list[Site] = []
-    missing: list[str] = []
+    unreadable: list[str] = []
     for rel in files:
         path = root / rel
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
-            missing.append(rel)
+        except (OSError, UnicodeDecodeError):
+            # **Absent and undecodable are the same answer here** and neither is a
+            # verdict: `UnicodeDecodeError` is not an `OSError`, so a file that is
+            # present but not UTF-8 used to leave `main()` as a traceback at exit
+            # **1** - this tool's "FAIL: N problem(s)", i.e. a citation violation
+            # invented out of a file that was never scanned (measured 2026-10-03,
+            # `cyc20261003-005224`, on a staged tree whose `prompts/system.j2` was
+            # `b"\xff\xfe..."`). The name is `unreadable` for both shapes: a list
+            # called `missing` was how the two got conflated in the first place.
+            unreadable.append(rel)
             continue
         sites.extend(scan(text, rel))
-    return sites, missing
+    return sites, unreadable
 
 
 def problems(sites: list[Site]) -> list[str]:
@@ -400,10 +412,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL: {len(repeated)} duplicated instruction-class entr(y/ies)")
         return 1
 
-    sites, missing = scan_tree(REPO_ROOT)
-    if missing:
-        print(f"unmeasurable: {len(missing)} file(s) in the instruction class are "
-              f"missing from {REPO_ROOT}: {', '.join(missing)}", file=sys.stderr)
+    sites, unreadable = scan_tree(REPO_ROOT)
+    if unreadable:
+        print(f"unmeasurable: {len(unreadable)} file(s) in the instruction class could "
+              f"not be read in {REPO_ROOT}: {', '.join(unreadable)}", file=sys.stderr)
         return 2
 
     print(f"tree: {REPO_ROOT}")
