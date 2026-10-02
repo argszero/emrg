@@ -334,18 +334,50 @@ def test_real_tree_is_consistent() -> None:
 
     This is the test that actually talks to vitest and node --test, which is the
     whole point of the tool - the static guard next door can only reason about
-    source text. It needs node_modules, so it skips (loudly) when they are
-    absent, e.g. in a bare CI checkout of the pytest job.
+    source text. It needs two things a checkout may not have: node_modules, and
+    `npm` on PATH. Either absence means "cannot ask the runners", never a verdict
+    on the tree - the same reading the runner probe below takes ("a missing
+    toolchain is not a defect in `_run`").
+
+    Measured both ways on 2026-10-03 (cyc20261003-010911), node_modules present
+    and nodejs off PATH: before the `npm` probe the row raised
+    `NodeCountError: cannot run 'npm'` while that sibling skipped in the same
+    session - one condition, two readings, and only one of them was about the
+    tree.
     """
     mod = _load_module()
     if not (mod.RENDERER_ROOT / "node_modules").exists():
         pytest.skip(f"no node_modules under {mod.RENDERER_ROOT}: cannot ask the runners")
+    if mod.shutil.which("npm") is None:
+        pytest.skip("npm is not on PATH: cannot ask the runners")
     renderer = mod.measured_renderer()
     gui = mod.measured_gui()
     documented = mod.documented_counts((REPO_ROOT / "Agent.md").read_text(encoding="utf-8"))
     assert documented == (renderer, gui), (
         f"Agent.md documents {documented} but the runners executed {(renderer, gui)} "
         "- run scripts/check-node-test-count.py --write"
+    )
+
+
+def test_the_real_tree_row_asks_the_host_before_it_asserts() -> None:
+    """Pin the order that makes the row above a probe rather than an assertion.
+
+    `test_real_tree_is_consistent` calls `_load_module()` itself, so a fixture
+    cannot inject an answer into it - what is readable instead is the order:
+    both guards inside that row, and both before the first measurement. The
+    second guard is the fix for the measurement in its docstring; a row that
+    keeps only the node_modules guard is red on a host that has node_modules and
+    no `npm`, which is a fact about the host, not about the tree.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    start = source.index("def test_real_tree_is_consistent(")
+    row = source[start : source.index("\ndef test_", start + 1)]
+    guards = ("if not (mod.RENDERER_ROOT", 'if mod.shutil.which("npm") is None')
+    for marker in guards:
+        assert marker in row, f"the row no longer asks the host: {marker!r} is gone"
+    assert max(row.index(m) for m in guards) < row.index("mod.measured_"), (
+        "both guards must precede the first measurement - a probe that runs after "
+        "the call it guards cannot skip the failure it exists to prevent"
     )
 
 
