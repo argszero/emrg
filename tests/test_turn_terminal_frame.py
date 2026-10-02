@@ -349,3 +349,36 @@ def test_every_frame_about_a_turn_names_the_request_it_is_about():
         "these broadcast payloads are about a turn but do not name it, so any "
         f"request in the session may read them as its own: {unnamed}"
     )
+
+
+def test_a_broadcast_error_frame_is_either_named_or_typed():
+    """The premise the scheduler's error reading rests on, made mechanical.
+
+    The read loop treats a frame carrying `error` as this cycle's failure only
+    when it names this request, or when it names nobody **and carries no `type`**
+    (the shape of the daemon's direct reply to a command this connection sent).
+    That rule is only sound while no *broadcast* error frame has that second
+    shape: an unnamed, untyped one would be read as this cycle's whatever it was
+    about. Measured 2026-10-02: `_handle_compact` publishes `compact_result`
+    with `error` to every subscriber, and a neighbouring client's failed compact
+    aborted a cycle that was running its own turn — which is why the rule exists;
+    this is the other half of it, so the rule cannot be quietly invalidated by a
+    new broadcast.
+    """
+    from emrg.server import daemon as daemon_mod
+
+    payloads = _broadcast_payloads(Path(daemon_mod.__file__).read_text())
+    assert len(payloads) > 20, (
+        f"the scan found almost no broadcast payloads: {len(payloads)}"
+    )
+    with_error = [(line, keys) for line, keys in payloads if "error" in keys]
+    assert with_error, "no broadcast payload carries an error — the scan is wrong"
+    loose = [
+        (line, keys) for line, keys in with_error
+        if "request_id" not in keys and "type" not in keys
+    ]
+    assert not loose, (
+        "these broadcast frames carry an error, name no request and carry no "
+        "type, so a cycle would read them as its own failure whatever they are "
+        f"about: {loose}"
+    )

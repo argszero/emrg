@@ -342,6 +342,36 @@ def _names_another_request(frame: dict, request_id: str) -> bool:
     return isinstance(other, str) and other != "" and other != request_id
 
 
+def _error_is_this_requests(frame: dict, request_id: str) -> bool:
+    """Whether a frame carrying `error` reports **this** cycle's failure.
+
+    Three shapes reach this socket, and only two of them are this cycle's:
+
+    * a frame about a turn names the request it is about, so the question is
+      equality — and a name that is somebody else's settles it without reading
+      anything else (`daemon.py`);
+    * a command **this connection** sent is answered directly, and those replies
+      carry no `type` at all (`{"error": "invalid task: …"}`,
+      `{"error": "message must be a JSON object"}`);
+    * a *session-level* command's result is **broadcast to every subscriber** and
+      carries the session's `type` — `_handle_compact` publishes
+      `compact_result` that way, failure branch included. The command was another
+      client's, so its failure is not this cycle's. Measured 2026-10-02: a failed
+      `compact` from another client aborted a cycle that was running its own turn
+      mid-round, and the log line read "server error: Compact failed: …" — that
+      client's command filed as this request's failure, with the cycle's work
+      abandoned on the strength of it.
+
+    `tests/test_turn_terminal_frame.py` holds the premise mechanically: every
+    broadcast payload carrying `error` either names a request or carries a `type`,
+    so nothing unnamed *and* untyped can arrive this way.
+    """
+    named = frame.get("request_id")
+    if isinstance(named, str) and named:
+        return named == request_id
+    return "type" not in frame
+
+
 def _queue_was_dropped(frame: dict) -> bool:
     """Whether `frame` is the daemon saying the session's pending queue was discarded.
 
@@ -2806,7 +2836,7 @@ class TaskHandler:
                         )
 
                 resp_error = resp.get("error")
-                if isinstance(resp_error, str):
+                if isinstance(resp_error, str) and _error_is_this_requests(resp, request_id):
                     error = str(resp_error)
                     end_reason = "server-error"
                     self._logger.warning(

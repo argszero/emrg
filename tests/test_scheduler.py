@@ -4395,3 +4395,103 @@ def test_a_frame_naming_another_request_is_never_this_cycles():
     assert theirs({"request_id": ""}, "me") is False, (
         "an empty id is not a claim about somebody else"
     )
+
+
+def test_another_clients_failed_compact_is_not_this_cycles_error(
+    tmp_path, monkeypatch, caplog,
+):
+    """A session-level command's failure is not this cycle's failure.
+
+    `compact` is handled with no busy check (`daemon.py::_process_message`) and
+    its result is **broadcast to every subscriber** of the session
+    (`_handle_compact`), the failure branch included. So while this cycle runs
+    its own turn, another client's failed compact arrives here — and it carries
+    no request id, only the session's `type`. Read as this cycle's error it
+    aborts a running cycle and files that client's command as this request's
+    failure. Measured 2026-10-02: the log line read "server error: Compact
+    failed: …" for a cycle whose own turn was one delta old.
+
+    The frames are the daemon's own shape: a `delta` naming this request (so the
+    turn is this cycle's), then the neighbour's broadcast.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"request_id": "self", "content": "working", "delta": True,
+         "session_id": "s"},
+        {"type": "compact_result", "session_id": "s", "messages_compacted": 0,
+         "error": "Compact failed: provider refused"},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert reason != "server-error", (
+        "another client's compact failed, not this cycle's turn — got "
+        f"{reason!r} from {messages}"
+    )
+    assert not any("server error" in m for m in messages), (
+        f"and it must not be reported as this cycle's failure: {messages}"
+    )
+    assert handler.evolutions == [], "nothing ran, so nothing is counted"
+
+
+def test_the_daemons_direct_reply_to_our_own_command_is_still_our_error(
+    tmp_path, monkeypatch, caplog,
+):
+    """The discriminating direction: our own rejection must still abort.
+
+    The daemon answers a command **this connection** sent directly, and those
+    replies carry no `type` and no request id (`daemon.py`: `{"error": "invalid
+    task: …"}`, `{"error": "message must be a JSON object"}`). A rule that asked
+    only "does this name this request" would drop this one on the floor, and the
+    cycle would end on the silence bound instead — reporting a stall for a
+    request the daemon refused outright.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"error": "invalid task: boom"},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == "server-error", f"got {reason!r}"
+    assert any("server error: invalid task" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_an_error_frame_belongs_to_the_request_it_names():
+    """The predicate, over the three shapes that reach this socket.
+
+    A named error is the named request's; an unnamed one is this cycle's only
+    when it is a direct reply, which is the shape with no `type` at all.
+    """
+    from emrg.server import scheduler as mod
+
+    mine = mod._error_is_this_requests
+    assert mine({"request_id": "me", "error": "boom"}, "me") is True
+    assert mine({"type": "tool_end", "request_id": "me", "error": True}, "me") is True
+    assert mine({"request_id": "host-1", "error": "boom"}, "me") is False, (
+        "the name settles it: that failure belongs to the request it names"
+    )
+    assert mine({"error": "invalid task: boom"}, "me") is True, (
+        "the daemon's direct reply to our own command carries no type"
+    )
+    assert mine({"error": "unknown message type", "received": "x"}, "me") is True
+    assert mine({"type": "compact_result", "error": "Compact failed: x"}, "me") is False
+    assert mine({"type": "messages_compacted", "error": "x"}, "me") is False
+    assert mine({"request_id": "", "error": "boom"}, "me") is True, (
+        "an empty id is 'not stated', so the frame is read by its shape — the "
+        "same reading `_names_another_request` gives it"
+    )
