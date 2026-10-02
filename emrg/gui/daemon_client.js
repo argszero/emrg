@@ -895,14 +895,23 @@ class DaemonClient {
     //    原来的顺序是「先看 error、再 FIFO 顶掉最早未决」，于是两条命令同时在飞时
     //    （list_sessions 后 compact），compact 的失败记在 list_sessions 头上，compact
     //    自己等到超时；实测 2026-10-02。
-    // ② 只有**没有 type** 的 `error` 帧才走 FIFO：那是 daemon 对某条命令的直接答复
-    //    （`{"error": "task requires session_id and cwd"}`），线缆上不带任何标识，最早
-    //    未决是唯一能认的形状。
+    // ② 只有**没有 type、也没有点名某一轮**的 `error` 帧才走 FIFO：那是 daemon 对
+    //    本连接某条命令的直接答复（`{"error": "unknown message type", …}`），线缆上
+    //    不带任何标识，最早未决是唯一能认的形状。
+    //    点了名的（`request_id`）**一定是某一轮的广播**，不是命令答复：工具循环的四处
+    //    失败广播正是 `{"request_id": …, "error": …}` 这个形状（没有 type）。原来的
+    //    条件只看「没有 type」，于是它 (a) reject 一条无关的在飞命令、(b) 被
+    //    `_classify` 认领后直接 return，渲染层再也看不到「这一轮失败了」——实测
+    //    2026-10-02，两条腿各测一半。
+    //    这条判据的正当性由 daemon 侧的机械化保证兜住：带 `error` 的**广播**必须
+    //    点名或带 type（tests/test_turn_terminal_frame.py::
+    //    test_a_broadcast_error_frame_is_either_named_or_typed），所以「无名且无 type
+    //    的 error」只可能是本连接某条命令的直接答复——两侧是同一条规则的两个半边。
     // ③ 其余 → 返回 false 走广播。这一支正是会话级失败广播该去的地方：`_handle_compact`
     //    把 `compact_result`（失败分支也带 `error`）广播给会话**每个**订阅者，而 `compact`
     //    没有 busy 检查 ⇒ 同一个会话里别的客户端的失败压缩会落到这条连接上。它不是本连接
     //    任何命令的答复，既不能 reject 命令、也不该被吞掉——渲染层要能看见「这个会话的
-    //    压缩失败了」。
+    //    压缩失败了」；工具循环那四处点名的失败广播同理（②的判据就是把它们交给③）。
     //
     // 两个分支都取**该 type 下最早**的那条：同一条连接上先发的命令先得到答复
     // （`daemon.py` 读循环逐条 await），而「一份回执回答它自己的命令」正是本族命题。
@@ -914,7 +923,7 @@ class DaemonClient {
       else matched.resolve(frame);
       return true;
     }
-    if (frame.error && frame.type === undefined) {
+    if (frame.error && frame.type === undefined && frame.request_id === undefined) {
       const oldest = this._pendingFifo.shift();
       if (oldest) {
         this._forget(oldest);

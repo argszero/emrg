@@ -1113,6 +1113,59 @@ test("已回答的命令不再留在发送顺序 FIFO 里（无名 error 必须�
   await assert.rejects(p2, /invalid task/, "这条 error 属于第二条命令，不能被死条吞掉");
 });
 
+test("点名了某一轮的 error 广播不是任何命令的答复（2026-10-02）", async () => {
+  // 工具循环的四处失败广播都长这样：`{"request_id": …, "error": …}`——**没有 type**。
+  // `_resolvePending` 的规则②只看「没有 type」就 FIFO reject 最早未决，于是一条在飞的
+  // 无关命令被判为失败（错误文本还是别人的 turn 的）。
+  //
+  // daemon 侧已机械化保证「带 error 的广播必须点名或带 type」
+  // （tests/test_turn_terminal_frame.py::test_a_broadcast_error_frame_is_either_named_or_typed），
+  // 所以**无名且无 type** 的 error 只可能是本连接某条命令的直接答复；点了名的则一定是
+  // 某一轮的广播——两侧是同一条规则的两个半边。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+
+  const pending = client.sendCommandAndWait("list_sessions", { cwd: "/a" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+
+  send({ request_id: "turn-1", error: "Turn ended without reporting: Boom" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(
+    client._pending.has("sessions_list"), true,
+    "别人的 turn 失败顶掉了在飞的 list_sessions",
+  );
+
+  send({ type: "sessions_list", sessions: [{ session_id: "mine" }] });
+  const frame = await pending;
+  assert.strictEqual(frame.sessions[0].session_id, "mine", "这条命令必须由它自己的回执回答");
+});
+
+test("点名了某一轮的 error 广播必须到达渲染层，而不是被配对逻辑吞掉（2026-10-02）", async () => {
+  // 同一个缺陷的另一半：有命令在飞时，那条帧被 `_resolvePending` 认领、`_classify`
+  // 直接 return，渲染层永远看不到「这一轮失败了」。命令配错只是症状，**一轮的失败
+  // 被吞掉**才是——而且它只在有命令在飞时发生（无未决时 `shift()` 取不到东西、返回
+  // false 走广播），所以这条腿必须把那条命令摆上，否则它测的是别的东西。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((t, d) => seen.push([t, d]));
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+
+  const pending = client.sendCommandAndWait("list_sessions", { cwd: "/a" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+
+  send({ request_id: "turn-1", error: "Turn ended without reporting: Boom" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(
+    seen.some(([t, d]) => t === "error" && /Turn ended without reporting/.test(d.error)),
+    "这一轮的失败必须发到渲染层（GUI 要显示它）",
+  );
+
+  send({ type: "sessions_list", sessions: [] });
+  await pending; // 不 await 会留下未决 Promise 与它的定时器，污染后面的用例
+});
+
 test("配对的身份是回执自己的 type：rant 与 remove_project 等得到答复（2026-10-02）", async () => {
   // 这两条命令原本永远配不上：`rant` 的回执连 type 都没有（`{"ok": true, "count": n}`），
   // `remove_project` 的回执叫 `project_removed` 而 RESPONSE_TYPES 里没有它。于是宿主在
