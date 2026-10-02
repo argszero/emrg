@@ -361,18 +361,30 @@ jobs:
       # （提交处理完成 ≠ 通过），若不解析 status 字段会继续 Staple → 报 cryptic 的
       # "Record not found" Error 65，掩盖真实 rejection 原因。必须显式解析并抓 log。
       # --timeout 20m：设计文档 §4.4 明确要求（默认 10m，Apple 公证排队高峰可能超时）
+      # ⚠️ 实测（tag v0.3.8，run 36956685533，2026-10-02）：submit 本身非零退出时，
+      # `VAR="$(cmd)"` 在 `-e` 下带着失败状态中止脚本，紧接着的 `echo "$NOTARY_OUT"`
+      # 来不及执行 —— 于是 `2>&1` 捕获到的 Apple 原话被丢弃，日志里只剩
+      # "exit code 1"，与"notarytool 不存在"无法区分。故用 `|| NOTARY_RC=$?` 取回
+      # 退出码：仍然失败（绝不放过未公证的 pkg），但先说清是提交被拒还是公证未过。
+      # ⚠️ 第二条同源缺陷，同一次实测：`$SUB_ID）` 里 `）` 的首字节在 UTF-8 locale 下
+      # 被 bash 当成标识符字符（LC_ALL=en_US.UTF-8 实测：值为空且尾部渲染成乱码；
+      # LC_ALL=C 时正常）。故此处一律写 `${SUB_ID}` —— 变量引用不得紧邻非 ASCII 字节。
       - name: Notarize pkg (macOS only)
         if: runner.os == 'macOS' && env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
         shell: bash
         run: |
           PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
+          NOTARY_RC=0
           NOTARY_OUT="$(xcrun notarytool submit "$PKG" \
             --apple-id "$APPLE_ID" \
             --password "$MACOS_NOTARY_APP_PASSWORD" \
             --team-id "$MACOS_NOTARY_TEAM_ID" \
-            --wait --timeout 20m --output-format json 2>&1)"
+            --wait --timeout 20m --output-format json 2>&1)" || NOTARY_RC=$?
           echo "$NOTARY_OUT"
+          if [ "$NOTARY_RC" -ne 0 ]; then
+            echo "::error::xcrun notarytool submit exited $NOTARY_RC - the SUBMISSION was refused, so this is not a notarization verdict. Apple's own reply is the output above. Usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement that needs accepting. A verdict failure looks different: it takes minutes, exits 0, and reports status=Invalid."
+          fi
           # 解析提交 ID 与状态（--output-format json 输出 {"id","message","status"}）
           SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
           STATUS="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)"
@@ -381,14 +393,14 @@ jobs:
             exit 1
           fi
           if [ "$STATUS" != "Accepted" ]; then
-            echo "::error::Apple 公证未通过（status=$STATUS, submission-id=$SUB_ID）。抓取 rejection 日志定位原因："
+            echo "::error::Apple 公证未通过（status=$STATUS, submission-id=${SUB_ID}）。抓取 rejection 日志定位原因："
             xcrun notarytool log "$SUB_ID" \
               --apple-id "$APPLE_ID" \
               --password "$MACOS_NOTARY_APP_PASSWORD" \
               --team-id "$MACOS_NOTARY_TEAM_ID" || echo "（notarytool log 拉取失败，请用上述命令手动查看）"
             exit 1
           fi
-          echo "✅ 公证通过（status=Accepted, submission-id=$SUB_ID）"
+          echo "✅ 公证通过（status=Accepted, submission-id=${SUB_ID}）"
 
       - name: Staple pkg (macOS only)
         if: runner.os == 'macOS' && env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
