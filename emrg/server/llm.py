@@ -23,6 +23,7 @@ import httpx
 
 from emrg import __version__
 from emrg.config import LlmConfig
+from emrg.server.tool_types import tool_arguments_text
 
 
 # ── 错误信息脱敏（20260807-0107）────────────────────────────
@@ -817,7 +818,9 @@ class LlmClient:
                             if fn.get("name"):
                                 acc["function"]["name"] = fn["name"]
                             if fn.get("arguments"):
-                                acc["function"]["arguments"] += fn["arguments"]
+                                acc["function"]["arguments"] += tool_arguments_text(
+                                    fn["arguments"]
+                                )
 
                         # Build current accumulated tool_calls list
                         current_tool_calls: list[dict] | None = None

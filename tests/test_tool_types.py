@@ -1,6 +1,11 @@
 """Tests for server.tool_types dataclasses."""
 
-from emrg.server.tool_types import ToolDefinition, ToolResult
+from emrg.server.tool_types import (
+    ToolDefinition,
+    ToolResult,
+    tool_arguments_object,
+    tool_arguments_text,
+)
 
 
 class TestToolDefinition:
@@ -90,3 +95,86 @@ class TestToolResult:
         a = ToolResult(tool_call_id="a", name="read", content="x")
         b = ToolResult(tool_call_id="b", name="read", content="x")
         assert a != b
+
+
+# ── A tool call's `arguments` payload (measured 2026-10-02) ─────────────────
+#
+# Both ends of the tool-call path read `function.arguments`: `llm.py` accumulates
+# the streamed deltas into one string, `daemon.py` parses that string into the
+# object `ToolExecutor.execute(arguments: dict)` is declared to take. Each end
+# used to guess alone, and each guess ended the whole turn on a value the other
+# considered normal — so the rule is one home (this module) and both are pinned
+# against it here.
+
+#: Every shape a `arguments` value has been seen or measured in.
+_ARGUMENT_SHAPES = [
+    ("a proper object", '{"command": "hi"}', {"command": "hi"}),
+    ("an empty object", "{}", {}),
+    ("empty text (the field was absent)", "", {}),
+    ("the text 'null'", "null", {}),
+    ("the text '[]'", "[]", {}),
+    ("the text '5'", "5", {}),
+    ("the text '\"x\"'", '"x"', {}),
+    ("the text 'true'", "true", {}),
+    ("unparseable text", "{not json", {}),
+    ("a dict (off-contract, already parsed)", {"command": "hi"}, {"command": "hi"}),
+    ("a list", ["hi"], {}),
+    ("a number", 5, {}),
+    ("None", None, {}),
+]
+
+
+class TestToolArgumentsObject:
+    """`tool_arguments_object` — the daemon's reader of that payload."""
+
+    def test_every_shape_yields_a_dict(self):
+        """The declared type is a dict for **every** input, never an exception.
+
+        The defect this closes: `json.loads(...)` under a one-name
+        `except json.JSONDecodeError` let five valid-JSON non-objects through to
+        `args.get("intent")`, and refused the two non-string shapes with a
+        `TypeError` that `except` did not catch — seven of these thirteen ended
+        the turn with a raw Python exception delivered to the client.
+        """
+        for label, raw, expected in _ARGUMENT_SHAPES:
+            got = tool_arguments_object(raw)
+            assert got == expected, f"{label}: {raw!r} → {got!r}, expected {expected!r}"
+            assert isinstance(got, dict), f"{label}: {got!r} is not a dict"
+
+    def test_the_contract_value_survives_intact(self):
+        """The direction that matters most: a real call is not silently emptied."""
+        nested = {"path": "a b", "n": 0, "flag": False, "inner": {"x": [1, 2]}}
+        import json as _json
+
+        assert tool_arguments_object(_json.dumps(nested)) == nested
+        assert tool_arguments_object(nested) == nested
+
+    def test_unreadable_text_is_not_recovered_from_the_other_side(self):
+        """A non-string that is not an object contributes nothing — no guessing."""
+        assert tool_arguments_object([{"a": 1}]) == {}
+        assert tool_arguments_object(0) == {}
+        assert tool_arguments_object(False) == {}
+
+
+class TestToolArgumentsText:
+    """`tool_arguments_text` — the LLM stream's writer of that payload."""
+
+    def test_text_passes_through_untouched(self):
+        """A fragment is not parsed: mid-stream it is usually an incomplete object."""
+        for fragment in ('{"command": ', "", '{"a": 1}', "{not json"):
+            assert tool_arguments_text(fragment) == fragment
+
+    def test_an_object_that_arrived_parsed_becomes_its_text(self):
+        """Off-contract, but unambiguous: dropping it would run the tool with no
+        arguments at all — a wrong action, not a lost one."""
+        import json as _json
+
+        assert tool_arguments_text({"command": "hi"}) == _json.dumps({"command": "hi"})
+        assert tool_arguments_text({"命令": "hi"}) == '{"命令": "hi"}'
+
+    def test_everything_else_contributes_no_text(self):
+        """The accumulator's right-hand side is always a `str` — the defect was
+        `arguments += value` raising `TypeError: can only concatenate str`."""
+        for value in (5, ["hi"], None, True, object()):
+            out = tool_arguments_text(value)
+            assert out == "" and isinstance(out, str), (value, out)

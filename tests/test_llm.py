@@ -1469,3 +1469,76 @@ def test_stream_does_not_retry_a_filter_once_a_tool_call_has_been_streamed(
     assert chunks[-1]["finish_reason"] == CONTENT_FILTER_FINISH
     assert chunks[-1]["tool_calls"][0]["id"] == "c1"
     assert fake.calls == 1, "a refusal after a streamed tool call was re-sent"
+
+
+# ── A tool call's `arguments` as it arrives from the provider ───────────────
+#
+# Measured 2026-10-02: the accumulator below did `arguments += value` for every
+# truthy value, so anything that was not a string raised
+# `TypeError: can only concatenate str (not "dict") to str` **out of the stream
+# generator** — the turn died before any tool ran, and no frame named the call.
+# The OpenAI contract is text accumulating across deltas, so a string is one more
+# fragment; a dict is an off-contract whole payload from an OpenAI-compatible
+# endpoint, and it is rendered to its text rather than dropped (dropping it would
+# run the tool with no arguments at all).
+
+
+class _ChunkStream:
+    """One SSE response carrying a single tool_call delta with `arguments`."""
+
+    status_code = 200
+    headers = {}
+
+    def __init__(self, arguments):
+        self.arguments = arguments
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def aiter_lines(self):
+        delta = {"tool_calls": [{
+            "index": 0, "id": "c1",
+            "function": {"name": "bash", "arguments": self.arguments},
+        }]}
+        yield "data: " + json.dumps({"choices": [{"delta": delta}]})
+        yield "data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+
+
+def _accumulated_arguments(client, arguments):
+    """The `arguments` the stream ends up reporting for one such chunk."""
+    import asyncio
+
+    fake = _FakeStreamClient([_ChunkStream(arguments)])
+    client._client = fake
+    out: list[str] = []
+
+    async def _run():
+        async for chunk in client.chat_stream([{"role": "user", "content": "hi"}]):
+            for tc in chunk.get("tool_calls") or []:
+                out.append(tc["function"]["arguments"])
+
+    asyncio.run(_run())
+    return out[-1] if out else None
+
+
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        ('{"command": "hi"}', '{"command": "hi"}'),
+        ('{"command": ', '{"command": '),          # a fragment: never parsed here
+        ("", ""),
+        ({"command": "hi"}, '{"command": "hi"}'),  # off-contract, preserved
+        ({"命令": "hi"}, '{"命令": "hi"}'),
+        (5, ""),
+        (["hi"], ""),
+        (None, ""),
+        (True, ""),
+    ],
+    ids=["text", "fragment", "empty", "dict", "dict-unicode", "int", "list", "none", "bool"],
+)
+def test_stream_accumulates_any_arguments_shape_without_raising(client, arguments, expected):
+    """Every shape yields a `str` for the accumulator, and never an exception."""
+    assert _accumulated_arguments(client, arguments) == expected
