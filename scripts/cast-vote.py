@@ -196,8 +196,11 @@ Exit codes
        tree that can no longer merge (a body naming no tree is not this, and a plan
        that cannot be computed is reported as unmeasurable rather than as a
        mismatch);
-       `gh-failed`: `gh` failed). Fail loud, and never report a posted
-       vote for a review that was never sent
+       `gh-failed`: `gh pr review` exited non-zero **and** the counter then showed no
+       review by this cycle — a non-zero exit is not proof nothing was sent, so the
+       counter is asked either way; a failure whose review did land is reported as the
+       counted vote it is). Fail loud, and never report a posted vote for a review
+       that was never sent — nor a failure for one that arrived
 
 `gh` is required, and so is network access to GitHub: the question is about a
 remote review, and every local guess would be about a different thing than the
@@ -805,6 +808,41 @@ def confirm(
     )
 
 
+def _report_landed(state: str, note: str, pr: int, cycle: str) -> int | None:
+    """What a counter reading is worth once a review may have been posted.
+
+    Shared by the two call sites rather than copied, because they ask the same
+    question of the same instrument: the failed-post path exists only because a
+    reported failure can still have landed a review, so one copy drifting away from
+    the other would be a fix applied to half the cases. `None` is the fourth answer —
+    the counter showed nothing — and the caller keeps it, because the two sites say
+    different things about that absence (posted and unmeasurable, versus not posted at
+    all) while the reading itself is the same one.
+    """
+    if state == "counted":
+        print(f"#{pr}: review posted as {cycle} and counted - {note}")
+        return 0
+    if state == "veto":
+        print(
+            f"#{pr}: review posted as {cycle} and counted as a VETO - {note}\n"
+            "A veto is not a lost vote: it is on the record and it resets the run, so "
+            f"#{pr} now needs three consecutive LGTMs from other cycles. "
+            "Re-posting contributes nothing - re-read it with "
+            f"scripts/check-vote-count.py {pr}."
+        )
+        return 0
+    if state == "void":
+        print(
+            f"#{pr}: review POSTED and NOT counted - {note}\n"
+            "The vote was spent for nothing. Nothing is rolled back by re-posting: a "
+            "second review from this cycle contributes nothing either, so fix the body "
+            "and let a later cycle vote.",
+            file=sys.stderr,
+        )
+        return 1
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cast-vote.py",
@@ -947,6 +985,44 @@ def main(argv: list[str] | None = None) -> int:
             f"{proc.stderr.strip()}",
             file=sys.stderr,
         )
+        # A non-zero exit is not proof the review was not delivered: `gh` can fail on a
+        # response it has already received. Measured 2026-10-03, `cyc20261003-065422` on
+        # #1824 — `addPullRequestReview` answered `GraphQL: An internal error occurred`
+        # with rc 1 while the review was on the PR; the retry being refused as
+        # "already-voted" is what settled it. The exit code therefore does not decide
+        # this: ask the counter, the same instrument the success path asks, and let its
+        # reading decide. Reporting a failure here without that read would tell a cycle
+        # to spend a second vote that GitHub refuses — and, worse, would have it record
+        # an uncast vote for a PR it in fact voted on.
+        try:
+            state, note = confirm(
+                args.pr,
+                cycle,
+                args.min_votes,
+                args.attempts,
+                args.delay,
+                args.mergeability_wait,
+            )
+        except Exception as exc:  # noqa: BLE001 - say the failure, do not hide it in a traceback
+            print(
+                f"the counter could not be read to see whether it landed anyway ({exc}), "
+                "so nothing can be said about it beyond the failure",
+                file=sys.stderr,
+            )
+            return 2  # cause: gh-failed
+        rc = _report_landed(state, note, args.pr, cycle)
+        if rc is not None:
+            print(
+                f"so the failure was in what gh reported, not in what it did: the review "
+                f"by {cycle} is on #{args.pr}",
+                file=sys.stderr,
+            )
+            return rc
+        print(
+            f"#{args.pr}: the counter shows no review by {cycle} either - {note}\n"
+            "so the POST is reported as failed; nothing was landed by it.",
+            file=sys.stderr,
+        )
         return 2  # cause: gh-failed
 
     state, note = confirm(
@@ -957,27 +1033,9 @@ def main(argv: list[str] | None = None) -> int:
         args.delay,
         args.mergeability_wait,
     )
-    if state == "counted":
-        print(f"#{args.pr}: review posted as {cycle} and counted - {note}")
-        return 0
-    if state == "veto":
-        print(
-            f"#{args.pr}: review posted as {cycle} and counted as a VETO - {note}\n"
-            "A veto is not a lost vote: it is on the record and it resets the run, so "
-            f"#{args.pr} now needs three consecutive LGTMs from other cycles. "
-            "Re-posting contributes nothing - re-read it with "
-            f"scripts/check-vote-count.py {args.pr}."
-        )
-        return 0
-    if state == "void":
-        print(
-            f"#{args.pr}: review POSTED and NOT counted - {note}\n"
-            "The vote was spent for nothing. Nothing is rolled back by re-posting: a "
-            "second review from this cycle contributes nothing either, so fix the body "
-            "and let a later cycle vote.",
-            file=sys.stderr,
-        )
-        return 1
+    rc = _report_landed(state, note, args.pr, cycle)
+    if rc is not None:
+        return rc
     print(
         f"#{args.pr}: review posted, and the counter never showed it - {note}\n"
         "That is unmeasurable, not a verdict: the review is on GitHub and cannot be "

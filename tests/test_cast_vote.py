@@ -645,20 +645,104 @@ def test_a_counted_veto_is_reported_as_registered_not_as_spent(
     assert len(gh.calls) == 1, "the review was posted exactly once"
 
 
-def test_a_failed_post_exits_2_and_never_reads_the_counter(mod, monkeypatch, capsys, body_file):
+def test_a_failed_post_the_counter_shows_nothing_for_exits_2(
+    mod, monkeypatch, capsys, body_file
+):
     """A `gh` failure is not a vote, so it must not be confirmed as one.
 
-    Reading the counter here would report the *pre-existing* count and could
-    print a cheerful "counted" for a review that was never sent.
+    But it is now the *counter's* reading that says nothing landed, not `gh`'s exit
+    code: the inference "rc != 0 therefore nothing was posted" is exactly what made the
+    tool call a review that had already landed a failure (measured 2026-10-03,
+    `cyc20261003-065422` on #1824 — see the test below). So this test asserts both
+    halves: still rc 2, and the counter was read to earn that answer.
     """
     counter = FakeCounter(verdict_with([vote(cycle=OTHER_CYCLE)], counted=[True], valid_count=1))
     gh = FakeGh(rc=1, stderr="gh: could not create review")
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
     rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", body_file(f"{CYCLE} — LGTM")])
     err = capsys.readouterr().err
     assert rc == 2
     assert len(gh.calls) == 1
-    assert counter.calls == [(1255, 3)], "no confirm read after a failed POST"
+    assert counter.calls == [(1255, 3)] * 4, "1 pre-flight read + 3 confirm reads"
     assert "could not create review" in err
+    assert "the counter shows no review" in err, "the refusal says what it was read from"
+
+
+def test_a_failed_post_the_counter_counted_is_reported_as_the_vote_it_was(
+    mod, monkeypatch, capsys, body_file
+):
+    """`gh` can exit non-zero on a response it has already received.
+
+    Measured 2026-10-03, `cyc20261003-065422` on #1824: `addPullRequestReview` answered
+    `GraphQL: An internal error occurred` with rc 1, and the review was live — the retry
+    was refused as "already-voted" and the counter read 1/3. Reporting rc 2 on that exit
+    code loses the vote twice: it tells the cycle to vote again (GitHub refuses) and it
+    records a PR as unvoted that this cycle did vote on.
+    """
+    counter = FakeCounter(
+        verdict_with([vote(cycle=OTHER_CYCLE)], counted=[True], valid_count=1),
+        verdict_with(
+            [vote(cycle=OTHER_CYCLE), vote(cycle=CYCLE)], counted=[True, True], valid_count=2
+        ),
+    )
+    gh = FakeGh(rc=1, stderr="GraphQL: An internal error occurred (addPullRequestReview)")
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", body_file(f"{CYCLE} — LGTM")])
+    captured = capsys.readouterr()
+    assert rc == 0, "the vote is on the record - reporting a failure would be false"
+    assert len(gh.calls) == 1, "the review was posted exactly once"
+    assert "counted" in captured.out
+    assert "2/3 valid votes" in captured.out
+    assert "An internal error occurred" in captured.err, "the failure is still reported"
+    assert "the failure was in what gh reported" in captured.err
+
+
+def test_a_veto_that_landed_despite_the_reported_failure_is_reported_too(
+    mod, monkeypatch, capsys, body_file
+):
+    """The landed-and-void case is not a failure either: it is a spent vote.
+
+    rc 1 with the advisory, and — the point — the VETO/void report rather than the
+    gh-failed refusal, so a cycle does not read a spent veto as a vote still to cast.
+    """
+    veto = Vote(at="2026-09-15T18:00:00Z", kind="veto", cycle=CYCLE, valid=True)
+    counter = FakeCounter(
+        verdict_with([vote(cycle=OTHER_CYCLE)], counted=[True], valid_count=1),
+        verdict_with([vote(cycle=OTHER_CYCLE), veto], counted=[True, True], valid_count=0),
+    )
+    gh = FakeGh(rc=1, stderr="gh: HTTP 502")
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", body_file(f"{CYCLE} — LGTM")])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "VETO" in captured.out
+    assert "HTTP 502" in captured.err
+
+
+def test_a_failure_whose_counter_read_also_fails_is_still_a_failure(
+    mod, monkeypatch, capsys, body_file
+):
+    """No reading, no answer - the refusal says so instead of guessing either way."""
+
+    class _RaisesAfterThePreflight(_ReadsBodiesLikeTheCounter):
+        def __init__(self, first, exc):
+            self._first, self._exc, self.calls = first, exc, 0
+
+        def check_pr(self, pr, needed, **kwargs):
+            self.calls += 1
+            if self.calls > 1:
+                raise self._exc
+            return self._first
+
+    counter = _RaisesAfterThePreflight(
+        verdict_with([vote(cycle=OTHER_CYCLE)], counted=[True], valid_count=1),
+        RuntimeError("network unreachable"),
+    )
+    gh = FakeGh(rc=1, stderr="gh: could not create review")
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", body_file(f"{CYCLE} — LGTM")])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert counter.calls == 2, "the pre-flight read and one confirm attempt"
+    assert "could not be read to see whether it landed anyway" in err
+    assert "network unreachable" in err
 
 
 def test_a_cycle_that_already_counted_a_vote_here_is_refused(mod, monkeypatch, capsys, body_file):
