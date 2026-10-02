@@ -53,6 +53,30 @@ absence. Messages the host typed into a client that never reached the daemon lef
 record anywhere and are outside both sources — as is any channel this repo does not
 know about.
 
+**And another instance's host is a third thing again**, which the absence line now says
+out loud. Both sources are *this* host's records: its daemon's log and the session
+histories on this machine. A message the host sent to a different instance's daemon — a
+peer working another repository, on another computer — left nothing here at all, so
+exit ``1`` means "absent from this host's record over a covered span", never "the host
+never said it". Measured twice on 2026-10-02/03: a peer's PR quoted a host message with
+a timestamp, this tool answered ``1`` with both spans covering the window, and the honest
+reading was *not readable from this host* — the same structural limit that makes the
+``Origin:`` line on a peer's issue unresolvable here (`.emrg/memory/cross-host-origin-cannot-resolve.md`).
+A cycle that reads ``1`` as a verdict about the host, rather than about this record,
+re-derives the false attribution this script exists to prevent.
+
+**And the count is host rows only**, which the absence line now says with a number. A
+phrase named as the host's can sit in the record many times over as an assistant's
+summary, a tool's output, or a rendered task prompt — none of them the host — and a bare
+``1`` cannot be told apart from "the phrase is nowhere here at all". The two need
+different answers: the first says *the claim quotes something other than the host*, the
+second says *nothing in this record is about it*. Counted on this host 2026-10-03: a
+peer's PR asserted the instrument "finds both messages, verbatim" for a phrase that
+occurs **21 times in the record and zero times as a host row**, so the refusal was right
+and its one line could not show why — and the instrument was read as broken instead.
+Measured in the other direction in the same run: `禁止新增issue`, which *is* a host
+message (2026-09-28 21:30:35), exits ``0`` and prints it.
+
 Exit codes
 ----------
 ``0`` found (prints the message). ``1`` no host message in the searched span contains
@@ -183,6 +207,16 @@ def parse_log_line(line: str) -> Message | None:
     )
 
 
+def _row_text(row: dict) -> str:
+    """A history row's text, whether it is stored as a string or as content parts."""
+    content = row.get("content")
+    if isinstance(content, list):
+        content = " ".join(
+            part.get("text", "") for part in content if isinstance(part, dict)
+        )
+    return content if isinstance(content, str) else ""
+
+
 def read_log(log_dir: Path) -> tuple[list[Message], list[Path], str | None, str | None]:
     """Messages in `log_dir`'s `emrgd.log*`, plus the span those files cover.
 
@@ -251,14 +285,8 @@ def read_sessions(
                     ts = normalise_ts(str(row.get("timestamp") or ""))
                     if not ts:
                         continue
-                    content = row.get("content")
-                    if isinstance(content, list):
-                        content = " ".join(
-                            part.get("text", "")
-                            for part in content
-                            if isinstance(part, dict)
-                        )
-                    if not isinstance(content, str) or not content:
+                    content = _row_text(row)
+                    if not content:
                         continue
                     stamps.append(ts)
                     key = (ts, root.name, content[:200])
@@ -312,6 +340,76 @@ def matches(
         if pattern.search(message.text):
             found.append(message)
     return found, skipped
+
+
+def elsewhere(
+    roots: list[Path],
+    log_messages: list[Message],
+    pattern: re.Pattern[str],
+    since: str | None,
+) -> tuple[dict[str, int], int]:
+    """Rows containing `pattern` that are **not** the host's, by row kind, and how many.
+
+    The verdict counts host rows alone, and that is exactly what makes it misreadable: a
+    phrase attributed to the host can sit in this record many times over as an
+    assistant's summary, a tool's output or a rendered task prompt, and a bare
+    "NOT FOUND" cannot be told apart from "the phrase is nowhere here at all". Counting
+    them is what turns the refusal into a reading: *the claim quotes something other than
+    the host*, which is actionable, rather than *the tool is broken*, which is not.
+
+    Same window as the verdict, so the numbers are about the span both sources covered;
+    `--all` is not consulted here because a scheduled prompt is precisely one of the
+    things that must not be attributed to the host. They are **rows, not independent
+    sources**, and the session asking the question is part of the record: measured
+    2026-10-03, a phrase this cycle had just typed into its own tool call came back as one
+    "elsewhere" mention. That does not weaken the line's direction - a row that is not the
+    host's is not the host's - but the count is not evidence that *something else* said it.
+    """
+    counts: dict[str, int] = {}
+    total = 0
+    seen: set[str] = set()
+    for message in log_messages:
+        if since is not None and message.ts < since:
+            continue
+        if message.text.startswith(TASK_PROMPT_PREFIX) and pattern.search(message.text):
+            counts["scheduled prompt"] = counts.get("scheduled prompt", 0) + 1
+            total += 1
+    for root in roots:
+        files = sorted(root.glob("history_*.jsonl")) + sorted(root.glob("history.jsonl"))
+        for path in (f for f in files if f.exists()):
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    # The same row lives in the daily file and in the current context;
+                    # matching lines are few, so the line itself is the dedupe key.
+                    if not pattern.search(line):
+                        continue
+                    if line in seen:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    text = _row_text(row)
+                    is_host = row.get("role") == "user" and not text.startswith(
+                        TASK_PROMPT_PREFIX
+                    )
+                    if is_host:
+                        continue          # the host's own words: the verdict's business
+                    ts = normalise_ts(str(row.get("timestamp") or ""))
+                    if since is not None and (not ts or ts < since):
+                        continue
+                    seen.add(line)
+                    if text.startswith(TASK_PROMPT_PREFIX):
+                        label = "scheduled prompt"
+                    else:
+                        label = str(row.get("type") or "row")
+                        if row.get("role"):
+                            label = f"{label}/{row['role']}"
+                    counts[label] = counts.get(label, 0) + 1
+                    total += 1
+    return counts, total
 
 
 def describe(message: Message) -> str:
@@ -432,8 +530,25 @@ def main(argv: list[str] | None = None) -> int:
               + " - an uncovered window is not evidence of absence", file=sys.stderr)
         return 2
 
-    print(f"NOT FOUND: no message in the searched span contains {args.pattern!r} "
+    counts, other_total = elsewhere(roots, log_messages, pattern, since)
+    print(f"NOT FOUND: no host message in the searched span contains {args.pattern!r} "
           f"({skipped} scheduled prompt(s) set aside; --all searches them too)")
+    if other_total:
+        detail = ", ".join(f"{kind} {count}" for kind, count in sorted(counts.items()))
+        print(f"  Host rows: 0. The phrase is in this record {other_total} time(s) as rows "
+              f"that are not the host's ({detail}) - an assistant's summary, a tool's "
+              "output or a rendered task prompt is not the host's words, and quoting one "
+              "of them as the host's is the false attribution this tool exists to catch.")
+        print("  The count is rows, not independent sources: this run's own session - the "
+              "question it just asked - is one of them.")
+    else:
+        print("  Host rows: 0, and nothing else in the span contains the phrase either - "
+              "so it is absent from this record, not merely from the host's part of it.")
+    print("  Both sources are *this* host's records: the daemon log and the session "
+          "histories named above, and nothing else. A message the host sent to another "
+          "instance's daemon left no entry here at all, so this is absence from this "
+          "host's record over a covered span - quote it as 'not readable from this host', "
+          "never as 'the host never said it'.")
     return 1
 
 

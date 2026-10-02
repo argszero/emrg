@@ -88,6 +88,14 @@ def sources(tmp_path: Path) -> dict:
             # An assistant row: never a host message.
             session_row("2026-09-18T10:00:00.000000+08:00", "a reply mentioning maplesyrup",
                         role="assistant"),
+            # A phrase the host's own rows never contain, in an assistant row and in a
+            # tool row: what a "NOT FOUND" has to be told apart from.
+            session_row("2026-09-19T10:00:00.000000+08:00", "a reply about honeysuckle",
+                        role="assistant"),
+            json.dumps({"type": "tool_result", "tool_call_id": "call_1",
+                        "content": "tool output about honeysuckle",
+                        "timestamp": "2026-09-20T10:00:00.000000+08:00"},
+                       ensure_ascii=False),
         ]) + "\n",
         encoding="utf-8",
     )
@@ -139,6 +147,9 @@ class TestTheSchedulerIsNotTheHost:
         assert done.returncode == 1, done.stdout + done.stderr
         assert "NOT FOUND" in done.stdout
         assert "1 scheduled prompt(s) set aside" in done.stdout
+        # ...and the verdict says where the phrase *is*: the scheduler's own row, which is
+        # the same refusal read as a fact rather than as a suspicion about the tool.
+        assert "scheduled prompt 1" in done.stdout
 
     def test_all_searches_them_too(self, sources):
         done = run(["--pattern", "Evolution Cycle", "--all", *both(sources)])
@@ -237,6 +248,55 @@ class TestTheThreeStates:
                     "--since", "2026-09-16", *both(sources)])
         assert done.returncode == 1, done.stdout + done.stderr
         assert "NOT FOUND" in done.stdout
+
+
+class TestAbsentFromTheHostIsNotAbsentFromTheRecord:
+    """The discrimination the verdict needed (measured 2026-10-03, cycle cyc20261003-043835).
+
+    A peer's PR body asserted that this instrument "finds both messages, verbatim" for a
+    phrase that occurs 21 times on this host and **zero** times as a host row — so the
+    refusal was right and its one line could not show why, and the instrument was read as
+    broken instead. `1` now carries the count it is excluding, which is what separates
+    *the claim quotes something other than the host* (actionable: go look at the claim)
+    from *nothing here is about it* (actionable: this is not readable from this host).
+    """
+
+    def test_a_phrase_only_non_host_rows_carry_is_named_where_it_is(self, sources):
+        done = run(["--pattern", "honeysuckle", *both(sources)])
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "NOT FOUND" in done.stdout
+        # One distinct row per kind, so the breakdown is what it claims to be.
+        assert "message/assistant 1" in done.stdout, done.stdout
+        assert "tool_result 1" in done.stdout, done.stdout
+        # ...and the reader is told what that means, not left to infer it.
+        assert "not the host's" in done.stdout
+        assert "not readable from this host" in done.stdout
+
+    def test_a_phrase_nowhere_in_the_record_says_so(self, sources):
+        """The other direction of the same line: absence *everywhere*, not just the host's
+        part of it. Without this arm the line above would pass on a counter that counted
+        every row and called it "not the host's"."""
+        done = run(["--pattern", "never-said-this", *both(sources)])
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "NOT FOUND" in done.stdout
+        assert "nothing else in the span contains the phrase" in done.stdout, done.stdout
+        assert "not the host's" not in done.stdout
+
+    def test_the_host_s_own_row_is_not_counted_as_elsewhere(self, sources):
+        """The control for the counter: the host's row is the verdict's business, and
+        counting it as an "elsewhere" mention would report the phrase as both."""
+        done = run(["--pattern", "the first thing the host said", *both(sources)])
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "FOUND" in done.stdout
+        assert "not the host's" not in done.stdout
+
+    def test_the_count_is_bounded_by_the_window(self, sources):
+        """The same window as the verdict, or the numbers would be about a different span
+        than the one the absence claims."""
+        done = run(["--pattern", "honeysuckle", "--since", "2026-09-20", *both(sources)])
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "tool_result 1" in done.stdout, done.stdout      # 2026-09-20, kept
+        assert "message/assistant" not in done.stdout           # 2026-09-19, outside it
 
 
 class TestTheInventory:
