@@ -100,11 +100,43 @@ def remove_session_index(session_id: str) -> None:
     _remove(str(session_id), sessions_index_path())
 
 
-def _read_meta_session_id(meta_path: Path) -> str | None:
-    """Return the session_id from a meta.json, or None if missing/corrupt."""
+def read_meta_object(meta_path: Path) -> dict | None:
+    """Read a session ``meta.json`` as a mapping, or ``None`` when it is not one.
+
+    "Not one" covers four on-disk states; no reader can tell them apart and
+    none of them yields a mapping, so the decision is taken once, here:
+
+    - the file is missing;
+    - it cannot be read (``OSError``) or decoded (``UnicodeDecodeError``);
+    - it does not parse;
+    - it parses to a JSON value that is not an object (``[]``, ``null``,
+      ``"s_1"``, ``5``).
+
+    A reader that guards only the third still meets the fourth as an
+    ``AttributeError`` on ``.get`` — the shape four call sites in
+    ``emrg/session.py`` and one in the daemon used to have. ``meta.json`` is
+    written with a plain (non-atomic) ``write_text``, so a process killed
+    mid-write really does leave a truncated file behind: the second state is
+    reachable without any external writer, not only through a hand-edited file.
+    """
+    if not meta_path.exists():
+        return None
     try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_meta_session_id(meta_path: Path) -> str | None:
+    """Return the session_id from a meta.json, or None if missing/corrupt.
+
+    "corrupt" is whatever ``read_meta_object`` refuses — including a file that
+    parses to a non-object, which this docstring promised before the reader
+    could deliver it.
+    """
+    meta = read_meta_object(meta_path)
+    if not meta:
         return None
     sid = meta.get("session_id")
     return str(sid) if sid else None

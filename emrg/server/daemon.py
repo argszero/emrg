@@ -5977,10 +5977,9 @@ class EmrgServer:
             })
             return
 
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            meta = {}
+        from emrg.sessions_index import read_meta_object
+
+        meta = read_meta_object(meta_path) or {}
         if meta.get("message_count", 0) <= 0:
             canonical = self._canonical_session_cwd(session_id)
             if canonical is None or str(Path(canonical).resolve()) != str(Path(cwd).resolve()):

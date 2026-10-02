@@ -24,7 +24,11 @@ from typing import Iterable
 
 from emrg.memory import SessionMemoryStore
 from emrg.sandbox.policy import SANDBOX_MODES
-from emrg.sessions_index import remove_session_index, upsert_session_index
+from emrg.sessions_index import (
+    read_meta_object,
+    remove_session_index,
+    upsert_session_index,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -285,8 +289,13 @@ class Session:
     def load(cls, session_id: str, cwd: Path) -> Session:
         """Load an existing session from disk."""
         session = cls(session_id, cwd)
-        if session._meta_path.exists():
-            meta = json.loads(session._meta_path.read_text(encoding="utf-8"))
+        # A meta.json that is missing, truncated or not an object leaves the
+        # constructor's defaults in place, which are exactly the fallbacks this
+        # used to apply field by field. Reading it used to raise
+        # JSONDecodeError, and a truncated meta.json is what a process killed
+        # mid-write leaves behind (`_save_meta` writes in place).
+        meta = read_meta_object(session._meta_path)
+        if meta:
             session._message_count = meta.get("message_count", 0)
             session._compact_count = meta.get("compact_count", 0)
             session._created_at = meta.get("created_at", "")
@@ -324,12 +333,7 @@ class Session:
     @property
     def title(self) -> str:
         """Return the session title (custom title or fallback to session ID)."""
-        meta = {}
-        if self._meta_path.exists():
-            try:
-                meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                pass
+        meta = read_meta_object(self._meta_path) or {}
         return meta.get("title", self.session_id)
 
     def rename(self, title: str) -> None:
@@ -591,13 +595,9 @@ class Session:
             meta["title"] = title
         else:
             # Preserve existing title if present
-            if self._meta_path.exists():
-                try:
-                    old = json.loads(self._meta_path.read_text(encoding="utf-8"))
-                    if "title" in old:
-                        meta["title"] = old["title"]
-                except (json.JSONDecodeError, OSError):
-                    pass
+            old = read_meta_object(self._meta_path) or {}
+            if "title" in old:
+                meta["title"] = old["title"]
         self._meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         # Global cross-project index (rant 2026-08-13T16:42:22): record this
         # session so other projects can locate it. Idempotent (no-op when the
@@ -672,11 +672,11 @@ class Session:
             meta_path = entry / "meta.json"
             if not meta_path.exists():
                 continue
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                results.append(meta)
-            except (json.JSONDecodeError, OSError):
+            meta = read_meta_object(meta_path)
+            if meta is None:
                 logger.warning("corrupt meta.json in %s, skipping", entry.name)
+                continue
+            results.append(meta)
 
         # Rant 2026-09-30T10:27:20：按「最后活动」排序。仅看 created_at 时，一个天天在用的
         # 会话会随着新会话不断创建而沉到列表底部——顺序必须跟着它变的是哪一种「新」。

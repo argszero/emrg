@@ -4174,3 +4174,31 @@ def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkey
         "a genuinely completed round no longer stamps the marker the #1114 alarm "
         "measures — the empty-answer guard must not have swallowed it"
     )
+
+
+# ── the resume handler's meta.json read ───────────────────────────────────
+
+
+def test_a_resume_of_a_session_whose_meta_is_not_an_object_is_answered(tmp_path):
+    """The daemon's own meta.json read is the fifth reader of the same rule.
+
+    Its `except (JSONDecodeError, OSError)` covered an unparseable file but not
+    one that parses to `[]`/`null`/`"s_1"`/`5`: `meta.get(...)` then raised
+    AttributeError out of a message handler, so the client got no
+    `resume_result` at all. The answer for every non-mapping state must be the
+    one a missing file already got.
+    """
+    server = _make_server()
+    session = Session.create_with_id("resume-non-object", tmp_path)
+    session.append_message({"type": "message", "role": "user", "content": "hi"})
+
+    for payload in ("[]", "null", '"s_1"', "5", '{"message_count": 1'):
+        session._meta_path.write_text(payload, encoding="utf-8")
+        ws = _FakeWs()
+        asyncio.run(server._handle_resume_session(session.session_id, tmp_path, ws))
+        results = [f for f in ws.sent if f.get("type") == "resume_result"]
+        assert results, f"{payload!r}: the handler answered nothing at all — {ws.sent}"
+        assert "error" not in results[-1], (
+            f"{payload!r}: a meta.json that is not a mapping is not a missing "
+            f"session — the index still locates this one: {results[-1]}"
+        )
