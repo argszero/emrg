@@ -1018,6 +1018,101 @@ test("不属于任何未决命令的 error 广播不能顶掉别人的命令（�
   assert.strictEqual(r.type, "sessions_list");
 });
 
+test("同一类型的两条命令同时在飞时，每份回执回答它自己的那一条（2026-10-02）", async () => {
+  // 未决命令按**响应 type** 存在一个 Map 里（`respType → entry`），而两条同类型命令的
+  // 响应 type 是同一个串（两次 `list_sessions` 都等 `sessions_list`）。于是后发的那条
+  // **覆盖**了先发的：第一份回执按 type 找到的是第二条命令，先发的那条只能等到超时。
+  // 这正是本族命题在客户端这一侧的另一种形态——「一份回执回答了不是它的那条命令」。
+  // 可达性：`main.js` 有多个 IPC 处理器各自 await 一次 `list_sessions`（打开项目、
+  // 注册项目、恢复会话），渲染层的两次调用在主进程里是并发的。
+  // 同类型回执的顺序有协议依据：`daemon.py` 的读循环 `await self._process_message(...)`
+  // 逐条处理，同一条连接上先发的命令先得到答复。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: "/a" }, 2000);
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: "/b" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+
+  send({ type: "sessions_list", sessions: [{ session_id: "for-the-first" }] });
+  const first = await p1;
+  assert.strictEqual(
+    first.sessions[0].session_id, "for-the-first",
+    "第一份回执必须回答第一条命令",
+  );
+
+  send({ type: "sessions_list", sessions: [{ session_id: "for-the-second" }] });
+  const second = await p2;
+  assert.strictEqual(
+    second.sessions[0].session_id, "for-the-second",
+    "第二份回执必须回答第二条命令",
+  );
+});
+
+test("先发命令的超时不能带走后发的那条（2026-10-02）", async () => {
+  // 修前的超时分支执行 `this._pending.delete(respType)`——而那条记录可能已经被后发的
+  // 同类型命令**替换**过了。于是「第一条超时」这句话实际删掉了第二条的登记：第二条的
+  // 回执到达时按 type 找不到任何未决命令，它会一路走到超时，而日志只说明是另一条超时。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: "/a" }, 60);
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: "/b" }, 2000);
+  await assert.rejects(p1, /command timeout: list_sessions/);
+
+  send({ type: "sessions_list", sessions: [{ session_id: "for-the-second" }] });
+  const second = await p2;
+  assert.strictEqual(
+    second.sessions[0].session_id, "for-the-second",
+    "第一条超时之后，第二条仍必须能被它自己的回执回答",
+  );
+});
+
+test("无名 error 帧只回答最早未决的那条，不牵连后发的同类型命令（2026-10-02）", async () => {
+  // 修前的 FIFO 兜底那一支执行 `this._pending.delete(oldest.frameType)`——两条同类型
+  // 命令的 frameType 是同一个串，所以「删掉最早那条」实际删掉的是**后发那条**的登记：
+  // 后发的命令此后既收不到按 type 的配对，也收不到 FIFO 兜底，只剩超时。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: "/a" }, 2000);
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: "/b" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ error: "invalid task" }); // 无名 error：daemon 对某条命令的直接答复
+  await assert.rejects(p1, /invalid task/);
+
+  send({ type: "sessions_list", sessions: [{ session_id: "for-the-second" }] });
+  const second = await p2;
+  assert.strictEqual(
+    second.sessions[0].session_id, "for-the-second",
+    "第二份回执必须仍能回答第二条命令",
+  );
+});
+
+test("已回答的命令不再留在发送顺序 FIFO 里（无名 error 必须落到真正在飞的那条）（2026-10-02）", async () => {
+  // 未决登记存在两个结构里（按 type 的队列 + 发送顺序 FIFO），摘除必须同时摘两个。
+  // 只摘队列而留下 FIFO 里的死条：下一个**无名** error 帧会 `shift()` 到那条已经
+  // resolve 过的登记，reject 一个已经落定的 Promise（什么都不发生），然后返回 true
+  // 把这一帧**吞掉**——真正在飞的那条命令因此收不到这条答复，只能等超时。
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: "/a" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "sessions_list", sessions: [{ session_id: "first" }] });
+  await p1;
+  assert.strictEqual(client._pending.size, 0, "已答复的命令不该继续占着登记表");
+
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: "/b" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ error: "invalid task" }); // 无名 error：唯一在飞的那条必须收到它
+  await assert.rejects(p2, /invalid task/, "这条 error 属于第二条命令，不能被死条吞掉");
+});
+
 test("配对的身份是回执自己的 type：rant 与 remove_project 等得到答复（2026-10-02）", async () => {
   // 这两条命令原本永远配不上：`rant` 的回执连 type 都没有（`{"ok": true, "count": n}`），
   // `remove_project` 的回执叫 `project_removed` 而 RESPONSE_TYPES 里没有它。于是宿主在

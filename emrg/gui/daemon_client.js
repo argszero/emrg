@@ -151,7 +151,7 @@ class DaemonClient {
     this.ws = null;
     this.connected = false;
     this._events = new Set(); // callbacks
-    this._pending = new Map(); // frameType → {resolve, reject, timer}
+    this._pending = new Map(); // respType → [entry, …]（同类型可同时有多条在飞）
     this._pendingFifo = [];
     this._groups = new Map(); // requestId → {node, lastSeen, timer, own}
     this._currentStream = null; // {requestId, timer}
@@ -851,19 +851,39 @@ class DaemonClient {
 
   // G93/G103：命令-响应配对（pending FIFO，按响应帧 type 配对）。
   // 命令类型 ≠ 响应类型（list_sessions → sessions_list 等），经映射表转换。
+  //
+  // 一个响应 type 下**可以有多条**在飞的命令（两次 `list_sessions` 都等
+  // `sessions_list`），所以登记表存的是**队列**而不只是一条：后发的命令覆盖先发的，
+  // 会让第一份回执去回答第二条命令，而先发的那条只剩超时（实测 2026-10-02）。
+  // 同类型回执的顺序有协议依据：`daemon.py` 的读循环逐条 `await
+  // self._process_message(...)`，同一条连接上先发的命令先得到答复。
   sendCommandAndWait(commandType, payload = {}, timeoutMs = PENDING_TIMEOUT_MS) {
     const respType = RESPONSE_TYPES[commandType] || commandType;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this._pending.delete(respType);
-        this._pendingFifo = this._pendingFifo.filter((p) => p.frameType !== respType);
+      const entry = { frameType: respType, resolve, reject, timer: null };
+      entry.timer = setTimeout(() => {
+        // 只撤下**自己**这一条：同一 type 下别人的登记与别人的超时都还在飞。
+        this._forget(entry);
         reject(new Error(`command timeout: ${commandType}`));
       }, timeoutMs);
-      const entry = { frameType: respType, resolve, reject, timer };
-      this._pending.set(respType, entry);
+      const queue = this._pending.get(respType);
+      if (queue) queue.push(entry);
+      else this._pending.set(respType, [entry]);
       this._pendingFifo.push(entry);
       this.sendCommand(commandType, payload);
     });
+  }
+
+  // 把一个未决登记从两个结构里都摘掉：按 type 的队列（空队列连键一起删，`_pending.size`
+  // 与 `_pending.has(type)` 的语义因此与「一个 type 一条」时完全一致）与发送顺序 FIFO。
+  _forget(entry) {
+    const queue = this._pending.get(entry.frameType);
+    if (queue) {
+      const rest = queue.filter((e) => e !== entry);
+      if (rest.length) this._pending.set(entry.frameType, rest);
+      else this._pending.delete(entry.frameType);
+    }
+    this._pendingFifo = this._pendingFifo.filter((e) => e !== entry);
   }
 
   _resolvePending(frame) {
@@ -883,10 +903,12 @@ class DaemonClient {
     //    没有 busy 检查 ⇒ 同一个会话里别的客户端的失败压缩会落到这条连接上。它不是本连接
     //    任何命令的答复，既不能 reject 命令、也不该被吞掉——渲染层要能看见「这个会话的
     //    压缩失败了」。
-    const matched = frame.type === undefined ? undefined : this._pending.get(frame.type);
+    //
+    // 两个分支都取**该 type 下最早**的那条：同一条连接上先发的命令先得到答复
+    // （`daemon.py` 读循环逐条 await），而「一份回执回答它自己的命令」正是本族命题。
+    const matched = frame.type === undefined ? undefined : this._oldestOfType(frame.type);
     if (matched) {
-      this._pending.delete(matched.frameType);
-      this._pendingFifo = this._pendingFifo.filter((p) => p !== matched);
+      this._forget(matched);
       clearTimeout(matched.timer);
       if (frame.error) matched.reject(new Error(frame.error));
       else matched.resolve(frame);
@@ -895,13 +917,18 @@ class DaemonClient {
     if (frame.error && frame.type === undefined) {
       const oldest = this._pendingFifo.shift();
       if (oldest) {
-        this._pending.delete(oldest.frameType);
+        this._forget(oldest);
         clearTimeout(oldest.timer);
         oldest.reject(new Error(frame.error));
         return true;
       }
     }
     return false;
+  }
+
+  _oldestOfType(respType) {
+    const queue = this._pending.get(respType);
+    return queue && queue.length ? queue[0] : undefined;
   }
 
   _rejectAllPending(msg) {
