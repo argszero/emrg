@@ -32,18 +32,21 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 
 WORKFLOW = ".github/workflows/build-release.yml"
 
-# The runner's default for `shell: bash` — the flags are the defect's mechanism, so the
-# arms must run under them and not under a friendlier interpreter default.
-RUNNER_SHELL = ["bash", "--noprofile", "--norc", "-eo", "pipefail"]
+# The runner's default flags for `shell: bash` — `-e` is the defect's mechanism, so the
+# arms must run under them and not under a friendlier interpreter default. The program
+# itself is resolved in `_run_step`, never spelled here.
+RUNNER_SHELL = ["--noprofile", "--norc", "-eo", "pipefail"]
 
 PKG_NAME = "EMRG-0.3.8-macos-arm64.pkg"
 
@@ -184,8 +187,36 @@ def test_no_variable_reference_touches_a_non_ascii_byte() -> None:
 _UNBRACED_BEFORE_NON_ASCII = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*(?=[\x80-\U0010ffff])")
 
 
+# The arms that follow execute the step body, so they need a POSIX shell — the same gate
+# `tests/test_release_end_state.py` puts on its executed arm. Written once and applied
+# three times, because a reason copied to three sites is a reason free to drift.
+#
+# Measured, and the reason this gate exists (CI, 2026-10-02, the Windows leg of run
+# `36959438654`): `bash` there resolves to the WSL launcher — `C:\Windows\System32\bash.exe`
+# precedes Git's bash on `PATH` — which answers "Windows Subsystem for Linux has no installed
+# distributions." and exits 1. All three arms therefore failed while measuring WSL's absence
+# rather than the step, and the PR went red on a change that is not wrong. The two pins above
+# are text reads over the parsed step, need no shell, and did run green on that leg.
+_posix_shell_only = pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "the step body is a POSIX shell script and this arm executes it; without a real "
+        "bash the run measures the shell's absence, not the step. Gated to the platforms "
+        "that can run one — the step itself is macOS-only."
+    ),
+)
+
+
 def _run_step(tmp_path, scenario: str, rejection: str = "no rejection detail"):
-    """Run the step body as the runner runs it, with `xcrun` stubbed."""
+    """Run the step body as the runner runs it, with `xcrun` stubbed.
+
+    The shell is resolved rather than spelled `bash`: on the Windows runner that name means
+    the WSL launcher, and a run that measures its absence says nothing about the step.
+    """
+    shell = shutil.which("bash")
+    if shell is None:
+        pytest.skip("no POSIX shell is available for the ground-truth run")
+
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "xcrun"
@@ -208,7 +239,7 @@ def _run_step(tmp_path, scenario: str, rejection: str = "no rejection detail"):
     env["MACOS_NOTARY_TEAM_ID"] = "TEAMID1234"
 
     return subprocess.run(
-        [*RUNNER_SHELL, str(script)],
+        [shell, *RUNNER_SHELL, str(script)],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -218,6 +249,7 @@ def _run_step(tmp_path, scenario: str, rejection: str = "no rejection detail"):
     )
 
 
+@_posix_shell_only
 def test_a_refused_submission_prints_apples_reply_and_still_fails(tmp_path) -> None:
     """The measured failure: a 3-second non-zero exit that used to say nothing.
 
@@ -237,6 +269,7 @@ def test_a_refused_submission_prints_apples_reply_and_still_fails(tmp_path) -> N
     )
 
 
+@_posix_shell_only
 def test_an_accepted_submission_keeps_the_step_green(tmp_path) -> None:
     """The other direction: the fix must not turn the step red on the happy path.
 
@@ -251,6 +284,7 @@ def test_an_accepted_submission_keeps_the_step_green(tmp_path) -> None:
     assert "Accepted" in result.stdout
 
 
+@_posix_shell_only
 def test_a_rejected_verdict_still_fetches_the_log_and_fails(tmp_path) -> None:
     """The pre-existing path, kept honest by the same execution.
 
