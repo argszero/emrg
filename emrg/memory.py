@@ -271,13 +271,27 @@ class MemoryFile:
     _fm_lines: ClassVar[tuple[str, ...] | None] = None
     _fm_parsed: ClassVar[dict[str, object]] = {}
 
+    # The file this memory actually lives in, when that is known. ``filename``
+    # derives a name from ``type`` + ``title``, which is not the name a memory
+    # gets when its title collides with one already on disk: the store writes
+    # the second one to ``<slug>-2.md``. Everything keyed by filename — the
+    # index rows (``MemoryIndex.add_entry`` identifies entries by it), the
+    # server's memory frames, a load → save — has to name the file the memory
+    # is really in, or a row lands on the wrong memory and the written file is
+    # referenced by nothing at all. Not part of the file format: ``to_markdown``
+    # renders frontmatter from ``_canonical_frontmatter`` only, and this is not
+    # in it.
+    _filename: Optional[str] = field(default=None, repr=False, compare=False)
+
     @property
     def filename(self) -> str:
-        """Derive a descriptive filename from title.
+        """The name of the file this memory is in, or the one its title derives.
 
         Does NOT include the id — the id lives in frontmatter only.
         This keeps filenames human-readable.
         """
+        if self._filename:
+            return self._filename
         prefix = f"{self.type}-" if self.type != "reference" else ""
         slug = slugify(self.title)
         return f"{prefix}{slug}.md"
@@ -403,6 +417,13 @@ class MemoryFile:
             status=frontmatter.get("status") or "active",
             title=title,
             body=body,
+            # A memory read from a file knows which file it came from — the only
+            # moment that name is available, and the name every reader that
+            # builds a path from it (the server's memory frame, an index row, an
+            # update's load → save) has to agree with. Without it a load
+            # re-derives the name from the title, which for a counter-suffixed
+            # file names a different memory's file.
+            _filename=_filename or None,
         )
         # Provenance for the write side: the lines as read, and the value each
         # key parsed to, so ``to_markdown`` can tell what it changed.
@@ -995,21 +1016,14 @@ class MemoryStore:
         filename = self._resolve_filename(mem)
         filepath = self.directory / filename
 
-        # Re-create with resolved filename (so to_markdown + index match)
-        mem = MemoryFile(
-            id=mem.id,
-            event_at=mem.event_at,
-            created_at=mem.created_at,
-            updated_at=mem.updated_at,
-            source_session=mem.source_session,
-            type=mem.type,
-            scope=mem.scope,
-            status=mem.status,
-            title=mem.title,
-            body=mem.body,
-        )
-        # Override filename for this instance
-        object.__setattr__(mem, "_filename", filename)
+        # Name the file this memory is in, so the index row, this instance and
+        # every later reader agree with the write. (This used to be an
+        # ``object.__setattr__(mem, "_filename", filename)`` against a property
+        # with no setter: a property is a data descriptor, so it won over the
+        # instance attribute and the override never took effect — the second
+        # memory of a duplicate title got a ``-2.md`` file and no index row,
+        # and reported the first memory's filename.)
+        mem._filename = filename
         mem.save(filepath)
 
         # Update index
@@ -1205,6 +1219,12 @@ class MemoryStore:
             new_path = project_store.directory / f"{stem}-{counter}.md"
             counter += 1
 
+        # The copy lives at ``new_path``, not at the name its title derives —
+        # and on a collision those two differ. The project index keys its rows
+        # by filename, so a row added under the derived name would attach
+        # itself to the resident memory of that title and leave this copy
+        # referenced by nothing.
+        mem._filename = new_path.name
         mem.save(new_path)
 
         # Update project index
