@@ -96,6 +96,42 @@ def test_grep_context_lines(temp_cwd):
     assert "print" in result.content
 
 
+def test_the_last_newline_is_not_a_searchable_line(temp_cwd):
+    """A file's terminating newline terminates its last line; it does not add one.
+
+    `"a\\nb\\n".split("\\n")` yields `['a', 'b', '']`, and the trailing `''` used to be
+    searched — so any pattern that can match an empty line reported a match **past the
+    end of every terminated file**. Measured on master `bc114ab`, 2026-10-02: a
+    two-line file searched for `^$` came back as "Found 1 matches ... t.txt:3:".
+    """
+    tool = GrepTool()
+    f = temp_cwd / "two.txt"
+    f.write_text("a\nb\n")          # two lines, both terminated
+
+    result = _run(tool.execute({"pattern": "^$", "path": str(f)}))
+    assert "No matches" in result.content, result.content
+
+    # The same file's real lines are all still found (the opposite direction: the
+    # last line is not dropped along with the phantom one).
+    result = _run(tool.execute({"pattern": "^", "path": str(f)}))
+    assert "Found 2 matches" in result.content, result.content
+    assert "two.txt:2:" in result.content
+    assert "two.txt:3:" not in result.content
+
+    # An unterminated file is unchanged: its last line is a line.
+    g = temp_cwd / "two_no_eol.txt"
+    g.write_text("a\nb")
+    result = _run(tool.execute({"pattern": "^", "path": str(g)}))
+    assert "Found 2 matches" in result.content, result.content
+
+    # A file with no lines has nothing to match — before, `^$` on a zero-byte file
+    # reported "Found 1 matches ... zero.txt:1:".
+    z = temp_cwd / "zero.txt"
+    z.write_bytes(b"")
+    result = _run(tool.execute({"pattern": "^$", "path": str(z)}))
+    assert "No matches" in result.content, result.content
+
+
 def test_definition():
     tool = GrepTool()
     d = tool.definition()

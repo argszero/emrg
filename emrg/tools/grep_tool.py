@@ -147,9 +147,23 @@ class GrepTool(ToolExecutor):
 
             # Read and search
             try:
-                lines = filepath.read_text(encoding="utf-8").split("\n")
+                text = filepath.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
+
+            # A file that ends with a newline splits into one element more than it has
+            # lines: the trailing '' is the position *after* the last terminator, not a
+            # line of the file. Left in, it is searchable — so a pattern that can match
+            # an empty line (`^$`, `^`, `.*`) reported one match past the end of every
+            # terminated file. Measured on master `bc114ab`, 2026-10-02: a two-line file
+            # `"a\nb\n"` searched for `^$` came back as "Found 1 matches ... t.txt:3:",
+            # and a *zero-byte* file came back as "Found 1 matches ... zero.txt:1:" — a
+            # match on a line of a file that has none. The same two lines drop the
+            # element in `MemoryIndex.from_text` (emrg/memory.py); this is that rule, at
+            # a reader that missed it. An unterminated non-empty file is unaffected.
+            lines = text.split("\n")
+            if lines and lines[-1] == "":
+                lines.pop()
 
             rel = str(filepath.relative_to(root.parent if root.is_file() else root))
 
