@@ -1342,16 +1342,29 @@ class EmrgServer:
                 # Phase 2 broadcast: maintain subscription on session_id change
                 # (protocol-contract §2.6.2 — the read loop is the only place
                 # last_session_id is updated; task/cancel/compact all pass here).
+                #
+                # What counts as a `cwd` is decided once, here, because this is the
+                # only place the field is *recorded*: `_touch_project` realpath()s it,
+                # and a non-string raises `TypeError` inside `_handle_client`, whose
+                # `except Exception` is the **connection's** — so one malformed field
+                # would tear the client down (measured 2026-10-02: `{"type":"ping",
+                # "cwd":5}` closed the socket with code 1000 and no frame, which at
+                # the client is indistinguishable from a network drop). A value that
+                # cannot be a path is not recorded; a message whose handler *needs*
+                # the cwd still answers for it (see `_process_message`).
+                new_cwd = data.get("cwd")
+                if not isinstance(new_cwd, str):
+                    new_cwd = ""
                 if data.get("session_id"):
                     new_sid = data["session_id"]
                     if new_sid != last_session_id:
                         if last_session_id:  # unsubscribe from previous session
                             self._session_subscribers.get(last_session_id, {}).pop(ws, None)
                         # 订阅记录该连接的 cwd——广播按 (session, cwd) 过滤（rant 17:38:56 根因 3）
-                        self._session_subscribers.setdefault(new_sid, {})[ws] = data.get("cwd") or last_cwd or ""
+                        self._session_subscribers.setdefault(new_sid, {})[ws] = new_cwd or last_cwd or ""
                         last_session_id = new_sid
-                if data.get("cwd"):
-                    last_cwd = data["cwd"]
+                if new_cwd:
+                    last_cwd = new_cwd
                     self._touch_project(last_cwd)
 
                 # ── Cancel: interrupt running tool loop ──────────
@@ -2542,7 +2555,31 @@ class EmrgServer:
     async def _process_message(
         self, msg: dict, ws
     ) -> None:
-        """Process a single message and send responses."""
+        """Process a single message and send responses.
+
+        A handler that raises is **answered**, not fatal: `_handle_client`'s
+        `except Exception` belongs to the *connection*, so before this wrapper one
+        malformed field ended the whole client with a clean close (code 1000) and no
+        frame — at the client, indistinguishable from a network drop (measured
+        2026-10-02: 9 of 18 malformed messages did exactly that — `cwd` as a number,
+        `read_file.path` as a number, `set_model.model` as a number, … — while the
+        loop's own malformed paths answer with an error frame). The status quo is
+        kept for the *log* (type + traceback, so a real bug stays visible); what
+        changed is that the client is told, and the connection survives.
+        """
+        try:
+            await self._dispatch_message(msg, ws)
+        except Exception as exc:  # noqa: BLE001 — a bad message must not end the connection
+            logger.warning(
+                "message handler failed (type=%r): %s", msg.get("type"), exc, exc_info=True
+            )
+            try:
+                await self._send(ws, {"error": f"message {msg.get('type')!r} failed: {exc}"})
+            except Exception:  # noqa: BLE001 — the connection may already be gone
+                pass
+
+    async def _dispatch_message(self, msg: dict, ws) -> None:
+        """Route one message to its handler. Raises what the handler raises."""
         msg_type = msg.get("type", "")
 
         if msg_type == "ping":
