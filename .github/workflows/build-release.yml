@@ -138,9 +138,20 @@ jobs:
           # "SecItemCopyMatching: item not found" 的 cryptic 错误）。实测（macOS 本机）：
           #   p12 含私钥 → "N identity(ies) imported."（1 个单数、多 个复数）；仅证书链 → "N certificates imported."
           # import 输出捕获后校验 identity/identities 行，缺失即明确报错，指引宿主重新导出含私钥的 p12。
+          # ⚠️ `security import` 失败（密码错、base64 根本不是 p12）时，`-e -o pipefail`
+          # 会在**赋值处**中止脚本：下面那行 `echo`（把 `2>&1` 捕获到的 security 原话
+          # 送进日志的**唯一**通道）来不及执行，而紧接着的诊断信息也永远跑不到——操作者
+          # 只看到 `Process completed with exit code 1.`，与 v0.3.8 那次 Notarize 失败的
+          # 签名逐字相同。故先单读退出码：**"导入失败"与"导入成功但没有私钥"是两件事**，
+          # 不能合成一条消息（前者说成因是 p12 本身或密码，后者才是导出方式）。
+          IMPORT_RC=0
           IMPORT_OUTPUT="$(security import /tmp/signing.p12 -k /tmp/ci.keychain -P "$MACOS_SIGNING_P12_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)"
+            -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)" || IMPORT_RC=$?
           echo "$IMPORT_OUTPUT"
+          if [ "$IMPORT_RC" -ne 0 ]; then
+            echo "::error::security import exited $IMPORT_RC - the p12 could not be imported at all, so \"it carries no signing private key\" cannot be concluded from this. security's own words are the output above. Usual causes: a wrong MACOS_SIGNING_P12_PASSWORD, or a MACOS_SIGNING_P12_BASE64 that is not a p12."
+            exit 1
+          fi
           if [[ ! "$IMPORT_OUTPUT" =~ identit(y|ies)\ imported ]]; then
             echo "::error::MACOS_SIGNING_P12_BASE64 未包含可签名私钥（security import 仅导入证书链）。请从 Keychain Access 导出含私钥的 p12（证书右键 → 导出 → 勾选\"包含私钥\"），重新 base64 后更新 GitHub Secret。import 输出：${IMPORT_OUTPUT}"
             exit 1
@@ -151,9 +162,17 @@ jobs:
           if [ -n "${MACOS_INSTALLER_P12_BASE64:-}" ]; then
             echo "==> 双 p12 方案：导入 Installer p12"
             echo "$MACOS_INSTALLER_P12_BASE64" | base64 --decode > /tmp/installer.p12
+            # Same rule as the Application p12 above, and the same reason: under
+            # `-e -o pipefail` a failed import would abort at the assignment and the
+            # `::error::` below named a state it could not be reached in.
+            INSTALLER_IMPORT_RC=0
             INSTALLER_IMPORT="$(security import /tmp/installer.p12 -k /tmp/ci.keychain -P "$MACOS_INSTALLER_P12_PASSWORD" \
-              -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)"
+              -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)" || INSTALLER_IMPORT_RC=$?
             echo "$INSTALLER_IMPORT"
+            if [ "$INSTALLER_IMPORT_RC" -ne 0 ]; then
+              echo "::error::security import exited $INSTALLER_IMPORT_RC - the Installer p12 could not be imported at all, so \"it carries no signing private key\" cannot be concluded from this. security's own words are the output above. Usual causes: a wrong MACOS_INSTALLER_P12_PASSWORD, or a MACOS_INSTALLER_P12_BASE64 that is not a p12."
+              exit 1
+            fi
             if [[ ! "$INSTALLER_IMPORT" =~ identit(y|ies)\ imported ]]; then
               echo "::error::MACOS_INSTALLER_P12_BASE64 未包含可签名私钥（security import 仅导入证书链）。请重新导出含私钥的 Installer p12 后更新 GitHub Secret。import 输出：${INSTALLER_IMPORT}"
               exit 1
