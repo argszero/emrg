@@ -135,15 +135,15 @@ class GrepTool(ToolExecutor):
         #: rendered text — see the summary below for what that cost.
         block_starts: list[int] = []
         files_searched = 0
-        stop = False
-        #: Set when the loop stopped at the result budget rather than at the end of the
-        #: tree. The count is then a **floor**, and the summary has to say so: a number
-        #: produced by a budget reads exactly like a number produced by counting, and
-        #: this is the reading an agent answers "how many places does this happen?" from.
-        search_cut = False
+        #: Set when the scan stopped because a match was found with ``max_results``
+        #: already collected. The count is then a **floor**, and the summary has to say
+        #: so: a number produced by a budget reads exactly like a number produced by
+        #: counting, and this is the reading an agent answers "how many places does this
+        #: happen?" from.
+        scan_capped = False
 
         for filepath in files:
-            if stop:
+            if scan_capped:
                 break
             files_searched += 1
 
@@ -163,22 +163,33 @@ class GrepTool(ToolExecutor):
             rel = str(filepath.relative_to(root.parent if root.is_file() else root))
 
             for i, line in enumerate(lines):
-                if stop:
+                if not regex.search(line):
+                    continue
+                # ``max_results`` is documented as "Maximum matches to return", so the
+                # cap is on **matches** — a block is 1 header + the context window, and
+                # sizing the cap by rendered *lines* made the parameter mean two things
+                # at once. Measured on master `eb20d6e3`, 2026-10-02, against a file of
+                # 300 matching lines: ``max_results=10`` returned **11** matches with no
+                # context (the old test was `len(results) > max_results * (2 + cb + ca)`,
+                # so the block that proved there was more was itself kept, and with
+                # cb=ca=0 the print budget never cut it) — a silent overshoot of a
+                # documented maximum. Asking for context changed the *unit* rather than
+                # the cap: the same 10 came back as **4** blocks at cb=ca=3. Reaching the
+                # cap with a match still in hand is what proves there is at least one
+                # more, and that is the one measured fact about the rest of the tree this
+                # scan is allowed to have.
+                if len(block_starts) >= max_results:
+                    scan_capped = True
                     break
-                if regex.search(line):
-                    ctx_start = max(0, i - context_before)
-                    ctx_end = min(len(lines), i + 1 + context_after)
 
-                    block_starts.append(len(results))
-                    results.append(f"{rel}:{i + 1}:")
-                    for ctx_i in range(ctx_start, ctx_end):
-                        marker = ">" if ctx_i == i else " "
-                        results.append(f" {marker}{lines[ctx_i]}")
+                ctx_start = max(0, i - context_before)
+                ctx_end = min(len(lines), i + 1 + context_after)
 
-                    if len(results) > max_results * (2 + context_before + context_after):
-                        stop = True
-                        search_cut = True
-                        break
+                block_starts.append(len(results))
+                results.append(f"{rel}:{i + 1}:")
+                for ctx_i in range(ctx_start, ctx_end):
+                    marker = ">" if ctx_i == i else " "
+                    results.append(f" {marker}{lines[ctx_i]}")
 
         if not results:
             return ToolResult(
@@ -201,16 +212,16 @@ class GrepTool(ToolExecutor):
         # search without context — asking for context created matches that do not
         # exist, and the inflation grows with the amount of context requested.
         matches_found = len(block_starts)
-        if search_cut:
+        if scan_capped:
             # The second half of the same claim (measured on master `6b417c4`, 2026-10-02):
-            # the loop above stops once the rendered lines pass
-            # ``max_results * (2 + context_before + context_after)`` — i.e. at about
-            # ``max_results`` matches — and the summary printed that number as if it were
-            # the number in the tree. A file holding 4000 matching lines came back as
-            # "Found 11 matches ... (searched 1 files)" with **no** indication that the
-            # search had stopped, so the floor read as a total. It is the same claim this
-            # action's count makes, one cause upstream, and the same reader: an agent
-            # answering "how many places does this happen?" from a budget.
+            # the loop above stops at ``max_results`` matches and the summary printed
+            # that number as if it were the number in the tree. A file holding 4000
+            # matching lines came back as "Found 11 matches ... (searched 1 files)" with
+            # **no** indication that the search had stopped, so the floor read as a
+            # total. It is the same claim this action's count makes, one cause upstream,
+            # and the same reader: an agent answering "how many places does this happen?"
+            # from a budget. ``matches_found`` is exactly ``max_results`` here, and the
+            # sentence says what that number is rather than letting it read as a total.
             summary = (
                 f"Found {matches_found} matches for '{pattern}' in {root}, where the "
                 f"search stopped at its result budget (max_results={max_results}) after "
@@ -246,10 +257,15 @@ class GrepTool(ToolExecutor):
                     break
                 shown += 1
                 cut = end
-            results = results[:cut]
-            results.append(
-                f"\n... [output truncated: {shown} of {matches_found} match blocks shown]"
-            )
+            # The notice is appended only when lines were really dropped. A budget
+            # smaller than one block keeps that block *whole*, so the cut lands at the
+            # last line anyway — and a notice reading `truncated: 1 of 1 match blocks
+            # shown` under an untruncated block is a cut this render never made.
+            if cut < len(results):
+                results = results[:cut]
+                results.append(
+                    f"\n... [output truncated: {shown} of {matches_found} match blocks shown]"
+                )
 
         return ToolResult(name="grep", content=summary + "\n".join(results))
 
