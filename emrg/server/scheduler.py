@@ -2440,10 +2440,11 @@ class TaskHandler:
             # silent ending (see `_end_heartbeat`).
             return self._NOT_STARTED
 
+        request_id = f"evolution-{cycle_time.isoformat()}"
         task_msg = json.dumps(
             {
                 "type": "task",
-                "id": f"evolution-{cycle_time.isoformat()}",
+                "id": request_id,
                 "session_id": self._session_id,
                 "cwd": self._source_dir,
                 "prompt": prompt,
@@ -2485,6 +2486,15 @@ class TaskHandler:
         #: this connection, so the silence that follows is not a turn that stopped
         #: reporting. Cleared by any other frame, which is the cycle's own turn
         #: speaking again. See `_QUEUED` for the measurement behind this.
+        #:
+        #: The two frames are a **session** broadcast (`daemon._broadcast`
+        #: targets every subscriber of the session, "including the originator"),
+        #: so the session's *other* requests arrive here as well: the
+        #: `request_id` they carry is what says whose, and a foreign one must
+        #: leave this flag alone — it says nothing about this cycle's turn, and
+        #: reading it as ours turns the stall watchdog off for a turn that
+        #: really did stop reporting (measured: a foreign `task_queued` between
+        #: our turn's frames and its silence relabelled a stall as `queued`).
         queued: bool = False
         queued_position: object = None
 
@@ -2563,9 +2573,10 @@ class TaskHandler:
                 # for "your request is not a turn yet, it is inside someone
                 # else's"; any other frame is this cycle's own turn reporting.
                 if resp.get("type") in ("task_queued", "steer_committed"):
-                    queued = True
-                    if resp.get("type") == "task_queued":
-                        queued_position = resp.get("position")
+                    if resp.get("request_id") == request_id:
+                        queued = True
+                        if resp.get("type") == "task_queued":
+                            queued_position = resp.get("position")
                 else:
                     queued = False
                 if resp.get("done"):
