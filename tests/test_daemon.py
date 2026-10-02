@@ -4209,3 +4209,137 @@ def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkey
         "a genuinely completed round no longer stamps the marker the #1114 alarm "
         "measures — the empty-answer guard must not have swallowed it"
     )
+
+
+# ── the two commands whose whole purpose is to destroy records ────────────────
+#
+# `clear_session` and `rewind_session` both answer `ok` for a rewrite of
+# `history.jsonl`. Until 2026-10-02 that answer was unconditional: the write's
+# `OSError` escaped the handler — so the message loop's `except Exception` ended the
+# client's connection instead of telling it anything — and with the in-place writer
+# that preceded the atomic one, the failing state was worse than either intended
+# one, because the file had already been truncated. Server logs are discarded, so
+# the frame is the only place the host could learn any of this.
+
+
+def _a_session_with_history(tmp_path, sid: str, n: int = 3) -> tuple:
+    """A server plus a session on disk holding `n` user records.
+
+    The history is written **directly**, not through `Session._write_history`: these
+    legs have to distinguish the handler's behaviour, so their fixture must not
+    depend on the writer whose contract is under test — a helper that asserted the
+    new contract would fail on the old tree and quietly take the control leg with it.
+    """
+    from emrg.session import Session
+
+    server = _make_server()
+    session = Session.create_with_id(sid, tmp_path)
+    records = [
+        {
+            "timestamp": f"2026-10-02T09:0{i}:00",
+            "type": "message",
+            "role": "user",
+            "content": f"msg-{i}",
+        }
+        for i in range(n)
+    ]
+    session._history_path.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records),
+        encoding="utf-8",
+    )
+    session._message_count = n
+    return server, session
+
+
+def _refuse_temp_files(*args, **kwargs):
+    """`tempfile.mkstemp`, replaced: every write target fails to be created."""
+    raise PermissionError(13, "Permission denied")
+
+
+def test_a_clear_that_cannot_write_the_history_answers_an_error(tmp_path, monkeypatch):
+    """`clear_session` must not say the conversation is gone while it is on disk."""
+    import emrg.server.atomic as atomic_mod
+
+    server, session = _a_session_with_history(tmp_path, "s_clear")
+    before = session._history_path.read_text(encoding="utf-8")
+
+    with monkeypatch.context() as m:
+        m.setattr(atomic_mod.tempfile, "mkstemp", _refuse_temp_files)
+        frames = _drive(
+            server,
+            {"type": "clear_session", "session_id": "s_clear", "cwd": str(tmp_path)},
+        )
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    frame = frames[0]
+    assert frame["type"] == "clear_result"
+    assert "error" in frame, f"a clear that did not happen answered ok: {frame!r}"
+    assert "nothing was cleared" in frame["error"], frame
+    assert str(session._history_path) in frame["error"], (
+        "the frame has to name the file — the daemon's own log is discarded"
+    )
+    assert session._history_path.read_text(encoding="utf-8") == before, (
+        "the history must be exactly what it was: this write is destructive, and a "
+        "half-written file drops records that exist nowhere else"
+    )
+
+
+def test_a_clear_that_can_write_still_answers_ok(tmp_path):
+    """The control: the same request says ok when the write works, and does it."""
+    server, session = _a_session_with_history(tmp_path, "s_clear_ok")
+
+    frames = _drive(
+        server,
+        {"type": "clear_session", "session_id": "s_clear_ok", "cwd": str(tmp_path)},
+    )
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["type"] == "clear_result" and frames[0]["ok"] is True, frames[0]
+    assert "[Session cleared]" in session._history_path.read_text(encoding="utf-8")
+
+
+def test_a_rewind_that_cannot_write_the_history_answers_an_error(tmp_path, monkeypatch):
+    """The rewind *is* the write: the records it drops exist nowhere else."""
+    import emrg.server.atomic as atomic_mod
+
+    server, session = _a_session_with_history(tmp_path, "s_rewind")
+    before = session._history_path.read_text(encoding="utf-8")
+
+    with monkeypatch.context() as m:
+        m.setattr(atomic_mod.tempfile, "mkstemp", _refuse_temp_files)
+        frames = _drive(
+            server,
+            {
+                "type": "rewind_session",
+                "session_id": "s_rewind",
+                "cwd": str(tmp_path),
+                "record_index": 1,
+            },
+        )
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    frame = frames[0]
+    assert frame["type"] == "rewind_result"
+    assert "error" in frame, f"a rewind that did not happen answered ok: {frame!r}"
+    assert "did not happen" in frame["error"], frame
+    assert session._history_path.read_text(encoding="utf-8") == before
+
+
+def test_a_rewind_that_can_write_still_truncates(tmp_path):
+    """The control: the rewrite really happens, and drops what it was asked to."""
+    server, session = _a_session_with_history(tmp_path, "s_rewind_ok")
+
+    frames = _drive(
+        server,
+        {
+            "type": "rewind_session",
+            "session_id": "s_rewind_ok",
+            "cwd": str(tmp_path),
+            "record_index": 1,
+        },
+    )
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["type"] == "rewind_result" and frames[0]["ok"] is True, frames[0]
+    kept = [json.loads(ln) for ln in session._history_path.read_text(encoding="utf-8").splitlines() if ln]
+    assert [r["content"] for r in kept] == ["msg-0"]

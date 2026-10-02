@@ -838,3 +838,162 @@ class TestGenerateSessionId:
         # Next call should produce a different ID
         new_sid = generate_session_id(tmp_path)
         assert new_sid != sid
+
+
+# ── the session store rewrites a whole file, so the rewrite is atomic ─────────
+#
+# Every caller of `_write_history` is *destructive*: compact, clear,
+# drop_history_records and the daemon's rewind each replace the whole conversation
+# with a shorter one. Which means the write **is** the act of dropping records, and
+# an in-place `open(path, "w")` truncates first — so a failure part-way (a full
+# disk, or the process dying mid-loop) left a partial history: the dropped records
+# gone *and* the survivors cut short, with nothing on disk saying so.
+# `_save_meta_with_title` rewrites meta.json whole on every appended record for the
+# same reason, and those two were the last whole-file rewrites in the session store
+# that were neither atomic nor reported.
+#
+# These legs pin the property by observation — what a reader sees *during* the
+# write — rather than by inspecting the implementation, because an in-place writer
+# cannot pass them.
+
+
+def _refuse_mkstemp(*args, **kwargs):
+    """A `tempfile.mkstemp` stand-in: the first syscall that needs to write fails.
+
+    Enter it with `monkeypatch.context()`, so the patch ends with the block and a
+    leg that needs the writer working again keeps the rest of its patches. This is
+    the shape a full disk (ENOSPC) or a read-only directory takes, and it is
+    cross-platform — a POSIX `chmod` does not make a file unwritable on Windows.
+    """
+    raise PermissionError(13, "Permission denied")
+
+
+def _watch_the_swap(monkeypatch):
+    """Record what the target holds at the instant it is swapped into place."""
+    import os as os_mod
+
+    seen: list[str] = []
+
+    def watched(src, dst, *args, **kwargs):
+        try:
+            seen.append(Path(dst).read_text(encoding="utf-8"))
+        except OSError:
+            seen.append("")
+        return real_replace(src, dst, *args, **kwargs)
+
+    real_replace = os_mod.replace
+    monkeypatch.setattr(os_mod, "replace", watched)
+    return seen
+
+
+class TestAHistoryRewriteIsAtomic:
+    def test_no_reader_sees_a_half_written_history(self, tmp_path, monkeypatch):
+        session = Session.create_with_id("s_atomic", tmp_path)
+        old = [
+            {"type": "message", "role": "user", "content": "one"},
+            {"type": "message", "role": "user", "content": "two"},
+            {"type": "message", "role": "user", "content": "three"},
+        ]
+        assert session._write_history(old) is True
+        old_text = session._history_path.read_text(encoding="utf-8")
+
+        seen = _watch_the_swap(monkeypatch)
+        assert session._write_history(old[:1]) is True
+
+        assert seen, "the rewrite never swapped a file into place — it is not atomic"
+        assert seen[0] == old_text, (
+            "a reader at the swap saw something other than the old, complete history: "
+            "the file was truncated in place"
+        )
+        kept = session._history_path.read_text(encoding="utf-8")
+        assert json.loads(kept.strip())["content"] == "one"
+
+    def test_a_rewrite_that_cannot_land_reports_false_and_keeps_the_old_history(
+        self, tmp_path, monkeypatch
+    ):
+        import emrg.server.atomic as atomic_mod
+
+        session = Session.create_with_id("s_atomic", tmp_path)
+        assert session._write_history([{"type": "message", "content": "kept"}]) is True
+        before = session._history_path.read_text(encoding="utf-8")
+
+        with monkeypatch.context() as m:
+            m.setattr(atomic_mod.tempfile, "mkstemp", _refuse_mkstemp)
+            assert session._write_history([{"type": "message", "content": "x"}]) is False
+        assert session._history_path.read_text(encoding="utf-8") == before, (
+            "a rewrite that could not happen changed the file"
+        )
+
+    def test_clear_answers_whether_the_history_was_written(self, tmp_path, monkeypatch):
+        """`clear` is the same destructive write, and it is a *command*."""
+        import emrg.server.atomic as atomic_mod
+
+        session = Session.create_with_id("s_atomic", tmp_path)
+        session.append_message({"type": "message", "role": "user", "content": "hi"})
+        before = session._history_path.read_text(encoding="utf-8")
+        count_before = session.message_count
+
+        with monkeypatch.context() as m:
+            m.setattr(atomic_mod.tempfile, "mkstemp", _refuse_mkstemp)
+            assert session.clear() is False
+        assert session._history_path.read_text(encoding="utf-8") == before
+        assert session.message_count == count_before, (
+            "the in-memory reading must not say 'cleared' over a file that still holds "
+            "every record — a reload would bring the conversation back whole"
+        )
+
+        # Control: with a writable target the same call says yes and does the thing.
+        assert session.clear() is True
+        assert session.message_count == 0
+        assert "[Session cleared]" in session._history_path.read_text(encoding="utf-8")
+
+
+class TestAMetaRewriteIsAtomic:
+    def test_a_meta_rewrite_that_landed_reports_true_and_keeps_the_files_mode(self, tmp_path):
+        import os as os_mod
+        import stat as stat_mod
+
+        session = Session.create_with_id("s_atomic", tmp_path)
+        assert session._save_meta() is True
+        assert json.loads(session._meta_path.read_text(encoding="utf-8"))["session_id"] == session.session_id
+
+        if os_mod.name == "nt":
+            return
+        # A host who tightened the file must not have it widened by the next rewrite:
+        # the shared writer chmods its temp file, so the mode has to come from the
+        # target rather than from this module's opinion.
+        os_mod.chmod(session._meta_path, 0o600)
+        assert session._save_meta() is True
+        assert stat_mod.S_IMODE(session._meta_path.stat().st_mode) == 0o600, (
+            "the rewrite changed the file's permissions"
+        )
+
+    def test_no_reader_sees_a_half_written_meta(self, tmp_path, monkeypatch):
+        session = Session.create_with_id("s_atomic", tmp_path)
+        old_text = session._meta_path.read_text(encoding="utf-8")
+
+        seen = _watch_the_swap(monkeypatch)
+        session._updated_at = "2026-01-02T03:04:05"
+        assert session._save_meta() is True
+
+        assert seen, "the meta rewrite never swapped a file into place — it is not atomic"
+        assert seen[0] == old_text
+
+    def test_a_meta_write_that_cannot_land_reports_false_and_does_not_raise(
+        self, tmp_path, monkeypatch
+    ):
+        """meta.json is rewritten on **every** appended record.
+
+        It used to raise out of `append_message` — reached from a message loop's
+        handler — so a session file that could not be written dropped the client
+        instead of costing it one stale field.
+        """
+        import emrg.server.atomic as atomic_mod
+
+        session = Session.create_with_id("s_atomic", tmp_path)
+        before = session._meta_path.read_text(encoding="utf-8")
+
+        with monkeypatch.context() as m:
+            m.setattr(atomic_mod.tempfile, "mkstemp", _refuse_mkstemp)
+            assert session._save_meta() is False
+        assert session._meta_path.read_text(encoding="utf-8") == before

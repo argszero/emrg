@@ -3085,7 +3085,21 @@ class EmrgServer:
                 })
                 return
             session = self._get_or_create_session(session_id, Path(cwd))
-            session.clear()
+            # A clear is a destructive rewrite of history.jsonl, so it reports whether
+            # the file was written: answering `ok` here told the host its conversation
+            # was gone while the old records were still on disk (and, before the write
+            # became atomic, could leave a half-written file behind). Server logs are
+            # discarded, so the frame is the only place this can be said.
+            if not session.clear():
+                await self._send(ws, {
+                    "type": "clear_result",
+                    "session_id": session_id,
+                    "error": (
+                        "could not write the session history — nothing was cleared "
+                        f"({session.dir_path / 'history.jsonl'})"
+                    ),
+                })
+                return
             # P1 (rant 21:55:37) Change F: clearing a session also drops its
             # pending queue (queued messages are stale after clear).
             dropped = self._session_pending.pop(session_id, [])
@@ -3286,7 +3300,21 @@ class EmrgServer:
                 return
             # Truncate: keep records up to (not including) record_index
             truncated = records[:record_index]
-            session._write_history(truncated)
+            # The rewind *is* this write — the records it drops exist nowhere else. So
+            # a write that did not land answers an error instead of `ok`, which is
+            # what this handler said before while the file still held everything (and,
+            # with the in-place writer that preceded the atomic one, could be left
+            # holding a truncated prefix of it).
+            if not session._write_history(truncated):
+                await self._send(ws, {
+                    "type": "rewind_result",
+                    "session_id": session_id,
+                    "error": (
+                        "could not write the session history — the rewind did not "
+                        f"happen ({session.dir_path / 'history.jsonl'})"
+                    ),
+                })
+                return
             # Update meta
             session._message_count = sum(
                 1 for r in truncated if r.get("type") == "message"

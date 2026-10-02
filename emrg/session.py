@@ -18,12 +18,14 @@ import json
 import logging
 import os
 import secrets
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 from emrg.memory import SessionMemoryStore
 from emrg.sandbox.policy import SANDBOX_MODES
+from emrg.server.atomic import atomic_write_bytes
 from emrg.sessions_index import remove_session_index, upsert_session_index
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,21 @@ logger = logging.getLogger(__name__)
 # ── llm.jsonl rotation ────────────────────────────────────────
 _LLM_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _LLM_LOG_BACKUP_COUNT = 2
+
+
+def _existing_mode(path: Path, default: int = 0o644) -> int:
+    """The permission bits a rewrite of `path` must keep, or `default` for a new file.
+
+    `atomic_write_bytes` chmods its temp file before the swap, so the mode it puts on
+    the target has to be named — and naming a constant instead of asking would put
+    *this* module's choice onto files another hand created: a session file the host
+    had tightened to 0o600 would be widened by the next appended message. Asking is
+    the same rule `git_utils.ensure_local_exclude` follows for the same reason.
+    """
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return default
 
 
 def generate_session_id(cwd: Path) -> str:
@@ -561,18 +578,35 @@ class Session:
         )
         return removed
 
-    def _write_history(self, records: list[dict]) -> None:
-        """Overwrite history.jsonl with new records."""
-        with open(self._history_path, "w", encoding="utf-8") as f:
-            for r in records:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    def _write_history(self, records: list[dict]) -> bool:
+        """Overwrite history.jsonl with `records`; True when the file was replaced.
+
+        **Atomic, because every caller of this method is destructive.** `compact`,
+        `clear`, `drop_history_records` and the daemon's rewind all replace the whole
+        conversation with a shorter one, so the write *is* the act of dropping records
+        — and an in-place `open(path, "w")` truncates the file first. A failure
+        part-way (a full disk, ENOSPC; or the process dying mid-loop) therefore left a
+        **partial** history: the dropped records gone *and* the survivors cut short,
+        with nothing on disk saying so. Writing a temp file and swapping it in leaves
+        the old file intact until the swap, so a write that cannot happen changes
+        nothing.
+
+        Returns whether the file was replaced. That is not decoration here either: the
+        daemon answers a client `ok` from this method, and "the log has a warning" is
+        not "the command did what it said" — server logs are discarded, so the frame
+        is the only place the host can be told.
+        """
+        text = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+        return atomic_write_bytes(
+            text, self._history_path, mode=_existing_mode(self._history_path)
+        )
 
     # ── Meta persistence ──────────────────────────────────────
 
-    def _save_meta(self) -> None:
-        self._save_meta_with_title(None)
+    def _save_meta(self) -> bool:
+        return self._save_meta_with_title(None)
 
-    def _save_meta_with_title(self, title: str | None) -> None:
+    def _save_meta_with_title(self, title: str | None) -> bool:
         meta = {
             "session_id": self.session_id,
             "created_at": self._created_at,
@@ -598,20 +632,38 @@ class Session:
                         meta["title"] = old["title"]
                 except (json.JSONDecodeError, OSError):
                     pass
-        self._meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        if not atomic_write_bytes(
+            json.dumps(meta, indent=2, ensure_ascii=False),
+            self._meta_path,
+            mode=_existing_mode(self._meta_path),
+        ):
+            # Named, because this file is rewritten on **every** appended record and a
+            # failure here used to leave no trace the host could reach: the daemon's
+            # stderr is discarded, and the client is never asked about meta.json. The
+            # index write below is skipped with it — a row pointing at a session whose
+            # meta.json is absent would be listed by nobody (`read_meta_object` answers
+            # "missing file"), so the index would advertise a session nothing can load.
+            logger.warning("session meta could not be written: %s", self._meta_path)
+            return False
         # Global cross-project index (rant 2026-08-13T16:42:22): record this
         # session so other projects can locate it. Idempotent (no-op when the
         # path is unchanged) and never raises — a failed index write must not
         # break session creation or message persistence.
         upsert_session_index(self.session_id, self._dir)
+        return True
 
     # ── Clear ──────────────────────────────────────────────────
 
-    def clear(self) -> None:
+    def clear(self) -> bool:
         """Clear the session's message history, keeping metadata intact.
 
         Writes an empty history.jsonl file, resets message_count to 0,
         and creates a system note about the reset.
+
+        Returns whether the cleared history was written. The early return is not
+        tidiness: the counters are the in-memory *reading* of the file, so resetting
+        them for a file that still holds every record would leave the session
+        reporting zero messages over a history a reload brings back whole.
         """
         now = datetime.now().isoformat()
         reset_record = {
@@ -620,11 +672,14 @@ class Session:
             "role": "system",
             "content": "[Session cleared]",
         }
-        self._write_history([reset_record])
+        if not self._write_history([reset_record]):
+            logger.warning("session not cleared — the history could not be written: %s", self._history_path)
+            return False
         self._message_count = 0
         self._updated_at = now
         self._save_meta()
         logger.info("session cleared: %s", self.session_id)
+        return True
 
     # ── Static: delete session ────────────────────────────────
 
