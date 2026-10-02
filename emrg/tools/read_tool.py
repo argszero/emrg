@@ -137,12 +137,33 @@ class ReadTool(ToolExecutor):
             )
 
         if path.is_dir():
-            # Directory listing
+            # A directory is a read result too, so it takes the same default bound
+            # the file path below applies — this branch had none, and the module's
+            # own docstring promises one ("Default limits prevent oversized tool
+            # results from consuming excessive tokens"). Measured on master
+            # `bc114ab9`, 2026-10-02: a directory of 5,000 entries came back as
+            # 5,002 lines / 85,098 characters with no notice and `error=False`,
+            # while a 5,000-**line file** was cut to 1,002 lines and said
+            # `truncated at start_line=1001 ... total 5000 lines`. The trees a
+            # caller lands in are the ordinary ones — `node_modules`, `dist`,
+            # `.git/objects` — where the unbounded listing is thousands of lines.
+            #
+            # No `start_line` exists for a listing, so the notice names the calls
+            # that can select instead: `glob` already caps its own answer and says
+            # so, and the shell pages.
             entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
+            shown = entries[:DEFAULT_MAX_LINES]
             lines: list[str] = [f"Directory listing for {path}/:", ""]
-            for e in entries:
+            for e in shown:
                 suffix = "/" if e.is_dir() else ""
                 lines.append(f"  {e.name}{suffix}")
+            if len(entries) > len(shown):
+                lines.append(
+                    f"\n... [{len(entries) - len(shown)} more entries not shown — a "
+                    f"directory listing is capped at {DEFAULT_MAX_LINES} entries like "
+                    f"a file read; use glob with a pattern to select, or the bash "
+                    f"tool to page through {path}]"
+                )
             return ToolResult(name="read", content="\n".join(lines))
 
         file_size = path.stat().st_size
