@@ -195,7 +195,24 @@ class ReadTool(ToolExecutor):
             )
 
         all_lines = text.split("\n")
+        # A file that ends with a newline splits into one element more than it has
+        # lines: "a\nb\nc\n" -> ['a', 'b', 'c', ''] — the trailing '' is the position
+        # *after* the last terminator, not a line of the file. Counting it made every
+        # terminated file (most of them) read as one line longer than it is, render a
+        # numbered line holding nothing, and announce a truncation whose continuation
+        # is empty: a 1000-line file read with no arguments reported
+        # "truncated at start_line=1001 ... total 1001 lines", where line 1001 was ''.
+        # `MemoryIndex.from_text` (emrg/memory.py) already drops this element with the
+        # same two lines and the same reasoning; this is that rule, at the readers that
+        # missed it. An unterminated non-empty file has no such element and is
+        # unaffected; a zero-byte file has no lines at all, and this is the only
+        # spelling of the condition that says so.
+        if all_lines and all_lines[-1] == "":
+            all_lines.pop()
         total_lines = len(all_lines)
+
+        if total_lines == 0:
+            return ToolResult(name="read", content=f"(empty file: {path})")
 
         # Compute effective limit — two tiers:
         #   Default (no limit specified): capped at DEFAULT_MAX_LINES to
