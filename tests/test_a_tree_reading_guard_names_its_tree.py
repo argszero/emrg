@@ -187,6 +187,13 @@ NOT_TREE_READERS = {
     "check-merge-sequence.py": "requires PR numbers; names the base it folds onto",
     "check-merge-tree-health.py": "requires PR numbers; prints the repo it works in",
     "check-merge-landing-diff.py": "requires PR numbers; names the base it diffs against",
+    "check-notary-credentials.py": (
+        "reads the three notarization variables from the environment and then asks Apple's "
+        "notary service (`xcrun notarytool history`) whether they are accepted - the subject "
+        "is a credential and the answer comes from the network, so no local tree would "
+        "answer anything. It is a host-side preflight: the rule this file holds is about a "
+        "guard naming the tree it reports on, and this one reports on a credential"
+    ),
     "check-release-published.py": (
         "takes a required release tag and reads that tag's release and its `build-release.yml` "
         "run from the GitHub API - the subject is the remote release queue, so no local tree "
