@@ -2,21 +2,25 @@
 
 Measured defect (2026-10-02, this tree, the real daemon over a real WebSocket):
 
-    9 of 18 malformed messages ended the client connection with **no frame at all**.
-    The close code was 1000 (normal), so at the client a daemon-side `TypeError` is
-    indistinguishable from an ordinary network drop — and the daemon's own log line
-    says `client error`, blaming the side that did nothing wrong.
+    a message whose JSON is valid and whose type is known, carrying one field of the
+    wrong **type**, ended the client connection with **no frame at all** — close code
+    1000 (normal), so at the client a daemon-side `TypeError` is indistinguishable from
+    an ordinary network drop, while the daemon's own log line said `client error`,
+    blaming the side that did nothing wrong.
 
-Two homes produced all nine:
+The surface is wide, and measuring it is how it was found: every handler's field names
+were parsed out of `daemon.py` and each was sent with a wrong-typed value — **83 of 138
+probes tore the connection down** before the fix. Two homes produced all of them:
 
-* the **read loop**'s `cwd` bookkeeping — `if data.get("cwd"): … self._touch_project(cwd)`
-  with `os.path.realpath(cwd)` inside, so `{"type": "ping", "cwd": 5}` raised before
-  the dispatcher was even reached. That `except Exception` belongs to
-  `_handle_client` — the *connection's*, not the message's — so the whole client went
-  away over one field;
+* the **read loop**'s bookkeeping, which *records* two fields and validates neither —
+  `cwd` reaches `os.path.realpath` and `session_id` becomes a **dict key** in
+  `_session_subscribers`, so `{"cwd": 5}` and `{"session_id": [1]}` are two shapes of
+  one bug: that `except Exception` belongs to `_handle_client` — the *connection's*,
+  not the message's. (Guarding only `cwd` left 12 of the 138 still dying, every one of
+  them a list `session_id`, which is why this file pins both fields.)
 * the **dispatcher** — a handler that indexes or path-ifies an unvalidated field
   (`read_file.path`, `list_files.path`, `set_model.model`, `rant.project`,
-  `trigger_task.name`, `compact.session_id`, `resume_session.cwd` …).
+  `trigger_task.name`, `compact.session_id`, …).
 
 Both are fixed, and this file measures both directions for each: the malformed message
 is answered **and** the well-formed ones still behave exactly as before.
@@ -46,8 +50,12 @@ from tests.test_ws_e2e import _boot_server
 MALFORMED = [
     ("cwd as a number, on a plain message", {"type": "ping", "cwd": 5}),
     ("cwd as a list, on a plain message", {"type": "ping", "cwd": ["/tmp"]}),
+    ("session_id as a list, on a plain message", {"type": "ping", "session_id": ["s"]}),
+    ("session_id as a dict, on a plain message", {"type": "ping", "session_id": {"s": 1}}),
+    ("session_id as a list, with a cwd", {"type": "ping", "session_id": [1], "cwd": "/tmp"}),
     ("cwd as a number, session scope", {"type": "resume_session", "session_id": "s", "cwd": 5}),
     ("cwd as a number, rename", {"type": "rename_session", "session_id": "s", "cwd": 5, "title": "t"}),
+    ("session_id as a list, rename", {"type": "rename_session", "session_id": [1], "cwd": "/tmp"}),
     ("read_file.path as a number", {"type": "read_file", "path": 5}),
     ("read_file.path as a list", {"type": "read_file", "path": [5]}),
     ("list_files.path as a number", {"type": "list_files", "path": 5}),
@@ -169,6 +177,48 @@ def test_a_non_string_cwd_is_ignored_rather_than_recorded() -> None:
                     assert "s2" not in registry.read_text(encoding="utf-8"), (
                         "a non-string cwd must not be recorded anywhere"
                     )
+                finally:
+                    await ws.close()
+            finally:
+                await cleanup()
+
+    asyncio.run(_test())
+
+
+def test_a_bad_session_id_is_not_recorded_as_a_subscription() -> None:
+    """The sibling of the `cwd` rule, in the same block: a session id is a string.
+
+    `session_id` does not reach `realpath` — it becomes a **dict key** in
+    `_session_subscribers`, so the shape that kills the connection is the one an
+    `os.path` call rejects for a different reason: an unhashable value. Measured
+    2026-10-02: with `cwd` guarded but `session_id` not, `{"type":"ping",
+    "session_id":[1]}` still closed the socket (12 of 138 probes remained), which is
+    why this test pins *this* field and not only its neighbour.
+
+    Two directions again: a good id is recorded, a bad one is not — and, crucially,
+    the connection is still there afterwards.
+    """
+
+    async def _test() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            server, _, cleanup = await _boot_server(root)
+            try:
+                ws = await connect_to_server()
+                try:
+                    await _send(ws, {"type": "ping", "session_id": "good", "cwd": str(root)})
+                    assert "good" in server._session_subscribers, (
+                        "a well-formed session_id must still be recorded — the fix must "
+                        f"not have disabled the subscription; got {list(server._session_subscribers)}"
+                    )
+
+                    await _send(ws, {"type": "ping", "session_id": ["bad"]})
+                    for key in server._session_subscribers:
+                        assert isinstance(key, str), (
+                            f"a non-string session_id became a subscription key: {key!r}"
+                        )
+                    pong = await _send(ws, {"type": "ping"})
+                    assert pong.get("type") == "pong", pong
                 finally:
                     await ws.close()
             finally:

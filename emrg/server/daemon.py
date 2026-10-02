@@ -1343,20 +1343,26 @@ class EmrgServer:
                 # (protocol-contract §2.6.2 — the read loop is the only place
                 # last_session_id is updated; task/cancel/compact all pass here).
                 #
-                # What counts as a `cwd` is decided once, here, because this is the
-                # only place the field is *recorded*: `_touch_project` realpath()s it,
-                # and a non-string raises `TypeError` inside `_handle_client`, whose
-                # `except Exception` is the **connection's** — so one malformed field
-                # would tear the client down (measured 2026-10-02: `{"type":"ping",
-                # "cwd":5}` closed the socket with code 1000 and no frame, which at
-                # the client is indistinguishable from a network drop). A value that
-                # cannot be a path is not recorded; a message whose handler *needs*
-                # the cwd still answers for it (see `_process_message`).
+                # This block *records* two fields, so this is where each is allowed to
+                # be decided — and both decisions are the same one: **a non-empty
+                # string, or nothing**. Everything below it (the subscription dict, the
+                # projects registry) assumes a usable value, and it is `_handle_client`
+                # that owns the `except Exception` — the **connection's** — so one
+                # malformed field would tear the client down (measured 2026-10-02 over a
+                # real WebSocket: 83 of 138 type-wrong probes closed the socket with code
+                # 1000 and no frame, which at the client is indistinguishable from a
+                # network drop). `cwd` reaches `os.path.realpath` and `session_id`
+                # becomes a dict key, so `{"cwd": 5}` and `{"session_id": [1]}` are the
+                # two shapes of that one bug; a value that cannot be used is simply not
+                # recorded, and a message whose handler *needs* the field still answers
+                # for it (see `_process_message`).
                 new_cwd = data.get("cwd")
                 if not isinstance(new_cwd, str):
                     new_cwd = ""
-                if data.get("session_id"):
-                    new_sid = data["session_id"]
+                new_sid = data.get("session_id")
+                if not isinstance(new_sid, str):
+                    new_sid = ""
+                if new_sid:
                     if new_sid != last_session_id:
                         if last_session_id:  # unsubscribe from previous session
                             self._session_subscribers.get(last_session_id, {}).pop(ws, None)
