@@ -60,7 +60,17 @@ export interface QueuedData {
   request_ids?: string[];
 }
 export interface ErrorData {
-  message?: string;
+  /** The wire's own key. It was declared `message` here — a spelling **no producer
+   *  uses** (`daemon_client.js` forwards the daemon's frame, which carries `error`),
+   *  so the type checked, the unit test that fed `message` passed, and every real
+   *  error rendered as "Something went wrong: " with nothing after it (measured
+   *  2026-10-02). A data type mirrors the wire it describes, or it describes
+   *  something that does not exist. */
+  error?: string;
+  /** Present when the frame is about one turn (the tool loop's failure
+   *  broadcasts); absent when it is the daemon's direct reply to a command this
+   *  connection sent. `case "error"` reads it to tell whose error this is. */
+  request_id?: string;
 }
 
 /** upgrade 事件载荷（main.js 心跳检测 installed_version ≠ current_version → 专用事件） */
@@ -491,10 +501,23 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
           transcript.addSystemMessage(tt("app.queuedCancelled"), sid);
         }
         break;
-      case "error":
-        transcript.addSystemMessage(tt("app.error", { msg: (data as ErrorData).message ?? "" }), sid);
-        releaseOwnStream(sid, null, true);
+      case "error": {
+        const err = data as ErrorData;
+        transcript.addSystemMessage(tt("app.error", { msg: err.error ?? "" }), sid);
+        // Whose error is this? The daemon's tool loop broadcasts its four failure
+        // frames to **every** subscriber of the session, each carrying the turn's
+        // `request_id`; the daemon's direct reply to a command this connection
+        // sent carries neither a name nor a type (the client's pairing already
+        // narrowed that shape — see `_resolvePending`). Only the second kind is a
+        // statement that *this* connection's turn is over, so only it force-releases
+        // the lock; a named one releases only if it names this sid's own turn
+        // (whose `done`/`turn_end` settles it anyway, daemon being the state source).
+        // Before: any error force-released, so a peer's failed turn (or a peer's
+        // failed `compact`) stopped this client's running stream in the UI while it
+        // was still receiving deltas (measured 2026-10-02).
+        releaseOwnStream(sid, err.request_id ?? null, err.request_id === undefined);
         break;
+      }
       case "pong": {
         const pong = data as PongData;
         store.update((s) => ({

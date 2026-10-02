@@ -231,11 +231,47 @@ describe("createDaemonBridge", () => {
   });
 
   it("error → 错误系统消息 + 释放锁", () => {
+    // 载荷形状是**线上真实的那个**：daemon 的错误帧把文本放在 `error` 键
+    // （`daemon_client.js` 的 `_emit("error", frame)` 原样转发）。这条测试曾经喂
+    // `{message: "boom"}` —— 一个**没有任何产出者**的拼写，于是它一直绿着，而真实
+    // 帧在界面上渲染成「出了点问题：」（后面什么都没有）。见下面两条腿。
     const { emit, bridge, transcript } = setup();
     bridge.handleFrame({ type: "message_delta", data: { chunks: [{ request_id: "r1", content: "x" }] }, sid: "s1" });
     bridge.handleFrame({ type: "done", data: { request_id: "r1" }, sid: "s1" });
-    emit({ type: "error", data: { message: "boom" }, sid: "s1" });
+    emit({ type: "error", data: { error: "boom" }, sid: "s1" });
     expect(entriesText(transcript, "s1")).toContain("s:err:boom");
+  });
+
+  it("error 帧的文本真的到达界面（线上键是 `error`，不是 `message`）（2026-10-02）", () => {
+    // 一个键名两个拼写：产出者（daemon → daemon_client.js）写 `error`，读者
+    // （本文件的 `case "error"`）读 `message`。`ErrorData` 声明了 `message`，于是
+    // 类型检查通过、单测（喂 message）也通过 —— 只有真实链路是空的。
+    const { emit, transcript } = setup();
+    emit({ type: "error", data: { error: "Turn ended without reporting: Boom" }, sid: "s1" });
+    const rows = entriesText(transcript, "s1");
+    expect(rows).toContain("s:err:Turn ended without reporting: Boom");
+    expect(rows).not.toContain("s:err:"); // 空文本那一格：缺陷的形状
+  });
+
+  it("点名了某一轮的 error 不是本连接的终局——不释放本端的锁（2026-10-02）", () => {
+    // 工具循环的四处失败广播是 `{request_id, error}`，广播给会话**每个**订阅者。
+    // 它说的是**那一轮**结束了，不是本连接这一轮。而 `case "error"` 原来无条件
+    // `releaseOwnStream(sid, null, true)`：别人的 turn 失败会把本端还在跑的流解锁
+    // （界面停止按钮消失、typing 收掉），而本端那一轮其实还在流式输出。
+    const { emit, bridge } = setup();
+    bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, s1: true } }));
+    emit({ type: "error", data: { error: "Turn ended without reporting: Boom", request_id: "turn-1" }, sid: "s1" });
+    expect(bridge.store.get().busyBySid["s1"]).toBe(true);
+  });
+
+  it("没有点名任何一轮的 error 仍然释放锁（控制腿：daemon 对本连接命令的直接答复）", () => {
+    // 与上一条同一条规则的另一半：`{"error": "unknown message type"}` 这种无名无 type
+    // 的帧只可能是 daemon 对本连接某条命令的直接答复（客户端侧的配对逻辑因此已经把它
+    // 收窄到「既无 type 也无 request_id」）。两棵树都绿——它的价值由变异臂证明。
+    const { emit, bridge } = setup();
+    bridge.store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, s1: true } }));
+    emit({ type: "error", data: { error: "unknown message type" }, sid: "s1" });
+    expect(bridge.store.get().busyBySid["s1"]).toBe(false);
   });
 
   it("disconnected → 按 sid 标记 + 清锁 + 清队列；无 sid → 全局 connected=false", () => {
