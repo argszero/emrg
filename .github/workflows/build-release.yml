@@ -361,21 +361,38 @@ jobs:
       # （提交处理完成 ≠ 通过），若不解析 status 字段会继续 Staple → 报 cryptic 的
       # "Record not found" Error 65，掩盖真实 rejection 原因。必须显式解析并抓 log。
       # --timeout 20m：设计文档 §4.4 明确要求（默认 10m，Apple 公证排队高峰可能超时）
+      # ⚠️ 捕获与判错必须分开（issue #1811，实测 run 36956685533 / tag v0.3.8 的 macOS job）：
+      # runner 的 bash 带 -e，而 `VAR="$(cmd)"` 的状态就是 cmd 的状态 —— submit 自身非零
+      # 退出时脚本在下一行 `echo "$NOTARY_OUT"` **之前**中止，于是本步存在的全部意义
+      # （把 Apple 的答复打出来）恰好在它有内容可打的那一刻不发生：3 秒即失败，日志里
+      # 只有 "Process completed with exit code 1"，分辨不出「提交被拒」与「notarytool
+      # 根本不在」。`|| NOTARY_RC=$?` 让赋值不再是可被 -e 中止的语句，先无条件 echo，
+      # 再按 rc 显式判错 —— 诊断不再与该命令的退出码互斥，且仍然失败（不是放宽）。
       - name: Notarize pkg (macOS only)
         if: runner.os == 'macOS' && env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
         shell: bash
         run: |
           PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
+          NOTARY_RC=0
           NOTARY_OUT="$(xcrun notarytool submit "$PKG" \
             --apple-id "$APPLE_ID" \
             --password "$MACOS_NOTARY_APP_PASSWORD" \
             --team-id "$MACOS_NOTARY_TEAM_ID" \
-            --wait --timeout 20m --output-format json 2>&1)"
+            --wait --timeout 20m --output-format json 2>&1)" || NOTARY_RC=$?
           echo "$NOTARY_OUT"
+          if [ "$NOTARY_RC" -ne 0 ]; then
+            echo "::error::notarytool submit 自身失败（rc=$NOTARY_RC，未产生任何 status）——Apple 的答复就是上面的原始输出。这不是公证判定（判定要几分钟并以 status=Invalid 结束）；数秒内失败通常是凭据、参数或 Apple 侧的问题。"
+            exit 1
+          fi
           # 解析提交 ID 与状态（--output-format json 输出 {"id","message","status"}）
-          SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
-          STATUS="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)"
+          # ⚠️ 一步之内的同一类：解析器失败时它的非零状态同样会被 -e 变成中止，于是下面
+          # 那条专为「输出不像 JSON」写的 ::error::（**带上原始输出**）永远不可达 —— 实测
+          # （本分支新增测试 test_output_without_a_status_still_refuses_and_prints_the_raw_text，
+          # 把提交桩设为 rc=0 且输出非 JSON）：本步退出码非零、却只打印了原始输出，
+          # 「解析失败」这句从未出现。空值才是这里要读的信号，故显式吞掉解析器的退出码。
+          SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)" || true
+          STATUS="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)" || true
           if [ -z "$SUB_ID" ] || [ -z "$STATUS" ]; then
             echo "::error::notarytool 输出解析失败（无法获取提交 ID/状态），请手动运行 notarytool submit 排查。原始输出：$NOTARY_OUT"
             exit 1
