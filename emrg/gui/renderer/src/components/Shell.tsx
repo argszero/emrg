@@ -620,18 +620,37 @@ export function Shell() {
   // daemon client put in the message — for a spawn failure that is the tail of
   // `emrgd.log`, which is the only place a host can read why the daemon will not
   // come back.
+  //
+  // Two states, one surface: the *failure* the main process named, and the
+  // **first-launch unpack** (`main.js` sends `installing: true` around the 250MB
+  // AppImage copy — R93 added the frame precisely so the window would not look
+  // frozen, and no renderer ever read it). The failure wins when both are set:
+  // it is the one the host has to act on, while the unpack finishes on its own.
   const failure = appState.connectionFailure;
-  const connectionNotice = !failure
-    ? ""
-    : failure.kind === "daemon-stopped"
-      ? t("app.daemonStopped", { msg: failure.detail })
-      : t("app.authFailed");
+  const notice: { kind: "failure" | "installing"; text: string } | null = failure
+    ? {
+        kind: "failure",
+        text:
+          failure.kind === "daemon-stopped"
+            ? t("app.daemonStopped", { msg: failure.detail })
+            : t("app.authFailed"),
+      }
+    : appState.installing
+      ? { kind: "installing", text: t("app.installing") }
+      : null;
 
   return (
     <div className="react-shell" data-testid="react-shell">
-      {connectionNotice ? (
-        <div id="connection-banner" role="alert" data-testid="connection-banner">
-          <span id="connection-banner-msg">{connectionNotice}</span>
+      {notice ? (
+        <div
+          id="connection-banner"
+          // An outage is an alert; an unpack is a polite status the host does not
+          // have to act on.
+          role={notice.kind === "failure" ? "alert" : "status"}
+          data-testid="connection-banner"
+          data-kind={notice.kind}
+        >
+          <span id="connection-banner-msg">{notice.text}</span>
         </div>
       ) : null}
       {showUpgradeBanner ? (

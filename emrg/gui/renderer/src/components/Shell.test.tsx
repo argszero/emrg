@@ -362,6 +362,58 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByTestId("conn-banner")).toBeInTheDocument());
   });
 
+  it("会话连上后断线横幅退场（不能挂在已经连上的会话上）", async () => {
+    // 上一条测试的反面：横幅起来之后必须有东西让它下去。写标记的那支
+    // （`disconnected`）从来没有对应的清标记调用，于是横幅一直挂着。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    m.emit({ type: "disconnected", sid: "s1", data: {} });
+    await waitFor(() => expect(screen.getByTestId("conn-banner")).toBeInTheDocument());
+
+    m.emit({ type: "status", data: { connected: true } });
+    await waitFor(() => expect(screen.queryByTestId("conn-banner")).not.toBeInTheDocument());
+  });
+
+  it("首次解压时说的是「正在安装」，不是只有灰点 (2026-10-02)", async () => {
+    // R93 给 main.js 加了这帧，注释写着「250MB 复制期间显示"正在安装 EMRG..."提示
+    // 防误判卡死」——而渲染层从来没有读者：连 vanilla 都没有（`showBanner` 只被
+    // `COPY.disconnected` 调过）。宿主看到的是一条「Disconnected」的灰点。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("connection-banner")).not.toBeInTheDocument();
+
+    m.emit({ type: "status", data: { connected: false, installing: true } });
+    const banner = await screen.findByTestId("connection-banner");
+    expect(banner.textContent).toContain("Installing EMRG");
+    // 中性状态不是告警：不是故障就不该按 alert 播报。
+    expect(banner.getAttribute("data-kind")).toBe("installing");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    m.emit({ type: "status", data: { connected: false, installing: false } });
+    await waitFor(() => expect(screen.queryByTestId("connection-banner")).not.toBeInTheDocument());
+  });
+
+  it("安装中途失败时横幅说的是失败，不是「正在安装」", async () => {
+    // 两个状态共用一条横幅，所以要有先后：失败是宿主必须动手的那条，解压自己会
+    // 走完。这里的顺序是「先出提示、后出失败」，正是启动时可能发生的交错。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit({ type: "status", data: { connected: false, installing: true } });
+    await screen.findByTestId("connection-banner");
+
+    m.emit({ type: "status", data: { connected: false, daemon_stopped: true, error: "boom" } });
+    const banner = await screen.findByTestId("connection-banner");
+    expect(banner.getAttribute("data-kind")).toBe("failure");
+    expect(banner.textContent).toContain("auto-retry stopped");
+    expect(banner.textContent).toContain("boom");
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
   it("composer send with no active session shows the need-session hint", async () => {
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());

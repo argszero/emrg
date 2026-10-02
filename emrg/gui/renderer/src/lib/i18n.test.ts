@@ -79,11 +79,12 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-09-30 由 `tool.detailName/-Input/-Output`（工具详情三段，rant 2026-09-30T09:17:54 → #1787）从 403 改为 406。
   // 2026-09-30 由 `composer.imageReason.*`（图片拒绝必须可见，rant 2026-09-30T09:35:04）从 403 改为 408。
   // 两个改动各加各的 key，互不重叠：合并后是 403 + 3 + 5 = 411（既不是 406 也不是 408）。
-  it("zh/en 各 411 个 key 且完全对齐", () => {
+  // 2026-10-02 由 `app.installing`（首次解压 AppImage 的提示，R93 加了 status 帧却没有人读）411 → 412。
+  it("zh/en 各 412 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(411);
-    expect(enKeys.length).toBe(411);
+    expect(zhKeys.length).toBe(412);
+    expect(enKeys.length).toBe(412);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

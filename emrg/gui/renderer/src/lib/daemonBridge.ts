@@ -380,6 +380,43 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     store.update((s) => ({ ...s, disconnectedBySid: { ...s.disconnectedBySid, [k]: v } }));
   }
 
+  /**
+   * One session's connection is back, so its banner has to go.
+   *
+   * A disconnection ends when something travels over the connection again, and
+   * the GUI's own re-open is that something: `conn-manager.js` `open()` sends
+   * `resume_session` and its `resume_result` arrives on the freshly established
+   * connection (forwarded as `command_result`). Without this the mark was
+   * written and never read back — `sidDisconnected(sid, true)` sat in the
+   * `disconnected` case and no call ever passed `false`, so the session banner
+   * (`app.sessionDisconnected`) stayed up for the rest of the run and told the
+   * host that a live session was about to reconnect.
+   */
+  function sessionConnectionBack(sid: string | null): void {
+    const k = KEY(sid);
+    // A session that was never marked gets no entry: this writes a state, not an
+    // outage, and inventing a row per `resume_result` would turn the map into a
+    // list of sessions instead of a list of disconnections.
+    if (!store.get().disconnectedBySid[k]) return;
+    sidDisconnected(sid, false);
+  }
+
+  /**
+   * Every session is connected again — the daemon-level connection is up and the
+   * GUI has re-opened and re-subscribed everything it had open (`main.js`
+   * `onRecovered`, which sends `status { connected: true }` last).
+   *
+   * The vanilla renderer's rule, kept whole (`js/app.js:1608`, "重连成功 → 清全部
+   * 会话断线标记"): it is one connection that carried them all, so they end
+   * together. Pure, so the caller can fold it into the same store update the
+   * status frame already produces.
+   */
+  function everySessionConnected(map: Record<string, boolean>): Record<string, boolean> {
+    const next: Record<string, boolean> = {};
+    for (const k of Object.keys(map)) next[k] = false;
+    return next;
+  }
+
   /** done/cancelled 释放该事件所属会话的锁（vanilla：仅当 request 匹配或 timeout） */
   function releaseOwnStream(sid: string | null, requestId?: string | null, force = false): void {
     const rid = inflightRidBySid.get(KEY(sid)) ?? null;
@@ -437,6 +474,9 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         // 这正是 TUI 那一半已经做过的事（`emrg/client/app.py`，stage「requirement 3 TUI half」）。
         const resume = data as ResumeResultData;
         if (resume?.type !== "resume_result") break;
+        // The frame arrived on this session's connection, which means that
+        // connection exists — the banner it left behind has to go with it.
+        sessionConnectionBack(resume.session_id ?? sid);
         const k = KEY(resume.session_id ?? sid);
         const startedMs = resumeTurnInstantMs(resume.meta);
         const { [k]: _drop, ...rest } = store.get().turnStartBySid;
@@ -580,6 +620,12 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
             reconnecting: st.reconnecting ?? s.reconnecting,
             installing: st.installing ?? s.installing,
             connectionFailure: failure,
+            // A connection that came back is what ends every session's outage:
+            // `connected: true` is sent by `main.js` after the GUI re-opened and
+            // re-subscribed what it had open, so every mark it set is about the
+            // connection that now exists again.
+            disconnectedBySid:
+              st.connected === true ? everySessionConnected(s.disconnectedBySid) : s.disconnectedBySid,
             serverId: st.server_id || s.serverId,
             model: st.model || s.model,
             vision: typeof st.vision === "boolean" ? st.vision : s.vision,

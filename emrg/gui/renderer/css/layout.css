@@ -549,6 +549,12 @@
   max-height: 40vh;
   overflow: auto;
 }
+/* 首次解压（`installing: true`）不是故障：同一条横幅，换成信息色 —— 红框会说
+   「出事了」，而这一刻只是 250MB 在复制，宿主唯一要做的就是等。 */
+#connection-banner[data-kind="installing"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 
 /* ── 侧边栏折叠（⌘B / 窄屏） ────────────── */
 body.sidebar-collapsed #sidebar {

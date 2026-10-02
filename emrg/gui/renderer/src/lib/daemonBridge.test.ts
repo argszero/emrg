@@ -168,6 +168,49 @@ describe("createDaemonBridge", () => {
     expect(bridge.store.get().connectionFailure).toEqual({ kind: "daemon-stopped", detail: "boom" });
   });
 
+  it("连接回来时会话的断线标记退场（vanilla app.js:1608 清全部）", () => {
+    // 标记只写不读：`disconnected` 分支调 `sidDisconnected(sid, true)`，而**没有
+    // 任何调用传过 false** ⇒ Shell 的会话横幅（`app.sessionDisconnected`）在整个
+    // 进程生命周期里再也下不来，一个已经连上的会话一直说「正在自动重连」。vanilla
+    // 在 daemon 级 `status {connected: true}` 上清掉全部会话标记。
+    const { emit, bridge } = setup();
+    emit({ type: "disconnected", sid: "s1", data: {} });
+    emit({ type: "disconnected", sid: "s2", data: {} });
+    expect(bridge.store.get().disconnectedBySid).toMatchObject({ s1: true, s2: true });
+
+    // 反向控制腿：不是连接回来的帧（重连退避每一步都发）不能清 —— 否则宿主在
+    // 第一次退避时就看不到「正在重连」了。
+    emit({ type: "status", data: { connected: false, reconnecting: true }, sid: null });
+    expect(bridge.store.get().disconnectedBySid.s1).toBe(true);
+
+    // 而**完全没提连接**的帧更不能清：`connected` 键不在 = 这帧对连接什么都没说，
+    // 与 `connectionFailure` 那条是同一句话（没点名就不改口）。这里必须显式问
+    // `=== true`，不能写成「不是 false 就算连上了」。
+    emit({ type: "status", data: { installing: true }, sid: null });
+    expect(bridge.store.get().disconnectedBySid.s1).toBe(true);
+
+    emit({ type: "status", data: { connected: true }, sid: null });
+    expect(bridge.store.get().disconnectedBySid.s1).toBe(false);
+    expect(bridge.store.get().disconnectedBySid.s2).toBe(false);
+  });
+
+  it("单个会话的连接回来只清它自己", () => {
+    // daemon 级 `connected: true` 覆盖不了「daemon 好好的、只有这个会话的 ws 断了」
+    // ——那条路走 `conn-manager.js` 的 `_scheduleSingleRetry` → `open()` →
+    // `resume_session`，其 `resume_result` 就是「这条连接又在了」的读数。
+    const { emit, bridge } = setup();
+    emit({ type: "disconnected", sid: "s1", data: {} });
+    emit({ type: "disconnected", sid: "s2", data: {} });
+    emit({ type: "command_result", sid: "s1", data: { type: "resume_result", session_id: "s1", meta: {} } });
+    expect(bridge.store.get().disconnectedBySid.s1).toBe(false);
+    expect(bridge.store.get().disconnectedBySid.s2).toBe(true);
+
+    // 没断过的会话不会因为一次 resume 被写进表：这张表记的是「断线」，不是「会话」。
+    expect("s3" in bridge.store.get().disconnectedBySid).toBe(false);
+    emit({ type: "command_result", sid: "s3", data: { type: "resume_result", session_id: "s3", meta: {} } });
+    expect("s3" in bridge.store.get().disconnectedBySid).toBe(false);
+  });
+
   it("生效的图片能力来自 daemon 的 pong / status / config_applied，且缺字段时不改口", () => {
     // Rant 2026-09-17T16:53:02：界面要显示 daemon 实际依据的 vision，而不是
     // config.toml 的声明值。三个报告点：pong（连接/心跳）、status（main 的
