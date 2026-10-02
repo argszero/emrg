@@ -405,8 +405,26 @@ jobs:
             echo "::error::xcrun notarytool submit exited $NOTARY_RC - the SUBMISSION was refused, so this is not a notarization verdict. Apple's own reply is the output above. Usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement that needs accepting. A verdict failure looks different: it takes minutes, exits 0, and reports status=Invalid."
           fi
           # 解析提交 ID 与状态（--output-format json 输出 {"id","message","status"}）
-          SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
-          STATUS="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)"
+          # ⚠️ The same rule as the two imports above, and here the failure is *silent*:
+          # `notarytool submit` can exit 0 while its output is not one JSON document —
+          # `--wait` progress lines are mixed into stdout by the `2>&1` above, so
+          # `json.load` raises. Under `-e -o pipefail` that aborts **at this assignment**,
+          # before the `if [ -z "$SUB_ID" ]` below, which was written for exactly this
+          # state: the operator saw the raw output plus `exit code 1` and no cause.
+          # Measured 2026-10-02 by running this body under the runner's flags with a stub
+          # that exits 0 after printing a progress line then the JSON.
+          #
+          # The status is read apart from the value because the two are different
+          # failures: "python3 could not parse it" says notarytool emitted something
+          # unexpected, while "it parsed and gave nothing" says Apple's reply lacked the
+          # field. (§112/§114 — a failed read is not a reading of an empty value.)
+          PARSE_RC=0
+          SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)" || PARSE_RC=$?
+          STATUS="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)" || PARSE_RC=$?
+          if [ "$PARSE_RC" -ne 0 ]; then
+            echo "::error::notarytool's output could not be parsed as JSON (the parser exited $PARSE_RC), so no submission id or status can be read from it - this is not a notarization verdict. Raw output above. A verdict failure looks different: notarytool exits 0 and reports status=Invalid."
+            exit 1
+          fi
           if [ -z "$SUB_ID" ] || [ -z "$STATUS" ]; then
             echo "::error::notarytool 输出解析失败（无法获取提交 ID/状态），请手动运行 notarytool submit 排查。原始输出：$NOTARY_OUT"
             exit 1
