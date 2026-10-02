@@ -1024,7 +1024,12 @@ def _earliest_run_created_at(head: str) -> str:
                 '{t: ([.workflow_runs[].created_at] | sort | .[0] // "")}',
             ]
         )
-        assert isinstance(runs, dict)
+        if not isinstance(runs, dict):
+            raise RuntimeError(
+                f"the runs API answered with {type(runs).__name__}, not the projected "
+                "object (`{t: ([.workflow_runs[].created_at] | sort | .[0] // "")}`), so "
+                "no push time could be read from it"
+            )
         created = runs.get("t")
         if isinstance(created, str) and created:
             if attempt:
@@ -1052,7 +1057,11 @@ def _head_push_time(head: str) -> tuple[str, bool]:
         return created, True
 
     commit = _gh_json(["api", f"repos/{REPO}/commits/{head}", "--jq", "{t: .commit.committer.date}"])
-    assert isinstance(commit, dict)
+    if not isinstance(commit, dict):
+        raise RuntimeError(
+            f"the commits API answered with {type(commit).__name__}, not the projected "
+            "object (`{t: .commit.committer.date}`), so no push time could be read from it"
+        )
     committer_date = commit.get("t")
     if not isinstance(committer_date, str) or not committer_date:
         raise RuntimeError(f"cannot determine a push time for head {head[:8]}")
@@ -1091,7 +1100,12 @@ def _pr_view(number: int) -> dict:
             "number,title,headRefOid,mergeable,mergeStateStatus",
         ]
     )
-    assert isinstance(view, dict)
+    if not isinstance(view, dict):
+        raise RuntimeError(
+            f"`gh pr view {number} --json number,title,headRefOid,mergeable,"
+            f"mergeStateStatus` answered with {type(view).__name__}, not the object those "
+            "fields arrive in"
+        )
     return view
 
 
@@ -1178,7 +1192,12 @@ def check_pr(
     # directory three times over for the same three answers.
     windows: dict[str, tuple[bool, str]] = {}
     for r in reviews:
-        assert isinstance(r, dict)
+        if not isinstance(r, dict):
+            raise RuntimeError(
+                f"a review row came back as {type(r).__name__}, not the projected object "
+                "(`.[] | {at: .submitted_at, body: .body}`) - the projection is the "
+                "caller's, and a row that lost it carries its fields under their raw names"
+            )
         # The projection must have applied: without it the fields arrive under
         # their raw names and `at` reads as "", which makes `"" <= push_time` true
         # and voids every vote - a full PR reporting 0/3, indistinguishable in the

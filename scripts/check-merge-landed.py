@@ -265,7 +265,13 @@ def tree_claims(number: int, repo: str) -> tuple[list[str], int]:
     claims: list[str] = []
     unresolved = 0
     for r in reviews:
-        assert isinstance(r, dict)
+        if not isinstance(r, dict):
+            raise RuntimeError(
+                f"#{number}: a review row came back as {type(r).__name__}, not the "
+                "projected object (`.[] | {at: .submitted_at, body: .body}`) - a "
+                "message has to say what arrived, because this one is the only thing "
+                "a host reads when the read fails"
+            )
         # The projection must have applied: without it the fields arrive under their
         # raw names, `at` reads as "", and the caller-owns-the-filter rule the sibling
         # documents would be broken silently here as well.
@@ -298,7 +304,26 @@ def check_pr(number: int, repo: str) -> Verdict:
     if not isinstance(view, dict):
         raise RuntimeError(f"#{number}: the PR response was not an object")
     state = str(view.get("state") or "")
-    if not view.get("merged"):
+    merged = view.get("merged")
+    # The fields are required rather than defaulted, and the sibling states the rule
+    # with the reason this one kept its own version of: `check-vote-count.py`'s
+    # `_merge_state` refuses a payload whose `mergeable`/`mergeStateStatus` went
+    # missing, "since an absent conflict is indistinguishable from no conflict".
+    # Here the absent field is the one *this* tool branches on, and the branch it
+    # falls into is the quiet one: `merged` missing is falsy, so the tool answered
+    # **PENDING - nothing has landed yet** and exited **0**, with the state rendered
+    # as a hole (`#1818 is  and unmerged`). Measured 2026-10-03
+    # (`cyc20261003-015225`) against a `gh` stand-in: payload `{}` and payload
+    # `{"a": 1}` both produced that line and rc 0, i.e. an unread merge flag read as
+    # an ordinary, expected state - and one this tool's own docstring calls out as
+    # the hole it was careful to announce on stderr.
+    if not isinstance(merged, bool) or not state:
+        raise RuntimeError(
+            f"#{number}: the PR payload does not say whether it merged "
+            f"(state={state!r}, merged={merged!r}) - refusing to report a state, "
+            "since an unread merge flag is indistinguishable from an unmerged PR"
+        )
+    if not merged:
         return Verdict(
             pr=number,
             state=state,

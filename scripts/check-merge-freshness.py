@@ -348,9 +348,17 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
             "createdAt: .created_at, conclusion}]}",
         ]
     )
-    assert isinstance(payload, dict)
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"the runs API answered with {type(payload).__name__}, not the projected "
+            "object the run list arrives in"
+        )
     runs_raw = payload.get("runs")
-    assert isinstance(runs_raw, list)
+    if not isinstance(runs_raw, list):
+        raise RuntimeError(
+            f"the projected `runs` field came back as {type(runs_raw).__name__}, not a "
+            "list of runs"
+        )
     matching = [
         r
         for r in runs_raw
@@ -392,7 +400,11 @@ def check_pr(number: int) -> Verdict:
             "number,title,headRefOid",
         ]
     )
-    assert isinstance(view, dict)
+    if not isinstance(view, dict):
+        raise RuntimeError(
+            f"`gh pr view {number} --json number,title,headRefOid` answered with "
+            f"{type(view).__name__}, not the object those fields arrive in"
+        )
     head_sha = str(view["headRefOid"])
 
     cmp_raw = _gh_json(
@@ -403,7 +415,11 @@ def check_pr(number: int) -> Verdict:
             "{status, ahead_by, behind_by, merge_base: .merge_base_commit.sha}",
         ]
     )
-    assert isinstance(cmp_raw, dict)
+    if not isinstance(cmp_raw, dict):
+        raise RuntimeError(
+            f"the compare API answered with {type(cmp_raw).__name__}, not the projected "
+            "object ({status, ahead_by, behind_by, merge_base: .merge_base_commit.sha})"
+        )
     status = str(cmp_raw["status"])
     ahead_by = int(cmp_raw["ahead_by"])
     behind_by = int(cmp_raw["behind_by"])

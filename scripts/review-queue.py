@@ -454,7 +454,11 @@ def open_prs(repo: str = REPO) -> list[int]:
             "number",
         ]
     )
-    assert isinstance(raw, list)
+    if not isinstance(raw, list):
+        raise RuntimeError(
+            f"`gh pr list --json number` answered with {type(raw).__name__}, not a list "
+            "of PR rows"
+        )
     return [int(item["number"]) for item in raw]
 
 
