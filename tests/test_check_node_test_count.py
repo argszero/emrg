@@ -329,17 +329,95 @@ def test_agent_md_documents_the_canonical_invocation(mod) -> None:
     )
 
 
+def _cannot_ask_the_runners(mod, *cwds: Path) -> str | None:
+    """Why this host cannot ask the Node runners, or `None` when it can.
+
+    The rows that talk to a real runner need **two** preconditions, and each of them
+    used to probe only one of them:
+
+    * `test_real_tree_is_consistent` checked `node_modules` and never asked whether a
+      runner starts;
+    * `test_a_bare_name_starts_the_real_runner` checked `shutil.which("npm")` and
+      never asked whether the path it found *runs*.
+
+    Two measured hosts sit in that gap, and they are different hosts, which is the
+    point:
+
+    * **npm absent from PATH** (reported by pm25coder, cycle `cyc20261003-001316`, on
+      Windows with `node_modules` present): `which` is `None`, so the sibling skipped
+      and the real row *failed* with `cannot run 'npm': [WinError 2]`. A red that
+      carries no signal about the counts the row compares.
+    * **npm found but unrunnable** (measured on this host, `cyc20261003-012150`):
+      `which("npm")` returns the existing dead asdf shim
+      (`/Users/…/.asdf/shims/npm`) whose interpreter is gone, so `which` is **not**
+      `None`, the sibling's guard does not fire, and **both** rows failed with
+      `rc=126` and the shim's own error text on stderr.
+
+    So the question is not "was a path found" but "did the runner answer", and the
+    only way to answer it is to run the cheapest command that proves it. A wrapper
+    that exits 0 while answering something else is caught by the same probe, because
+    what is asserted is a version, not an exit code — the discrimination the release
+    guards settled on (`check-notary-credentials.py`: "what replied, not the exit
+    code").
+
+    **This is a skip, not a failure**, for the reason the sibling already states: "a
+    missing toolchain is not a defect in `_run`". CI installs the toolchain and runs
+    these rows for real. What it is *not* is a blanket `except NodeCountError: skip`
+    around the rows — `measured_renderer` raises the same error type when vitest
+    disagrees with itself about its own total, and that is a finding, not a host
+    limitation. Only the two toolchain preconditions are gated here.
+    """
+    for cwd in cwds:
+        if not (cwd / "node_modules").exists():
+            return f"no node_modules under {cwd}: cannot ask the runners"
+    try:
+        out = mod._run(["npm", "--version"], cwds[0])
+    except (mod.NodeCountError, OSError) as exc:
+        return f"`npm` does not run on this host: {exc}"
+    if not re.match(r"\d+\.\d+", out.strip()):
+        return (
+            f"`npm --version` answered {out.strip()[:120]!r}, which is not a version "
+            "- something on PATH answers for npm without being npm"
+        )
+    return None
+
+
+def _require_the_runners(mod, *cwds: Path) -> None:
+    """Skip — with the reason — when this host cannot ask the Node runners.
+
+    The *call* that skips names Node in its own literal text, and that is
+    load-bearing rather than cosmetic: `tests/test_ci_workflow_toolchain.py` decides
+    which jobs must install the toolchain by parsing the suite for real
+    `pytest.skip(...)` calls whose arguments spell npm/node (a docstring cannot
+    satisfy it — that guard's docstring records why it is AST-based). One skip here
+    for both rows, so the suite still answers "yes, a row skips without Node" from one
+    call, and that contract is pinned by a test below rather than left to survive by
+    luck.
+
+    `_cannot_ask_the_runners` stays pure and separately tested: a helper that *raises*
+    on the first thing it cannot do is much harder to test in both directions than one
+    that answers.
+    """
+    reason = _cannot_ask_the_runners(mod, *cwds)
+    if reason is not None:
+        pytest.skip(f"cannot ask the Node runners: {reason}")
+
+
 def test_real_tree_is_consistent() -> None:
     """Integration: the tool reports OK on the checked-in tree.
 
     This is the test that actually talks to vitest and node --test, which is the
     whole point of the tool - the static guard next door can only reason about
-    source text. It needs node_modules, so it skips (loudly) when they are
-    absent, e.g. in a bare CI checkout of the pytest job.
+    source text. It needs node_modules **and a runner that starts**, so it skips
+    (loudly, naming which one is missing) when either is absent, e.g. in a bare CI
+    checkout of the pytest job.
+
+    Both directories are gated, not just the renderer's: this row asks a runner in
+    each of them, and probing a subset of the preconditions is the defect the helper
+    documents.
     """
     mod = _load_module()
-    if not (mod.RENDERER_ROOT / "node_modules").exists():
-        pytest.skip(f"no node_modules under {mod.RENDERER_ROOT}: cannot ask the runners")
+    _require_the_runners(mod, mod.RENDERER_ROOT, mod.GUI_ROOT)
     renderer = mod.measured_renderer()
     gui = mod.measured_gui()
     documented = mod.documented_counts((REPO_ROOT / "Agent.md").read_text(encoding="utf-8"))
@@ -349,6 +427,164 @@ def test_real_tree_is_consistent() -> None:
     )
 
 
+class _FakeMod:
+    """A module stand-in exposing what the gate uses: `_run` and its error type.
+
+    The error class is this class's own, so a stub that raises it is caught by the
+    gate the same way the tool's real `NodeCountError` is - a stub raising the *loaded
+    module's* class instead would escape and read as the gate being broken.
+    """
+
+    class NodeCountError(Exception):
+        pass
+
+    def __init__(self, run):
+        self._run = run
+
+
+def _load_module_from(path: Path):
+    """Load a python file by path, for reaching another test module's instruments.
+
+    Importing a sibling *file* rather than its test functions: what is needed is its
+    detector, and it is deliberately not re-implemented here — a second copy of a rule
+    is a second answer, and the one that drifts is the one nobody reads.
+    """
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[path.stem] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _runner_cwd(tmp_path: Path) -> Path:
+    """A cwd that passes the `node_modules` half, so the runner half is what is tested."""
+    (tmp_path / "node_modules").mkdir(exist_ok=True)
+    return tmp_path
+
+
+def test_the_runner_gate_names_a_directory_without_node_modules(tmp_path: Path) -> None:
+    """The first precondition, named: which directory cannot be asked, and why."""
+    bare = tmp_path / "no-deps"
+    bare.mkdir()
+    reason = _cannot_ask_the_runners(_FakeMod(lambda *a, **k: "11.9.0"), bare)
+    assert reason is not None and "no node_modules" in reason, reason
+    assert str(bare) in reason, "the reason must name the directory it means"
+
+
+def test_the_runner_gate_names_a_runner_that_cannot_start(tmp_path: Path) -> None:
+    """The second precondition: a `which` result that does not execute is not a runner.
+
+    This is the shape measured on this host (`cyc20261003-012150`): `which("npm")`
+    returns the existing dead asdf shim, so a `which is None` guard does not fire and
+    the row fails with `rc=126` instead of skipping.
+    """
+    def boom(cmd, cwd, env=None):
+        raise _FakeMod.NodeCountError(f"`{cmd[0]}` in {cwd} failed (rc=126):\nshim is dead")
+
+    reason = _cannot_ask_the_runners(_FakeMod(boom), _runner_cwd(tmp_path))
+    assert reason is not None and "does not run on this host" in reason, reason
+    assert "rc=126" in reason, "the runner's own failure must reach the reason"
+
+
+def test_the_runner_gate_names_an_exec_that_is_not_there(tmp_path: Path) -> None:
+    """The reporter's shape (`cyc20261003-001316`): no npm on PATH at all.
+
+    `_run` raises `FileNotFoundError` for this one - a different exception from the
+    `rc=126` above, which is why both are pinned.
+    """
+
+    def missing(cmd, cwd, env=None):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+
+    reason = _cannot_ask_the_runners(_FakeMod(missing), _runner_cwd(tmp_path))
+    assert reason is not None and "does not run on this host" in reason, reason
+
+
+def test_the_runner_gate_refuses_something_that_answers_without_being_npm(
+    tmp_path: Path,
+) -> None:
+    """Exit 0 is not the reading; the *answer* is.
+
+    A wrapper that swallows the call and prints its own usage line would pass an
+    exit-code check and fail this one - the distinction the release guards settled
+    on ("what replied, not the exit code").
+    """
+
+    def usage(cmd, cwd, env=None):
+        return "usage: npm <command>\n"
+
+    reason = _cannot_ask_the_runners(_FakeMod(usage), _runner_cwd(tmp_path))
+    assert reason is not None and "not a version" in reason, reason
+
+
+def test_the_runner_gate_lets_a_working_runner_through(tmp_path: Path) -> None:
+    """The other direction: without this leg, "always skip" would satisfy every case above."""
+    calls: list[tuple] = []
+
+    def version(cmd, cwd, env=None):
+        calls.append((tuple(cmd), cwd))
+        return "11.9.0\n"
+
+    assert _cannot_ask_the_runners(_FakeMod(version), _runner_cwd(tmp_path)) is None
+    assert calls == [(("npm", "--version"), _runner_cwd(tmp_path))], (
+        "the gate must ask the bare name, the way the tool's own resolution works"
+    )
+
+
+def test_both_runner_rows_are_wired_to_the_gate(monkeypatch) -> None:
+    """Both rows must *call* the gate - a helper nothing uses is the old defect.
+
+    Pinned by monkeypatching the pure half, so the real `_require_the_runners` runs and
+    the whole chain is measured on every host: CI's pytest job runs before `npm ci`,
+    and this is the one leg that can assert the rows skip (rather than fail) there.
+    """
+    monkeypatch.setattr(
+        sys.modules[__name__], "_cannot_ask_the_runners", lambda *a, **k: "stub: no runner"
+    )
+    rows = [
+        ("test_real_tree_is_consistent", lambda: test_real_tree_is_consistent()),
+        (
+            "test_a_bare_name_starts_the_real_runner",
+            lambda: test_a_bare_name_starts_the_real_runner(_load_module(), Path(".")),
+        ),
+    ]
+    for row, call in rows:
+        with pytest.raises(pytest.skip.Exception, match="stub: no runner") as excinfo:
+            call()
+        assert "Node" in str(excinfo.value), (
+            f"{row} skips without naming the toolchain: {str(excinfo.value)!r}. "
+            "tests/test_ci_workflow_toolchain.py finds this suite's Node dependency by "
+            "parsing for real skip calls whose text spells npm/node, so a skip whose "
+            "wording loses that spelling silently retires a CI guard"
+        )
+
+
+def test_the_ci_guard_still_sees_this_files_node_dependency() -> None:
+    """The contract `tests/test_ci_workflow_toolchain.py` depends on, owned here.
+
+    That guard asserts the suite really does contain a real `pytest.skip(...)` naming
+    npm/node - its premise, without which its CI rule ("every job running the suite must
+    set up Node") can pass vacuously. The naming now lives in this file's gate, so the
+    dependency is pinned where the wording lives - and pinned by **asking that guard's
+    own detector**, not by re-implementing it or by asserting a literal this file wrote
+    itself.
+
+    Measured 2026-10-03 (`cyc20261003-012150`): introducing the gate turned that guard
+    red for exactly this reason (the skip's argument became a bare name), and the repair
+    is this contract rather than a change to the detector.
+    """
+    guard = _load_module_from(REPO_ROOT / "tests" / "test_ci_workflow_toolchain.py")
+    here = Path(__file__).resolve()
+    assert guard._skip_on_missing_node_calls(here), (
+        "no real `pytest.skip(...)` in this file spells npm/node any more, so "
+        "tests/test_ci_workflow_toolchain.py can no longer see that this suite skips "
+        "without the toolchain - it would pass vacuously. Keep the npm/node spelling in "
+        "the skip's own text: pytest.skip(f\"cannot ask the Node runners: {reason}\")"
+    )
+    assert guard._starts_a_real_node_runner(here), (
+        "no call here starts a real Node runner from a literal argv any more, so the "
+        "other half of that guard's premise is gone"
+    )
 def test_ci_gate_uses_the_check_mode_not_the_preview(mod) -> None:
     """The CI step must call the bare form, whose exit code actually gates.
 
@@ -569,10 +805,13 @@ def test_a_bare_name_starts_the_real_runner(mod, fake_cwd) -> None:
     `which`; this asserts the result is usable.
 
     Skipped, not failed, where no runner is installed: this repo's pytest job can
-    run before `npm ci`, and a missing toolchain is not a defect in `_run`.
+    run before `npm ci`, and a missing toolchain is not a defect in `_run`. The gate
+    is `_cannot_ask_the_runners`, not `which("npm") is None`: a *found* path that
+    cannot execute (this host's dead asdf shim, measured `cyc20261003-012150`) is not
+    a runner either, and the old one-sided guard let this row fail with the shim's
+    `rc=126` instead of skipping.
     """
-    if mod.shutil.which("npm") is None:
-        pytest.skip("npm is not on PATH")
+    _require_the_runners(mod, fake_cwd)
     out = mod._run(["npm", "--version"], fake_cwd)  # bare name, as the tool calls it
     assert re.match(r"\d+\.\d+", out.strip()), (
         f"a bare `npm` must start a real runner through the resolution; got {out!r}"
