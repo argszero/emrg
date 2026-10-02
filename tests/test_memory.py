@@ -666,3 +666,106 @@ class TestMemoryIndexRowOverTheCap:
         assert len(row[0]) <= INDEX_TITLE_MAX_CHARS, "the rewritten row still exceeds the cap"
         assert "big.md" in row[0], "the rewritten row lost the link to its detail file"
         assert "Small" in after, "the in-cap sibling row was dropped as well"
+
+
+class TestTwoMemoriesWithTheSameTitle:
+    """A duplicate title writes a counter-suffixed file; the index has to follow.
+
+    Issue #1801. ``MemoryFile.filename`` derives its name from ``type`` +
+    ``title``, and ``MemoryIndex.add_entry`` identifies rows *by filename*, so
+    a memory written to ``<slug>-2.md`` must report that name or its row lands
+    on the resident memory of that title and its own file is referenced by
+    nothing — permanent, because ``_rebuild_index`` derives the name the same
+    way. Measured before the fix: two files, one row, one orphan.
+    """
+
+    def _rows(self, store):
+        return MemoryIndex.from_text(store.index_path.read_text(encoding="utf-8")).entries
+
+    def _files(self, store):
+        return sorted(p.name for p in store.directory.glob("*.md") if p.name != "MEMORY.md")
+
+    def test_create_gives_each_memory_its_own_row(self, project_store):
+        first = project_store.create("project", "Same title", "first")
+        second = project_store.create("project", "Same title", "second")
+
+        assert self._files(project_store) == ["project-same-title-2.md", "project-same-title.md"]
+        assert first.filename != second.filename, "both memories claim the same file"
+        for mem in (first, second):
+            assert (project_store.directory / mem.filename).exists(), mem.filename
+
+        entries = self._rows(project_store)
+        assert sorted(e.filename for e in entries) == [
+            "project-same-title-2.md",
+            "project-same-title.md",
+        ], "each file needs a row of its own; neither may be orphaned"
+
+    def test_each_row_opens_the_memory_that_wrote_it(self, project_store):
+        first = project_store.create("project", "Same title", "first body")
+        second = project_store.create("project", "Same title", "second body")
+
+        assert first.id != second.id
+        for mem in (first, second):
+            back = project_store.get_by_filename(mem.filename)
+            assert back is not None and back.id == mem.id, (
+                f"{mem.filename} does not open the memory that wrote it"
+            )
+
+    def test_a_memory_read_from_disk_reports_its_own_file(self, project_store):
+        project_store.create("project", "Same title", "first")
+        second = project_store.create("project", "Same title", "second")
+
+        loaded = {m.id: m for m in project_store.list()}
+        assert loaded[second.id].filename == second.filename, (
+            "a reload re-derived the name from the title, so two memories "
+            "report one file"
+        )
+
+    def test_rebuild_index_keeps_the_counter_suffixed_memory(self, project_store):
+        project_store.create("project", "Same title", "first")
+        project_store.create("project", "Same title", "second")
+
+        project_store.rebuild_index()
+
+        assert sorted(e.filename for e in self._rows(project_store)) == [
+            "project-same-title-2.md",
+            "project-same-title.md",
+        ], "a rebuild re-derived the name and dropped the suffixed memory again"
+
+    def test_update_of_the_suffixed_memory_keeps_its_row(self, project_store):
+        project_store.create("project", "Same title", "first")
+        second = project_store.create("project", "Same title", "second")
+
+        updated = project_store.update(second.id, body="second, edited")
+
+        assert updated.filename == second.filename
+        assert sorted(e.filename for e in self._rows(project_store)) == [
+            "project-same-title-2.md",
+            "project-same-title.md",
+        ]
+
+    def test_promote_with_a_colliding_title_keeps_its_row(self, session_store, temp_cwd):
+        project = ProjectMemoryStore(temp_cwd)
+        project.create("project", "Collide", "already resident")
+        mem = session_store.create("project", "Collide", "from the session")
+
+        promoted = session_store.promote_to_project(mem.id, project)
+
+        assert promoted is not None
+        assert promoted.filename != mem.filename, "the copy claims the resident memory's file"
+        assert promoted.filename.endswith("-collide-1.md"), promoted.filename
+        assert (project.directory / promoted.filename).exists()
+        assert sorted(e.filename for e in self._rows(project)) == sorted(
+            ["project-collide-1.md", "project-collide.md"]
+        ), "the promoted copy's row must name the file it was written to"
+
+    def test_the_filename_field_stays_out_of_the_file_format(self, project_store):
+        mem = project_store.create("project", "Same title", "first")
+        project_store.create("project", "Same title", "second")
+
+        text = (project_store.directory / mem.filename).read_text(encoding="utf-8")
+        assert "_filename" not in text, "the override leaked into the serialized memory"
+
+        reloaded = MemoryFile.from_file(project_store.directory / mem.filename)
+        assert reloaded._filename == mem.filename
+        assert reloaded.to_markdown() == text, "a load → save rewrote the file"
