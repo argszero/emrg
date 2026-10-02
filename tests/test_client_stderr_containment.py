@@ -145,7 +145,33 @@ def test_a_handler_that_captured_the_terminal_is_repointed(screen, monkeypatch):
     assert "internal detail" in _crash_log(cwd).read_text(encoding="utf-8")
 
 
-def test_a_handler_on_a_named_logger_is_repointed(screen, monkeypatch):
+@pytest.fixture
+def named_logger_at_debug(monkeypatch):
+    """``websockets.client`` forced to DEBUG, through the API that clears the cache.
+
+    ``monkeypatch.setattr(logger, "level", logging.DEBUG)`` sets the attribute and
+    leaves ``Logger._cache`` untouched — and ``isEnabledFor`` answers *from that
+    cache*. So the precondition was really "nobody has asked this logger whether
+    DEBUG is enabled yet": measured 2026-10-02, any earlier file in the run that
+    logs over a WebSocket (websockets itself logs each frame at DEBUG, which asks)
+    primed ``_cache[DEBUG] = False``, the record was dropped, and
+    `test_a_handler_on_a_named_logger_is_repointed` read an empty crash log — a
+    verdict that depended on the *file order*, in a module whose own docstring
+    warns that an assertion which "passed for the wrong reason" proves nothing.
+    ``setLevel`` is the API that invalidates the cache (`manager._clear_cache()`),
+    and it restores the same way, so nothing is left cached either way.
+    """
+    logger = logging.getLogger("websockets.client")
+    monkeypatch.setattr(logger, "handlers", [])
+    original_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield logger
+    finally:
+        logger.setLevel(original_level)
+
+
+def test_a_handler_on_a_named_logger_is_repointed(screen, named_logger_at_debug):
     """A ``StreamHandler`` binds ``sys.stderr`` at construction — on *any* logger.
 
     The repoint loop walked ``logging.getLogger().handlers``, root only, while
@@ -155,9 +181,7 @@ def test_a_handler_on_a_named_logger_is_repointed(screen, monkeypatch):
     is "whatever writes to the client's stderr".
     """
     screen, cwd = screen
-    logger = logging.getLogger("websockets.client")
-    monkeypatch.setattr(logger, "handlers", [])
-    monkeypatch.setattr(logger, "level", logging.DEBUG)
+    logger = named_logger_at_debug
 
     with _screen(screen):
         handler = logging.StreamHandler()      # binds the *object* sys.stderr (= screen)
