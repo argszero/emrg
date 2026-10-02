@@ -73,6 +73,60 @@ _ASSIGN_OPEN = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)="\$\(', re.M)
 _STATUS_RECOVERY = re.compile(r'\|\|\s*(?:true|:|[A-Za-z_][A-Za-z0-9_]*=\$\?)')
 
 
+# ── the second shape: a `grep` pipeline whose emptiness the step tests ────────
+#
+# `2>&1` is not the only way a capture loses the status it needed. `grep` exits **1**
+# when it matches nothing — that is what it is for — so a `VAR="$(… | grep … | head -1)"
+# assignment fails whenever the answer is "nothing here", and under `-e -o pipefail`
+# that aborts the step *at the assignment*. Executed on this host (2026-10-02): the same
+# pipeline with `head` in place of `grep` exits 0 on empty input, which is why the four
+# `PKG="$(find … | head -1)"` sites are not this rule's business.
+#
+# What makes the abort a defect rather than a retirement is the step's own next move: a
+# later `-z` test on that variable says the step has decided an empty value is a
+# legitimate outcome it intends to handle. The abort happens *before* that decision, so
+# the branch is unreachable in exactly the state it was written for — measured on the
+# Sign pkg step, which printed nothing on stdout and exited 1 with only an Application
+# identity in the keychain.
+_GREP_STAGE = re.compile(r'(?:^|[|(]\s*|\$\(\s*|\s)grep\s')
+
+
+def unreachable_emptiness_tests(text: str) -> list[str]:
+    """`name (step): VAR` for every `grep` pipeline the step then tests for emptiness.
+
+    Statements carrying `2>&1` are left to `unrecovered_captures`: both rules name the
+    same remedy there, and a site reported twice reads as two defects.
+    """
+    out: list[str] = []
+    doc = yaml.safe_load(text)
+    for job, cfg in (doc.get("jobs") or {}).items():
+        for step in (cfg.get("steps") or []):
+            if not isinstance(step, dict) or not step.get("run"):
+                continue
+            lines = str(step["run"]).splitlines()
+            for i, line in enumerate(lines):
+                m = _ASSIGN_OPEN.match(line)
+                if not m:
+                    continue
+                var = m.group(1)
+                statement, j = [], i
+                while j < len(lines):
+                    statement.append(lines[j])
+                    if ')"' in lines[j]:
+                        break
+                    j += 1
+                joined = "\n".join(statement)
+                if "2>&1" in joined or not _GREP_STAGE.search(joined):
+                    continue
+                if _STATUS_RECOVERY.search(joined):
+                    continue
+                rest = "\n".join(lines[i + len(statement):])
+                if not re.search(r'-\s*z\s+"\$\{?' + re.escape(var) + r'\}?"', rest):
+                    continue
+                out.append(f"{step.get('name') or '(unnamed step)'}: {var}")
+    return out
+
+
 def unrecovered_captures(text: str) -> list[str]:
     """`name (step): VAR` for every stderr capture that discards its command's status."""
 
@@ -258,6 +312,47 @@ def test_the_guard_reads_the_thing_it_names() -> None:
     discarded = 'OUT="$(security import p12 -P "$PW" 2>/dev/null)"\n'
     assert unrecovered_captures(step(discarded)) == [], (
         "a capture that discards its output was reported — the rule is about kept output"
+    )
+
+
+def test_a_grep_pipeline_does_not_make_the_emptiness_branch_unreachable() -> None:
+    """The second shape, over the real workflow and over synthetic bodies both ways.
+
+    Measured on `main`'s Sign pkg step before this rule existed: with only an Application
+    identity in the keychain the step printed nothing on stdout and exited 1, so the
+    `::error::` naming that state — and the remedy it carries — could not be read.
+    """
+    offenders = unreachable_emptiness_tests(_read(WORKFLOW))
+    assert not offenders, (
+        "these assignments pipe through `grep`, whose exit 1 on no-match aborts the step "
+        "at the assignment, and the step then tests the result with `-z` — a branch that "
+        f"can no longer be reached in the state it was written for: {offenders}"
+    )
+
+    def step(body: str) -> str:
+        return yaml.safe_dump({"jobs": {"build": {"steps": [{"name": "x", "run": body}]}}})
+
+    lookup = 'ID="$(security find-identity -v /tmp/k | grep \'Developer ID Installer\' | head -1)"\n'
+    handles_empty = 'if [ -z "$ID" ]; then echo "::error::no installer identity"; exit 1; fi\n'
+    assert unreachable_emptiness_tests(step(lookup + handles_empty)) == ["x: ID"], (
+        "the guard did not flag a `grep` lookup whose empty case the step handles — it "
+        "measures nothing"
+    )
+    assert unreachable_emptiness_tests(step(lookup + 'productsign --sign "$ID" p.pkg\n')) == [], (
+        "a lookup whose empty result the step never handles was reported — that is a "
+        "different shape, and reporting it would be the over-broad rule rejected above"
+    )
+    assert unreachable_emptiness_tests(
+        step('ID="$(security find-identity -v /tmp/k | grep X | head -1 || true)"\n' + handles_empty)
+    ) == [], (
+        "a lookup that lets `grep`'s no-match through was reported — emptiness is the "
+        "answer here, so it needs no recovery"
+    )
+    assert unreachable_emptiness_tests(
+        step('PKG="$(find dist | head -1)"\nif [ -z "$PKG" ]; then exit 0; fi\n')
+    ) == [], (
+        "a `head` pipeline was reported — `head` exits 0 on empty input (measured), so "
+        "that branch is reachable and this rule must not claim otherwise"
     )
 
 
