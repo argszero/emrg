@@ -360,3 +360,25 @@ def test_touch_project_writes_nothing_for_a_directory_in_no_repository(tmp_path,
     assert "now ignores .emrg/" not in caplog.text, caplog.text
     registered = (tmp_path / "config" / "projects.yml").read_text(encoding="utf-8")
     assert str(plain) in registered, "the registration half must be unaffected"
+
+
+def test_a_write_that_did_not_land_is_reported_as_an_error(tmp_path, monkeypatch):
+    """`added` is a claim about the file, so it waits for the file.
+
+    The writer reports a failure it handled instead of raising it (measured
+    2026-10-02, cycle cyc20261002-163118), so a caller that only caught an
+    exception would answer `added` for a `.git/info/exclude` nothing was added to.
+    """
+    from emrg.server import git_utils as mod
+
+    repo = _repo(tmp_path / "clone")
+    exclude = _exclude_file(repo)
+    before = exclude.read_text(encoding="utf-8")
+    monkeypatch.setattr(mod, "atomic_write_bytes", lambda *a, **k: False)
+
+    assert ensure_local_exclude(str(repo)) == f"error: could not write {exclude}"
+    assert exclude.read_text(encoding="utf-8") == before, "the refused write changed the file"
+
+    monkeypatch.undo()
+    assert ensure_local_exclude(str(repo)) == "added"
+    assert EXCLUDE_ENTRY in exclude.read_text(encoding="utf-8")

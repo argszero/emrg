@@ -165,15 +165,24 @@ class AbortRuns:
     def _save(self) -> None:
         state = self._load()
         _prune(state)
+        # Best-effort by construction: losing the count costs a later reader one
+        # question, while raising here would cost the turn its explanation. Two
+        # shapes of failure, both swallowed for that reason — the writer's own
+        # report (it handles and logs a write it could not make), and anything
+        # else it can still raise, which is a caller-side mistake rather than a
+        # disk-side one and must not reach the turn either.
         try:
-            atomic_write_bytes(
+            written = atomic_write_bytes(
                 json.dumps(state, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
                 self._path,
             )
-        except OSError as exc:
-            # Losing the count costs a later reader one question; raising here
-            # would cost the turn its explanation.
-            logger.warning("could not write abort-run state to %s (%s)", self._path, exc)
+        except Exception:  # noqa: BLE001 — see above: the turn outranks the count
+            written = False
+        if not written:
+            logger.warning(
+                "could not write abort-run state to %s (counting from scratch next time)",
+                self._path,
+            )
 
 
 def _prune(state: dict[str, dict], *, now: datetime | None = None) -> None:

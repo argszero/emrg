@@ -188,6 +188,13 @@ TASK_NAME_MAX = 32
 MIN_INTERVAL = 60
 DEFAULT_INTERVAL = 1800
 
+#: What the CRUD path answers when the write did not land. `write_table` returns
+#: whether the file was replaced, and a caller that reports success without asking
+#: tells a human "created" about a task the next daemon restart has never heard of.
+#: The path is named because the reason (a read-only directory, a full disk) is in
+#: the daemon log, and this is the sentence that sends the host there.
+TASK_WRITE_FAILED = "could not write {path} — the change was not saved"
+
 # ── tasks.yml is the only source of truth (rant 2026-09-28T09:54:10) ──
 #
 # The host's principle, verbatim: 「tasks.yml 本身不做任何内存缓存。什么时候用，
@@ -359,16 +366,21 @@ def read_table(path: Path | None = None) -> list[dict]:
     return [e for e in data if isinstance(e, dict)]
 
 
-def write_table(records: list[dict], path: Path | None = None) -> None:
+def write_table(records: list[dict], path: Path | None = None) -> bool:
     """Replace tasks.yml atomically. The only writer in the codebase.
 
     It writes the file and does nothing else: no in-memory set is touched and no
     handler is started, stopped or cancelled. That is why "writing tasks.yml does not
     affect running tasks" is a property of the structure rather than a rule somebody
     has to remember.
+
+    Returns whether the file was replaced. That is not decoration: a caller which
+    answers a human ("task created") is asserting the file changed, and only this
+    can tell it so — measured 2026-10-02, the CRUD path answered `(True, task)` for
+    a task that was never persisted.
     """
     path = path or _tasks_yml_path()
-    atomic_write_yaml(records, path, prefix=".tasks_", dumper=_TaskTableDumper)
+    return atomic_write_yaml(records, path, prefix=".tasks_", dumper=_TaskTableDumper)
 
 
 def validate_task_record(record: dict) -> str | None:
@@ -3020,13 +3032,14 @@ class TaskScheduler:
         """Read tasks.yml (the module-level reader, this scheduler's path)."""
         return read_table(self._tasks_file)
 
-    def _write_table(self, records: list[dict]) -> None:
+    def _write_table(self, records: list[dict]) -> bool:
         """Replace tasks.yml atomically (the module-level writer, this path).
 
         Writes the file and does nothing else — no handler is started, stopped or
-        cancelled, which is why a write can never disturb a running cycle.
+        cancelled, which is why a write can never disturb a running cycle. Returns
+        whether the file was replaced, which every CRUD method below reports.
         """
-        write_table(records, self._tasks_file)
+        return write_table(records, self._tasks_file)
 
     def _ensure_emrg_project_entry(self) -> None:
         """Ensure projects.yml has an emrg entry.
@@ -3056,10 +3069,15 @@ class TaskScheduler:
                     "path": str(Path.home() / ".emrg" / "evolution" / "emrg"),
                     "last_active": datetime.now().isoformat(),
                 })
-                atomic_write_yaml(entries, projects_file, prefix=".projects_")
-                logger.info(
-                    "TaskScheduler: self-heal — added emrg entry to projects.yml"
-                )
+                if not atomic_write_yaml(entries, projects_file, prefix=".projects_"):
+                    logger.warning(
+                        "TaskScheduler: self-heal could not write %s — the emrg "
+                        "entry is still missing", projects_file,
+                    )
+                else:
+                    logger.info(
+                        "TaskScheduler: self-heal — added emrg entry to projects.yml"
+                    )
             else:
                 # Repair a stale emrg entry whose path no longer exists
                 # (2026-08-12 incident: a pytest temp dir leaked into
@@ -3076,11 +3094,16 @@ class TaskScheduler:
                         break  # real checkout — preserved as-is
                     entry["path"] = str(Path.home() / ".emrg" / "evolution" / "emrg")
                     entry["last_active"] = datetime.now().isoformat()
-                    atomic_write_yaml(entries, projects_file, prefix=".projects_")
-                    logger.info(
-                        "TaskScheduler: self-heal — repaired stale emrg entry "
-                        "%r -> %s", existing, entry["path"],
-                    )
+                    if not atomic_write_yaml(entries, projects_file, prefix=".projects_"):
+                        logger.warning(
+                            "TaskScheduler: self-heal could not write %s — the stale "
+                            "emrg entry %r is still there", projects_file, existing,
+                        )
+                    else:
+                        logger.info(
+                            "TaskScheduler: self-heal — repaired stale emrg entry "
+                            "%r -> %s", existing, entry["path"],
+                        )
                     break
         except (yaml.YAMLError, OSError) as e:
             logger.warning(
@@ -3142,7 +3165,8 @@ class TaskScheduler:
         if description:
             task["description"] = description
         tasks.append(task)
-        self._write_table(tasks)
+        if not self._write_table(tasks):
+            return False, TASK_WRITE_FAILED.format(path=self._tasks_file)
         logger.info("TaskScheduler: task %s created (type=%s)", name, task_type)
         return True, task
 
@@ -3183,7 +3207,8 @@ class TaskScheduler:
             if fields["sandbox"] is not None and fields["sandbox"] not in SANDBOX_MODES:
                 return False, f"invalid sandbox {fields['sandbox']!r} (expected one of {', '.join(SANDBOX_MODES)})"
             task["sandbox"] = fields["sandbox"]
-        self._write_table(tasks)
+        if not self._write_table(tasks):
+            return False, TASK_WRITE_FAILED.format(path=self._tasks_file)
         logger.info("TaskScheduler: task %s updated", name)
         return True, task
 
@@ -3194,7 +3219,8 @@ class TaskScheduler:
         tasks = [t for t in tasks if t.get("name") != name]
         if len(tasks) == before:
             return False, f"task {name!r} not found"
-        self._write_table(tasks)
+        if not self._write_table(tasks):
+            return False, TASK_WRITE_FAILED.format(path=self._tasks_file)
         logger.info("TaskScheduler: task %s deleted", name)
         return True, ""
 

@@ -200,3 +200,19 @@ def test_the_test_suite_is_not_pointed_at_the_hosts_state(tmp_path):
     # fixture patches the module attribute, so an early-bound name would keep
     # pointing at the real function and quietly assert nothing.
     assert mod.default_path() == tmp_path / "abort-runs.json"
+
+
+def test_a_writer_that_reports_failure_does_not_lose_the_count(tmp_path, monkeypatch):
+    """The other shape of the same best-effort rule.
+
+    `test_an_unwritable_state_file_does_not_raise` stubs a writer that *raises*.
+    Since 2026-10-02 the writer reports a write it could not make instead of raising
+    it (`emrg/server/atomic.py`), so the path that a full disk actually takes is this
+    one — the report — and the count must survive it the same way.
+    """
+    monkeypatch.setattr(mod, "atomic_write_bytes", lambda *args, **kwargs: False)
+    runs = AbortRuns(tmp_path / "abort-runs.json")
+
+    assert runs.note("content_filter", "s_1")["count"] == 1
+    assert runs.note("content_filter", "s_1")["count"] == 2
+    assert not (tmp_path / "abort-runs.json").exists()

@@ -1000,12 +1000,21 @@ class EmrgServer:
 
     def _assert_token_file(self) -> None:
         """(Re)write the auth token file for the current daemon (single-line
-        token, mode 0o600 — rant 2026-08-20T14:32:52: emrgd.port → emrgd.token)."""
-        atomic_write_bytes(
+        token, mode 0o600 — rant 2026-08-20T14:32:52: emrgd.port → emrgd.token).
+
+        A write that did not land is warned about here rather than left to the
+        caller: nothing raises any more, and a missing token file is the state
+        where every client fails to authenticate while the daemon looks healthy.
+        """
+        if not atomic_write_bytes(
             self._auth_token,
             config_dir() / "emrgd.token",
             mode=0o600,
-        )
+        ):
+            logger.warning(
+                "emrgd.token could not be written to %s — clients will not authenticate",
+                config_dir() / "emrgd.token",
+            )
 
     def _rebuild_sessions_index(self) -> None:
         """Backfill the global cross-project session index at startup.
@@ -1872,7 +1881,12 @@ class EmrgServer:
         # Build sorted YAML list
         entries = sorted(projects.values(), key=lambda e: e.get("path", ""))
 
-        atomic_write_yaml(entries, self._projects_log, prefix=".projects_")
+        if not atomic_write_yaml(entries, self._projects_log, prefix=".projects_"):
+            logger.warning(
+                "could not record project activity in %s — the entry for %s may be "
+                "missing or stale",
+                self._projects_log, cwd,
+            )
 
     async def _check_github_auth(self) -> dict:
         """Detect whether GitHub auth is configured (rant 2026-08-07T10:17:27).
@@ -5778,10 +5792,8 @@ class EmrgServer:
                 "name": name,
             })
             return
-        try:
-            atomic_write_yaml(remaining, self._projects_log, prefix=".projects_")
-        except OSError:
-            logger.exception("remove_project: failed to write %s", self._projects_log)
+        if not atomic_write_yaml(remaining, self._projects_log, prefix=".projects_"):
+            logger.warning("remove_project: failed to write %s", self._projects_log)
             await self._send(ws, {
                 "type": "project_removed",
                 "removed": False,

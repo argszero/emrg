@@ -489,7 +489,11 @@ def ensure_local_exclude(repo_dir: str) -> str:
     body += _EXCLUDE_NOTE + runtime_exclude_entry(prefix) + "\n"
     try:
         mode = os.stat(exclude).st_mode & 0o777 if exclude.exists() else 0o644
-        atomic_write_bytes(body, exclude, mode=mode)
     except OSError as exc:
         return f"error: {exc}"
+    # The outcome comes from the return value, not from an exception: the writer
+    # reports a failure it handled (and logged) rather than raising it, so a caller
+    # that only catches would report `added` for a file nothing was added to.
+    if not atomic_write_bytes(body, exclude, mode=mode):
+        return f"error: could not write {exclude}"
     return "added"

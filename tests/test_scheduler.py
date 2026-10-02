@@ -3648,3 +3648,42 @@ def test_a_silent_daemon_after_the_terminal_frame_does_not_wedge_the_handler(
         "the completion text, and no slowdown state is invented from silence"
     )
     assert handler._slowdown_active is False, "silence is not a slowdown signal"
+
+
+def test_a_task_that_cannot_be_written_is_not_reported_as_created(tmp_path):
+    """The answer a host reads must be about the file, not about the call.
+
+    Measured 2026-10-02 (cycle cyc20261002-163118): with `tasks.yml` unreachable,
+    `task_create` raised `PermissionError` out of the write — and where the write
+    failed for a later reason it answered `(True, task)` for a task that was never
+    persisted, so the GUI showed a task a restart forgot. `write_table` reports
+    whether the file was replaced; every CRUD path has to read that report.
+
+    The failure is arranged without permissions or mocks: `tasks.yml` sits *under a
+    regular file*, which no platform lets a directory be created in. Nothing is
+    written, and the answer names the path.
+    """
+    from emrg.server import scheduler as mod
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        (tmp_path / "projects.yml").write_text(
+            yaml.safe_dump([{"name": "emrg", "path": str(tmp_path)}]), encoding="utf-8"
+        )
+        blocked = tmp_path / "blocked"
+        blocked.write_text("not a directory", encoding="utf-8")
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = blocked / "tasks.yml"
+
+        ok, res = sched.task_create(name="probe", task_type="evolution", project="emrg")
+        assert ok is False, f"a task that was never saved was reported as created: {res!r}"
+        assert "could not write" in res and "tasks.yml" in res, res
+        assert not (blocked / "tasks.yml").exists()
+
+        ok_u, res_u = sched.task_update("emrg-task", interval=900)
+        assert ok_u is False and "could not write" in res_u, res_u
+
+        ok_d, res_d = sched.task_delete("emrg-task")
+        assert ok_d is False and "could not write" in res_d, res_d
+    finally:
+        mod.config_dir = orig
