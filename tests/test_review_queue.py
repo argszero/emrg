@@ -1621,6 +1621,96 @@ def test_the_ledger_the_override_names_is_the_one_read(monkeypatch):
     ], links.queue_calls
 
 
+def test_another_projects_rants_do_not_widen_the_closed_window(monkeypatch):
+    """The bound is the oldest instant that can *place* a row, and only this repo's rants can.
+
+    Measured 2026-10-02: 40 open rants, 39 of them `silicon-science-cs` reaching back to
+    2026-09-11, and the one `emrg` rant 8 hours old. Letting the other project set the
+    bound spent **48.8s / 668 rows** on a reading whose usable window costs **5.8s / 6
+    rows** — for a repo that can never place a row for a rant it cannot declare.
+    """
+    tool = _fresh_tool()
+    emrg_stamp = "2026-10-02T07:48:41.525323+08:00"
+    other_stamp = "2026-09-11T23:51:35.442412+08:00"
+    links = _links(
+        monkeypatch,
+        tool,
+        [
+            _row(emrg_stamp),
+            {"timestamp": other_stamp, "status": "pending", "message": "theirs",
+             "project": "silicon-science-cs"},
+        ],
+    )
+
+    rows = tool.open_rant_rows(None, tool.REPO)
+
+    assert links.queue_calls == [
+        (tool.REPO, "open", None),
+        (tool.REPO, "closed", "2026-10-01T23:48:41Z"),
+    ], links.queue_calls
+    assert len(rows) == 2, (
+        "the narrowing is about the *reading*, not the rows: another project's rant is "
+        "still rendered with its project named, so the cycle reading the queue alone can "
+        f"skip it - got {rows!r}"
+    )
+    assert [r.project for r in rows] == ["emrg", "silicon-science-cs"], (
+        "newest first, each row carrying its own project"
+    )
+
+
+def test_a_foreign_project_alone_spends_no_closed_reading(monkeypatch):
+    """No rant this repo could declare means no second call at all.
+
+    The reading exists to tell `never filed` from `filed and closed` *in this repo*. With
+    only another project's rants open, this repo has nothing to look up: the call would
+    return rows that cannot place any of them.
+    """
+    tool = _fresh_tool()
+    links = _links(
+        monkeypatch,
+        tool,
+        [{"timestamp": "2026-09-11T23:51:35.442412+08:00", "status": "pending",
+          "message": "theirs", "project": "silicon-science-cs"}],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert links.queue_calls == [(tool.REPO, "open", None)], links.queue_calls
+    assert (rant.issues, rant.closed_issues) == ([], [])
+
+
+def test_the_two_spellings_of_this_project_both_match(monkeypatch):
+    """`emrg` and `argszero/emrg` are the same project, and R5's own rule says so.
+
+    The template matches a rant to a task by either spelling, so a bound that recognised
+    only one would silently stop placing rows for rants written the other way — and a
+    row that stops being placed is the `no issue yet` defect this reading removes.
+    """
+    tool = _fresh_tool()
+    assert tool.could_declare_here("emrg", tool.REPO) is True
+    assert tool.could_declare_here(tool.REPO, tool.REPO) is True
+    assert tool.could_declare_here("silicon-science-cs", tool.REPO) is False
+    assert tool.could_declare_here("", tool.REPO) is False, (
+        "a rant naming no project belongs to no task, so no repo can declare it"
+    )
+    assert tool.could_declare_here("emrg-other", tool.REPO) is False, (
+        "a prefix is not the project: `emrg-other` is another ledger row's name"
+    )
+
+    stamp = "2026-10-02T07:48:41.525323+08:00"
+    links = _links(
+        monkeypatch, tool,
+        [{"timestamp": stamp, "status": "pending", "message": "ours",
+          "project": tool.REPO}],
+        closed_issues=[(1807, f"Origin: rant {stamp}\n\nbody")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert [call[1] for call in links.queue_calls] == ["open", "closed"], links.queue_calls
+    assert rant.closed_issues == [1807]
+
+
 def test_a_rant_whose_issue_was_closed_says_so_instead_of_no_issue_yet(monkeypatch):
     """The measured case, 2026-10-02: the release rant rendered `no issue yet` while its
     issue #1807 existed and had been closed when its own PR #1808 merged."""

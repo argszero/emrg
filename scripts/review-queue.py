@@ -143,6 +143,21 @@ from pathlib import Path
 
 REPO = "argszero/emrg"
 
+
+def could_declare_here(project: str, repo: str = REPO) -> bool:
+    """Whether an issue in `repo` could carry this rant's `Origin:` line.
+
+    A rant's declaring issue is filed by its own project's task, in that project's
+    repository, so the pairing is the project name (`emrg`) or its `owner/repo` form
+    (`argszero/emrg`) — the two spellings the template matches a rant to a task by. A rant
+    naming no project belongs to nobody, and one naming another project is another
+    repository's issue list: this repo can no more declare it than it can read it.
+
+    This is the one place the pairing is code rather than prose, and it exists to bound a
+    *reading*: see `open_rant_rows`, where the difference is 48.8s of `gh` against 5.8s.
+    """
+    return bool(project) and project in (repo, repo.rsplit("/", 1)[-1])
+
 #: How the family's tools are invoked (`Agent.md`, "Test Commands"). Printed
 #: commands carry the runner the docstrings and the docs prescribe — a bare
 #: `scripts/x.py` is not executable on this host, so printing one would hand the
@@ -517,11 +532,20 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
     # rant means filing its issue, so that reading invites a duplicate issue for work
     # already finished. The second reading is spent only when some open rant lacks an open
     # declaring issue, and only over the window those rants could have been filed in.
+    #
+    # "Those rants" is this repo's rants, not the whole ledger. The bound above is the
+    # oldest instant that can *place* a row, and another project's rants cannot be placed
+    # here at any bound — so letting them set the window buys nothing and costs the whole
+    # ledger's history. Measured 2026-10-02 on this host: 40 open rants, of which 39 were
+    # `silicon-science-cs` with the oldest reaching back to 2026-09-11,
+    # while the only `emrg` one was 8 hours old — the same reading cost **48.8s / 668
+    # rows** at the ledger's bound and **5.8s / 6 rows** at this repo's.
     closed_by_timestamp: dict[str, list[int]] = {}
     unplaced = [
         str(row.get("timestamp", ""))
         for row in wanted
         if not by_timestamp.get(str(row.get("timestamp", "")))
+        and could_declare_here(str(row.get("project", "") or ""), repo)
     ]
     if unplaced:
         since = min(
