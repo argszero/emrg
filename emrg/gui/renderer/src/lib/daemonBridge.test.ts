@@ -211,6 +211,53 @@ describe("createDaemonBridge", () => {
     expect("s3" in bridge.store.get().disconnectedBySid).toBe(false);
   });
 
+  it("进化计数**增长**才计数：首次读数、持平、下降都不算，帧不说也不改口", () => {
+    // 「演化刚完成」这件事只由增长表达（vanilla `maybeShowEvolutionToast`，js/app.js:1119）。
+    // 判定放在桥上而不是渲染时比较：两帧计数可以都落在两次渲染之间（启动 init + 第一个
+    // pong，或两个背靠背的 pong），渲染时比较只会看见后一个、把增长整个丢掉。
+    const { emit, bridge } = setup();
+    expect(bridge.store.get().evolutionGrowthCount).toBe(0);
+
+    // 第一次读到计数 = 基线，不是增长。
+    emit({ type: "pong", data: { evolution_count: 5 } });
+    expect(bridge.store.get().evolutionCount).toBe(5);
+    expect(bridge.store.get().evolutionGrowthCount).toBe(0);
+
+    // 不说计数的帧：计数留住，也不是增长。
+    emit({ type: "pong", data: {} });
+    expect(bridge.store.get().evolutionCount).toBe(5);
+    expect(bridge.store.get().evolutionGrowthCount).toBe(0);
+
+    // 增长 → +1。
+    emit({ type: "pong", data: { evolution_count: 6 } });
+    expect(bridge.store.get().evolutionGrowthCount).toBe(1);
+
+    // 持平 / 下降都不算（降级回滚不是「演化完成」）。
+    emit({ type: "pong", data: { evolution_count: 6 } });
+    emit({ type: "pong", data: { evolution_count: 4 } });
+    expect(bridge.store.get().evolutionCount).toBe(4);
+    expect(bridge.store.get().evolutionGrowthCount).toBe(1);
+
+    // **两次增长、中间没有渲染** —— 这正是判定不能放在渲染时的理由：两帧都要算。
+    emit({ type: "pong", data: { evolution_count: 5 } });
+    emit({ type: "pong", data: { evolution_count: 6 } });
+    expect(bridge.store.get().evolutionGrowthCount).toBe(3);
+  });
+
+  it("启动快照里的计数更高也算增长（applyInit 与 pong 同一条规则）", () => {
+    // 后台演化完成了，而 GUI 是重开窗口进来的：它先看到的是 init 返回的更高计数。
+    const { emit, bridge } = setup();
+    emit({ type: "pong", data: { evolution_count: 5 } });
+    bridge.applyInit({ config_exists: true, api_key_configured: true, evolution_count: 8 });
+    expect(bridge.store.get().evolutionCount).toBe(8);
+    expect(bridge.store.get().evolutionGrowthCount).toBe(1);
+
+    // init 说没有计数（字段缺失）→ 不改口、不算增长。
+    bridge.applyInit({ config_exists: true, api_key_configured: true });
+    expect(bridge.store.get().evolutionCount).toBe(8);
+    expect(bridge.store.get().evolutionGrowthCount).toBe(1);
+  });
+
   it("生效的图片能力来自 daemon 的 pong / status / config_applied，且缺字段时不改口", () => {
     // Rant 2026-09-17T16:53:02：界面要显示 daemon 实际依据的 vision，而不是
     // config.toml 的声明值。三个报告点：pong（连接/心跳）、status（main 的

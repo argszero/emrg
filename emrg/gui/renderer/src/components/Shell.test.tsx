@@ -39,6 +39,9 @@ function mockEmrg() {
   const sendRant = vi.fn().mockResolvedValue({ ok: true, count: 11 });
   const restartDaemon = vi.fn().mockResolvedValue({ ok: true });
   const setModel = vi.fn().mockResolvedValue({ ok: true });
+  // GitHub nudge（`#github-banner`）：设置页也在用这个方法，默认「已连接」——
+  // 只有点名测这条横幅的用例才把它改成未连接。
+  const githubStatus = vi.fn().mockResolvedValue({ authenticated: true, user: "argszero" });
   const triggerTask = vi.fn().mockResolvedValue({ ok: true });
   const switchSession = vi.fn().mockResolvedValue({ ok: true });
   (window as unknown as { emrg?: unknown }).emrg = {
@@ -59,6 +62,7 @@ function mockEmrg() {
     sendRant,
     restartDaemon,
     setModel,
+    githubStatus,
     triggerTask,
     switchSession,
   };
@@ -78,6 +82,7 @@ function mockEmrg() {
     sendRant,
     restartDaemon,
     setModel,
+    githubStatus,
     triggerTask,
     switchSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
@@ -412,6 +417,105 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(banner.textContent).toContain("auto-retry stopped");
     expect(banner.textContent).toContain("boom");
     expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  // ── GitHub nudge（自进化完成而没连 GitHub）+ 顶部横幅单一化 ──
+
+  it("演化计数增长且未连 GitHub → 提示去连接；连了就不提示 (2026-10-02)", async () => {
+    // vanilla：`maybeShowEvolutionToast`（js/app.js:1115）在计数**增长**时调
+    // `githubStatus()`，未认证才弹 `#github-banner`（index.html:53）。React 迁移留下了
+    // 横幅的 CSS 与 6 条词典串，元素/触发点/读者一起没了 —— 宿主连不上 GitHub 时，
+    // 「成果推不上去」这件事在界面上没有任何一句话说。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+
+    // 首次读到计数 = 基线，不是新闻（vanilla：「首次连接/无增长不提示」）。
+    m.emit({ type: "pong", data: { evolution_count: 5 } });
+    await waitFor(() => expect(screen.queryByTestId("github-banner")).not.toBeInTheDocument());
+    expect(m.githubStatus).not.toHaveBeenCalled();
+
+    // 增长 → 问一次 GitHub。
+    m.githubStatus.mockResolvedValue({ authenticated: false, user: null });
+    m.emit({ type: "pong", data: { evolution_count: 6 } });
+    const banner = await screen.findByTestId("github-banner");
+    expect(m.githubStatus).toHaveBeenCalledTimes(1);
+    expect(banner.textContent).toContain("Connect GitHub");
+
+    // 「去连接」→ 设置页（vanilla 同：hideGithubBanner + showSettings）。
+    fireEvent.click(screen.getByTestId("github-banner-connect"));
+    await waitFor(() => expect(screen.getByTestId("panel-settings")).toBeInTheDocument());
+    expect(screen.queryByTestId("github-banner")).not.toBeInTheDocument();
+  });
+
+  it("已经连上 GitHub 时计数增长什么都不说", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit({ type: "pong", data: { evolution_count: 5 } });
+    m.emit({ type: "pong", data: { evolution_count: 6 } });
+    await waitFor(() => expect(m.githubStatus).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("github-banner")).not.toBeInTheDocument();
+  });
+
+  it("关闭后的提示不再回来（同一进程内）", async () => {
+    // vanilla `_githubBannerDismissed` 只写不重置：宿主说了「别烦我」，下一次计数增长
+    // 也不该把它叫回来。
+    const m = mockEmrg();
+    m.githubStatus.mockResolvedValue({ authenticated: false, user: null });
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit({ type: "pong", data: { evolution_count: 5 } });
+    m.emit({ type: "pong", data: { evolution_count: 6 } });
+    await screen.findByTestId("github-banner");
+    fireEvent.click(screen.getByTestId("github-banner-dismiss"));
+    await waitFor(() => expect(screen.queryByTestId("github-banner")).not.toBeInTheDocument());
+
+    m.emit({ type: "pong", data: { evolution_count: 7 } });
+    // 等一拍再断言「没有」：增长处理是异步的，直接断言会在它跑完之前通过。
+    await waitFor(() => expect(m.githubStatus).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("github-banner")).not.toBeInTheDocument();
+  });
+
+  it("问不到 GitHub 状态就什么都不说（读数失败 ≠ 未连接）", async () => {
+    const m = mockEmrg();
+    m.githubStatus.mockRejectedValue(new Error("daemon busy"));
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit({ type: "pong", data: { evolution_count: 5 } });
+    m.emit({ type: "pong", data: { evolution_count: 6 } });
+    await waitFor(() => expect(m.githubStatus).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("github-banner")).not.toBeInTheDocument();
+  });
+
+  it("顶部只有一个横幅：连不上时不说别的，连回来才轮到升级提示", async () => {
+    // 四条 `#*-banner` 规则都钉在 `top: var(--sp-3)` + 居中 + `z-index: 20`（layout.css）
+    // —— 同时渲染两个就是**后一个盖住前一个**，宿主只会被告知一件事。所以顶部按优先级
+    // 只出一条：故障 > 解压 > GitHub 提示 > 升级。
+    const m = mockEmrg();
+    m.githubStatus.mockResolvedValue({ authenticated: false, user: null });
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+
+    // 升级提示先来。
+    m.emit({ type: "upgrade", data: { current_version: "0.3.7", installed_version: "0.3.8" } });
+    await screen.findByTestId("upgrade-banner");
+
+    // 故障来了 → 升级横幅让位（它没有自己的时刻，故障有）。
+    m.emit({ type: "status", data: { connected: false, daemon_stopped: true, error: "boom" } });
+    await screen.findByTestId("connection-banner");
+    expect(screen.queryByTestId("upgrade-banner")).not.toBeInTheDocument();
+
+    // 连接回来了 → 故障退场，升级提示回来（什么都没丢）。
+    m.emit({ type: "status", data: { connected: true } });
+    await screen.findByTestId("upgrade-banner");
+    expect(screen.queryByTestId("connection-banner")).not.toBeInTheDocument();
+
+    // 计数增长 → GitHub 提示排在升级之前（它有「演化刚完成」这个时刻，升级没有）。
+    m.emit({ type: "pong", data: { evolution_count: 5 } });
+    m.emit({ type: "pong", data: { evolution_count: 6 } });
+    await screen.findByTestId("github-banner");
+    expect(screen.queryByTestId("upgrade-banner")).not.toBeInTheDocument();
   });
 
   it("composer send with no active session shows the need-session hint", async () => {

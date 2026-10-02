@@ -77,6 +77,21 @@ interface WorkspaceBridge {
    * （daemon 内存 _run_version 不更新 → 心跳持续报版本差 → 横幅永不消失）。
    */
   restartDaemon?(): Promise<unknown>;
+  /**
+   * Is GitHub connected on this instance?
+   *
+   * The nudge below asks this at the one moment it is worth asking (an evolution
+   * just completed), never at startup: local chat does not need GitHub, so a
+   * boot-time nag would be noise (vanilla's own reasoning, `js/app.js:1150`).
+   * `preload.js:57` → `emrg:githubStatus` → the daemon's `github_status`.
+   *
+   * The `js/app.js` / `index.html` line numbers cited around the nudge below are the
+   * vanilla renderer's, which no longer exists in the tree (#1024 deleted it) — read
+   * them with `git show 1f7440ef^:emrg/gui/renderer/js/app.js`. They are kept because
+   * they are where the behaviour being restored was written down, not because a
+   * reader can open them.
+   */
+  githubStatus?(): Promise<{ authenticated?: boolean; user?: string | null }>;
   /** /model 直切模型（rant 2026-09-01T20:22:00：对齐 TUI，preload.js 已暴露 emrg:setModel） */
   setModel?(p: { model: string }): Promise<unknown>;
   /** 历史按需加载（rant 2026-09-01T20:19:40：GUI 打开会话不显示历史——链路从未接线） */
@@ -128,6 +143,14 @@ export function Shell() {
   // 同一版本，不重复弹）；restarting 防重复点击（relaunch 后进程即退出）。
   const [dismissedUpgrade, setDismissedUpgrade] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
+  // GitHub nudge（`#github-banner`）：自进化刚完成、而本实例没连 GitHub —— 那正是
+  // 成果推不上去的时刻。vanilla 在 `maybeShowEvolutionToast`（`js/app.js:1115`）里
+  // 判「evolution_count 增长」并调 `githubStatus()`；React 迁移留下了这条横幅的 CSS
+  // 与 6 条词典串，却把**元素、触发点与读者**一起丢了（实测 2026-10-02）。
+  const [githubNudge, setGithubNudge] = useState(false);
+  // 关闭是**本进程内**的：「别再烦我」不该被下一次计数增长撤销（vanilla
+  // `_githubBannerDismissed`，`js/app.js:1151`——它同样只写不重置）。
+  const githubDismissedRef = useRef(false);
   // 会话信息行（rant 2026-09-01T20:16:55：对齐 TUI 状态栏——id/name/project/消息数/轮计时）
   //
   // 计时基准是 **daemon 的轮开始时刻**（`turnStartBySid`，由 `turn_start` 帧、或打开会话时的
@@ -231,6 +254,35 @@ export function Shell() {
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView]);
+
+  /**
+   * An evolution just completed — ask whether GitHub is connected, and nudge if not.
+   *
+   * The trigger is the count **growing** (the bridge counts that, so no frame is
+   * lost between two renders), not the count: `evolutionCount` arrives on every
+   * `pong` and at boot, so a first reading is a baseline, not news (vanilla:
+   * "首次连接/无增长不提示", `js/app.js:1119`). The moment matters because a
+   * completed evolution is the one time its result has to be pushed — a host who is
+   * not connected learns it here or not at all.
+   */
+  useEffect(() => {
+    if (appState.evolutionGrowthCount === 0) return;
+    if (githubDismissedRef.current) return;
+    const b = wsBridge();
+    if (!b?.githubStatus) return;
+    void (async () => {
+      try {
+        const s = await b.githubStatus?.();
+        if (s?.authenticated) return;
+        // A late answer must not resurrect a nudge the host already closed.
+        if (githubDismissedRef.current) return;
+        setGithubNudge(true);
+      } catch {
+        // `github_status` unreachable (daemon busy / old build) → say nothing. A
+        // nudge built on a failed reading would claim a state nobody measured.
+      }
+    })();
+  }, [appState.evolutionGrowthCount]);
 
   // ── workspace 面板动作（vanilla dialogs.js 语义） ──
   async function addProject() {
@@ -610,8 +662,13 @@ export function Shell() {
   }
 
   const upgradeBanner = appState.upgradeBanner;
-  const showUpgradeBanner =
-    upgradeBanner && upgradeBanner.installed !== "" && upgradeBanner.installed !== dismissedUpgrade;
+  // The banner that is *due* (installed differs from running, and this version has
+  // not been dismissed) — kept as the value itself rather than a boolean so the
+  // render below has a narrowed non-null banner to interpolate.
+  const pendingUpgrade =
+    upgradeBanner && upgradeBanner.installed !== "" && upgradeBanner.installed !== dismissedUpgrade
+      ? upgradeBanner
+      : null;
 
   // Why the connection is down, when the main process said. The sentence is shown
   // here rather than as a transcript row because the frame is **global** (the main
@@ -639,26 +696,94 @@ export function Shell() {
       ? { kind: "installing", text: t("app.installing") }
       : null;
 
+  // **One slot, one banner.** Every banner that lives *above* the app is pinned to
+  // the same place — `#connection-banner`, `#github-banner` and `#upgrade-banner`
+  // are each `position: absolute; top: var(--sp-3); left: 50%; z-index: 20` in
+  // `layout.css` — so two of them at once means the later one in DOM order *covers*
+  // the earlier: the host is told one thing and not the other. (The `.conn-banner`
+  // that reports a per-session outage is deliberately not one of these: it is laid
+  // out in the chat flow, so it stacks instead of covering.) The top of the window
+  // therefore shows the highest-priority condition only:
+  //
+  //   1. the connection failure — the host has to act, and nothing else can be
+  //      done first;
+  //   2. the first-launch unpack — transient, and it explains a window that would
+  //      otherwise look frozen;
+  //   3. the GitHub nudge — tied to a *moment* (an evolution just finished and its
+  //      result cannot be pushed), so it must not wait behind a banner that has no
+  //      moment of its own;
+  //   4. the upgrade banner — "restart to apply" keeps until the host restarts.
+  //
+  // Each lower one reappears the moment the higher one clears, so nothing is lost.
+  type TopBanner =
+    | { kind: "failure" | "installing"; text: string }
+    | { kind: "github" }
+    | { kind: "upgrade"; banner: { current: string; installed: string } };
+  const topBanner: TopBanner | null = notice
+    ? notice
+    : githubNudge
+      ? { kind: "github" }
+      : pendingUpgrade
+        ? { kind: "upgrade", banner: pendingUpgrade }
+        : null;
+
   return (
     <div className="react-shell" data-testid="react-shell">
-      {notice ? (
+      {topBanner?.kind === "failure" || topBanner?.kind === "installing" ? (
         <div
           id="connection-banner"
           // An outage is an alert; an unpack is a polite status the host does not
           // have to act on.
-          role={notice.kind === "failure" ? "alert" : "status"}
+          role={topBanner.kind === "failure" ? "alert" : "status"}
           data-testid="connection-banner"
-          data-kind={notice.kind}
+          data-kind={topBanner.kind}
         >
-          <span id="connection-banner-msg">{notice.text}</span>
+          <span id="connection-banner-msg">{topBanner.text}</span>
         </div>
       ) : null}
-      {showUpgradeBanner ? (
+      {topBanner?.kind === "github" ? (
+        <div id="github-banner" role="status" data-testid="github-banner">
+          <span id="github-banner-msg">{t("settings.githubBannerMsg")}</span>
+          <button
+            type="button"
+            id="github-banner-connect"
+            className="btn btn-primary"
+            data-testid="github-banner-connect"
+            onClick={() => {
+              // vanilla: hide the banner, then open Settings → the GitHub section
+              // (`js/app.js:1179`). Dismissing rather than keeping it up: the host
+              // is on their way to the answer, so the question is over.
+              githubDismissedRef.current = true;
+              setGithubNudge(false);
+              setActiveView("settings");
+            }}
+          >
+            {t("settings.githubBannerConnect")}
+          </button>
+          <button
+            type="button"
+            id="github-banner-dismiss"
+            className="btn btn-ghost"
+            title={t("settings.githubBannerDismiss")}
+            data-testid="github-banner-dismiss"
+            onClick={() => {
+              githubDismissedRef.current = true;
+              setGithubNudge(false);
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
+      {topBanner?.kind === "upgrade" ? (
         <div id="upgrade-banner" role="status" data-testid="upgrade-banner">
           <span id="upgrade-banner-msg">
-            {upgradeBanner.current && upgradeBanner.current !== upgradeBanner.installed
-              ? t("app.upgradeBannerMsgFromTo", { from: upgradeBanner.current, to: upgradeBanner.installed })
-              : t("app.upgradeBannerMsg", { version: upgradeBanner.installed })}
+            {topBanner.banner.current && topBanner.banner.current !== topBanner.banner.installed
+              ? t("app.upgradeBannerMsgFromTo", {
+                  from: topBanner.banner.current,
+                  to: topBanner.banner.installed,
+                })
+              : t("app.upgradeBannerMsg", { version: topBanner.banner.installed })}
           </span>
           <button
             type="button"
@@ -676,7 +801,7 @@ export function Shell() {
             className="btn btn-ghost"
             title="✕"
             data-testid="upgrade-banner-dismiss"
-            onClick={() => setDismissedUpgrade(upgradeBanner.installed)}
+            onClick={() => setDismissedUpgrade(topBanner.banner.installed)}
           >
             ✕
           </button>

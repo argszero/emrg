@@ -139,6 +139,22 @@ export interface DaemonAppState {
   vision: boolean | null;
   currentVersion: string;
   evolutionCount: number | null;
+  /**
+   * How many times the reported evolution count has **grown** this process.
+   *
+   * A trigger, not a display value: the count itself is in `evolutionCount`, and
+   * what a surface needs to know is "an evolution just finished" — the one moment
+   * its result has to be pushed somewhere. It is counted here rather than compared
+   * at render time because two frames carrying counts (a boot `init` and the first
+   * `pong`, or two pongs back to back) can both land between two renders: the
+   * render-time compare would see only the newer one and lose the growth entirely
+   * (measured 2026-10-02 — the same shape vanilla avoided by checking in its frame
+   * handler, `js/app.js:1115`).
+   *
+   * Monotonic and never reset. A first reading is a baseline, not news: growth is
+   * `prev !== null && n > prev` (vanilla's "首次连接/无增长不提示").
+   */
+  evolutionGrowthCount: number;
   sessions: SessionSummary[];
   openSessions: OpenSessionEntry[];
   /** 每会话 busy 锁（P3 slice 1：done/cancelled 按 sid 释放，不误清激活会话） */
@@ -212,6 +228,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     vision: null,
     currentVersion: "",
     evolutionCount: null,
+    evolutionGrowthCount: 0,
     sessions: [],
     openSessions: [],
     busyBySid: {},
@@ -295,6 +312,21 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
   // P2 queue-injection（#655）：busy 时发送的消息入 daemon 队列，queued_requeue
   // 以原 requestId 重发（不重加用户行）。逐 sid 记录（后台会话独立跟踪）。
   const queuedSends = new Map<string, { requestId: string; text: string; sandbox?: string; images?: ImageAttach[] | null }[]>();
+
+  /**
+   * A newly reported evolution count, folded with the one already in the store.
+   *
+   * `undefined`/`null` from the frame means the frame said nothing, so the stored
+   * value stands (the same rule every other field here follows) — and a frame that
+   * says nothing is not growth.
+   */
+  function evolutionFold(
+    prev: number | null,
+    reported: number | null | undefined,
+  ): { evolutionCount: number | null; grew: boolean } {
+    const n = reported ?? prev;
+    return { evolutionCount: n, grew: prev !== null && n !== null && n > prev };
+  }
 
   function sidBusy(sid: string | null, busy: boolean): void {
     const k = KEY(sid);
@@ -568,15 +600,19 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         break;
       case "pong": {
         const pong = data as PongData;
-        store.update((s) => ({
-          ...s,
-          serverId: pong.identity?.instance_id || s.serverId,
-          model: pong.model || s.model,
-          // A pong that carries no boolean says nothing about the capability, so the
-          // last reported value stands rather than being reset to unknown.
-          vision: typeof pong.vision === "boolean" ? pong.vision : s.vision,
-          evolutionCount: pong.evolution_count ?? s.evolutionCount,
-        }));
+        store.update((s) => {
+          const evo = evolutionFold(s.evolutionCount, pong.evolution_count);
+          return {
+            ...s,
+            serverId: pong.identity?.instance_id || s.serverId,
+            model: pong.model || s.model,
+            // A pong that carries no boolean says nothing about the capability, so the
+            // last reported value stands rather than being reset to unknown.
+            vision: typeof pong.vision === "boolean" ? pong.vision : s.vision,
+            evolutionCount: evo.evolutionCount,
+            evolutionGrowthCount: s.evolutionGrowthCount + (evo.grew ? 1 : 0),
+          };
+        });
         break;
       }
       case "config_applied": {
@@ -727,18 +763,25 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
 
   function applyInit(result: InitResult): void {
     if (!result) return;
-    store.update((s) => ({
-      ...s,
-      // init 成功=配置存在+key 已配置（main.js 仅在两者均满足时才走到 ensureConnected）
-      connected: Boolean(result.config_exists && result.api_key_configured),
-      serverId: result.server_id || s.serverId,
-      model: result.model || s.model,
-      vision: typeof result.vision === "boolean" ? result.vision : s.vision,
-      evolutionCount: result.evolution_count ?? s.evolutionCount,
-      currentVersion: result.current_version || s.currentVersion,
-      sessions: result.sessions || s.sessions,
-      openSessions: result.open_sessions || s.openSessions,
-    }));
+    store.update((s) => {
+      // The same fold as `pong`: a boot count that is *higher* than the one already
+      // in the store is growth too (the GUI can boot into a re-opened window while
+      // an evolution finished in the background).
+      const evo = evolutionFold(s.evolutionCount, result.evolution_count);
+      return {
+        ...s,
+        // init 成功=配置存在+key 已配置（main.js 仅在两者均满足时才走到 ensureConnected）
+        connected: Boolean(result.config_exists && result.api_key_configured),
+        serverId: result.server_id || s.serverId,
+        model: result.model || s.model,
+        vision: typeof result.vision === "boolean" ? result.vision : s.vision,
+        evolutionCount: evo.evolutionCount,
+        evolutionGrowthCount: s.evolutionGrowthCount + (evo.grew ? 1 : 0),
+        currentVersion: result.current_version || s.currentVersion,
+        sessions: result.sessions || s.sessions,
+        openSessions: result.open_sessions || s.openSessions,
+      };
+    });
   }
 
   async function respondApproval(approved: boolean): Promise<boolean> {

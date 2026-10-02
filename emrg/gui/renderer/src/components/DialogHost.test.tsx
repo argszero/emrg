@@ -28,6 +28,8 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     vision: null,
     currentVersion: "0.2.81",
     evolutionCount: 115,
+    // No growth observed in this fixture — the counter counts, it does not carry.
+    evolutionGrowthCount: 0,
     sessions: [],
     openSessions: [],
     busyBySid: {},
