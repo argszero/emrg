@@ -250,6 +250,41 @@ def test_the_executable_the_chain_resolves_is_one_that_starts():
     )
 
 
+@needs_windows
+def test_a_python_child_of_this_dialect_round_trips_non_ascii():
+    """The measured defect, end to end: the child's codec and this tool's reader agree.
+
+    Both halves are correct on their own, which is why no string test can see this:
+    the child writes what Python's locale tells it to, and ``_decode_output`` reads
+    UTF-8 because ``ENCODING_PREAMBLE`` made PowerShell emit UTF-8.  On a host whose
+    console code page is not UTF-8 the child's bytes are decoded as something they
+    are not — measured 2026-10-03 on Windows Server 2022 (``cp936``), where this
+    command returned ``\\ufffd``s before the child was told which codec its reader
+    uses.
+
+    The command is deliberately **ASCII**: ``chr()`` names the characters, so a
+    failure here is about the stream's codec and cannot be a mangled argument.
+    """
+    import emrg.sandbox.policy  # noqa: PLC0415
+
+    command = f"& '{sys.executable}' -c \"print(chr(20320)+chr(22909))\""
+    result = asyncio.run(
+        pwsh.run_command(
+            command,
+            policy=emrg.sandbox.policy.SandboxPolicy(
+                mode="danger-full-access", workspace_root=tempfile.mkdtemp()
+            ),
+            workdir=tempfile.mkdtemp(),
+            timeout=120.0,
+            platform_name="win32",
+        )
+    )
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip() == "\u4f60\u597d", (
+        f"a Python child's non-ASCII output did not survive the collector: {result.stdout!r}"
+    )
+
+
 # ── the argv: the dialect is the word in front of the flags ───────────────
 
 
@@ -365,6 +400,31 @@ def test_the_child_environment_never_gets_a_term_from_us(monkeypatch):
     monkeypatch.delenv("TERM", raising=False)
     without = _captured_argv(monkeypatch, "echo ok", pwsh_path="C:\\pwsh.exe")
     assert "TERM" not in without["env"], "nothing invents one"
+
+
+def test_the_python_child_is_told_the_codec_this_tool_decodes_with(monkeypatch):
+    """``ENCODING_PREAMBLE`` pins PowerShell; a nested interpreter is the other half.
+
+    Measured 2026-10-03 on the Windows host (console ``cp936``) through this very
+    tool: ``python -c "print(chr(20320)+chr(22909))"`` came back as replacement
+    characters.  The preamble is not a substitute — it sets PowerShell's *own*
+    output encoding, and a Python child spawned inside takes its stdio codec from
+    the locale, so it writes GBK onto a stream ``_decode_output`` reads as UTF-8.
+
+    Asserted on the spawned child's environment rather than on the constant: the
+    constant is not the contract (the sibling ``TERM`` case above makes the same
+    distinction).
+    """
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    seen = _captured_argv(monkeypatch, "echo ok", pwsh_path="C:\\pwsh.exe")
+    assert seen["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_a_deployer_declared_interpreter_codec_wins(monkeypatch):
+    """The rule the cache relocation follows: a declaration is not overruled."""
+    monkeypatch.setenv("PYTHONIOENCODING", "gbk")
+    seen = _captured_argv(monkeypatch, "echo ok", pwsh_path="C:\\pwsh.exe")
+    assert seen["env"]["PYTHONIOENCODING"] == "gbk"
 
 
 # ── the platform gate (bundle/base cordis.patch.yml, four rows) ───────────

@@ -10,7 +10,7 @@ two copies is a rule that drifts — and ``pwsh_tool_v2`` may not import
 ``bash_tool_v2`` (design §14.5 item 1: the dialects are peers, not one layered
 on the other).
 
-Two rules, two subjects, kept in one place:
+Three rules, three subjects, kept in one place:
 
 * :func:`confined_env` — **caches**.  Why the relocation exists at all: measured
   on the dev host through the bash tool at ``workspace-write``, the three failure
@@ -38,6 +38,13 @@ Two rules, two subjects, kept in one place:
   ``cwd``, and that workdir may hold an ``emrg`` package of its own; the argv
   therefore keeps the workdir out of ``sys.path`` (``-P``), which leaves
   ``PYTHONPATH`` as the one place the runner's import root can come from.
+
+* :func:`stdio_encoding_env` — **the interpreter's own stdio codec**.  Both tools
+  decode a child's stream as UTF-8, which is exactly what ``ENCODING_PREAMBLE``
+  makes PowerShell emit — but a *Python* child inside that shell picks its codec
+  from the **locale**, so on this repo's Windows hosts it writes ``cp936`` bytes
+  onto a stream its reader decodes as UTF-8.  The preamble pinned the shell and
+  left the interpreter, which is the half a reading actually arrives through.
 """
 
 from __future__ import annotations
@@ -61,6 +68,45 @@ CACHE_ENV: dict[str, str] = {
     "PIP_CACHE_DIR": "pip",
     "npm_config_cache": "npm",
 }
+
+#: The interpreter's stdio codec.  A child Python writing to a pipe takes its
+#: encoding from the **locale** — measured on this repo's Windows host, console
+#: ``cp936``, so ``print`` of non-ASCII text emits GBK.  Both tools decode that
+#: pipe as UTF-8 (``_decode_output``), and ``ENCODING_PREAMBLE`` already makes
+#: the *shell* emit UTF-8, so the interpreter is the one half of the pair that
+#: had nothing telling it what its reader expects.
+STDIO_ENCODING_ENV: dict[str, str] = {"PYTHONIOENCODING": "utf-8"}
+
+
+def stdio_encoding_env(environ: dict | None = None) -> dict[str, str]:
+    """Tell a child Python to write its stdio as UTF-8.
+
+    Why an environment variable and not a per-script fix: no script can know what
+    its caller decodes with, and the caller is one program — the shell tool — that
+    already asked PowerShell for UTF-8.  Setting it here makes the writer's codec
+    the reader's codec for every child, instead of for the ones an author
+    remembered.
+
+    Measured 2026-10-03 on the Windows host (console ``cp936``), through the pwsh
+    tool: raw **UTF-8** bytes of three CJK characters come back as those
+    characters; the raw **GBK** bytes of the same characters come back as
+    mojibake.  A Python child emits the second, because ``sys.stdout.encoding``
+    was ``gbk`` while the tool decodes UTF-8.  The visible cost was not cosmetic:
+    ``scripts/find-host-message.py`` — the instrument R7 makes a cycle answer
+    "did the host say this?" with — returns the host's own words as mojibake.
+
+    The value is not forced: a deployer who declared a codec keeps it, the same
+    rule the cache relocation follows, because a deliberate declaration is not
+    this module's to overrule.
+
+    :param environ: the environment to read; defaults to ``os.environ``.
+    :returns: the variable to add to the child's environment, or ``{}`` when the
+        environment already names one.
+    """
+    source = os.environ if environ is None else environ
+    if any(name in source for name in STDIO_ENCODING_ENV):
+        return {}
+    return dict(STDIO_ENCODING_ENV)
 
 
 def confined_env(policy: SandboxPolicy, base: str | None = None) -> dict[str, str]:

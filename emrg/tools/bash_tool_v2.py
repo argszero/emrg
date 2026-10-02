@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 # leaving that surface where it was.
 from emrg.tools.shell_env import CACHE_ENV as _CACHE_ENV  # noqa: F401  (re-export)
 from emrg.tools.shell_env import confined_env, runner_import_env  # noqa: F401  (re-export)
+from emrg.tools.shell_env import stdio_encoding_env
 
 
 #: Output budget and framing, unchanged from the old tool: keep stderr intact
@@ -458,11 +459,15 @@ async def run_command(
         argv[:4],
     )
     # The child's environment: the caller's, with interactive git prompts off
-    # (that is the old tool's behaviour, kept) and — when this run really is
-    # confined — the two things the boundary itself needs from it: the package
-    # caches relocated into the run's granted temp area, and the runner's own
-    # import root (see ``confined_env`` / ``runner_import_env``).
+    # (that is the old tool's behaviour, kept), the interpreter told which codec
+    # this tool decodes with — the reader is UTF-8 (``_decode_output``) and a
+    # Python child defaults to the locale, so the two disagree wherever the
+    # locale is not UTF-8 — and, when this run really is confined, the two things
+    # the boundary itself needs from it: the package caches relocated into the
+    # run's granted temp area, and the runner's own import root (see
+    # ``stdio_encoding_env`` / ``confined_env`` / ``runner_import_env``).
     child_env = no_prompt_env()
+    child_env.update(stdio_encoding_env())
     if confined is not None:
         child_env.update(confined_env(policy))
         child_env.update(runner_import_env())

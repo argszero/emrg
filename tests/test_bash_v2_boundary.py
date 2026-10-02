@@ -457,6 +457,62 @@ def test_the_unconfined_path_relocates_nothing(tmp_path, monkeypatch):
     assert "UV_CACHE_DIR" not in seen["env"], "nothing was confined, so nothing was relocated"
 
 
+# ── the interpreter's own stdio codec ─────────────────────────────────────
+#
+# Every collector in this family decodes a child's stream as UTF-8, while a Python
+# child takes its stdio codec from the **locale**.  Where the two disagree the
+# reader loses, and the loss is silent: measured 2026-10-03 on the Windows host
+# (console ``cp936``), a Python child's Chinese came back through the pwsh tool as
+# replacement characters, so ``scripts/find-host-message.py`` — the instrument a
+# cycle answers "did the host say this?" with — returned the host's own words as
+# mojibake.  The fix is one variable, and it is deliberately **not** part of the
+# boundary: an unconfined run reads through the same collector, so it rides on
+# every spawn; and a declaration the deployer already made is left alone, the rule
+# the cache relocation follows.
+
+
+def test_an_interpreter_child_is_told_the_codec_the_reader_uses(monkeypatch):
+    """The rule itself: UTF-8, because that is what the collector decodes with."""
+    from emrg.tools.shell_env import stdio_encoding_env
+
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    assert stdio_encoding_env() == {"PYTHONIOENCODING": "utf-8"}
+
+
+def test_a_deployer_declared_interpreter_codec_wins(monkeypatch):
+    """Same rule as the caches: a deliberate declaration is not this module's to overrule."""
+    from emrg.tools.shell_env import stdio_encoding_env
+
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii")
+    assert stdio_encoding_env() == {}
+
+
+def test_the_codec_rides_on_every_spawn_not_only_a_confined_one(tmp_path, monkeypatch):
+    """An unconfined run reads through the same collector, so it needs the variable too.
+
+    The spawn is intercepted before it happens and the environment is the subject,
+    exactly as the cache-relocation test beside it — which is also why the mode is
+    ``danger-full-access``: a confined-only implementation would pass a test written
+    against the confined path and leave the host's own sessions mojibake.
+    """
+    import emrg.tools.bash_tool_v2 as v2
+
+    seen: dict = {}
+
+    async def fake_spawn(*argv, **kwargs):
+        seen.update(kwargs)
+        raise AssertionError("stop here: the environment is the subject")
+
+    monkeypatch.setattr(v2.asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    policy = SandboxPolicy(mode="danger-full-access", workspace_root=str(tmp_path))
+    try:
+        asyncio.run(v2.run_command("echo hi", policy=policy, workdir=str(tmp_path), timeout=5.0))
+    except AssertionError:
+        pass
+    assert seen["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
 @needs_seatbelt
 def test_a_confined_command_really_sees_the_relocated_cache(boundary, monkeypatch):
     """The end-to-end half: the variable is in the child's environment, not just planned.

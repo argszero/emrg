@@ -73,7 +73,7 @@ from emrg.tools import command_scan
 from emrg.sandbox.escalation import ESCALATION_TARGETS
 from emrg.sandbox.escalation import hops_from as escalation_hops
 from emrg.tools.base import ToolExecutor
-from emrg.tools.shell_env import confined_env, runner_import_env
+from emrg.tools.shell_env import confined_env, runner_import_env, stdio_encoding_env
 
 logger = logging.getLogger(__name__)
 
@@ -557,14 +557,19 @@ async def run_command(
     )
     # The child's environment: the caller's with interactive git prompts off,
     # the dialect's own colour/pager overrides (no `TERM` — see ENV_OVERRIDES),
-    # and — when this run really is confined — the two things the boundary itself
-    # needs from it: the package caches relocated into the granted temp area, and
-    # the runner's own import root.  The relocation is EMRG's own measure (the
-    # blueprint's deployer sets caches from their own shell) and the import root
-    # is what the runner's `-P` argv leaves room for; both are shared with the
-    # bash twin through `shell_env`, so the two dialects cannot disagree.
+    # the interpreter told which codec this tool decodes with — `ENCODING_PREAMBLE`
+    # above pins *PowerShell's* output to UTF-8 and leaves a nested Python child
+    # on the locale, which is the half a reading actually arrives through — and,
+    # when this run really is confined, the two things the boundary itself needs
+    # from it: the package caches relocated into the granted temp area, and the
+    # runner's own import root.  The relocation is EMRG's own measure (the
+    # blueprint's deployer sets caches from their own shell), the import root is
+    # what the runner's `-P` argv leaves room for, and the codec is what the
+    # collector reads; all three are shared with the bash twin through
+    # `shell_env`, so the two dialects cannot disagree.
     child_env = no_prompt_env()
     child_env.update(ENV_OVERRIDES)
+    child_env.update(stdio_encoding_env())
     if confined is not None:
         child_env.update(confined_env(policy))
         child_env.update(runner_import_env())
