@@ -131,25 +131,32 @@ class GrepTool(ToolExecutor):
         # Search
         results: list[str] = []
         files_searched = 0
+        files_skipped = 0
         stop = False
 
         for filepath in files:
             if stop:
                 break
-            files_searched += 1
 
             # Skip large files
             try:
                 if filepath.stat().st_size > MAX_FILE_SIZE:
+                    files_skipped += 1
                     continue
             except OSError:
+                files_skipped += 1
                 continue
 
             # Read and search
             try:
                 lines = filepath.read_text(encoding="utf-8").split("\n")
             except (UnicodeDecodeError, OSError):
+                files_skipped += 1
                 continue
+
+            # Counted only now: the pattern is actually run against this file's
+            # lines, so "searched" means searched rather than "reached".
+            files_searched += 1
 
             rel = str(filepath.relative_to(root.parent if root.is_file() else root))
 
@@ -169,12 +176,14 @@ class GrepTool(ToolExecutor):
                         stop = True
                         break
 
+        coverage = self._coverage(files_searched, files_skipped)
+
         if not results:
             return ToolResult(
                 name="grep",
                 content=(
                     f"No matches for '{pattern}' in {root} "
-                    f"(searched {files_searched} files)"
+                    f"({coverage})"
                     + (f" matching '{file_glob}'" if file_glob else "")
                 ),
             )
@@ -183,7 +192,7 @@ class GrepTool(ToolExecutor):
         actual_matches = sum(1 for r in results if r.endswith(":"))
         summary = (
             f"Found {actual_matches} matches for '{pattern}' "
-            f"in {root} (searched {files_searched} files):\n\n"
+            f"in {root} ({coverage}):\n\n"
         )
 
         # Truncate if too many lines
@@ -192,6 +201,23 @@ class GrepTool(ToolExecutor):
             results.append(f"\n... [output truncated at ~{max_results} match blocks]")
 
         return ToolResult(name="grep", content=summary + "\n".join(results))
+
+    @staticmethod
+    def _coverage(files_searched: int, files_skipped: int) -> str:
+        """The search's coverage clause — the single rendering both summaries use.
+
+        ``files_searched`` counts the files the pattern was actually run against;
+        the files this tool skips by design (over ``MAX_FILE_SIZE``, or not UTF-8
+        text) are named separately, so a summary never implies a search was
+        complete when part of the tree was never read.
+        """
+        text = f"searched {files_searched} files"
+        if files_skipped:
+            text += (
+                f", skipped {files_skipped} "
+                f"(over {MAX_FILE_SIZE // 1024}KB or not UTF-8 text)"
+            )
+        return text
 
     @staticmethod
     def _collect_files(root: Path, file_glob: str | None) -> list[Path]:

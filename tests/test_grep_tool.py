@@ -1,13 +1,14 @@
 """Tests for the grep tool."""
 
 import asyncio
+import re
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from emrg.tools.grep_tool import GrepTool
+from emrg.tools.grep_tool import MAX_FILE_SIZE, GrepTool
 
 
 @pytest.fixture
@@ -120,3 +121,114 @@ def test_grep_nonexistent_path():
     }))
     assert result.error
     assert "not found" in result.content.lower()
+
+
+# ---------------------------------------------------------------------------
+# The coverage clause: "searched N files" must count the files the pattern was
+# actually run against, not the files the walk reached.
+# ---------------------------------------------------------------------------
+
+_COVERAGE_RE = re.compile(r"\(searched (\d+) files(?:, skipped (\d+) \([^)]*\))?\)")
+
+
+def _coverage(text: str) -> tuple[int, int]:
+    """Read the two numbers back out of a summary — (searched, skipped)."""
+    m = _COVERAGE_RE.search(text)
+    assert m, f"no coverage clause in {text!r}"
+    return int(m.group(1)), int(m.group(2) or 0)
+
+
+@pytest.fixture
+def mixed_tree():
+    """Six files: four text files the pattern can reach, two skipped by design."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "a.txt").write_text("alpha TARGET\n")
+        (root / "b.txt").write_text("beta only\n")
+        (root / "c.txt").write_text("gamma only\n")
+        (root / "sub").mkdir()
+        (root / "sub" / "d.txt").write_text("delta TARGET\n")
+        # Over MAX_FILE_SIZE: skipped by design, and it does contain the pattern.
+        (root / "huge.txt").write_text("x" * 600_000 + "\nTARGET\n")
+        # Not UTF-8 text: skipped by design, and it does contain the bytes.
+        (root / "raw.bin").write_bytes(b"\xff\xfe\x00TARGET\xff")
+        yield root
+
+
+def test_the_searched_count_is_the_files_read(mixed_tree):
+    """`searched N` must be the files the pattern ran against, not files reached."""
+    tool = GrepTool()
+    result = _run(tool.execute({"pattern": "TARGET", "path": str(mixed_tree)}))
+    assert not result.error
+    searched, skipped = _coverage(result.content)
+    # Four text files, and only two of them hold the pattern.
+    assert searched == 4
+    assert skipped == 2
+    assert "Found 2 matches" in result.content
+
+
+def test_the_coverage_numbers_add_up_to_the_tree(mixed_tree):
+    """The two numbers a reader can check: searched + skipped == files present."""
+    tool = GrepTool()
+    result = _run(tool.execute({"pattern": "TARGET", "path": str(mixed_tree)}))
+    searched, skipped = _coverage(result.content)
+    present = sum(1 for p in mixed_tree.rglob("*") if p.is_file())
+    assert searched + skipped == present == 6
+    # And the number is not simply everything the walk reached.
+    assert searched != present
+
+
+def test_the_no_match_summary_reads_the_same_coverage(mixed_tree):
+    """The branch a reader consults to conclude "nothing there" carries it too."""
+    tool = GrepTool()
+    result = _run(tool.execute({"pattern": "ZZZ_NOPE", "path": str(mixed_tree)}))
+    assert "No matches" in result.content
+    assert _coverage(result.content) == (4, 2)
+
+
+def test_both_summaries_render_one_coverage_clause(mixed_tree):
+    """Match and no-match summaries must render the identical clause."""
+    tool = GrepTool()
+    hit = _run(tool.execute({"pattern": "TARGET", "path": str(mixed_tree)}))
+    miss = _run(tool.execute({"pattern": "ZZZ_NOPE", "path": str(mixed_tree)}))
+    assert _COVERAGE_RE.search(hit.content).group(0) == _COVERAGE_RE.search(
+        miss.content
+    ).group(0)
+
+
+def test_a_skipped_file_is_named(mixed_tree):
+    """A summary must not imply the search covered files it never read."""
+    tool = GrepTool()
+    result = _run(tool.execute({"pattern": "TARGET", "path": str(mixed_tree)}))
+    assert "skipped 2" in result.content
+    assert str(MAX_FILE_SIZE // 1024) in result.content
+
+
+def test_no_skip_is_announced_when_nothing_was_skipped(temp_cwd):
+    """The other direction: a full search must not claim skipped files."""
+    tool = GrepTool()
+    result = _run(tool.execute({"pattern": "import", "path": str(temp_cwd)}))
+    searched, skipped = _coverage(result.content)
+    assert skipped == 0
+    assert "skipped" not in result.content
+    # The fixture holds five files, but `__pycache__/compiled.pyc` is never
+    # collected (a skip dir), so four are read and all four are read.
+    assert searched == 4
+    assert sum(1 for p in temp_cwd.rglob("*") if p.is_file()) == 5
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="path separator differs (\\ vs /)")
+def test_the_size_bound_is_read_from_both_sides():
+    """Exactly MAX_FILE_SIZE is searched; one byte more is skipped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        at_bound = "TARGET" + "x" * (MAX_FILE_SIZE - 6)
+        (root / "at.txt").write_text(at_bound)
+        (root / "over.txt").write_text("y" * (MAX_FILE_SIZE + 1))
+        assert (root / "at.txt").stat().st_size == MAX_FILE_SIZE
+        assert (root / "over.txt").stat().st_size == MAX_FILE_SIZE + 1
+        tool = GrepTool()
+        result = _run(tool.execute({"pattern": "TARGET", "path": str(root)}))
+        assert _coverage(result.content) == (1, 1)
+        assert "at.txt" in result.content
+        assert "over.txt" not in result.content
