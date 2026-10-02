@@ -39,7 +39,10 @@ enclosing function (good enough: a comprehension cannot bind the enclosing
 scope's names) and its own target names are not treated as this scope's
 bindings.
 
-Exit codes: 0 clean, 1 findings, 2 unmeasurable (a tree that will not parse).
+Exit codes: 0 clean, 1 findings, 2 unmeasurable. `2` covers every way this guard
+cannot answer: a file that will not parse, a file whose `from x import *` makes the
+names in scope unenumerable, and a `--root` that is not a tree it can read at all (not
+a directory, or a directory carrying no module under the directories it scans).
 """
 
 from __future__ import annotations
@@ -618,10 +621,17 @@ def undefined_reads(path: Path) -> tuple[list[tuple[str, int, str]], bool]:
     return sorted(findings, key=lambda item: item[1]), True
 
 
-def scan(root: Path) -> tuple[list[str], list[str]]:
-    """(findings as lines, files that could not be measured)."""
+def scan(root: Path) -> tuple[list[str], list[str], int]:
+    """(findings as lines, files that could not be measured, modules actually read).
+
+    The third value exists so `main` can tell "no findings here" from "no tree
+    here": with neither, this returns two empty lists, and two empty lists are
+    what a clean tree returns as well. See `main` for the measurement that made
+    the difference necessary.
+    """
     findings: list[str] = []
     unmeasured: list[str] = []
+    read = 0
     for directory in SCANNED_DIRS:
         base = root / directory
         if not base.is_dir():
@@ -640,6 +650,7 @@ def scan(root: Path) -> tuple[list[str], list[str]]:
             except SyntaxError as exc:
                 unmeasured.append(f"{path}: {exc}")
                 continue
+            read += 1
             if not definite:
                 unmeasured.append(
                     f"{path}: a `from ... import *` makes the names in scope "
@@ -658,7 +669,7 @@ def scan(root: Path) -> tuple[list[str], list[str]]:
                     f"{function}  reads {name!r}, which nothing in this module "
                     f"binds - this line raises NameError whenever it runs"
                 )
-    return findings, unmeasured
+    return findings, unmeasured, read
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -682,7 +693,34 @@ def main(argv: list[str] | None = None) -> int:
     sys.stdout.reconfigure(line_buffering=True)
     print(f"tree: {root}")
 
-    findings, unmeasured = scan(root)
+    # Naming the tree is half the rule; this is the other half. The incident that
+    # produced the convention (2026-09-11, `check-doc-count.py`) was a confident
+    # `OK` about a checkout the caller was not in -- and a root this guard cannot
+    # read at all answers `OK` in exactly the same words, because `scan` finds no
+    # directory, returns no findings, and no findings is what a clean tree returns.
+    #
+    # Measured 2026-10-03 (`cyc20261003-073709`), after it happened here: a
+    # relative `--root` was resolved twice (the caller had `cd`-ed into it first),
+    # and the guard answered `OK` about a directory that does not exist. Three
+    # shapes, all of them a verdict about nothing:
+    #
+    #     --root /tmp/does-not-exist   -> OK, rc 0
+    #     --root /tmp/an-empty-dir     -> OK, rc 0
+    #     --root /etc/hosts  (a file)  -> OK, rc 0
+    #
+    # The family already answers better: `llm-cost-report.py` warns and exits
+    # non-zero, `check-release-tag.py` reports `not measurable`, and
+    # `calibrate_silent_drift_threshold.py` says it cannot read the path. This is
+    # that rule, in the one member that did not have it.
+    if not root.is_dir():
+        print(
+            f"UNMEASURABLE: {root} is not a directory, so there is no tree here to "
+            "read - an OK about it would be a verdict about nothing.",
+            file=sys.stderr,
+        )
+        return 2
+
+    findings, unmeasured, modules_read = scan(root)
 
     for line in findings:
         print(f"ERROR: {line}")
@@ -716,11 +754,24 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # The second half of the same question, for a root that *is* a directory: every
+    # directory this guard reads may be missing (it falls through each with
+    # `continue`), so a tree that carries none of them scans nothing and reaches
+    # here with no findings -- the same two empty lists as a clean tree.
+    if modules_read == 0:
+        print(
+            f"UNMEASURABLE: no Python module under {root} in "
+            f"{', '.join(SCANNED_DIRS)} - this guard reads those directories, and a "
+            "tree that carries none of them is not one it can answer about. An OK "
+            "here would be a verdict about nothing.",
+            file=sys.stderr,
+        )
+        return 2
     if not args.quiet:
         print(
-            "OK: no name is read before its first binding in its own function "
-            "scope, and no name read inside a function or class body is bound "
-            "nowhere in its module."
+            f"OK: {modules_read} module(s) read, and no name is read before its "
+            "first binding in its own function scope, and no name read inside a "
+            "function or class body is bound nowhere in its module."
         )
     return 0
 

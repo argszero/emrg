@@ -372,6 +372,120 @@ class TestTheBoundNowhereRule:
         assert "OK" not in proc.stdout, proc.stdout
 
 
+class TestATreeItCannotRead:
+    """A root that is not this project's tree is `could not measure`, never `OK`.
+
+    Measured 2026-10-03 (`cyc20261003-073709`), after it happened *during a cycle*:
+    a relative `--root` was resolved twice -- the caller had `cd`-ed into it first --
+    and the guard answered `OK` about a directory that does not exist. It could,
+    because `scan` finds no directory, returns no findings, and **no findings is
+    exactly what a clean tree returns**. Naming the tree is half the family's rule;
+    this is the half that says the tree it named is one it can read.
+
+    The population was measured rather than assumed: over the `scripts/` guards that
+    take a filesystem root, every sibling already answers honestly about a path that
+    is not there (`llm-cost-report.py` warns and exits non-zero; `check-release-tag.py`
+    reports `not measurable`; `calibrate_silent_drift_threshold.py` says it cannot read
+    the path). This was the one member that did not.
+    """
+
+    def test_a_root_that_does_not_exist_is_not_clean(self, tmp_path) -> None:
+        missing = tmp_path / "not-here"
+        proc = _run(missing)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "OK" not in proc.stdout, proc.stdout
+        assert "not a directory" in proc.stderr, proc.stderr
+        assert str(missing.resolve()) in proc.stderr, proc.stderr
+
+    def test_a_root_that_is_a_file_is_not_clean(self, tmp_path) -> None:
+        """The shape a mistyped `--root` lands on as easily as a missing one."""
+        target = tmp_path / "a-file.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        proc = _run(target)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "OK" not in proc.stdout, proc.stdout
+
+    def test_an_empty_directory_is_not_clean(self, tmp_path) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        proc = _run(empty)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "OK" not in proc.stdout, proc.stdout
+        assert "no Python module under" in proc.stderr, proc.stderr
+        # The message names what it looked for, so a caller who pointed at the wrong
+        # directory can see which one it wanted.
+        for directory in ("emrg", "scripts", "tests", "packaging"):
+            assert directory in proc.stderr, proc.stderr
+
+    def test_a_directory_with_none_of_the_scanned_directories_is_not_clean(
+        self, tmp_path
+    ) -> None:
+        """A real tree, just not *this* project's -- e.g. another repo's checkout."""
+        other = tmp_path / "other-project"
+        (other / "src").mkdir(parents=True)
+        (other / "src" / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        proc = _run(other)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "OK" not in proc.stdout, proc.stdout
+
+    def test_a_scanned_directory_with_no_module_is_not_clean(self, tmp_path) -> None:
+        """`emrg/` present and empty is still zero modules read."""
+        (tmp_path / "emrg").mkdir(parents=True)
+        proc = _run(tmp_path)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "OK" not in proc.stdout, proc.stdout
+
+    def test_a_subset_tree_is_still_measured(self, tmp_path) -> None:
+        """The refusal must not swallow the trees this guard is *meant* to read.
+
+        An attribution run builds a root holding one file -- `emrg/server/daemon.py`
+        and nothing else -- and that tree is the whole reason `--root` exists. A
+        guard that refused anything but a full checkout would have answered
+        `unmeasurable` for the reading that found the defect it was written for.
+
+        Deliberately asserts the verdict and not the count line: it is the control
+        that must hold on the tree *without* this cycle's change as well, so a
+        failure here is "the refusal over-reached" and nothing else.
+        """
+        (tmp_path / "emrg" / "server").mkdir(parents=True)
+        (tmp_path / "emrg" / "server" / "only.py").write_text(
+            "def f():\n    return 1\n", encoding="utf-8"
+        )
+        proc = _run(tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "OK" in proc.stdout, proc.stdout
+
+    def test_a_subset_tree_still_reports_its_defect(self, tmp_path) -> None:
+        """The control for the row above: measuring a subset is not clearing it.
+
+        Uses the *first* rule's shape (a read above its binding) so that the answer
+        does not depend on this cycle's change: on either tree the reading must be
+        rc=1, which is what makes this a control for the refusal rather than a second
+        test of something else.
+        """
+        (tmp_path / "emrg").mkdir(parents=True)
+        (tmp_path / "emrg" / "bad.py").write_text(
+            "def f():\n    return flag\n    flag = 1\n", encoding="utf-8"
+        )
+        proc = _run(tmp_path)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "'flag'" in proc.stdout, proc.stdout
+
+    def test_a_clean_reading_names_how_many_modules_it_read(self, tmp_path) -> None:
+        """`OK` is a claim about something, so the claim says what.
+
+        Every verdict in this family names its subject: the tree is named before the
+        verdict, and this is the same rule applied to the measurement -- a count of
+        zero is what made an `OK` about a directory that is not there indistinguishable
+        from an `OK` about a clean checkout, and printing the number is what keeps the
+        two apart for a reader who only sees the verdict line.
+        """
+        tree = _tree(tmp_path, good="def f():\n    return 1\n")
+        proc = _run(tree)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "1 module(s) read" in proc.stdout, proc.stdout
+
+
 class TestItsExitCodes:
     def test_a_file_that_will_not_parse_is_unmeasurable_not_clean(self, tmp_path) -> None:
         """`0` means "measured and clean", so a tree it cannot read is never `0`."""
