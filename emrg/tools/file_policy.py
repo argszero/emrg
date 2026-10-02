@@ -180,6 +180,23 @@ def resolve_file_target(file_path: str, workspace: str | None) -> str:
 def is_within(path: str, root: str) -> bool:
     """True when ``path`` (absolute) is inside ``root`` (absolute) or equals it.
 
+    **This is the one spelling of "inside".** ``emrg/sandbox/fence.py`` decides
+    whether a write target sits under a granted root by calling this function; it
+    used to carry a private copy (``_is_within_root``), and the copies had drifted
+    by exactly the root case below. The copy that was right said so in its own
+    docstring ("a root spelled ``/`` … must not become ``//``"), which is how the
+    other one's mistake stayed invisible: it was a *different function*, so no
+    reading compared them. Measured on master (2026-10-02):
+    ``is_within("/etc/hosts", "/")`` → **False** here, **True** in the fence —
+    and on Windows the same call was already True, because that arm normalised the
+    root's separator and the POSIX arm did not.
+
+    The root is a **prefix**, so its own trailing separator is not part of the
+    boundary: a root spelled ``/`` must not become ``//``, which no path starts
+    with. ``realpath`` drops a trailing separator from every spelling that has
+    more to it (``/a/`` → ``/a``), so this normalisation only ever fires for the
+    root itself.
+
     Under a Windows shell the comparison canonicalises the separator before the
     prefix test. That is a uniform substitution on both sides, so it cannot
     change which of two real paths contains the other — but it does stop the
@@ -192,9 +209,12 @@ def is_within(path: str, root: str) -> bool:
         rr = os.path.realpath(root)
         if WINDOWS_SHELL:
             rp = rp.replace("\\", "/")
-            rr = rr.replace("\\", "/").rstrip("/")
-            return rp == rr or rp.startswith(rr + "/")
-        return rp == rr or rp.startswith(rr + os.sep)
+            rr = rr.replace("\\", "/")
+            sep = "/"
+        else:
+            sep = os.sep
+        rr = rr.rstrip(sep)
+        return rp == rr or rp.startswith(rr + sep)
     except OSError:
         return False
 

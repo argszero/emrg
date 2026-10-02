@@ -48,11 +48,9 @@ agree by construction rather than by maintenance.
 
 from __future__ import annotations
 
-import os
-
 from emrg.sandbox.policy import DANGER_FULL_ACCESS, SandboxPolicy
 from emrg.sandbox.roots import canonical_path, writable_roots
-from emrg.tools.file_policy import protected_paths
+from emrg.tools.file_policy import is_within, protected_paths
 
 
 def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
@@ -90,7 +88,7 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         # ``emrg/tools/file_policy.py`` because the legacy scanner reads it too.
         return f"{policy.mode} sandbox: blocked write to protected daemon file {file_path!r}"
     roots = writable_roots(policy)
-    if any(_is_within_root(target, root) for root in roots):
+    if any(is_within(target, root) for root in roots):
         return None
     granted = (
         ", ".join(repr(root) for root in roots)
@@ -107,19 +105,3 @@ def file_refusal(file_path: str, policy: SandboxPolicy) -> str | None:
         f"{policy.mode} sandbox: blocked file write to {file_path!r}{resolved} — "
         f"outside every root this tier grants ({granted})"
     )
-
-
-def _is_within_root(target: str, root: str) -> bool:
-    """Whether a canonical target is the root or sits under it.
-
-    A prefix test on a canonical pair, which is the comparison the providers
-    make (``providers/darwin.py`` matches its filters the same way).  ``root``
-    arrives canonical, so the separator is normalised once here rather than in
-    each caller — a root spelled ``/`` (the filesystem root, which no tier
-    grants but a policy could) must not become ``//``.
-
-    :param target: the canonical target path.
-    :param root: one canonical granted root.
-    :returns: whether the target is inside the granted root.
-    """
-    return target == root or target.startswith(root.rstrip(os.sep) + os.sep)
