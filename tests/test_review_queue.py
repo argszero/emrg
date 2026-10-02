@@ -1473,11 +1473,12 @@ class FakeLinks:
     live queue instead of here.
     """
 
-    def __init__(self, rows, issues=(), path="/tmp/rants.jsonl"):
+    def __init__(self, rows, issues=(), path="/tmp/rants.jsonl", closed_issues=()):
         self.rows = rows
         self.issues = [{"number": n, "body": b} for n, b in issues]
+        self.closed_issues = [{"number": n, "body": b} for n, b in closed_issues]
         self.path = Path(path)
-        self.queue_calls: list[str] = []
+        self.queue_calls: list[tuple[str, str, str | None]] = []
         self.read: Path | None = None
         self.origins_asked: list[list[dict]] = []
 
@@ -1488,8 +1489,12 @@ class FakeLinks:
         self.read = path
         return self.rows
 
-    def load_queue(self, repo):
-        self.queue_calls.append(repo)
+    def load_queue(self, repo, state="open", since=None):
+        """The sibling's loader, mirroring its signature — including the bounded closed
+        reading `open_rant_rows` spends for rants with no open declaring issue."""
+        self.queue_calls.append((repo, state, since))
+        if state == "closed":
+            return types.SimpleNamespace(issues=self.closed_issues)
         return types.SimpleNamespace(issues=self.issues)
 
     def declared_origins(self, issues):
@@ -1503,8 +1508,8 @@ class FakeLinks:
         return found
 
 
-def _links(monkeypatch, tool, rows, issues=(), path="/tmp/rants.jsonl"):
-    links = FakeLinks(rows, issues, path)
+def _links(monkeypatch, tool, rows, issues=(), path="/tmp/rants.jsonl", closed_issues=()):
+    links = FakeLinks(rows, issues, path, closed_issues)
     monkeypatch.setattr(tool, "issue_links", lambda: links)
     return links
 
@@ -1597,11 +1602,100 @@ def test_an_issue_declaring_a_rant_is_attached_to_that_rants_row(monkeypatch):
 
 
 def test_the_ledger_the_override_names_is_the_one_read(monkeypatch):
-    """`--rants` is the whole of how a host with a ledger elsewhere is reached."""
+    """`--rants` is the whole of how a host with a ledger elsewhere is reached.
+
+    The two calls are pinned as a **rule**, not as a count: the open reading is always
+    spent, and the closed one only for a rant the open reading could not place, bounded by
+    that rant's own instant normalised to UTC. `+08:00` in a query string is a space to
+    the API, so the spelling here is the whole reason the bound is expressible at all.
+    """
     tool = _fresh_tool()
     links = _links(monkeypatch, tool, [_row("2026-09-30T09:17:54+08:00")])
 
     tool.open_rant_rows("/elsewhere/rants.jsonl", tool.REPO)
 
     assert links.read == Path("/elsewhere/rants.jsonl")
-    assert links.queue_calls == [tool.REPO]
+    assert links.queue_calls == [
+        (tool.REPO, "open", None),
+        (tool.REPO, "closed", "2026-09-30T01:17:54Z"),
+    ], links.queue_calls
+
+
+def test_a_rant_whose_issue_was_closed_says_so_instead_of_no_issue_yet(monkeypatch):
+    """The measured case, 2026-10-02: the release rant rendered `no issue yet` while its
+    issue #1807 existed and had been closed when its own PR #1808 merged."""
+    tool = _fresh_tool()
+    stamp = "2026-10-02T07:48:41.525323+08:00"
+    _links(
+        monkeypatch,
+        tool,
+        [_row(stamp)],
+        closed_issues=[(1807, f"Origin: rant {stamp}\n\nbody")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert rant.issues == []
+    assert rant.closed_issues == [1807]
+    out = tool.render_rant(rant)
+    assert f"rant {stamp}  pending  #1807 closed" in out, out
+    assert "no issue yet" not in out, out
+
+
+def test_an_open_declaring_issue_spends_no_closed_reading(monkeypatch):
+    """The second call is a bound, not a habit: a rant the open reading places costs one
+    request, exactly as it did before this reading existed."""
+    tool = _fresh_tool()
+    stamp = "2026-09-30T09:17:54+08:00"
+    links = _links(
+        monkeypatch,
+        tool,
+        [_row(stamp)],
+        issues=[(1771, f"Origin: rant {stamp}\n\nbody")],
+        closed_issues=[(1772, f"Origin: rant {stamp}\n\nbody")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert rant.issues == [1771]
+    assert rant.closed_issues == []
+    assert links.queue_calls == [(tool.REPO, "open", None)], links.queue_calls
+    assert "#1771" in tool.render_rant(rant)
+    assert "closed" not in tool.render_rant(rant)
+
+
+def test_neither_state_is_still_no_issue_yet(monkeypatch):
+    """The words keep their meaning: they are printed only when both readings found
+    nothing, so a cycle reading them is being told to file one."""
+    tool = _fresh_tool()
+    _links(
+        monkeypatch,
+        tool,
+        [_row("2026-09-30T09:35:04+08:00")],
+        issues=[(1771, "Origin: rant 2026-09-30T09:17:54+08:00\n\nbody")],
+        closed_issues=[(1772, "no origin line here")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert (rant.issues, rant.closed_issues) == ([], [])
+    assert "  no issue yet  " in tool.render_rant(rant)
+
+
+def test_a_closed_pull_request_is_not_read_as_a_declaring_issue(monkeypatch):
+    """`Origin:` is an issue's line, and the issues endpoint returns PRs among them."""
+    tool = _fresh_tool()
+    stamp = "2026-09-30T09:17:54+08:00"
+    links = _links(monkeypatch, tool, [_row(stamp)])
+    links.closed_issues = [
+        {
+            "number": 1773,
+            "body": f"Origin: rant {stamp}\n\nbody",
+            "pull_request": {"url": "https://api.github.com/repos/x/y/pulls/1773"},
+        }
+    ]
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert rant.closed_issues == []
+    assert "no issue yet" in tool.render_rant(rant)

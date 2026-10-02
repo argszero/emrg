@@ -479,6 +479,7 @@ class Rant:
     status: str
     message: str = ""
     issues: list[int] = field(default_factory=list)
+    closed_issues: list[int] = field(default_factory=list)
     project: str = ""
 
 
@@ -508,6 +509,41 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
         for stamp in stamps:
             by_timestamp.setdefault(stamp, []).append(number)
 
+    # A rant whose declaring issue was closed (normally by the merge of its own PR) is
+    # invisible to the open reading above, so its row would claim `no issue yet` — the
+    # same words it prints for a rant that never had one. Measured 2026-10-02: the
+    # release rant rendered `no issue yet` while issue #1807 existed, declared the rant's
+    # timestamp, and had been closed when #1808 merged. R5 tells a cycle that taking up a
+    # rant means filing its issue, so that reading invites a duplicate issue for work
+    # already finished. The second reading is spent only when some open rant lacks an open
+    # declaring issue, and only over the window those rants could have been filed in.
+    closed_by_timestamp: dict[str, list[int]] = {}
+    unplaced = [
+        str(row.get("timestamp", ""))
+        for row in wanted
+        if not by_timestamp.get(str(row.get("timestamp", "")))
+    ]
+    if unplaced:
+        since = min(
+            (parsed for parsed in (instant(stamp) for stamp in unplaced) if parsed),
+            default=None,
+        )
+        if since is not None:
+            # Spelled in UTC with a `Z`: the ledger's offset carries a `+`, and a query
+            # string reads that as a space (`+08:00` arrives as ` 08:00`), so the instant
+            # must not be passed in the form the ledger stores it in. Measured on this
+            # repo: `since=<UTC Z form>` is one request returning 20 rows in ~1.2s.
+            closed = links.load_queue(
+                repo,
+                "closed",
+                since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            # `Origin:` is an issue's line, and the issues endpoint returns PRs too.
+            closed_issues = [row for row in closed.issues if "pull_request" not in row]
+            for number, stamps in links.declared_origins(closed_issues).items():
+                for stamp in stamps:
+                    closed_by_timestamp.setdefault(stamp, []).append(number)
+
     return sorted(
         (
             Rant(
@@ -515,6 +551,9 @@ def open_rant_rows(rants: str | None = None, repo: str = REPO) -> list[Rant]:
                 status=str(row.get("status", "")),
                 message=str(row.get("message", "")),
                 issues=sorted(by_timestamp.get(str(row.get("timestamp", "")), [])),
+                closed_issues=sorted(
+                    closed_by_timestamp.get(str(row.get("timestamp", "")), [])
+                ),
                 project=str(row.get("project", "") or ""),
             )
             for row in wanted
@@ -926,8 +965,21 @@ def render_rant(rant: Rant) -> str:
     The project is last and keyed rather than bare, so it cannot be read as part of the
     status or as an issue number, and so a row without one is visible as such: §2.2 makes
     a rant that names no project *(nor this task's)* one to ignore entirely.
+
+    `no issue yet` means what it says: no issue in **either** state declares this rant.
+    An issue that was closed — normally by the merge of its own PR — renders as
+    `#1807 closed`, because the two are opposite instructions: the first says "file one",
+    and following it for an issue that already exists creates the duplicate this repo's
+    link reading exists to report. The row states that the issue is closed and stops
+    there: a close by merge and a close without one are not distinguishable from here,
+    so the cycle reads the issue rather than being told which it was.
     """
-    where = ", ".join(f"#{n}" for n in rant.issues) if rant.issues else "no issue yet"
+    if rant.issues:
+        where = ", ".join(f"#{n}" for n in rant.issues)
+    elif rant.closed_issues:
+        where = ", ".join(f"#{n} closed" for n in rant.closed_issues)
+    else:
+        where = "no issue yet"
     excerpt = " ".join(rant.message.split())
     if len(excerpt) > 110:
         excerpt = excerpt[:109] + "…"
