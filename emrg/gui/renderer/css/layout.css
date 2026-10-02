@@ -518,6 +518,38 @@
 }
 #upgrade-banner .btn { padding: 4px 12px; min-height: 0; font-size: var(--fs-secondary); }
 
+/* ── Connection-failure banner: the reason, not just the dot ──────────────
+   The main process stops re-spawning the daemon after three attempts and sends
+   `{daemon_stopped: true, error: <message incl. the emrgd.log tail>}` once; an
+   auth failure sends `{auth_failed: true, error: …}`. #1024 deleted the vanilla
+   renderer whose `handleStatus` printed both and the React renderer never read
+   them, so the GUI showed only the header's grey "Disconnected" (measured
+   2026-10-02). Same geometry as the upgrade banner; `pre-wrap` because the
+   payload is a multi-line log tail rather than a version string. */
+#connection-banner {
+  position: absolute;
+  top: var(--sp-3);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  background: var(--red-soft);
+  color: var(--red);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-secondary);
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+  animation: banner-in var(--dur-med) var(--ease);
+  white-space: pre-wrap;
+  text-align: left;
+  max-width: 90%;
+  max-height: 40vh;
+  overflow: auto;
+}
+
 /* ── 侧边栏折叠（⌘B / 窄屏） ────────────── */
 body.sidebar-collapsed #sidebar {
   display: none;

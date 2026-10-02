@@ -18,7 +18,7 @@ import type { DaemonAppState, SessionSummary } from "../lib/daemonBridge";
 function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
   return {
     connected: true,
-    authFailed: false,
+    connectionFailure: null,
     reconnecting: false,
     installing: false,
     serverId: "srv-1",

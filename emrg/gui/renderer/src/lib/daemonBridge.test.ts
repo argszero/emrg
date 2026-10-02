@@ -122,6 +122,52 @@ describe("createDaemonBridge", () => {
     expect(st.evolutionCount).toBe(7);
   });
 
+  it("status 的失败原因进 store，重连时退场（2026-10-02）", () => {
+    // The main process sends the reason and nobody read it: `daemon_stopped` was
+    // not even declared on `StatusData`, so the sentence (which for a spawn
+    // failure is the message `startDaemon` builds — it includes the emrgd.log
+    // tail) had no reader at all, and `auth_failed` set a flag no surface
+    // consumed. Both were printed by the vanilla renderer's `handleStatus`,
+    // deleted with it in #1024.
+    const { emit, bridge } = setup();
+    const tail = "daemon failed to start after 3 attempts — please start it manually ('emrg server')";
+    emit({ type: "status", data: { connected: false, daemon_stopped: true, error: tail }, sid: null });
+    let st = bridge.store.get();
+    expect(st.connectionFailure).toEqual({ kind: "daemon-stopped", detail: tail });
+    expect(st.connected).toBe(false);
+
+    // The notice is about *this* outage: a connection that came back retires it,
+    // or the surface would keep naming a daemon that is running again.
+    emit({ type: "status", data: { connected: true }, sid: null });
+    st = bridge.store.get();
+    expect(st.connectionFailure).toBeNull();
+
+    // The other cause replaces it rather than sitting beside it — one connection,
+    // one outage, which is why this is a union and not two flags.
+    emit({ type: "status", data: { connected: false, auth_failed: true, error: "bad token" }, sid: null });
+    expect(bridge.store.get().connectionFailure).toEqual({ kind: "auth" });
+
+    emit({ type: "status", data: { connected: true }, sid: null });
+    expect(bridge.store.get().connectionFailure).toBeNull();
+  });
+
+  it("重连途中不发原因的 status 帧不改口", () => {
+    // `reconnecting: true` is sent on every backoff step and carries no reason;
+    // it must not clear the one already known, nor invent an outage where the
+    // daemon simply has not answered yet.
+    const { emit, bridge } = setup();
+    emit({ type: "status", data: { connected: false, reconnecting: true }, sid: null });
+    let st = bridge.store.get();
+    expect(st.reconnecting).toBe(true);
+    expect(st.connectionFailure).toBeNull();
+
+    // …and it does not erase a reason already known: the retry is about the same
+    // outage, so the sentence stays until something says otherwise.
+    emit({ type: "status", data: { connected: false, daemon_stopped: true, error: "boom" }, sid: null });
+    emit({ type: "status", data: { connected: false, reconnecting: true }, sid: null });
+    expect(bridge.store.get().connectionFailure).toEqual({ kind: "daemon-stopped", detail: "boom" });
+  });
+
   it("生效的图片能力来自 daemon 的 pong / status / config_applied，且缺字段时不改口", () => {
     // Rant 2026-09-17T16:53:02：界面要显示 daemon 实际依据的 vision，而不是
     // config.toml 的声明值。三个报告点：pong（连接/心跳）、status（main 的

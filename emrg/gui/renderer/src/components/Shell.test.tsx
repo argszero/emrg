@@ -320,6 +320,38 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.queryByTestId("conn-vision")).not.toBeInTheDocument());
   });
 
+  it("shows why the daemon will not come back, not just the grey dot (2026-10-02)", async () => {
+    // The status frame's failure reasons had no reader: the main process sends
+    // `{daemon_stopped: true, error: …}` once after the spawn throttle trips, and
+    // for that path the message it builds in `daemon_client.startDaemon` carries
+    // the `emrgd.log` tail — the one place a host can see the cause. #1024 deleted
+    // the vanilla renderer's `handleStatus` (which printed `app.daemonStopped`)
+    // and the React renderer never read the keys, so the GUI showed only
+    // "Disconnected".
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("connection-banner")).not.toBeInTheDocument();
+
+    const reason = "daemon failed to start after 3 attempts — please start it manually ('emrg server')\n  emrgd.log tail: boom";
+    m.emit({ type: "status", data: { connected: false, daemon_stopped: true, error: reason } });
+    const banner = await screen.findByTestId("connection-banner");
+    // The banner carries the sentence *and* the daemon's own words.
+    expect(banner.textContent).toContain("auto-retry stopped");
+    expect(banner.textContent).toContain("emrgd.log tail: boom");
+
+    // An auth failure is the other half of the same mechanism, and it had a flag
+    // (`authFailed`) with no surface reading it.
+    m.emit({ type: "status", data: { connected: false, auth_failed: true, error: "bad token" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("connection-banner").textContent).toContain("Authentication failed"),
+    );
+
+    // A connection that came back retires the notice — it describes this outage.
+    m.emit({ type: "status", data: { connected: true, model: "claude-3.7" } });
+    await waitFor(() => expect(screen.queryByTestId("connection-banner")).not.toBeInTheDocument());
+  });
+
   it("shows the disconnected banner when the active session broadcasts disconnected", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));

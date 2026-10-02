@@ -613,8 +613,27 @@ export function Shell() {
   const showUpgradeBanner =
     upgradeBanner && upgradeBanner.installed !== "" && upgradeBanner.installed !== dismissedUpgrade;
 
+  // Why the connection is down, when the main process said. The sentence is shown
+  // here rather than as a transcript row because the frame is **global** (the main
+  // process sends `status` with no sid), so a row would land in the no-session
+  // bucket and never be seen. `app.daemonStopped` interpolates the reason the
+  // daemon client put in the message — for a spawn failure that is the tail of
+  // `emrgd.log`, which is the only place a host can read why the daemon will not
+  // come back.
+  const failure = appState.connectionFailure;
+  const connectionNotice = !failure
+    ? ""
+    : failure.kind === "daemon-stopped"
+      ? t("app.daemonStopped", { msg: failure.detail })
+      : t("app.authFailed");
+
   return (
     <div className="react-shell" data-testid="react-shell">
+      {connectionNotice ? (
+        <div id="connection-banner" role="alert" data-testid="connection-banner">
+          <span id="connection-banner-msg">{connectionNotice}</span>
+        </div>
+      ) : null}
       {showUpgradeBanner ? (
         <div id="upgrade-banner" role="status" data-testid="upgrade-banner">
           <span id="upgrade-banner-msg">

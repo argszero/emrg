@@ -42,6 +42,22 @@ export interface StatusData {
   auth_failed?: boolean;
   reconnecting?: boolean;
   installing?: boolean;
+  /**
+   * The main process gave up on re-spawning the daemon and says so once.
+   *
+   * It travels with `error`, which on this path is **the tail of `emrgd.log`**
+   * (`daemon_client.js`'s `startDaemon` builds the message and includes it) —
+   * so the sentence is the only thing that tells a host *why* the daemon is
+   * gone. Both keys went unread here after #1024 deleted the vanilla renderer
+   * that printed them (`Chat.addSystemMessage(_t("app.daemonStopped", …))`), and
+   * the React renderer that replaced it kept the dictionary entry and dropped
+   * the reader: the GUI said "Disconnected" and nothing else (measured
+   * 2026-10-02).
+   */
+  daemon_stopped?: boolean;
+  /** Why the connection is down: the `emrgd.log` tail on a spawn failure, the
+   *  auth error otherwise. Paired with whichever flag above is set. */
+  error?: string;
 }
 
 /** pong 事件载荷（daemon 心跳） */
@@ -89,10 +105,25 @@ export interface DaemonEventFrame {
 export interface DaemonAppState {
   /** 连接状态（status.connected / disconnected 事件驱动） */
   connected: boolean;
-  /** status 附带的诊断标记 */
-  authFailed: boolean;
   reconnecting: boolean;
   installing: boolean;
+  /**
+   * Why the connection is down, when the main process said why — or null, which
+   * is also the state after a `connected: true` frame retires it. The notice
+   * describes *this* outage, not a property of the app.
+   *
+   * A variant carries the surface's whole input: `daemon-stopped` owns the
+   * `emrgd.log` tail its sentence interpolates, `auth` needs no detail because
+   * its sentence says what to do about it. The shape is a union rather than two
+   * flags plus a string because those three can disagree (both set, or a reason
+   * left over from the outage before) — and the vanilla renderer's reader for
+   * them was deleted with it in #1024, so nothing has been reading the flags
+   * since (measured 2026-10-02).
+   */
+  connectionFailure:
+    | { kind: "auth" }
+    | { kind: "daemon-stopped"; detail: string }
+    | null;
   serverId: string;
   model: string;
   /**
@@ -171,9 +202,9 @@ export function resumeTurnInstantMs(meta: unknown): number | null {
 export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
   return createSnapshotStore<DaemonAppState>({
     connected: false,
-    authFailed: false,
     reconnecting: false,
     installing: false,
+    connectionFailure: null,
     serverId: "",
     model: "",
     // Nothing has reported it yet — not `false`, which would be a claim about the
@@ -522,17 +553,39 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       }
       case "status": {
         const st = data as StatusData;
-        store.update((s) => ({
-          ...s,
-          connected: st.connected ?? s.connected,
-          authFailed: st.auth_failed ?? s.authFailed,
-          reconnecting: st.reconnecting ?? s.reconnecting,
-          installing: st.installing ?? s.installing,
-          serverId: st.server_id || s.serverId,
-          model: st.model || s.model,
-          vision: typeof st.vision === "boolean" ? st.vision : s.vision,
-          currentVersion: st.current_version || s.currentVersion,
-        }));
+        // This is the port of the reader #1024 deleted along with the vanilla
+        // renderer (`js/app.js:1604`), read in its order: `connected` retires
+        // the notice, then `auth_failed`, then `daemon_stopped`. The two
+        // producers are mutually exclusive anyway (`main.js` `ensureConnected`
+        // sends exactly one per frame), so the order is fidelity rather than
+        // precedence — and a port sharing it is one a reviewer can diff against
+        // the original. What is *new* is the last arm: vanilla fell through to a
+        // red dot, which is the same rule — a frame naming no cause does not
+        // clear the cause. Both `reconnecting` (every backoff step) and
+        // `installing` are sent mid-outage and name none.
+        store.update((s) => {
+          const failure: DaemonAppState["connectionFailure"] =
+            st.connected === true
+              ? null
+              : st.auth_failed === true
+                ? { kind: "auth" }
+                : st.daemon_stopped === true
+                  ? { kind: "daemon-stopped", detail: st.error ?? "" }
+                  : // Neither named: the notice stands. The previous value is
+                    // read here, where the previous state lives.
+                    s.connectionFailure;
+          return {
+            ...s,
+            connected: st.connected ?? s.connected,
+            reconnecting: st.reconnecting ?? s.reconnecting,
+            installing: st.installing ?? s.installing,
+            connectionFailure: failure,
+            serverId: st.server_id || s.serverId,
+            model: st.model || s.model,
+            vision: typeof st.vision === "boolean" ? st.vision : s.vision,
+            currentVersion: st.current_version || s.currentVersion,
+          };
+        });
         break;
       }
       case "sessions": {
