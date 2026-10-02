@@ -84,6 +84,17 @@ _ERR_MAX = 30_000
 _HEAD_TAIL_RATIO = 0.6
 _STDERR_SEPARATOR = "\n[stderr]\n"
 
+#: Room kept inside the budget for a truncation notice itself, so the bounded
+#: text — content *and* the line saying what was cut — stays within the budget it
+#: was handed.  The notice is a few dozen characters; the reserve covers it (and
+#: the framing newlines) at any digit count an output can reach.  The pwsh twin
+#: carries its own copy of this number, and the twins' agreement is pinned.
+_NOTICE_RESERVE = 200
+
+#: The smallest content budget worth splitting into two ends.  Below it, a head
+#: and a tail would each be a fragment, so the head alone is kept and said so.
+_MIN_BOTH_ENDS = 1000
+
 #: How long a killed run's pipes get to close before the reader is abandoned.
 _STREAM_GRACE_SECONDS = 1.0
 
@@ -345,17 +356,35 @@ def _truncate_stderr(stderr: str) -> str:
 def _truncate_stdout(stdout: str, remaining: int) -> str:
     """Bound stdout to ``remaining``, keeping head and tail.
 
+    Two rules, and the notice serves both readers: **what comes back fits
+    ``remaining``** — the content and its notice together, because the budget is
+    what the module promised the context and a notice is not exempt from it —
+    and **the notice names the characters the cut really dropped**, so the number
+    is one the reader can check against the original rather than a statement
+    about the budget.
+
     :param stdout: the collected stdout.
-    :param remaining: the characters left in the budget.
+    :param remaining: the characters this stream may occupy.
     :returns: stdout within that budget.
     """
-    head_chars = int(remaining * _HEAD_TAIL_RATIO)
-    tail_chars = remaining - head_chars - 200
-    if tail_chars < 500:
-        return stdout[: remaining - 50] + f"\n\n... [stdout truncated: {len(stdout)} → {remaining} chars]"
+    if len(stdout) <= remaining:
+        return stdout
+    if remaining <= _NOTICE_RESERVE:
+        # No room for content and a notice both: name the loss, keep nothing.
+        return f"... [stdout truncated, {len(stdout)} chars total]"
+    budget = remaining - _NOTICE_RESERVE
+    if budget < _MIN_BOTH_ENDS:
+        omitted = len(stdout) - budget
+        return (
+            stdout[:budget]
+            + f"\n\n... [stdout truncated: {omitted} chars omitted, head kept]"
+        )
+    head_chars = int(budget * _HEAD_TAIL_RATIO)
+    tail_chars = budget - head_chars
+    omitted = len(stdout) - head_chars - tail_chars
     return (
         f"{stdout[:head_chars]}\n\n"
-        f"... [{len(stdout) - remaining} chars omitted] ..."
+        f"... [{omitted} chars omitted] ..."
         f"\n\n{stdout[-tail_chars:]}"
     )
 
