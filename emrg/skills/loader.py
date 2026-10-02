@@ -67,6 +67,48 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
     return result
 
 
+def frontmatter_block(text: str) -> tuple[str, str] | None:
+    """The frontmatter block and the body, or ``None`` when there is no block.
+
+    **The delimiters are lines.** A YAML frontmatter block starts and ends with a
+    line that is exactly ``---``, which is the rule ``emrg/memory.py`` has always
+    used for the memory files (``lines[0].strip() == "---"`` … ``lines[i].strip()
+    == "---"``). This module read the delimiter as a **substring** instead
+    (``text.split("---", 2)``), so a ``---`` *inside a value* ended the block
+    early — silently, and in a way no reader could see:
+
+        ---
+        name: tripledash
+        description: Use --- to separate sections
+        ---
+        # Body
+
+    measured on master: the description becomes ``"Use"`` and the body becomes
+    ``"to separate sections\\n---\\n# Body"`` — the rest of the description leaks
+    into the body, and since progressive disclosure shows the model *only* the
+    description, the skill is advertised as doing something it does not.
+
+    One home, three readers. ``emrg/skills/registry.py`` (the catalog's ``skills:``
+    list) and ``emrg/skills/installer.py`` (the published-file check) each carried
+    their own copy of the substring split; the installer also handed the parser the
+    **whole file** rather than the block, so a body line spelled ``description: …``
+    satisfied its "has frontmatter" check while ``load_skills`` rejected the same
+    file — install reported ``{"ok": True}`` for a skill that can never load. All
+    three now ask this function.
+
+    :param text: the file's text.
+    :returns: ``(frontmatter, body)``, both stripped, or ``None`` when the text
+        does not begin with a ``---`` line or has no closing ``---`` line.
+    """
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "\n".join(lines[1:i]).strip(), "\n".join(lines[i + 1 :]).strip()
+    return None
+
+
 def _parse_skill_file(file_path: Path, source: str) -> Optional[Skill]:
     """Parse a single skill .md file. Returns None if parsing fails."""
     # Defensive: the deprecated registry file (superseded 2026-08-08T10:14:29
@@ -82,18 +124,12 @@ def _parse_skill_file(file_path: Path, source: str) -> Optional[Skill]:
         logger.debug("skill: cannot read %s", file_path)
         return None
 
-    if not text.startswith("---"):
-        logger.debug("skill: no frontmatter in %s", file_path)
+    block = frontmatter_block(text)
+    if block is None:
+        logger.debug("skill: no frontmatter block in %s", file_path)
         return None
 
-    # Split on --- delimiters: first ---, then frontmatter, then ---, then body
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        logger.debug("skill: malformed frontmatter in %s", file_path)
-        return None
-
-    frontmatter_str = parts[1].strip()
-    body = parts[2].strip()
+    frontmatter_str, body = block
 
     fm = _parse_frontmatter(frontmatter_str)
     if not fm:

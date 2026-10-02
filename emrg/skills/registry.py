@@ -26,6 +26,7 @@ import tempfile
 from pathlib import Path
 
 from emrg.config import config_dir
+from emrg.skills.loader import frontmatter_block
 
 logger = logging.getLogger(__name__)
 
@@ -119,10 +120,10 @@ def parse_skills_frontmatter(text: str) -> list[dict]:
     """
     if not text.startswith("---"):
         return []
-    parts = text.split("---", 2)
-    if len(parts) < 3:
+    block = frontmatter_block(text)
+    if block is None:
         return []
-    fm_lines = parts[1].splitlines()
+    fm_lines = block[0].splitlines()
 
     entries: list[dict] = []
     current: dict[str, str] | None = None

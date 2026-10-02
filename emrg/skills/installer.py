@@ -156,10 +156,16 @@ async def _publish_skill(entry: dict, runner: Optional[Runner]) -> dict:
         return {"error": f"{CLI_NAME} skill produced empty output"}
 
     # Validate the published file has a name+description frontmatter
-    # (reuse the loader's parser — no new YAML dependency).
-    from emrg.skills.loader import _parse_frontmatter
+    # (reuse the loader's parser — no new YAML dependency), and parse the
+    # **block** rather than the whole file: the parser reads every unindented
+    # `key: value` line it is given, so handing it the whole text let a body line
+    # supply the fields this check is looking for, and the file was then
+    # installed as `{"ok": True}` while `load_skills` rejected it for having no
+    # frontmatter — a success report for a skill that can never load.
+    from emrg.skills.loader import _parse_frontmatter, frontmatter_block
 
-    fm = _parse_frontmatter(skill_text) if skill_text.startswith("---") else {}
+    block = frontmatter_block(skill_text)
+    fm = _parse_frontmatter(block[0]) if block is not None else {}
     name = fm.get("name", "")
     description = fm.get("description", "")
     if not name or not description:
