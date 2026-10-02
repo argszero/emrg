@@ -289,20 +289,40 @@ def _silence_deadline(now: float, last_frame_at: float, tool_deadline: float | N
                tool_deadline if tool_deadline is not None else 0.0)
 
 
-def _names_another_request(frame: dict, request_id: str) -> bool:
-    """Whether `frame` is a broadcast about some *other* request than this cycle's.
+def _about_this_requests_queue(frame: dict, request_id: str) -> bool:
+    """Whether `frame` says something about **this request's** place in the queue.
 
-    Every frame of a turn names the request it belongs to — `delta`,
-    `tool_start`, `tool_end`, `done`, `task_queued` and `steer_committed` all
-    carry `request_id` (`daemon.py`) — and a turn's frames are session
-    broadcasts, so a session's *other* requests land on this socket as well.
+    Two shapes, and each is the one thing it can be:
 
-    A frame with no `request_id` is not this predicate's business: the
-    turn-wrapper's own error frame has none, and neither do two of the tests'
-    fixtures, so an absent id means "not stated" rather than "somebody else's".
+    * `queued_requeue` carries the ids still pending **in a list** (`daemon.py`),
+      so the question is membership.
+    * every other frame that answers for a request carries its id in
+      `request_id` — `task_queued`, `steer_committed`, and this cycle's own turn
+      reporting (`delta`, `tool_start`, `tool_end`, `done`) — so the question is
+      equality. A frame with **no** id answers for nobody: the holding turn's
+      `turn_end`, and the turn-wrapper's error frame.
+
+    Everything else on the socket is the holding turn's own life, and reading
+    one as an answer to this cycle is what turned a queued cycle into a
+    completed evolution (the holder's `done`) or into a wedge (the holder's
+    id-less `turn_end` clearing the flag, the silence after it then being read as
+    the turn stopping) — both measured 2026-10-02.
     """
-    other = frame.get("request_id")
-    return bool(other) and other != request_id
+    if frame.get("type") == "queued_requeue":
+        ids = frame.get("request_ids")
+        return isinstance(ids, list) and request_id in ids
+    return frame.get("request_id") == request_id
+
+
+def _queue_was_dropped(frame: dict) -> bool:
+    """Whether `frame` is the daemon saying the session's pending queue was discarded.
+
+    `daemon.py` broadcasts `queued_cancelled` when a turn ends by cancel, error
+    or disconnect with messages still pending. It carries no request ids — the
+    queue is gone as a whole — so the caller may only read it as being about
+    this cycle's request when it already knows the request was in that queue.
+    """
+    return frame.get("type") == "queued_cancelled"
 
 
 def _requeue_names_this_request(frame: dict, request_id: str) -> bool:
@@ -1784,6 +1804,19 @@ class TaskHandler:
     #: request was never lost; only the reading of what happened was wrong.
     _QUEUED = "queued"
 
+    #: The ending of a cycle the daemon accepted into a busy session's pending
+    #: queue and then **dropped**: the holding turn ended by cancel, error or
+    #: disconnect, and `daemon.py` answers that by broadcasting
+    #: `queued_cancelled` after clearing the pending list, so the request will
+    #: never be started as this connection's turn.
+    #:
+    #: Distinct from `_QUEUED`, which says the daemon is still holding it, and
+    #: from `_STALLED`, which says a turn that was running stopped reporting.
+    #: Measured 2026-10-02: without this ending the same sequence reported
+    #: `stalled` — a false wedge, in the log line whose whole text is "the turn
+    #: stopped reporting without closing the socket".
+    _QUEUE_DROPPED = "queue-dropped"
+
     #: Endings that leave no marker behind: the cycle finished, or it never
     #: started.
     _SILENT_ENDINGS = frozenset({_CLEAN_END, _NOT_STARTED})
@@ -1802,6 +1835,10 @@ class TaskHandler:
         _QUEUED: (
             "was queued behind a busy session (merged into that turn, never "
             "started as this connection's own)"
+        ),
+        _QUEUE_DROPPED: (
+            "was dropped from the busy session's queue (never started as this "
+            "connection's own, and nothing ran)"
         ),
         _NO_TERMINAL_FRAME: "ended without a terminal frame",
     }
@@ -2613,7 +2650,38 @@ class TaskHandler:
                 # appended, i.e. a cycle counted as evolution whose own turn
                 # never began. `_QUEUED` documents the contract it breaks: "a
                 # queued request never gets a `done` of its own".
-                if queued and _names_another_request(resp, request_id):
+                #
+                # The holding turn's frames that carry **no** request id are the
+                # same rule's other half (`turn_end`, and the wrapper's error
+                # frame): they are not about this request either, so they may
+                # not clear the flag nor be taken as this cycle's error. Measured
+                # 2026-10-02: on `13329a23` a queued cycle that met its holder's
+                # `turn_end` reported `stalled` ("the turn stopped reporting
+                # without closing the socket"), and one that met the holder's
+                # error frame reported `server-error` — the holding turn's
+                # trouble filed as this cycle's.
+                if queued and not _about_this_requests_queue(resp, request_id):
+                    if _queue_was_dropped(resp):
+                        # The one exception, because it is a fact about the
+                        # request rather than about the holding turn: the daemon
+                        # discarded the queue this request was in. It is
+                        # reachable only here — the flag is set by the daemon's
+                        # own `task_queued` for this request — and it is
+                        # terminal, because a dropped request is never started.
+                        end_reason = self._QUEUE_DROPPED
+                        error = (
+                            f"dropped from the session's queue: the daemon took "
+                            f"this cycle's request (position {queued_position}) "
+                            f"and then discarded the pending queue without ever "
+                            f"starting it as this connection's turn"
+                        )
+                        self._logger.warning(
+                            "TaskHandler[%s]: %s — the holding turn ended by "
+                            "cancel or error, so this cycle was dropped rather "
+                            "than run; nothing ran and nothing is wedged",
+                            self.name, error,
+                        )
+                        break
                     continue
                 # `task_queued` and `steer_committed` are the daemon's two words
                 # for "your request is not a turn yet, it is inside someone

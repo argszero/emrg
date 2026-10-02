@@ -3663,6 +3663,11 @@ def test_silence_after_a_queued_cycle_started_is_a_stall_again(tmp_path, monkeyp
     turn that goes silent is the stall the watchdog exists for. Without the
     clearing, one busy session relabels every later silence this cycle meets —
     the same defect mirrored, and a wedge would be filed as a busy session.
+
+    The frames carry this cycle's request id, because that is what the daemon
+    sends: the turn's own `tool_start`/`tool_end` name the request they belong to
+    (`daemon.py`), and it is the id — not the mere arrival of a frame — that says
+    this turn is the cycle's own.
     """
     from emrg.server import scheduler as mod
 
@@ -3671,8 +3676,10 @@ def test_silence_after_a_queued_cycle_started_is_a_stall_again(tmp_path, monkeyp
     _silence_frames(handler, tmp_path, monkeypatch, frames=[
         {"type": "task_queued", "request_id": "self", "session_id": "s",
          "position": 1},
-        {"type": "tool_start", "tool_name": "bash", "arguments": {"command": "true"}},
-        {"type": "tool_end", "tool_name": "bash", "content": "ok", "error": False},
+        {"type": "tool_start", "request_id": "self", "tool_name": "bash",
+         "arguments": {"command": "true"}},
+        {"type": "tool_end", "request_id": "self", "tool_name": "bash",
+         "content": "ok", "error": False},
     ])
 
     with caplog.at_level(logging.ERROR):
@@ -3873,15 +3880,18 @@ def test_a_queued_cycle_is_not_ended_by_the_holding_turns_terminal_frame(
     )
 
 
-def test_a_requeue_naming_another_request_does_not_hold_this_cycle_open(
+def test_a_requeue_naming_another_request_does_not_answer_for_this_one(
     tmp_path, monkeypatch, caplog,
 ):
     """The rule reads the id, not the frame type.
 
     `queued_requeue` carries the ids still pending; only this cycle's own id in
-    that list says anything about this cycle's request. A helper test as well as
-    an executed one, because the executed shape (a foreign requeue after our own)
-    is the direction the *fix* must not over-reach into.
+    that list says anything about this cycle's request. A requeue naming somebody
+    else is therefore *no answer at all* for this one, and the cycle stays where
+    the daemon's own `task_queued` put it — waiting, with the bound as its only
+    way out. The alternative was measured and is worse: clearing the flag on a
+    frame that names another request sent a still-queued cycle into `_STALLED`,
+    whose log line claims its turn stopped reporting.
     """
     import logging
 
@@ -3910,27 +3920,48 @@ def test_a_requeue_naming_another_request_does_not_hold_this_cycle_open(
     with caplog.at_level(logging.WARNING):
         reason = asyncio.run(handler._run_evolution_cycle())
 
-    assert reason != handler._QUEUED, (
-        "another request's requeue is not evidence that this cycle is still "
-        f"waiting — got {reason!r}"
+    assert reason == handler._QUEUED, (
+        "a requeue that does not name this request answers nothing about it, so "
+        f"the cycle is still where the daemon put it — got {reason!r}"
+    )
+    assert not any("stopped reporting" in r.getMessage() for r in caplog.records), (
+        "and nothing here is a wedge: "
+        f"{[r.getMessage() for r in caplog.records]}"
     )
 
 
-def test_a_foreign_frames_never_become_this_cycles_turn(tmp_path, monkeypatch, caplog):
-    """The predicate, both ways, and the two frame shapes it must not touch.
+def test_the_queue_predicate_answers_only_for_this_requests_queue():
+    """The predicate, over every shape the daemon puts on the wire.
 
     A frame with no `request_id` says "not stated", not "somebody else's": the
-    turn-wrapper's own error frame carries none, and the loop's existing tests
-    write frames without one.
+    holding turn's `turn_end` and the turn-wrapper's error frame carry none, and
+    the loop's existing tests write frames without one — so the question is not
+    "does this frame name another request" but "does it answer for *this* one",
+    and an id-less frame answers for nobody.
     """
     from emrg.server import scheduler as mod
 
-    assert mod._names_another_request({"request_id": "host-1"}, "mine") is True
-    assert mod._names_another_request({"request_id": "mine"}, "mine") is False
-    assert mod._names_another_request({}, "mine") is False, (
-        "an absent request_id is not a claim about somebody else"
+    mine = mod._about_this_requests_queue
+    assert mine({"type": "task_queued", "request_id": "me"}, "me") is True
+    assert mine({"type": "task_queued", "request_id": "host-1"}, "me") is False, (
+        "another request's queue position is not this request's"
     )
-    assert mod._names_another_request({"request_id": ""}, "mine") is False
+    assert mine({"type": "steer_committed", "request_id": "me"}, "me") is True
+    assert mine({"type": "queued_requeue", "request_ids": ["me"]}, "me") is True
+    assert mine({"type": "queued_requeue", "request_ids": ["host-1"]}, "me") is False
+    assert mine({"type": "queued_requeue"}, "me") is False
+    assert mine({"type": "queued_cancelled", "session_id": "s"}, "me") is False, (
+        "the drop is terminal but carries no ids; it is read as this request's "
+        "only where the flag already says the request was in that queue"
+    )
+    assert mine({"type": "turn_end", "session_id": "s"}, "me") is False
+    assert mine({"error": "Turn ended without reporting: CancelledError"}, "me") is False
+    assert mine({"request_id": "me", "content": "hi", "delta": True}, "me") is True, (
+        "this cycle's own turn finally reporting is the thing the flag waits for"
+    )
+    assert mine({"request_id": "host-1", "done": True}, "me") is False
+    assert mod._queue_was_dropped({"type": "queued_cancelled"}) is True
+    assert mod._queue_was_dropped({"type": "queued_requeue", "request_ids": ["me"]}) is False
 
 
 def test_a_cycle_that_ran_its_own_turn_still_counts(tmp_path, monkeypatch, caplog):
@@ -4040,4 +4071,128 @@ def test_a_foreign_queue_frame_never_becomes_the_position_reported(
     assert any("position 3" in m for m in messages), messages
     assert not any("position 7" in m for m in messages), (
         f"the neighbour's queue position is not evidence about this request: {messages}"
+    )
+
+
+def test_a_queued_cycles_own_silence_is_not_a_stall_when_the_holder_ends(
+    tmp_path, monkeypatch, caplog,
+):
+    """The holding turn's `turn_end` says nothing about this request.
+
+    `turn_end` carries no `request_id` (`daemon.py` broadcasts it as the turn's
+    last lifecycle frame), so a rule that only asked "is this somebody else's
+    frame" let it through and it cleared the flag — and the silence after it was
+    then read as a turn that stopped reporting. Measured on `13329a23`: this
+    sequence ends `stalled`, whose log line is *"the turn stopped reporting
+    without closing the socket"*, for a cycle that never had a turn here.
+
+    The frames are two shapes the daemon really emits: the bare `turn_end`, and
+    the holding turn's frames before it.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
+         "position": 4},
+        {"request_id": "host-1", "content": "thinking", "delta": True,
+         "session_id": "s"},
+        {"type": "turn_end", "session_id": "s"},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._QUEUED, (
+        "the holding turn ending is not this cycle's turn ending, and the "
+        f"daemon is still holding its request — got {reason!r}"
+    )
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("stopped reporting" in m for m in messages), (
+        f"nothing here stopped reporting: {messages}"
+    )
+    assert handler.evolutions == [], "nothing ran, so nothing is counted"
+
+
+def test_a_dropped_queue_is_its_own_ending(tmp_path, monkeypatch, caplog):
+    """The one frame that *is* about this request while it waits: the drop.
+
+    `queued_cancelled` is broadcast when a turn ends by cancel, error or
+    disconnect with messages still pending, and the pending list is cleared —
+    so a request that was in that queue will never be started. Measured
+    2026-10-02 on `13329a23`: this sequence reported `stalled`, the one ending
+    whose meaning is a wedge to investigate.
+
+    Both halves are asserted: the ending names the drop, and it is not counted
+    (nothing ran). A fix that reached for `queued` here would be wrong in the
+    other direction — that reason says the daemon is *still* holding it.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
+         "position": 2},
+        {"request_id": "host-1", "content": "thinking", "delta": True,
+         "session_id": "s"},
+        {"type": "queued_cancelled", "session_id": "s"},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    # The literal rather than the attribute: on a tree without this ending the
+    # attribute does not exist, so the red would be an AttributeError instead of
+    # the behaviour (this is the convention `test_a_terminal_frame_still_ends_cleanly`
+    # uses for `done`).
+    assert reason == "queue-dropped", (
+        f"the daemon dropped the queue this request was in — got {reason!r}"
+    )
+    assert handler.evolutions == [], "nothing ran, so nothing is counted"
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("dropped from the session's queue" in m for m in messages), messages
+    assert not any("stopped reporting" in m for m in messages), (
+        f"a dropped request is not a wedge: {messages}"
+    )
+    assert any("nothing ran and nothing is wedged" in m for m in messages), (
+        f"and the marker must say so for whoever reads it: {messages}"
+    )
+
+
+def test_the_holding_turns_error_is_not_this_cycles_error(tmp_path, monkeypatch, caplog):
+    """The wrapper's error frame is id-less, and it is the *holding* turn's.
+
+    `daemon.py` emits `{"error": "Turn ended without reporting: …"}` from the
+    turn wrapper with no `request_id`, before the turn's cwd filter is cleared —
+    so a queued cycle receives it too. Read as this cycle's error it becomes
+    `server-error`, which is a definite claim that *this* request failed.
+    """
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "self", "session_id": "s",
+         "position": 1},
+        {"error": "Turn ended without reporting: CancelledError: "},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason != "server-error", (
+        "the holding turn's failure is not this cycle's failure — a queued "
+        f"request has no turn here to fail — got {reason!r}"
+    )
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("server error" in m for m in messages), (
+        f"and it must not be reported as one: {messages}"
     )
