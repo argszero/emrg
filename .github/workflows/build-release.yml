@@ -344,7 +344,28 @@ jobs:
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
           INSTALLER_ID="${MACOS_INSTALLER_IDENTITY:-}"
           if [ -z "$INSTALLER_ID" ]; then
-            INSTALLER_ID="$(security find-identity -v /tmp/ci.keychain | grep 'Developer ID Installer' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+            # ⚠️ `VAR="$(… | grep …)"` under the runner's `-e -o pipefail` aborts the step
+            # **at the assignment** whenever `grep` finds nothing — and "no Developer ID
+            # Installer identity" is exactly the state the `::error::` below exists for,
+            # so that message and its `exit 1` were unreachable in the one case they were
+            # written to explain. Measured 2026-10-02 by executing this body under
+            # `bash --noprofile --norc -eo pipefail`: with an identity present the step
+            # reaches productsign (rc 0); with none it printed **nothing** and exited 1,
+            # so the operator saw only "exit code 1" (the same signature that left the
+            # v0.3.8 notarize failure unexplained).
+            #
+            # `security`'s own status is read **apart** from the pipeline's, because the two
+            # failures are different failures: a keychain that cannot be read must not be
+            # reported as "no Installer certificate is configured". That would be an
+            # unreadable reading dressed as a definite bad configuration — the §AT lesson
+            # (`draft=` + `|| true` printing "still a DRAFT" out of a failed read).
+            SECURITY_RC=0
+            IDENTITIES_OUT="$(security find-identity -v /tmp/ci.keychain)" || SECURITY_RC=$?
+            if [ "$SECURITY_RC" -ne 0 ]; then
+              echo "::error::security find-identity exited $SECURITY_RC — the keychain at /tmp/ci.keychain could not be read, so \"no Developer ID Installer identity\" cannot be concluded from this. security's own output: $IDENTITIES_OUT"
+              exit 1
+            fi
+            INSTALLER_ID="$(printf '%s\n' "$IDENTITIES_OUT" | grep 'Developer ID Installer' | head -1 | sed -E 's/.*"([^"]+)".*/\1/' || true)"
           fi
           if [ -z "$INSTALLER_ID" ]; then
             echo "::error::pkg 签名需要 Developer ID Installer 证书（productsign 不接受 Application 身份）。请配置 MACOS_INSTALLER_IDENTITY + MACOS_INSTALLER_P12_BASE64（双 p12 方案），或用 security export -t identities 导出含 Installer 的 p12 到 MACOS_SIGNING_P12_BASE64（单 p12 方案）。"
