@@ -374,8 +374,13 @@ jobs:
             --wait --timeout 20m --output-format json 2>&1)"
           echo "$NOTARY_OUT"
           # 解析提交 ID 与状态（--output-format json 输出 {"id","message","status"}）
-          SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
-          STATUS="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)"
+          # ⚠️ 与 `NOTARY_OUT` 同源的第二处（实测 2026-10-02，cyc20261002-113230）：解析器
+          # 失败时它的非零状态同样被 `-e` 变成中止，于是下面那条**专为「输出不像 JSON」写的**
+          # ::error::（它把原始输出也带进日志）**永远不可达**。实测：把 submit 桩设成 rc=0、
+          # 输出非 JSON，本步确实非零退出，却只印了原始输出，「解析失败」这句从未出现。
+          # 空值才是这里要读的信号（下一行的 `-z` 检查），故显式吞掉解析器的退出码。
+          SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)" || true
+          STATUS="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)" || true
           if [ -z "$SUB_ID" ] || [ -z "$STATUS" ]; then
             echo "::error::notarytool 输出解析失败（无法获取提交 ID/状态），请手动运行 notarytool submit 排查。原始输出：$NOTARY_OUT"
             exit 1
