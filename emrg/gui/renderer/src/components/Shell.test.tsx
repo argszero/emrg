@@ -122,7 +122,10 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
 
   it("renders the chat loop (transcript + composer) without window.emrg (degradation)", async () => {
     render(wrapper(<Shell />));
-    await waitFor(() => expect(screen.getByTestId("transcript-view")).toBeInTheDocument());
+    // 无会话 → 转写为空 → 会话区渲染的是**空状态欢迎屏**（vanilla `updateEmptyState()`
+    // 数容器子节点，`js/app.js:1340`）；转写视图要在**有条目**时才在场，那条腿在
+    // `Shell welcome state` 一组里钉住。这里问的是「会话区在、输入框在」。
+    await waitFor(() => expect(screen.getByTestId("empty-state")).toBeInTheDocument());
     expect(screen.getByTestId("composer")).toBeInTheDocument();
     expect(screen.getByTestId("react-shell-sidebar")).toBeInTheDocument();
     // 无 emrg → 连接状态点灰色（未连接）
@@ -576,9 +579,9 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
 
   // ── Batch 5 slice 5：workspace 视图切换（vanilla switchView 语义） ──
 
-  it("默认 sessions 视图：显示会话区（transcript/composer），不显示面板", async () => {
+  it("默认 sessions 视图：显示会话区（转写/空状态 + composer），不显示面板", async () => {
     render(wrapper(<Shell />));
-    await waitFor(() => expect(screen.getByTestId("transcript-view")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("empty-state")).toBeInTheDocument());
     expect(screen.getByTestId("composer")).toBeInTheDocument();
     expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
     expect(screen.queryByTestId("panel-projects")).not.toBeInTheDocument();
@@ -962,5 +965,107 @@ describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 /
     await waitFor(() =>
       expect(m.sendRant).toHaveBeenCalledWith({ message: "hello world", project: "emrg" }),
     );
+  });
+});
+
+describe("Shell welcome state（空状态欢迎屏 #empty-state）", () => {
+  afterEach(() => {
+    delete (window as unknown as { emrg?: unknown }).emrg;
+  });
+
+  it("空会话 → 问候 + 说明 + 三张示例卡；转写视图不在场", async () => {
+    // vanilla `updateEmptyState()`（js/app.js:1340）：激活会话的容器没有子节点时显示
+    // `#empty-state`（问候/说明/三张示例卡，index.html:278-286）。#1024 删 vanilla 时
+    // `components.css` 的 `#empty-state`/`.empty-hello`/`.empty-sub`/`.example-grid`
+    // 与词典的 `empty.*` 五条串都留下了，**元素与读者一起没了**（实测 2026-10-02）
+    // —— 宿主第一次打开 GUI 看到的是**一片空白**。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+
+    const empty = await screen.findByTestId("empty-state");
+    expect(empty.textContent).toContain("Hi, I'm EMRG");
+    expect(empty.textContent).toContain("Your AI work partner");
+    for (const n of [1, 2, 3]) {
+      expect(screen.getByTestId(`example-card-${n}`)).toBeInTheDocument();
+    }
+    // 空的转写**没有**转写视图：两者是同一个位置的两态，不是叠在一起的两层。
+    expect(screen.queryByTestId("transcript-view")).not.toBeInTheDocument();
+  });
+
+  it("有会话但一条消息都没有，同样是空 → 欢迎屏在", async () => {
+    // 「有没有 activeSid」不是判据，**转写空不空**才是（vanilla 数的是容器子节点）。
+    // 一条差别：`getEntries(activeSid)` 与 `getEntries(null)` 是两个不同的桶，
+    // 所以这条腿单独钉一次 —— 且要**等到自动选中真的发生**（active 类出现）再断言，
+    // 否则 find 到的是「还没选中」那一态的空状态，测的就不是这条腿（变异臂抓到过）。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    expect(screen.getAllByTestId("open-session-item")[0].className).toContain("active");
+    expect(await screen.findByTestId("empty-state")).toBeInTheDocument();
+    expect(screen.queryByTestId("transcript-view")).not.toBeInTheDocument();
+  });
+
+  it("来了第一条消息 → 欢迎屏退场，转写视图上场（两态互斥）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }]));
+    // **先等自动选中落地**：空状态在「还没选中」和「选中了但是空」两种情形下都在场，
+    // 只等它等于什么都没等到 —— 那样这条测试会靠「activeSid 随后才变」通过，
+    // 而不是靠转写真的跟着条目走（未订阅的变异臂正是这样活下来的）。
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    await screen.findByTestId("empty-state");
+
+    m.emit(deltaFrame("s1", "hello"));
+    await waitFor(() => expect(screen.getByTestId("transcript-view")).toBeInTheDocument());
+    expect(screen.getByText("hello")).toBeInTheDocument();
+    expect(screen.queryByTestId("empty-state")).not.toBeInTheDocument();
+  });
+
+  it("点示例卡 → 那句话被填进输入框（本地化的那句，不是中文兜底）", async () => {
+    // vanilla（js/app.js:1774）：`input.value = (card.textContent || card.dataset.example)`
+    // —— **显示什么就填什么**，`data-example` 只是中文兜底。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("empty-state");
+
+    fireEvent.click(screen.getByTestId("example-card-1"));
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-input").textContent).toBe("Write this week's work report"),
+    );
+  });
+
+  it("点示例卡是**替换**输入框，不是追加", async () => {
+    // vanilla 是 `input.value = ...`。宿主先打了一半再点卡片，旧内容必须走掉——
+    // 否则发出去的是两句话粘在一起，而宿主看见的只是「点了一下」。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("empty-state");
+
+    await typeIntoComposer("draft text");
+    expect(screen.getByTestId("composer-input").textContent).toContain("draft text");
+    fireEvent.click(screen.getByTestId("example-card-2"));
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-input").textContent).toBe("Organize the files in this folder"),
+    );
+  });
+
+  it("面板视图不显示欢迎屏（它属于会话视图）", async () => {
+    // vanilla `setWorkspaceChrome("panel")` 把空状态一并隐藏（js/app.js:758-762）。
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("empty-state");
+
+    fireEvent.click(screen.getByTestId("nav-projects"));
+    await waitFor(() => expect(screen.getByTestId("panel-projects")).toBeInTheDocument());
+    expect(screen.queryByTestId("empty-state")).not.toBeInTheDocument();
   });
 });

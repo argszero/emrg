@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
+import type { Editor } from "@tiptap/react";
 import { useI18n } from "../lib/i18n";
 import { useSnapshotStore } from "../hooks/useSnapshotStore";
 import { useDaemonBridge } from "./DaemonBridgeProvider";
@@ -151,6 +152,9 @@ export function Shell() {
   // 关闭是**本进程内**的：「别再烦我」不该被下一次计数增长撤销（vanilla
   // `_githubBannerDismissed`，`js/app.js:1151`——它同样只写不重置）。
   const githubDismissedRef = useRef(false);
+  // 空状态示例卡片要往**输入框**里填字（vanilla `empty-state` 的 click 处理器），
+  // 所以这里持有输入框的 Editor 实例；Composer 的 `editorRef` 就是这条桥。
+  const composerEditorRef = useRef<Editor | null>(null);
   // 会话信息行（rant 2026-09-01T20:16:55：对齐 TUI 状态栏——id/name/project/消息数/轮计时）
   //
   // 计时基准是 **daemon 的轮开始时刻**（`turnStartBySid`，由 `turn_start` 帧、或打开会话时的
@@ -529,6 +533,50 @@ export function Shell() {
   }
 
   const isPanelView = activeView !== "sessions";
+
+  // ── 空状态欢迎屏（`#empty-state`）──────────────────────────────────────────
+  //
+  // vanilla `updateEmptyState()`（`js/app.js:1340`）在**激活会话的聊天容器没有任何
+  // 子节点**时显示它：一句问候 + 一句说明 + 三张示例卡片，点卡片把示例填进输入框
+  // （`js/app.js:1774`）。#1024 删 vanilla 渲染层时，`components.css` 的
+  // `#empty-state` / `.empty-hello` / `.empty-sub` / `.example-grid` / `.example-card`
+  // 与词典里 `empty.*` 五条串都留下了，**元素与读者一起没了**（实测 2026-10-02）——
+  // 于是宿主第一次打开 GUI、或新开一个空会话时，看到的是**一片空白**：没有任何一句
+  // 话告诉他这是什么、能问什么。这是 banner 那一类缺陷的第三处（前两处：连接横幅、
+  // GitHub 提示）。
+  //
+  // 只此一条：**可见的转写里没有条目**。（`!isPanelView` 曾经也写在这里，是**多余的**：
+  // 空状态只出现在 `isPanelView ? … : …` 的 else 分支里，那一支成立就意味着 `!isPanelView`
+  // ——变异臂「让空状态跟进面板视图」一个红都没有，就是这条死子句的证明。）
+  //
+  // 也曾经写过「载入历史中不算空」，那条在本实现里同样不可达：进度条只在 `loadHistory`/
+  // `loadOlderHistory` 里 `setLoadBar`，两处都在**回放之后**才设它，且只有 `hasMore` 才非空
+  // ——页里 0 条而 `hasMore` 为真的组合 daemon 不会产生。一条测试接不住的条件就是一条
+  // 没人守的分支，故不写。
+  const transcriptVersion = useSyncExternalStore(transcript.subscribe, transcript.getVersion);
+  // 快照取的是**数目**，不是那个数组：`getEntries` 交回的是 store 内部那个**活**数组
+  // （`transcript.ts:507`），追加就地改它、只有 `clear` 才换对象 —— 把一个会自己变的
+  // 数组当快照存进 `useMemo`，会让「变没变」在这条判据上失真（变异臂实测：去掉版本号
+  // 依赖后这条测试照样绿，因为长度从那个活数组里漏了出来）。数字 + 版本号依赖，
+  // 两件事各归其位。
+  const transcriptEntryCount = useMemo(
+    () => transcript.getEntries(activeSid).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [transcript, activeSid, transcriptVersion],
+  );
+  const showWelcome = transcriptEntryCount === 0;
+
+  /**
+   * 示例卡片 → 输入框（vanilla 是 `input.value = card.textContent`，即**替换**）。
+   * 填的是**本地化后**的那句话：vanilla 读的就是 `textContent`（已本地化的显示文本），
+   * 不是 `data-example` 的中文兜底 —— 宿主看到什么，发出去的就是什么。
+   */
+  function fillComposer(text: string): void {
+    const ed = composerEditorRef.current;
+    if (!ed) return;
+    ed.chain().clearContent().insertContent(text).focus("end").run();
+  }
+
   // 生产 markdown 渲染器（真实 vendor marked/DOMPurify/hljs，Batch 5 承诺项）——
   // 一次构造复用；缺省降级在 TranscriptView 内部仍兜底
   const mdRenderer = useMemo(() => createProdMarkdownRenderer(), []);
@@ -880,21 +928,49 @@ export function Shell() {
                   {t("app.sessionDisconnected")}
                 </div>
               ) : null}
-              <TranscriptView
+              {showWelcome ? (
+                <div id="empty-state" data-testid="empty-state">
+                  <div className="empty-hello">
+                    <span className="brand-star">✦</span> <span>{t("empty.hello")}</span>
+                  </div>
+                  <div className="empty-sub">{t("empty.sub")}</div>
+                  <div className="example-grid">
+                    {(["empty.example1", "empty.example2", "empty.example3"] as const).map((k) => (
+                      <button
+                        key={k}
+                        type="button"
+                        className="example-card"
+                        data-testid={`example-card-${k.slice(-1)}`}
+                        onClick={() => fillComposer(t(k))}
+                      >
+                        {t(k)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <TranscriptView
+                  store={transcript}
+                  sid={activeSid}
+                  renderer={mdRenderer}
+                  canLoadOlder={
+                    activeSid
+                      ? (() => {
+                          const hs = historyPageState(historyPagesRef.current, activeSid);
+                          return hs.hasMore && !hs.loading;
+                        })()
+                      : false
+                  }
+                  onLoadOlder={onScrollTop}
+                />
+              )}
+              <Composer
                 store={transcript}
                 sid={activeSid}
-                renderer={mdRenderer}
-                canLoadOlder={
-                  activeSid
-                    ? (() => {
-                        const hs = historyPageState(historyPagesRef.current, activeSid);
-                        return hs.hasMore && !hs.loading;
-                      })()
-                    : false
-                }
-                onLoadOlder={onScrollTop}
+                busy={busy}
+                onCommand={handleCommand}
+                editorRef={composerEditorRef}
               />
-              <Composer store={transcript} sid={activeSid} busy={busy} onCommand={handleCommand} />
             </>
           )}
         </main>
