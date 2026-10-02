@@ -693,6 +693,41 @@ def test_a_readable_index_reaches_the_listing_verbatim(tmp_path):
     assert "could not be read" not in frame["index"]
 
 
+def test_a_template_that_cannot_be_written_answers_the_client(tmp_path):
+    """A template write that fails answers a frame; it does not end the connection.
+
+    Driven through `_process_message` for the reason above: the message loop's
+    `except Exception` is what a raise from this handler reaches, and the GUI's
+    task-type editor (`emrg/gui/main.js`) turns `ok: false` into the error the host
+    reads — so "could not write <path>" is a frame, and a dropped connection is not
+    an answer at all.
+    """
+    from emrg.protocol import InstanceIdentity
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import TaskScheduler
+
+    server = _make_server()
+    original = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        # A plain file where the templates directory belongs: `mkdir` cannot
+        # succeed, which is the shape a read-only `~/.emrg` and a full disk share.
+        (tmp_path / "task-templates").write_text("not a directory\n")
+        server._scheduler = TaskScheduler(InstanceIdentity())
+        frames = _drive(
+            server,
+            {"type": "task_template_create", "name": "report", "prompt": "# Report"},
+        )
+    finally:
+        mod.config_dir = original
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["type"] == "template_result"
+    assert frames[0]["ok"] is False
+    assert "not saved" in frames[0]["error"], frames[0]
+    assert not (tmp_path / "task-templates" / "report.md").exists()
+
+
 def test_a_memory_that_cannot_be_read_is_not_reported_as_absent(tmp_path):
     """`None` from the store means two different things; the frame must not merge them.
 

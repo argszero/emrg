@@ -36,7 +36,7 @@ from emrg.connect import connect_to_server
 from emrg.sandbox.policy import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
-from emrg.server.atomic import atomic_write_yaml
+from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.git_utils import (
     _detect_git_remote,
     ensure_local_exclude,
@@ -439,22 +439,60 @@ def _read_custom_template(name: str) -> str | None:
     return None
 
 
-def _write_custom_template(name: str, prompt: str) -> None:
-    """Atomically write a user template."""
-    d = _task_templates_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    p = d / f"{name}.md"
-    tmp = p.with_suffix(".md.tmp")
-    tmp.write_text(prompt, encoding="utf-8")
-    tmp.replace(p)
+#: What the template CRUD answers when the file it was asked to change did not
+#: change. Both the writer and the deleter report whether they landed, and a
+#: caller that answers a human without reading that is answering about a file
+#: state nobody established. The path is named because the reason (a read-only
+#: directory, a full disk) is in the daemon log, and this is the sentence that
+#: sends the host there.
+#:
+#: Two sentences rather than one, because a removal is not a write and the two
+#: have to say different things about what is still true: after a failed write
+#: the old template is intact, after a failed removal the file is still there.
+TEMPLATE_WRITE_FAILED = "could not write {path} — the template was not saved"
+TEMPLATE_REMOVE_FAILED = "could not remove {path} — the template is still there"
 
 
-def _delete_custom_template(name: str) -> None:
+def _write_custom_template(name: str, prompt: str) -> bool:
+    """Write a user template atomically; True when the file was replaced.
+
+    The write goes through the shared atomic writer rather than its own
+    `tmp.write_text()` + `tmp.replace()`, so "atomic" has one home — and, like it,
+    this reports a failure it handled instead of raising it. Both halves were
+    defects, and neither is hypothetical: the inline version put `mkdir` and the
+    temp write outside any guard, so on a host whose `~/.emrg` cannot be written
+    (a read-only directory, or a full disk — ENOSPC takes the same `OSError`
+    branch) an exception escaped `template_create` into the daemon's message
+    handler, which ends the client's connection instead of answering it; and the
+    `None` it returned told `template_create`/`template_update` the template had
+    been written, so the GUI reported a task type the daemon never had.
+
+    `mode=0o644` is what the inline `write_text` produced (umask aside) and what a
+    prompt template wants to be: the host edits these files. The directory is not
+    made here — `atomic_write_bytes` makes it inside its own guard, which is also
+    why "the directory cannot be created" is now reported rather than thrown.
+    """
+    return atomic_write_bytes(prompt, _task_templates_dir() / f"{name}.md", mode=0o644)
+
+
+def _delete_custom_template(name: str) -> bool:
+    """Remove a user template; True when it is gone afterwards.
+
+    `unlink`'s `OSError` used to be swallowed here, and that made
+    `template_delete` answer "deleted" for a file that was still on disk — a
+    read-only directory is enough to produce it, and that answer goes to a human.
+    "Already absent" is True, not False: the question the answer belongs to is
+    whether the template is still there, and it is not.
+    """
     p = _task_templates_dir() / f"{name}.md"
     try:
         p.unlink()
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        logger.warning("custom template %s could not be removed", p, exc_info=True)
+        return False
+    return True
 
 
 def _resolve_task_template(task_type: str) -> Path:
@@ -3264,7 +3302,9 @@ class TaskScheduler:
             return False, "template prompt must not be empty"
         if _read_custom_template(name) is not None:
             return False, f"template {name!r} already exists"
-        _write_custom_template(name, prompt)
+        path = _task_templates_dir() / f"{name}.md"
+        if not _write_custom_template(name, prompt):
+            return False, TEMPLATE_WRITE_FAILED.format(path=path)
         logger.info("TaskScheduler: custom template %s created", name)
         return True, ""
 
@@ -3276,7 +3316,9 @@ class TaskScheduler:
             return False, f"template {name!r} not found"
         if not prompt or not prompt.strip():
             return False, "template prompt must not be empty"
-        _write_custom_template(name, prompt)
+        path = _task_templates_dir() / f"{name}.md"
+        if not _write_custom_template(name, prompt):
+            return False, TEMPLATE_WRITE_FAILED.format(path=path)
         logger.info("TaskScheduler: custom template %s updated", name)
         return True, ""
 
@@ -3296,6 +3338,8 @@ class TaskScheduler:
                 f"cannot delete type {name!r}: {len(refs)} task(s) use it "
                 f"({', '.join(str(r) for r in refs[:5])})"
             )
-        _delete_custom_template(name)
+        path = _task_templates_dir() / f"{name}.md"
+        if not _delete_custom_template(name):
+            return False, TEMPLATE_REMOVE_FAILED.format(path=path)
         logger.info("TaskScheduler: custom template %s deleted", name)
         return True, ""

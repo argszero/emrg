@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2860,6 +2861,139 @@ def test_template_crud_and_guards(tmp_path):
         ok, err = sched.template_delete("report")
         assert ok and err == ""
         assert mod._read_custom_template("report") is None
+    finally:
+        mod.config_dir = orig
+
+
+# ── a template the daemon cannot write is not a template it made ─────────────
+#
+# `_write_custom_template` and `_delete_custom_template` each answer one question —
+# "did the file change?" — and until 2026-10-02 that answer was thrown away. The
+# write's failure escaped the daemon's message handler (whose loop ends the client's
+# connection and cancels the running turn), and the removal's was swallowed, so
+# `template_delete` answered "deleted" for a file still on disk. The caller is the
+# GUI's task-type editor (`emrg/gui/main.js` turns `ok: false` into the dialog's
+# error), so in both shapes the answer reached a human.
+
+
+def _make_undeletable(target: Path) -> None:
+    """Make `target` impossible to unlink, in the way each platform refuses it.
+
+    POSIX decides by the *directory's* write bit, Windows by the file's own
+    read-only attribute, so one intent needs two mechanisms. Both are real
+    filesystem behaviour rather than a stub, which is what makes the leg using
+    this measure the writer's answer instead of a mock's.
+    """
+    if os.name == "nt":
+        os.chmod(target, stat.S_IREAD)
+    else:
+        os.chmod(target.parent, 0o500)
+
+
+def _undo_undeletable(target: Path) -> None:
+    """Undo :func:`_make_undeletable`, so pytest can clean `tmp_path` up."""
+    if os.name == "nt":
+        os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+    else:
+        os.chmod(target.parent, 0o700)
+
+
+def test_the_template_helpers_report_whether_they_landed(tmp_path):
+    """The two file helpers answer a question; both halves are asserted here."""
+    mod, orig = _p2_env(tmp_path)
+    try:
+        assert mod._write_custom_template("report", "# Report") is True
+        target = tmp_path / "task-templates" / "report.md"
+        assert target.read_text(encoding="utf-8") == "# Report"
+        assert mod._write_custom_template("report", "# New") is True
+        assert mod._read_custom_template("report") == "# New"
+        if os.name != "nt":
+            # The shared writer defaults to 0o600 (the auth token's mode); a
+            # template is a file the host is meant to edit, and the inline
+            # `write_text` this replaced produced 0o644.
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        assert mod._delete_custom_template("report") is True
+        assert mod._read_custom_template("report") is None
+        # Deleting what is already gone is not a failure: the question is whether
+        # the template is still there, and it is not.
+        assert mod._delete_custom_template("report") is True
+    finally:
+        mod.config_dir = orig
+
+
+def test_a_template_that_cannot_be_written_is_not_reported_as_created(tmp_path):
+    """A create whose file was never written is an error, not `(True, "")`."""
+    mod, orig = _p2_env(tmp_path)
+    try:
+        # A plain file where the templates directory belongs: `mkdir` cannot
+        # succeed, which is the shape a read-only `~/.emrg` and a full disk share
+        # (ENOSPC takes the same OSError branch).
+        (tmp_path / "task-templates").write_text("not a directory\n")
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+
+        ok, err = sched.template_create("report", "# Report")
+        assert not ok, "a template that was never written was reported as created"
+        assert str(tmp_path / "task-templates" / "report.md") in err, err
+        assert "not saved" in err, err
+        assert mod._read_custom_template("report") is None
+
+        # Control: the same call with the directory available still says yes. A
+        # handler that always answers "no" passes the assertions above and fails
+        # this one.
+        (tmp_path / "task-templates").unlink()
+        ok, err = sched.template_create("report", "# Report")
+        assert ok and err == "", (ok, err)
+        assert mod._read_custom_template("report") == "# Report"
+    finally:
+        mod.config_dir = orig
+
+
+def test_a_template_that_cannot_be_updated_keeps_the_old_one_and_says_so(tmp_path, monkeypatch):
+    """The update path reads the writer's answer, and the old file survives."""
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        ok, err = sched.template_create("report", "# Report")
+        assert ok and err == ""
+
+        # The writer's own failure modes are exercised by the create leg above
+        # (a real, unmakeable directory) and by `tests/test_atomic.py`; what this
+        # leg pins is the caller: a writer that reports "no" must not become
+        # "updated" in the answer the GUI shows.
+        monkeypatch.setattr(mod, "atomic_write_bytes", lambda *a, **k: False)
+        ok, err = sched.template_update("report", "# New")
+        assert not ok, "an update whose file was not written was reported as saved"
+        assert "not saved" in err, err
+        assert mod._read_custom_template("report") == "# Report"
+    finally:
+        mod.config_dir = orig
+
+
+def test_a_template_that_cannot_be_deleted_is_not_reported_as_deleted(tmp_path):
+    """`template_delete` used to answer "deleted" for a file it could not remove."""
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        ok, err = sched.template_create("report", "# Report")
+        assert ok and err == ""
+        target = tmp_path / "task-templates" / "report.md"
+
+        _make_undeletable(target)
+        try:
+            ok, err = sched.template_delete("report")
+        finally:
+            _undo_undeletable(target)
+        assert not ok, "a template still on disk was reported as deleted"
+        assert "still there" in err, err
+        assert target.exists()
+
+        # Control: once it can be removed, the same call says yes and the file goes.
+        ok, err = sched.template_delete("report")
+        assert ok and err == "", (ok, err)
+        assert not target.exists()
     finally:
         mod.config_dir = orig
 
