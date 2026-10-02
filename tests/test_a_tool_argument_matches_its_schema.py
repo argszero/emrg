@@ -134,22 +134,107 @@ def test_a_required_string_that_is_null_is_a_wrong_value():
     assert argument_shape_problem(optional, {"workdir": None}) is None
 
 
-def test_a_property_that_is_not_a_string_is_left_alone():
-    """The leak this rule closes is the string one, measured; the rest is the
-    tool's own business — `start_line: "3"` is accepted today, and turning that
-    into a refusal would be a behaviour change dressed as a defect fix."""
+def test_an_integer_property_is_left_to_its_own_rule():
+    """Two declared types are read here, and no third.
+
+    `start_line: "3"` is accepted today (`int("3")`) and turning that into a
+    refusal would be a behaviour change dressed as a defect fix; the count
+    parameters' *domain* is a different rule with its own home
+    (`emrg.tools.base.as_count`, measured in `cyc20261002-054508`), where a
+    nonsense count takes the documented default instead of raising.
+    """
     definition = ToolDefinition(
         name="t", description="", parameters={
-            "properties": {
-                "start_line": {"type": "integer"},
-                "replace_all": {"type": "boolean"},
-            },
-            "required": [],
+            "properties": {"start_line": {"type": "integer"}}, "required": [],
         },
     )
     assert argument_shape_problem(definition, {"start_line": "3"}) is None
     assert argument_shape_problem(definition, {"start_line": []}) is None
-    assert argument_shape_problem(definition, {"replace_all": "yes"}) is None
+
+
+def test_a_boolean_property_that_is_not_a_boolean_is_refused():
+    """The second measured type, and the reason it is not "the tool's business".
+
+    A boolean has no type error to raise — the tool reads it for truthiness — so
+    the caller's word for *no* is read as *yes*. Measured on this host
+    2026-10-03 (`cyc20261003-063623`) through the tools' own `execute()`:
+    `edit(replace_all="false")` **rewrote every occurrence** and answered
+    `Made 2 replacements`, and `grep(ignore_case="false")` searched
+    case-insensitively. Declining to guess is the only way to be right, because
+    the text for false is not decidable from the schema (`""` already means false
+    today, `"false"` did not).
+    """
+    definition = ToolDefinition(
+        name="t", description="", parameters={
+            "properties": {"replace_all": {"type": "boolean"}}, "required": [],
+        },
+    )
+    for value, shape in (
+        ("false", "str"), ("no", "str"), ("true", "str"),
+        (1, "int"), (0, "int"), ([], "list"), ({}, "dict"), (1.0, "float"),
+    ):
+        assert argument_shape_problem(definition, {"replace_all": value}) == (
+            f"the `replace_all` argument must be a boolean; got {shape}"
+        ), value
+    # …and the type the schema does declare is left alone, both values.
+    assert argument_shape_problem(definition, {"replace_all": True}) is None
+    assert argument_shape_problem(definition, {"replace_all": False}) is None
+    # Optional + null is absent, exactly as it is for an optional string.
+    assert argument_shape_problem(definition, {"replace_all": None}) is None
+
+
+def test_a_required_boolean_that_is_null_is_a_wrong_value():
+    """The same boundary as the string half, stated for the boolean one.
+
+    `edit`'s `replace_all` is optional in every schema that has it, so this is
+    the rule rather than a call that happens to exist — and a required boolean is
+    what makes the difference between "the model did not set it" and "the model
+    set it to nothing".
+    """
+    definition = ToolDefinition(
+        name="t", description="", parameters={
+            "properties": {"replace_all": {"type": "boolean"}},
+            "required": ["replace_all"],
+        },
+    )
+    assert argument_shape_problem(definition, {"replace_all": None}) == (
+        "the `replace_all` argument must be a boolean; got null"
+    )
+
+
+def test_every_boolean_property_of_every_registered_tool_is_checked():
+    """The population leg, over the daemon's real registry.
+
+    Read from the registry rather than written here, for the reason the string
+    population is: a new boolean property must be covered the day it is
+    registered. The count is asserted so the leg cannot pass by finding nothing,
+    and both directions are checked so a rule that refused every boolean could
+    not pass it.
+    """
+    server = _server()
+    population = [
+        (name, prop)
+        for name in server.tools.names
+        for prop, spec in (server.tools.get(name).definition()
+                           .parameters.get("properties", {}) or {}).items()
+        if isinstance(spec, dict) and spec.get("type") == "boolean"
+    ]
+    assert len(population) >= 2, (
+        f"the boolean population is {population}; if the registry lost its "
+        f"booleans this rule would pass vacuously"
+    )
+    for tool_name, prop in population:
+        definition = server.tools.get(tool_name).definition()
+        wrong = argument_shape_problem(definition, {prop: "false"})
+        assert wrong == f"the `{prop}` argument must be a boolean; got str", (
+            f"{tool_name}.{prop} accepted the string 'false': {wrong}"
+        )
+        assert argument_shape_problem(definition, {prop: False}) is None, (
+            f"{tool_name}.{prop} refused a real boolean"
+        )
+        assert argument_shape_problem(definition, {prop: True}) is None, (
+            f"{tool_name}.{prop} refused a real boolean"
+        )
 
 
 def test_a_tool_that_does_not_exist_and_arguments_that_are_not_an_object_are_not_my_question():
@@ -328,3 +413,79 @@ def test_the_other_tools_leak_the_same_way_and_are_refused_the_same(
     answer = tool_messages[0]["content"]
     assert answer.startswith("the `") and "must be a string" in answer, answer
     assert "Traceback" not in answer and "TypeError" not in answer, answer
+
+
+# ── the boolean half, at the site where the harm happens ────────────────────
+#
+# The string half's harm is a Python sentence; this half's harm is a **write**.
+# So each leg below asserts the thing that actually matters — the file on disk —
+# and not merely that a refusal was printed.
+
+
+def test_replace_all_false_does_not_rewrite_the_file(tmp_path, monkeypatch):
+    """The measured harm, exactly: `replace_all="false"` rewrote every occurrence.
+
+    Measured on this host 2026-10-03 (`cyc20261003-063623`), on master's own
+    `edit`: a two-occurrence file, `replace_all="false"`, and `execute()` answered
+    `Made 2 replacements` — the caller's word for *no* read as *yes*, on the one
+    tool whose job is to change a file. The file is what is asserted, because a
+    refusal printed beside a completed write would satisfy a weaker leg.
+    """
+    target = tmp_path / "two.txt"
+    target.write_text("aa\nbb\naa\n", encoding="utf-8")
+    _server_obj, frames, messages = _drive_call(
+        tmp_path, monkeypatch, tool_name="edit",
+        args={"file_path": str(target), "old_string": "aa",
+              "new_string": "ZZ", "replace_all": "false"},
+    )
+    assert target.read_text(encoding="utf-8") == "aa\nbb\naa\n", (
+        "the file was rewritten by a call that said replace_all=false"
+    )
+    tool_messages = [m for m in messages if m.get("role") == "tool"]
+    assert tool_messages[0]["content"] == (
+        "the `replace_all` argument must be a boolean; got str"
+    )
+    ends = [f for f in frames if f.get("type") == "tool_end"]
+    assert ends and ends[0]["error"] is True
+
+
+def test_ignore_case_false_does_not_search_case_insensitively(tmp_path, monkeypatch):
+    """The same accident on a read: `"false"` was truthy, so it applied the flag.
+
+    Measured the same way: a file holding `TARGET`, searched with the lowercase
+    pattern `target` and `ignore_case="false"`, found a match on master — the
+    caller asked for a case-sensitive search and got the opposite.
+    """
+    (tmp_path / "s.txt").write_text("TARGET here\nnothing\n", encoding="utf-8")
+    _server_obj, _frames, messages = _drive_call(
+        tmp_path, monkeypatch, tool_name="grep",
+        args={"pattern": "target", "path": str(tmp_path), "ignore_case": "false"},
+    )
+    tool_messages = [m for m in messages if m.get("role") == "tool"]
+    assert tool_messages[0]["content"] == (
+        "the `ignore_case` argument must be a boolean; got str"
+    )
+
+
+@pytest.mark.parametrize("replace_all,rewritten", [(True, "ZZ\nbb\nZZ\n"),
+                                                   (False, "aa\nbb\naa\n")])
+def test_a_real_boolean_is_still_honoured_both_ways(
+    tmp_path, monkeypatch, replace_all, rewritten,
+):
+    """The control: the rule must not flatten the values the schema declares.
+
+    `replace_all=True` really replaces both occurrences and `replace_all=False`
+    really leaves the file alone (and reports the ambiguity, which is `edit`'s
+    own rule for a multi-occurrence match) — so a rule that refused every boolean
+    would fail here rather than pass everywhere else.
+    """
+    target = tmp_path / "two.txt"
+    target.write_text("aa\nbb\naa\n", encoding="utf-8")
+    _server_obj, _frames, messages = _drive_call(
+        tmp_path, monkeypatch, tool_name="edit",
+        args={"file_path": str(target), "old_string": "aa",
+              "new_string": "ZZ", "replace_all": replace_all},
+    )
+    assert target.read_text(encoding="utf-8") == rewritten
+    tool_messages = [m for m in messages if m.get("role") == "tool"]
+    assert "must be a boolean" not in tool_messages[0]["content"]
