@@ -125,6 +125,55 @@ def resolve_client_tier(session, req_sandbox: str | None = None) -> str:
     """
     return getattr(session, "sandbox", None) or req_sandbox or SESSION_DEFAULT_SANDBOX_MODE
 
+
+def _images_fault(value) -> str:
+    """Why a `task` frame's `images` field cannot be used, or `""` when it can.
+
+    The value reaches `_build_user_content`, which assumes a list of objects and reads
+    three fields off each. Measured 2026-10-02 over every shape a frame can carry, in
+    **both** vision modes (which one runs depends on the session's model, not on the
+    frame):
+
+    | what is assumed | the operation that assumes it | a shape that breaks it |
+    |---|---|---|
+    | it is a list | `for img in images`, `sorted(images, …)` | `5` (`not iterable`), `"x"` (iterates to characters), `{"a": 1}` (iterates to keys), `[5]`, `["p"]`, `[None]` |
+    | each element is an object | `img.get(…)` | the three above |
+    | `path` is a string | `Path(img["path"]).read_bytes()` — **vision only** | absent (`KeyError`), `5` (`TypeError` — and the `except (OSError, FileNotFoundError)` beside it catches neither) |
+    | `label` is a string | `", ".join(labels)` — **non-vision only** | `5` (`expected str instance`) |
+    | `position` is an integer | `text[last_pos:pos]`, `sorted` — **vision only** | `"x"`, `None`, `1.5` |
+
+    Eight of the thirteen shapes measured ended the turn with a raw Python exception
+    printed to the client (`Turn ended without reporting: AttributeError: …`). Two of
+    those — `[{}]` and `[{"path": 5}]` — crash **only** when the session's model has
+    vision on, which is how they survived: the same frame is harmless under another
+    model. That is also why this is checked where the value *enters* and not where it is
+    used — the used-shape depends on runtime configuration, the entered-shape does not.
+
+    `None` (no images) and `[]` are usable, so absence is not a fault. A faulty value is
+    **refused by name** at the branch that builds the request — deliberately unlike
+    `_as_str`'s degrade-to-`""`, because the two losses are not the same size: an empty
+    prompt is a turn the daemon can still run, while a dropped image is the model
+    answering about a picture it never received — an answer wearing the shape of the
+    real one, which the client cannot tell apart from a correct answer.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, list):
+        return f"must be a list of objects, not {type(value).__name__}"
+    for i, item in enumerate(value):
+        if not isinstance(item, dict):
+            return f"[{i}] must be an object, not {type(item).__name__}"
+        if not isinstance(item.get("path"), str):
+            return f"[{i}].path must be a string"
+        # `label`/`position` are read with `.get(default)`, but a *present* key is read
+        # as itself — `{"label": None}` reaches `", ".join` as a crash, not as the "?".
+        if "label" in item and not isinstance(item["label"], str):
+            return f"[{i}].label must be a string"
+        if "position" in item and not isinstance(item["position"], int):
+            return f"[{i}].position must be an integer"
+    return ""
+
+
 # ── 日志脱敏（rant 2026-08-06T10:21:26）────────────────────────────
 # tool call 参数可能含 api_key/token/authorization/password 等敏感字段，
 # 递归替换值为 ***，避免 emrgd.log 泄露凭据。
@@ -1421,6 +1470,17 @@ class EmrgServer:
                     # P1 (rant 21:55:37): construct req + allow_tools FIRST
                     # (the busy branch must append req to the pending queue),
                     # then check busy.
+                    #
+                    # `images` is checked here, with `session_id`/`cwd` above, because
+                    # this is where the two values a *client* supplies enter — the shape
+                    # the turn needs depends on the session's model (`_images_fault`), so
+                    # a check at the point of use would leave the frame that broke under
+                    # one model crashing under another.
+                    images = data.get("images")
+                    fault = _images_fault(images)
+                    if fault:
+                        await self._send(ws, {"error": f"task: images {fault}"})
+                        continue
                     try:
                         req = TaskRequest(
                             id=data.get("id", ""),
@@ -1428,7 +1488,7 @@ class EmrgServer:
                             cwd=cwd,
                             prompt=data.get("prompt", ""),
                             timestamp=data.get("timestamp", ""),
-                            images=data.get("images"),
+                            images=images,
                             sandbox=data.get("sandbox"),
                         )
                     except Exception as e:

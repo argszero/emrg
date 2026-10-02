@@ -528,6 +528,64 @@ class TestWSProtocol:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_a_malformed_images_field_is_refused_not_fatal(self):
+        """A `task` frame's `images` is a boundary too — and it was the last one unguarded.
+
+        Measured 2026-10-02: eight of thirteen `images` shapes ended the turn with a raw
+        Python exception printed to the client (`Turn ended without reporting:
+        AttributeError: 'int' object has no attribute 'get'`), while a well-formed frame
+        answered normally. Two of the eight — an element with no `path`, or with a
+        non-string one — crash **only** when the session's model has vision on, which is
+        how they lasted: the same frame is harmless under another model.
+
+        The refusal names the message and the fault (the index and the field), the
+        connection survives, and the honest control — a frame of the shape both clients
+        actually send — still runs its turn.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cwd = root / "wd"
+                cwd.mkdir()
+                _, _, cleanup = await _boot_server(root)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        base = {
+                            "type": "task", "session_id": "s_img",
+                            "cwd": str(cwd), "prompt": "hi",
+                        }
+                        for bad in (5, "x", [5], [None], [{}], [{"path": 5}],
+                                    [{"path": str(cwd / "a.png"), "label": 5}]):
+                            await ws.send(json.dumps({**base, "images": bad}))
+                            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                            error = frame.get("error", "")
+                            assert "images" in error, (
+                                f"images={bad!r} answered {frame!r} — a malformed frame "
+                                "must be refused by name, not by dying in the turn"
+                            )
+                        # Still usable: the same connection answers a ping...
+                        await ws.send(json.dumps({"type": "ping"}))
+                        pong = await _recv_until(
+                            ws, lambda f: f.get("type") == "pong", what="pong")
+                        assert pong["type"] == "pong"
+
+                        # ...and the control: the shape a real client sends.
+                        good = {"path": str(cwd / "a.png"), "label": "[image1]", "position": 0}
+                        await ws.send(json.dumps({**base, "id": "t-img", "images": [good]}))
+                        start = await _recv_until(
+                            ws, lambda f: f.get("type") == "turn_start", what="turn_start")
+                        assert start["session_id"] == "s_img"
+                        await _recv_until(
+                            ws,
+                            lambda f: f.get("done") and f.get("request_id") == "t-img",
+                            what="turn done")
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_streaming_task_with_tool_calls(self):
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:

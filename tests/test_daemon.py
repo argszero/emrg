@@ -3741,6 +3741,85 @@ def test_build_user_content_non_vision_degrade():
     assert "hello" in out
 
 
+#: Every shape a `task` frame's `images` field can carry, and what the turn's own
+#: encoder does with it. Measured 2026-10-02: eight of these raised out of
+#: `_build_user_content` and ended the turn with a raw Python exception reported to
+#: the client. The point of the list is the *crossing* below — the predicate and the
+#: encoder are checked against each other, so neither can drift alone.
+_IMAGE_SHAPES = [
+    ("absent", None),
+    ("empty list", []),
+    ("a number", 5),
+    ("a string", "x"),
+    ("a dict (iterates to its keys)", {"a": 1}),
+    ("a list of numbers", [5]),
+    ("a list of strings", ["p"]),
+    ("a list of None", [None]),
+    ("an object with no path", [{}]),
+    ("an object whose path is a number", [{"path": 5}]),
+    ("an object whose path is None", [{"path": None}]),
+    ("an object whose label is a number", [{"path": "/etc/hosts", "label": 5}]),
+    ("an object whose label is None", [{"path": "/etc/hosts", "label": None}]),
+    ("an object whose position is a string", [{"path": "/etc/hosts", "position": "x"}]),
+    ("an object whose position is None", [{"path": "/etc/hosts", "position": None}]),
+    ("an object whose position is a float", [{"path": "/etc/hosts", "position": 1.5}]),
+    ("a path with no label or position", [{"path": "/etc/hosts"}]),
+    ("the whole shape a client sends", [{"path": "/etc/hosts", "label": "x", "position": 0, "mime": "image/png"}]),
+]
+
+
+@pytest.mark.parametrize("label,shape", _IMAGE_SHAPES, ids=[s[0] for s in _IMAGE_SHAPES])
+def test_the_images_predicate_and_the_encoder_agree(label, shape, tmp_path):
+    """`_images_fault` accepts a shape exactly when **no** model could crash on it.
+
+    The two are one rule with two readers — the branch that refuses the frame, and the
+    encoder that would have crashed on it — so they are checked against each other
+    rather than each against a hand-written expectation. The crossing is stated as the
+    *union* over both vision modes, and that is the whole point: which mode runs depends
+    on the session's model, so a shape that is harmless under one and fatal under the
+    other (`[{}]`, `[{"path": 5}]`, `{"label": 5}`, `{"position": "x"}`) still has to be
+    refused — the frame does not say which model will read it. Two directions:
+
+    * accepted ⇒ the encoder must survive **both** modes, or the refusal is looser than
+      the operation it protects;
+    * refused ⇒ the encoder must die in **at least one** mode, or the refusal is
+      rejecting a frame that would always have worked.
+    """
+    import emrg.server.daemon as daemon_mod
+
+    fault = daemon_mod._images_fault(shape)
+    failures = []
+    for vision in (False, True):
+        try:
+            EmrgServer._build_user_content("hi", shape, vision)
+        except Exception as exc:  # noqa: BLE001 — any raise is the thing under test
+            failures.append(f"vision={vision}: {type(exc).__name__}: {exc}")
+    if fault:
+        assert failures, (
+            f"{label}: the predicate refuses it ({fault!r}) but neither vision mode "
+            "crashes on it — the rule is stricter than the operation it protects"
+        )
+    else:
+        assert not failures, (
+            f"{label}: the predicate accepts it, so a turn reaches the encoder and dies "
+            f"with {'; '.join(failures)}"
+        )
+
+
+def test_an_images_fault_names_the_field_and_the_element():
+    """A refusal the client can act on: which element, which field."""
+    import emrg.server.daemon as daemon_mod
+
+    assert daemon_mod._images_fault(None) == ""
+    assert daemon_mod._images_fault([]) == ""
+    assert daemon_mod._images_fault([{"path": "/etc/hosts"}]) == ""
+
+    # The element index is only useful if it is the *right* one.
+    two = [{"path": "/etc/hosts"}, {"path": "/etc/hosts", "position": "x"}]
+    assert daemon_mod._images_fault(two) == "[1].position must be an integer"
+    assert daemon_mod._images_fault([{"path": "/etc/hosts"}, 7]).startswith("[1]")
+
+
 # ── Daemon observability (rant 2026-08-25T09:25:32 — silent death) ──
 
 
