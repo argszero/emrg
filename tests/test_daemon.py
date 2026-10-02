@@ -4024,8 +4024,11 @@ def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame
     so a turn that ends silently wedges them (PR #1669).
     """
     async def stream(messages, tools=None):
-        from emrg.server.llm import CONTENT_FILTER_ERROR
-        raise RuntimeError(CONTENT_FILTER_ERROR)
+        # `llm.py` raises `ContentFilterAbort` once the refusal ladder is spent;
+        # the stub raises the same type, so this leg tests the loop rather than a
+        # difference between the stub and the client.
+        from emrg.server.llm import CONTENT_FILTER_ERROR, ContentFilterAbort
+        raise ContentFilterAbort(CONTENT_FILTER_ERROR)
         yield  # pragma: no cover - makes this an async generator
 
     session, frames = _drive_tool_loop_with_stream(tmp_path, monkeypatch, stream)
@@ -4054,8 +4057,11 @@ def test_an_exhausted_content_filter_ladder_reports_once_with_one_terminal_frame
 
 def _aborting_stream():
     async def stream(messages, tools=None):
-        from emrg.server.llm import CONTENT_FILTER_ERROR
-        raise RuntimeError(CONTENT_FILTER_ERROR)
+        # `llm.py` raises `ContentFilterAbort` once the refusal ladder is spent;
+        # the stub raises the same type, so this leg tests the loop rather than a
+        # difference between the stub and the client.
+        from emrg.server.llm import CONTENT_FILTER_ERROR, ContentFilterAbort
+        raise ContentFilterAbort(CONTENT_FILTER_ERROR)
         yield  # pragma: no cover - makes this an async generator
 
     return stream

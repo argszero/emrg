@@ -59,9 +59,12 @@ from emrg.server.llm import (
     CONTENT_RISK,
     CONTEXT_TOO_LONG,
     EMPTY_ANSWER_ERROR,
+    ContentFilterAbort,
     LlmClient,
+    SelfExplainingLlmError,
     classify_llm_error,
     is_overlong_error,
+    tool_call_unreadable_error,
     with_content_risk_hint,
 )
 from emrg.server.git_utils import (
@@ -75,7 +78,7 @@ from emrg.sandbox import escalation
 from emrg.sandbox.policy import DEFAULT_MODE as DEFAULT_SANDBOX_MODE
 from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.server import content_risk_probe
-from emrg.server.tool_types import ToolResult
+from emrg.server.tool_types import ToolResult, tool_call_shape_problem
 from emrg.memory import (
     INDEX_COUNT_WARN,
     INDEX_SIZE_WARN,
@@ -3990,7 +3993,21 @@ class EmrgServer:
                     # Track accumulated tool calls for finalization
                     tcs = delta.get("tool_calls")
                     if tcs:
-                        for tc in tcs:
+                        for _position, tc in enumerate(tcs):
+                            # The second reader of the same entry, and the rule
+                            # is asked here too rather than inherited from
+                            # `llm.chat_stream` having normalized it (it does, in
+                            # production — but that is a fact about one
+                            # implementation of `chat_stream`, not about this
+                            # loop, and the read is this loop's own). Measured
+                            # 2026-10-03: `idx = tc.get("index", 0)` here raised
+                            # `AttributeError: 'NoneType' object has no attribute
+                            # 'get'` on a stream that yields the provider's
+                            # entries unchanged, ending the round as
+                            # `LLM error: ... Check config at ~/.emrg/config.toml`.
+                            _problem = tool_call_shape_problem(tc)
+                            if _problem is not None:
+                                raise tool_call_unreadable_error(_position, _problem)
                             idx = tc.get("index", 0) if "index" in tc else 0
                             tc_by_index[idx] = tc
 
@@ -4094,22 +4111,38 @@ class EmrgServer:
                             "auto": True,
                         })
                         continue
-                # A content-filter refusal is not a configuration problem, so the
-                # generic frame's "Check config at ~/.emrg/config.toml" sends the
-                # host after the wrong thing. The refusal travels as its own
-                # sentence, which names what happened and which retries were
-                # already spent (rant 2026-09-28T16:58:08, requirement D).
+                # Two questions, and they used to be one `if`:
+                #
+                #   * does this failure's own sentence already say what happened?
+                #     — if so the generic "Check config at ~/.emrg/config.toml"
+                #     remedy sends the host after the wrong thing (rant
+                #     2026-09-28T16:58:08, requirement D);
+                #   * is this the content filter's abort? — if so it is one abort
+                #     of a *run* worth counting (rant 2026-09-28T15:57:31,
+                #     requirement L3).
+                #
+                # The old test was `CONTENT_FILTER_ERROR not in str(e)`, which
+                # answered both with one substring, so the second answer was only
+                # as good as the first: widening the first without giving the
+                # second a signal of its own would have counted *every*
+                # self-explaining failure as a content-filter abort. Measured
+                # 2026-10-03 (`cyc20261003-043254`): a provider that sent a null
+                # where a tool call should be was reported as `LLM error:
+                # 'NoneType' object has no attribute 'get'. Check config at
+                # ~/.emrg/config.toml`. Each question is now asked of the error
+                # itself — `SelfExplainingLlmError` for the first,
+                # `ContentFilterAbort` for the second.
                 error_text = str(e)
-                if CONTENT_FILTER_ERROR not in error_text:
+                if not isinstance(e, SelfExplainingLlmError):
                     error_text = f"LLM error: {e}. Check config at ~/.emrg/config.toml"
-                else:
+                if isinstance(e, ContentFilterAbort):
                     # The ladder being spent is one abort, and *a run* of them is
-                    # the fact worth reporting (rant 2026-09-28T15:57:31,
-                    # requirement L3): the generic `logger.exception` above names
-                    # the sentence, but only a count tells a host whether they are
-                    # looking at one unlucky turn or at a trigger that has been
-                    # firing for two days. The session is already the logger's
-                    # own column, so the run is keyed on it too.
+                    # the fact worth reporting: the generic `logger.exception`
+                    # above names the sentence, but only a count tells a host
+                    # whether they are looking at one unlucky turn or at a
+                    # trigger that has been firing for two days. The session is
+                    # already the logger's own column, so the run is keyed on it
+                    # too.
                     logger.error(
                         "round %d: %s — the retry ladder is spent, reporting it",
                         round_num,
@@ -6546,6 +6579,35 @@ class EmrgServer:
                             session.session_id, _round + 1, content[:150],
                         )
                         break
+
+                    # The memory reflection loop's reader — the last of the four
+                    # sites `tool_call_shape_problem` names — and the rule is the
+                    # same one the streaming path asks (`emrg/server/tool_types.py`).
+                    # The *reaction* differs on purpose: this is a private,
+                    # fire-and-forget mini loop whose every failure is swallowed
+                    # by the `except Exception` at the bottom of this function, so
+                    # raising here would be a silent abort — which is exactly what
+                    # was measured on 2026-10-03 (`cyc20261003-043254`): a
+                    # reflection round whose entry was `None` stopped after one
+                    # LLM call, wrote nothing at a level anyone reads, and looked
+                    # identical to "nothing worth remembering". An entry this loop
+                    # cannot read is dropped and named, and the rest of the round
+                    # still runs.
+                    readable: list[dict] = []
+                    for _position, tc in enumerate(tool_calls):
+                        problem = tool_call_shape_problem(tc)
+                        if problem is None:
+                            readable.append(tc)
+                        else:
+                            logger.warning(
+                                "memory reflection: id=%s round=%d tool_calls[%d] "
+                                "cannot be read (%s) — dropped, the rest of the "
+                                "round continues",
+                                session.session_id, _round + 1, _position, problem,
+                            )
+                    if not readable:
+                        break
+                    tool_calls = readable
 
                     # Execute tools
                     logger.info(

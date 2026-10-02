@@ -23,6 +23,7 @@ import httpx
 
 from emrg import __version__
 from emrg.config import LlmConfig
+from emrg.server.tool_types import tool_call_shape_problem
 
 
 # ── 错误信息脱敏（20260807-0107）────────────────────────────
@@ -326,6 +327,86 @@ EMPTY_ANSWER_ERROR = (
 )
 
 
+class SelfExplainingLlmError(RuntimeError):
+    """An LLM failure whose own sentence is the whole explanation.
+
+    The daemon's error frame appends a generic remedy to every exception it
+    reports —
+
+        LLM error: {the exception}. Check config at ~/.emrg/config.toml
+
+    — and that remedy is right for the failures it was written for: a wrong
+    ``base_url``, a dead proxy, a rejected key all live in the config, and
+    sending the host there is the one useful thing to say. It is the wrong
+    instruction for a failure the exchange itself already explains. Measured
+    2026-10-03 (``cyc20261003-043254``): a provider that sent a null where a
+    tool call should be was answered
+
+        LLM error: 'NoneType' object has no attribute 'get'.
+        Check config at ~/.emrg/config.toml
+
+    — a sentence with no subject *and* a host sent to inspect a file that has
+    nothing to do with it. The frame test used to be a substring of the
+    content-filter sentence (``CONTENT_FILTER_ERROR not in str(e)``), which is
+    a marker only the one error that used to carry it could satisfy; a type
+    says what the rule is, and a second self-explaining failure joins by
+    raising this one.
+
+    Subclasses ``RuntimeError`` deliberately: every existing caller that
+    catches ``RuntimeError`` around an LLM call keeps working unchanged.
+    """
+
+
+class ContentFilterAbort(SelfExplainingLlmError):
+    """The provider's content filter refused the model's own output.
+
+    One type rather than a substring, because two different questions are asked
+    about this failure and only one of them is "does it explain itself?".
+
+    The daemon counts *runs* of these aborts (rant 2026-09-28T15:57:31,
+    requirement L3: 53 aborted cycles over two days read, line by line, as 53
+    unrelated ones) and used to recognise them by searching the exception's text
+    for :data:`CONTENT_FILTER_ERROR` — a single substring answering *both*
+    questions, so the second answer was worth no more than the first. Widening
+    the first one to "any failure that explains itself" (which is what the
+    config remedy turns on, and what the malformed tool call of 2026-10-03
+    needed) would have counted *every* such failure as a content-filter abort,
+    writing a provider's malformed payload into the run as a refused answer: a
+    host told a trigger has been firing that never fired. The second question
+    therefore gets a signal of its own that is not a sentence.
+
+    A subclass of :class:`SelfExplainingLlmError` because the refusal's sentence
+    is the whole explanation, so it is still reported as its own message rather
+    than with the config remedy appended.
+    """
+
+
+def tool_call_unreadable_error(position: int, problem: str) -> SelfExplainingLlmError:
+    """The failure raised when the provider's ``tool_calls`` carries an entry
+    this client cannot read.
+
+    Named rather than raw, and named *here* rather than at each of the readers,
+    because the sentence has to be one sentence: it is what the host reads. It
+    says what arrived, where, and that no tool ran — the three facts the raw
+    ``AttributeError`` did not carry.
+
+    Deliberately no word from the overlong or content-risk vocabularies
+    ("context length", "too long", "length limit", "400", "413", ...): an error
+    that matched either would be *acted* on by the round — a content refusal is
+    handed to the refusal ladder and an overlong one to the chunked compactor,
+    and re-sending a round whose tool calls could not be read is a wrong action
+    dressed as a retry. ``tests/test_a_malformed_tool_call_is_named.py`` pins
+    that by classifying this error and requiring ``other``.
+    """
+    return SelfExplainingLlmError(
+        f"the provider's tool_calls entry {position} cannot be read: {problem} — "
+        "no tool ran for this round and the round is not counted as a completed "
+        "one. The request was answered with a payload this client cannot read, "
+        "which is a bug in the provider or in the gateway in front of it, not in "
+        "this session: retry, or use a different model."
+    )
+
+
 def content_risk_retry(stage: int, original: list[dict]) -> tuple[str, list[dict]] | None:
     """The next rung for a content refusal, or ``None`` when the ladder is spent.
 
@@ -479,7 +560,7 @@ class LlmClient:
                 " stream" if streaming else "", len(CONTENT_RISK_LADDER),
                 CONTENT_FILTER_FINISH, already_streamed,
             )
-            raise RuntimeError(CONTENT_FILTER_ERROR)
+            raise ContentFilterAbort(CONTENT_FILTER_ERROR)
         rung, rung_messages = nxt
         logger.warning(
             "LLM%s content filter blocked the answer (finish_reason=%s) — "
@@ -802,7 +883,19 @@ class LlmClient:
                             reasoning_parts.append(reasoning)
 
                         # Accumulate tool_calls from delta
-                        for tc in delta.get("tool_calls", []):
+                        for _position, tc in enumerate(delta.get("tool_calls", [])):
+                            # The entry is read before anything else may touch
+                            # it: measured 2026-10-03, a provider that sent a
+                            # null (or a string, or a list) here raised
+                            # `AttributeError: 'NoneType' object has no attribute
+                            # 'get'` out of this generator, and the round
+                            # reported it as `LLM error: ... Check config at
+                            # ~/.emrg/config.toml` — the shape never named and
+                            # the host sent to inspect a config file. One home
+                            # states the rule; this is the first of its readers.
+                            _problem = tool_call_shape_problem(tc)
+                            if _problem is not None:
+                                raise tool_call_unreadable_error(_position, _problem)
                             idx = tc.get("index", 0)
                             if idx not in tc_by_index:
                                 tc_by_index[idx] = {

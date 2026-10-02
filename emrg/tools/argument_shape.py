@@ -61,16 +61,7 @@ opinion about something this module cannot see.
 
 from __future__ import annotations
 
-from emrg.server.tool_types import ToolDefinition
-
-
-def _shape(value: object) -> str:
-    """The received value's shape, spelled the way the caller wrote it.
-
-    A JSON null is `null` rather than Python's `NoneType`: the sentence is read
-    by whoever wrote the call, and that is the word their payload used.
-    """
-    return "null" if value is None else type(value).__name__
+from emrg.server.tool_types import ToolDefinition, shape_of
 
 
 def argument_shape_problem(
@@ -106,5 +97,5 @@ def argument_shape_problem(
             # Optional and null: ``absent``, the reading every tool's own
             # optional-argument chain gives it. See the module docstring.
             continue
-        return f"the `{name}` argument must be a string; got {_shape(value)}"
+        return f"the `{name}` argument must be a string; got {shape_of(value)}"
     return None
