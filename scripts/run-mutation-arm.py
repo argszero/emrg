@@ -302,6 +302,31 @@ def _passed_count(out: str) -> int:
     return int(found[-1]) if found else 0
 
 
+def _no_pytest_report(proc: subprocess.CompletedProcess[str]) -> str:
+    """The child's own last stderr line when the run produced no pytest report, else "".
+
+    pytest writes its report to **stdout** in every state it can reach - a passing run
+    prints `1 passed in 0.00s`, a node id that resolves to nothing prints
+    `no tests ran in 0.00s` (rc 4), an empty file prints the same line (rc 5). Empty
+    stdout therefore means the run never reached pytest at all, and the child's stderr
+    carries the reason (`python3.13: No module named pytest`).
+
+    Measured 2026-10-02 (`cyc20261002-103624`), which is why this exists: the child is
+    started in the tree `--cwd` names, so a **relative** `PYTHONPATH` entry resolves
+    against *that* tree rather than the caller's shell - the caller's pytest is present,
+    the child's is not, and every run in the suite came back "refused (rc=1, 0 passed)".
+    The refusal named the node id as the cause, so a cycle read its own broken
+    environment as a regression in the code (35 failed where the honest baseline is 2)
+    and the message it printed pointed away from the cause. A report about a run has to
+    name a cause that exists: the child's own line is what was observed, and "check the
+    node id" is a remedy for a different input than the one that failed.
+    """
+    if (proc.stdout or "").strip():
+        return ""
+    lines = [line.strip() for line in (proc.stderr or "").splitlines() if line.strip()]
+    return lines[-1] if lines else f"exit {proc.returncode} with nothing on either stream"
+
+
 def _assertion_lines(out: str) -> list[str]:
     """The assertion lines pytest echoed, marker stripped - candidates for `--expect`.
 
@@ -604,16 +629,41 @@ def main(argv: list[str] | None = None) -> int:
                     # A refusal is a verdict like any other, so it goes through the same
                     # report path: an unattributed non-zero exit is the failure this tool
                     # exists to prevent, and that includes this tool's own.
-                    arm.preflight = f"refused (rc={proc.returncode}, {passed} passed)"
-                    arm.decide(
-                        TARGET_BROKEN,
-                        f"before any mutation the target exited {proc.returncode} with "
-                        f"{passed} passed. An arm can only attribute a failure to its "
-                        "mutation if the target collected and passed first - check the node "
-                        "id (a class method needs its class: "
-                        "tests/test_x.py::TestC::test_y)",
-                        EXIT_TARGET_BROKEN,
-                    )
+                    #
+                    # Two refusals, because they have different causes and only one of
+                    # them is the caller's input. A run that reached pytest (rc 4: the
+                    # node id resolves to nothing; rc 5: nothing collected; a collection
+                    # error) is a target the caller named wrongly. A run with no pytest
+                    # report at all never got that far - the child could not start pytest
+                    # - and telling *that* caller to check the node id sends them to fix
+                    # the one thing that is not wrong (measured 2026-10-02,
+                    # `cyc20261002-103624`).
+                    no_report = _no_pytest_report(proc)
+                    if no_report:
+                        arm.preflight = f"no pytest report (rc={proc.returncode})"
+                        arm.decide(
+                            TARGET_BROKEN,
+                            "before any mutation the run produced no pytest report at "
+                            f"all: {no_report}. Nothing collected and nothing passed, so "
+                            "there is no reading of the target to attribute to a mutation "
+                            "- and the node id is not the cause. The child runs in the "
+                            "tree --cwd names, so an environment entry that is relative "
+                            "(PYTHONPATH above all) means something different there than "
+                            "it does in the caller's shell; pass absolute paths, or point "
+                            "the run at an interpreter that can import pytest",
+                            EXIT_TARGET_BROKEN,
+                        )
+                    else:
+                        arm.preflight = f"refused (rc={proc.returncode}, {passed} passed)"
+                        arm.decide(
+                            TARGET_BROKEN,
+                            f"before any mutation the target exited {proc.returncode} with "
+                            f"{passed} passed. An arm can only attribute a failure to its "
+                            "mutation if the target collected and passed first - check the node "
+                            "id (a class method needs its class: "
+                            "tests/test_x.py::TestC::test_y)",
+                            EXIT_TARGET_BROKEN,
+                        )
                 else:
                     arm.preflight = f"{passed} passed"
 
@@ -634,6 +684,20 @@ def main(argv: list[str] | None = None) -> int:
                         "the target still passed with the mutation in place, so it does "
                         "not depend on the line this arm breaks",
                         EXIT_SURVIVED,
+                    )
+                elif no_report := _no_pytest_report(proc):
+                    # The same reading as the refusal above, one stage later: this run
+                    # never reached pytest either, so it says nothing about the mutation.
+                    # Reachable with `--no-preflight`, and the `_why_unjudgeable` text it
+                    # would otherwise get ("failed, but not on the assertion this arm
+                    # names") describes a failure that did not happen.
+                    arm.decide(
+                        UNJUDGEABLE,
+                        "the run produced no pytest report at all: "
+                        f"{no_report}. Nothing ran against the mutation, so this arm "
+                        "produced no evidence either way - fix the run (an absolute "
+                        "PYTHONPATH, an interpreter that can import pytest) and repeat it",
+                        EXIT_UNJUDGEABLE,
                     )
                 elif proc.returncode == PYTEST_TEST_FAILED and args.expect in out:
                     arm.decide(

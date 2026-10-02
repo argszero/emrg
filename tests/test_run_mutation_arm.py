@@ -661,3 +661,156 @@ class TestTheSmallReadings:
         (line,) = mod._assertion_lines(f"E           {long_assertion}\n")
         assert len(line) == mod._ASSERTION_MAX_CHARS, len(line)
         assert long_assertion.startswith(line), "the truncation must be a prefix, not a re-wrap"
+
+
+class TestARunThatNeverReachedPytest:
+    """A child that could not start pytest is not a reading of the target.
+
+    The child is started **in the tree `--cwd` names**, so anything relative in the
+    environment (PYTHONPATH above all) means something different there than it does in
+    the caller's shell. When that happens every run comes back with empty stdout and the
+    interpreter's own one-line complaint on stderr - and the arm must report *that*,
+    because the remaining shape of the refusal ("check the node id") is a remedy for an
+    input that is not the one that failed.
+
+    Measured 2026-10-02 (`cyc20261002-103624`): a relative `PYTHONPATH` entry in one
+    full-suite run turned the honest baseline (2 failed) into 35 failed, every one of
+    them a test whose child could not import pytest, and the message in each report
+    pointed at the node id.
+    """
+
+    NO_PYTEST = "python3.13: No module named pytest\n"
+
+    @pytest.fixture()
+    def child(self, monkeypatch, request):
+        """Make the child's run return `request.param` instead of starting pytest.
+
+        The tool reaches the child through `subprocess.run`, so the fake stands in for
+        the whole run - which is the point: these tests pin the *judgement* of a run
+        whose shape is known, and the shape is what the environment produced.
+        """
+        import subprocess as subprocess_mod
+
+        real_run = subprocess_mod.run
+        calls = []
+
+        def fake_run(*a, **kw):
+            calls.append(kw)
+            # The pre-flight and the judged run each call this; a caller that wants the
+            # second run to differ passes a list and the runs are served in order.
+            answers = request.param if isinstance(request.param, list) else [request.param]
+            answer = answers[min(len(calls) - 1, len(answers) - 1)]
+            return subprocess_mod.CompletedProcess(
+                args=kw.get("cwd"), returncode=answer[0], stdout=answer[1], stderr=answer[2]
+            )
+
+        monkeypatch.setattr(subprocess_mod, "run", fake_run)
+        yield calls
+        monkeypatch.setattr(subprocess_mod, "run", real_run)
+
+    @pytest.mark.parametrize(
+        "child", [(1, "", NO_PYTEST)], indirect=True
+    )
+    def test_a_preflight_without_a_report_is_not_a_node_id_problem(
+        self, mod, tree, child, capsys
+    ) -> None:
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+
+        assert rc == mod.EXIT_TARGET_BROKEN, out
+        assert "verdict: TARGET-BROKEN" in out, out
+        # The evidence the tool actually observed, quoted back.
+        assert "No module named pytest" in out, out
+        # And the remedy that does not apply is not offered.
+        assert "check the node id" not in out, out
+        assert "the node id is not the cause" in out, out
+        # A refusal writes nothing: the run that failed judged no mutation.
+        assert (tree / "subject.py").read_text(encoding="utf-8") == SUBJECT
+
+    @pytest.mark.parametrize(
+        "child", [(4, "\nno tests ran in 0.00s\n", "ERROR: not found: tests/x.py::nope\n")],
+        indirect=True,
+    )
+    def test_a_run_that_did_reach_pytest_keeps_the_node_id_remedy(
+        self, mod, tree, child, capsys
+    ) -> None:
+        """The control: rc 4 with pytest's own summary is a target the caller named
+        wrongly, and its remedy must survive this change."""
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+
+        assert rc == mod.EXIT_TARGET_BROKEN, out
+        assert "check the node id" in out, out
+        assert "preflight: refused (rc=4, 0 passed)" in out, out
+
+    @pytest.mark.parametrize(
+        "child",
+        [[(1, "", NO_PYTEST), (1, "", NO_PYTEST)]],
+        indirect=True,
+    )
+    def test_a_judged_run_without_a_report_is_not_a_verdict_about_the_mutation(
+        self, mod, tree, child, capsys
+    ) -> None:
+        """`--no-preflight` reaches the judged run without a pre-flight to refuse it,
+        and there the same empty report would otherwise be read as "the target failed,
+        but not on the assertion this arm names" - a failure that did not happen."""
+        argv = [
+            "--file", "subject.py",
+            "--old", GREETING,
+            "--new", 'return "goodbye " + name',
+            "--node", HELLO_NODE,
+            "--expect", "hello x",
+            "--cwd", str(tree),
+            "--no-preflight",
+        ]
+        rc = mod.main(argv)
+        out = capsys.readouterr().out
+
+        assert rc == mod.EXIT_UNJUDGEABLE, out
+        assert "verdict: UNJUDGEABLE" in out, out
+        assert "no pytest report at all" in out, out
+        assert "No module named pytest" in out, out
+        assert "not on the assertion this arm names" not in out, out
+        # The mutation is still put back, on this path too.
+        assert "restored byte-for-byte: True" in out, out
+        assert (tree / "subject.py").read_text(encoding="utf-8") == SUBJECT
+
+
+class TestTheNoReportReading:
+    """`_no_pytest_report` is the classifier both refusals above are built on."""
+
+    def _proc(self, mod, rc: int, out: str, err: str):
+        import subprocess as subprocess_mod
+
+        return subprocess_mod.CompletedProcess(
+            args=[], returncode=rc, stdout=out, stderr=err
+        )
+
+    @pytest.mark.parametrize(
+        "out",
+        [
+            "1 passed in 0.02s\n",                      # a passing run
+            "\nno tests ran in 0.00s\n",                # rc 4 / rc 5 - pytest ran
+            "1 failed in 0.05s\n",
+        ],
+    )
+    def test_a_run_with_a_summary_is_a_run(self, mod, out) -> None:
+        assert mod._no_pytest_report(self._proc(mod, 1, out, "ERROR: not found: x\n")) == ""
+
+    @pytest.mark.parametrize("err", ["python3.13: No module named pytest\n", "boom\n"])
+    def test_an_empty_stdout_is_a_run_that_never_started(self, mod, err) -> None:
+        assert mod._no_pytest_report(self._proc(mod, 1, "", err)) == err.strip()
+
+    def test_the_last_line_is_the_one_reported(self, mod) -> None:
+        """The interpreter's complaint is the last thing on the stream."""
+        err = "Traceback (most recent call last):\n  File x\nRuntimeError: boom\n"
+        assert mod._no_pytest_report(self._proc(mod, 1, "", err)) == "RuntimeError: boom"
+
+    @pytest.mark.parametrize("streams", [("", ""), ("   \n", "")])
+    def test_two_silent_streams_still_produce_a_sentence(self, mod, streams) -> None:
+        """An empty reason would print `... produced no pytest report at all: .` -
+        a verdict with a hole where its evidence goes."""
+        out, err = streams
+        reading = mod._no_pytest_report(self._proc(mod, 1, out, err))
+        assert reading, "the report has to say what was observed"
+        assert "exit 1" in reading, reading
