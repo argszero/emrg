@@ -34,12 +34,17 @@ def test_glob_all_python(temp_cwd):
     tool = GlobTool()
     result = _run(tool.execute({"pattern": "**/*.py", "workdir": str(temp_cwd)}))
     assert not result.error
-    assert "main.py" in result.content
-    assert "utils.py" in result.content
-    assert "test_main.py" in result.content
-    assert "__init__.py" in result.content
-    assert ".hidden.py" not in result.content
-    assert "compiled.pyc" not in result.content
+    # A hidden file must not be *listed as a match*. The assertion reads the listing
+    # rather than the whole answer because the answer now also *names* what it skipped
+    # — a skip that is not reported is a claim about the tree this search never made
+    # (`tests/test_glob_names_what_it_skipped.py` carries that measurement).
+    listed = [line.strip() for line in result.content.split("\n") if line.startswith("  ")]
+    assert "src/main.py" in listed
+    assert "src/utils.py" in listed
+    assert "tests/test_main.py" in listed
+    assert "__init__.py" in listed
+    assert ".hidden.py" not in listed
+    assert "compiled.pyc" not in listed
 
 
 def test_glob_markdown(temp_cwd):
