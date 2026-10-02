@@ -138,9 +138,19 @@ jobs:
           # "SecItemCopyMatching: item not found" 的 cryptic 错误）。实测（macOS 本机）：
           #   p12 含私钥 → "N identity(ies) imported."（1 个单数、多 个复数）；仅证书链 → "N certificates imported."
           # import 输出捕获后校验 identity/identities 行，缺失即明确报错，指引宿主重新导出含私钥的 p12。
+          # ⚠️ `|| IMPORT_RC=$?` 不是可选的（实测 tag v0.3.8 同类缺陷 = #1811/#1812；机制
+          # 复测 2026-10-03，cyc20261003-021304）：`security import` 非零退出时，
+          # `VAR="$(cmd)"` 在 `-e` 下带着失败状态中止脚本，紧接着的 `echo "$IMPORT_OUTPUT"`
+          # 与那条写明补救办法的 `::error::` 都来不及执行 —— `2>&1` 捕获到的原因被丢弃，
+          # 日志里只剩 "exit code 1"，与"p12 只有证书链"无法区分。
+          IMPORT_RC=0
           IMPORT_OUTPUT="$(security import /tmp/signing.p12 -k /tmp/ci.keychain -P "$MACOS_SIGNING_P12_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)"
+            -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)" || IMPORT_RC=$?
           echo "$IMPORT_OUTPUT"
+          if [ "$IMPORT_RC" -ne 0 ]; then
+            echo "::error::security import exited ${IMPORT_RC} - the p12 could not be read at all (a wrong MACOS_SIGNING_P12_PASSWORD, or a truncated export). security import's own output is above."
+            exit 1
+          fi
           if [[ ! "$IMPORT_OUTPUT" =~ identit(y|ies)\ imported ]]; then
             echo "::error::MACOS_SIGNING_P12_BASE64 未包含可签名私钥（security import 仅导入证书链）。请从 Keychain Access 导出含私钥的 p12（证书右键 → 导出 → 勾选\"包含私钥\"），重新 base64 后更新 GitHub Secret。import 输出：${IMPORT_OUTPUT}"
             exit 1
@@ -151,9 +161,15 @@ jobs:
           if [ -n "${MACOS_INSTALLER_P12_BASE64:-}" ]; then
             echo "==> 双 p12 方案：导入 Installer p12"
             echo "$MACOS_INSTALLER_P12_BASE64" | base64 --decode > /tmp/installer.p12
+            # 同 :141 的 `|| INSTALLER_RC=$?`，同一条实测。
+            INSTALLER_RC=0
             INSTALLER_IMPORT="$(security import /tmp/installer.p12 -k /tmp/ci.keychain -P "$MACOS_INSTALLER_P12_PASSWORD" \
-              -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)"
+              -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)" || INSTALLER_RC=$?
             echo "$INSTALLER_IMPORT"
+            if [ "$INSTALLER_RC" -ne 0 ]; then
+              echo "::error::security import exited ${INSTALLER_RC} for the Installer p12 - it could not be read at all (a wrong MACOS_INSTALLER_P12_PASSWORD, or a truncated export). security import's own output is above."
+              exit 1
+            fi
             if [[ ! "$INSTALLER_IMPORT" =~ identit(y|ies)\ imported ]]; then
               echo "::error::MACOS_INSTALLER_P12_BASE64 未包含可签名私钥（security import 仅导入证书链）。请重新导出含私钥的 Installer p12 后更新 GitHub Secret。import 输出：${INSTALLER_IMPORT}"
               exit 1
@@ -344,7 +360,11 @@ jobs:
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
           INSTALLER_ID="${MACOS_INSTALLER_IDENTITY:-}"
           if [ -z "$INSTALLER_ID" ]; then
-            INSTALLER_ID="$(security find-identity -v /tmp/ci.keychain | grep 'Developer ID Installer' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+            # ⚠️ `|| true` 不是可选的（同 :141 的一条实测）：`grep` 无匹配即退出 1，而这里是
+            # **允许无匹配** 的探测 —— 无 `-e` 保护时管道状态带着失败中止脚本，下面那条写明
+            # "需要 Developer ID Installer 证书" 的 `::error::` 永远不会打印。空值才是这条
+            # 探测的答案，让下面的判空分支给出补救办法。
+            INSTALLER_ID="$(security find-identity -v /tmp/ci.keychain | grep 'Developer ID Installer' | head -1 | sed -E 's/.*"([^"]+)".*/\1/' || true)"
           fi
           if [ -z "$INSTALLER_ID" ]; then
             echo "::error::pkg 签名需要 Developer ID Installer 证书（productsign 不接受 Application 身份）。请配置 MACOS_INSTALLER_IDENTITY + MACOS_INSTALLER_P12_BASE64（双 p12 方案），或用 security export -t identities 导出含 Installer 的 p12 到 MACOS_SIGNING_P12_BASE64（单 p12 方案）。"
