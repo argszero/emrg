@@ -64,6 +64,7 @@ from emrg.server.llm import (
     is_overlong_error,
     with_content_risk_hint,
 )
+from emrg.server.json_object import parse_json_object, read_json_object
 from emrg.server.git_utils import (
     _detect_git_remote,
     ensure_local_exclude,
@@ -1281,12 +1282,11 @@ class EmrgServer:
         try:
             logs_dir = config_dir() / "logs"
             for f in logs_dir.glob("evolution-*.json"):
-                try:
-                    data = json.loads(f.read_text(encoding="utf-8"))
-                    if data.get("timestamp"):
-                        disk += 1
-                except (json.JSONDecodeError, OSError):
-                    continue  # corrupt/partial write — don't count
+                data = read_json_object(f)
+                if data is None:
+                    continue  # corrupt/partial write, or JSON that is not a log
+                if data.get("timestamp"):
+                    disk += 1
         except OSError:
             pass
         return max(in_memory, disk)
@@ -3014,15 +3014,14 @@ class EmrgServer:
                 )[: max(1, min(int(limit), 20))]
                 recent = []
                 for f in files:
-                    try:
-                        data = json.loads(f.read_text(encoding="utf-8"))
-                        recent.append({
-                            "timestamp": data.get("timestamp", ""),
-                            "impact": data.get("impact", []),
-                            "operations": data.get("operations", []),
-                        })
-                    except (json.JSONDecodeError, OSError):
-                        continue
+                    data = read_json_object(f)
+                    if data is None:
+                        continue  # corrupt/partial write, or JSON that is not a log
+                    recent.append({
+                        "timestamp": data.get("timestamp", ""),
+                        "impact": data.get("impact", []),
+                        "operations": data.get("operations", []),
+                    })
                 await self._send(ws, {
                     "type": "evolution_summary",
                     "count": self._evolution_count(),
@@ -4947,9 +4946,8 @@ class EmrgServer:
         try:
             with open(_USAGE_ANCHOR_STATS_PATH, "r", encoding="utf-8") as fh:
                 for line in fh:
-                    try:
-                        ev = json.loads(line)
-                    except ValueError:
+                    ev = parse_json_object(line)
+                    if ev is None:
                         continue
                     if (ev.get("type") == "anchor_provider_drift"
                             and ev.get("session") == _PLANTED_FIRE_DRILL_SESSION):

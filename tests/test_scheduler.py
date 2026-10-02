@@ -818,6 +818,35 @@ def test_task_handler_task_runs_corrupt_file_ignored(tmp_path):
         mod.config_dir = orig
 
 
+def test_task_handler_task_runs_non_object_line_skips_only_itself(tmp_path):
+    """One bad line must not discard the whole restored history.
+
+    The docstring of `_load_task_runs` promises "a single corrupt line is
+    skipped while the rest is kept", and a line that parses to `[]`/`5`/`null`
+    is the case its `(ValueError, TypeError)` guard missed: the AttributeError
+    from `data.get` reached the handler's outer `except Exception`, which resets
+    `records` — so every valid record on both sides of it was thrown away, and
+    the restored history was silently shorter than the file.
+    """
+    from emrg.server import scheduler as mod
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        runs_dir = tmp_path / "logs" / "task-runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "emrg-task.jsonl").write_text(
+            json.dumps({"timestamp": "2026-10-02T00:00:00", "work": "before"}) + "\n"
+            + "[]\n"
+            + "5\n"
+            + json.dumps({"timestamp": "2026-10-02T01:00:00", "work": "after"}) + "\n",
+            encoding="utf-8",
+        )
+        handler = make_handler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
+        assert [e.work for e in handler.evolutions] == ["before", "after"]
+    finally:
+        mod.config_dir = orig
+
+
 def test_task_handler_task_runs_write_failure_tolerated(tmp_path):
     """A failed append only logs a warning — never breaks the running cycle."""
     from emrg.protocol import EvolutionLog

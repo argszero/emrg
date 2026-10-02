@@ -37,6 +37,7 @@ from emrg.sandbox.policy import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
+from emrg.server.json_object import parse_json_object
 from emrg.server.git_utils import (
     _detect_git_remote,
     ensure_local_exclude,
@@ -1893,9 +1894,8 @@ class TaskHandler:
                     line = line.strip()
                     if not line:
                         continue
-                    try:
-                        data = json.loads(line)
-                    except (ValueError, TypeError):
+                    data = parse_json_object(line)
+                    if data is None:
                         self._logger.warning(
                             "TaskHandler[%s]: skipping corrupt task-run line in %s",
                             self.name, self._task_runs_file,

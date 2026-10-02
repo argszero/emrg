@@ -4174,3 +4174,82 @@ def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkey
         "a genuinely completed round no longer stamps the marker the #1114 alarm "
         "measures — the empty-answer guard must not have swallowed it"
     )
+
+
+# ── a JSON log that is not an object ──────────────────────────────────────
+#
+# Three readers in this file held a file (or a JSONL line) meant to be an
+# object and then indexed it with `.get`, guarding `(JSONDecodeError, OSError)`
+# — which misses the state where the text parses to something that is not an
+# object. `[]` in the logs directory was enough: `_process_message` raised
+# AttributeError, and `_handle_client`'s `except Exception` ends the message
+# loop, so the client was dropped rather than answered. The rule now lives in
+# `emrg.server.json_object`; these are its call sites.
+
+
+def _write_evolution_log(logs_dir: Path, name: str, payload) -> Path:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    p = logs_dir / name
+    p.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+    return p
+
+
+def test_a_ping_is_answered_when_an_evolution_log_is_not_an_object(tmp_path, monkeypatch):
+    """`ping` counts the evolution logs, so one bad log used to silence it.
+
+    The frame is the contract: a client that connects and pings gets a pong.
+    """
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    _write_evolution_log(tmp_path / "logs", "evolution-20261002-000000.json", "[]")
+    server = _make_server()
+    ws = _FakeWs()
+
+    asyncio.run(server._process_message({"type": "ping"}, ws))
+
+    assert [f.get("type") for f in ws.sent] == ["pong"], ws.sent
+
+
+def test_the_evolution_summary_skips_a_log_that_is_not_an_object(tmp_path, monkeypatch):
+    """Skipped, not swallowed whole: the good logs still come back."""
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    logs = tmp_path / "logs"
+    _write_evolution_log(logs, "evolution-20261002-000000.json", "[]")
+    _write_evolution_log(logs, "evolution-20261002-010000.json", {
+        "timestamp": "2026-10-02T01:00:00", "operations": ["landed"], "impact": ["x"],
+    })
+    _write_evolution_log(logs, "evolution-20261002-020000.json", "5")
+    server = _make_server()
+    ws = _FakeWs()
+
+    asyncio.run(server._process_message({"type": "evolution_summary", "limit": 5}, ws))
+
+    frames = [f for f in ws.sent if f.get("type") == "evolution_summary"]
+    assert frames, ws.sent
+    assert [r["timestamp"] for r in frames[-1]["recent"]] == ["2026-10-02T01:00:00"], frames[-1]
+
+
+def test_the_evolution_count_counts_only_logs_that_are_objects(tmp_path, monkeypatch):
+    """One good log next to two non-objects is one evolution, not zero and not three."""
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    logs = tmp_path / "logs"
+    _write_evolution_log(logs, "evolution-20261002-000000.json", "[]")
+    _write_evolution_log(logs, "evolution-20261002-010000.json", {"timestamp": "2026-10-02T01:00:00"})
+    _write_evolution_log(logs, "evolution-20261002-020000.json", "null")
+    server = _make_server()
+
+    assert server._evolution_count() == 1
+
+
+def test_the_drill_counts_around_a_stats_line_that_is_not_an_object(tmp_path, monkeypatch):
+    """The drill documents that it must never crash; a non-object line did.
+
+    Counting continues past it — the events on both sides still count.
+    """
+    monkeypatch.setattr("emrg.server.daemon._USAGE_ANCHOR_STATS_PATH", tmp_path / "stats.jsonl")
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    drill_session = daemon_mod._PLANTED_FIRE_DRILL_SESSION
+    ev = json.dumps({"type": "anchor_provider_drift", "session": drill_session})
+    (tmp_path / "stats.jsonl").write_text(f"{ev}\n[]\n{ev}\n", encoding="utf-8")
+    server = _make_server()
+
+    assert server._count_drill_drift_events() == 2
