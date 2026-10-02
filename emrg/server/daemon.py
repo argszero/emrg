@@ -184,6 +184,7 @@ def _redact(value):
     return value
 
 from emrg.tools import ToolRegistry
+from emrg.tools.argument_shape import argument_shape_problem
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
 from emrg.tools.shell_dialects import (
@@ -4370,14 +4371,26 @@ class EmrgServer:
                     self._inject_tool_arguments(tc_name, args, session, req)
 
                     # Execute
-                    refusal = await self._apply_escalation(
-                        tc_name, args, session, req,
-                    )
                     tool = self.tools.get(tc_name)
+                    # An argument that is not the type the tool's OWN schema
+                    # names is refused by name here, before the call can be
+                    # escalated or executed — measured 2026-10-03: a string
+                    # property sent as a list reached every tool as a bare
+                    # `TypeError` (`unhashable type: 'list'`), which the loop
+                    # then relayed to the model as `Tool execution error: ...`.
+                    # One home: `emrg/tools/argument_shape.py`.
+                    refusal = argument_shape_problem(
+                        tool.definition() if tool is not None else None, args,
+                    )
+                    if refusal is None:
+                        refusal = await self._apply_escalation(
+                            tc_name, args, session, req,
+                        )
                     if refusal is not None:
-                        # A refused escalation is the call's outcome, and the
-                        # command does not run at all: a hop that was not granted
-                        # must not be granted by accident.
+                        # A refused escalation, or a call that could not be
+                        # made, is the call's outcome, and the command does not
+                        # run at all: a hop that was not granted must not be
+                        # granted by accident.
                         result = ToolResult(
                             tool_call_id=tc_id,
                             name=tc_name,
