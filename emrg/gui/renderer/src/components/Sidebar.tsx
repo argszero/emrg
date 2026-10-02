@@ -52,6 +52,12 @@ export interface SidebarProps {
   activeView?: SidebarViewId;
   /** 点击 nav 按钮 → 切换工作区视图（vanilla switchView 语义） */
   onSwitchView?: (view: SidebarViewId) => void;
+  /**
+   * 自进化计数 —— 侧边栏顶部成长卡上的那个数（vanilla `#growth-count`，
+   * `updateGrowthCard()` 从 4 处被调，`js/app.js:1106`）。`null` 与 `undefined` 都
+   * 按 vanilla 的 `state.evolutionCount ?? 0` 落成 `0`。
+   */
+  evolutionCount?: number | null;
 }
 
 export function Sidebar({
@@ -66,10 +72,37 @@ export function Sidebar({
   onOpenChat,
   activeView = "sessions",
   onSwitchView,
+  evolutionCount = null,
 }: SidebarProps) {
   const { t } = useI18n();
   const entries = sortOpenSessions(openSessions);
   const nowMs = Date.now();
+
+  /**
+   * 成长状态卡（vanilla `#growth-card`，`index.html:24-27`，WorkBuddy P3「自进化可见化」）。
+   *
+   * 它是这一栏里**唯一**一件与工作内容无关的东西：宿主随时能看到「EMRG 已自我进化 N 次」，
+   * 也就是「它在为我变好」。`components.css`/`layout.css` 的 `.growth-card` / `.growth-line`
+   * / `.growth-note` 规则一直在（`layout.css:137-155`），词典四条串也一直在
+   * （`copy.growthCardTitle` / `copy.growthCountPrefix` / `copy.times` / `copy.growthNote`），
+   * 而 #1024 删 vanilla 渲染层时**元素与读者一起没了**（实测 2026-10-02：`growth-card`
+   * 在 `src/` 下零命中）—— 于是 React 版里这个数只出现在**设置 → 关于**里，主界面上
+   * 一句都看不到。
+   *
+   * 结构与 vanilla 逐字对应：`🌱 {growthCountPrefix} **{n}** {times}` + 一行 `growthNote`。
+   * 数字用 `<b>` 包住不是装饰 —— `.growth-line b { color: var(--accent) }` 靠它高亮。
+   */
+  const growthCard = (
+    <div className="growth-card" data-testid="growth-card" title={t("copy.growthCardTitle")}>
+      <div className="growth-line">
+        🌱 {t("copy.growthCountPrefix")} <b data-testid="growth-count">{evolutionCount ?? 0}</b>{" "}
+        {t("copy.times")}
+      </div>
+      <div className="growth-note" data-testid="growth-note">
+        {t("copy.growthNote")}
+      </div>
+    </div>
+  );
 
   // vanilla #side-nav：五个导航按钮（sessions/projects/tasks/rants/settings）
   const navRail = (
@@ -94,6 +127,7 @@ export function Sidebar({
     // vanilla：无打开会话 → label hidden + 空 nav
     return (
       <div className="react-sidebar" data-testid="sidebar">
+        {growthCard}
         {navRail}
         <button type="button" className="new-chat-btn" data-testid="new-chat-btn" title={t("sidebar.newChatTitle")} onClick={onNewChat}>
           {t("sidebar.newChat")}
@@ -113,6 +147,7 @@ export function Sidebar({
 
   return (
     <div className="react-sidebar" data-testid="sidebar">
+      {growthCard}
       {navRail}
       <button type="button" className="new-chat-btn" data-testid="new-chat-btn" title={t("sidebar.newChatTitle")} onClick={onNewChat}>
         {t("sidebar.newChat")}

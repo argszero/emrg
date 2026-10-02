@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
@@ -1067,5 +1067,147 @@ describe("Shell welcome state（空状态欢迎屏 #empty-state）", () => {
     fireEvent.click(screen.getByTestId("nav-projects"));
     await waitFor(() => expect(screen.getByTestId("panel-projects")).toBeInTheDocument());
     expect(screen.queryByTestId("empty-state")).not.toBeInTheDocument();
+  });
+});
+
+describe("Shell evolution toast（进化完成提示 #evolution-toast）", () => {
+  // 本环境的 `window.localStorage` 是一个**没有方法**的空对象（实测：`getItem`/`setItem`
+  // /`clear` 全是 `undefined`）—— Node 22 的实验性实现遮蔽了 jsdom 的。这不影响这条
+  // 规则的正确性（「存储不可用 → 照常显示」正是它写下的语义，且下面有一条用例专门
+  // 钉它），但要让**节流本身**可测，就必须装一个真能存的内存 stub —— 与
+  // `ResultPanel.test.tsx` 里那份同款。
+  // `localStorage` 在本环境里是 window 的**自有访问器属性**（`get,set,enumerable,configurable`）
+  // —— 实测：装 stub 用 defineProperty 可以，但 `delete` 之后拿到的是 `undefined`（不是原来
+  // 那个），所以还原必须把原描述符**重新装回去**。少了这一步，stub 会漏给下一个用例，
+  // 而漏出去的方向恰好让「存储不可用」那条控制腿失效（它实测抓到过这一次）。
+  const REAL_LS_DESC = Object.getOwnPropertyDescriptor(window, "localStorage");
+
+  function installMemoryStorage(): Record<string, string> {
+    const mem: Record<string, string> = {};
+    const stub = {
+      getItem: (k: string) => (k in mem ? mem[k] : null),
+      setItem: (k: string, v: string) => {
+        mem[k] = v;
+      },
+      removeItem: (k: string) => {
+        delete mem[k];
+      },
+      clear: () => {
+        for (const k of Object.keys(mem)) delete mem[k];
+      },
+    };
+    Object.defineProperty(window, "localStorage", { value: stub, configurable: true, writable: true });
+    return mem;
+  }
+
+  afterEach(() => {
+    if (REAL_LS_DESC) Object.defineProperty(window, "localStorage", REAL_LS_DESC);
+    delete (window as unknown as { emrg?: unknown }).emrg;
+  });
+
+  it("演化计数增长 → 弹出提示，带计数与两个动作；首次读数不弹", async () => {
+    // vanilla `maybeShowEvolutionToast`（js/app.js:1114）：计数**增长**才提示
+    // （1119 行原文「首次连接/无增长不提示」），先 maybeShowGithubBanner()，再受
+    // 「一天最多 1 次」的 localStorage 节流（1122-1127）后 showEvolutionToast()。
+    installMemoryStorage();
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+
+    // 第一次读到计数 = 基线，不是新闻。
+    m.emit({ type: "pong", data: { evolution_count: 52 } });
+    await waitFor(() => expect(screen.getByTestId("growth-count")).toHaveTextContent("52"));
+    expect(screen.queryByTestId("evolution-toast")).not.toBeInTheDocument();
+
+    m.emit({ type: "pong", data: { evolution_count: 53 } });
+    const toast = await screen.findByTestId("evolution-toast");
+    expect(toast).toHaveTextContent("EMRG just completed a self-evolution!");
+    // 那句带计数的话（`copy.evolutionToastMsg`）——「第 53 次」是这个提示的全部信息量
+    expect(screen.getByTestId("evolution-toast-msg")).toHaveTextContent("53");
+    expect(screen.getByTestId("evolution-toast-see")).toHaveTextContent("See details");
+    expect(screen.getByTestId("evolution-toast-dismiss")).toHaveTextContent("Got it");
+  });
+
+  it("「去看看」→ 提示退场，并**走 /version 那条路**把版本行放进转写", async () => {
+    // vanilla：`#evolution-toast-see` → hideEvolutionToast() + showVersionInfo()
+    // （js/app.js:1192-1198），而 showVersionInfo 就是 `app.versionInfo` 那行系统消息
+    // （js/app.js:1099）。React 里同一个动作已经有一个家 —— `/version` 指令 —— 所以
+    // 按钮走那条路，而不是把同一句话再拼一遍。
+    installMemoryStorage();
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit({ type: "pong", data: { evolution_count: 4 } });
+    m.emit({ type: "pong", data: { evolution_count: 5 } });
+    await screen.findByTestId("evolution-toast");
+
+    fireEvent.click(screen.getByTestId("evolution-toast-see"));
+    await waitFor(() => expect(screen.queryByTestId("evolution-toast")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/EMRG GUI v/)).toBeInTheDocument());
+  });
+
+  it("「知道了」→ 提示退场，且**今天不再弹**（一天一次）", async () => {
+    const mem = installMemoryStorage();
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit({ type: "pong", data: { evolution_count: 4 } });
+    m.emit({ type: "pong", data: { evolution_count: 5 } });
+    await screen.findByTestId("evolution-toast");
+    fireEvent.click(screen.getByTestId("evolution-toast-dismiss"));
+    await waitFor(() => expect(screen.queryByTestId("evolution-toast")).not.toBeInTheDocument());
+    // 节流是在**弹出之前**写的今天，所以关闭与节流是两件事：即使宿主不点关闭也一样。
+    expect(Object.keys(mem)).toEqual(["emrg.evoToast.date"]);
+
+    // 同一天里再来一次增长 → 不再弹（节流记在今天）。
+    m.emit({ type: "pong", data: { evolution_count: 6 } });
+    await waitFor(() => expect(screen.getByTestId("growth-count")).toHaveTextContent("6"));
+    expect(screen.queryByTestId("evolution-toast")).not.toBeInTheDocument();
+  });
+
+  it("提示在场时星号在脉动，退场后停下（vanilla 的 brand-star pulse）", async () => {
+    // `showEvolutionToast` 里给 `#brand-star` 加 `pulse`、`hideEvolutionToast` 里摘掉
+    // （js/app.js:1137-1138 / 1144-1145），动画在 `animations.css:89` 的
+    // `.brand-star.pulse` —— 同样一直在、同样没人加过这个类。
+    installMemoryStorage();
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    const star = () => screen.getByTestId("react-shell").querySelector(".brand-star");
+    expect(star()?.className).not.toContain("pulse");
+
+    m.emit({ type: "pong", data: { evolution_count: 4 } });
+    m.emit({ type: "pong", data: { evolution_count: 5 } });
+    await screen.findByTestId("evolution-toast");
+    await waitFor(() => expect(star()?.className).toContain("pulse"));
+
+    fireEvent.click(screen.getByTestId("evolution-toast-dismiss"));
+    await waitFor(() => expect(star()?.className).not.toContain("pulse"));
+  });
+
+  it("另一天到了 → 又是可以弹的一天（节流记的是**日历日**）", async () => {
+    // 直接种下「很久以前弹过」的状态：规则判的是日历日，不是「距上次 N 小时」。
+    const mem = installMemoryStorage();
+    mem["emrg.evoToast.date"] = "2020-01-01";
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit({ type: "pong", data: { evolution_count: 1 } });
+    m.emit({ type: "pong", data: { evolution_count: 2 } });
+    expect(await screen.findByTestId("evolution-toast")).toBeInTheDocument();
+    expect(mem["emrg.evoToast.date"]).not.toBe("2020-01-01");
+  });
+
+  it("存储不可用（本环境的 `window.localStorage` 就是这样一个对象）→ 照常弹出，不静默关掉", async () => {
+    // 这条是**反向控制腿**：它用的正是本环境真实的那只 storage（没有方法，读写都抛）。
+    // 少了它，上面四条「装了 stub 才通过」的用例无法区分「节流生效」与「提示根本不弹」。
+    const real = window.localStorage;
+    expect(typeof (real as unknown as { getItem?: unknown }).getItem).toBe("undefined");
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit({ type: "pong", data: { evolution_count: 4 } });
+    m.emit({ type: "pong", data: { evolution_count: 5 } });
+    expect(await screen.findByTestId("evolution-toast")).toBeInTheDocument();
   });
 });

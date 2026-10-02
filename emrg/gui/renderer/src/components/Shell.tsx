@@ -16,6 +16,7 @@ import { ResultPanel } from "./ResultPanel";
 import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
 import { TranscriptView } from "./TranscriptView";
 import { Composer, type CommandRouting } from "./Composer";
+import { claimEvolutionToastDay, safeLocalStorage } from "../lib/evolutionToast";
 import { DialogHost, type DialogHostHandle } from "./DialogHost";
 import {
   HISTORY_PAGE,
@@ -152,6 +153,24 @@ export function Shell() {
   // 关闭是**本进程内**的：「别再烦我」不该被下一次计数增长撤销（vanilla
   // `_githubBannerDismissed`，`js/app.js:1151`——它同样只写不重置）。
   const githubDismissedRef = useRef(false);
+  /**
+   * 「进化完成」提示（vanilla `#evolution-toast`，`index.html:498-506`）。
+   *
+   * `null` = 不在场；数字 = 正带着那个计数显示。触发点是**计数增长**（同一个
+   * `evolutionGrowthCount`），与上一周期那条 GitHub 提示**同一时刻、两个问题**：
+   * 这里问的是「宿主知不知道它刚进化过」，那条问的是「成果推得出去吗」。
+   *
+   * **没有「显示但不知道计数」这一态**：增长意味着桥读到过一个数（`evolutionFold`
+   * 只在 `n !== null` 时判增长），而 vanilla 的 `maybeShowEvolutionToast` 同样在
+   * `evolutionCount == null` 时直接 return（`js/app.js:1116`）。⇒ 词典里的
+   * `copy.evolutionToastMsgStatic` 在 React 里**没有读者**，而且不该造一个 —— 它是
+   * vanilla **静态 HTML 里那行占位文字**的默认值（`index.html:501` 的 `data-i18n`），
+   * React 的元素是按计数生成的，那个默认值没有对应的东西。
+   *
+   * 节流规则在 `lib/evolutionToast.ts`（一天一次，vanilla `js/app.js:1122-1127`）——
+   * 那个模块也写明了为什么这条**有**节流而那一条**没有**。
+   */
+  const [evolutionToast, setEvolutionToast] = useState<number | null>(null);
   // 空状态示例卡片要往**输入框**里填字（vanilla `empty-state` 的 click 处理器），
   // 所以这里持有输入框的 Editor 实例；Composer 的 `editorRef` 就是这条桥。
   const composerEditorRef = useRef<Editor | null>(null);
@@ -287,6 +306,28 @@ export function Shell() {
       }
     })();
   }, [appState.evolutionGrowthCount]);
+
+  /**
+   * The same moment, told to the host: an evolution just completed.
+   *
+   * vanilla's `maybeShowEvolutionToast` (`js/app.js:1114`) does two things on a
+   * growing count — `maybeShowGithubBanner()` (the effect above, unthrottled) and,
+   * at most once a day, `showEvolutionToast()`. This is the second half: the host
+   * is working in the GUI, an evolution finishes in the daemon, and unless they
+   * open Settings → About they are told nothing. The toast is the one surface
+   * whose whole job is to say "this thing you are using just got better".
+   *
+   * `localStorage` may be unavailable (privacy mode, non-browser) and the rule
+   * then answers "show" — see `lib/evolutionToast.ts`, which owns the day key and
+   * the once-a-day comparison. Note the order vanilla uses and this keeps: the
+   * GitHub nudge is asked *before* the throttle, so a dismissed toast never
+   * suppresses it.
+   */
+  useEffect(() => {
+    if (appState.evolutionGrowthCount === 0) return;
+    if (!claimEvolutionToastDay(safeLocalStorage())) return;
+    setEvolutionToast(appState.evolutionCount ?? null);
+  }, [appState.evolutionGrowthCount, appState.evolutionCount]);
 
   // ── workspace 面板动作（vanilla dialogs.js 语义） ──
   async function addProject() {
@@ -856,7 +897,15 @@ export function Shell() {
         </div>
       ) : null}
       <header className="react-shell-header">
-        <span className="react-shell-brand">✦ EMRG</span>
+        {/*
+          星号是 `showEvolutionToast` 里被点亮的那个元素（vanilla `$("brand-star").classList.add("pulse")`，
+          `js/app.js:1137-1138`）—— `.brand-star.pulse` 的 `star-pulse` 动画在
+          `animations.css:89`，同样一直在、同样没人加过这个类。它 2 次 1.2s 就把「刚刚进化过」
+          这件事指给眼睛，而不必读提示上的字。
+        */}
+        <span className="react-shell-brand">
+          <span className={`brand-star${evolutionToast !== null ? " pulse" : ""}`}>✦</span> EMRG
+        </span>
         {activeSid ? (
           <span className="react-shell-session" data-testid="session-info" title={activeSid}>
             {activeTitle} ({activeSid})
@@ -890,6 +939,7 @@ export function Shell() {
             knownSessions={appState.sessions}
             activeSid={activeSid}
             activeView={activeView}
+            evolutionCount={appState.evolutionCount}
             turnStartBySid={appState.turnStartBySid}
             onSelect={selectSession}
             onSwitchView={switchView}
@@ -1007,6 +1057,46 @@ export function Shell() {
           onDismiss={() => setRantOpen(false)}
         />
       </div>
+      {/*
+        进化完成提示（vanilla `#evolution-toast`）。它挂在最外层而不是聊天区里：
+        `.evolution-toast` 是 `position: fixed`（`components.css:1414`），与它下面的
+        构造无关，而放在这里就不会随面板/会话切换被卸载 —— 演化完成这件事不属于
+        某个会话。
+      */}
+      {evolutionToast !== null ? (
+        <div className="evolution-toast" role="status" data-testid="evolution-toast">
+          <div className="evolution-toast-title">{t("copy.evolutionToastTitle")}</div>
+          <div className="evolution-toast-msg" data-testid="evolution-toast-msg">
+            {t("copy.evolutionToastMsg", { n: evolutionToast })}
+          </div>
+          <div className="evolution-toast-actions">
+            <button
+              type="button"
+              className="btn btn-primary"
+              data-testid="evolution-toast-see"
+              onClick={() => {
+                // vanilla `#evolution-toast-see` → `hideEvolutionToast(); showVersionInfo()`
+                // （`js/app.js:1192-1198`），而 `showVersionInfo()` 就是把
+                // `app.versionInfo` 那行**系统消息**放进转写（`js/app.js:1099`）。
+                // React 里同一个动作已经有一个家 —— `/version` 指令 —— 所以这里
+                // 走那条路而不是把同一句话再拼一遍（两个拼写就会漂移）。
+                setEvolutionToast(null);
+                dialogHost.current?.runDirect("/version", []);
+              }}
+            >
+              {t("copy.evolutionToastSee")}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              data-testid="evolution-toast-dismiss"
+              onClick={() => setEvolutionToast(null)}
+            >
+              {t("copy.evolutionToastDismiss")}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

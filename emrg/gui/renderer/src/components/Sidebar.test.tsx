@@ -181,3 +181,34 @@ describe("Sidebar", () => {
     expect(onSwitchView).toHaveBeenCalledWith("settings");
   });
 });
+
+describe("Sidebar 成长卡（#growth-card）", () => {
+  it("顶上就有成长卡，写着计数与那句说明（vanilla #growth-card）", () => {
+    // vanilla `index.html:24-27` 的 `#growth-card`：`🌱 已自我进化 <b>N</b> 次` + 一行
+    // `growthNote`，WorkBuddy P3 的「自进化可见化」。#1024 删 vanilla 渲染层时，
+    // `layout.css:137-155` 的 CSS 与词典四条串都留下了，**元素与读者一起没了**
+    // （实测 2026-10-02：`growth-card` 在 `src/` 下零命中）—— 于是 React 版里这个
+    // 数只出现在**设置 → 关于**，主界面上一句都看不到。
+    setup({ evolutionCount: 53 });
+    const card = screen.getByTestId("growth-card");
+    expect(card).toHaveTextContent("已自我进化");
+    expect(card).toHaveTextContent("53");
+    expect(screen.getByTestId("growth-count")).toHaveTextContent("53");
+    expect(screen.getByTestId("growth-note")).toHaveTextContent("边工作边学习，越用越懂你");
+    // 标题（悬停）来自词典，不是硬编码 —— vanilla 的 data-i18n-title 同源
+    expect(card).toHaveAttribute("title", "EMRG 每次自我改进都会自动汇报");
+  });
+
+  it("计数没报过（null/缺省）→ 落成 0，而不是空白（vanilla 的 `?? 0`）", () => {
+    setup({});
+    expect(screen.getByTestId("growth-count")).toHaveTextContent("0");
+    setup({ evolutionCount: null });
+    expect(screen.getAllByTestId("growth-count").at(-1)).toHaveTextContent("0");
+  });
+
+  it("空态（没有打开会话）同样有成长卡 —— 它是这一栏里与工作内容无关的那件东西", () => {
+    setup({ openSessions: [], evolutionCount: 7 });
+    expect(screen.getByTestId("growth-card")).toBeInTheDocument();
+    expect(screen.getByTestId("growth-count")).toHaveTextContent("7");
+  });
+});
