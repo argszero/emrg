@@ -138,11 +138,20 @@ jobs:
           # "SecItemCopyMatching: item not found" 的 cryptic 错误）。实测（macOS 本机）：
           #   p12 含私钥 → "N identity(ies) imported."（1 个单数、多 个复数）；仅证书链 → "N certificates imported."
           # import 输出捕获后校验 identity/identities 行，缺失即明确报错，指引宿主重新导出含私钥的 p12。
+          # ⚠️ `|| IMPORT_RC=$?` 不是装饰。runner 用 `bash --noprofile --norc -eo pipefail` 启动本步骤，
+          # 而 `VAR="$(cmd)"` 会带上 cmd 的退出码 ⇒ `security import` **自己**非零退出时（口令错、
+          # p12 用 Apple 不接受的现代算法导出——v0.2.7 那 9 次失败正是这一类），`-e` 在**赋值处**中止，
+          # 下面那句 `echo` 与那条写着「import 输出：…」的 `::error::` 都不可达：日志里只剩 `exit code 1`，
+          # 捕获到的诊断被丢掉不印——而那正是这条消息存在的理由。守卫把「外部中止」变成「内部判定」。
+          # 实测（macOS 26.5.1，`security import` 打 `SecKeychainItemImport: MAC verification failed … (wrong password?)`、rc=1）。
+          IMPORT_RC=0
           IMPORT_OUTPUT="$(security import /tmp/signing.p12 -k /tmp/ci.keychain -P "$MACOS_SIGNING_P12_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)"
+            -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)" || IMPORT_RC=$?
           echo "$IMPORT_OUTPUT"
-          if [[ ! "$IMPORT_OUTPUT" =~ identit(y|ies)\ imported ]]; then
-            echo "::error::MACOS_SIGNING_P12_BASE64 未包含可签名私钥（security import 仅导入证书链）。请从 Keychain Access 导出含私钥的 p12（证书右键 → 导出 → 勾选\"包含私钥\"），重新 base64 后更新 GitHub Secret。import 输出：${IMPORT_OUTPUT}"
+          # 这句话只报读数（rc 与 import 的原话），不替它们断言成因：rc=0 且无 identity 行 = 仅证书链；
+          # rc≠0 = import 本身没成功。两者都由同一处打印，因为分辨者是 import 自己的输出。
+          if [ "$IMPORT_RC" -ne 0 ] || [[ ! "$IMPORT_OUTPUT" =~ identit(y|ies)\ imported ]]; then
+            echo "::error::MACOS_SIGNING_P12_BASE64 无法导入或未包含可签名私钥（security import rc=$IMPORT_RC）。若 rc=0 则是仅导入证书链，请从 Keychain Access 导出含私钥的 p12（证书右键 → 导出 → 勾选\"包含私钥\"）；若 rc≠0 请读下面的 import 原始输出。重新 base64 后更新 GitHub Secret。import 输出：${IMPORT_OUTPUT}"
             exit 1
           fi
           # 双 p12 方案（rant 2026-08-06T15:26）：若配置了独立的 Installer p12
@@ -151,11 +160,13 @@ jobs:
           if [ -n "${MACOS_INSTALLER_P12_BASE64:-}" ]; then
             echo "==> 双 p12 方案：导入 Installer p12"
             echo "$MACOS_INSTALLER_P12_BASE64" | base64 --decode > /tmp/installer.p12
+            # 同一形状、同一守卫，理由见上一段的 IMPORT_RC（这一句的成因是 Installer p12 导出/口令）。
+            INSTALLER_RC=0
             INSTALLER_IMPORT="$(security import /tmp/installer.p12 -k /tmp/ci.keychain -P "$MACOS_INSTALLER_P12_PASSWORD" \
-              -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)"
+              -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)" || INSTALLER_RC=$?
             echo "$INSTALLER_IMPORT"
-            if [[ ! "$INSTALLER_IMPORT" =~ identit(y|ies)\ imported ]]; then
-              echo "::error::MACOS_INSTALLER_P12_BASE64 未包含可签名私钥（security import 仅导入证书链）。请重新导出含私钥的 Installer p12 后更新 GitHub Secret。import 输出：${INSTALLER_IMPORT}"
+            if [ "$INSTALLER_RC" -ne 0 ] || [[ ! "$INSTALLER_IMPORT" =~ identit(y|ies)\ imported ]]; then
+              echo "::error::MACOS_INSTALLER_P12_BASE64 无法导入或未包含可签名私钥（security import rc=$INSTALLER_RC）。请重新导出含私钥的 Installer p12 后更新 GitHub Secret。import 输出：${INSTALLER_IMPORT}"
               exit 1
             fi
           fi
