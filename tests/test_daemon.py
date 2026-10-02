@@ -4174,3 +4174,63 @@ def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkey
         "a genuinely completed round no longer stamps the marker the #1114 alarm "
         "measures — the empty-answer guard must not have swallowed it"
     )
+def test_every_bare_name_in_the_daemon_modules_annotations_is_bound():
+    """`Any` was read by two annotations since #271 while `typing` imported only
+    `Optional` — and the module ran, because a *local* annotation is never
+    evaluated (PEP 526) and `from __future__ import annotations` made the rest
+    lazy. Nothing at runtime ever noticed; a type checker does, and so does
+    anything that reads the annotations as values.
+
+    The line this test draws is between a **bare** name and a **quoted** one:
+    `-> "jinja2.Environment"` is a forward reference to a dependency imported
+    inside the function, written as a string on purpose, so it is not read here;
+    `dict[str, Any]` is read, so `Any` must be bound. `if TYPE_CHECKING:` imports
+    count as bound, because that is the pattern where a name a checker needs is
+    deliberately absent at runtime.
+
+    Found while mechanising "a name bound nowhere" in `cyc20261003-065537`
+    (`scripts/check_unbound_reads.py`, whose second rule excludes local
+    annotations for exactly the PEP 526 reason above — which is why this test
+    exists rather than a finding from that guard).
+    """
+    import ast
+    import builtins
+
+    tree = ast.parse(Path(daemon_mod.__file__).read_text(encoding="utf-8"))
+
+    roots: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign):
+            roots.append(node.annotation)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.returns is not None:
+                roots.append(node.returns)
+            args = node.args
+            for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs,
+                             args.vararg, args.kwarg):
+                if argument is not None and argument.annotation is not None:
+                    roots.append(argument.annotation)
+
+    annotated: set[str] = set()
+    for root in roots:
+        for inner in ast.walk(root):
+            if isinstance(inner, ast.Name):
+                annotated.add(inner.id)
+
+    bound = set(vars(daemon_mod))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and getattr(node.test, "id", None) == "TYPE_CHECKING":
+            for inner in ast.walk(node):
+                if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    for alias in inner.names:
+                        bound.add((alias.asname or alias.name).split(".")[0])
+
+    missing = sorted(
+        name for name in annotated
+        if name not in bound and not hasattr(builtins, name)
+    )
+    assert not missing, (
+        "emrg/server/daemon.py annotates with a name it does not bind — a bare "
+        "name in an annotation is a reference, so a checker and `get_type_hints` "
+        f"both fail on it: {missing}"
+    )

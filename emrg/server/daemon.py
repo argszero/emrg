@@ -28,7 +28,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import yaml
@@ -38,6 +38,7 @@ from websockets.exceptions import ConnectionClosed
 from emrg._win import win32_no_window_kwargs
 from emrg.config import (
     LlmConfig,
+    SandboxConfig,
     config_dir,
     find_model_entry,
     load_sandbox_config,

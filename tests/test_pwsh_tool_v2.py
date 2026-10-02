@@ -458,6 +458,23 @@ def test_the_hosts_own_answer_is_the_real_one():
     assert mounted == expected
 
 
+def test_the_documented_default_path_is_reachable():
+    """`sandbox_config` defaults to `None`, and the docstring says that is fine.
+
+    Every other test in this file passes a `SandboxConfig` explicitly, and every
+    production caller does too — which is exactly why the *default* was never run:
+    the parameter falls back with `config = sandbox_config or SandboxConfig()`, and
+    `SandboxConfig` was never imported into `daemon.py` (b92ed00d, 2026-09-23), so
+    the one call shaped like the docstring raised `NameError`. It survived every
+    suite for ten days because nothing in the tree took the default. Found by the
+    bound-nowhere rule in `scripts/check_unbound_reads.py`
+    (`cyc20261003-065537`); this is the behavioural half of the same reading.
+    """
+    tool = build_shell_tool()
+    expected = SHELL_TOOL_NAME_WINDOWS if os.name == "nt" else SHELL_TOOL_NAME_POSIX
+    assert tool.definition().name == expected
+
+
 def test_every_mounted_dialect_receives_the_session_cwd(tmp_path):
     """The injected arguments cover the roster, not one member of it.
 

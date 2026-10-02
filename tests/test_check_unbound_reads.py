@@ -7,6 +7,17 @@ keep that class out of the tree, so these tests are in two halves: a built tree
 where it must fire and a built tree where it must stay silent, plus the verdict
 on the checkout this suite lives in -- the half that was missing from the
 neighbouring guard and let the crash ship.
+
+`cyc20261003-065537` added the guard's **second** rule, BOUND-NOWHERE -- a name
+read *inside a scope* that nothing in the module binds at all, which is a
+`NameError` rather than an `UnboundLocalError`. Its own defect was
+`emrg/server/daemon.py::build_shell_tool` writing `sandbox_config or
+SandboxConfig()` with `SandboxConfig` never imported (b92ed00d, 2026-09-23): the
+documented default path raised `NameError` and every caller in the tree passed a
+config explicitly, so nothing ever hit it. Those tests are in
+`TestTheBoundNowhereRule`; the third half of its design is that an *annotation*
+is only a read where Python evaluates it, and PEP 526 was measured for that
+rather than assumed -- see the annotation cases below.
 """
 
 from __future__ import annotations
@@ -202,6 +213,163 @@ class TestItStaysSilent:
         assert proc.returncode == 0, (
             f"the guard reported {label} as a defect:\n{proc.stdout}{proc.stderr}"
         )
+
+
+class TestTheBoundNowhereRule:
+    """The second rule: a name nothing in the module binds, read where it runs."""
+
+    def test_a_name_bound_nowhere_is_reported(self, tmp_path) -> None:
+        """The shipped shape, reduced: a call to a name that was never imported."""
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            def build():
+                return SandboxConfig()
+            """,
+        )
+        proc = _run(tree)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        reported = proc.stdout.replace("\\", "/")
+        assert "BOUND-NOWHERE" in reported, proc.stdout
+        assert "emrg/bad.py:2" in reported, proc.stdout
+        assert "in build()" in reported, proc.stdout
+        assert "'SandboxConfig'" in reported, proc.stdout
+
+    @pytest.mark.parametrize(
+        "label,source",
+        [
+            (
+                "an import",
+                "import os\n\ndef f():\n    return os.sep\n",
+            ),
+            (
+                "a parameter",
+                "def f(thing):\n    return thing\n",
+            ),
+            (
+                "a binding in an enclosing function",
+                "def outer():\n    thing = 1\n    def inner():\n        return thing\n",
+            ),
+            (
+                "a module-level assignment",
+                "thing = 1\n\ndef f():\n    return thing\n",
+            ),
+            (
+                "a name in a `TYPE_CHECKING` import",
+                "from __future__ import annotations\n"
+                "from typing import TYPE_CHECKING\n"
+                "if TYPE_CHECKING:\n"
+                "    from pathlib import Path\n"
+                "\ndef f(p: Path) -> Path:\n"
+                "    return p\n",
+            ),
+        ],
+    )
+    def test_a_name_something_binds_is_not_reported(self, tmp_path, label, source) -> None:
+        tree = _tree(tmp_path, good=source)
+        proc = _run(tree)
+        assert proc.returncode == 0, (
+            f"the guard reported {label} as bound nowhere:\n{proc.stdout}{proc.stderr}"
+        )
+
+    # ── annotations: read only where Python evaluates them ──────────────────
+    #
+    # PEP 526, measured on this checkout (see `_annotation_ids`):
+    #   module level  `x: T = 1`      evaluated   (unless `from __future__ import annotations`)
+    #   class body    `class C: x: T` evaluated   (unless lazy)
+    #   local         `def f(): x: T` **never evaluated**, lazy or not
+    # The local half is not symmetry for its own sake: `emrg/server/daemon.py`
+    # has read `Any` since #271 without importing it and run for months, because
+    # both of its uses are local annotations. A rule that called that a NameError
+    # would be wrong about the tree it just measured, and a guard that is wrong
+    # once is switched off.
+
+    def test_a_local_annotation_is_never_a_read(self, tmp_path) -> None:
+        tree = _tree(
+            tmp_path,
+            good="def f():\n    ctx: NoSuchName = {}\n    return ctx\n",
+        )
+        proc = _run(tree)
+        assert proc.returncode == 0, (
+            "a local variable annotation is never evaluated (PEP 526), so naming an "
+            f"unbound type there is not a NameError:\n{proc.stdout}{proc.stderr}"
+        )
+
+    def test_a_local_annotation_does_not_mask_a_real_read(self, tmp_path) -> None:
+        """The control: the same name read for real *is* still reported."""
+        tree = _tree(
+            tmp_path,
+            bad="def f():\n    ctx: NoSuchName = {}\n    return NoSuchName\n",
+        )
+        proc = _run(tree)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "'NoSuchName'" in proc.stdout, proc.stdout
+
+    def test_a_class_body_annotation_is_evaluated(self, tmp_path) -> None:
+        """A class body stores its annotations in `__annotations__`, so it reads."""
+        tree = _tree(
+            tmp_path,
+            bad="class C:\n    field: NoSuchName = 1\n",
+        )
+        proc = _run(tree)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "'NoSuchName'" in proc.stdout, proc.stdout
+        assert "in the body of class C" in proc.stdout, proc.stdout
+
+    def test_a_class_body_annotation_is_lazy_when_the_module_is(self, tmp_path) -> None:
+        tree = _tree(
+            tmp_path,
+            good="from __future__ import annotations\n\nclass C:\n    field: NoSuchName = 1\n",
+        )
+        proc = _run(tree)
+        assert proc.returncode == 0, (
+            f"a lazy module does not evaluate its class annotations:\n{proc.stdout}{proc.stderr}"
+        )
+
+    def test_a_class_body_read_is_reported(self, tmp_path) -> None:
+        tree = _tree(
+            tmp_path,
+            bad="class C:\n    field = NoSuchName\n",
+        )
+        proc = _run(tree)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "in the body of class C" in proc.stdout, proc.stdout
+
+    def test_a_property_setter_decorator_is_not_a_read_of_the_enclosing_function(
+        self, tmp_path
+    ) -> None:
+        """`@x.setter` reads `x` from the *class* body, where it is already bound.
+
+        The first version of this rule attributed that read to the decorated
+        function and reported 22 findings on this checkout, every one of them
+        correct code.
+        """
+        tree = _tree(
+            tmp_path,
+            good="""\
+            class C:
+                @property
+                def p(self):
+                    return 1
+
+                @p.setter
+                def p(self, value):
+                    self._p = value
+            """,
+        )
+        proc = _run(tree)
+        assert proc.returncode == 0, (
+            f"the class body's own `@p.setter` read was misattributed:\n"
+            f"{proc.stdout}{proc.stderr}"
+        )
+
+    def test_a_star_import_makes_the_reading_unmeasurable(self, tmp_path) -> None:
+        """`2` is "could not measure", never a clean tree (R2's rule, in a guard)."""
+        tree = _tree(tmp_path, good="from os import *\n\ndef f():\n    return path\n")
+        proc = _run(tree)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "not measured" in proc.stderr, proc.stderr
+        assert "OK" not in proc.stdout, proc.stdout
 
 
 class TestItsExitCodes:
