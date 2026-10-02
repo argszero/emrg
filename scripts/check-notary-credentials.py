@@ -36,7 +36,16 @@ reach a verdict would send the host to CI with the same false confidence this sc
 exists to remove, so it is exit 2 and **never 0**. The success shape is the one thing not
 measurable on this host (it has no valid credentials to spend — and spending a real
 submission to prove a *history* call works would be the waste this guards), so the arm is
-only as strong as "the asked-for JSON came back"; nothing here reads a field inside it.
+only as strong as "the asked-for JSON **shape** came back" — a JSON object carrying a
+`history` list; nothing here reads a field inside a record.
+
+**Exit 1 means Apple refused the credentials and nothing else.** Every other way this can
+fail — an unreadable `--env-file`, a JSON reply of the wrong shape, no `xcrun`, no
+variables to send, a timeout, a transport error — is a *failure to measure* and exits 2.
+Measured 2026-10-03 (`cyc20261003-004200`): before this was stated, four such paths
+(`--env-file` missing, a directory, not UTF-8, and `{"history": null}`) each left the
+process at exit 1 through an uncaught exception, i.e. told the host to go rotate a
+password that had never been asked about.
 
 The password is read from the environment and never printed — not in the reading, and not
 in a subprocess error echoed back (see `_redact`).
@@ -152,14 +161,27 @@ def probe(xcrun: str | None, env: dict[str, str]) -> tuple[str, str]:
         try:
             parsed = json.loads(result.stdout)
         except ValueError:
+            parsed = None
+        # And the *shape* the request asked for is part of the answer, not only "some JSON
+        # arrived": a JSON list, a bare `0`, or an object whose `history` is null is not the
+        # submission history `--output-format json` asks for. Measured 2026-10-03
+        # (`cyc20261003-004200`) on this PR's own head: `{"history": null}` reached
+        # `len(None)`, raised `TypeError`, and the traceback left the process at **exit 1**
+        # — the code this script reserves for "Apple refused the credentials", so a host
+        # whose stand-in answered an odd shape was told to go rotate a password that was
+        # never measured.
+        history = parsed.get("history") if isinstance(parsed, dict) else None
+        if not isinstance(history, list):
             return "unmeasurable", (
-                "the call exited 0 but did not answer with the JSON `--output-format json` "
-                f"asks for, so no credentials verdict was reached. Output: "
+                "the call exited 0 but did not answer with the submission history "
+                "`--output-format json` asks for (a JSON object carrying a `history` list), "
+                f"so no credentials verdict was reached. Output: "
                 f"{_redact(result.stdout.strip()[:200], secrets)!r}"
             )
-        count = len(parsed.get("history", [])) if isinstance(parsed, dict) else None
-        where = f"{count} past submission(s) on record" if count is not None else "a JSON reply"
-        return "works", f"Apple answered the submission-history request ({where})"
+        return "works", (
+            f"Apple answered the submission-history request "
+            f"({len(history)} past submission(s) on record)"
+        )
 
     combined = f"{result.stdout}\n{result.stderr}"
     if _REFUSED.search(combined):
@@ -174,13 +196,22 @@ def probe(xcrun: str | None, env: dict[str, str]) -> tuple[str, str]:
     )
 
 
-def check(env: dict[str, str], xcrun: str | None) -> int:
+def check(env: dict[str, str], xcrun: str | None, env_file_error: str | None = None) -> int:
     """Print the reading and return the exit code."""
     print("notary credentials preflight")
     print(f"  apple-id: {env.get(APPLE_ID_VAR) or '(unset)'}")
     print(f"  team-id:  {env.get(TEAM_ID_VAR) or '(unset)'}")
     print(f"  password: {'set' if env.get(PASSWORD_VAR) else '(unset)'}")
     print(f"  xcrun:    {xcrun or '(not on PATH)'}")
+    if env_file_error is not None:
+        # The credentials were never read, so there is nothing to ask Apple about: exit 2,
+        # the not-measurable code. Measured 2026-10-03 (`cyc20261003-004200`) on this PR's
+        # own head: an unreadable `--env-file` (missing, a directory, not UTF-8) raised out
+        # of `main` and left the process at **exit 1**, which is this script's code for
+        # "Apple refused your credentials" — the host would rotate a password instead of
+        # fixing a path.
+        print(f"not measurable: {env_file_error}")
+        return 2
     state, detail = probe(xcrun, env)
     if state == "works":
         print(f"OK: {detail}")
@@ -225,10 +256,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     env = dict(os.environ)
+    env_file_error: str | None = None
     if args.env_file is not None:
-        env.update(_read_env_file(args.env_file))
+        try:
+            env.update(_read_env_file(args.env_file))
+        except (OSError, UnicodeDecodeError) as exc:
+            # `--env-file` is how a host keeps the password out of the shell history, so a
+            # wrong path is a likely accident and must read as one. All three shapes are
+            # reachable: missing, a directory, and a file that is not UTF-8.
+            env_file_error = (
+                f"cannot read --env-file {args.env_file}: {exc} - the credentials the "
+                f"release would send were never read, so nothing was measured"
+            )
     xcrun = args.xcrun if args.xcrun is not None else shutil.which("xcrun")
-    return check(env, xcrun)
+    return check(env, xcrun, env_file_error)
 
 
 def _read_env_file(path: str) -> dict[str, str]:

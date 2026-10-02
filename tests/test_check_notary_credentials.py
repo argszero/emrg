@@ -66,6 +66,17 @@ if scenario == "accepted":
     json.dump({"history": [{"id": "sub-1", "status": "Accepted"}]}, sys.stdout)
     sys.stdout.write("\\n")
     sys.exit(0)
+if scenario == "null_history":
+    # Valid JSON, but not the shape `--output-format json` asked for: measured 2026-10-03
+    # (`cyc20261003-004200`) to reach `len(None)` and leave the process at exit 1.
+    json.dump({"history": None}, sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
+if scenario == "wrong_json":
+    # The same defect through a different door: JSON arrived, the asked-for answer did not.
+    json.dump([], sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
 if scenario == "refused":
     sys.stderr.write("Error: HTTP status code: 401. Invalid credentials. "
                      "Use an app-specific password.\\n")
@@ -114,6 +125,7 @@ def _run(
     credentials: bool = True,
     xcrun: str | None = None,
     empty_path: bool = False,
+    env_file: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -141,6 +153,8 @@ def _run(
         env["PATH"] = str(empty)
     else:
         argv += ["--xcrun", str(stub)]
+    if env_file is not None:
+        argv += ["--env-file", str(env_file)]
 
     return subprocess.run(
         argv,
@@ -220,6 +234,98 @@ def test_an_answer_that_is_not_a_credentials_verdict_is_unmeasured(
         f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
     )
     assert "not measurable" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "scenario, why",
+    [
+        ("null_history", "the reply is valid JSON but its `history` is null"),
+        ("wrong_json", "the reply is valid JSON but not the asked-for object"),
+    ],
+)
+@_posix_only
+def test_a_json_reply_of_the_wrong_shape_is_unmeasured(
+    tmp_path: Path, scenario: str, why: str
+) -> None:
+    """Exit 0 plus *some* JSON is not the asked-for answer — the shape is part of it.
+
+    Measured 2026-10-03 (`cyc20261003-004200`) on this branch's previous head: with
+    `{"history": null}` the script reached `len(None)`, raised `TypeError`, and the
+    traceback left the process at **exit 1** — this file's code for "Apple refused the
+    credentials". A host whose wrapper answered an odd shape was sent to rotate a password
+    that had never been asked about.
+    """
+    result = _run(tmp_path, scenario)
+    assert result.returncode == 2, (
+        f"{scenario} answered exit {result.returncode}, expected 2 — {why}.\n"
+        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    assert "not measurable" in result.stdout
+
+
+@pytest.mark.parametrize("shape", ["missing", "directory", "not-utf8"])
+@_posix_only
+def test_an_env_file_that_cannot_be_read_is_unmeasured(tmp_path: Path, shape: str) -> None:
+    """`--env-file` is how a host keeps the password out of the shell history, so a wrong
+    path is a likely accident — and it must read as one, not as a refused credential.
+
+    Measured 2026-10-03 (`cyc20261003-004200`): all three shapes raised out of `main` and
+    left the process at exit 1, the refusal code. The credentials were never read, so the
+    honest answer is "could not measure" (2).
+    """
+    target: Path
+    if shape == "missing":
+        target = tmp_path / "no-such.env"
+    elif shape == "directory":
+        target = tmp_path / "a-directory"
+        target.mkdir()
+    else:
+        target = tmp_path / "not-utf8.env"
+        target.write_bytes(b"APPLE_ID=dev@example.invalid\n\xff\xfe\x00not-utf-8\n")
+
+    result = _run(tmp_path, "accepted", env_file=target)
+    assert result.returncode == 2, (
+        f"an unreadable --env-file ({shape}) answered exit {result.returncode}, expected 2 "
+        f"— nothing about the credentials was measured.\n"
+        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    assert "not measurable" in result.stdout
+    assert "--env-file" in result.stdout, "the file that could not be read was not named"
+
+
+@_posix_only
+def test_only_apple_refuses_here(tmp_path: Path) -> None:
+    """The rule the cases above share, stated once: **exit 1 means Apple said no.**
+
+    Every other way this script can fail to reach a verdict is a measurement failure, and
+    a measurement failure reported as a credential fault sends the host to the wrong fix —
+    which is worse than no preflight, because it reads as one. This sweep fails if any
+    path grows back into the refusal code.
+    """
+    a_directory = tmp_path / "a-directory"
+    a_directory.mkdir()
+    not_utf8 = tmp_path / "not-utf8.env"
+    not_utf8.write_bytes(b"APPLE_ID=dev@example.invalid\n\xff\xfe\x00not-utf-8\n")
+    measurement_failures: list[tuple[str, dict[str, object]]] = [
+        ("server_error", {}),
+        ("transport", {}),
+        ("not_json", {}),
+        ("null_history", {}),
+        ("wrong_json", {}),
+        ("accepted", {"credentials": False}),
+        ("accepted", {"xcrun": str(tmp_path / "nope" / "xcrun")}),
+        ("accepted", {"empty_path": True}),
+        ("accepted", {"env_file": tmp_path / "no-such.env"}),
+        ("accepted", {"env_file": a_directory}),
+        ("accepted", {"env_file": not_utf8}),
+    ]
+    for scenario, kwargs in measurement_failures:
+        result = _run(tmp_path, scenario, **kwargs)
+        assert result.returncode != 1, (
+            f"{scenario} {kwargs} exited 1 — the code reserved for Apple refusing the "
+            f"credentials. Nothing about the credentials was measured.\n"
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
 
 
 @_posix_only
