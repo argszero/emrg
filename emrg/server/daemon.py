@@ -1014,23 +1014,20 @@ class EmrgServer:
         projects not registered in projects.yml) would otherwise be invisible
         to other projects. Best-effort — failures are logged at debug level
         and never crash the daemon.
+
+        The registered project paths are read by ``sessions_index`` itself, from
+        the same file this class holds as ``_projects_log`` (both are
+        ``config_dir()/projects.yml``). This method used to parse that file here as
+        well, which made two readers of one fact — and the searches built on it
+        drifted: the daemon's copy fed a scan that walked each project path one
+        level deep, while the R7 instrument's discovery walked the config root
+        recursively, so a nested project's history was invisible to a search that
+        reported its messages absent (`cyc20261003-080425`).
         """
         from emrg.sessions_index import rebuild_sessions_index
 
         try:
-            project_paths: list[str] = []
-            if self._projects_log.exists():
-                try:
-                    data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
-                    if isinstance(data, list):
-                        project_paths = [
-                            e.get("path", "")
-                            for e in data
-                            if isinstance(e, dict) and e.get("path")
-                        ]
-                except (yaml.YAMLError, OSError):
-                    pass
-            count = rebuild_sessions_index(config_dir(), project_paths)
+            count = rebuild_sessions_index(config_dir())
             logger.info("sessions index rebuilt: %d sessions indexed", count)
         except Exception:
             logger.debug("sessions index rebuild failed", exc_info=True)

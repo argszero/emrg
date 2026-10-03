@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -95,9 +96,18 @@ def sources(tmp_path: Path) -> dict:
 
 
 def run(args: list[str]) -> subprocess.CompletedProcess:
+    # `PYTHONPATH` is pinned to this checkout, absolutely: the canonical invocation is
+    # `uv run --no-sync python3 scripts/find-host-message.py`, which puts this tree on
+    # the path, while a bare `python scripts/...` would import whatever `emrg` happens
+    # to be installed elsewhere on the machine (measured 2026-10-03: a host's
+    # `~/.emrg/install/source/emrg`, a copy that predates this cycle's change). A test
+    # that measures another tree's copy reports on that tree, not on this one.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, env=env,
     )
 
 
@@ -235,6 +245,116 @@ class TestTheThreeStates:
         altogether and answering about the whole span."""
         done = run(["--pattern", "the first thing the host said",
                     "--since", "2026-09-16", *both(sources)])
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "NOT FOUND" in done.stdout
+
+
+class TestTheSearchIsThisHostAndNotTheCache:
+    """The index is a cache; the verdict must be about the host.
+
+    Measured 2026-10-03 (`cyc20261003-080425`) on this host: `game0/blender0` is a
+    project nested inside the registered project `game0`, its session directory was
+    on disk, and it was **not** in `sessions_index.json` — so this tool answered
+    `NOT FOUND ... in the searched span` for a message that is in that session's
+    history. R7 forbids the shape: a search that had to be cut short answers `2`,
+    never "the host never said it".
+
+    The roots are now the union of the index's directories and a live discovery of
+    every tree this host has (`emrg.sessions_index.session_dirs` — the same rule the
+    daemon's own backfill uses). These pin the three directions: a tree the index
+    does not name is still searched, a tree the index *does* name is still searched
+    even when discovery would not reach it, and a discovery that could not run is
+    `2` rather than an absence.
+    """
+
+    def _config(self, tmp_path: Path, *, index: dict, projects: str | None) -> Path:
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        (cfg / "sessions_index.json").write_text(json.dumps(index), encoding="utf-8")
+        if projects is not None:
+            (cfg / "projects.yml").write_text(projects, encoding="utf-8")
+        return cfg
+
+    def _session(self, root: Path, sid: str, rows: list[str]) -> Path:
+        d = root / ".emrg" / "sessions" / sid
+        d.mkdir(parents=True)
+        (d / "history_260927.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        (d / "meta.json").write_text(json.dumps({"session_id": sid}), encoding="utf-8")
+        return d
+
+    def test_a_project_nested_inside_a_project_is_searched(self, tmp_path):
+        """The measured case: the index does not name it, the host still has it."""
+        project = tmp_path / "outer"
+        self._session(project / "inner", "s_inner",
+                      [session_row("2026-09-27T08:49:02.000000+08:00",
+                                   "完成blender 特斯拉model 3 建模")])
+        cfg = self._config(tmp_path, index={},
+                           projects=f"- name: outer\n  path: {project}\n")
+        log_dir = tmp_path / "empty-logs"
+        log_dir.mkdir()
+
+        done = run(["--pattern", "特斯拉model 3", "--log-dir", str(log_dir),
+                    "--index", str(cfg / "sessions_index.json")])
+
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "s_inner" in done.stdout
+        assert "FOUND" in done.stdout
+
+    def test_a_tree_the_index_names_is_searched_even_so(self, tmp_path):
+        """Union, not replacement: pruning must not drop an indexed tree."""
+        project = tmp_path / "elsewhere"
+        d = self._session(project / "s_indexed", "s_indexed",
+                          [session_row("2026-09-27T09:00:00.000000+08:00",
+                                       "an indexed message about maple")])
+        # An index naming a directory discovery will never produce (outside the
+        # config root and outside every registered project).
+        cfg = self._config(tmp_path, index={"s_indexed": str(d)}, projects=None)
+        log_dir = tmp_path / "empty-logs"
+        log_dir.mkdir()
+
+        done = run(["--pattern", "indexed message", "--log-dir", str(log_dir),
+                    "--index", str(cfg / "sessions_index.json")])
+
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "FOUND" in done.stdout
+
+    def test_a_discovery_that_cannot_run_is_two_not_one(self, tmp_path, monkeypatch, capsys):
+        """The half of the rule that is about honesty, not coverage."""
+        cfg = self._config(tmp_path, index={}, projects=None)
+        log_dir = tmp_path / "empty-logs"
+        log_dir.mkdir()
+        monkeypatch.setattr(MOD, "discovered_session_dirs",
+                            lambda root: ([], "could not import emrg.sessions_index"))
+
+        rc = MOD.main(["--pattern", "anything at all", "--log-dir", str(log_dir),
+                       "--index", str(cfg / "sessions_index.json")])
+
+        captured = capsys.readouterr()
+        assert rc == 2, captured.out + captured.err
+        assert "discovery was incomplete" in captured.err
+        assert "NOT FOUND" not in captured.out
+
+    def test_a_real_absence_is_still_one(self, tmp_path):
+        """The control: an ordinary miss over a real search stays `1`."""
+        project = tmp_path / "outer"
+        self._session(project, "s_outer",
+                      [session_row("2026-09-27T08:49:02.000000+08:00", "something else")])
+        cfg = self._config(tmp_path, index={},
+                           projects=f"- name: outer\n  path: {project}\n")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        # A source with a span, so the window really is covered: "nothing to read"
+        # is the other unmeasurable path and would answer 2 for the wrong reason.
+        (log_dir / "emrgd.log").write_text(
+            "2026-09-01 00:00:00 [DEBUG] [-] [-] daemon: starting up\n"
+            + host_line("2026-09-15 10:00:00", "s_outer", "an early thing")
+            + "\n2026-10-03 00:00:00 [DEBUG] [-] [-] daemon: still running\n",
+            encoding="utf-8",
+        )
+
+        done = run(["--pattern", "a phrase nobody sent", "--log-dir", str(log_dir),
+                    "--index", str(cfg / "sessions_index.json")])
+
         assert done.returncode == 1, done.stdout + done.stderr
         assert "NOT FOUND" in done.stdout
 

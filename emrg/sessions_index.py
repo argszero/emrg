@@ -110,20 +110,34 @@ def _read_meta_session_id(meta_path: Path) -> str | None:
     return str(sid) if sid else None
 
 
-def _iter_project_sessions(project_path: Path):
-    """Yield (session_id, session_dir) from <project>/.emrg/sessions/*/meta.json."""
-    sessions_dir = project_path / ".emrg" / "sessions"
-    if not sessions_dir.is_dir():
-        return
-    for entry in sorted(sessions_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        meta_path = entry / "meta.json"
-        if not meta_path.exists():
-            continue
-        sid = _read_meta_session_id(meta_path)
-        if sid:
-            yield sid, str(entry)
+def _registered_project_paths(config_root: Path) -> list[str]:
+    """`path` of every entry in the config root's `projects.yml` ([] when unreadable).
+
+    The daemon reads this file itself and passes the list in; this reader exists so
+    the *other* caller — the R7 instrument, which has no daemon to ask — computes the
+    same set of session trees. Same file, same field: a second spelling of "where do
+    this host's projects live" is how the two searches came to disagree.
+    """
+    path = config_root / "projects.yml"
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - yaml ships with the package
+        return []
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        # Best-effort, like the backfill it feeds: a corrupt or unreadable registry
+        # means this host declared no project paths, never a crash at startup. Broad
+        # on purpose — the shapes a `safe_load` of edited-by-hand YAML can hand back
+        # are not worth enumerating here, and none of them is actionable.
+        return []
+    if not isinstance(data, list):
+        return []
+    return [
+        str(entry["path"])
+        for entry in data
+        if isinstance(entry, dict) and entry.get("path")
+    ]
 
 
 def _iter_nested_sessions(root: Path):
@@ -150,6 +164,39 @@ def _iter_nested_sessions(root: Path):
                     yield sid, str(entry)
 
 
+def session_dirs(
+    config_root: Path, project_paths: list[str] | None = None
+) -> dict[str, str]:
+    """Every session directory this host has, as ``session_id -> directory``.
+
+    One rule for both callers, because the two disagreeing is not a hypothetical:
+    this scan fed the index, the R7 instrument read the index, and a session tree
+    the scan did not reach became invisible to a search that then reported its
+    messages *absent* (measured 2026-10-03, `cyc20261003-080425`).
+
+    **Both inputs are walked the same way.** A registered project path is the root
+    of a project *tree* exactly as `config_root` is, so it is scanned recursively
+    too. It used to be scanned one level deep (`<project>/.emrg/sessions/*`), which
+    silently dropped every project nested inside another one -- `game0/blender0`
+    on this host is one, and its history held a host message the search could not
+    see. `project_paths=None` reads them from `config_root/projects.yml`; the daemon
+    passes its own list, read from that same file.
+    """
+    found: dict[str, str] = {}
+    for sid, sdir in _iter_nested_sessions(config_root):
+        found[sid] = sdir
+    paths = project_paths if project_paths is not None else _registered_project_paths(config_root)
+    for project in paths:
+        if not project:
+            continue
+        try:
+            for sid, sdir in _iter_nested_sessions(Path(project)):
+                found[sid] = sdir
+        except OSError:
+            continue
+    return found
+
+
 def rebuild_sessions_index(
     config_root: Path, project_paths: list[str] | None = None
 ) -> int:
@@ -166,17 +213,7 @@ def rebuild_sessions_index(
     index_path = config_root / _INDEX_FILENAME
     data = _load(index_path)
 
-    found: dict[str, str] = {}
-    for sid, sdir in _iter_nested_sessions(config_root):
-        found[sid] = sdir
-    for p in project_paths or []:
-        if not p:
-            continue
-        try:
-            for sid, sdir in _iter_project_sessions(Path(p)):
-                found[sid] = sdir
-        except OSError:
-            continue
+    found = session_dirs(config_root, project_paths)
 
     for sid, sdir in found.items():
         data[sid] = sdir

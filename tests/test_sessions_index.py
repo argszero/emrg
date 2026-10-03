@@ -206,3 +206,153 @@ def test_sessions_index_path_is_under_config_dir():
     """The default index path lives under ~/.emrg (config_dir)."""
     p = sessions_index_path()
     assert p.name == "sessions_index.json"
+
+
+class TestAProjectPathIsATree:
+    """A registered project is walked like the config root is, not one level deep.
+
+    Measured 2026-10-03 (`cyc20261003-080425`) on this host: `game0/blender0` is a
+    project nested inside the registered project `game0`, its session directory is
+    on disk, and `rebuild_sessions_index` never indexed it — the config root went
+    through `_iter_nested_sessions` (recursive) while each project path went through
+    a one-level `iterdir`. The consequence was not cosmetic: `find-host-message.py`
+    reads that index, so a host message in the nested project's history was answered
+    `NOT FOUND ... in the searched span` — R7's forbidden shape, a cut-short search
+    reported as an absence.
+
+    The two scans are one rule now (`session_dirs`), and these are the directions it
+    has to hold in: the nested tree is found, the non-nested one still is, and the
+    pruning the config-root walk relies on applies to a project tree as well.
+    """
+
+    def _make_session(self, root: Path, sid: str) -> Path:
+        sessions_dir = root / ".emrg" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        sdir = sessions_dir / sid
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "meta.json").write_text(
+            json.dumps({"session_id": sid, "message_count": 0}), encoding="utf-8"
+        )
+        return sdir
+
+    def test_a_project_nested_inside_a_project_is_indexed(self, tmp_path):
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        project = tmp_path / "outer"
+        outer = self._make_session(project, "s_outer")
+        nested = self._make_session(project / "inner", "s_inner")
+
+        count = rebuild_sessions_index(cfg, project_paths=[str(project)])
+
+        data = _load(cfg / "sessions_index.json")
+        assert count == 2
+        assert data["s_outer"] == str(outer)
+        assert data["s_inner"] == str(nested), (
+            "a session in a project nested inside a registered project was not "
+            "indexed — the project path is a tree root, exactly as the config root is"
+        )
+
+    def test_the_project_scan_still_finds_the_project_itself(self, tmp_path):
+        """The control: the recursion must not cost the one-level case."""
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        project = tmp_path / "flat"
+        sdir = self._make_session(project, "s_flat")
+
+        rebuild_sessions_index(cfg, project_paths=[str(project)])
+
+        assert _load(cfg / "sessions_index.json")["s_flat"] == str(sdir)
+
+    def test_a_project_tree_is_pruned_the_same_way(self, tmp_path):
+        """`node_modules` under a project must not be walked (the daemon waits on this)."""
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        project = tmp_path / "app"
+        real = self._make_session(project, "s_real")
+        ignored = self._make_session(project / "node_modules", "s_ignored")
+
+        rebuild_sessions_index(cfg, project_paths=[str(project)])
+
+        data = _load(cfg / "sessions_index.json")
+        assert data["s_real"] == str(real)
+        assert "s_ignored" not in data
+
+    def test_project_paths_are_read_from_the_config_root_when_not_given(self, tmp_path):
+        """The second caller has no daemon to ask, so `None` must read the file."""
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        project = tmp_path / "registered"
+        sdir = self._make_session(project, "s_registered")
+        (cfg / "projects.yml").write_text(
+            f"- name: registered\n  path: {project}\n", encoding="utf-8"
+        )
+
+        count = rebuild_sessions_index(cfg)
+
+        assert count == 1
+        assert _load(cfg / "sessions_index.json")["s_registered"] == str(sdir)
+
+    def test_an_unreadable_projects_file_is_not_a_crash(self, tmp_path):
+        """A corrupt registry means no project paths, never an exception."""
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        (cfg / "projects.yml").write_text("- [not: a, list, of, dicts]\n", encoding="utf-8")
+        assert rebuild_sessions_index(cfg) in (0, 1)
+
+
+def test_discovery_finds_a_session_under_a_registered_project(tmp_path):
+    """`session_dirs` is the one rule both callers read, so pin it directly."""
+    from emrg.sessions_index import session_dirs
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    project = tmp_path / "outer"
+    sessions_dir = project / ".emrg" / "sessions" / "s_nested"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "meta.json").write_text(
+        json.dumps({"session_id": "s_nested"}), encoding="utf-8"
+    )
+    (cfg / "projects.yml").write_text(f"- name: p\n  path: {project}\n", encoding="utf-8")
+
+    found = session_dirs(cfg)
+
+    assert found == {"s_nested": str(sessions_dir)}
+
+
+
+def test_the_backfill_indexes_a_session_nested_in_a_registered_project(tmp_path, monkeypatch):
+    """The daemon's own entry point, on a config root this test owns.
+
+    This is the delegation and the recursion in one reading: the daemon calls
+    `rebuild_sessions_index(config_dir())` with no list, the module reads
+    `<config_root>/projects.yml` for itself, and the project's tree is walked
+    recursively. Before `cyc20261003-080425` the third of those was false — and the
+    consequence was not the index alone: `find-host-message.py` reads it, so a host
+    message in a nested project's history was answered "absent over a covered span".
+
+    `config_dir` is pinned to a tmp root before the server is built, so the
+    instantiation writes nothing under the host's `~/.emrg`.
+    """
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    project = tmp_path / "outer"
+    sessions_dir = project / "inner" / ".emrg" / "sessions" / "s_nested"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "meta.json").write_text(
+        json.dumps({"session_id": "s_nested"}), encoding="utf-8"
+    )
+    (cfg / "projects.yml").write_text(f"- name: outer\n  path: {project}\n", encoding="utf-8")
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: cfg)
+    monkeypatch.setattr("emrg.sessions_index.config_dir", lambda: cfg)
+
+    from emrg.config import LlmConfig
+    from emrg.server.daemon import EmrgServer
+
+    server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    server._rebuild_sessions_index()
+
+    data = _load(cfg / "sessions_index.json")
+    assert data.get("s_nested") == str(sessions_dir), (
+        "the daemon's startup backfill did not reach a session in a project nested "
+        f"inside a registered project: {data}"
+    )

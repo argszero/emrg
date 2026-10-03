@@ -321,6 +321,37 @@ def describe(message: Message) -> str:
     return f"  {message.ts} | {message.session} | [{where}{note}] {message.text}"
 
 
+def discovered_session_dirs(config_root: Path) -> tuple[list[Path], str | None]:
+    """Session directories the host has, discovered live — plus a reason if not.
+
+    The index is a *cache* of these, written by the daemon as sessions are created
+    and backfilled at its startup. Reading the cache alone makes this instrument's
+    verdict depend on the cache being complete and current, and it was neither:
+    measured 2026-10-03 (`cyc20261003-080425`), `game0/blender0`'s session was on
+    disk, absent from the index, and this tool answered `NOT FOUND ... in the
+    searched span` about a host message that is in its history. R7 forbids exactly
+    that shape — a search that had to be cut short answers `2`, never "the host
+    never said it".
+
+    So the directories are computed here from the same rule the daemon uses
+    (`emrg.sessions_index.session_dirs`, which scans the config root and every
+    registered project tree recursively). That keeps one home for "where are this
+    host's session trees", instead of a second spelling that can drift from it.
+
+    Returns `(directories, None)` on success and `([], reason)` when the package
+    cannot be imported — a caller that gets no directories must say so rather than
+    answer about a search it did not perform.
+    """
+    try:
+        from emrg.sessions_index import session_dirs
+    except ImportError as exc:  # a scripts-only tree: the search is then incomplete
+        return [], f"could not import emrg.sessions_index ({exc})"
+    try:
+        return [Path(p) for p in session_dirs(config_root).values()], None
+    except Exception as exc:  # never a verdict: this is a measurement, not a rule
+        return [], f"session discovery failed ({exc!r})"
+
+
 def main(argv: list[str] | None = None) -> int:
     # A merged reader must see the sources before any verdict, and this family's
     # docstrings promise that order. stdout is block-buffered when it is a pipe (how a
@@ -377,17 +408,28 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.sessions:
         roots = [Path(p) for p in args.sessions]
+        discovery_note = None
     else:
         roots = index_roots(Path(args.index))
         here = Path.cwd() / ".emrg" / "sessions"
         if here.is_dir():
             roots.extend(p for p in here.iterdir() if p.is_dir() and p not in roots)
+        # The live half: session trees that exist whether or not the index names
+        # them. Union rather than replacement, so an index entry into a tree this
+        # scan prunes or does not reach is still searched.
+        indexed = {p.resolve() for p in roots}
+        discovered, discovery_note = discovered_session_dirs(Path(args.index).parent)
+        roots.extend(p for p in discovered if p.resolve() not in indexed)
     session_messages, session_dirs, ses_oldest, ses_newest = read_sessions(roots)
 
     print(f"log: {log_dir} ({len(log_files)} file(s), "
           f"{log_oldest or 'none'} -> {log_newest or 'none'})")
     print(f"sessions: {len(session_dirs)} dir(s) with a history, "
           f"{ses_oldest or 'none'} -> {ses_newest or 'none'}")
+    if discovery_note:
+        print(f"sessions: {discovery_note} - only the index's directories were "
+              "searched, so an absence here is not a reading of this host",
+              file=sys.stderr)
     if since:
         print(f"window: messages at or after {since}")
 
@@ -421,6 +463,11 @@ def main(argv: list[str] | None = None) -> int:
     # Absence is reported only over a span both sources reached back past. A window
     # that neither source covers is unmeasurable, never empty.
     uncovered: list[str] = []
+    if discovery_note:
+        # The session half is known to be cut short, so whatever it would have held
+        # is unmeasured. Distinct from the span checks below, which are about how far
+        # back a source reaches, not about how much of the host it saw.
+        uncovered.append(f"session discovery was incomplete: {discovery_note}")
     for label, oldest, count in (("the log", log_oldest, len(log_files)),
                                  ("session histories", ses_oldest, len(session_dirs))):
         if oldest is None or count == 0:
