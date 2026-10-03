@@ -318,7 +318,7 @@ class TestTheReasonNamesTheFailure:
         "rc,needle",
         [
             (2, "collection"),
-            (4, "no longer resolves"),
+            (4, "still parses"),
             (5, "no test was collected"),
             (1, "not on the assertion this arm names"),
         ],
@@ -579,3 +579,76 @@ class TestTheDocumentNamesTheTool:
             str(mod.EXIT_RESTORE_MISMATCH): mod.RESTORE_MISMATCH,
         }
         assert spelled == expected
+
+
+class TestANonParsingMutationIsNamedNotGuessed:
+    """A mutated file that does not parse must be *named*, not read as a bad node id.
+
+    Measured 2026-10-03 (`cyc20261003-202837`), driving one non-parsing mutation through
+    this tool and changing only the target form: a **node id** gives pytest exit **4**
+    and a **path** gives **2**, because pytest reports an uncollectable node as a usage
+    error. The exit-4 branch used to conclude "the target no longer resolves" — an
+    assertion about a target the pre-flight had just proved good, sending the caller to
+    re-check a node id that was never wrong. Both arms below run the real tool against
+    the real mini tree; the node-id row is the one that used to misattribute.
+    """
+
+    def test_the_syntax_error_is_read_from_text_that_does_not_parse(self, mod) -> None:
+        assert mod._syntax_error("x = 1\n", "subject.py") == ""
+        message = mod._syntax_error('return "hello " + (\n', "subject.py")
+        assert message, "a file that cannot be compiled must yield a reason"
+        assert "line 1" in message, message
+
+    def test_the_reason_puts_the_syntax_error_before_any_exit_code_reading(self, mod) -> None:
+        reason = mod._why_unjudgeable(4, "assert", "", syntax_error="'(' was never closed at line 2")
+        assert "no longer parses" in reason, reason
+        assert "'(' was never closed at line 2" in reason, reason
+        assert "usage error" not in reason, (
+            "with a syntax error in hand the exit code needs no interpreting, and the "
+            f"old reading is exactly what must not be printed: {reason}"
+        )
+
+    def test_a_target_that_really_does_not_resolve_keeps_its_reason(self, mod) -> None:
+        """The other direction: with a file that still parses, exit 4 is still a bad target."""
+        reason = mod._why_unjudgeable(4, "assert", "", syntax_error="")
+        assert "still parses" in reason and "test_x.py::TestC::test_y" in reason, reason
+        assert "no longer parses" not in reason, reason
+
+    def test_a_non_parsing_mutation_under_a_node_id_names_the_syntax_error(
+        self, mod, tree, capsys
+    ) -> None:
+        """End to end, on the target form that yields exit 4 - the misattributed one."""
+        rc = _arm(mod, tree, old=GREETING, new='return "hello " + (')
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_UNJUDGEABLE, out
+        assert "verdict: UNJUDGEABLE" in out, out
+        assert "no longer parses" in out, out
+        assert "was never closed" in out, (
+            "the report has to name the syntax error itself, not just say the run did "
+            f"not separate the outcomes:\n{out}"
+        )
+        assert "target no longer resolves" not in out, (
+            "the node id was proved good by the pre-flight, so this reading is false "
+            f"here:\n{out}"
+        )
+
+    def test_a_non_parsing_mutation_under_a_path_still_names_it(
+        self, mod, tree, capsys
+    ) -> None:
+        """The same mutation on the other target form, which exits 2 instead of 4.
+
+        Neither form may fall back to a guess: the discriminator is the mutated text,
+        not the code the run happened to return.
+        """
+        rc = _arm(mod, tree, old=GREETING, new='return "hello " + (',
+                  node="tests/test_subject.py")
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_UNJUDGEABLE, out
+        assert "no longer parses" in out and "was never closed" in out, out
+
+    def test_the_tree_is_left_intact_by_a_non_parsing_arm(self, mod, tree, capsys) -> None:
+        """The restore is the one thing an unjudgeable arm must never lose."""
+        before = (tree / "subject.py").read_text(encoding="utf-8")
+        _arm(mod, tree, old=GREETING, new='return "hello " + (')
+        capsys.readouterr()
+        assert (tree / "subject.py").read_text(encoding="utf-8") == before

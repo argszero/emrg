@@ -216,10 +216,15 @@ entry). `--measure` prints the whole inventory.
 `scripts/run-mutation-arm.py` runs **one mutation arm and judges it** — the evidence that a test depends
 on the line it claims to test. Break the line and the test must die; a test that survives it is not
 testing what it says. It exists because "the run failed, so the mutation was caught" is wrong in ways
-that look identical to success: a node id that does not resolve — a class method named without its class
-— makes pytest exit **4** having run *nothing*, and a mutation that breaks the module's syntax makes
-pytest *error*, which returns the same exit code as a failure (**1** when a fixture loads the module,
-**2** when collection imports it). So the judgement is three-valued rather than pass/fail — `KILLED`
+that look identical to success: a node id that does not resolve — a class method named without its
+class — makes pytest exit **4** having run *nothing*, and a mutation that breaks the module's syntax
+makes pytest *error* rather than fail, with a code that depends on **how the target was named**:
+**1** when a fixture imports the module at run time (the same code as a failing test), **2** when
+collection imports it and the target was named as a **path**, and **4** when it was named as a **node
+id** (pytest reports an uncollectable node as a usage error, so on that form the parse failure and a
+mistyped target are one code). The tool compiles the mutated text and names the syntax error it finds,
+so the report says which of the two it was. The judgement
+is three-valued rather than pass/fail — `KILLED`
 (the target failed on the `--expect` text), `SURVIVED` (it still passed), `UNJUDGEABLE` (the run
 separates neither; the reason is named and the assertion lines the run really echoed are printed, so the
 retry is one step). Exit `0`/`1`/`2` are those three; `3` TARGET-BROKEN (the target did not collect or
