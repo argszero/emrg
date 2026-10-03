@@ -633,7 +633,9 @@ class BashToolV2(ToolExecutor):
                         "type": "string",
                         "description": "Working directory for the command. The daemon "
                         "supplies the session's working directory, which is also the "
-                        "writable boundary; passing another value does not widen it.",
+                        "writable boundary, and that value is the one used: a value "
+                        "passed here is discarded, so it neither widens nor narrows "
+                        "where the command runs.",
                     },
                     "sandbox_permissions": {
                         "type": "string",

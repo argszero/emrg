@@ -127,7 +127,7 @@ The executor's confinement is the **OS process boundary** (macOS Seatbelt, Linux
 
 `pwsh_path` (default empty) names the PowerShell executable the Windows roster uses. Empty means the resolution chain decides, in the blueprint's order: the `ProgramFiles` PowerShell 7 install directory, then each `PATH` entry (a Microsoft Store install is an app-execution alias on `PATH`), then Windows PowerShell **5.1** at `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` — which every Windows host has, so "PowerShell is missing" is not a reachable state there. A value you set is used verbatim.
 
-Unlike `[llm]` and `[update]`, `pwsh_path` is **read once at startup** and is *not* hot-reloaded: it decides which executable the registry's tool is built with, and the registry is constructed once. Change one and restart the daemon. Every shell tool receives the session's working directory as its authorization root, injected by the daemon rather than chosen by the model (`workdir`/`workspace` in a tool call cannot widen it).
+Unlike `[llm]` and `[update]`, `pwsh_path` is **read once at startup** and is *not* hot-reloaded: it decides which executable the registry's tool is built with, and the registry is constructed once. Change one and restart the daemon. Every shell tool receives the session's working directory as its authorization root, injected by the daemon rather than chosen by the model: a `workdir` or `workspace` a tool call carries is **discarded**, so it neither widens nor narrows the boundary the call runs under — change directory inside the command instead.
 
 ```toml
 [sandbox]

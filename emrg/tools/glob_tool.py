@@ -37,7 +37,8 @@ class GlobTool(ToolExecutor):
                     "pattern": {
                         "type": "string",
                         "description": (
-                            "Glob pattern relative to the project root. "
+                            "Glob pattern, resolved under the session's working "
+                            "directory. "
                             "Examples: '**/*.py', 'src/**/*.rs', '**/*test*.py', "
                             "'*.md', 'emrg/tools/*.py'"
                         ),
@@ -45,7 +46,11 @@ class GlobTool(ToolExecutor):
                     "workdir": {
                         "type": "string",
                         "description": (
-                            "Working directory for the pattern (default: project root)."
+                            "Working directory for the pattern. The daemon supplies "
+                            "the session's working directory, and that value is the "
+                            "one used: a value passed here is discarded. Used outside "
+                            "the daemon, the tool defaults to the process's own "
+                            "directory."
                         ),
                     },
                     "intent": {
