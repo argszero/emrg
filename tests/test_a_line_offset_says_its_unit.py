@@ -147,10 +147,17 @@ def test_an_ordinary_offset_still_cuts_the_line(ascii_file):
 
 
 def test_a_zero_offset_changes_nothing(ascii_file):
-    """The default path, byte for byte what it was."""
+    """The default path, byte for byte what it was.
+
+    `line_limit=4` on a three-line file asks for more lines than the file has, which is
+    the shape that used to render a fourth, empty one: `"line 1\\n…\\nline 3\\n"` split on
+    `"\\n"` yields a trailing `''`, and that element is the position after the last
+    terminator rather than a line of the file (#1810). Three lines is the whole file,
+    and a zero offset has to leave it exactly as it was.
+    """
     res = _read(ascii_file, start_line=1, line_limit=4)
 
-    assert res.content == "     1\tline 1\n     2\tline 2\n     3\tline 3\n     4\t", (
+    assert res.content == "     1\tline 1\n     2\tline 2\n     3\tline 3", (
         f"a read with no offset changed: {res.content!r}"
     )
 
