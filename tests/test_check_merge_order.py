@@ -50,6 +50,51 @@ SCRIPT = REPO_ROOT / "scripts" / "check-merge-order.py"
 # written for. Hence every clean/conflict fixture below carries `_TREE` explicitly.
 _TREE = "9" * 40
 
+#: The option's own name as a whole token, never as a substring. Only the delimiters
+#: of git's diagnostic decide it, so the rule does not depend on the language of the
+#: sentence around it - the sentence is translated by gettext, the name is not.
+#: See `_git_refused_the_quiet_option` for the measurement that makes this necessary.
+_REFUSED_QUIET = re.compile(r"(?<![A-Za-z0-9-])quiet(?![A-Za-z0-9-])")
+
+
+def _git_refused_the_quiet_option(proc: "subprocess.CompletedProcess[str]") -> bool:
+    """Did git refuse `--quiet` itself instead of answering the merge with it?
+
+    `--write-tree --quiet` is newer than the git the evolution host runs. Measured
+    both ways on 2026-10-02 (`cyc20261002-231142`): git 2.46.0.windows.1 rejects the
+    option in its parser - ``error: unknown option `quiet'``, exit **129**, and
+    `git merge-tree -h` never lists it - while CI's 2.55.0.windows.5 answers the
+    merge (exit 0, empty stdout, empty stderr). Master's CI is green and the host's
+    suite is red for the same tree, and this is the whole difference.
+
+    The reading is the refusal, not the empty stdout: for a git that does have the
+    option an empty stdout *is* the answer (a clean merge, tree name suppressed),
+    which is the shape the tool under test must read as "not answered" rather than
+    as a verdict. Keying on exit 129 plus the option's own name keeps the two
+    apart - git's usage error is exit 129, and the option name is not translated,
+    so a localized git still reads correctly.
+
+    The name is matched as a **whole token** (`_REFUSED_QUIET`), never as a
+    substring. Measured on this host (git 2.50.1, scratch repo, 2026-10-03
+    `cyc20261003-044422`): git prints the error line **and** its usage block
+    together, and the block lists the options - so on a git that implements
+    `--quiet` the block *names* it:
+
+        $ git merge-tree --write-tree --frobnicate HEAD HEAD
+        error: unknown option `frobnicate'
+        usage: git merge-tree [--write-tree] [<options>] <branch1> <branch2>
+            --quiet               suppress all output; only exit status wanted
+
+    A substring match therefore reads **any** unknown option as a refusal of this
+    one (measured: `--frobnicate` and the typo `--quiett` both satisfied
+    `"quiet" in stderr`), turning a git that should fail loudly into a silent skip.
+    The lookarounds are what separate the three shapes: the usage block's `--quiet`
+    is preceded by a dash, so it is not a match; a typo is followed by a letter, so
+    it is not one either; and the error line's `` `quiet' `` is delimited on both
+    sides, so it is.
+    """
+    return proc.returncode == 129 and bool(_REFUSED_QUIET.search(proc.stderr))
+
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("check_merge_order", SCRIPT)
@@ -69,6 +114,9 @@ class TestTheMergeQuestionIsAnswered():
     `merge-tree` exits 0 for a clean merge *and* for `--quiet` on the same merge
     (printing nothing), and exits 1 for a conflict *and* for a failure to merge
     the two inputs (printing nothing) - measured 2026-09-14 (`cyc20260914-055701`).
+    The `--quiet` half holds on a git that implements the option; on one that does
+    not, the parser refuses it (see `_git_refused_the_quiet_option`), which is a
+    third thing again and not a shape any answer can be read from.
     So: "no merged tree named" = not answered, whatever the code says.
     """
 
@@ -532,6 +580,100 @@ class TestTheReportNamesWhatCollides():
         assert capsys.readouterr().out == ""
 
 
+class TestTheQuietProbeSeparatesARefusalFromAnAnswer:
+    """The gate above must fire on a *refusal*, never on a result it dislikes.
+
+    A probe that widened - exit code alone, or any diagnostic at all - would skip
+    the assertion on CI too, where the option exists and the shape is measurable,
+    and the file would go quiet about the one shape that proves the exit code
+    cannot be the verdict. So both readings are pinned, plus the near misses.
+    """
+
+    @staticmethod
+    def _proc(returncode: int, stderr: str) -> subprocess.CompletedProcess[str]:
+        argv = ["git", "merge-tree", "--write-tree", "--quiet", "a", "b"]
+        return subprocess.CompletedProcess(argv, returncode, "", stderr)
+
+    @staticmethod
+    def _refusal_for(name: str) -> str:
+        """What a git that does not know `--name` prints, in full.
+
+        Both halves, because that is what git really writes: measured on this host
+        (2026-10-03) by making git refuse an *unknown* option and reading the whole
+        of stderr, the error line and the usage block always arrive together. An
+        arm carrying the error line alone is not a sample of anything - and it is
+        exactly the shape that let a substring match look sound, because the usage
+        block below it is what names `--quiet`.
+        """
+        return (
+            f"error: unknown option `{name}'\n"
+            "usage: git merge-tree [--write-tree] [<options>] <branch1> <branch2>\n"
+            "    --write-tree          do a real merge instead of a trivial merge\n"
+            "    --messages            also show informational/conflict messages\n"
+            "    --quiet               suppress all output; only exit status wanted\n"
+        )
+
+    def test_an_unknown_option_is_read_as_a_refusal(self) -> None:
+        """git 2.46.0.windows.1's shape for `--quiet` itself.
+
+        Recorded 2026-10-02 (`cyc20261002-231142`) from the host that was red: the
+        error line names the option, and the usage block follows it. The block here
+        is the one this host prints (2.50.1, which *does* implement the option), so
+        the arm carries the harder input - a refusal whose own usage block names
+        `--quiet` - rather than the easier one that omits it.
+        """
+        assert _git_refused_the_quiet_option(
+            self._proc(129, self._refusal_for("quiet"))
+        ) is True
+
+    def test_an_answered_merge_is_not_read_as_a_refusal(self) -> None:
+        """A git that has the option answers the merge and writes no diagnostic."""
+        assert _git_refused_the_quiet_option(self._proc(0, "")) is False
+
+    def test_an_unrelated_failure_is_not_read_as_a_refusal(self) -> None:
+        """A bad revision is git failing at the merge, not at the option."""
+        assert _git_refused_the_quiet_option(
+            self._proc(128, "fatal: bad revision 'b'\n")
+        ) is False
+
+    def test_a_different_unknown_option_is_not_read_as_a_refusal(self) -> None:
+        """The same exit code with another option named is some other complaint.
+
+        Carries the whole diagnostic, usage block included, because the block is
+        what makes this arm non-trivial: it *lists* `--quiet`, so a reading that
+        searches the text for the name reads this refusal as a refusal of `--quiet`
+        and skips an assertion it should have run.
+        """
+        assert _git_refused_the_quiet_option(
+            self._proc(129, self._refusal_for("colour"))
+        ) is False
+
+    def test_a_typo_of_this_option_is_not_read_as_a_refusal(self) -> None:
+        """`--quiett` is a different word, so it must not buy the same skip.
+
+        Length alone separates it (`quiet` is followed by a `t`), which is the case
+        a token match handles and a prefix/substring match does not. A mistyped
+        option should fail the row loudly, never silence it.
+        """
+        assert _git_refused_the_quiet_option(
+            self._proc(129, self._refusal_for("quiett"))
+        ) is False
+
+    def test_the_refusal_words_with_another_exit_code_are_not_a_refusal(self) -> None:
+        """The code is half the reading, and this is the arm that isolates it.
+
+        Synthetic by construction - it pairs git's own refusal text with a code git
+        would not use for it - and that is the point: every other negative arm
+        carries a stderr that already fails to name the option, so without this one
+        the `129` clause could be deleted and the suite would stay green. Git's
+        usage error is 129, and a merge failure (1) whose diagnostic happened to
+        name an option for some other reason must not buy a skip.
+        """
+        assert _git_refused_the_quiet_option(
+            self._proc(1, self._refusal_for("quiet"))
+        ) is False
+
+
 class TestAgainstRealGitHistory:
     """One end-to-end case on a synthetic repo, so the argv really is accepted."""
 
@@ -629,9 +771,11 @@ class TestAgainstRealGitHistory:
         version of this file modelled a clean merge as "exit 0, nothing printed"
         and a conflict as a stage block with no tree at all. This pins the real
         output instead: the merged tree's OID is the first line for a clean merge
-        **and** for a conflict, and `--write-tree --quiet` (a documented flag that
-        suppresses exactly that line) is the case where exit 0 and "nothing
-        printed" arrive together - which is why the exit code cannot be the answer.
+        **and** for a conflict, and `--write-tree --quiet` (a flag that suppresses
+        exactly that line - and that a git older than CI's 2.55 may not implement,
+        which is why the clause below is gated by a probe rather than assumed) is
+        the case where exit 0 and "nothing printed" arrive together - which is why
+        the exit code cannot be the answer.
         """
         repo = tmp_path / "r"
         repo.mkdir()
@@ -656,6 +800,10 @@ class TestAgainstRealGitHistory:
         assert len(proc.stdout.splitlines()) == 1
 
         # The same clean merge with the tree name suppressed: exit 0, no output.
+        # The shape needs `--quiet`, and this git may not have it - so ask the
+        # process that just ran, rather than a version this file would have to
+        # keep in step. A git that cannot take the option cannot be asked for the
+        # shape: that is "unmeasurable here", never "the shape is absent".
         quiet = subprocess.run(
             ["git", "merge-tree", "--write-tree", "--quiet", base, base],
             cwd=repo,
@@ -663,6 +811,12 @@ class TestAgainstRealGitHistory:
             text=True,
             encoding="utf-8",
         )
+        if _git_refused_the_quiet_option(quiet):
+            pytest.skip(
+                "this git has no `merge-tree --write-tree --quiet`, so the "
+                "suppressed-tree shape is unmeasurable here "
+                f"(git said: {quiet.stderr.strip().splitlines()[0]})"
+            )
         assert (quiet.returncode, quiet.stdout) == (0, "")
 
         # A real conflict: exit 1, and the tree's name is still the first line.
@@ -681,6 +835,54 @@ class TestAgainstRealGitHistory:
         assert conflict.returncode == 1
         assert re.fullmatch(r"[0-9a-f]{40}", conflict.stdout.splitlines()[0])
         assert any("\tf.txt" in line for line in conflict.stdout.splitlines())
+
+    def test_the_probe_answers_the_way_real_git_does(self, tmp_path) -> None:
+        """The arm that would have caught a substring reading, on a real process.
+
+        The arms above carry a stderr this file writes, which is why they could not
+        see the defect: an unrelated unknown option really does satisfy
+        `"quiet" in stderr` on a git that implements `--quiet`, because the usage
+        block git prints beside the error *lists* the option. Measured here rather
+        than asserted: the failure is a property of a process this file does not
+        control, so only a real git can be asked about it.
+
+        This is also the arm that fails when git's diagnostic changes shape - if the
+        usage block stops arriving with the error line, the premise the probe's rule
+        rests on is gone and the row says so instead of quietly passing.
+        """
+        repo = tmp_path / "r"
+        repo.mkdir()
+        self._git(repo, "init", "-q", "-b", "main")
+        self._git(repo, "config", "user.email", "t@example.com")
+        self._git(repo, "config", "user.name", "t")
+        (repo / "f.txt").write_text("base\n", encoding="utf-8")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "base")
+
+        def merge_tree(*options: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "merge-tree", "--write-tree", *options, "HEAD", "HEAD"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        unknown = merge_tree("--frobnicate")
+        assert unknown.returncode == 129, (
+            f"an unknown option should be git's usage error (129), got "
+            f"{unknown.returncode}: {unknown.stderr!r}"
+        )
+        assert "usage: git merge-tree" in unknown.stderr, (
+            "git no longer prints its usage block beside the error line, so the "
+            "measurement this probe's rule rests on no longer holds here"
+        )
+        assert _git_refused_the_quiet_option(unknown) is False, (
+            "an unrelated unknown option was read as a refusal of `--quiet` - the "
+            "usage block git prints names that option, so a reading that searches "
+            "the text for the name cannot tell a refusal of it from any other, and "
+            "the row it guards would skip an assertion it should have run"
+        )
 
 
 class TestARePushedHeadIsFetchedNotRejected:

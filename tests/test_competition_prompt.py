@@ -531,3 +531,76 @@ def test_machine_rejection_is_not_permanent():
     )
     # Phase A must route to the right one of the two.
     assert "does **not** go in that section" in text
+
+
+def test_the_host_facing_half_of_the_summary_is_required():
+    """The host asked for these readings twice; the second ask is why they are pinned.
+
+    Measured from the host's own messages in this task's session
+    (`scripts/find-host-message.py --pattern '自说自话|卡点'` finds both):
+    2026-10-01T15:58:48 asked what the competition is, what is being done, what the
+    blocker is and what the score is; 2026-10-02T07:56:20 asked again, after that
+    answer did not land, adding how likely the goal is, what is still missing, and
+    what to do about the blocker. A request made twice is a requirement, so each
+    half is pinned separately — a summary that answers the round's own seven
+    questions and none of these passed before.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    block = text.split("**Three more the host asked for by name.", 1)
+    assert len(block) == 2, (
+        "§5 lost the host-facing half of the closing summary: the second ask "
+        "(2026-10-02T07:56:20) is not reflected anywhere"
+    )
+    host_half = block[1].split("\n---", 1)[0]
+    assert "How likely is the goal to be reached, and on what evidence?" in host_half, (
+        "the closing summary does not have to state the odds, which is the first "
+        "thing the host asked for the second time"
+    )
+    assert "What is still missing between here and the goal?" in host_half, (
+        "the closing summary does not have to state the gap to the goal"
+    )
+    assert "What does the host have to decide or do?" in host_half, (
+        "the closing summary does not have to name what the host must decide"
+    )
+    # A probability without its basis is what "don't talk to yourself" rejected, so
+    # the basis is part of the requirement, not decoration.
+    assert "with the basis it is estimated from" in host_half
+    # And the reader it is written for — the host reads this, not only the next round.
+    assert "not read the previous round's messages" in host_half
+
+
+def test_the_blocker_rule_has_all_three_cases_and_keeps_the_forbidden_list_above_it():
+    """Three cases, and the third one is the load-bearing half.
+
+    The first two cases are tempting to over-apply: "bypass it yourself" reads as a
+    licence, and a later edit could drop the "no method found → ask the host" case
+    or leave it available to the hard constraints. Both directions are pinned —
+    every case must still be named, and the Forbidden list must be stated to win
+    over a score-neutral bypass.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    block = text.split("**The blocker rule**", 1)
+    assert len(block) == 2, (
+        "the host's blocker rule (2026-10-02T07:56:20) is gone: with no case rule, "
+        "a round either bypasses blindly or strands the blocker"
+    )
+    rule = block[1].split("\n### ", 1)[0]
+    assert "does not touch the competition's score" in rule, "the first case is missing"
+    assert "would affect the score" in rule, "the second case is missing"
+    assert "No way past is found" in rule and "as a question to the host" in rule, (
+        "the third case is missing — that is the one the host asked to be consulted "
+        "on ('如果你找不到方法，就和我讨论')"
+    )
+    # Both directions of case 1 and 2: the bypass is permitted only where it is
+    # score-neutral, and it must be recorded rather than asserted.
+    assert "Take it yourself" in rule and "why it was score-neutral" in rule
+    assert "Do not take it" in rule
+    assert "The Forbidden list is not a blocker to be bypassed" in rule
+    for forbidden_that_a_bypass_may_not_step_over in (
+        "real-name / phone / payment verification",
+        "the offline gate",
+    ):
+        assert forbidden_that_a_bypass_may_not_step_over in rule, (
+            "the blocker rule does not exclude the hard constraints, so "
+            "'bypassing does not affect the score' can be read as covering them"
+        )

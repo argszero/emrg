@@ -1731,6 +1731,28 @@ class TaskHandler:
     #: *why* it moved on would otherwise be lost to a log line nobody reads.
     _STALLED = "stalled"
 
+    #: The ending of a cycle the daemon accepted but never started as this
+    #: connection's turn: the session was busy, so the request went into that
+    #: session's pending queue (`task_queued`) and was merged into the busy turn
+    #: at its next boundary (`steer_committed`), where the terminal frame belongs
+    #: to *that* turn's requester — a queued request never gets a `done` of its
+    #: own (`tests/test_ws_e2e.py::TestWSBroadcast::test_task_queued_instead_of_busy_error`
+    #: pins both halves).
+    #:
+    #: Distinct from `_STALLED`, and not cosmetically: a stall says a turn that
+    #: was running stopped reporting, which is a wedge to investigate; this says
+    #: no turn of this cycle ever began here, which is a busy session and needs
+    #: nothing. Reading one as the other sends the next cycle — and whoever reads
+    #: the marker — after a fault that did not happen.
+    #:
+    #: Measured 2026-10-02 (issue #1815): the competition task's cycle began at
+    #: 09:09:25 while the host's own turn held that session, and the marker it
+    #: left reads `stalled / tool_count 0 / ended 09:19:25` — exactly the 600s
+    #: round bound — while the session's own history shows the cycle prompt
+    #: arriving in that turn at 10:09:56 and working until at least 13:50. The
+    #: request was never lost; only the reading of what happened was wrong.
+    _QUEUED = "queued"
+
     #: Endings that leave no marker behind: the cycle finished, or it never
     #: started.
     _SILENT_ENDINGS = frozenset({_CLEAN_END, _NOT_STARTED})
@@ -1745,6 +1767,10 @@ class TaskHandler:
         ),
         _STALLED: (
             "stalled (no frame past the bound for the step it was in)"
+        ),
+        _QUEUED: (
+            "was queued behind a busy session (merged into that turn, never "
+            "started as this connection's own)"
         ),
         _NO_TERMINAL_FRAME: "ended without a terminal frame",
     }
@@ -2452,6 +2478,15 @@ class TaskHandler:
         #: instants an in-flight tool call said it expected to still be running.
         last_frame_at = time.monotonic()
         tool_deadline: float | None = None
+        #: Set when the daemon answers this cycle with `task_queued` (the session
+        #: was busy, so the request went into its pending queue) or
+        #: `steer_committed` (that request was merged into the busy turn). Both
+        #: mean the same thing for this loop: no turn of this cycle is running on
+        #: this connection, so the silence that follows is not a turn that stopped
+        #: reporting. Cleared by any other frame, which is the cycle's own turn
+        #: speaking again. See `_QUEUED` for the measurement behind this.
+        queued: bool = False
+        queued_position: object = None
 
         try:
             await ws.send(task_msg)
@@ -2471,6 +2506,28 @@ class TaskHandler:
                         ws.recv(), timeout=deadline - now,
                     ))
                 except asyncio.TimeoutError:
+                    if queued:
+                        # The daemon took this cycle's request and never started it
+                        # as this connection's turn. The socket is open and silent
+                        # because the session was busy, not because a turn went
+                        # quiet: same silence, different fault, so a different
+                        # ending — and no ERROR, because nothing is wedged.
+                        end_reason = self._QUEUED
+                        error = (
+                            f"queued behind a busy session: the daemon held this "
+                            f"cycle's request (position {queued_position}) and no "
+                            f"frame followed for {int(now - last_frame_at)}s "
+                            f"(bound {int(deadline - last_frame_at)}s, "
+                            f"tools={tool_count}) - this cycle never ran as its "
+                            f"own turn here"
+                        )
+                        self._logger.warning(
+                            "TaskHandler[%s]: %s — the session was busy, so this "
+                            "cycle was merged into the turn that held it rather "
+                            "than started; the cycle is not counted",
+                            self.name, error,
+                        )
+                        break
                     # The socket is still open — the turn stopped producing
                     # frames. Measured 2026-09-27: a backgrounded command killed
                     # the turn, nothing was ever written to the socket again, and
@@ -2502,6 +2559,15 @@ class TaskHandler:
                 # frame like any other, so the round bound covers the gap after a
                 # tool returns until the next round's first token.
                 tool_deadline = None
+                # `task_queued` and `steer_committed` are the daemon's two words
+                # for "your request is not a turn yet, it is inside someone
+                # else's"; any other frame is this cycle's own turn reporting.
+                if resp.get("type") in ("task_queued", "steer_committed"):
+                    queued = True
+                    if resp.get("type") == "task_queued":
+                        queued_position = resp.get("position")
+                else:
+                    queued = False
                 if resp.get("done"):
                     end_reason = self._CLEAN_END
                     duration = int((datetime.now() - cycle_time).total_seconds())
