@@ -40,6 +40,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.tool_preflight import starts
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "check-notary-credentials.py"
 WORKFLOW = ".github/workflows/build-release.yml"
@@ -482,8 +484,8 @@ def test_a_windows_path_survives_being_handed_to_a_shell() -> None:
     bash and the Windows path shape are both available.
     """
     shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("no POSIX shell is available to read the path back")
+    if not starts(shell):
+        pytest.skip("no POSIX shell that starts is available to read the path back")
 
     windows = "D:\\a\\emrg\\emrg\\.venv\\Scripts\\python.exe"
     # A space, so the *quoting* half is load-bearing too: unquoted, the shell splits this into
@@ -537,8 +539,8 @@ def test_the_documented_command_carries_its_variables_into_the_preflight(tmp_pat
     script is never invoked.
     """
     shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("no POSIX shell is available to run the documented block")
+    if not starts(shell):
+        pytest.skip("no POSIX shell that starts is available to run the documented block")
 
     filled = _preflight_block()
     for placeholder, value in (
