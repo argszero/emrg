@@ -433,6 +433,27 @@ def _fetch_head(number: int) -> str:
     sha = _rev_parse(ref)
     merge_tree.drop_ref(ref, run=_run)
     return sha
+
+
+def _head(number: int, repo: str = "argszero/emrg") -> str:
+    """A PR's head: the transport first, the API when it cannot serve one.
+
+    `_fetch_head` refuses when the fetch fails, and on this host that refusal is
+    about the *checkout* rather than the PR: `origin` is subject to
+    `url.<base>.insteadOf` and can be a local clone with no `refs/pull/*` at all.
+    `merge_tree.head_via_api` owns that measurement and the second path; what is
+    this gate's is the composition - the transport's sentence is kept, because it is
+    why the fallback ran, and the fallback's is added, because it is what a reader
+    has to act on. `repo` travels with the number for that reason: it is the only
+    argument the API path asks.
+    """
+    try:
+        return _fetch_head(number)
+    except MeasurementError as exc:
+        sha, why = merge_tree.head_via_api(repo, number, run=_run)
+        if not sha:
+            raise MeasurementError(f"{exc} - and {why}") from None
+        return sha
 def _diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
     """What git said, from both streams - a failure must not report itself as empty."""
     detail = (proc.stdout[-500:] + proc.stderr[-500:]).strip()
@@ -766,7 +787,7 @@ def check_pr(
     change the state or the exit code: a rendering that disagrees is not a defect in the
     PR, and one that could not be read is printed as unreadable.
     """
-    head = _fetch_head(number)
+    head = _head(number, repo)
     try:
         tree, landed, apparent, backwards, reversed_inside = landing_reading(base, head)
     except Conflict as exc:

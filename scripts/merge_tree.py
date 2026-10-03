@@ -93,7 +93,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Sequence
 
 
@@ -481,6 +483,79 @@ def drop_ref(
     the measurement. The next run's forced fetch overwrites the same name anyway.
     """
     return run(["git", "update-ref", "-d", ref])
+
+
+#: The sibling script that materialises a commit - and, when it is not already local,
+#: the blobs and trees under it - through the GitHub REST API. Named as a constant
+#: because the fallback below is the only place in this family that spends a network
+#: round trip, and a reader has to be able to find it.
+_SYNC_SCRIPT = "sync-master-from-api.py"
+
+
+def head_via_api(
+    repo: str,
+    number: int,
+    run: Callable[..., subprocess.CompletedProcess],
+) -> tuple[str, str]:
+    """A PR's head commit, materialised through the API. `(sha, "")` or `("", why)`.
+
+    **Why the transport is not enough.** Every gate in this family reads a PR's head
+    with `git fetch origin +pull/<N>/head:<ref>`, and `origin` is not always the remote
+    the PR lives on: `url.<base>.insteadOf` is applied before the transport reads a
+    remote's URL, so a rewrite to a local directory - this host's offline fallback, in
+    place since 2026-09-27 - makes that fetch ask a clone that has no `refs/pull/*` at
+    all. Measured here 2026-10-03 (`cyc20261003-194944`; the same sentence had been
+    recorded from the sibling gates on 09-30 and 10-02):
+
+        #1836: could not measure: could not fetch PR #1836: fatal: couldn't find
+        remote ref pull/1836/head
+
+    which is a sentence about the *checkout* being read as one about the PR. Five of
+    the six merge gates therefore answered nothing on this host, every cycle, while the
+    host's own template requires them: the readings that decide a merge were the ones
+    the machine could not take. The rewrite is not the defect and is not to be removed
+    - it is what keeps this host working when `github.com:443` is unreachable - so the
+    gate has to be able to reach the head the other way.
+
+    **What the other way is.** `api.github.com` and `github.com:443` fail
+    independently, and the repository already owns the instrument for the second case:
+    `scripts/sync-master-from-api.py --ref <sha>` walks a commit chain down to the
+    first object already present locally, writes each missing commit byte-exact
+    (accepting a reconstruction only when its object name equals the remote's), and
+    fetches the missing blobs and trees under it via the Git Data API. This module
+    calls it rather than reimplementing it - a second implementation of "rebuild a
+    commit from the API" is the same defect this module exists to remove, one level
+    down.
+
+    **It never raises and never guesses.** Each of the three steps either yields a
+    commit this repository really has or returns the sentence that says what happened;
+    the caller composes its own refusal from that plus git's, in its own error type,
+    because what an unmeasurable head *means* is the caller's mapping (module
+    docstring). The last step is asked and not assumed for the reason `drop_ref` gives
+    about names: `sync-master-from-api.py` exits 0 on its own terms, and a sha that is
+    not a commit here would otherwise travel on as if it were one.
+    """
+    proc = run(["gh", "api", f"repos/{repo}/pulls/{number}", "--jq", ".head.sha"])
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip() or "unknown error"
+        return "", f"the API could not name PR #{number}'s head ({detail})"
+    sha = proc.stdout.strip()
+    if not is_object_name(sha):
+        return "", (
+            f"the API named PR #{number}'s head as {sha!r}, which is not an object name"
+        )
+    script = Path(__file__).resolve().parent / _SYNC_SCRIPT
+    proc = run([sys.executable, str(script), "--repo", repo, "--ref", sha])
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip() or "unknown error"
+        return "", f"materialising {sha[:12]} through the API failed ({detail})"
+    proc = run(["git", "cat-file", "-e", sha + "^{commit}"])
+    if proc.returncode != 0:
+        return "", (
+            f"the API named {sha[:12]} and the materialiser exited 0, but this "
+            f"repository has no such commit"
+        )
+    return sha, ""
 
 
 def merge_commit(

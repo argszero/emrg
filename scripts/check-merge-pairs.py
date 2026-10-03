@@ -279,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         # such a number fail loud as rc 2. The resolved heads are reused below, so
         # this costs no extra fetches - and every pair is now measured against one
         # snapshot of each head rather than a fresh fetch per pair.
-        heads = {n: seq._fetch_head(n) for n in numbers}
+        heads = {n: seq._head(n, args.repo) for n in numbers}
     except MeasurementError as exc:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2

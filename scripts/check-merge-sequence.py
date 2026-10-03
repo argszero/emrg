@@ -247,6 +247,15 @@ import merge_tree  # noqa: E402  (needs the path above)
 # as check-merge-tree-health.py: both tools judge the same guard, and two
 # spellings of its report would be one spelling too many.
 GUARD = "scripts/check-doc-count.py"
+
+#: How long the tree extraction may take before the fold calls it unmeasurable.
+#: Generous: `git archive` of this repository's tree takes under a second, and the
+#: bound is not a performance budget - it is the difference between a reading and a
+#: hang. Measured 2026-10-03 (`cyc20261003-194944`): this gate blocked inside
+#: `git archive` for a whole window with no output, no verdict, and the process alive;
+#: `check-merge-tree-health.py`, whose copy of this step carries the other two hangs,
+#: names the same number.
+ARCHIVE_TIMEOUT = 120
 # The guard's report shape changed on 2026-09-13 (#1158): it no longer compares a
 # stored count against the collection, it reports files that store one at all, and
 # the count is measured on demand. Both regexes are kept so the step report names
@@ -436,7 +445,7 @@ def _plan_from_open_prs(
     current = base
     excluded_heads: dict[int, str] = {}
     for number in numbers:
-        head = _fetch_head(number)
+        head = _head(number, repo)
         merged = _merge_commit(current, head)
         if merged is None:
             # Not taken, and not judged: the next candidate is tested against the
@@ -649,6 +658,27 @@ def _fetch_head(number: int) -> str:
     return sha
 
 
+def _head(number: int, repo: str = "argszero/emrg") -> str:
+    """A PR's head: the transport first, the API when it cannot serve one.
+
+    `_fetch_head` refuses when the fetch fails, and on this host that refusal is
+    about the *checkout* rather than the PR: `origin` is subject to
+    `url.<base>.insteadOf` and can be a local clone with no `refs/pull/*` at all.
+    `merge_tree.head_via_api` owns that measurement and the second path; what is
+    this gate's is the composition - the transport's sentence is kept, because it is
+    why the fallback ran, and the fallback's is added, because it is what a reader
+    has to act on. `repo` travels with the number for that reason: it is the only
+    argument the API path asks.
+    """
+    try:
+        return _fetch_head(number)
+    except MeasurementError as exc:
+        sha, why = merge_tree.head_via_api(repo, number, run=_run)
+        if not sha:
+            raise MeasurementError(f"{exc} - and {why}") from None
+        return sha
+
+
 # Author/committer for the synthetic merge commits, independent of git config - the
 # whole family's, from `merge_tree.commit_env`.
 #
@@ -712,9 +742,22 @@ def _extract_tree(tree_sha: str, workdir: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
-    with tarfile.open(fileobj=archive.stdout, mode="r|") as tar:
-        tar.extractall(workdir, filter="data")
-    if archive.wait() != 0:
+    try:
+        with tarfile.open(fileobj=archive.stdout, mode="r|") as tar:
+            tar.extractall(workdir, filter="data")
+        archive.wait(timeout=ARCHIVE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise MeasurementError(
+            f"git archive did not finish for tree {tree_sha[:8]} within "
+            f"{ARCHIVE_TIMEOUT}s"
+        ) from None
+    finally:
+        # Whatever happened above, `git archive` can still be writing into a pipe
+        # nobody drains any more - `check-merge-tree-health.py`'s copy of this step
+        # carries the measurement of three runs that left exactly that process alive.
+        if archive.poll() is None:
+            archive.kill()
+    if archive.returncode != 0:
         raise MeasurementError(f"git archive failed for tree {tree_sha[:8]}")
 
 
@@ -921,7 +964,7 @@ def main(argv: list[str] | None = None) -> int:
         current = base
         for number in numbers:
             try:
-                head = _fetch_head(number)
+                head = _head(number, args.repo)
                 merged = _merge_commit(current, head)
             except MeasurementError as exc:
                 print(f"  #{number}: could not measure: {exc}", file=sys.stderr)

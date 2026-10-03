@@ -141,6 +141,17 @@ import merge_tree  # noqa: E402  (needs the path above)
 # printing it (2026-09-13), so a real finding was reported as the last line of the
 # report - the trailing "Measure it with:" hint - instead of as the finding itself.
 GUARD = "scripts/check-doc-count.py"
+
+#: How long the tree extraction may take before the gate calls it unmeasurable.
+#: Generous, because `git archive` of this repository's tree takes under a second and
+#: the bound is not a performance budget: it is the difference between a reading and a
+#: hang. Measured on this host 2026-10-03 (`cyc20261003-194944`), three runs of this
+#: family - two of this gate, one of `check-merge-sequence.py` - blocked inside
+#: `git archive` with the process alive and idle for the whole window, no output, and
+#: no verdict; the same commands completed in 5-11s when the step did return. An
+#: unbounded wait is not a measurement, and this family's rule is that a question it
+#: cannot answer is reported unmeasurable.
+ARCHIVE_TIMEOUT = 120
 COUNT_IN_REPORT = re.compile(r"FAIL: (\d+) tracked file\(s\) state")
 OK_IN_REPORT = re.compile(r"OK: no tracked file states the Python test count")
 
@@ -356,6 +367,29 @@ def _fetch_head(number: int) -> str:
     sha = _rev_parse(ref)
     merge_tree.drop_ref(ref, run=_run)
     return sha
+
+
+def _head(number: int, repo: str = "argszero/emrg") -> str:
+    """A PR's head: the transport first, the API when it cannot serve one.
+
+    `_fetch_head` refuses when the fetch fails, and on this host that refusal is
+    about the *checkout* rather than the PR: `origin` is subject to
+    `url.<base>.insteadOf` and can be a local clone with no `refs/pull/*` at all.
+    `merge_tree.head_via_api` owns that measurement and the second path; what is
+    this gate's is the composition - the transport's sentence is kept, because it is
+    why the fallback ran, and the fallback's is added, because it is what a reader
+    has to act on. `repo` travels with the number for that reason: it is the only
+    argument the API path asks.
+    """
+    try:
+        return _fetch_head(number)
+    except MeasurementError as exc:
+        sha, why = merge_tree.head_via_api(repo, number, run=_run)
+        if not sha:
+            raise MeasurementError(f"{exc} - and {why}") from None
+        return sha
+
+
 def _merge_tree_paths(
     a: str, b: str, cwd: str | None = None
 ) -> tuple[list[str] | None, str]:
@@ -436,9 +470,24 @@ def _guard_verdict(tree_sha: str, workdir: Path, cwd: str | None = None) -> tupl
         cwd=cwd,
         stderr=subprocess.DEVNULL,
     )
-    with tarfile.open(fileobj=archive.stdout, mode="r|") as tar:
-        tar.extractall(workdir, filter="data")
-    if archive.wait() != 0:
+    try:
+        with tarfile.open(fileobj=archive.stdout, mode="r|") as tar:
+            tar.extractall(workdir, filter="data")
+        archive.wait(timeout=ARCHIVE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise MeasurementError(
+            f"git archive did not finish for tree {tree_sha[:8]} within "
+            f"{ARCHIVE_TIMEOUT}s"
+        ) from None
+    finally:
+        # Whatever happened above - a tree tarfile refused to read, the timeout -
+        # `git archive` can still be writing into a pipe nobody drains any more, and
+        # an archive left there is a live process the caller never learns about
+        # (measured 2026-10-03: three hung runs left `git archive` plus the `git`
+        # shim above it alive for the rest of the window).
+        if archive.poll() is None:
+            archive.kill()
+    if archive.returncode != 0:
         raise MeasurementError(f"git archive failed for tree {tree_sha[:8]}")
 
     script = workdir / GUARD
@@ -490,7 +539,11 @@ def _guard_verdict(tree_sha: str, workdir: Path, cwd: str | None = None) -> tupl
 
 
 def check_pr(
-    number: int, base: str, workdir: Path, cwd: str | None = None
+    number: int,
+    base: str,
+    workdir: Path,
+    cwd: str | None = None,
+    repo: str = "argszero/emrg",
 ) -> tuple[str, str]:
     """Verdict for one PR: (state, report).
 
@@ -500,7 +553,7 @@ def check_pr(
     there is no merged tree to judge. Reporting it as unhealthy would be a
     verdict about a tree that does not exist.
     """
-    head = _rev_parse(_fetch_head(number))
+    head = _rev_parse(_head(number, repo))
     paths, diagnosis = _merge_tree_paths(base, head, cwd=cwd)
     if paths is None:
         raise MeasurementError(f"merge-tree failed for PR #{number}: {diagnosis}")
@@ -546,7 +599,9 @@ def main(argv: list[str] | None = None) -> int:
         workdir = Path(tmp) / "tree"
         for number in numbers:
             try:
-                state, report = check_pr(number, base, workdir, cwd=cwd)
+                state, report = check_pr(
+                    number, base, workdir, cwd=cwd, repo=args.repo
+                )
             except MeasurementError as exc:
                 print(f"  #{number}: could not measure: {exc}", file=sys.stderr)
                 return 2

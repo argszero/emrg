@@ -585,7 +585,28 @@ def _fetch_head(number: int) -> str:
     return commit
 
 
-def _fetch_heads(numbers: list[int]) -> list[tuple[int, str]]:
+def _head(number: int, repo: str = "argszero/emrg") -> str:
+    """A PR's head: the transport first, the API when it cannot serve one.
+
+    `_fetch_head` refuses when the fetch fails, and on this host that refusal is
+    about the *checkout* rather than the PR: `origin` is subject to
+    `url.<base>.insteadOf` and can be a local clone with no `refs/pull/*` at all.
+    `merge_tree.head_via_api` owns that measurement and the second path; what is
+    this gate's is the composition - the transport's sentence is kept, because it is
+    why the fallback ran, and the fallback's is added, because it is what a reader
+    has to act on. `repo` travels with the number for that reason: it is the only
+    argument the API path asks.
+    """
+    try:
+        return _fetch_head(number)
+    except MeasurementError as exc:
+        sha, why = merge_tree.head_via_api(repo, number, run=_run)
+        if not sha:
+            raise MeasurementError(f"{exc} - and {why}") from None
+        return sha
+
+
+def _fetch_heads(numbers: list[int], repo: str = "argszero/emrg") -> list[tuple[int, str]]:
     """Fetch every planned PR's head. Each ref is released by the fetch that made it.
 
     That is what makes the release unconditional: this list can raise on the third
@@ -593,7 +614,7 @@ def _fetch_heads(numbers: list[int]) -> list[tuple[int, str]]:
     `return`, a raise, a killed process - leaves nothing resident, because nothing
     was ever resident beyond the `rev-parse` that read it.
     """
-    return [(number, _fetch_head(number)) for number in numbers]
+    return [(number, _head(number, repo)) for number in numbers]
 
 
 def _merge_tree(ours: str, theirs: str) -> tuple[str | None, list[str]]:
@@ -1436,7 +1457,7 @@ def main(argv: list[str] | None = None) -> int:
         base_ref = seq._qualify_ref(args.base)
         base = _rev_parse(base_ref)
         numbers = args.prs or _open_pr_numbers(args.repo)
-        heads = _fetch_heads(numbers)
+        heads = _fetch_heads(numbers, args.repo)
 
         # The ref measured, not the spelling typed: they differ whenever a short name
         # is ambiguous, and a header that reports `origin/master` for a commit that is

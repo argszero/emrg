@@ -336,7 +336,16 @@ def _fetch_head(repo: str, number: int) -> str:
         # Not `--quiet`: it suppresses the rejection diagnostic as well, which is
         # how this surfaced as an undiagnosable "unknown error" with empty stderr.
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
-        raise RuntimeError(f"could not fetch PR #{number}: {detail}")
+        # The transport is the fast path, not the only one: `origin` can be a local
+        # directory (a `url.<base>.insteadOf` rewrite), where `refs/pull/<N>/head` does
+        # not exist - `merge_tree.head_via_api` owns the why, the measurement and the
+        # reason it is not a defect to be repaired by editing `.git/config`.
+        sha, why = merge_tree.head_via_api(repo, number, run=_run)
+        if not sha:
+            raise RuntimeError(
+                f"could not fetch PR #{number}: {detail} - and {why}"
+            )
+        return sha
     # The commit, and the ref dropped again as soon as it is read: the name is
     # mutable in a way a SHA is not, so nothing downstream wants it back, and a ref
     # left behind pins that head's objects forever (measured 2026-09-17: this gate
