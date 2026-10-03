@@ -17,9 +17,17 @@ killed" is wrong in ways that *look identical* to success:
   arms "killed" while none had run, and this tool's first own use reproduced it three
   times in one sitting.
 * **the mutation did not parse.** A source edit that produces invalid Python makes
-  pytest exit **4** as well, so it is indistinguishable from the case above by exit
-  code alone - and equally indistinguishable from a real kill to a harness that only
-  asks "did it fail?".
+  pytest *error* rather than fail - and which code it returns depends on **how the
+  target is named**, not on the error (all three rows driven through this tool
+  2026-10-03, `cyc20261003-202837`): a fixture that imports the module at run time
+  gives **1**, the same code as a failing test; a collection-time import gives **2**
+  for a path target (`tests/test_x.py`) and **4** for a node-id target
+  (`tests/test_x.py::test_y` - the form this tool's own usage example passes), because
+  pytest reports an uncollectable node as a usage error. So an error is
+  indistinguishable from a real kill to a harness that only asks "did it fail?", and
+  on the node-id form it is also indistinguishable, by exit code alone, from a
+  *mistyped* target - which is why the mutated text is compiled here and the syntax
+  error it names is what the report gives, instead of a guess read off the code.
 * **the restore is not a snapshot.** Restoring a mutated file with `git checkout --`
   silently reverts *uncommitted* work: an arm run inside a cycle, whose change is not
   committed yet, deletes the very change the next arm mutates.
@@ -31,8 +39,13 @@ judgement below is built on:
     a test that failed                             1
     an *error* - a fixture that blew up loading   1   (measured: mutating a file the
       a module that cannot parse                       `mod` fixture imports)
-    a collection-time error - a syntax error       2   (INTERRUPTED)
-      in a file pytest imports while collecting
+    a collection-time error - a syntax error       2   (INTERRUPTED; a *path* target.
+      in a file pytest imports while collecting          A node-id target gives 4 here
+                                                          instead - pytest reports an
+                                                          uncollectable node as a usage
+                                                          error. This tool compiles the
+                                                          mutated text, so it names the
+                                                          syntax error either way.)
     a node id that does not resolve                4   (USAGE_ERROR)
     nothing collected (`-k` matching nothing)      5
 
@@ -258,12 +271,44 @@ def _assertion_lines(out: str) -> list[str]:
     return seen
 
 
-def _why_unjudgeable(rc: int, expect: str, out: str) -> str:
+def _syntax_error(text: str, name: str) -> str:
+    """Why `text` is not Python, or "" when it parses.
+
+    Measured 2026-10-03 (`cyc20261003-202837`): a mutation that breaks the syntax makes
+    pytest fail to collect the target, and the code it returns depends on the target
+    form - **4** for a node id (`tests/test_x.py::test_y`, the form this tool's usage
+    example passes), **2** for a path. The exit-4 branch used to read that as "the
+    target no longer resolves" and send the caller to re-check a node id the pre-flight
+    had already proved good. Compiling the mutated text is the determinate answer, it
+    costs one call, and it is available *before* the run rather than inferred from a
+    code that means two things.
+    """
+    try:
+        compile(text, name, "exec")
+    except SyntaxError as exc:
+        where = f"line {exc.lineno}" if exc.lineno else "an unknown line"
+        return f"{exc.msg} at {where}"
+    except ValueError as exc:
+        # NUL bytes and the like: not a SyntaxError, still not importable.
+        return str(exc)
+    return ""
+
+
+def _why_unjudgeable(rc: int, expect: str, out: str, syntax_error: str = "") -> str:
+    if syntax_error:
+        # Determinate, and it comes first: the mutated text does not parse, which is
+        # *this arm's* doing, so no code the run returned needs interpreting.
+        return (
+            f"the mutated file no longer parses - {syntax_error}. pytest exited {rc} "
+            "because the target could not be imported, not because a test failed on the "
+            "line this arm breaks; no test ran, so this is not a kill"
+        )
     if rc == PYTEST_USAGE_ERROR:
         return (
-            "pytest exited 4 (usage error) AFTER a pre-flight that collected and passed "
-            "- the target no longer resolves, which a mutation should not be able to "
-            "cause. No test ran, so this is not a kill"
+            "pytest exited 4 (usage error) AFTER a pre-flight that collected and passed, "
+            "and the mutated file still parses - check the target spelling (a class "
+            "method needs its class: tests/test_x.py::TestC::test_y). No test ran, so "
+            "this is not a kill"
         )
     if rc == PYTEST_INTERRUPTED:
         return (
@@ -313,6 +358,10 @@ class Arm:
         #: `--expect` - printed when the verdict is UNJUDGEABLE, which is the one
         #: state where the caller has to retype the fragment.
         self.assertions: list[str] = []
+        #: why the mutated text is not Python, or "" - read before the run, so the
+        #: verdict never has to infer the cause from an exit code that means two
+        #: different things depending on how the target was named.
+        self.syntax_error = ""
 
     def decide(self, verdict: str, why: str, code: int) -> None:
         self.verdict, self.why, self.code = verdict, why, code
@@ -329,6 +378,7 @@ class Arm:
             "mutated_rc": self.mutated_rc,
             "mutated_passed": self.mutated_passed,
             "assertions": list(self.assertions),
+            "syntax_error": self.syntax_error,
             "restored": self.restored,
             "verdict": self.verdict,
             "why": self.why,
@@ -433,6 +483,12 @@ def main(argv: list[str] | None = None) -> int:
         _report(arm, args.json)
         return arm.code
 
+    # Read from the mutated text, before anything runs: a mutation that breaks the
+    # syntax is this arm's own doing, and it is the one cause whose exit code varies
+    # with how the target was named (`_syntax_error` records that measurement).
+    if target.suffix == ".py":
+        arm.syntax_error = _syntax_error(mutated, target.name)
+
     home = Path(tempfile.mkdtemp(prefix="emrg-arm-"))
     mutated_on_disk = False
     try:
@@ -483,7 +539,9 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     arm.decide(
                         UNJUDGEABLE,
-                        _why_unjudgeable(proc.returncode, args.expect, out),
+                        _why_unjudgeable(
+                            proc.returncode, args.expect, out, arm.syntax_error
+                        ),
                         EXIT_UNJUDGEABLE,
                     )
             finally:
