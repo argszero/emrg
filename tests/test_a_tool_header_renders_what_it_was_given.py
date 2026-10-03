@@ -58,6 +58,11 @@ _CRASHING_SHAPES: list[tuple[str, dict, str]] = [
         "read",
     ),
     ("bash with a numeric command", {"command": 123, "intent": "x"}, "bash"),
+    (
+        "bash with a long command and a mapping workdir",
+        {"command": "x" * 80, "workdir": {f"k{i}": i for i in range(25)}, "intent": "x"},
+        "bash",
+    ),
 ]
 
 
@@ -129,7 +134,7 @@ def test_each_shape_is_one_the_unguarded_read_cannot_survive(
             continue
         try:
             eval(expression, namespace)  # noqa: S307
-        except (TypeError, ValueError, AttributeError) as exc:  # noqa: F841
+        except (TypeError, ValueError, AttributeError, KeyError):  # noqa: F841
             raised = True
     assert raised, (
         f"{label}: pushing this shape through the pre-fix read did not raise, so this "
@@ -149,6 +154,13 @@ def _unguarded_reads() -> dict[str, str]:
         "file_path": "PurePath(args.get('file_path', '')).name",
         "start_line": "int(args.get('start_line') or args.get('line_limit'))",
         "command": "args.get('command', '').split('\\n')",
+        # The truncation branch, not the plain read: a mapping reaches the slice only once
+        # the prefix is too long to leave room for the command (`remaining < 8`), which is
+        # why the arm above pairs a 25-key workdir with an 80-character command.
+        "workdir": (
+            "('…' + args.get('workdir')[-19:]) if len(args.get('workdir')) > 20 "
+            "else args.get('workdir')"
+        ),
     }
 
 
