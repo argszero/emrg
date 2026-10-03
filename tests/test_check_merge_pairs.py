@@ -321,7 +321,7 @@ def test_a_repeated_number_does_not_pair_a_pr_with_itself(mod, monkeypatch, caps
 
     assert rc == 0
     assert (C1, C1) not in calls and (C2, C2) not in calls, calls
-    assert "2 PR(s) -> 2 ordered pair(s)" in out, out
+    assert "2 named PR(s) -> 2 ordered pair(s)" in out, out
 
 
 def test_an_unmeasurable_pair_is_not_a_pass(mod, monkeypatch, capsys):
@@ -765,3 +765,46 @@ def test_the_docstring_holds_this_file_to_the_singular_it_judges_by(mod):
     assert "scripts/check-doc-count.py" in doc, "the docstring must name the guard it runs"
     assert "seq.GUARD" in doc, "and the constant the name is taken from"
     assert "check-merge-plan-suite.py" in doc, "and where the suite question is asked instead"
+
+
+class TestTheHeaderNamesTheSelectionNotTheRepository:
+    """The `pairs:` line counts the caller's list, so it says which list that is.
+
+    The siblings `check-merge-order.py` and `check-pr-base.py` were corrected for this
+    shape on 2026-09-26 (`cyc20260926-015635` / `-023125`); this is the same hazard at the
+    remaining sites of the family (measured 2026-10-03, `cyc20261003-143513`). The line is
+    worse here than a bare count elsewhere: it sizes the pair set, so it is the sentence
+    that says how much of the family's question was asked - and `1 PR(s) -> 0 ordered
+    pair(s)` next to a checkmark is exactly the reading the exit-code contract forbids.
+    """
+
+    def _header(self, mod, monkeypatch, capsys, argv: list[str]) -> str:
+        """One run of `main`, stubbed down to the header line.
+
+        One PR forms no pair, so the loop never runs and every measurement below the
+        header is unnecessary - which is the point of using a single number here.
+        """
+        monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: BASE)
+        monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
+        monkeypatch.setattr(mod.seq, "_open_pr_numbers", lambda repo: [1])
+        monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: C1)
+        monkeypatch.setattr(
+            mod.seq, "_merge_commit", lambda a, b: pytest.fail("a single PR forms no pair")
+        )
+        mod.main(argv)
+        return capsys.readouterr().out
+
+    def test_a_named_list_is_not_reported_as_the_open_set(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        out = self._header(mod, monkeypatch, capsys, ["--base", "origin/master", "1"])
+
+        assert "pairs: 1 named PR(s) -> 0 ordered pair(s)" in out, out
+        assert "open PR(s)" not in out, out
+
+    def test_the_default_still_says_open(self, mod, monkeypatch, capsys) -> None:
+        """The control: with no numbers given, the selection *is* every open PR."""
+        out = self._header(mod, monkeypatch, capsys, ["--base", "origin/master"])
+
+        assert "pairs: 1 open PR(s) -> 0 ordered pair(s)" in out, out
+        assert "named" not in out, out

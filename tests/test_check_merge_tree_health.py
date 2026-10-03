@@ -1187,3 +1187,48 @@ class TestTheVerdictSaysWhatItMeasured:
         assert "`scripts/check-doc-count.py`" in section, section
         assert "`GUARD`" in section, section
         assert "guards" not in section, section
+
+
+class TestTheHeaderNamesTheSelectionNotTheRepository:
+    """The header's count is the caller's list, so it says which list that is.
+
+    The siblings `check-merge-order.py` and `check-pr-base.py` were corrected for this
+    shape on 2026-09-26 (`cyc20260926-015635` / `-023125`); measured 2026-10-03
+    (`cyc20261003-143513`), `check-merge-tree-health.py 1830` on a three-PR queue
+    answered `1 PR(s) checked against origin/master` - a true sentence about the
+    caller's one-number list, in the vocabulary of a fact about the repository, and
+    the line a cycle quotes into a merge decision.
+    """
+
+    def _header(self, mod, monkeypatch, capsys, argv: list[str]) -> str:
+        """One run of `main`, stubbed down to the header line.
+
+        The head fetch raises, so the run ends at the first row and nothing after the
+        header is measured - the header is on stdout before that, which is the whole
+        subject here.
+        """
+        def boom(*a, **k):
+            raise mod.MeasurementError("stub: nothing is fetched in this arm")
+
+        monkeypatch.setattr(mod, "_git_cwd", lambda: "stub/cwd")
+        monkeypatch.setattr(mod, "_refresh_base", lambda ref: None)
+        monkeypatch.setattr(mod, "_rev_parse", lambda ref: "0" * 40)
+        monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
+        monkeypatch.setattr(mod, "_fetch_head", boom)
+        mod.main(argv)
+        return capsys.readouterr().out
+
+    def test_a_named_list_is_not_reported_as_the_open_set(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        out = self._header(mod, monkeypatch, capsys, ["--base", "origin/master", "1"])
+
+        assert "1 named PR(s) checked" in out, out
+        assert "open PR(s)" not in out, out
+
+    def test_the_default_still_says_open(self, mod, monkeypatch, capsys) -> None:
+        """The control: with no numbers given, the selection *is* every open PR."""
+        out = self._header(mod, monkeypatch, capsys, ["--base", "origin/master"])
+
+        assert "1 open PR(s) checked" in out, out
+        assert "named" not in out, out

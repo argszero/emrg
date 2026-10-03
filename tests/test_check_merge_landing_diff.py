@@ -1551,3 +1551,44 @@ def test_the_paths_that_read_backwards_carry_no_counts(
     change, _, backwards = report.partition("  reads backwards:")
     assert "(+" in change
     assert "(+" not in backwards
+
+
+class TestTheHeaderNamesTheSelectionNotTheRepository:
+    """This file's header count is the caller's list, so it says which list that is.
+
+    Same rule as the siblings corrected on 2026-09-26 (`cyc20260926-015635` /
+    `-023125`), and the same hazard: a bare `N PR(s) checked` is read as a fact about
+    the repository while it is a count of the numbers the caller typed.
+    """
+
+    def _header(self, mod, monkeypatch, capsys, argv: list[str]) -> str:
+        """One run of `main`, stubbed down to the header line.
+
+        The head fetch raises, so the run stops at the first row; the header is printed
+        before it, which is what this class is about.
+        """
+        def boom(*a, **k):
+            raise mod.MeasurementError("stub: nothing is fetched in this arm")
+
+        monkeypatch.setattr(mod, "_refresh_base", lambda ref: None)
+        monkeypatch.setattr(mod, "_rev_parse", lambda ref: "0" * 40)
+        monkeypatch.setattr(mod, "_qualify_ref", lambda ref: ref)
+        monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
+        monkeypatch.setattr(mod, "_fetch_head", boom)
+        mod.main(argv)
+        return capsys.readouterr().out
+
+    def test_a_named_list_is_not_reported_as_the_open_set(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        out = self._header(mod, monkeypatch, capsys, ["--base", "origin/master", "1"])
+
+        assert "1 named PR(s) checked" in out, out
+        assert "open PR(s)" not in out, out
+
+    def test_the_default_still_says_open(self, mod, monkeypatch, capsys) -> None:
+        """The control: with no numbers given, the selection *is* every open PR."""
+        out = self._header(mod, monkeypatch, capsys, ["--base", "origin/master"])
+
+        assert "1 open PR(s) checked" in out, out
+        assert "named" not in out, out

@@ -286,8 +286,14 @@ def main(argv: list[str] | None = None) -> int:
 
     pairs = [(a, b) for a in numbers for b in numbers if a != b]
     print(f"base {base[:8]} ({base_ref})")
+    # The count is the **selection's**, so it names the selection (the rule
+    # `check-merge-order.py` / `check-pr-base.py` carry since 2026-09-26, measured
+    # 2026-10-03 `cyc20261003-143513`): with no numbers given that *is* every open PR,
+    # and with numbers given it is those. A bare `N PR(s)` here also sizes the pair
+    # set, so it is the line that says how much of the family's question was asked.
+    where = "named" if args.prs else "open"
     print(
-        f"pairs: {len(numbers)} PR(s) -> {len(pairs)} ordered pair(s), "
+        f"pairs: {len(numbers)} {where} PR(s) -> {len(pairs)} ordered pair(s), "
         f"each measured as {base_ref} -> A -> B, judged by {seq.GUARD}"
     )
 

@@ -861,7 +861,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
 
-    print(f"base {base[:8]} ({_qualify_ref(args.base)}), {len(numbers)} PR(s) checked")
+    # The count is the **selection's**, so it names the selection (the rule
+    # `check-merge-order.py` / `check-pr-base.py` carry since 2026-09-26): with no
+    # numbers given that *is* every open PR, and with numbers given it is those. A
+    # bare `N PR(s)` reads as a fact about the repository while being a count of the
+    # caller's list - measured 2026-10-03 (`cyc20261003-143513`) on the siblings.
+    where = "named" if args.prs else "open"
+    print(
+        f"base {base[:8]} ({_qualify_ref(args.base)}), "
+        f"{len(numbers)} {where} PR(s) checked"
+    )
     states: list[tuple[int, str]] = []
     for number in numbers:
         try:

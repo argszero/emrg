@@ -537,7 +537,17 @@ def main(argv: list[str] | None = None) -> int:
     # were built to remove.
     cwd = _git_cwd()
     print(f"repo: {cwd}")
-    print(f"base {base[:8]}, {len(numbers)} PR(s) checked against {args.base}")
+    # The count is the **selection's**, so it names the selection: with no numbers
+    # given that *is* every open PR, and with numbers given it is those. Measured
+    # 2026-10-03 (`cyc20261003-143513`): `check-merge-tree-health.py 1830` on a
+    # three-PR queue answered `1 PR(s) checked against origin/master` - a true
+    # sentence about the caller's one-number list, in the vocabulary of a fact about
+    # the repository, and the line a cycle quotes into a merge decision. The siblings
+    # `check-merge-order.py` and `check-pr-base.py` were corrected for this shape on
+    # 2026-09-26 (`cyc20260926-015635` / `cyc20260926-023125`); this enforces the same
+    # rule at the remaining sites of the family.
+    where = "named" if args.prs else "open"
+    print(f"base {base[:8]}, {len(numbers)} {where} PR(s) checked against {args.base}")
 
     healthy: list[int] = []
     unhealthy: list[int] = []

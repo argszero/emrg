@@ -1441,7 +1441,13 @@ def main(argv: list[str] | None = None) -> int:
         # The ref measured, not the spelling typed: they differ whenever a short name
         # is ambiguous, and a header that reports `origin/master` for a commit that is
         # not master is how the wrong-tree defect stays invisible.
-        print(f"base {base[:8]} ({base_ref}), {len(numbers)} PR(s) planned")
+        # The count is the **selection's**, so it names the selection (the rule
+        # `check-merge-order.py` / `check-pr-base.py` carry since 2026-09-26, measured
+        # 2026-10-03 `cyc20261003-143513`): with no numbers given that *is* every open
+        # PR, and with numbers given it is those - and this line is what tells a reader
+        # how much of the queue the plan's verdict is about.
+        where = "named" if args.prs else "open"
+        print(f"base {base[:8]} ({base_ref}), {len(numbers)} {where} PR(s) planned")
 
         try:
             tip = build_plan_tip(base, heads)
