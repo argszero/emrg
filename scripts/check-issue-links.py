@@ -815,14 +815,25 @@ def _paged_json(args: list[str]) -> list[dict]:
     return payload
 
 
-def load_queue(repo: str) -> Queue:
-    """The open issues and open PRs, from the one endpoint that returns both."""
-    rows = _paged_json(
-        [
-            "api",
-            f"repos/{repo}/issues?state=open&per_page={_TIMELINE_PER_PAGE}",
-        ]
-    )
+def load_queue(repo: str, state: str = "open", since: str | None = None) -> Queue:
+    """The issues and PRs in `state`, from the one endpoint that returns both.
+
+    `state="open"` is this tool's own reading — the queue whose links it judges — and is
+    the default so no caller gets a different queue by omission.
+
+    `state="closed"` with a `since` is `review-queue.py`'s rant row, which needs the
+    opposite thing: an issue that declared a rant and was then **closed by the merge of
+    its own PR**. Measured 2026-10-02, that row rendered `no issue yet` for a rant whose
+    issue #1807 existed and had been closed when #1808 merged — so a cycle was told to
+    file an issue for work that was already done, which is the duplicate this tool exists
+    to report. `since` bounds the reading by `updated_at`: it returns the issues that
+    closed around the rants in question rather than every issue the repository ever
+    closed, and a `since`-bounded call here measures one request against this repo.
+    """
+    query = f"repos/{repo}/issues?state={state}&per_page={_TIMELINE_PER_PAGE}"
+    if since:
+        query += f"&since={since}"
+    rows = _paged_json(["api", query])
     queue = Queue()
     for row in rows:
         for field_ in ("number", "title", "created_at"):

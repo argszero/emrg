@@ -759,3 +759,76 @@ def test_start_daemon_captures_the_child_stderr_instead_of_discarding_it():
     assert "stderr_path = _start_stderr_path()" in src
     assert "stderr_handle = _truncate_start_stderr(stderr_path)" in src
     assert "stderr_path=stderr_path if stderr_handle is not None else None" in src
+
+
+# ── a startup failure before the event loop reaches the channel the report reads ──
+
+
+def test_a_config_failure_at_startup_reaches_emrgd_log(monkeypatch, caplog):
+    """The defect the host hit on 2026-09-27, from the outside.
+
+    A stray line appended to `~/.emrg/config.toml` made `load_config()` raise out of
+    `main()`. At that moment `_configure_logging()` had run but nothing had *logged*,
+    and `_redirect_std_streams()` had already re-pointed this child's own stderr at
+    `emrgd-crash.log` — so both channels `_startup_failure_detail` reads came back
+    empty and the host was told the child was silent, while the traceback sat in a
+    file no failure report reads.
+
+    `load_config()` is inside the guard now, so the failure is a CRITICAL record with
+    its traceback in `emrgd.log` — the channel the client's log-delta reader already
+    prints — and a `crash` exit record, which the path never wrote before.
+
+    Nothing here starts, stops or restarts a daemon: `main()` is called with its four
+    side effects stubbed (`ensure_tool_dirs`, `_configure_logging`,
+    `_redirect_std_streams`, and `DaemonExit` itself), so no host file is opened and
+    the exit record is never written.
+    """
+    import tomllib
+
+    from emrg.server import __main__ as server_main
+
+    monkeypatch.setattr(server_main, "ensure_tool_dirs", lambda: [])
+    # Stubbed because their real bodies open the host's `~/.emrg/emrgd.log` and
+    # `~/.emrg/emrgd-crash.log`: the *log call* is what this test is about, and
+    # `caplog` captures it without either file existing.
+    monkeypatch.setattr(server_main, "_configure_logging", lambda: None)
+    monkeypatch.setattr(server_main, "_redirect_std_streams", lambda: None)
+
+    def _corrupt_config():
+        raise tomllib.TOMLDecodeError(
+            "Expected '=' after a key in a key/value pair (at line 48, column 6)"
+        )
+
+    monkeypatch.setattr("emrg.config.load_config", _corrupt_config)
+
+    exits: list[tuple[str, int, str | None]] = []
+
+    class _Exit:
+        def __init__(self, reason: str, exit_code: int, traceback_text: str | None) -> None:
+            exits.append((reason, exit_code, traceback_text))
+            self.exit_code = exit_code
+
+        def write_record(self) -> None:
+            pass
+
+    monkeypatch.setattr(server_main, "DaemonExit", _Exit)
+
+    with caplog.at_level(logging.CRITICAL, logger="emrg.server"):
+        with pytest.raises(SystemExit) as exit_info:
+            server_main.main()
+
+    assert exit_info.value.code == 1, "a config error is still a failed start"
+    assert exits and exits[0][0] == "crash", exits
+    assert "TOMLDecodeError" in (exits[0][2] or ""), (
+        "the exit record is the durable half; it must carry the traceback, not just "
+        f"the reason: {exits[0]!r}"
+    )
+    critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert critical, (
+        "nothing reached emrgd.log, so the client's failure report — which reads that "
+        "log's delta and the child's stderr — would still call this start silent"
+    )
+    assert any(r.exc_info for r in critical), (
+        "the record must carry the traceback: 'it crashed' without the TOML error's "
+        "line and column is the message the host already could not act on"
+    )

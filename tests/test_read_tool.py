@@ -338,3 +338,68 @@ def test_read_tool_description_mentions_images():
     desc = tool.definition().description
     assert "vision-format image block" in desc
     assert ".png" in desc
+
+
+class TestTheFileIsAsLongAsItsLines:
+    """A file's last newline terminates its last line; it does not add one.
+
+    `"a\\nb\\nc\\n".split("\\n")` yields four elements, and the tool used to count
+    all four — so every terminated file (most files) read as one line longer than it
+    is, rendered a numbered line holding nothing, and could announce a truncation
+    whose continuation was empty. Measured 2026-10-02 on master `bc114ab`: a file of
+    1000 lines read with no arguments reported "truncated at start_line=1001 ...
+    total 1001 lines", and line 1001 held `''`.
+    """
+
+    def test_a_terminated_file_renders_the_lines_it_has(self, tmp_path):
+        f = tmp_path / "three.txt"
+        f.write_text("a\nb\nc\n")
+        result = _run(ReadTool().execute({"file_path": str(f), "intent": "read it"}))
+        assert not result.error
+        assert result.content.split("\n") == ["     1\ta", "     2\tb", "     3\tc"]
+
+    def test_a_lone_newline_is_one_empty_line(self, tmp_path):
+        f = tmp_path / "just_newline.txt"
+        f.write_text("\n")
+        result = _run(ReadTool().execute({"file_path": str(f), "intent": "read it"}))
+        assert result.content.split("\n") == ["     1\t"]
+
+    def test_a_zero_byte_file_has_no_lines(self, tmp_path):
+        f = tmp_path / "zero.txt"
+        f.write_bytes(b"")
+        result = _run(ReadTool().execute({"file_path": str(f), "intent": "read it"}))
+        assert "empty file" in result.content, result.content
+        assert "     1\t" not in result.content
+
+    def test_an_unterminated_file_keeps_its_last_line(self, tmp_path):
+        """The opposite direction: the last line is real, never dropped."""
+        f = tmp_path / "three_no_eol.txt"
+        f.write_text("a\nb\nc")
+        result = _run(ReadTool().execute({"file_path": str(f), "intent": "read it"}))
+        assert result.content.split("\n") == ["     1\ta", "     2\tb", "     3\tc"]
+
+    def test_a_file_of_exactly_the_default_limit_reads_whole(self, tmp_path):
+        """1000 terminated lines fill the default window exactly — nothing is left
+        over, so the notice that sends a reader to the next range must not appear."""
+        from emrg.tools.read_tool import DEFAULT_MAX_LINES
+
+        f = tmp_path / "exactly.txt"
+        f.write_text("".join(f"line {i}\n" for i in range(1, DEFAULT_MAX_LINES + 1)))
+        result = _run(ReadTool().execute({"file_path": str(f), "intent": "read it"}))
+        assert not result.error
+        assert "truncated" not in result.content
+        assert result.content.split("\n")[-1] == f"  {DEFAULT_MAX_LINES}\tline {DEFAULT_MAX_LINES}"
+
+    def test_the_line_over_the_default_limit_does_report_a_truncation(self, tmp_path):
+        """The same boundary read the other way, so the test above cannot pass by
+        the notice being broken: one line more, and the notice is owed — naming the
+        real total and the real continuation line."""
+        from emrg.tools.read_tool import DEFAULT_MAX_LINES
+
+        f = tmp_path / "one_over.txt"
+        total = DEFAULT_MAX_LINES + 1
+        f.write_text("".join(f"line {i}\n" for i in range(1, total + 1)))
+        result = _run(ReadTool().execute({"file_path": str(f), "intent": "read it"}))
+        assert not result.error
+        assert f"truncated at start_line={total}, " in result.content
+        assert f"total {total} lines" in result.content
