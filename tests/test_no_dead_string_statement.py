@@ -30,6 +30,14 @@ variable-documentation idiom in `emrg/server/content_risk_probe.py`
 are adjacent pairs, so the narrow rule has no false positives and the broader one
 would have had to carry an allow-list. `tests/test_a_skipped_subject_is_reported.py`
 records the same direction of judgement.
+
+A second shape is dead for the same reason and is reported too (added 2026-10-04,
+`cyc20261004-011003`, while reviewing this file): an **f-string** is not an
+`ast.Constant`, so the adjacent rule as first written could not see one - and an
+f-string in the first position of a body is not a docstring at all, because
+`ast.get_docstring` does not recognise it. Neither shape needs an allow-list: no
+idiom makes a first-statement f-string intentional, and 0 f-string statements exist
+in this tree, so both clauses cost nothing today.
 """
 
 from __future__ import annotations
@@ -47,23 +55,53 @@ BODY_OWNERS = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
 
 
 def _is_string_statement(node: ast.stmt) -> bool:
-    return (
-        isinstance(node, ast.Expr)
-        and isinstance(node.value, ast.Constant)
-        and isinstance(node.value.value, str)
-    )
+    """Whether `node` is a bare string expression - the only shape that can be dead.
+
+    The **f-string** counts, which is not a technicality: it is not an `ast.Constant`,
+    so a rule written around `Constant` alone is blind to it, while the interpreter
+    evaluates and discards it exactly like a literal one *and* `ast.get_docstring`
+    does not recognise it - so an f-string in the docstring position leaves the member
+    with `__doc__ = None` while looking like documentation in the source. Measured
+    2026-10-04 (`cyc20261004-011003`): 0 f-string statements in this tree, so the
+    clause costs nothing and closes a shape of the same class.
+    """
+    if not isinstance(node, ast.Expr):
+        return False
+    if isinstance(node.value, ast.JoinedStr):
+        return True
+    return isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+
+
+def _is_fstring_statement(node: ast.stmt) -> bool:
+    """Whether `node` is a bare f-string expression - never a docstring, always dropped."""
+    return isinstance(node, ast.Expr) and isinstance(node.value, ast.JoinedStr)
 
 
 def dead_string_statements(source: str) -> list[int]:
-    """Line numbers of a string statement that directly follows another one."""
+    """Line numbers of a string statement the interpreter throws away.
+
+    Two shapes, both of them text that is evaluated and discarded:
+
+    * one that **directly follows another string statement** - the inserted-docstring
+      defect this file was written for, where the upper text survives as `__doc__` and
+      the lower is dead;
+    * an **f-string in the first position of a body** - not the adjacent case, and not
+      a docstring either (`ast.get_docstring` answers `None` for it), so a member
+      documented that way has no documentation at all. Reported because no allow-list
+      is needed for it: there is no idiom in which a first-statement f-string is
+      intentional.
+    """
     found: list[int] = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, BODY_OWNERS):
             continue
-        for first, second in zip(node.body, node.body[1:]):
+        body = node.body
+        for first, second in zip(body, body[1:]):
             if _is_string_statement(first) and _is_string_statement(second):
                 found.append(second.lineno)
-    return found
+        if body and _is_fstring_statement(body[0]):
+            found.append(body[0].lineno)
+    return sorted(found)
 
 
 class TestTheRuleIsReal:
@@ -103,6 +141,32 @@ class TestTheRuleIsReal:
         """
         source = 'x = 1\n"""What x is."""\n'
         assert dead_string_statements(source) == []
+
+    def test_an_fstring_beside_a_string_is_reported(self) -> None:
+        """The adjacent shape, written with an f-string below the real docstring.
+
+        Added 2026-10-04 (`cyc20261004-011003`) after reading this file: the predicate
+        was written around `ast.Constant`, and an f-string is a `JoinedStr` - so the
+        rule was silent on the whole shape. The text is dropped exactly the same way,
+        which is the rule's subject, so the blindness was to a *kind*, not a case.
+        """
+        source = 'def f():\n    """The live text."""\n    f"""The dead {1}."""\n    return 1\n'
+        assert dead_string_statements(source) == [3]
+
+    def test_an_fstring_that_opens_a_body_is_reported(self) -> None:
+        """The first-position shape: not adjacent, and not a docstring either.
+
+        `ast.get_docstring` answers `None` for a body that opens with an f-string, so
+        the member silently has no documentation - and the text is evaluated and
+        discarded. No allow-list is needed for this one (there is no idiom in which a
+        first-statement f-string is intentional), which is why it is reported rather
+        than traded away for the narrowness the paragraph above records.
+        """
+        source = 'def f():\n    f"""Documents nothing."""\n    return 1\n'
+        assert dead_string_statements(source) == [2]
+        assert ast.get_docstring(ast.parse(source).body[0]) is None, (
+            "the premise of this test: Python does not read that string as a docstring"
+        )
 
 
 class TestThisTree:
