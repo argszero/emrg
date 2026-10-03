@@ -41,6 +41,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import jinja2
+import pytest
 import yaml
 
 from emrg.protocol import InstanceIdentity
@@ -49,6 +50,7 @@ from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.server import scheduler as mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.scheduler import TaskHandler
+from tests import shell_lines
 from tests.task_handler_factory import make_handler
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1465,10 +1467,26 @@ _CREATE_RESOLVED_HEAD = re.compile(r"--head\s+\"\$\(gh api user -q \.login\):")
 
 
 def _create_calls(text: str) -> list[str]:
-    """Every `gh pr create` command in a fenced block, its continuations joined.
+    r"""Every `gh pr create` command in a fenced block, its continuations joined.
 
     Only fenced blocks are read: the template also *talks* about `gh pr create` in prose and in
     capability tables, and a rule about the command must not be satisfiable by the sentence.
+
+    "Its continuations" is the **shell's** question, asked of `tests/shell_lines` — an odd run
+    of trailing backslashes. Read here as `block[j].rstrip().endswith("\\")` until 2026-10-03,
+    which is `True` for a run of two: a shell reads `a \\` as a whole number of escaped
+    backslashes, ends the command there, and runs the next line as a command of its own.
+    Measured with a real `bash` and a stub `gh`, on the shipped block and on the same block
+    with one byte added (`cyc20261003-205852`):
+
+        shipped (`\` x1) -> pr create -R o/r --head "$(gh api user -q .login):br" --title x
+        doubled (`\` x2) -> pr create -R o/r \
+                            line 3: --head: command not found
+                            line 4: --title: command not found
+
+    and this reader answered **"one call, and it names the head"** for both. So on the doubled
+    shape the guard below was green on a template whose PR step runs a bare `gh pr create`.
+    Both shapes are now pinned, on the reader and on the shape the shell reads.
     """
     calls: list[str] = []
     for block in _fenced_blocks(text):
@@ -1477,7 +1495,7 @@ def _create_calls(text: str) -> list[str]:
                 continue
             call = [line]
             j = i
-            while block[j].rstrip().endswith("\\") and j + 1 < len(block):
+            while shell_lines.continues(block[j]) and j + 1 < len(block):
                 j += 1
                 call.append(block[j])
             calls.append(" ".join(part.strip() for part in call))
@@ -1562,6 +1580,134 @@ def test_the_create_head_scan_answers_both_ways() -> None:
     ) and not _create_calls("| `gh pr create` | ✅ | ✅ |\n"), (
         "a capability table and a sentence are not the command — the scan reads fenced blocks only"
     )
+
+
+#: One backslash, as `chr(92)`, so this file spells no backslash literal in these pins: the
+#: defect was one byte, and a test that has to be read through Python's own escaping is a test
+#: whose next editor can write that byte wrongly the same way. `_BS * 2` cannot be misread.
+_BS = chr(92)
+
+#: The shipped shape of the PR step, as the template writes it.
+_CREATE_BLOCK = (
+    '```bash\ncd "$DEV" && gh pr create -R o/r ' + _BS + "\n"
+    '  --head "$(gh api user -q .login):<branch name>" ' + _BS + "\n"
+    '  --title "x"\n```'
+)
+
+
+class TestTheContinuationTheShellPerforms:
+    """The reader behind this file's create-call guard, against the shell's own rule.
+
+    The reader is `_create_calls`, and what it decides is which lines the shell runs as **one**
+    command. Every assertion here is about one byte — how many backslashes end a line — and each
+    is paired with what the shell does with that shape, so the pair is the evidence rather than
+    the prose. Measured 2026-10-03 (`cyc20261003-205852`) with a real `bash` and a stub `gh`.
+    """
+
+    @pytest.mark.parametrize(
+        "count,expected", [(0, False), (1, True), (2, False), (3, True), (4, False)]
+    )
+    def test_only_an_odd_run_continues(self, count, expected) -> None:
+        """The rule, at the boundary: an even run is whole escaped backslashes."""
+        line = 'cd "$DEV" && gh pr create -R o/r ' + _BS * count
+        assert shell_lines.continues(line) is expected
+        assert shell_lines.trailing_backslashes(line) == count
+
+    def test_a_backslash_with_whitespace_after_it_continues_nothing(self) -> None:
+        """The shape `rstrip()` gets wrong from the other side: `x \\ ` escapes the **space**.
+
+        Measured: the shipped reader called this a continuation, because it stripped the space
+        away before asking whether the line ended in a backslash.
+        """
+        assert shell_lines.continues('cd "$DEV" && x.py ' + _BS + " ") is False
+        assert shell_lines.trailing_backslashes("x " + _BS + " ") == 0
+
+    def test_the_reader_tells_the_two_shapes_apart(self) -> None:
+        """One byte differs; the shell reads one command and three.
+
+        The defect this class exists for: on the doubled shape the reader answered "one call,
+        and it names the head", so `test_every_create_call_names_the_head` was green on a
+        template whose PR step runs a **bare** `gh pr create` — the next lines become commands
+        of their own (`--head: command not found`, `--title: command not found`).
+        """
+        doubled = _CREATE_BLOCK.replace(" " + _BS + "\n", " " + _BS * 2 + "\n")
+        assert doubled != _CREATE_BLOCK
+
+        assert len(_create_calls(_CREATE_BLOCK)) == 1
+        assert "--head" in _create_calls(_CREATE_BLOCK)[0]
+
+        assert _create_calls(doubled) == ['cd "$DEV" && gh pr create -R o/r ' + _BS * 2], (
+            "a doubled backslash ends the command in a shell, so this block is three commands "
+            "and the create call is the bare first one — reading it as one call that still "
+            "carries `--head` is the defect"
+        )
+        # And the guard's own reading of it: the head is *not* found, because the line that
+        # carries it is no longer part of the call the shell runs.
+        assert _create_calls_without_a_head(doubled), (
+            "the doubled shape runs a create call with no `--head`, so the guard must flag it"
+        )
+        assert not _create_calls_without_a_head(_CREATE_BLOCK), (
+            "the control: the shipped shape names the head and must not be flagged"
+        )
+
+    def test_a_backslash_before_whitespace_ends_the_call(self) -> None:
+        """The same defect reached from the other side: `x \\ ` is not a continuation either."""
+        text = _CREATE_BLOCK.replace(" " + _BS + "\n", " " + _BS + " \n", 1)
+        assert text != _CREATE_BLOCK
+        assert _create_calls(text) == ['cd "$DEV" && gh pr create -R o/r ' + _BS], (
+            "a backslash followed by a space escapes the space and continues nothing, so the "
+            "create call ends there and the next line is a command of its own"
+        )
+        assert _create_calls_without_a_head(text), (
+            "the shape that results runs a create call with no `--head`"
+        )
+
+    def test_the_template_with_a_doubled_backslash_is_caught(self) -> None:
+        """End to end on the real template: every continuation doubled, the guards must fire.
+
+        This is the reading that was silent. With the wrong rule, doubling **every** continuation
+        in the shipped template left both scans answering "[]" — no missing head, no literal head
+        — while a shell runs each block as bare `gh pr create` plus `command not found` lines.
+        The template itself is correct today, which is exactly why this pin doubles it in memory
+        rather than asserting about a defect that happens to be present.
+        """
+        shipped = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+        assert _create_calls(shipped), "the template no longer opens a PR — nothing to double"
+
+        mutated = "".join(
+            ln.rstrip("\n") + _BS + "\n" if shell_lines.continues(ln.rstrip("\n")) else ln
+            for ln in shipped.splitlines(keepends=True)
+        )
+        assert mutated.count(" " + _BS * 2) > 0, (
+            "the template has no continuation to double — this pin would be empty"
+        )
+        assert mutated != shipped
+
+        assert _create_calls_without_a_head(mutated), (
+            "every continuation in the template is doubled, so a shell runs each block as a bare "
+            "`gh pr create` — and the guard for a create call that cannot name its head was silent "
+            "on it"
+        )
+
+
+class TestTheCommandSplitter:
+    """`shell_lines.commands`, so a caller that wants every command does not re-derive it."""
+
+    def test_the_block_is_split_the_way_the_shell_reads_it(self) -> None:
+        block = ["a " + _BS, "b " + _BS, "c", "d"]
+        assert shell_lines.commands(block) == [["a " + _BS, "b " + _BS, "c"], ["d"]]
+
+    def test_a_block_that_ends_mid_command_keeps_its_last_line(self) -> None:
+        """An unreadable input is reported by what it contains, not by becoming an absence."""
+        block = ["a", "b " + _BS]
+        assert shell_lines.commands(block) == [["a"], ["b " + _BS]]
+
+    def test_the_shipped_template_splits_into_more_than_one_command(self) -> None:
+        """The surface: the splitter reads a real block rather than returning one group."""
+        shipped = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+        blocks = [b for b in _fenced_blocks(shipped) if any("gh pr create" in ln for ln in b)]
+        assert blocks, "the template no longer opens a PR in a fenced block"
+        assert any(len(shell_lines.commands(b)) > 1 for b in blocks)
 
 
 #: The tier rule a dirty tree used to carry, in each template's own words. #1563
