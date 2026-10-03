@@ -48,12 +48,27 @@ def mod():
     return _load_module()
 
 
-def _cannot_ask_the_runners(mod) -> str | None:
-    """The precondition this host fails, or ``None`` when both are met.
+def _renderer_runner(mod):
+    """The renderer's runner as `npm test` will look for it: the vitest package.
 
-    There are **two**, and the pair is the point: the tool resolves `npm` through
-    PATH and then runs it inside a directory it expects to hold `node_modules`.
-    Having one is not having the other.
+    A **directory named** `node_modules` is not an installation. Measured
+    2026-10-03 (`cyc20261003-115810`) on the evolution host:
+    `emrg/gui/renderer/node_modules` exists and is **empty** - 0 entries, no
+    `.bin`, no `vitest` - so the existence check passed, `npm test` ran, and it
+    answered `'vitest' is not recognized as an internal or external command`. The
+    renderer's script is `vitest run`, so the runner's presence is the fact that
+    decides whether the count can be measured at all.
+    """
+    return mod.RENDERER_ROOT / "node_modules" / "vitest" / "package.json"
+
+
+def _cannot_ask_the_runners(mod) -> str | None:
+    """The precondition this host fails, or ``None`` when every half is met.
+
+    There are **three**, and the pair framing was short by one: the tool resolves
+    `npm` through PATH, runs it inside a directory it expects to hold
+    `node_modules`, and that directory has to hold the runner the script starts.
+    Having one is not having the next.
 
     Measured 2026-10-03 (`cyc20261003-065523`) on the evolution host: the
     renderer's `node_modules` is present while `npm`, `node` and `npx` are all
@@ -64,9 +79,15 @@ def _cannot_ask_the_runners(mod) -> str | None:
     already skips for exactly this reason and states it ("a missing toolchain is
     not a defect in `_run`"); this helper is that rule, applied to the one test that
     needs both halves.
+
+    Measured again the same day (`cyc20261003-115810`), on the same host and after
+    that two-part check had landed: `npm` and the empty `node_modules` were both
+    there, the run went through, and it failed on `vitest` not being found. The
+    third half is the one that decides the count: the **runner** has to be
+    installed, not merely a directory named after where it would be.
     """
-    if not (mod.RENDERER_ROOT / "node_modules").exists():
-        return f"no node_modules under {mod.RENDERER_ROOT}"
+    if not _renderer_runner(mod).exists():
+        return f"no vitest installed under {mod.RENDERER_ROOT}/node_modules"
     if mod.shutil.which("npm") is None:
         return "no `npm` on PATH"
     return None
@@ -75,35 +96,49 @@ def _cannot_ask_the_runners(mod) -> str | None:
 def test_the_runner_precondition_names_which_half_is_missing(
     mod, monkeypatch, tmp_path
 ) -> None:
-    """Both halves, each isolated, plus the case where neither is missing.
+    """Every half, each isolated, plus the case where none is missing.
 
-    The defect this replaces was a check that could not tell its two subjects
-    apart - it asked about `node_modules` and returned a verdict about the whole
-    toolchain - so the three directions are the whole content: the modules missing,
-    the executable missing, and neither. The third is what keeps the helper from
-    turning an askable host into a permanent skip.
+    The defect this replaces was a check that could not tell its subjects apart -
+    it asked about `node_modules` and returned a verdict about the whole
+    toolchain - so the directions are the whole content: the directory absent, the
+    directory present but empty, the runner installed with no `npm`, and nothing
+    missing. The last keeps the helper from turning an askable host into a
+    permanent skip, and the empty third is the measured one: it is what a green
+    suite on this host was hiding.
     """
     installed = tmp_path / "renderer"
     installed.mkdir()
     monkeypatch.setattr(mod, "RENDERER_ROOT", installed)
-
-    # `npm` present, no node_modules: the modules are what is missing.
     monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    # No node_modules at all: the runner is what is missing, named by its place.
     assert "node_modules" in (_cannot_ask_the_runners(mod) or ""), (
         "a host without the renderer's node_modules must be told so by name"
     )
 
-    # node_modules present, no `npm`: the executable is what is missing. This is
+    # node_modules present and empty - the state measured on the evolution host.
+    # A directory of that name satisfied the old check and the run failed on
+    # `vitest`; the answer here must be the missing runner, not silence.
+    (installed / "node_modules").mkdir()
+    empty = _cannot_ask_the_runners(mod) or ""
+    assert "vitest" in empty, (
+        "an empty node_modules is not an installation, and the host has to be told "
+        f"which fact is missing; got {empty!r}"
+    )
+
+    # The runner installed, no `npm`: the executable is what is missing. This is
     # the half the integration test used to walk past - measured on the evolution
     # host, where node_modules is installed and no node is on PATH at all.
-    (installed / "node_modules").mkdir()
+    runner = _renderer_runner(mod)
+    runner.parent.mkdir(parents=True)
+    runner.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(mod.shutil, "which", lambda name: None)
     assert "npm" in (_cannot_ask_the_runners(mod) or ""), (
         "a host with node_modules but no `npm` must be told so by name - checking "
         "the modules alone let this host reach `_run` and report a failure"
     )
 
-    # Both present: nothing is missing, so the integration test has to run.
+    # Every half present: nothing is missing, so the integration test has to run.
     monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
     assert _cannot_ask_the_runners(mod) is None, (
         "an askable host must not be skipped - a helper that always answers "
@@ -111,7 +146,7 @@ def test_the_runner_precondition_names_which_half_is_missing(
     )
 
 
-def test_the_integration_test_gates_on_both_halves() -> None:
+def test_the_integration_test_gates_on_every_half() -> None:
     """The call site, which the helper's own pins cannot reach.
 
     The helper can be correct while the test beside it keeps the old one-line
@@ -131,13 +166,13 @@ def test_the_integration_test_gates_on_both_halves() -> None:
         f"assert against some other function: {body[:200]!r}"
     )
     assert "_cannot_ask_the_runners(mod)" in body, (
-        "the integration test no longer asks the two-part precondition, so a host "
-        "with node_modules and no `npm` reports a failure instead of a skip"
+        "the integration test no longer asks the precondition, so a host that "
+        "cannot run the runners reports a failure instead of a skip"
     )
     assert 'node_modules").exists()' not in body, (
         "the integration test still carries its own node_modules existence check: "
-        "one half standing in for two is the defect, and a second copy of it is a "
-        "second place to keep in step"
+        "one half standing in for the rest is the defect, and a second copy of it "
+        "is a second place to keep in step"
     )
 
 
