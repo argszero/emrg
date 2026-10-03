@@ -190,6 +190,23 @@ class TestTheScriptReaders:
         monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
         assert mod._resolve_conflict_mode() == 2
 
+    def test_the_node_count_tool_reports_a_gui_test_file_it_cannot_decode(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """`module_skip_entries`: the read there had **no** `try` at all.
+
+        Found by re-running the older branch's own test file against this tree
+        (`cyc20261003-222355`): its census reports every read, guarded or not, and this
+        one is a read inside a generator expression. The guard next door only sees reads
+        that already have a `try`, which is why this site needed a leg of its own.
+        """
+        mod = _load("scripts/check-node-test-count.py")
+        monkeypatch.setattr(mod, "GUI_ROOT", tmp_path)
+        (tmp_path / "test").mkdir()
+        (tmp_path / "test" / f"bad{mod.GUI_TEST_SUFFIX}").write_bytes(NOT_UTF8)
+        with pytest.raises(mod.NodeCountError, match="cannot read"):
+            mod.module_skip_entries()
+
     def test_the_node_count_tool_reports_a_document_it_cannot_decode_as_unmeasurable(
         self, tmp_path, monkeypatch, capsys
     ) -> None:

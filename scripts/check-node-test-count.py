@@ -266,11 +266,25 @@ def measured_renderer() -> int:
 
 
 def module_skip_entries() -> int:
-    """How many extra entries the GUI runner registers for module-level `skip(`."""
+    """How many extra entries the GUI runner registers for module-level `skip(`.
+
+    The read is inside a guard on purpose: this generator-shaped read used to have no
+    `try` at all, and a GUI test file whose bytes are not UTF-8 raised
+    `UnicodeDecodeError` out of `main` -- whose exit code is 1, this tool's "the doc and
+    the runner disagree" verdict. `NodeCountError` is what the callers already report as
+    unmeasurable. Measured 2026-10-03 (`cyc20261003-222355`).
+    """
     base = GUI_ROOT / "test"
     files = sorted(base.glob(f"*{GUI_TEST_SUFFIX}"))
     assert files, f"no GUI test files found under {base}"
-    return sum(len(MODULE_SKIP_ENTRY.findall(f.read_text(encoding="utf-8"))) for f in files)
+    total = 0
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise NodeCountError(f"cannot read {path}: {exc}") from exc
+        total += len(MODULE_SKIP_ENTRY.findall(text))
+    return total
 
 
 def measured_gui() -> int:
