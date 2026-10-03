@@ -106,9 +106,59 @@ async def _default_http_get(url: str) -> Optional[dict]:
         return resp.json()
 
 
+#: Exit codes a POSIX shell uses when it **found the file and could not run it**
+#: (126) or could not find the command at all (127). Both mean the CLI never
+#: started, which is a different fact from "it started and refused", and the
+#: remedy is different too — see `_could_not_start`.
+_STARTUP_EXIT_CODES = (126, 127)
+
+
+def install_hint() -> str:
+    """The command that puts this CLI on PATH — the one home for the remedy.
+
+    It is quoted in `install_skill`'s `confirm_required` answer and in the
+    startup failure below, and a remedy written twice is a remedy that drifts.
+    """
+    return " ".join(CLI_INSTALL_CMD)
+
+
 def cli_available() -> bool:
-    """True when the CLI executable is on PATH."""
+    """True when the CLI **name resolves on PATH** — not when the CLI runs.
+
+    Measured 2026-10-03 (`cyc20261003-155102`): a CLI whose shim points at a
+    removed interpreter (this host's asdf shape for `npm`/`node`) resolves under
+    `shutil.which` and exits **126** when invoked. Read as "the CLI is
+    installed", that answer sends the caller past the `confirm_required` branch
+    — so the host is never told to install it, and the failure arrives as
+    `... skill failed (exit 126)`, which names no remedy.
+
+    Running the CLI here to tell the two apart is **not** available: this CLI
+    starts a browser daemon as a side effect (`ensure_daemon()` runs before the
+    script), so a preflight probe would have effects of its own. The two states
+    are therefore separated where they actually differ — at the run, by
+    `_could_not_start` — and this function keeps the cheap presence answer,
+    named for exactly what it answers.
+    """
     return shutil.which(CLI_NAME) is not None
+
+
+def _could_not_start(returncode: int | None = None, detail: str = "") -> str:
+    """The message for a CLI that never started, carrying the remedy.
+
+    Split out from `_publish_skill` so the two entrance points — the raw
+    `OSError` (no such file) and a startup exit code — produce one wording, and
+    so both are testable without a subprocess.
+
+    The CLI's own output is carried when there is any: for a broken shim that
+    line names the interpreter that is missing, which is the evidence the old
+    message dropped on the floor.
+    """
+    why = "is not runnable" if returncode is None else f"could not be started (exit {returncode})"
+    message = (
+        f"{CLI_NAME} {why} — it is on PATH but the command did not run. Reinstall it: "
+        f"`{install_hint()}`"
+    )
+    return f"{message}. The CLI said: {detail.strip()[:300]}" if detail.strip() else message
 
 
 async def _fetch_latest_tag(repo: str, http_get: Optional[HttpGet]) -> Optional[str]:
@@ -146,10 +196,15 @@ async def _publish_skill(entry: dict, runner: Optional[Runner]) -> dict:
     run = runner or _default_runner
     try:
         result = await run([CLI_NAME, "skill"])
-    except FileNotFoundError:
-        return {"error": f"{CLI_NAME} CLI not found on PATH"}
+    except (FileNotFoundError, NotADirectoryError, PermissionError) as exc:
+        # The command could not be started at all — no such file, a component of
+        # the path is not a directory, or it is not executable. All three are
+        # "install/repair it", never "the CLI ran and said no".
+        return {"error": _could_not_start(None, str(exc))}
+    if result.returncode in _STARTUP_EXIT_CODES:
+        return {"error": _could_not_start(result.returncode, result.stdout)}
     if result.returncode != 0:
-        return {"error": f"{CLI_NAME} skill failed (exit {result.returncode})"}
+        return {"error": f"{CLI_NAME} skill failed (exit {result.returncode}): {result.stdout.strip()[:300]}"}
 
     skill_text = result.stdout.strip()
     if not skill_text:
@@ -212,17 +267,16 @@ async def install_skill(
             return {
                 "confirm_required": True,
                 "name": name,
-                "install_command": " ".join(CLI_INSTALL_CMD),
+                "install_command": install_hint(),
                 "message": (
-                    f"Skill {name!r} needs its CLI installed first: "
-                    f"`{' '.join(CLI_INSTALL_CMD)}`"
+                    f"Skill {name!r} needs its CLI installed first: `{install_hint()}`"
                 ),
             }
         run = runner or _default_runner
         try:
             result = await run(CLI_INSTALL_CMD)
-        except FileNotFoundError:
-            return {"error": "uv not found on PATH — cannot install CLI"}
+        except (FileNotFoundError, NotADirectoryError, PermissionError) as exc:
+            return {"error": f"`{CLI_INSTALL_CMD[0]}` could not be started: {exc}"}
         if result.returncode != 0:
             return {"error": f"CLI install failed (exit {result.returncode}): {result.stdout[-300:]}"}
         if not cli_available():

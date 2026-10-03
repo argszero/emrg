@@ -39,18 +39,38 @@ SHIPPED_CATALOG = REPO_ROOT / "emrg" / "skills" / "skill-catalog.md"
 class FakeRunner:
     """Controllable asyncio subprocess runner (FakeGitRun-style)."""
 
-    def __init__(self, skill_output: str = "", cli_install_rc: int = 0):
+    def __init__(self, skill_output: str = "", cli_install_rc: int = 0, skill_rc: int = 0):
         self.calls: list[list[str]] = []
         self.skill_output = skill_output
         self.cli_install_rc = cli_install_rc
+        self.skill_rc = skill_rc
 
     async def __call__(self, cmd, **kwargs):
         self.calls.append(list(cmd))
         if cmd[0] == "uv" and cmd[1:3] == ["tool", "install"]:
             return installer.CmdResult(self.cli_install_rc, "installed\n")
         if cmd == ["browser-harness", "skill"]:
-            return installer.CmdResult(0, self.skill_output)
+            return installer.CmdResult(self.skill_rc, self.skill_output)
         return installer.CmdResult(0, "")
+
+
+class DeadShimRunner:
+    """A runner standing in for a CLI that is on PATH and cannot start.
+
+    The shape is this host's, measured (`cyc20261003-155102`): an asdf-style shim
+    whose interpreter is gone. `/bin/sh` starts, `exec` fails, and the shell exits
+    **126** with a line naming the missing interpreter.
+    """
+
+    def __init__(self, rc: int = 126):
+        self.rc = rc
+        self.output = (
+            "browser-harness: line 3: /opt/homebrew/Cellar/asdf/0.14.1/libexec/bin/"
+            "asdf: No such file or directory\n"
+        )
+
+    async def __call__(self, cmd, **kwargs):
+        return installer.CmdResult(self.rc, self.output)
 
 
 class FakeHttp:
@@ -336,6 +356,114 @@ class TestInstall:
         ))
         assert result["ok"] is True
         assert result["version"] == "unknown"
+
+
+# ── a CLI that is on PATH and cannot start ───────────────────────────
+#
+# `cli_available()` answers *is this name on PATH*, and the caller treats that as
+# *the CLI works*. Measured 2026-10-03 (`cyc20261003-155102`) with a shim whose
+# interpreter is gone: `which` resolves, the run exits 126, and the host was told
+# `browser-harness skill failed (exit 126)` — a message that names neither the
+# state nor the remedy, and drops the one line that says *which* interpreter is
+# missing. The run is the first place the two states can be told apart (probing
+# earlier would start a browser daemon), so that is where these arms read them.
+
+class TestCliThatCannotStart:
+    def test_startup_codes_carry_the_remedy_and_the_cli_output(self, tmp_home, with_cli):
+        """Both startup codes, and the evidence the old message discarded."""
+        ensure_catalog_file()
+        for rc in (126, 127):
+            runner = DeadShimRunner(rc=rc)
+            result = _run(installer.install_skill(
+                "browser-harness", confirmed=True, runner=runner, http_get=FakeHttp()
+            ))
+            error = result["error"]
+            assert "could not be started" in error, (
+                f"exit {rc} means the command never ran; the message must say so: {error!r}"
+            )
+            assert installer.install_hint() in error, (
+                f"the state this message describes is the one the remedy fixes, so the "
+                f"remedy has to be in it: {error!r}"
+            )
+            assert "libexec/bin/asdf" in error, (
+                f"the CLI's own line names the missing interpreter and was dropped: {error!r}"
+            )
+
+    def test_a_cli_that_ran_and_failed_is_not_told_to_reinstall(self, tmp_home, with_cli):
+        """The other direction, and the one that matters more: a *false* remedy.
+
+        Exit 2 is the CLI running and refusing. Telling that host to reinstall
+        would send them to fix the wrong thing — worse than saying nothing — so
+        the two messages must not overlap. Asserted first for that reason: the
+        wording below is about the message being *right*, this is about it not
+        being actively misleading.
+        """
+        ensure_catalog_file()
+        runner = FakeRunner(skill_output="no such skill\n", skill_rc=2)
+        result = _run(installer.install_skill(
+            "browser-harness", confirmed=True, runner=runner, http_get=FakeHttp()
+        ))
+        error = result["error"]
+        assert "Reinstall it" not in error and installer.install_hint() not in error, (
+            f"a CLI that started and refused is not a broken install, so the install "
+            f"remedy must not appear: {error!r}"
+        )
+        assert "failed (exit 2)" in error, f"the run's own outcome must be named: {error!r}"
+        assert "no such skill" in error, f"the CLI's output must be carried: {error!r}"
+
+    def test_a_command_that_is_not_there_at_all_says_the_same_thing(self, tmp_home, with_cli):
+        """The `OSError` entrance to the same state, with the same remedy.
+
+        `FileNotFoundError` is 127 arriving as an exception instead of an exit
+        code, so it gets one wording rather than the old bare "CLI not found on
+        PATH" — which named the state but no way out of it.
+        """
+        ensure_catalog_file()
+
+        async def missing(cmd, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory")
+
+        result = _run(installer.install_skill(
+            "browser-harness", confirmed=True, runner=missing, http_get=FakeHttp()
+        ))
+        error = result["error"]
+        assert "is not runnable" in error, error
+        assert installer.install_hint() in error, error
+        assert "No such file or directory" in error, (
+            f"the system's own words about why are evidence and must survive: {error!r}"
+        )
+
+    def test_the_remedy_has_one_home(self, tmp_home, no_cli):
+        """The install command is quoted from `install_hint()`, never re-typed.
+
+        The remedy now appears in two answers — `confirm_required` and the startup
+        failure — and a command spelled twice is a command that drifts apart.
+        """
+        ensure_catalog_file()
+        result = _run(installer.install_skill("browser-harness", confirmed=False))
+        assert result["install_command"] == installer.install_hint(), (
+            "the confirmation answer must quote the single home for the remedy"
+        )
+        assert installer.install_hint() == " ".join(installer.CLI_INSTALL_CMD)
+
+    def test_a_precondition_probe_cannot_answer_this_and_says_so(self, tmp_home):
+        """`cli_available()` keeps the presence answer, and the docstring says which.
+
+        A future editor who reads "True = the CLI is installed" would delete the
+        startup branch below as dead code. It is not dead: this arm pins that a
+        resolving name and a runnable CLI are two answers, which is the whole
+        reason the branch exists.
+        """
+        assert installer.cli_available() in (True, False)
+        doc = installer.cli_available.__doc__ or ""
+        assert "not when the CLI runs" in doc, (
+            f"the function's name promises more than it answers; the docstring must "
+            f"say what it answers: {doc[:200]!r}"
+        )
+        runner = DeadShimRunner()
+        assert _run(installer._publish_skill(
+            {"install": "self-publishing", "dest": "~/.emrg/skills/"}, runner
+        )).get("error"), "the run is where the two states part, and it must report one"
 
 
 # ── update check ─────────────────────────────────────────────────────
