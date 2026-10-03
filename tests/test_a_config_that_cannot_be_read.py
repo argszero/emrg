@@ -219,12 +219,13 @@ def test_a_config_the_entry_cannot_read_leaves_a_record_and_no_server(
         "the host is not shown"
     )
     record = json.loads(record_path.read_text(encoding="utf-8").splitlines()[-1])
-    # `crash` is the landed contract for a startup failure before the event loop
-    # (#1836, `cyc20261003-222355` resolved this branch onto it): the exit record's
-    # `reason` is one word for the *kind* of stop, and the cause lives in the
-    # traceback beside it. This branch's own version had written `config: <cause>`
-    # here; the landing kept the word and moved the cause, which is the reading the
-    # host's failed-start report already parses.
+    # `crash` is the landed word for a startup failure before the event loop (#1836,
+    # merged 2026-10-03 while this branch was open): the record's `reason` names the
+    # *kind* of stop, and the cause moved into the traceback beside it. This branch's
+    # own first version wrote `config: <cause>` here; the landing kept the word and
+    # carries the cause next to it, which is the shape the host's failed-start report
+    # already parses. What this branch adds to the landing is the line below: the log
+    # says *which file*, and a traceback carries a line and a column, not a path.
     assert record["reason"] == "crash", (
         f"{shape}: the record's reason is the word every pre-loop startup failure gets, "
         f"and the cause belongs in the traceback: {record}"
