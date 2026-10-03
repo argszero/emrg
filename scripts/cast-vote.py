@@ -186,7 +186,10 @@ Exit codes
        plain comment (a ❌ lower down is still found, so the asymmetry is on the approval
        side, which is the one that loses a vote silently); `count-unreadable`: the vote count could
        not be read; `already-voted`: this cycle already has a counted vote or a
-       veto here; `own-head-window`: the abstention clause is why nothing was
+       veto here; `pr-terminal`: the PR is already merged or closed, so this review
+       would land on a finished PR and count for nothing (measured 2026-10-03: a
+       parallel cycle merged #1836 four seconds after a scan listed it open);
+       `own-head-window`: the abstention clause is why nothing was
        posted — either the head was pushed by this cycle or by the one immediately
        before it, or the head itself could not be judged because the window cannot
        be decided from it (no CI run for the head, so its push time is the commit
@@ -251,6 +254,7 @@ RC2_CAUSES = (
     "cycle-id",          # no cycle id, several of them, or --cycle disagrees
     "verdict-mark",      # the counter reads no verdict out of the body: it would skip the review
     "count-unreadable",  # the sibling counter raised
+    "pr-terminal",       # the PR is merged or closed: nothing to vote on
     "already-voted",     # this cycle already has a counted vote or a veto here
     "own-head-window",   # the head is this cycle's own, or its window cannot be decided
     "landing-tree",      # the body names a tree that is not the one this merge would land
@@ -897,6 +901,27 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - the counter fails loud; say why, post nothing
         print(f"refusing to post: the vote count could not be read ({exc})", file=sys.stderr)
         return 2  # cause: count-unreadable
+    if getattr(verdict, "terminal", False):
+        # Asked of the counter, which owns the vocabulary (issue #1837). A finished PR
+        # is the one case `_state_of` cannot see: the counter reports it with no votes
+        # at all, so this cycle's state here reads `none` — indistinguishable, from
+        # this tool's side, from a PR nobody has reviewed yet. Posting then lands a
+        # review on a merged PR: it cannot count for anything, and `confirm` would
+        # report it as "posted but not readable as a vote" (exit 1) — an unmeasurable
+        # outcome for a known one. Measured 2026-10-03 (`cyc20261003-224625`): the
+        # merge of #1836 landed four seconds after a scan listed it open, which is the
+        # window this refusal exists for.
+        state = str(getattr(verdict, "state", "") or "finished")
+        merged_at = str(getattr(verdict, "merged_at", "") or "")
+        when = f" (merged {merged_at})" if merged_at else ""
+        print(
+            f"refusing to post: #{args.pr} is {state}{when} - a finished PR has nothing "
+            "to vote on, so this review would count for nothing. The counter reads it "
+            f"with no votes at all: re-read it with "
+            f"scripts/check-vote-count.py {args.pr}",
+            file=sys.stderr,
+        )
+        return 2  # cause: pr-terminal
     if state in {"counted", "veto"}:
         print(f"refusing to post: {note}", file=sys.stderr)
         return 2  # cause: already-voted
