@@ -113,39 +113,45 @@ def main() -> None:
     # end in — also records the effective PATH in emrgd.log, where the next
     # occurrence is one grep away.
     ensure_tool_dirs()
+    # Startup is inside the guard, not only the event loop. `load_config()` used to
+    # run before it, so a corrupt `~/.emrg/config.toml` -- measured on the host
+    # 2026-09-27: a stray `probe` line appended to line 48 by a sandbox probe -- raised
+    # out of `main()` **having called no logger at all**. `emrgd.log` received nothing,
+    # and by then `_redirect_std_streams()` had already re-pointed this child's own
+    # stderr at `emrgd-crash.log`, so the captured stderr was empty as well. The
+    # client's failure report reads exactly those two channels
+    # (`client/daemon_manager.py::_startup_failure_detail`), so the host was told
+    # "the child is already exited (exit=1)" with both channels silent -- while the
+    # traceback, naming the file, the line and the column, was one file over, in a
+    # file no failure report reads. The guard is the fix: every startup failure now
+    # reaches `emrgd.log` (the channel that report *does* read) and the exit record,
+    # whatever the crash log keeps as the low-level sink.
+    #
+    # A config failure additionally names the file in that one line. Measured
+    # 2026-10-03 (`cyc20261003-211427`) by running this entry as a child with HOME
+    # pinned to a scratch tree, for each shape in `CONFIG_READ_ERRORS`:
+    #
+    #     config        child rc  emrgd-exit.log  what the host was told
+    #     not UTF-8     1         NO RECORD       nothing but the PATH line
+    #     corrupt TOML  1         NO RECORD       nothing but the PATH line
+    #     missing       1         NO RECORD       nothing but the PATH line
+    #     valid         143       A RECORD        the exit record, reason named
+    #
+    # The traceback the generic handler carries names the *line and column* but not
+    # which file, so this handler says it in words. The exit record keeps the reason
+    # the landed contract gives every pre-loop startup failure (`crash`) and now
+    # carries the traceback with it; the row for a valid config is the control -- the
+    # record is written on every path that reaches `run_server`, and only those.
     try:
         config = load_config()
+        result = asyncio.run(run_server(config.llm))
     except CONFIG_READ_ERRORS as exc:
-        # The daemon's own config could not be read, so there is no server to run
-        # — and this is the one stop path that used to reach neither the log nor
-        # the record, because it happens *above* the try below. Measured
-        # 2026-10-03 (`cyc20261003-211427`) by running this entry as a child with
-        # HOME pinned to a scratch tree, for each shape in `CONFIG_READ_ERRORS`:
-        #
-        #     config        child rc  emrgd-exit.log  what the host was told
-        #     not UTF-8     1         NO RECORD       nothing but the PATH line
-        #     corrupt TOML  1         NO RECORD       nothing but the PATH line
-        #     missing       1         NO RECORD       nothing but the PATH line
-        #     valid         143       A RECORD        the exit record, reason named
-        #
-        # The traceback went to `emrgd-crash.log`, which the client's failed-start
-        # explainer deliberately does not read: it reads `emrgd.log` on purpose,
-        # so a cause that never reaches the logging system is a cause the host is
-        # not shown. The row for a valid config is the control — the record is
-        # written on every path that reaches `run_server`, and only those.
-        #
-        # So both halves are written here: the cause through the logger (one line,
-        # naming the file), and the durable record the module above promises for
-        # *every* daemon stop, normal or abnormal.
-        cfg_path = config_path()
         cause = f"{type(exc).__name__}: {exc}"
         logging.getLogger("emrg.server").critical(
-            "daemon cannot start: %s could not be read — %s", cfg_path, cause
+            "daemon cannot start: %s could not be read -- %s",
+            config_path(), cause, exc_info=True,
         )
-        DaemonExit(f"config: {cause}", 1, None).write_record()
-        sys.exit(1)
-    try:
-        result = asyncio.run(run_server(config.llm))
+        result = DaemonExit("crash", 1, traceback.format_exc())
     except KeyboardInterrupt:
         # SIGINT delivered at the event-loop poll point escapes the main
         # coroutine — record it here so no stop path is ever silent.

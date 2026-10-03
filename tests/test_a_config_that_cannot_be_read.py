@@ -219,14 +219,25 @@ def test_a_config_the_entry_cannot_read_leaves_a_record_and_no_server(
         "the host is not shown"
     )
     record = json.loads(record_path.read_text(encoding="utf-8").splitlines()[-1])
-    assert record["reason"].startswith("config: "), record
-    assert "Error" in record["reason"], (
-        f"{shape}: the record's reason has to name the cause, not just 'config': {record}"
+    # `crash` is the landed contract for a startup failure before the event loop
+    # (#1836, `cyc20261003-222355` resolved this branch onto it): the exit record's
+    # `reason` is one word for the *kind* of stop, and the cause lives in the
+    # traceback beside it. This branch's own version had written `config: <cause>`
+    # here; the landing kept the word and moved the cause, which is the reading the
+    # host's failed-start report already parses.
+    assert record["reason"] == "crash", (
+        f"{shape}: the record's reason is the word every pre-loop startup failure gets, "
+        f"and the cause belongs in the traceback: {record}"
+    )
+    assert "Error" in (record.get("traceback") or ""), (
+        f"{shape}: the record has to name the cause, not just that something crashed: "
+        f"{record}"
     )
     assert record["exit_code"] == 1
     assert str(cfg_path) in caplog.text, (
         f"{shape}: the log line has to name the file — the host has to be able to "
-        f"find it without guessing: {caplog.text!r}"
+        f"find it without guessing, and the traceback carries the line and column but "
+        f"not the path: {caplog.text!r}"
     )
 
 
