@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -385,7 +386,7 @@ def _run_daemon() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    from emrg.config import load_config
+    from emrg.config import config_path, load_config
     from emrg.tool_path import ensure_tool_dirs
 
     # Rant 2026-09-27T19:45:54 defect B — the same normalization the `emrgd`
@@ -393,10 +394,32 @@ def _run_daemon() -> None:
     # daemon see the same tool directories.
     ensure_tool_dirs()
 
+    # `load_config()` has three ways to fail, and this path used to answer exactly
+    # one of them: a **missing** file printed a sentence, while a file that is not
+    # valid TOML and a file that is not UTF-8 both raised out of `main()` as a raw
+    # traceback — measured 2026-10-03 on an isolated HOME (`cyc20261003-184104`),
+    # where the missing case printed
+    # `Error: config not found at <path> — create it with [llm] section` and the
+    # other two printed `tomllib.TOMLDecodeError: Expected '=' after a key ...`
+    # under a stack of `tomllib` internal frames.
+    #
+    # The daemon's own entry (`emrg/server/__main__.py`) reports all three now,
+    # because startup there is inside the guard that turns a crash into a record
+    # (issue #1835). This is the foreground twin of that path — the command the
+    # CLI's own start-failure message tells a host to run — and the rule is the
+    # same one launcher over: a failure names its cause where the reader is
+    # looking. The parser's own words carry the file, the line and the column, so
+    # they are kept; the frames, which name `tomllib`'s internals, are not.
     try:
         config = load_config()
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except tomllib.TOMLDecodeError as e:
+        print(f"Error: {config_path()} is not valid TOML — {e}", file=sys.stderr)
+        sys.exit(1)
+    except UnicodeDecodeError as e:
+        print(f"Error: {config_path()} is not UTF-8 text — {e}", file=sys.stderr)
         sys.exit(1)
 
     from emrg.server.daemon import run_server
