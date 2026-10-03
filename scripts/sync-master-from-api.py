@@ -26,7 +26,7 @@ previous behavior failed loud with "run git fetch when https returns" and forced
 a manual gh-api + mktree recovery dance.
 
 Usage:
-    python scripts/sync-master-from-api.py [--repo owner/name] [--ref master] [--repo owner/name] [--ref master]
+    python scripts/sync-master-from-api.py [--repo owner/name] [--ref master] [--no-fetch-objects]
 
 Behavior:
   * resolves repo from --repo or `git remote get-url origin`
