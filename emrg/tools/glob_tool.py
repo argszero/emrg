@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, resolve_tool_path
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,9 @@ class GlobTool(ToolExecutor):
         if not pattern:
             return ToolResult(name="glob", content="Error: no pattern provided", error=True)
 
-        cwd = Path(workdir).expanduser().resolve()
+        cwd, refusal = resolve_tool_path(workdir)
+        if refusal:
+            return ToolResult(name="glob", content=refusal, error=True)
         if not cwd.is_dir():
             return ToolResult(
                 name="glob",

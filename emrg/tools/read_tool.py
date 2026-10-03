@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, read_text_or_refusal, resolve_tool_path
 
 logger = logging.getLogger(__name__)
 
@@ -126,10 +126,26 @@ class ReadTool(ToolExecutor):
         if not file_path:
             return ToolResult(name="read", content="Error: no file_path provided", error=True)
 
-        path = Path(file_path).expanduser().resolve()
+        path, refusal = resolve_tool_path(file_path)
+        if refusal:
+            return ToolResult(name="read", content=refusal, error=True)
         logger.debug("read: %s (start_line=%d, byte_offset=%d)", path, start_line, start_line_byte_offset)
 
-        if not path.exists():
+        try:
+            exists = path.exists()
+        except OSError:
+            # `Path.exists()` answers a question about the filesystem and, since
+            # Python 3.13, raises when the filesystem will not answer it. "I
+            # could not tell" is not "it is not there", and reporting a missing
+            # file from a stat that never happened is a claim this tool has no
+            # measurement for (`emrg/sessions_index.py::liveness` is the same
+            # rule on the index side).
+            return ToolResult(
+                name="read",
+                content=f"Error: cannot read {path}: permission denied",
+                error=True,
+            )
+        if not exists:
             return ToolResult(
                 name="read",
                 content=f"Error: file not found: {path}",
@@ -138,7 +154,18 @@ class ReadTool(ToolExecutor):
 
         if path.is_dir():
             # Directory listing
-            entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
+            try:
+                entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
+            except OSError:
+                # A directory this process may not list is the same refusal as a
+                # file it may not read: the entries are not empty, they are
+                # unread (`Path.glob`'s swallow of the same error is the sibling
+                # defect, fixed on `feature/a-glob-says-what-it-skipped`).
+                return ToolResult(
+                    name="read",
+                    content=f"Error: cannot read {path}: permission denied",
+                    error=True,
+                )
             lines: list[str] = [f"Directory listing for {path}/:", ""]
             for e in entries:
                 suffix = "/" if e.is_dir() else ""
@@ -192,14 +219,9 @@ class ReadTool(ToolExecutor):
                 error=True,
             )
 
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return ToolResult(
-                name="read",
-                content=f"Error: cannot read {path} as text (binary file?)",
-                error=True,
-            )
+        text, refusal = read_text_or_refusal(path)
+        if refusal:
+            return ToolResult(name="read", content=refusal, error=True)
 
         all_lines = text.split("\n")
         # A file that ends with a newline splits into one element more than it has

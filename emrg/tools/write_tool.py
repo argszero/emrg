@@ -9,7 +9,7 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, resolve_tool_path
 from emrg.tools.file_policy import resolve_file_target
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,9 @@ class WriteTool(ToolExecutor):
         # session cwd — instead of being resolved against the daemon's own cwd,
         # which is the tree the predicates do not judge.
         target = resolve_file_target(file_path, arguments.get("workspace"))
-        path = Path(target).resolve()
+        path, refusal = resolve_tool_path(target)
+        if refusal:
+            return ToolResult(name="write", content=refusal, error=True)
 
         # One policy for both tools (host ruling 2026-09-28T21:50, issue #1553):
         # the boundary is the derivation the kernel-enforced dialects read too
@@ -96,7 +98,14 @@ class WriteTool(ToolExecutor):
         except OSError as e:
             return ToolResult(name="write", content=f"Error creating directory: {e}", error=True)
 
-        existed = path.exists()
+        try:
+            existed = path.exists()
+        except OSError:
+            return ToolResult(
+                name="write",
+                content=f"Error: cannot write {path}: permission denied",
+                error=True,
+            )
         try:
             path.write_text(content, encoding="utf-8")
         except OSError as e:

@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, resolve_tool_path
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,9 @@ class GrepTool(ToolExecutor):
                 name="grep", content=f"Error: invalid regex pattern: {e}", error=True
             )
 
-        root = Path(search_path).expanduser().resolve()
+        root, refusal = resolve_tool_path(search_path)
+        if refusal:
+            return ToolResult(name="grep", content=refusal, error=True)
         if not root.exists():
             return ToolResult(
                 name="grep", content=f"Error: path not found: {root}", error=True

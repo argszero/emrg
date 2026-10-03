@@ -9,7 +9,7 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, read_text_or_refusal, resolve_tool_path
 from emrg.tools.file_policy import resolve_file_target
 
 logger = logging.getLogger(__name__)
@@ -84,7 +84,9 @@ class EditTool(ToolExecutor):
         # cwd), not resolved against the daemon's own cwd, which is the tree the
         # predicates do not judge.
         target = resolve_file_target(file_path, arguments.get("workspace"))
-        path = Path(target).resolve()
+        path, refusal = resolve_tool_path(target)
+        if refusal:
+            return ToolResult(name="edit", content=refusal, error=True)
 
         # One policy for both tools — the same call the write tool makes, so the
         # two cannot drift (host ruling 2026-09-28T21:50, issue #1553;
@@ -100,7 +102,16 @@ class EditTool(ToolExecutor):
         if reason:
             return ToolResult(name="edit", content=reason, error=True)
 
-        if not path.exists():
+        try:
+            exists = path.exists()
+        except OSError:
+            # "I could not tell" is not "it is not there" (see `read_tool`).
+            return ToolResult(
+                name="edit",
+                content=f"Error: cannot read {path}: permission denied",
+                error=True,
+            )
+        if not exists:
             return ToolResult(
                 name="edit", content=f"Error: file not found: {path}", error=True
             )
@@ -124,12 +135,9 @@ class EditTool(ToolExecutor):
         # A file whose lines are *uniformly* CRLF gets them back; one that is LF takes
         # the same bytes it did before; a mixed file is written LF-only, which is what
         # this tool already did to it.
-        try:
-            raw = path.open("r", encoding="utf-8", newline="").read()
-        except UnicodeDecodeError:
-            return ToolResult(
-                name="edit", content=f"Error: cannot read {path} as text", error=True
-            )
+        raw, refusal = read_text_or_refusal(path, newline="")
+        if refusal:
+            return ToolResult(name="edit", content=refusal, error=True)
         crlf_file = raw.count("\r\n") > 0 and raw.count("\r\n") == raw.count("\n")
         content = raw.replace("\r\n", "\n").replace("\r", "\n")
 
