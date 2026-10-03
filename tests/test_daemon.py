@@ -681,6 +681,34 @@ def test_an_unreadable_index_costs_the_listing_not_the_connection(tmp_path):
     )
 
 
+def test_a_memory_the_walk_could_not_read_is_named_not_hidden(tmp_path):
+    """The listing must not show a shorter directory as if it were all of it.
+
+    Measured 2026-10-04: `MemoryStore.list()` dropped the file with a `logger.debug`,
+    so the frame carried one fewer memory and no reader — the panel, the host — could
+    tell that from a directory that really does hold one fewer. The guard is asserted
+    to really fail first, so the leg below is not vacuous.
+    """
+    server = _make_server()
+    directory = _memory_project(
+        tmp_path, b"# Memory Index\n", note_bytes=UNDECODABLE_MEMORY
+    )
+    with pytest.raises(UnicodeDecodeError):
+        (directory / "note.md").read_text(encoding="utf-8")
+
+    frame = _drive(server, {"type": "list_memories", "scope": "project", "cwd": str(tmp_path)})[0]
+
+    assert frame["type"] == "memories_list"
+    assert frame["memories"] == [], "an unreadable file is not a readable row"
+    assert "note.md" in frame["unreadable"], (
+        "the frame must name the file the walk could not read, or a shorter list "
+        "reads as a shorter directory"
+    )
+    assert "UnicodeDecodeError" in frame["unreadable"], (
+        "the note must say why, the way the index's own notice does"
+    )
+
+
 def test_a_readable_index_reaches_the_listing_verbatim(tmp_path):
     """The negative half: the ordinary path gains nothing but the same text."""
     server = _make_server()

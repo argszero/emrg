@@ -895,18 +895,21 @@ class MemoryStore:
         except OSError:
             logger.debug("memory index threshold check skipped", exc_info=True)
 
-    def _rebuild_index(self) -> MemoryIndex:
-        """Rebuild the entire index by scanning all .md files."""
+    def _rebuild_index(self) -> tuple[MemoryIndex, str]:
+        """The index a full scan builds, and a sentence naming what it could not read.
+
+        Returns `(index, note)`, the note `""` when every file was read. It is carried
+        out rather than logged because the caller's next act is to *persist* this
+        index: a full rewrite that omits a file it could not read deletes that file's
+        row and leaves a memory on disk that nothing indexes, which is a loss the
+        tolerant `except` would otherwise make silent. Both halves come from
+        `_read_directory`, so this and `list()` cannot disagree about what is here.
+        """
         idx = MemoryIndex()
-        for path in sorted(self.directory.glob("*.md")):
-            if path.name == "MEMORY.md":
-                continue
-            try:
-                mem = MemoryFile.from_file(path)
-                idx.add_entry(mem)
-            except (OSError, ValueError):
-                logger.debug("Skipping unparseable memory: %s", path, exc_info=True)
-        return idx
+        memories, unreadable = self._read_directory()
+        for mem in memories:
+            idx.add_entry(mem)
+        return idx, self._unreadable_note(unreadable)
 
     # ── File lookup ────────────────────────────────────────────
 
@@ -1085,26 +1088,75 @@ class MemoryStore:
             return None
         return MemoryFile.from_file(path)
 
+    def _read_directory(self) -> tuple[list[MemoryFile], list[str]]:
+        """One walk: every memory that parses, and a name for every file that did not.
+
+        Returns `(memories, unreadable)`. Both halves come from one walk on purpose,
+        the shape `_scan` already uses: a reader handed only the list answers "what is
+        in this directory" with a number it did not measure. The catch is
+        `(OSError, ValueError)`, and `UnicodeDecodeError` is a `ValueError` subclass —
+        `MemoryIndex.save` writes with `path.write_text` (truncate, then write), so a
+        reader can observe a partial file, and a cut inside a multi-byte character is a
+        decode error. Measured 2026-09-24 through `_scan` on that same race: 68 of 120
+        requests answered "not found" for a memory that was on disk.
+        """
+        memories: list[MemoryFile] = []
+        unreadable: list[str] = []
+        for path in sorted(self.directory.glob("*.md")):
+            if path.name == "MEMORY.md":
+                continue
+            try:
+                memories.append(MemoryFile.from_file(path))
+            except (OSError, ValueError) as exc:
+                unreadable.append(f"{path.name} ({type(exc).__name__})")
+                logger.debug("Skipping unparseable memory: %s", path, exc_info=True)
+        return memories, unreadable
+
+    @staticmethod
+    def _unreadable_note(unreadable: list[str]) -> str:
+        """The sentence a caller gets when a walk could not read every file.
+
+        `""` when every file was read, so the note tests the way `get_with_reason`'s
+        reason does: empty means "this is all of them".
+        """
+        if not unreadable:
+            return ""
+        return (
+            f"{len(unreadable)} file(s) in the memory directory could not be read: "
+            + ", ".join(unreadable)
+        )
+
     def list(
         self,
         type_filter: str | None = None,
         status_filter: str | None = None,
     ) -> list[MemoryFile]:
-        """List all memories, optionally filtered by type or status."""
-        memories: list[MemoryFile] = []
-        for path in sorted(self.directory.glob("*.md")):
-            if path.name == "MEMORY.md":
-                continue
-            try:
-                mem = MemoryFile.from_file(path)
-                if type_filter and mem.type != type_filter:
-                    continue
-                if status_filter and mem.status != status_filter:
-                    continue
-                memories.append(mem)
-            except (OSError, ValueError):
-                logger.debug("Skipping unparseable memory: %s", path, exc_info=True)
-        return memories
+        """List all memories, optionally filtered by type or status.
+
+        The parsing half of `list_with_reason`, which is the reading that also names
+        the files the walk could not read; a caller that shows the directory wants
+        both, and not being able to tell the two apart from a bare list is why the
+        pair exists.
+        """
+        return self.list_with_reason(type_filter, status_filter)[0]
+
+    def list_with_reason(
+        self,
+        type_filter: str | None = None,
+        status_filter: str | None = None,
+    ) -> tuple[list[MemoryFile], str]:
+        """`list()`, plus a sentence naming every file the walk could not read.
+
+        Different answers a bare list cannot separate: an empty note says "these are
+        every memory in the directory", a non-empty one says "I could not finish
+        looking". `get_with_reason` splits the same pair for one id.
+        """
+        memories, unreadable = self._read_directory()
+        if type_filter:
+            memories = [m for m in memories if m.type == type_filter]
+        if status_filter:
+            memories = [m for m in memories if m.status == status_filter]
+        return memories, self._unreadable_note(unreadable)
 
     def update(self, mem_id: str, **kwargs) -> MemoryFile | None:
         """Update fields of an existing memory.
@@ -1168,16 +1220,25 @@ class MemoryStore:
 
     # ── Maintenance ────────────────────────────────────────────
 
-    def rebuild_index(self) -> None:
-        """Rebuild MEMORY.md from all .md files on disk.
+    def rebuild_index(self) -> str:
+        """Rebuild MEMORY.md from all .md files on disk. Returns "" when it did.
 
-        Useful if the index gets out of sync or corrupted.
+        Useful if the index gets out of sync or corrupted. It **fails closed**: a file
+        this scan could not read is a row the rebuilt index would drop, and a rewrite
+        that drops it leaves a memory on disk that nothing indexes. So the on-disk
+        index is left as it is and the returned sentence names the files to fix first;
+        the walk's tolerant `except (OSError, ValueError)` is what a concurrent writer
+        trips, since `MemoryIndex.save` truncates before it writes.
         """
-        index = self._rebuild_index()
+        index, note = self._rebuild_index()
+        if note:
+            logger.warning("index rebuild refused: %s", note)
+            return note
         self._save_index(index, "rebuild_index")
         logger.info(
             "index rebuilt: %d entries in %s", len(index.entries), self.index_path
         )
+        return ""
 
     @property
     def count(self) -> int:

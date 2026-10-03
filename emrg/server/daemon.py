@@ -6261,7 +6261,7 @@ class EmrgServer:
             store = SessionMemoryStore(session_dir)
             index_path = store.index_path
 
-        memories = store.list()
+        memories, unreadable = store.list_with_reason()
         index_text = self._index_for_frame(index_path)
 
         await self._send(ws, {
@@ -6270,6 +6270,12 @@ class EmrgServer:
             "directory": str(store.directory),
             "index_path": str(index_path),
             "index": index_text,
+            # A file the walk could not read is a memory the panel below would simply
+            # not show, and a shorter list is indistinguishable from a shorter
+            # directory. `list_with_reason` names them (`get_with_reason` splits the
+            # same pair for one id), and the field is carried whether or not the
+            # client renders it — a reading dropped here cannot be recovered.
+            "unreadable": unreadable,
             "memories": [
                 {
                     "id": m.id,

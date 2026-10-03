@@ -2062,6 +2062,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             lines.append("Type /memory project for project memories.")
                         else:
                             lines.append("  (no memories yet)")
+                        # A shorter list than the directory holds is not visible in the
+                        # list itself: `list_with_reason` names the files the walk could
+                        # not read, and dropping the note here would show an unreadable
+                        # memory as an absent one.
+                        unreadable = data.get("unreadable", "")
+                        if unreadable:
+                            lines.append("")
+                            lines.append(f"  ⚠ {unreadable}")
                         chat.add("system", "\n".join(lines))
                     term.render()
                     continue
