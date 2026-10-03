@@ -35,7 +35,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: directory rather than on `*.py`: a document naming `packaging/gen-assets.sh` or
 #: `install.sh` names something outside this class, and a rule that flags them would be a
 #: rule with exceptions.
-REFERENCE = re.compile(r"scripts/([A-Za-z0-9_.-]+\.(?:py|sh))")
+#:
+#: `/` is in the name class, and the reason is the direction this guard is allowed to be
+#: wrong in. The first version used `[A-Za-z0-9_.-]+` - a **flat** name - so a document
+#: naming `scripts/tools/foo.py` matched the anchor and then failed on the `/`, and the
+#: reader returned **nothing** for it. That is not "this document names no script": it is a
+#: recognized shape read as an absent one, which is the one failure a reader of this family
+#: may not have (a name that does not exist is reported; a shape that was not classified is
+#: invisible). No such reference exists in the tracked documents today (measured
+#: 2026-10-03), so the fix changes no verdict - it removes a silence.
+REFERENCE = re.compile(r"scripts/([A-Za-z0-9_./-]+\.(?:py|sh))")
 
 #: Stated limit: a URL to *another* repository's `scripts/...` path would be read as a
 #: reference to ours. No such reference exists in the tracked documents today (measured
@@ -190,3 +199,53 @@ def test_the_references_the_documents_carry_are_found_individually() -> None:
         f"evolution_prompt.md names only {len(prompt)} scripts: {prompt} - it is the "
         f"instruction set every cycle runs, and a reference there is a command"
     )
+
+
+class TestTheReaderClassifiesBeforeItReports:
+    """A shape the reader recognises but cannot classify must be read, not dropped.
+
+    The anchor is the `scripts/` directory, and everything after it up to the extension is
+    the script's location. The first version of the name class held no `/`, so a reference
+    to a script one directory down - `scripts/tools/foo.py` - matched the anchor and then
+    failed on the `/`: the reader returned **nothing** for it, and nothing is what a document
+    that names no script returns. Those two answers must not be the same answer.
+
+    Both directions are pinned, and the second one is the point: this is not a change to a
+    verdict (nothing in the tree is nested today) but the removal of a silence.
+    """
+
+    def test_a_nested_script_path_is_a_reference(self) -> None:
+        assert referenced_scripts("see `scripts/tools/gone.py` for the rest") == ["tools/gone.py"]
+
+    def test_a_nested_reference_is_reported_when_the_script_is_absent(self) -> None:
+        """The consequence, in the rule's own vocabulary - and the half the silence hid."""
+        text = "run `scripts/tools/gone.py` then `scripts/check-doc-count.py`\n"
+        found = missing_scripts(text, lambda name: name == "check-doc-count.py")
+        assert found == ["tools/gone.py"], (
+            f"a nested reference the script does not exist for was not reported, so the "
+            f"guard is silent exactly where a reader would lose the round: {found!r}"
+        )
+
+    def test_the_anchor_still_excludes_other_directories(self) -> None:
+        """The class boundary is unchanged: only paths under `scripts/` are references."""
+        text = "`packaging/gen-assets.sh`, `tests/test_check_doc_count.py`, `install.sh`\n"
+        assert referenced_scripts(text) == [], referenced_scripts(text)
+
+    def test_the_real_corpus_has_no_reference_the_reader_drops(self) -> None:
+        """The control over the real documents: what the reader finds, the corpus contains.
+
+        Written as a *comparison* rather than a count of captured names, because a count
+        cannot see a dropped reference - the dropped one is precisely the one not counted.
+        The broad pattern accepts any path characters, so anything it sees that the rule's
+        reader does not is a shape this rule does not classify.
+        """
+        broad = re.compile(r"scripts/([A-Za-z0-9_./*?\[\]-]+\.(?:py|sh))")
+        dropped: list[str] = []
+        for name in _tracked_markdown():
+            text = (REPO_ROOT / name).read_text(encoding="utf-8")
+            for reference in sorted(set(broad.findall(text)) - set(referenced_scripts(text))):
+                dropped.append(f"{name}: {reference}")
+        assert not dropped, (
+            "these references are in the documents and are not classified as references, so "
+            "this guard reports nothing about them:\n  " + "\n  ".join(dropped)
+        )
