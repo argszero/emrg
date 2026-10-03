@@ -178,6 +178,27 @@ def config_dir() -> Path:
     return Path.home() / ".emrg"
 
 
+#: Every way **reading the config file itself** can fail, in one home.
+#:
+#: Three shapes, and they are one class because a caller cannot tell them apart by
+#: asking "could I read the config?":
+#:
+#: * **`OSError`** — no such file, a directory where the file should be, a
+#:   permission bit. (`FileNotFoundError` and `IsADirectoryError` are members.)
+#: * **`tomllib.TOMLDecodeError`** — bytes that are not valid TOML.
+#: * **`UnicodeDecodeError`** — bytes that are not valid UTF-8. It is a
+#:   **`ValueError`, not an `OSError`**, which is why a tuple spelled
+#:   `(OSError, tomllib.TOMLDecodeError)` catches two of the three and lets this
+#:   one escape.
+#:
+#: Measured 2026-10-03 (`cyc20261003-211427`) on the two section loaders below,
+#: which spelled that shorter tuple: a missing file, a corrupt file and a
+#: directory all returned their defaults, and a file holding `\xff` raised out of
+#: both of them — so the *same* input class (a config this reader cannot read)
+#: was answered two different ways depending on which byte was wrong.
+CONFIG_READ_ERRORS = (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError)
+
+
 def config_path() -> Path:
     """Returns the config file path."""
     home = Path.home()
@@ -275,7 +296,7 @@ def load_sandbox_config() -> SandboxConfig:
     if cfg_path.exists():
         try:
             data = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError):
+        except CONFIG_READ_ERRORS:
             data = {}
         cfg = _sandbox_from(data)
     return cfg
@@ -286,13 +307,17 @@ def load_update_config() -> UpdateConfig:
 
     The daemon constructs the UpgradeManager from this helper. Missing config
     file or missing section → defaults (enabled=True, delay_minutes=1440).
+    An unreadable file is the third case and takes the same branch:
+    `CONFIG_READ_ERRORS` names all three ways that can happen — a non-UTF-8 file
+    is one of them, and reading the section is worth exactly as much whichever
+    byte is wrong.
     """
     cfg_path = config_path()
     if not cfg_path.exists():
         return UpdateConfig()
     try:
         data = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+    except CONFIG_READ_ERRORS:
         return UpdateConfig()
     update_data = data.get("update", {})
     return UpdateConfig(
