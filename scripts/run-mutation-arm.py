@@ -17,9 +17,11 @@ killed" is wrong in ways that *look identical* to success:
   arms "killed" while none had run, and this tool's first own use reproduced it three
   times in one sitting.
 * **the mutation did not parse.** A source edit that produces invalid Python makes
-  pytest exit **4** as well, so it is indistinguishable from the case above by exit
-  code alone - and equally indistinguishable from a real kill to a harness that only
-  asks "did it fail?".
+  pytest *error* rather than fail, and pytest returns the same code for an error as
+  for a failure: **1** when a fixture loads the module, **2** when collection imports
+  it (both measured 2026-09-26, the table below). So an error is indistinguishable
+  from a real kill to a harness that only asks "did it fail?" - and it is *not* exit
+  4, which means "no test ran because the node id does not resolve".
 * **the restore is not a snapshot.** Restoring a mutated file with `git checkout --`
   silently reverts *uncommitted* work: an arm run inside a cycle, whose change is not
   committed yet, deletes the very change the next arm mutates.

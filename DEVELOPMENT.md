@@ -195,6 +195,9 @@ uv run python -m emrg     # launch TUI
 uv run python -c "from emrg.client.app import run_client"   # import check
 uv run python -m emrg --help
 uv run --no-sync python3 scripts/check-rant-citations.py    # every citation names its public record
+uv run --no-sync python3 scripts/run-mutation-arm.py \
+    --file <file> --old <text> --new <text> \
+    --node <pytest node id> --expect <the assertion text>   # one judged mutation arm
 ```
 
 `scripts/check-rant-citations.py` answers one question about the instruction prose
@@ -209,6 +212,23 @@ covers the **running** copy — the one resolved from the loaded module, i.e.
 are swept like every other file's and the frozen-debt list is empty (the mechanisms that
 hold a site out of the rule are exercised by synthetic tests rather than by a real
 entry). `--measure` prints the whole inventory.
+
+`scripts/run-mutation-arm.py` runs **one mutation arm and judges it** — the evidence that a test depends
+on the line it claims to test. Break the line and the test must die; a test that survives it is not
+testing what it says. It exists because "the run failed, so the mutation was caught" is wrong in ways
+that look identical to success: a node id that does not resolve — a class method named without its class
+— makes pytest exit **4** having run *nothing*, and a mutation that breaks the module's syntax makes
+pytest *error*, which returns the same exit code as a failure (**1** when a fixture loads the module,
+**2** when collection imports it). So the judgement is three-valued rather than pass/fail — `KILLED`
+(the target failed on the `--expect` text), `SURVIVED` (it still passed), `UNJUDGEABLE` (the run
+separates neither; the reason is named and the assertion lines the run really echoed are printed, so the
+retry is one step). Exit `0`/`1`/`2` are those three; `3` TARGET-BROKEN (the target did not collect or
+pass *before* the mutation), `4` NO-MUTATION (the anchor does not occur exactly once), `5`
+RESTORE-MISMATCH. It snapshots the file, pre-flights the target unmutated, pins `HOME`/`TMPDIR` for the
+child only, and restores **byte for byte** on every path, including its own failure — so an arm cannot
+leave a mutated tree behind. `--expect` is the failing assertion's own source line, not the test's
+message: pytest echoes that line, and a fragment copied from a message can be missed when an earlier
+assertion in the same test fires first.
 
 ### Electron GUI
 

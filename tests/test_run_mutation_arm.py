@@ -33,12 +33,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import ast
+import re
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "run-mutation-arm.py"
+DOC = REPO_ROOT / "DEVELOPMENT.md"
 
 SUBJECT = '''"""A tiny subject for the arm runner's own tests."""
 
@@ -413,3 +416,166 @@ class TestTheSmallReadings:
         (line,) = mod._assertion_lines(f"E           {long_assertion}\n")
         assert len(line) == mod._ASSERTION_MAX_CHARS, len(line)
         assert long_assertion.startswith(line), "the truncation must be a prefix, not a re-wrap"
+
+
+#: How a reader meets this tool. `DEVELOPMENT.md` is where a reader who is not reading
+#: the script's own header finds it, and until this pin existed the tool was named in
+#: **no** tracked document at all - cycles that needed an arm wrote one by hand instead,
+#: which is the drift the tool's header opens by describing.
+_VERDICT_NAMES = ("KILLED", "SURVIVED", "UNJUDGEABLE", "TARGET-BROKEN", "NO-MUTATION",
+                  "RESTORE-MISMATCH")
+
+
+def _documented_invocation(doc: str) -> str:
+    """The shell block in `doc` that invokes the arm runner, continuation lines included.
+
+    Located by the tool's own name rather than by line number, so an edit above it cannot
+    make this measure a different block; the block ends at the first line that is not a
+    backslash continuation.
+    """
+    lines = doc.splitlines()
+    for index, line in enumerate(lines):
+        if "run-mutation-arm.py" in line and line.rstrip().endswith("\\"):
+            block = [line]
+            for following in lines[index + 1:]:
+                block.append(following)
+                if not following.rstrip().endswith("\\"):
+                    break
+            return "\n".join(block)
+    return ""
+
+
+def _flags_in(text: str) -> set[str]:
+    """Every long option spelled in `text`."""
+    return set(re.findall(r"--[a-z][a-z0-9-]*", text))
+
+
+def _documented_tool_flags(doc: str) -> set[str]:
+    """The options the documented invocation passes to the **tool**, not to its launcher.
+
+    The block opens with the launcher's own command (`uv run --no-sync python3 ...`), and
+    `--no-sync` is `uv`'s flag: reading the whole block would report it as an option the
+    tool must accept. So the cut is the tool's own path, which is also the one line that
+    makes it this tool's invocation and not another script's.
+    """
+    invocation = _documented_invocation(doc)
+    if "run-mutation-arm.py" not in invocation:
+        return set()
+    return _flags_in(invocation.split("run-mutation-arm.py", 1)[1])
+
+
+def _real_flags(mod, capsys) -> set[str]:
+    """The tool's own option list, asked of argparse rather than transcribed.
+
+    Read from `--help` because the parser is built inside `main`: a second list here would
+    be a copy of the flags, and a copy is what drifts.
+    """
+    with pytest.raises(SystemExit) as exit_info:
+        mod.main(["--help"])
+    assert exit_info.value.code == 0, "asking for help must not be an error"
+    return _flags_in(capsys.readouterr().out)
+
+
+def _module_docstring(path: Path) -> str:
+    return ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or ""
+
+
+def _exit_code_table(text: str) -> dict[str, str]:
+    """Code -> verdict, as a header writes it: a digit, then the verdict in capitals."""
+    return {code: name for code, name in re.findall(r"^\s*(\d)\s+([A-Z][A-Z0-9-]*)\s", text, re.M)}
+
+
+class TestTheExitCodeTableIsTheConstants:
+    """The header's table is what a caller reads to interpret an exit code, so it is read.
+
+    The judgement is built on these six codes, and the table is prose: correcting a code
+    in `EXIT_*` and leaving the header as it was would send a caller to the wrong reading
+    with nothing red. That already happened one line over - the header claimed a mutation
+    that does not parse exits **4** ("no test ran, the node id does not resolve") while its
+    own measured table gives 1 or 2 for it (found 2026-10-03, corrected there).
+    """
+
+    def test_the_header_table_matches_the_modules_own_constants(self, mod) -> None:
+        expected = {
+            str(mod.EXIT_KILLED): mod.KILLED,
+            str(mod.EXIT_SURVIVED): mod.SURVIVED,
+            str(mod.EXIT_UNJUDGEABLE): mod.UNJUDGEABLE,
+            str(mod.EXIT_TARGET_BROKEN): mod.TARGET_BROKEN,
+            str(mod.EXIT_NO_MUTATION): mod.NO_MUTATION,
+            str(mod.EXIT_RESTORE_MISMATCH): mod.RESTORE_MISMATCH,
+        }
+        assert _exit_code_table(_module_docstring(SCRIPT)) == expected
+
+    def test_the_table_is_the_family_this_test_reads(self) -> None:
+        """The extractor's own shape: a line that is not `digit verdict` is not a row.
+
+        Without this, a regex that matched nothing would leave the comparison above
+        comparing two empty dictionaries and passing for a header with no table at all.
+        """
+        text = (
+            "Exit codes\n----------\n"
+            "    0  KILLED       the mutation landed\n"
+            "a node id that does not resolve         4   (USAGE_ERROR)\n"
+            "1. apply the replacement\n"
+        )
+        assert _exit_code_table(text) == {"0": "KILLED"}
+
+
+class TestTheDocumentNamesTheTool:
+    """`DEVELOPMENT.md` has to name the tool *and* the flags it names have to exist.
+
+    A presence check on the tool's name would accept a paragraph whose invocation has
+    been left behind by a rename, so the flags the document spells are compared with the
+    ones argparse really has. What it deliberately cannot see: a document that describes
+    the tool's behaviour wrongly in prose - only the spelling of the flags is mechanical.
+    """
+
+    def test_the_document_invokes_the_arm_runner(self) -> None:
+        invocation = _documented_invocation(DOC.read_text(encoding="utf-8"))
+        assert invocation.strip(), (
+            "DEVELOPMENT.md no longer shows how to run scripts/run-mutation-arm.py - the "
+            "tool was documented 2026-10-03 because cycles were hand-rolling arms instead"
+        )
+        for flag in ("--file", "--old", "--new", "--node", "--expect"):
+            assert flag in invocation, f"the documented invocation dropped {flag}"
+
+    def test_every_flag_the_document_spells_is_a_flag_the_tool_has(self, mod, capsys) -> None:
+        documented = _documented_tool_flags(DOC.read_text(encoding="utf-8"))
+        assert documented, "the invocation named no flag at all, so this would measure nothing"
+        unknown = documented - _real_flags(mod, capsys)
+        assert not unknown, (
+            f"DEVELOPMENT.md spells {sorted(unknown)}, which the tool does not accept - a "
+            "renamed flag leaves the document showing an invocation that cannot run"
+        )
+
+    def test_the_check_would_fire_on_a_flag_the_tool_does_not_have(self, mod, capsys) -> None:
+        """The control: without it, a `_flags_in` that returned nothing would pass above."""
+        assert _flags_in("--file x --not-a-flag y") - _real_flags(mod, capsys) == {"--not-a-flag"}
+
+    def test_the_document_names_every_verdict_the_tool_can_print(self) -> None:
+        text = DOC.read_text(encoding="utf-8")
+        for name in _VERDICT_NAMES:
+            assert name in text, (
+                f"a reader who meets the tool in DEVELOPMENT.md cannot interpret "
+                f"{name!r} because the document does not name it"
+            )
+
+    def test_the_exit_codes_the_document_spells_are_the_tools_own(self, mod) -> None:
+        """The `3`/`4`/`5` pairs the document writes are compared with the constants.
+
+        The `0`/`1`/`2` sentence names its three verdicts by order rather than by pair, so
+        it is not extractable and the test above covers their presence instead.
+        """
+        spelled = dict(re.findall(r"`(\d)`\s+([A-Z][A-Z-]+)", DOC.read_text(encoding="utf-8")))
+        assert spelled, "no `code` VERDICT pair was found - this assertion would measure nothing"
+        for code, name in spelled.items():
+            assert int(code) in (
+                mod.EXIT_KILLED, mod.EXIT_SURVIVED, mod.EXIT_UNJUDGEABLE,
+                mod.EXIT_TARGET_BROKEN, mod.EXIT_NO_MUTATION, mod.EXIT_RESTORE_MISMATCH,
+            ), f"{code} is not an exit code this tool can produce"
+        expected = {
+            str(mod.EXIT_TARGET_BROKEN): mod.TARGET_BROKEN,
+            str(mod.EXIT_NO_MUTATION): mod.NO_MUTATION,
+            str(mod.EXIT_RESTORE_MISMATCH): mod.RESTORE_MISMATCH,
+        }
+        assert spelled == expected
