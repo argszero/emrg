@@ -2230,6 +2230,44 @@ class TestWSWorkspacePanel:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_read_file_counts_a_terminated_file_by_its_lines(self):
+        """A file's terminating newline terminates its last line; it does not add one.
+
+        Measured on master `bc114ab`, 2026-10-02: a 10-line file written with
+        `"".join(f"line{i}\\n")` came back as `total_lines: 11` with `truncated: true`
+        for a window that covered the whole file — so a client was offered a next page
+        whose only line is empty.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                f = work / "terminated.txt"
+                f.write_text("".join(f"line{i}\n" for i in range(1, 11)), encoding="utf-8")
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {"type": "read_file", "path": str(f)})
+                        assert resp["type"] == "file_content"
+                        assert resp["total_lines"] == 10
+                        # A window of exactly the file's length leaves nothing over.
+                        resp2 = await self._cmd(ws, {
+                            "type": "read_file", "path": str(f), "line_limit": 10,
+                        })
+                        assert resp2["truncated"] is False
+                        # One line beyond it, and the page is owed.
+                        resp3 = await self._cmd(ws, {
+                            "type": "read_file", "path": str(f), "line_limit": 9,
+                        })
+                        assert resp3["truncated"] is True
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_read_file_binary_and_large(self):
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:

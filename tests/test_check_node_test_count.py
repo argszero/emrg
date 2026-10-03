@@ -48,6 +48,99 @@ def mod():
     return _load_module()
 
 
+def _cannot_ask_the_runners(mod) -> str | None:
+    """The precondition this host fails, or ``None`` when both are met.
+
+    There are **two**, and the pair is the point: the tool resolves `npm` through
+    PATH and then runs it inside a directory it expects to hold `node_modules`.
+    Having one is not having the other.
+
+    Measured 2026-10-03 (`cyc20261003-065523`) on the evolution host: the
+    renderer's `node_modules` is present while `npm`, `node` and `npx` are all
+    absent from PATH. The integration test let the run through on the
+    `node_modules` check alone, so `_run` raised `NodeCountError: cannot run 'npm'`
+    and a host that simply *cannot ask* reported a failure - while the docstring
+    beside it promised a skip. One screen down, `test_a_bare_name_starts_the_real_runner`
+    already skips for exactly this reason and states it ("a missing toolchain is
+    not a defect in `_run`"); this helper is that rule, applied to the one test that
+    needs both halves.
+    """
+    if not (mod.RENDERER_ROOT / "node_modules").exists():
+        return f"no node_modules under {mod.RENDERER_ROOT}"
+    if mod.shutil.which("npm") is None:
+        return "no `npm` on PATH"
+    return None
+
+
+def test_the_runner_precondition_names_which_half_is_missing(
+    mod, monkeypatch, tmp_path
+) -> None:
+    """Both halves, each isolated, plus the case where neither is missing.
+
+    The defect this replaces was a check that could not tell its two subjects
+    apart - it asked about `node_modules` and returned a verdict about the whole
+    toolchain - so the three directions are the whole content: the modules missing,
+    the executable missing, and neither. The third is what keeps the helper from
+    turning an askable host into a permanent skip.
+    """
+    installed = tmp_path / "renderer"
+    installed.mkdir()
+    monkeypatch.setattr(mod, "RENDERER_ROOT", installed)
+
+    # `npm` present, no node_modules: the modules are what is missing.
+    monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert "node_modules" in (_cannot_ask_the_runners(mod) or ""), (
+        "a host without the renderer's node_modules must be told so by name"
+    )
+
+    # node_modules present, no `npm`: the executable is what is missing. This is
+    # the half the integration test used to walk past - measured on the evolution
+    # host, where node_modules is installed and no node is on PATH at all.
+    (installed / "node_modules").mkdir()
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+    assert "npm" in (_cannot_ask_the_runners(mod) or ""), (
+        "a host with node_modules but no `npm` must be told so by name - checking "
+        "the modules alone let this host reach `_run` and report a failure"
+    )
+
+    # Both present: nothing is missing, so the integration test has to run.
+    monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert _cannot_ask_the_runners(mod) is None, (
+        "an askable host must not be skipped - a helper that always answers "
+        "would make the integration test green forever by never running"
+    )
+
+
+def test_the_integration_test_gates_on_both_halves() -> None:
+    """The call site, which the helper's own pins cannot reach.
+
+    The helper can be correct while the test beside it keeps the old one-line
+    check - that is exactly the state this cycle found. Pinned on the body, in the
+    shape `tests/test_check_merge_order.py` pins its forced refspec: the call is
+    what has to be there, and it is not observable through the helper.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    # Anchored at a line start with the parameter list, because this test's own
+    # source contains the name in a string literal - an unanchored search found
+    # *this* function first and pinned the wrong body.
+    marker = "\ndef test_real_tree_is_consistent("
+    assert marker in source, "the integration test this pin is about is gone"
+    body = source.split(marker, 1)[1].split("\ndef ", 1)[0]
+    assert "Integration: the tool reports OK" in body, (
+        "the extraction did not land on the integration test, so this pin would "
+        f"assert against some other function: {body[:200]!r}"
+    )
+    assert "_cannot_ask_the_runners(mod)" in body, (
+        "the integration test no longer asks the two-part precondition, so a host "
+        "with node_modules and no `npm` reports a failure instead of a skip"
+    )
+    assert 'node_modules").exists()' not in body, (
+        "the integration test still carries its own node_modules existence check: "
+        "one half standing in for two is the defect, and a second copy of it is a "
+        "second place to keep in step"
+    )
+
+
 def _doc(tmp_path: Path, renderer: int | str, gui: int | str) -> Path:
     """A minimal Agent.md copy carrying both Node count lines."""
     head = (
@@ -334,12 +427,16 @@ def test_real_tree_is_consistent() -> None:
 
     This is the test that actually talks to vitest and node --test, which is the
     whole point of the tool - the static guard next door can only reason about
-    source text. It needs node_modules, so it skips (loudly) when they are
-    absent, e.g. in a bare CI checkout of the pytest job.
+    source text. It needs **both** halves of the toolchain: the renderer's
+    `node_modules` and `npm` itself on PATH. Either one absent means the host cannot
+    ask the runners, which is a skip naming what is missing (e.g. in a bare CI
+    checkout of the pytest job) and never a failure - a red here would be read as a
+    drifted count.
     """
     mod = _load_module()
-    if not (mod.RENDERER_ROOT / "node_modules").exists():
-        pytest.skip(f"no node_modules under {mod.RENDERER_ROOT}: cannot ask the runners")
+    blocked = _cannot_ask_the_runners(mod)
+    if blocked is not None:
+        pytest.skip(f"{blocked}: cannot ask the runners")
     renderer = mod.measured_renderer()
     gui = mod.measured_gui()
     documented = mod.documented_counts((REPO_ROOT / "Agent.md").read_text(encoding="utf-8"))
