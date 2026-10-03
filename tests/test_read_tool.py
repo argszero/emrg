@@ -23,6 +23,22 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _line_count(text: str) -> int:
+    """How many lines `text` has, by the rule the tools now share.
+
+    A file's last newline **ends** its last line; it does not add one (#1810). So a
+    terminated file has as many lines as it has newlines, an unterminated one has one
+    more, and a zero-byte file has none at all. `text.split("\\n")` is not that count:
+    it yields a trailing `''` for every terminated file, which is the position *after*
+    the last terminator rather than a line — so a test that counts that element asserts
+    a length the tool never reports. These tests read the length out of the tool's own
+    message, so they must count the way it counts.
+    """
+    if not text or text.endswith("\n"):
+        return text.count("\n")
+    return text.count("\n") + 1
+
+
 def test_read_basic(temp_file):
     tool = ReadTool()
     f, _ = temp_file
@@ -58,7 +74,7 @@ def test_read_with_line_limit(temp_file):
     assert not result.error
     assert "line 1" in result.content
     assert "line 2" in result.content
-    assert "truncated" in result.content  # 6 lines total with trailing newline > 2
+    assert "truncated" in result.content  # 5 lines > 2
 
 
 def test_read_with_limit_alias(temp_file):
@@ -119,7 +135,7 @@ def test_read_start_line_beyond_eof(temp_file):
     """
     tool = ReadTool()
     f, _ = temp_file
-    total = len(f.read_text(encoding="utf-8").split("\n"))
+    total = _line_count(f.read_text(encoding="utf-8"))
     result = _run(tool.execute({"file_path": str(f), "start_line": 100}))
 
     assert not result.error
@@ -155,6 +171,12 @@ def test_a_read_never_names_a_range_that_ends_before_it_starts(temp_file):
     reachable past the end — must name the line the caller asked for and the file's real
     length. A reverted message fails both: it prints the backwards range *and* names no
     `start_line`.
+
+    Both readings are taken with the line count the tool itself uses: a file's last
+    newline ends its last line rather than adding one (#1810), so `"only\\n"` is one line
+    and `""` is none. That last shape has an answer of its own — the empty-file message —
+    which is checked instead of the past-the-end one, because there is no line to start
+    from and the file names its length in words.
     """
     tool = ReadTool()
     _, d = temp_file
@@ -167,7 +189,7 @@ def test_a_read_never_names_a_range_that_ends_before_it_starts(temp_file):
     for name, text in shapes.items():
         path = d / name
         path.write_text(text, encoding="utf-8")
-        total = len(text.split("\n"))  # the tool's own reading of "how many lines"
+        total = _line_count(text)
         for start in range(1, total + 4):
             result = _run(tool.execute({"file_path": str(path), "start_line": start}))
             assert not result.error, (name, start, result.content)
@@ -180,7 +202,17 @@ def test_a_read_never_names_a_range_that_ends_before_it_starts(temp_file):
                     f"{name} start_line={start}: range goes past the file's {size} lines"
                 )
 
-            if start > total:
+            if total == 0:
+                # A file with no lines at all is answered by the empty-file message: a
+                # different answer, and a complete one — there is nothing to start from,
+                # so no `start_line` is echoed and the length of zero is what the
+                # sentence says in words. It must still be that message, and not a
+                # range or a blank.
+                assert result.content.startswith("(empty file:"), (
+                    f"{name} start_line={start}: a file with no lines is not answered "
+                    f"as an empty file: {result.content!r}"
+                )
+            elif start > total:
                 # The empty branch. An answer with no lines is still an answer, so it
                 # has to say where the caller asked to start and how long the file is.
                 named = _START_RE.search(result.content)
