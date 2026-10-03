@@ -317,6 +317,193 @@ def test_a_complete_listing_still_answers_normally(mod, monkeypatch, capsys):
     assert "FAILED JOB: build" in capsys.readouterr().out
 
 
+# --- the channel: gh first, the public API when gh cannot ---------------
+
+
+#: What `gh api` really prints on this host, measured 2026-10-04
+#: (`cyc20261004-072223`) with no token in `~/.config/gh`, no `GH_TOKEN` and no
+#: credential-helper entry. `gh` does not attempt the request, so this is a refusal
+#: rather than a failure - and every path in this tool was unreadable because of it.
+_GH_REFUSED = (
+    "To get started with GitHub CLI, please run:  gh auth login\n"
+    "Alternatively, populate the GH_TOKEN environment variable with a GitHub API "
+    "authentication token.\n"
+)
+
+
+def _gh_says(mod, monkeypatch, *, refuses: bool):
+    """Drive `_gh_api`'s own proxy process, not `subprocess`: the module is loaded by
+    path and `mod.subprocess` is the shared stdlib module, so patching its attribute
+    would replace `subprocess.run` for everything else in the process (the reason
+    `FakeGh` is patched at `_gh_api` instead)."""
+
+    class _Proc:
+        def __init__(self, rc, out, err):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    def fake_run(argv, **kwargs):
+        assert argv[:2] == ["gh", "api"], argv
+        if refuses:
+            return _Proc(1, "", _GH_REFUSED)
+        return _Proc(0, '{"jobs": []}', "")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+
+def test_gh_refusing_is_followed_by_the_public_api(mod, monkeypatch, capsys):
+    """The whole point: a tokenless host must still get the reading it can have.
+
+    Measured 2026-10-04 (`cyc20261004-072223`): `gh api <any path>` answers only the
+    refusal above on this host, while `api.github.com/<the same path>` answers **200**
+    anonymously for a run's jobs and for a job's check-run annotations. Without this
+    fallback the tool reported "could not read" for a question three of whose four parts
+    were one public request away - the exact failure it exists to remove.
+    """
+    _gh_says(mod, monkeypatch, refuses=True)
+    monkeypatch.setattr(mod, "_public_api", lambda path: '{"jobs": [{"id": 1}]}')
+    body = mod._gh_api("repos/argszero/emrg/actions/runs/42/jobs")
+    assert body == '{"jobs": [{"id": 1}]}'
+    assert mod.transports_used() == ["api.github.com (no token)"], (
+        "the reading must name the channel that answered it"
+    )
+
+
+def test_gh_working_never_asks_the_public_api(mod, monkeypatch):
+    """Control leg: with a working `gh` the fallback must not run at all.
+
+    Both halves matter: a fallback that always fires would spend the host's anonymous
+    budget (60 requests/hour, shared with everything else on the machine) on requests
+    `gh` already answered, and would hide a `gh` that is failing.
+    """
+    _gh_says(mod, monkeypatch, refuses=False)
+    called = []
+    monkeypatch.setattr(mod, "_public_api", lambda path: called.append(path) or "{}")
+    body = mod._gh_api("repos/argszero/emrg/actions/runs/42/jobs")
+    # The claim of this leg first: it is the one an arm can break on its own, and an
+    # assertion that only fires after a body comparison reports the *other* failure.
+    assert called == [], "a working gh must not be second-guessed"
+    assert body == '{"jobs": []}'
+    assert mod.transports_used() == ["gh"]
+
+
+def test_both_channels_refusing_name_both_reasons(mod, monkeypatch, capsys):
+    """When neither channel answers, the report carries each one's own words.
+
+    They are not interchangeable: `gh`'s refusal means "no token here", the anonymous
+    `403` means "this endpoint is not public" (which is exactly the job log's answer -
+    the one part of a run that GitHub will not serve without credentials). Collapsing
+    them into "could not read" is the defect this file is about, one level up.
+    """
+    _gh_says(mod, monkeypatch, refuses=True)
+
+    def refused(path):
+        raise mod._PublicApiRefused("api.github.com answered HTTP 403 for the log")
+
+    monkeypatch.setattr(mod, "_public_api", refused)
+    with pytest.raises(RuntimeError) as excinfo:
+        mod._gh_api("repos/argszero/emrg/actions/jobs/1/logs")
+    message = str(excinfo.value)
+    assert "gh auth login" in message, "the proxy's own refusal is carried, not replaced"
+    assert "HTTP 403" in message, "the anonymous status is carried too"
+    assert "could not read" in message
+
+
+def test_the_check_run_annotations_are_read_when_the_log_is_not(mod, monkeypatch, capsys):
+    """The runner's own annotation list, which does not need the log.
+
+    Measured 2026-10-04 (`cyc20261004-072223`) on v0.3.8's failed job: the log is `403`
+    anonymously while `repos/.../check-runs/<id>/annotations` answers `200` and carries
+    `Process completed with exit code 1.` - the runner's own record of why the step died.
+    For a step that printed nothing at all (that job's case) it is the whole of the cause,
+    so a report that stopped at "LOG NOT READ" would be withholding a reading it had.
+    """
+    job = _job()
+    job["check_run_url"] = "https://api.github.com/repos/argszero/emrg/check-runs/555"
+    _gh_says(mod, monkeypatch, refuses=True)
+
+    def public(path):
+        if "/jobs?" in path:
+            return json.dumps({"jobs": [job]})
+        if "/check-runs/555/annotations" in path:
+            return json.dumps([
+                {"annotation_level": "failure", "title": "", "message": "Process completed with exit code 1."},
+                {"annotation_level": "notice", "title": "", "message": "not a failure"},
+            ])
+        raise mod._PublicApiRefused(f"api.github.com answered HTTP 403 for {path}")
+
+    monkeypatch.setattr(mod, "_public_api", public)
+    rc = mod.main(["42"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "Process completed with exit code 1." in out, "the annotation is the reading"
+    assert "from the check run" in out, "and it says which channel it came from"
+    assert "not a failure" not in out, (
+        "a notice is not an annotation about a failure, and listing it would bury the one "
+        "that is"
+    )
+
+
+def test_a_log_in_hand_is_not_annotated_twice(mod, monkeypatch, capsys):
+    """Control leg: with the log read, the check-run channel is not asked at all.
+
+    Both halves are the point: the text is already in the log's own `##[error]` lines, so
+    a second identical list would read as a second finding, and the extra request would
+    spend the host's 60/hour anonymous budget on data `gh` already returned.
+    """
+    asked = []
+    # The job carries its `check_run_url`, which is what makes this a control rather than
+    # a no-op: without it `_api_annotations` returns before asking anything, so the arm
+    # that removes the `log_read` guard survived here (measured 2026-10-04) - the fixture
+    # could not reach the code the rule is about.
+    job = _job()
+    job["check_run_url"] = "https://api.github.com/repos/argszero/emrg/check-runs/555"
+    fake = FakeGh([job], {1: _STEP_BLOCK})
+
+    def fake_gh(path):
+        asked.append(path)
+        # The check-run endpoint is *answered* and *recorded*, never raised on: an inner
+        # raise would make an arm aimed at this rule report the raise instead of the
+        # assertion that states the rule.
+        return "[]" if "/check-runs/" in path else fake(path)
+
+    rc = _run(mod, monkeypatch, fake_gh, ["42"])
+    out = capsys.readouterr().out
+    assert not any("/check-runs/" in p for p in asked), (
+        "the annotation list was already in the log's ##[error] lines - one annotation, "
+        "one channel, and no request spent on the second"
+    )
+    assert rc == 0
+    assert "##[error]Process completed with exit code 1." in out
+    assert "from the check run" not in out
+
+
+def test_a_tokenless_host_reports_the_failed_step_it_can_read(mod, monkeypatch, capsys):
+    """End to end on the host this runs on: jobs anonymous, the log refused.
+
+    This is the reading the cycle actually needs, and the one it could not take before:
+    `cyc20261004-072223` measured the v0.3.8 job listing and its annotations as public,
+    and its log as `403`. Exit stays **2** - the *cause* is still unread - but the failed
+    step is named instead of the whole question being written off, so a reader learns
+    "step 18 died silently" from a host with no credentials at all.
+    """
+    _gh_says(mod, monkeypatch, refuses=True)
+    jobs_body = json.dumps({"jobs": [_job()]})
+
+    def public(path):
+        if "/jobs?" in path:
+            return jobs_body
+        raise mod._PublicApiRefused(f"api.github.com answered HTTP 403 for {path}")
+
+    monkeypatch.setattr(mod, "_public_api", public)
+    rc = mod.main(["42"])
+    captured = capsys.readouterr()
+    assert rc == 2, "the cause itself was still not read, and 2 keeps that honest"
+    assert "18. Notarize pkg (macOS only)" in captured.out, "the failed step is named"
+    assert "api.github.com (no token)" in captured.out, "the basis is named with it"
+    assert "LOG NOT READ" in captured.out
+    assert "403" in captured.err
+
+
 def test_a_failing_post_job_step_does_not_displace_the_cause(mod, monkeypatch, capsys):
     """The teardown's own annotation must not become "the failing step's block".
 

@@ -296,6 +296,13 @@ above, which bury the cause). Exit `0` = a cause was printed; `1` = the run has 
 the question could not be answered (bad id, `gh` failed, no jobs listed, or a failed job's log came
 back empty) — **never a pass**.
 
+**It works without a GitHub token too**, which matters because `gh` refuses *every* call when it is
+unauthenticated ("please run: gh auth login") while the same paths answer anonymously: the tool falls
+back to `api.github.com` with no credentials, prints which channel answered, and reads the runner's
+annotations from the job's check run — so a tokenless host still gets the failed job and the failed
+step. The job **log** is the one part GitHub will not serve anonymously (`403`), and the report says
+so per job instead of reporting no cause.
+
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 > **Self-evolution from source**: the evolution workspace expects the repo at `~/.emrg/evolution/emrg`. Packaged installs self-heal (clone on demand + auto-bootstrap projects/tasks); source installs should clone there explicitly if you want the evolution daemon to work on this repo.

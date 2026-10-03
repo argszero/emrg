@@ -58,8 +58,14 @@ not explained itself. It is therefore printed (the `LOG EMPTY` line, so the read
 visible) *and* counted as unmeasured (exit 2, by `main`'s `unreadable` set) - the two halves
 of "never report could-not-measure as a pass".
 
-`gh` is required, and so is network access to api.github.com. There is no offline mode:
-the whole question is about what a runner printed.
+`gh` is preferred and `api.github.com` is the fallback, so **a tokenless host still gets
+an answer for everything except the log itself**: `gh` refuses every call without a
+token, while the public endpoints answer anonymously - the run's jobs (which name the
+failed step) and a job's check-run annotations (the runner's `##[error]` text). The job
+log is the one part GitHub will not serve anonymously (`403`), and the tool says so
+rather than reporting "no cause". Network access to api.github.com is required; there is
+no offline mode, because the whole question is about what a runner printed. Every report
+names the channel that answered it.
 """
 
 from __future__ import annotations
@@ -69,8 +75,16 @@ import json
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 REPO = "argszero/emrg"
+
+#: Identifies this tool to api.github.com, which refuses requests without one.
+USER_AGENT = "emrg-read-run-failure"
+#: One anonymous request's budget. Anonymous reads share a 60/hour bucket with every
+#: other unauthenticated client on the host, so a hung request is not worth waiting out.
+_TIMEOUT = 30
 
 # GitHub's conclusion for a job that failed to do its work. Named rather than tested with
 # `!= "success"` so an unseen conclusion falls through to the fail-loud branch below
@@ -95,13 +109,77 @@ _MAX_ANNOTATIONS = 10
 _MAX_LINE = 300
 
 
+#: Which channel answered, so the reading names its own basis. A set, not a flag: one
+#: run's jobs, its logs and its check-runs can be answered by different channels, and a
+#: report claiming they all came one way would be wrong about half of them.
+_TRANSPORT: set[str] = set()
+
+
+def _note_transport(which: str) -> None:
+    _TRANSPORT.add(which)
+
+
+def transports_used() -> list[str]:
+    """The channels that answered, sorted - the reading's basis, printed with it."""
+    return sorted(_TRANSPORT)
+
+
+class _PublicApiRefused(RuntimeError):
+    """`api.github.com` answered, and refused: the status is the answer, not a hiccup."""
+
+
+def _public_api(path: str) -> str:
+    """The same path, read from `api.github.com` with no credentials at all.
+
+    Its own function rather than inlined into `_gh_api`, because it is the second seam a
+    test needs to drive (patching `subprocess` would replace it for every other module in
+    the process, which the sibling suite's `FakeGh` docstring already records).
+
+    The body is returned on 200 and nothing else. A 403/404 is raised as
+    `_PublicApiRefused` carrying the status: GitHub answers **public** endpoints
+    anonymously and refuses private ones (and the job logs - see below) with the same
+    403, so the status is a fact about the endpoint that the caller must not lose.
+    """
+    request = urllib.request.Request(
+        f"https://api.github.com/{path}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raise _PublicApiRefused(
+            f"api.github.com answered HTTP {exc.code} for {path} anonymously"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - a report, not a crash
+        raise _PublicApiRefused(
+            f"api.github.com could not be reached for {path} anonymously: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def _gh_api(path: str) -> str:
-    """One `gh api` call, failing loud rather than returning an empty answer.
+    """One API read, failing loud rather than returning an empty answer.
 
     The path is passed as an argument rather than a URL, so no call site can send the
     request anywhere else; the program name is prepended here so no call site can forget
     it (the failure `check-merge-freshness.py`'s `_gh_json` records: a helper that omitted
     `gh` ran the POSIX `pr` utility instead).
+
+    **`gh` first, then `api.github.com` with no credentials.** Measured 2026-10-04
+    (`cyc20261004-072223`) on the tokenless host this runs on: `gh api <any path>`
+    answers nothing at all - not a failed request, a refusal to try -
+
+        To get started with GitHub CLI, please run:  gh auth login
+        Alternatively, populate the GH_TOKEN environment variable ...
+
+    - while the *same* paths answer `200` anonymously: this run's job listing (which
+    names the failed step) and the job's check-run annotations (which carry the runner's
+    `##[error]` text). The job **log** is the exception: it is `403` to an
+    unauthenticated fetch. So without this fallback the tool reported "could not read"
+    for a question three of whose four parts were one public request away - the failure
+    mode this whole file is written against. Both channels' reasons are raised together
+    when both refuse, because the remedies differ (a token, versus a retry).
     """
     proc = subprocess.run(
         ["gh", "api", path],
@@ -110,11 +188,19 @@ def _gh_api(path: str) -> str:
         encoding="utf-8",
         errors="replace",
     )
-    if proc.returncode != 0:
+    if proc.returncode == 0:
+        _note_transport("gh")
+        return proc.stdout
+    gh_reason = proc.stderr.strip() or f"gh exited {proc.returncode} with no message"
+    try:
+        body = _public_api(path)
+    except _PublicApiRefused as exc:
         raise RuntimeError(
-            f"gh api {path} failed (rc={proc.returncode}): {proc.stderr.strip()}"
-        )
-    return proc.stdout
+            f"could not read {path}: gh api failed (rc={proc.returncode}): {gh_reason} | "
+            f"and {exc}"
+        ) from exc
+    _note_transport("api.github.com (no token)")
+    return body
 
 
 def _jobs(run_id: int, repo: str) -> list[dict]:
@@ -198,6 +284,53 @@ def _annotation_lines(log: str) -> list[str]:
     latter is overwhelmingly the step's own echoed source text.
     """
     found = [_clean(line) for line in log.splitlines() if _ANNOTATION in line]
+    return found[:_MAX_ANNOTATIONS]
+
+
+def _check_run_id(job: dict) -> int | None:
+    """The job's check-run id, from the payload's own `check_run_url`.
+
+    That URL is the only place the id appears: the jobs endpoint names it `check_run_url`
+    and nothing else, and the annotations endpoint needs the id rather than the job id.
+    """
+    tail = str(job.get("check_run_url") or "").rstrip("/").rsplit("/", 1)[-1]
+    return int(tail) if tail.isdigit() else None
+
+
+def _api_annotations(job: dict, repo: str) -> list[str] | None:
+    """The runner's own annotations for one job, or `None` if they could not be read.
+
+    A **second channel for the same text**: `_annotation_lines` scrapes `##[error]` out of
+    the log, and this asks GitHub for the annotation list it built from them. They answer
+    the same question and only this one survives without a log - measured 2026-10-04
+    (`cyc20261004-072223`): the job log is `403` to an unauthenticated fetch while this
+    endpoint answers `200` and carries the annotation text (for v0.3.8's failed job, the
+    runner's own `Process completed with exit code 1.`). So a tokenless host can read the
+    failing step *and* what the runner annotated, which is the whole of the cause when the
+    step died without printing anything.
+
+    `None` rather than `[]` when the request failed, so "no annotations" and "the list
+    could not be read" stay apart - the distinction the rest of this file is built on.
+    """
+    check_run = _check_run_id(job)
+    if check_run is None:
+        return None
+    try:
+        payload = json.loads(_gh_api(f"repos/{repo}/check-runs/{check_run}/annotations"))
+    except Exception:  # noqa: BLE001 - a second channel failing must not end the report
+        return None
+    if not isinstance(payload, list):
+        return None
+    found: list[str] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        level = str(item.get("annotation_level") or "")
+        if level not in {"failure", "warning"}:
+            continue
+        title = str(item.get("title") or "").strip()
+        message = _clean(str(item.get("message") or "").strip())
+        found.append(f"[{level}] " + (f"{title}: " if title else "") + message)
     return found[:_MAX_ANNOTATIONS]
 
 
@@ -298,13 +431,21 @@ def main(argv: list[str] | None = None) -> int:
             names = ", ".join(str(job.get("name")) for job in other_jobs)
             summary += f", {len(other_jobs)} concluded otherwise: {names}"
         print(summary + ")")
+        # The basis, beside the subject: `gh` and the anonymous public API do not carry
+        # the same fields, so a reader deciding whether to quote a field needs to know
+        # which channel produced it. Printed only when it is not the obvious one, so the
+        # ordinary token-bearing report is unchanged.
+        if any(channel != "gh" for channel in transports_used()):
+            print(f"transport: {', '.join(transports_used())}")
 
     if not failed_jobs:
         # A determinate reading: nothing failed. Exit 1, not 0 - "no failure" is not the
         # answer this tool was asked for, and a caller scripting it should see the
         # difference rather than a silent success.
         if args.json:
-            print(json.dumps({"run": args.run_id, "repo": args.repo, "failed": False, "jobs": [
+            print(json.dumps({"run": args.run_id, "repo": args.repo, "failed": False,
+                              "transport": transports_used(),
+                              "jobs": [
                 {"name": j.get("name"), "conclusion": j.get("conclusion")} for j in jobs
             ]}, indent=2))
         else:
@@ -338,6 +479,9 @@ def main(argv: list[str] | None = None) -> int:
             # with the fetch forced to fail, `unreadable` held the same job twice and the
             # output was byte-identical to a genuinely empty log).
             unreadable.append(f"{name}: the log came back empty")
+        # Only when the log is not in hand: with it, `_annotation_lines` already carries
+        # this text, and a second identical list would read as a second finding.
+        api_annotations = None if log_read else _api_annotations(job, args.repo)
         if log_read:
             excerpt, block_lines, basis = _cause_excerpt(lines, args.tail)
         else:
@@ -353,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
                 "failed_steps": steps,
                 "other_conclusions": unknown,
                 "annotations": _annotation_lines(log),
+                "annotations_from_api": api_annotations,
                 "excerpt": excerpt,
                 "excerpt_basis": basis,
                 "excerpt_of": block_lines,
@@ -367,6 +512,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         print(json.dumps({"run": args.run_id, "repo": args.repo, "failed": True,
+                          "transport": transports_used(),
                           "jobs": reports, "unreadable": unreadable}, indent=2))
     else:
         for report in reports:
@@ -385,6 +531,15 @@ def main(argv: list[str] | None = None) -> int:
                 # assert a fact about the run that this cycle never measured.
                 print("  LOG NOT READ: the fetch failed, so no line of this job's log was "
                       "seen - the reason is on stderr, and this is not a cause")
+                annotations = report["annotations_from_api"]
+                if annotations:
+                    # GitHub's own annotation list, which does not need the log. Printed
+                    # under its own label, because the channel is part of the reading.
+                    print(f"  annotation (from the check run, {len(annotations)}):")
+                    for line in annotations:
+                        print(f"    {line}")
+                elif annotations is None:
+                    print("  annotations: the check run's list could not be read either")
             elif not report["log_lines"]:
                 print("  LOG EMPTY: the log came back with no lines - this is not a cause")
             else:
