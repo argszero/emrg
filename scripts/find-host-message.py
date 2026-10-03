@@ -44,6 +44,27 @@ reached back past the window being claimed. Otherwise the answer is ``2``, unmea
 silence: this tool's own author's first search for that directive was cut off by a
 timeout and read as "no such message".
 
+A record that cannot be read is a hole, not a line that was not there
+--------------------------------------------------------------------
+Measured 2026-10-03 (`cyc20261003-085457`), and the reason this file reads records
+rather than lines: the daemon writes the prompt **verbatim**, so a multi-line message
+is one record across many physical lines. A line-at-a-time reader never matched one,
+and the loss was silent and large - **122 of this host's 156** `task received` records
+(78%), including two real host messages (a 2026-09-27 message about a car model and a
+2026-09-30 one about the car sinking through the track, both with images) that the tool
+answered "the host never said it" about, at exit `1`.
+
+The same shape recurs in the session source: a row that announces itself as a host row
+and then cannot be parsed was skipped, so one truncated `history.jsonl` row made a
+phrase it contains answer `NOT FOUND` while the identical row, well formed, answered
+`FOUND` (measured `cyc20261003-083317`).
+
+So both readers **count** what they could not read, and a count above zero makes the
+answer `2` instead of `1` - absence is never reported over a hole. A match still wins:
+a record this reader could not read cannot un-find a message it did read. The count is
+printed with the file it came from, so the hole is locatable and fixable rather than
+merely refused.
+
 What this cannot measure
 ------------------------
 A host message older than the oldest readable log line *and* older than every session
@@ -51,14 +72,18 @@ history on the machine. Both spans are printed, so the answer is always bounded 
 span a reader can see; `--since` before either span is reported as ``2`` rather than as
 absence. Messages the host typed into a client that never reached the daemon left no
 record anywhere and are outside both sources — as is any channel this repo does not
-know about.
+know about. A session row truncated *before* its `"user"` marker is not counted either,
+because the prefilter that makes an 11 MB log affordable is what decides which lines
+reach the parser; that bound is stated in `read_sessions` rather than papered over.
 
 Exit codes
 ----------
 ``0`` found (prints the message). ``1`` no host message in the searched span contains
-the pattern, and both sources covered the span. ``2`` the question could not be
-answered: no source, or a `--since` older than what either source reaches back to.
-``2`` is not a ``1``: an unmeasured window is never evidence of absence.
+the pattern, both sources covered the span, and **no record went unread**. ``2`` the
+question could not be answered: no source, a `--since` older than what either source
+reaches back to, or a record either source wrote that this reader could not read.
+``2`` is not a ``1``: an unmeasured window is never evidence of absence, and neither is
+a window with a hole in it.
 """
 
 from __future__ import annotations
@@ -79,10 +104,25 @@ DEFAULT_INDEX = Path.home() / ".emrg" / "sessions_index.json"
 #: The daemon's line for one received message. The prompt is quoted and may be
 #: followed by the routing note; both the quote and the note are optional in the
 #: sense that older lines predate either.
+#:
+#: The prompt group is `[\s\S]*?` rather than `.*?` on purpose, and it is the fix
+#: for a measured defect (2026-10-03, cycle cyc20261003-085457): the daemon writes
+#: the prompt **verbatim**, so a multi-line message is one record spread over many
+#: physical lines. With `.*?` a record never matched, because the closing quote sits
+#: on a later line - and on this host that silently dropped **122 of 156** records
+#: (78%), including two real host messages (`特斯拉 model 3 …` 2026-09-27,
+#: `车在跑道外…` 2026-09-30), every one of which the tool then answered "the host
+#: never said it" about. The trailing `$` plus the non-greedy group is what makes it
+#: land on the record's own closing quote: the earliest quote only wins when what
+#: follows it is the end or the routing note.
 LOG_LINE = re.compile(
     r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) .*?task received: '
-    r'session=(?P<session>\S+) prompt="(?P<prompt>.*?)"(?: → routing.*)?$'
+    r'session=(?P<session>\S+) prompt="(?P<prompt>[\s\S]*?)"(?: → routing[\s\S]*)?$'
 )
+
+#: Where a received-message record *begins*. What follows may run across physical
+#: lines, so this is the line reader's start condition rather than a whole record.
+RECORD_BEGIN = re.compile(r'task received: session=\S+ prompt="')
 
 #: A line's leading local timestamp, read without parsing the rest of the line: it is
 #: what bounds the window this source can speak about.
@@ -183,21 +223,31 @@ def parse_log_line(line: str) -> Message | None:
     )
 
 
-def read_log(log_dir: Path) -> tuple[list[Message], list[Path], str | None, str | None]:
+def read_log(
+    log_dir: Path,
+) -> tuple[list[Message], list[Path], str | None, str | None, list[str]]:
     """Messages in `log_dir`'s `emrgd.log*`, plus the span those files cover.
 
-    The first and last line of each file give the span without parsing 10 MB of DEBUG
-    lines twice over: the files are append-only and chronological, so the span's ends
-    are their ends. `oldest`/`newest` are the extremes across every file read, because
-    rotation is what makes a window claimable or not.
+    A record is read from its `task received: session=… prompt="` line to the physical
+    line that closes the quote (and carries the routing note), so a prompt the daemon
+    wrote verbatim across many lines is read whole instead of dropped. Any record that
+    began and never closed - or that the next record cut into - is **named** in the
+    fifth value, because a record this reader could not read is a hole in the answer
+    rather than a line that was not there.
+
+    The span is read from each physical line's leading timestamp and is unaffected by a
+    record spanning lines: only a record's first line carries one.
     """
     messages: list[Message] = []
     files: list[Path] = []
     ends: list[tuple[str, str]] = []
+    unreadable: list[str] = []
     for path in sorted(log_dir.glob("emrgd.log*")):
         files.append(path)
         first: str | None = None
         last: str | None = None
+        pending: list[str] = []
+        unclosed = 0
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 stamp = LINE_TS.match(line)
@@ -205,37 +255,82 @@ def read_log(log_dir: Path) -> tuple[list[Message], list[Path], str | None, str 
                     if first is None:
                         first = stamp.group("ts")
                     last = stamp.group("ts")
-                if "task received: " in line:
-                    message = parse_log_line(line)
+                if pending:
+                    pending.append(line)
+                    joined = "".join(pending).rstrip("\n")
+                    if LOG_LINE.match(joined):
+                        message = parse_log_line(joined)
+                        if message is not None:
+                            messages.append(message)
+                        pending = []
+                        continue
+                    if not RECORD_BEGIN.search(line):
+                        continue
+                    # A new record began before this one closed: the first is a hole.
+                    unclosed += 1
+                    pending = [line]
+                elif RECORD_BEGIN.search(line):
+                    pending = [line]
+                else:
+                    continue
+                # A record that fits on one physical line closes right here.
+                text = line.rstrip("\n")
+                if LOG_LINE.match(text):
+                    message = parse_log_line(text)
                     if message is not None:
                         messages.append(message)
+                    pending = []
+        if pending:
+            unclosed += 1
+        if unclosed:
+            unreadable.append(f"{path.name}: {unclosed} received-message record(s)")
         if first is not None and last is not None:
             ends.append((first, last))
     if not ends:
-        return messages, files, None, None
-    return messages, files, min(e[0] for e in ends), max(e[1] for e in ends)
+        return messages, files, None, None, unreadable
+    return (
+        messages,
+        files,
+        min(e[0] for e in ends),
+        max(e[1] for e in ends),
+        unreadable,
+    )
 
 
 def read_sessions(
     roots: list[Path],
-) -> tuple[list[Message], list[Path], str | None, str | None]:
+) -> tuple[list[Message], list[Path], str | None, str | None, list[str]]:
     """Host messages in `roots`' session histories, plus the span they cover.
 
     `history_*.jsonl` is the complete daily record and `history.jsonl` the current
     context; both are read because a session created today has a daily file while a
     compacted one may hold a host message only in the current file. Rows are deduped
     on `(timestamp, session, text)`, so reading both is not a double count.
+
+    A line that passes the `"user"` prefilter and then fails to parse is **counted**
+    (the fifth value): it announced itself as a host row and this reader could not read
+    it, so an absence reported over it is an absence reported over a hole. Measured
+    2026-10-03 (`cyc20261003-083317`): a single truncated row made a phrase it contains
+    answer `NOT FOUND` (rc=1) on a tree where the same row, well formed, answers
+    `FOUND` (rc=0).
+
+    The prefilter bounds this count, and that bound is stated rather than papered over:
+    a row truncated *before* its `"user"` marker never reaches the parser and is not
+    counted. Widening it means `json.loads` on every line of an 11 MB log, which is the
+    cost the prefilter exists to avoid.
     """
     messages: list[Message] = []
     scanned: list[Path] = []
     stamps: list[str] = []
     seen: set[tuple[str, str, str]] = set()
+    unreadable: list[str] = []
     for root in roots:
         files = sorted(root.glob("history_*.jsonl")) + sorted(root.glob("history.jsonl"))
         present = [f for f in files if f.exists()]
         if present:
             scanned.append(root)
         for path in present:
+            bad = 0
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 for line in handle:
                     # Cheap prefilter: the expensive part is json.loads on 11 MB of
@@ -245,6 +340,7 @@ def read_sessions(
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
+                        bad += 1
                         continue
                     if row.get("role") != "user":
                         continue
@@ -274,9 +370,11 @@ def read_sessions(
                             truncated=False,
                         )
                     )
+            if bad:
+                unreadable.append(f"{root.name}/{path.name}: {bad} host row(s)")
     if not stamps:
-        return messages, scanned, None, None
-    return messages, scanned, min(stamps), max(stamps)
+        return messages, scanned, None, None, unreadable
+    return messages, scanned, min(stamps), max(stamps), unreadable
 
 
 def index_roots(index: Path) -> list[Path]:
@@ -373,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 2
     log_dir = Path(args.log_dir)
-    log_messages, log_files, log_oldest, log_newest = read_log(log_dir)
+    log_messages, log_files, log_oldest, log_newest, log_holes = read_log(log_dir)
 
     if args.sessions:
         roots = [Path(p) for p in args.sessions]
@@ -382,7 +480,7 @@ def main(argv: list[str] | None = None) -> int:
         here = Path.cwd() / ".emrg" / "sessions"
         if here.is_dir():
             roots.extend(p for p in here.iterdir() if p.is_dir() and p not in roots)
-    session_messages, session_dirs, ses_oldest, ses_newest = read_sessions(roots)
+    session_messages, session_dirs, ses_oldest, ses_newest, session_holes = read_sessions(roots)
 
     print(f"log: {log_dir} ({len(log_files)} file(s), "
           f"{log_oldest or 'none'} -> {log_newest or 'none'})")
@@ -430,6 +528,17 @@ def main(argv: list[str] | None = None) -> int:
     if uncovered:
         print("unmeasurable: " + "; ".join(uncovered)
               + " - an uncovered window is not evidence of absence", file=sys.stderr)
+        return 2
+
+    # A record either source wrote and this reader could not read is a hole of unknown
+    # position, and absence cannot be claimed over a hole. Measured 2026-10-03: with a
+    # multi-line prompt unreadable (78% of this host's log records) and with one
+    # truncated session row, `NOT FOUND` was printed about messages that are on disk.
+    holes = log_holes + session_holes
+    if holes:
+        print("unmeasurable: " + "; ".join(holes)
+              + " could not be read, and a record that cannot be read is not evidence "
+              "of absence", file=sys.stderr)
         return 2
 
     print(f"NOT FOUND: no message in the searched span contains {args.pattern!r} "

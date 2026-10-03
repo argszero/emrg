@@ -248,6 +248,146 @@ class TestTheInventory:
         assert "## Evolution Cycle" not in done.stdout
 
 
+class TestAMultiLineRecordIsAReadableRecord:
+    """Measured 2026-10-03 (`cyc20261003-085457`): 122 of this host's 156 records.
+
+    The daemon writes the prompt verbatim, so a multi-line message is one record over
+    many physical lines and a line-at-a-time reader never matched it. Each leg is
+    paired with the one-line form of the same record, so a red is attributable to the
+    newline and not to the fixture.
+    """
+
+    def _log_only(self, tmp_path: Path, record: str) -> dict:
+        """A log with `record` as its only record, plus one covering session row.
+
+        The second source carries no claim of its own - it is there so the span is
+        covered and the verdict turns on the **log** record, which is what these legs
+        are about.
+        """
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        (log_dir / "emrgd.log").write_text(
+            "2026-09-01 00:00:00 [DEBUG] [-] [-] emrg.server.daemon: starting up\n"
+            + record
+            + "2026-10-31 00:00:00 [DEBUG] [-] [-] emrg.server.daemon: still running\n",
+            encoding="utf-8",
+        )
+        sess = tmp_path / "sessions" / "sess-a"
+        sess.mkdir(parents=True)
+        (sess / "history.jsonl").write_text(
+            session_row("2026-09-20T10:00:00.000000+08:00", "an unrelated host row") + "\n",
+            encoding="utf-8",
+        )
+        return {"log_dir": log_dir, "sessions": tmp_path / "sessions"}
+
+    @staticmethod
+    def _record(ts: str, session: str, lines: list[str]) -> str:
+        """A record the way the daemon writes it: prompt verbatim, note on the last line."""
+        head = (f'{ts} [INFO] [-] [{session}] emrg.server.daemon: '
+                f'task received: session={session} prompt="')
+        return head + lines[0] + "\n" + "\n".join(lines[1:]) + '" → routing via LLM\n'
+
+    def test_a_multi_line_host_message_is_found(self, tmp_path):
+        """The defect: this answered NOT FOUND about a message on disk."""
+        tree = self._log_only(
+            tmp_path,
+            self._record("2026-09-15 10:00:00", "sess-a",
+                         ["the car sinks", "through the track", "look at maplesyrup"]),
+        )
+        done = run(["--pattern", "maplesyrup", *both(tree)])
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "maplesyrup" in done.stdout
+
+    def test_the_one_line_form_of_the_same_record_is_found(self, tmp_path):
+        """The control: the newline is what made the difference, not the fixture."""
+        tree = self._log_only(
+            tmp_path,
+            host_line("2026-09-15 10:00:00", "sess-a", "the car sinks and then maplesyrup"),
+        )
+        done = run(["--pattern", "maplesyrup", *both(tree)])
+        assert done.returncode == 0, done.stdout + done.stderr
+
+    def test_a_multi_line_scheduled_prompt_is_set_aside_not_reported(self, tmp_path):
+        """The scheduler talking is not the host talking, newline or not.
+
+        Before the fix this record was not read at all, so it was neither reported nor
+        counted - it simply did not exist. Now it is read and the host-only default
+        must refuse it, which is what the `skipped` count is for.
+        """
+        tree = self._log_only(
+            tmp_path,
+            self._record("2026-09-16 10:00:00", "sess-a",
+                         ["## Evolution Cycle", "You are EMRG's self-evolution module."]),
+        )
+        done = run(["--pattern", "Evolution Cycle", *both(tree)])
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "1 scheduled prompt(s) set aside" in done.stdout
+        # And `--all` does show it, so it was read rather than lost.
+        every = run(["--pattern", "Evolution Cycle", "--all", *both(tree)])
+        assert every.returncode == 0, every.stdout + every.stderr
+        assert "## Evolution Cycle" in every.stdout
+
+    def test_a_record_that_never_closes_is_unmeasurable(self, tmp_path):
+        """A record cut off mid-write is a hole: absence is not claimed over it."""
+        tree = self._log_only(
+            tmp_path,
+            '2026-09-17 10:00:00 [INFO] [-] [sess-a] emrg.server.daemon: '
+            'task received: session=sess-a prompt="a message that never ends\n',
+        )
+        done = run(["--pattern", "never-said-this", *both(tree)])
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "could not be read" in done.stderr
+
+
+class TestAHostRowThatCannotBeReadIsAHole:
+    """Measured 2026-10-03 (`cyc20261003-083317`): one truncated row, one false absence."""
+
+    def _tree(self, tmp_path: Path, rows: list[str]) -> dict:
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        (log_dir / "emrgd.log").write_text(
+            "2026-09-01 00:00:00 [DEBUG] [-] [-] emrg.server.daemon: starting up\n"
+            "2026-10-31 00:00:00 [DEBUG] [-] [-] emrg.server.daemon: still running\n",
+            encoding="utf-8",
+        )
+        sessions = tmp_path / "sessions" / "sess-a"
+        sessions.mkdir(parents=True)
+        (sessions / "history.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        return {"log_dir": log_dir, "sessions": tmp_path / "sessions"}
+
+    def test_a_truncated_row_refuses_absence(self, tmp_path):
+        """The row announces itself as a host row and cannot be read: exit 2, not 1."""
+        tree = self._tree(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "hi"),
+            session_row("2026-09-16T10:00:00.000000+08:00", "the phrase is maplesyrup")[:-1],
+            session_row("2026-09-17T10:00:00.000000+08:00", "bye"),
+        ])
+        done = run(["--pattern", "maplesyrup", *both(tree)])
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "could not be read" in done.stderr
+
+    def test_the_same_tree_readable_answers_one(self, tmp_path):
+        """The control for the leg above: same rows, the truncated one made whole."""
+        tree = self._tree(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "hi"),
+            session_row("2026-09-16T10:00:00.000000+08:00", "the phrase is maplesyrup"),
+            session_row("2026-09-17T10:00:00.000000+08:00", "bye"),
+        ])
+        found = run(["--pattern", "maplesyrup", *both(tree)])
+        assert found.returncode == 0, found.stdout + found.stderr
+        absent = run(["--pattern", "nobody-said-this", *both(tree)])
+        assert absent.returncode == 1, absent.stdout + absent.stderr
+
+    def test_a_match_wins_over_a_hole(self, tmp_path):
+        """A hole cannot un-find a message this reader did read."""
+        tree = self._tree(tmp_path, [
+            session_row("2026-09-16T10:00:00.000000+08:00", "the phrase is maplesyrup"),
+            session_row("2026-09-17T10:00:00.000000+08:00", "bye")[:-1],
+        ])
+        done = run(["--pattern", "maplesyrup", *both(tree)])
+        assert done.returncode == 0, done.stdout + done.stderr
+
+
 class TestTheTemplateCarriesTheStep:
     """A tool nothing tells a cycle to run is dead code (measured, this cycle)."""
 
