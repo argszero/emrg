@@ -99,6 +99,16 @@ sys.exit(f"stub does not know scenario {scenario!r}")
 # The stand-in is a shebang script, so these arms need a host that can execute one -- the
 # same gate (and the same reason) as the notarize test's executed arms: without a real
 # POSIX host the run measures the stub's absence, not the preflight.
+#
+# This gate is what `test_the_documented_command_carries_its_variables_into_the_preflight`
+# shipped without, and the Windows leg went red for it within minutes of the push (measured
+# 2026-10-03, `cyc20261003-143643`: `test` success, `test-windows` failure on this head,
+# while the previous head and master are green on both). The mechanism is in that arm's own
+# harness rather than in the document: it substitutes `sys.executable` and `str(stub)` --
+# **Windows paths** -- unquoted into a bash script, and a shell reads the backslashes as
+# escapes, so `C:\...\python.exe` becomes `C:...python.exe`, is not found, the stand-in
+# never runs, and the arm's three assertions fail. Reproduced on a POSIX host by handing
+# bash a backslash path: `bash -c 'printf "%s\n" C:\a\b\python.exe'` prints `C:abpython.exe`.
 _posix_only = pytest.mark.skipif(
     os.name == "nt",
     reason=(
@@ -417,6 +427,7 @@ def test_the_documented_command_continues_each_line_with_one_backslash() -> None
     )
 
 
+@_posix_only
 def test_the_documented_command_carries_its_variables_into_the_preflight(tmp_path) -> None:
     """The executed half: run the documented block and read what reached the command.
 
