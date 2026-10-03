@@ -3337,10 +3337,45 @@ Streaming
         term.shutdown(); sys.stdout.write("\n"); sys.stdout.flush()
 
 
+def _display_text(value: object) -> str:
+    """A field the header renders, or `""` when the model sent another shape.
+
+    The arguments reach here as the provider emitted them: `_parse_arguments` makes the
+    *container* a dict, and nothing makes a field the type its schema declares. Read
+    unguarded, `{"file_path": "a.txt", "content": null}` raises
+    `TypeError: object of type 'NoneType' has no len()` out of `_format_args` — which is
+    called while building the cards for a resumed session (`_cards_from_tool_calls`) and
+    on every `tool_start` whose `intent` is empty. So one such call in a session's history
+    made that session un-resumable, and the raise is exactly what the contract one
+    function below spells out and this broke: *a call that cannot be parsed still gets a
+    card*. A field of the wrong shape is rendered as absent, never fatal.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def _display_int(value: object) -> int | None:
+    """A field the header uses as a number, or `None` when it is not one.
+
+    `int()` is what the line range needs, and it is the call that raised: a non-numeric
+    `start_line` with a `line_limit` beside it gave `ValueError: invalid literal for
+    int() with base 10: 'abc'`. `None` reads as "not a number", which the caller renders
+    by leaving the range out — the same output as a card that was given no range at all.
+    """
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _format_args(args: dict, tool_name: str = "") -> str:
     """Format tool arguments for compact, human-readable display in the ToolCard header.
 
     Instead of raw JSON, shows the most relevant argument for each tool type.
+
+    Every field it reads goes through `_display_text` / `_display_int` first, so no shape
+    the model can send makes this raise: the header is the one place a malformed call is
+    still supposed to be *visible*, and a call that kills the renderer instead takes the
+    session it belongs to with it.
     """
     if not args:
         return ""
@@ -3352,8 +3387,8 @@ def _format_args(args: dict, tool_name: str = "") -> str:
     # the roster's one definition rather than repeating "bash" here, where a
     # second dialect would have been silently mis-formatted.
     if tool_name in SHELL_TOOL_NAMES:
-        cmd = args.get("command", "")
-        workdir = args.get("workdir")
+        cmd = _display_text(args.get("command"))
+        workdir = _display_text(args.get("workdir"))
         if cmd:
             # Show first non-empty line, truncate long commands
             first_line = ""
@@ -3381,23 +3416,23 @@ def _format_args(args: dict, tool_name: str = "") -> str:
                 first_line = first_line[:remaining - 3] + "..."
             return prefix + first_line
     elif tool_name in ("read", "write", "edit"):
-        fp = args.get("file_path", "")
+        fp = _display_text(args.get("file_path"))
         if fp:
             name = PurePath(fp).name
             # Compact path display
             short = "…/" + name if len(fp) > 50 else fp
             # Add context: size for write, range for read
             if tool_name == "write":
-                content_len = len(args.get("content", ""))
+                content_len = len(_display_text(args.get("content")))
                 if content_len >= 1024:
                     short += f" ({content_len // 1024}KB)"
                 elif content_len > 0:
                     short += f" ({content_len}B)"
             elif tool_name == "read":
-                sl = args.get("start_line") or args.get("offset")
-                ll = args.get("line_limit") or args.get("limit")
+                sl = _display_int(args.get("start_line") or args.get("offset"))
+                ll = _display_int(args.get("line_limit") or args.get("limit"))
                 if sl and ll:
-                    short += f" [L{sl}:L{int(sl) + int(ll)}]"
+                    short += f" [L{sl}:L{sl + ll}]"
                 elif sl:
                     short += f" [from L{sl}]"
             return short
