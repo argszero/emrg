@@ -263,3 +263,33 @@ class TestTheTemplateCarriesTheStep:
         text = PROMPT.read_text(encoding="utf-8")
         assert CANONICAL in text
         assert SCRIPT.exists()
+
+
+class TestIndexRootsAnswersEveryShapeOfAnUnreadableIndex:
+    """`index_roots` promises "unreadable index -> none", so `[]` must be the answer.
+
+    The read-error family (`emrg/read_errors.py`) has three shapes of "I could not read
+    this file", and this instrument is on the R7 path — "did the host say this?" — so a
+    shape that raises instead of answering costs the search, not a row. Measured
+    2026-10-03 (`cyc20261003-215322`): the corrupt shape returned `[]` and the non-UTF-8
+    shape raised, while the docstring said the same thing about both.
+    """
+
+    @pytest.mark.parametrize(
+        "payload",
+        [b'{"s1": "/tmp/p", ', b'{"s1": "\xff\xfe"}\n', b""],
+        ids=["corrupt-json", "not-utf-8", "empty"],
+    )
+    def test_an_unreadable_index_yields_no_roots(self, tmp_path, payload) -> None:
+        index = tmp_path / "sessions_index.json"
+        index.write_bytes(payload)
+        assert MOD.index_roots(index) == []
+
+    def test_a_missing_index_yields_no_roots(self, tmp_path) -> None:
+        assert MOD.index_roots(tmp_path / "not-there.json") == []
+
+    def test_a_readable_index_yields_its_roots(self, tmp_path) -> None:
+        """The control: "no roots" must not be the answer for every input."""
+        index = tmp_path / "sessions_index.json"
+        index.write_text(json.dumps({"s1": "/tmp/one", "s2": "/tmp/two"}), encoding="utf-8")
+        assert MOD.index_roots(index) == [Path("/tmp/one"), Path("/tmp/two")]
