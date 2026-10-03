@@ -109,6 +109,7 @@ RUN_HERE = (
     "check-memory-index.py",
     "check-rant-citations.py",
     "check_nonlocal.py",
+    "check_read_parse_guards.py",
     "check_unbound_reads.py",
 )
 
