@@ -81,6 +81,12 @@ if scenario == "server_error":
 if scenario == "transport":
     sys.stderr.write("Error: unable to connect to Apple (DNS lookup failed)\\n")
     sys.exit(1)
+if scenario == "history_null":
+    # The shape that reached `len(None)`: a JSON object whose `history` is there and is not
+    # a list. It is not the answer `--output-format json` asks for, and it must not be able
+    # to leave the process at exit 1 -- which is this script's code for Apple's refusal.
+    sys.stdout.write('{"history": null}\\n')
+    sys.exit(0)
 if scenario == "not_json":
     # A wrapper or a wrong `xcrun` answering successfully with something else: rc 0 is not
     # a credentials verdict unless the asked-for answer came back.
@@ -114,6 +120,7 @@ def _run(
     credentials: bool = True,
     xcrun: str | None = None,
     empty_path: bool = False,
+    env_file: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -141,6 +148,9 @@ def _run(
         env["PATH"] = str(empty)
     else:
         argv += ["--xcrun", str(stub)]
+
+    if env_file is not None:
+        argv += ["--env-file", env_file]
 
     return subprocess.run(
         argv,
@@ -313,4 +323,96 @@ def test_the_preflight_sends_the_variables_the_release_sends() -> None:
         f"the preflight sends {sorted(declared.values())} but the release sends "
         f"{sorted(next(iter(n)) for n in sent.values())} — the host would be checking "
         f"credentials the build does not use"
+    )
+
+
+# ── Exit 1 belongs to Apple, and to nothing else ──────────────────────────────
+#
+# Measured 2026-10-03 (`cyc20261003-141219`) on master `92c7e576`: four paths with nothing
+# to do with the credentials each ended the process at exit **1** through an uncaught
+# exception. Exit 1 is this script's code for "Apple refused them ... Fix it and re-run this
+# before tagging", so a host with a typo in a path, or an editor that wrote UTF-16, was sent
+# to rotate a password that had never been asked about. These arms pin the rule the script
+# now states: exit 1 is spent on Apple's answer, and every other failure is exit 2.
+
+
+@_posix_only
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "history_null",  # the reply's shape, not its exit code
+        "not_json",  # exited 0 answering something else
+        "server_error",  # a 5xx is not an authentication verdict
+        "transport",  # nothing was asked, so nothing was learned
+    ],
+)
+def test_a_reply_that_is_not_a_verdict_never_takes_the_refusal_code(
+    tmp_path: Path, scenario: str
+) -> None:
+    """The verdict code is Apple's answer alone — the rule, over every non-verdict shape."""
+    result = _run(tmp_path, scenario)
+    assert result.returncode == 2, (
+        f"{scenario!r} exited {result.returncode}, not 2: a reading that reached no verdict "
+        f"can be read as Apple refusing the credentials, which is a fault line a host acts "
+        f"on.\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    assert "REFUSED" not in result.stdout, "a non-verdict was reported as a refusal"
+
+
+@_posix_only
+@pytest.mark.parametrize("shape", ["missing", "directory", "not_utf8"])
+def test_an_unreadable_env_file_is_not_a_refusal(tmp_path: Path, shape: str) -> None:
+    """`--env-file` failing to read is an accident of the host's, not Apple's verdict.
+
+    All three shapes are reachable by ordinary means — a typo in a path, a directory
+    instead of a file, and a file some editor wrote as UTF-16 — and each used to leave the
+    process at exit 1.
+    """
+    target = tmp_path / "credentials.env"
+    if shape == "missing":
+        env_file = str(tmp_path / "nope" / "credentials.env")
+    elif shape == "directory":
+        target.mkdir()
+        env_file = str(target)
+    else:
+        target.write_bytes(b"\xff\xfe\x00 A P P L E")
+        env_file = str(target)
+
+    result = _run(tmp_path, "accepted", env_file=env_file)
+    assert result.returncode == 2, (
+        f"an unreadable --env-file ({shape}) exited {result.returncode}, not 2 — the "
+        f"refusal code is Apple's answer alone.\nstdout={result.stdout!r}\n"
+        f"stderr={result.stderr!r}"
+    )
+    assert "Traceback" not in result.stderr, (
+        "the failure left as an uncaught exception, so its exit code is Python's rather "
+        f"than this script's.\nstderr={result.stderr!r}"
+    )
+    assert "not measurable" in result.stdout, (
+        "the reading must say it could not measure, because that is what the host acts on"
+    )
+
+
+@_posix_only
+def test_a_readable_env_file_still_answers_the_question(tmp_path: Path) -> None:
+    """The other direction: a good `--env-file` is read and the verdict is unchanged.
+
+    Without this leg, "refuse every `--env-file`" would satisfy the arms above while making
+    the flag — the one way a host keeps the password out of the shell history — useless.
+    """
+    target = tmp_path / "credentials.env"
+    target.write_text(
+        f"{APPLE_ID_VAR}=dev@example.invalid\n"
+        f"{PASSWORD_VAR}={PASSWORD}\n"
+        f"{TEAM_ID_VAR}=TEAMID1234\n",
+        encoding="utf-8",
+    )
+    result = _run(tmp_path, "accepted", credentials=False, env_file=str(target))
+    assert result.returncode == 0, (
+        f"a readable --env-file did not reach a verdict (exit {result.returncode}).\n"
+        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    assert "OK:" in result.stdout
+    assert PASSWORD not in result.stdout and PASSWORD not in result.stderr, (
+        "the password reached the terminal"
     )
