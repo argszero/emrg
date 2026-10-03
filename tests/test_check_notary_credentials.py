@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -417,6 +418,110 @@ def test_the_documented_command_continues_each_line_with_one_backslash() -> None
     )
 
 
+def _shell_path(path, *, nt: bool | None = None) -> str:
+    """A path the shell reads back as one argument, on either platform.
+
+    Measured on the Windows leg of run `37100806753` (`cyc20261003-155509`): interpolating
+    `str(sys.executable)` **unquoted** into the documented block produced
+
+        `documented-block.sh: line 1: D:aemrgemrg.venvScriptspython.exe: command not found`
+
+    — exit 127 on a block that was correct. The backslashes that separate a Windows path are
+    *escape characters* to bash, so they are consumed and the path collapses. The same class as
+    the doubled backslash this file's pins are about, one layer out: a backslash where a shell
+    reads it. Forward slashes plus one level of quoting is what a shell needs, and it costs a
+    POSIX path nothing.
+
+    `nt` is a parameter rather than a read of `os.name` so **both branches are testable from
+    either platform** - a conversion that only runs on the CI leg that found the bug is exactly
+    the code that regresses unnoticed.
+    """
+    text = str(path)
+    if (os.name == "nt") if nt is None else nt:
+        text = text.replace("\\", "/")
+    return shlex.quote(text)
+
+
+def _run_the_documented_block(shell: str, block: str, tmp_path, env: dict) -> subprocess.CompletedProcess[str]:
+    """Write the block out and run it as a shell script, or skip if the shell cannot run one."""
+    probe = subprocess.run(
+        [shell, "--noprofile", "--norc", "-c", "echo probe-ok"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if "probe-ok" not in (probe.stdout or ""):
+        # Measured precedent (CI, 2026-10-02, the Windows leg of run 36959438654): on that
+        # runner `bash` resolved to the WSL launcher, which answers "Windows Subsystem for
+        # Linux has no installed distributions" and exits 1. An arm that ran anyway would
+        # measure the shell's absence rather than the block, so it reports instead of failing.
+        pytest.skip(
+            f"`{shell}` cannot run a script here ({probe.stdout!r} / {probe.stderr!r}), so a "
+            f"run would measure the shell's absence rather than the documented block"
+        )
+    script = tmp_path / "documented-block.sh"
+    script.write_text(block, encoding="utf-8")
+    return subprocess.run(
+        [shell, "--noprofile", "--norc", str(script)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def test_a_windows_path_survives_being_handed_to_a_shell() -> None:
+    """The conversion, measured against a real shell rather than asserted about a string.
+
+    On Windows `sys.executable` is `D:\\a\\emrg\\emrg\\.venv\\Scripts\\python.exe`. Handed to
+    bash unquoted, the backslashes are consumed and the path collapses to
+    `D:aemrgemrg.venvScriptspython.exe` - measured on the Windows leg of run 37100806753. This
+    is the arm that keeps the fix: it asks a real bash what it read back, on a platform where
+    bash and the Windows path shape are both available.
+    """
+    shell = shutil.which("bash")
+    if shell is None:
+        pytest.skip("no POSIX shell is available to read the path back")
+
+    windows = "D:\\a\\emrg\\emrg\\.venv\\Scripts\\python.exe"
+    # A space, so the *quoting* half is load-bearing too: unquoted, the shell splits this into
+    # two words and the path that arrives is truncated at the space.
+    posix = "/home/runner/work/my project/emrg/.venv/bin/python"
+
+    for path, nt, expected in (
+        (windows, True, "D:/a/emrg/emrg/.venv/Scripts/python.exe"),
+        (posix, False, posix),
+    ):
+        quoted = _shell_path(path, nt=nt)
+        read_back = subprocess.run(
+            [shell, "--noprofile", "--norc", "-c", f"printf '%s' {quoted}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert read_back.stdout == expected, (
+            f"a shell read {quoted!r} back as {read_back.stdout!r}, expected {expected!r} - "
+            f"a path that arrives mangled is a command that never runs"
+        )
+
+    # And the shape that actually failed: without the conversion the shell loses the
+    # separators, which is the measurement this helper exists for.
+    collapsed = subprocess.run(
+        [shell, "--noprofile", "--norc", "-c", f"printf '%s' {windows}"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert collapsed.stdout == "D:aemrgemrg.venvScriptspython.exe", (
+        f"the unquoted Windows path no longer collapses in this shell ({collapsed.stdout!r}) - "
+        f"re-measure the failure this helper exists for before trusting it"
+    )
+
+
 def test_the_documented_command_carries_its_variables_into_the_preflight(tmp_path) -> None:
     """The executed half: run the documented block and read what reached the command.
 
@@ -442,32 +547,29 @@ def test_the_documented_command_carries_its_variables_into_the_preflight(tmp_pat
         ("MACOS_NOTARY_TEAM_ID=<team>", "MACOS_NOTARY_TEAM_ID=TEAM-VALUE"),
     ):
         filled = filled.replace(placeholder, value)
-    stub = tmp_path / "preflight-stand-in.py"
+    # The stand-in lives in a directory whose name contains a **space**, so an unquoted
+    # interpolation is caught here rather than only on the Windows leg that found the bug:
+    # unquoted, the shell splits the path at the space and runs a command that does not exist.
+    stub = tmp_path / "stand in" / "preflight-stand-in.py"
+    stub.parent.mkdir(parents=True, exist_ok=True)
     stub.write_text(_PREFLIGHT_STUB, encoding="utf-8")
     filled = filled.replace(
         "uv run --no-sync python3 scripts/check-notary-credentials.py",
-        f"{sys.executable} {stub}",
+        f"{_shell_path(sys.executable)} {_shell_path(stub)}",
     )
-    assert str(stub) in filled, "the stand-in never replaced the preflight invocation"
-
-    script = tmp_path / "documented-block.sh"
-    script.write_text(filled, encoding="utf-8")
+    assert "check-notary-credentials.py" not in filled, (
+        "the stand-in never replaced the preflight invocation, so this arm would run the real "
+        "script - which spends a credential and asks Apple"
+    )
 
     env = dict(os.environ)
     for name in (APPLE_ID_VAR, PASSWORD_VAR, TEAM_ID_VAR):
         env.pop(name, None)
 
-    # Deliberately without the workflow's `-e`: this arm is about which variables arrive,
-    # not about how the shell gives up. A host pasting the block into an interactive shell
-    # gets no `-e` either.
-    result = subprocess.run(
-        [shell, "--noprofile", "--norc", str(script)],
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    # Deliberately without the workflow's `-e`: this arm is about which variables arrive, not
+    # about how the shell gives up. A host pasting the block into an interactive shell gets no
+    # `-e` either.
+    result = _run_the_documented_block(shell, filled, tmp_path, env)
     for name, value in (
         (APPLE_ID_VAR, "ID-VALUE"),
         (PASSWORD_VAR, "PW-VALUE"),
