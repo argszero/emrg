@@ -57,8 +57,21 @@ Exit codes
 ----------
 ``0`` found (prints the message). ``1`` no host message in the searched span contains
 the pattern, and both sources covered the span. ``2`` the question could not be
-answered: no source, or a `--since` older than what either source reaches back to.
-``2`` is not a ``1``: an unmeasured window is never evidence of absence.
+answered: no source, a `--since` older than what either source reaches back to, or a
+session row that **could have been a host message and could not be read**. ``2`` is not
+a ``1``: an unmeasured window is never evidence of absence.
+
+A row that will not parse is not skipped
+----------------------------------------
+A history line is a JSON record, and one that fails to parse used to be dropped with a
+`continue` - which made the search quietly smaller than the span it printed. Measured
+2026-10-03 (`cyc20261003-083317`): a truncated row carried the phrase, the reported span
+(``2026-09-15 -> 2026-09-17``) contained that row, and the answer was
+"no message in the searched span contains" it. The row is now a channel: `main` answers
+``2`` and names the file and line, unless the damage left the row's own timestamp
+readable **and** that timestamp is before the window - the one case in which the hole
+cannot hold an in-window message. A hole whose timestamp is itself damaged blocks every
+window, deliberately: a line that cannot be dated cannot be placed outside one.
 """
 
 from __future__ import annotations
@@ -93,6 +106,13 @@ LINE_TS = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ")
 #: here rather than inferred per line — an exactly-60-character message and a truncated
 #: one are indistinguishable in the log, and this is the only way to say which.
 LOG_HEAD_CHARS = 60
+
+#: A record's own timestamp, read straight out of a line that will **not** parse. A damaged
+#: line is a hole in the span; this is the one fact that can place it, and only when the
+#: damage left the field intact (a line truncated after it, which is what a partial write
+#: produces). A line this cannot date is treated as in-window, deliberately - see
+#: `read_sessions`.
+RAW_TS = re.compile(r'"timestamp"\s*:\s*"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
 
 #: A scheduled task's own prompt, as the daemon logged it. The scheduler talking is not
 #: the host talking, and conflating them is a measured error mode rather than a worry:
@@ -218,17 +238,29 @@ def read_log(log_dir: Path) -> tuple[list[Message], list[Path], str | None, str 
 
 def read_sessions(
     roots: list[Path],
-) -> tuple[list[Message], list[Path], str | None, str | None]:
+) -> tuple[list[Message], list[Path], str | None, str | None, list[tuple[Path, int, str]]]:
     """Host messages in `roots`' session histories, plus the span they cover.
 
     `history_*.jsonl` is the complete daily record and `history.jsonl` the current
     context; both are read because a session created today has a daily file while a
     compacted one may hold a host message only in the current file. Rows are deduped
     on `(timestamp, session, text)`, so reading both is not a double count.
+
+    The fifth value is the **damaged** rows: `(path, line number, recovered timestamp or
+    "")` for every line that passed the prefilter and then would not parse. Those lines
+    are the reason this is a channel and not a `continue` - a row that could have been a
+    host message and could not be read is a hole in the search, so `main` refuses to
+    report absence over one (measured 2026-10-03, `cyc20261003-083317`: the phrase was on
+    disk in a truncated line, the printed span contained that line, and the tool answered
+    "no message in the searched span contains" it). The recovered timestamp is what lets
+    a hole **outside** the window be excluded rather than blocking a claim it cannot
+    affect; a line whose timestamp is itself damaged is reported with `""` and blocks
+    every window, because a line that cannot be dated cannot be excluded from one.
     """
     messages: list[Message] = []
     scanned: list[Path] = []
     stamps: list[str] = []
+    damaged: list[tuple[Path, int, str]] = []
     seen: set[tuple[str, str, str]] = set()
     for root in roots:
         files = sorted(root.glob("history_*.jsonl")) + sorted(root.glob("history.jsonl"))
@@ -237,14 +269,21 @@ def read_sessions(
             scanned.append(root)
         for path in present:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
-                for line in handle:
+                for number, line in enumerate(handle, start=1):
                     # Cheap prefilter: the expensive part is json.loads on 11 MB of
                     # one-line records, and a non-user row can never be a host message.
+                    # Damage is only collected for lines the prefilter lets through, and
+                    # that is exact rather than a shortcut: a line without the `"user"`
+                    # token cannot be a user row, so it cannot be the host speaking.
                     if '"user"' not in line:
                         continue
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
+                        found = RAW_TS.search(line)
+                        damaged.append(
+                            (path, number, normalise_ts(found.group(1)) if found else "")
+                        )
                         continue
                     if row.get("role") != "user":
                         continue
@@ -275,8 +314,8 @@ def read_sessions(
                         )
                     )
     if not stamps:
-        return messages, scanned, None, None
-    return messages, scanned, min(stamps), max(stamps)
+        return messages, scanned, None, None, damaged
+    return messages, scanned, min(stamps), max(stamps), damaged
 
 
 def index_roots(index: Path) -> list[Path]:
@@ -382,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
         here = Path.cwd() / ".emrg" / "sessions"
         if here.is_dir():
             roots.extend(p for p in here.iterdir() if p.is_dir() and p not in roots)
-    session_messages, session_dirs, ses_oldest, ses_newest = read_sessions(roots)
+    session_messages, session_dirs, ses_oldest, ses_newest, damaged = read_sessions(roots)
 
     print(f"log: {log_dir} ({len(log_files)} file(s), "
           f"{log_oldest or 'none'} -> {log_newest or 'none'})")
@@ -396,6 +435,11 @@ def main(argv: list[str] | None = None) -> int:
         found, skipped = matches(messages, re.compile(".*"), since, not args.all)
         host = [m for m in found if not m.text.startswith(TASK_PROMPT_PREFIX)]
         print(f"{len(host)} host message(s), {skipped} scheduled prompt(s) set aside")
+        if damaged:
+            # The inventory is a count of what was read, so a line that could not be read
+            # belongs in it: without this line the count reads as the whole file.
+            print(f"and {len(damaged)} row(s) that could not be read: "
+                  f"{', '.join(f'{p.name}:{n}' for p, n, _ in damaged)}")
         for message in sorted(host, key=lambda m: m.ts):
             print(describe(message))
         return 0
@@ -427,9 +471,22 @@ def main(argv: list[str] | None = None) -> int:
             uncovered.append(f"{label} had nothing to read")
         elif since is not None and oldest > since:
             uncovered.append(f"{label} reaches back only to {oldest}, after {since}")
+    # A row that could have been a host message and could not be read is a hole in the
+    # window, and absence over a hole is the reading this tool exists to refuse. A hole
+    # whose own timestamp survived the damage and is before the window is excluded,
+    # because it cannot hold an in-window message; one that cannot be dated is not
+    # excluded, because a line that cannot be dated cannot be placed outside anything.
+    holes = [d for d in damaged if d[2] == "" or since is None or d[2] >= since]
+    if holes:
+        named = ", ".join(f"{p.name}:{n}" for p, n, _ in holes)
+        uncovered.append(
+            f"{len(holes)} row(s) could have been a host message and could not be read "
+            f"({named})"
+        )
     if uncovered:
         print("unmeasurable: " + "; ".join(uncovered)
-              + " - an uncovered window is not evidence of absence", file=sys.stderr)
+              + " - a span that was not fully read is not evidence of absence",
+              file=sys.stderr)
         return 2
 
     print(f"NOT FOUND: no message in the searched span contains {args.pattern!r} "

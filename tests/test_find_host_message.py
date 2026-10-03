@@ -19,7 +19,11 @@ What is pinned, in both directions (#455)
   pattern drawn from one would be "found" while the host never sent it — so the host-only
   default must refuse it, and say how many it set aside;
 * the **uncovered window**: `--since` older than either source reaches back to is `2`,
-  never `1`. Absence is a claim about a span, and an unmeasured span supports none.
+  never `1`. Absence is a claim about a span, and an unmeasured span supports none;
+* the **row that will not parse**: dropped with a `continue` until 2026-10-03, which made
+  the search smaller than the span it printed - a truncated row carrying the phrase read
+  as "no message in the searched span contains" it. It is a channel now: `2`, naming the
+  file and line, unless the row's own timestamp survived and predates the window.
 """
 
 from __future__ import annotations
@@ -237,6 +241,135 @@ class TestTheThreeStates:
                     "--since", "2026-09-16", *both(sources)])
         assert done.returncode == 1, done.stdout + done.stderr
         assert "NOT FOUND" in done.stdout
+
+
+#: A row cut short mid-record, the shape a partial write leaves. Its `timestamp` field
+#: is intact, which is the case `main` can place; `UNDATABLE` damages that field too.
+DAMAGED_TS = "2026-09-16T10:00:00.000000+08:00"
+
+
+def damaged_row(text: str, ts: str = DAMAGED_TS) -> str:
+    """A user row with its closing brace (and nothing else) missing."""
+    return json.dumps({"type": "message", "role": "user", "content": text,
+                       "timestamp": ts}, ensure_ascii=False)[:-1]
+
+
+#: The same damage, but inside the timestamp - so the row cannot be dated at all.
+UNDATABLE_ROW = ('{"type": "message", "role": "user", "content": "a phrase lost here", '
+                 '"timestamp": "2026-09-16T10:00:0')
+
+
+def covering_log(tmp_path: Path) -> Path:
+    """A log directory whose span covers the fixture rows, so nothing else is uncovered."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "emrgd.log").write_text(
+        "2026-09-01 00:00:00 [DEBUG] [-] [-] emrg.server.daemon: starting up\n"
+        "2026-09-30 00:00:00 [DEBUG] [-] [-] emrg.server.daemon: still running\n",
+        encoding="utf-8",
+    )
+    return log_dir
+
+
+def sessions_with(tmp_path: Path, rows: list[str]) -> Path:
+    """One session directory whose daily history is exactly `rows`."""
+    session = tmp_path / "sessions" / "sess-a"
+    session.mkdir(parents=True)
+    (session / "history_260915.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return session
+
+
+def ask(tmp_path: Path, rows: list[str], *args: str) -> subprocess.CompletedProcess:
+    return run([*args, "--log-dir", str(covering_log(tmp_path)),
+                "--sessions", str(sessions_with(tmp_path, rows))])
+
+
+class TestARowThatWillNotParse:
+    """A row that could be the host's and cannot be read is not a row that was searched.
+
+    Measured 2026-10-03 (`cyc20261003-083317`, reproduced `cyc20261003-164808`): the row
+    carrying the phrase was truncated, the printed span contained it, and the answer was
+    "no message in the searched span contains" it - an absence read out of a search that
+    never happened, which is the one reading this tool exists to refuse.
+    """
+
+    def test_the_phrase_in_a_damaged_row_is_not_reported_absent(self, tmp_path):
+        done = ask(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "an ordinary host message"),
+            damaged_row("the host really said maplesyrup here"),
+            session_row("2026-09-17T10:00:00.000000+08:00", "another host message"),
+        ], "--pattern", "maplesyrup")
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "NOT FOUND" not in done.stdout, (
+            "the phrase is on disk in a row the tool never read, so absence is not the reading"
+        )
+        assert "could not be read" in done.stderr
+        assert "history_260915.jsonl:2" in done.stderr, (
+            "the hole must name the file and line, or a reader cannot go and look"
+        )
+
+    def test_the_same_phrase_is_found_when_the_row_is_whole(self, tmp_path):
+        """The control: it is the damage that changes the answer, not the phrase."""
+        done = ask(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "an ordinary host message"),
+            session_row(DAMAGED_TS, "the host really said maplesyrup here"),
+        ], "--pattern", "maplesyrup")
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "maplesyrup" in done.stdout
+
+    def test_a_clean_tree_still_answers_absent(self, tmp_path):
+        """The other control: "report every hole" must not become "never answer absent"."""
+        done = ask(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "an ordinary host message"),
+            session_row("2026-09-17T10:00:00.000000+08:00", "another host message"),
+        ], "--pattern", "never-said-this")
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "NOT FOUND" in done.stdout
+        assert "could not be read" not in done.stderr
+
+    def test_a_hole_dated_before_the_window_is_excluded(self, tmp_path):
+        """The hole is a hole in *the window*, and a row that predates it cannot be in it.
+
+        Without this leg, "any hole blocks every window" would pass the tests above while
+        making a tree with one damaged row answer 2 to every absence query forever - the
+        over-wide direction, which is its own way of losing the instrument.
+        """
+        done = ask(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "an ordinary host message"),
+            damaged_row("a phrase nobody asked about"),          # dated 2026-09-16
+            session_row("2026-09-17T10:00:00.000000+08:00", "another host message"),
+        ], "--pattern", "never-said-this", "--since", "2026-09-17")
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "NOT FOUND" in done.stdout
+
+    def test_a_hole_that_cannot_be_dated_blocks_every_window(self, tmp_path):
+        """A row whose own timestamp is damaged cannot be placed outside anything."""
+        done = ask(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "an ordinary host message"),
+            UNDATABLE_ROW,
+            session_row("2026-09-17T10:00:00.000000+08:00", "another host message"),
+        ], "--pattern", "never-said-this", "--since", "2026-09-18")
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "could not be read" in done.stderr
+
+    def test_a_match_elsewhere_is_still_reported(self, tmp_path):
+        """A hole can only hide a match, never manufacture one, so 0 is unaffected."""
+        done = ask(tmp_path, [
+            session_row("2026-09-17T10:00:00.000000+08:00", "the host said maplesyrup"),
+            damaged_row("an unreadable row"),
+        ], "--pattern", "maplesyrup")
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "FOUND" in done.stdout
+
+    def test_the_inventory_counts_the_rows_it_could_not_read(self, tmp_path):
+        """`--measure` is a count of what was read, so a hole belongs in the count."""
+        done = ask(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "an ordinary host message"),
+            damaged_row("an unreadable row"),
+        ], "--measure")
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "could not be read" in done.stdout
+        assert "history_260915.jsonl:2" in done.stdout
 
 
 class TestTheInventory:
