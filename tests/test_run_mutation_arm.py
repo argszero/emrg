@@ -210,6 +210,55 @@ class TestTheJudgementOfOneArm:
         assert rc == mod.EXIT_KILLED, out
         assert "any of which can be --expect" not in out, out
 
+    def test_an_unjudgeable_arm_whose_mutation_raises_offers_the_exception_line(
+        self, mod, tree, capsys
+    ) -> None:
+        """The shape measured 2026-10-04, end to end: the mutation raises, nothing asserts.
+
+        A mutation that makes the subject raise is refused by the run because of a
+        `TypeError`, not an assertion, and this is the case whose report used to be
+        empty - the remedy silent in exactly the state it was written for. The fragment
+        the run prints is pytest's own `E` explanation of the exception.
+        """
+        rc = _arm(mod, tree, old=GREETING, new='return "hello " + None',
+                  expect="a fragment no line prints")
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_UNJUDGEABLE, out
+        assert "any of which can be --expect" in out, out
+        assert "TypeError" in out, out
+
+    def test_the_offered_candidate_works_as_expect_verbatim(self, mod, tree, capsys) -> None:
+        """The invariant the whole remedy rests on, asserted by *using* the candidate.
+
+        Reading it out of the report and handing it straight back is the caller's next
+        move, so if it did not match, the block would be decoration. Same arm both times,
+        so the fragment offered is one that run really printed.
+        """
+        rc = _arm(mod, tree, old=GREETING, new='return "hello " + None',
+                  expect="a fragment no line prints")
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_UNJUDGEABLE, out
+        lines = out.splitlines()
+        head = next(
+            i for i, line in enumerate(lines) if "any of which can be --expect" in line
+        )
+        offered = [
+            line.strip()
+            for line in lines[head + 1 :]
+            if line.startswith("  ") and line.strip()
+        ]
+        assert any("TypeError" in text for text in offered), (
+            f"the run printed a TypeError and the report offered none of it: {offered}"
+        )
+        candidate = next(text for text in offered if "TypeError" in text)
+        rc_again = _arm(mod, tree, old=GREETING, new='return "hello " + None',
+                        expect=candidate)
+        out_again = capsys.readouterr().out
+        assert rc_again == mod.EXIT_KILLED, (
+            f"the candidate the report offered ({candidate!r}) did not judge the arm it "
+            f"was taken from:\n{out_again}"
+        )
+
     def test_the_json_report_carries_the_verdict_and_the_observed_run(
         self, mod, tree, capsys
     ) -> None:
@@ -363,24 +412,51 @@ class TestTheSmallReadings:
     def test_a_unique_anchor_is_replaced_once(self, mod) -> None:
         assert mod._apply("x y", "x", "z") == "z y"
 
-    def test_the_echoed_assertions_are_read_marker_stripped_and_in_order(self, mod) -> None:
-        """Both of pytest's echoed forms, and what the reader must *not* be offered.
+    def test_the_echoed_lines_are_read_marker_stripped_and_in_order(self, mod) -> None:
+        """Both of pytest's echoed explanations, and what the reader must *not* be offered.
 
-        The `where` and exception lines are the ones to refuse: they sit in the same
-        block, they are not assertions, and a caller who pasted one would come back
-        with a second UNJUDGEABLE instead of a verdict.
+        The `+  where ...` block is the one to refuse: it explains the values *inside* an
+        assertion rather than naming the failure, so a caller handed one would be pasting
+        context rather than a failure line.
+
+        The exception line is asserted here **because it used to be refused**, which is
+        this arm's subject rather than a detail of it. Requiring the word `assert` read a
+        raised exception as "this run echoed no assertion", so an arm whose mutation broke
+        the code by raising - the commonest way a mutation breaks anything - came back
+        with an empty candidate list and the caller re-ran pytest by hand (measured
+        2026-10-04 on `2fda2d15`: the report really did print nothing). The old reason for
+        the refusal was that such a fragment "would get UNJUDGEABLE again"; it does not,
+        because `--expect` only has to appear in the run's output and an `E` explanation
+        does - which is how the arm that measured this was finally judged.
         """
         report = (
-            "FAILED tests/x.py::test_a - AssertionError\n"
+            "FAILED tests/x.py::test_a - TypeError\n"
             '>           assert mapping["a"] == 2\n'
             "E           assert 0 == 1\n"
             'E            +  where 0 = int("0")\n'
-            "E       AttributeError: boom\n"
+            "E       TypeError: object of type 'NoneType' has no len()\n"
             "1 failed in 0.05s\n"
         )
         assert mod._assertion_lines(report) == [
             'assert mapping["a"] == 2',
             "assert 0 == 1",
+            "TypeError: object of type 'NoneType' has no len()",
+        ]
+
+    def test_an_exception_explanation_is_offered_though_it_says_no_assert(self, mod) -> None:
+        """The single-line form of the defect: pytest's own output for a raised exception.
+
+        Fed verbatim from a real run (`value = None; return len(value)`), so the arm is
+        about the text pytest prints rather than a paraphrase of it. Before the change
+        this returned `[]`; the `>` line beside it is still refused, because a bare source
+        echo is the mutated line's own text that the caller wrote.
+        """
+        out = (
+            ">       return len(value)\n"
+            "E       TypeError: object of type 'NoneType' has no len()\n"
+        )
+        assert mod._assertion_lines(out) == [
+            "TypeError: object of type 'NoneType' has no len()"
         ]
 
     @pytest.mark.parametrize(
@@ -388,11 +464,14 @@ class TestTheSmallReadings:
         [
             "1 passed in 0.02s",
             "",
-            "E       AttributeError: boom\nE        +  where boom = f()\n",
+            # Context without the line it explains: still nothing a caller can use.
+            "E        +  where boom = f()\n",
+            # A bare source echo with no assertion on it.
+            ">           value = compute()\n",
         ],
     )
-    def test_a_run_that_echoed_no_assertion_offers_none(self, mod, text) -> None:
-        """Empty is an answer: a collection error has no assertion to hand back."""
+    def test_a_run_that_echoed_no_failure_line_offers_none(self, mod, text) -> None:
+        """Empty stays an answer: a collection error has no failure line to hand back."""
         assert mod._assertion_lines(text) == []
 
     def test_the_candidate_list_is_capped_and_deduplicated(self, mod) -> None:
