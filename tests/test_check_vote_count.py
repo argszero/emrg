@@ -483,6 +483,45 @@ def test_a_merged_pr_is_a_terminal_reading_not_an_unmeasurable_one(mod, monkeypa
     assert len(reads) == 1, "one read, which is what carries the state as well"
 
 
+def test_a_terminal_row_reports_no_measurement_it_never_took(mod, monkeypatch, capsys):
+    """`--json` on a finished PR: the three measurement fields are `null`.
+
+    Measured 2026-10-03 (`cyc20261003-231313`) with a `MERGED` payload: the run made
+    exactly **one** `gh` call (`pr view 1`) — no run lookup at all — and `--json` still
+    printed `ci_ran: true`, `push_time_exact: true`, and a `push_time` holding the
+    **merge** time. The prose renderer had already deliberately dropped the push time
+    and the merge state for a terminal PR ("printing it as a push would misdate the
+    head"), so the two surfaces disagreed about the same fact.
+
+    `ci_ran`'s meaning is pinned by `test_json_mode_carries_the_ci_conjunct` two
+    hundred lines down: **false** is "no CI run for the head". Reporting `true` from a
+    branch that never looks makes the field unreadable in the direction that matters —
+    a consumer cannot tell "CI ran" from "not looked for". `null` is the family's
+    spelling for "not measured", and `terminal` on the same row says which reading it
+    is. The control is the existing test: an open PR with no run still reads **false**,
+    not `null`.
+    """
+    fake = FakeGh(_three_votes(), state="MERGED", merged_at="2026-10-03T14:46:59Z",
+                  mergeable="UNKNOWN", merge_state="UNKNOWN")
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    rc = mod.main(["1", "--json"])
+    assert rc == 0
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["terminal"] is True and row["state"] == "MERGED"
+    assert row["merged_at"] == "2026-10-03T14:46:59Z"
+    assert row["push_time"] is None, (
+        "the merge time is not a push time, and it already has its own field"
+    )
+    assert row["push_time_exact"] is None, "no run was looked for, so this was not read"
+    assert row["ci_ran"] is None, (
+        "true claims a run this branch never looked for; false claims there is none"
+    )
+    assert not [c for c in fake.calls if c[:2] == ["run", "list"]], (
+        "the premise of the assertions above: no run lookup happens for a finished PR"
+    )
+
+
 def test_a_closed_unmerged_pr_reads_as_closed_and_not_as_merged(mod, monkeypatch, capsys):
     """The two terminal states are told apart, because they are not the same fact.
 

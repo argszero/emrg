@@ -202,6 +202,11 @@ caller that wants to act on them. There is deliberately no flag that drops the
 mergeable clause: a mode in which this tool says "ready" about a PR that cannot
 merge is the exact reading it was just fixed for.
 
+A **terminal** PR (`MERGED`/`CLOSED`) is a row of its own: `terminal` is true and
+`verdict` is the lifecycle word, and the three fields that report *measurements* —
+`push_time`, `push_time_exact`, `ci_ran` — are `null`, because none of them was
+taken (a finished PR is read once, and no run is looked for). `false` there would
+say "no CI run exists for this head", which is a claim the tool did not check.
 
 `gh` and network access to GitHub are required; there is no offline mode.
 """
@@ -1244,12 +1249,24 @@ def check_pr(
         # queue printed a `--mergeability-wait 60` for it that provably cannot
         # succeed. The live question ("how many votes does this head still have?")
         # has no subject once the branch has landed, so it is answered by saying so.
+        # `push_time` and `push_time_exact` are left **empty and False**, not filled
+        # with the merge time. Both names claim a reading this branch does not take:
+        # no push time is read (the `mergedAt` above is the one datum here, and it has
+        # its own field), and no CI run is looked for — this branch returns before
+        # `_earliest_run_created_at`, so `exact=True` was the tool asserting it had
+        # found a run at exactly that instant. Measured 2026-10-03
+        # (`cyc20261003-231313`) with a MERGED payload: the run made exactly **one**
+        # `gh` call (`pr view 1`) and `--json` still printed `ci_ran: true` and
+        # `push_time: <the merge time>`. The prose renderer had deliberately dropped
+        # both for the reason above; the machine surface read the other way, and
+        # `tests/test_check_vote_count.py` states what `ci_ran` means ("no run for the
+        # head" ⇒ false), so a consumer could not tell "CI ran" from "not looked for".
         return Verdict(
             pr=int(view.get("number") or number),
             title=str(view.get("title") or ""),
             head_sha=head,
-            push_time=str(view.get("mergedAt") or ""),
-            push_time_exact=True,
+            push_time="",
+            push_time_exact=False,
             mergeable=str(view.get("mergeable") or ""),
             merge_state=str(view.get("mergeStateStatus") or ""),
             state=state,
@@ -1465,8 +1482,14 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "pr": v.pr,
                         "head": v.head_sha,
-                        "push_time": v.push_time,
-                        "push_time_exact": v.push_time_exact,
+                        # The three measurement fields read `null` for a terminal PR:
+                        # it is read once and never asked about a run, so a boolean
+                        # here would be a claim about a measurement that was never
+                        # taken -- `false` says "no CI run exists for this head", and
+                        # the tool did not look. `terminal` above says which reading
+                        # this row carries, so a consumer never has to infer it.
+                        "push_time": None if v.terminal else v.push_time,
+                        "push_time_exact": None if v.terminal else v.push_time_exact,
                         "valid_votes": v.valid_count,
                         "needed": v.needed,
                         "mergeable": v.mergeable,
@@ -1474,7 +1497,7 @@ def main(argv: list[str] | None = None) -> int:
                         "state": v.state,
                         "merged_at": v.merged_at,
                         "terminal": v.terminal,
-                        "ci_ran": v.push_time_exact,
+                        "ci_ran": None if v.terminal else v.push_time_exact,
                         "blocked": v.blocked,
                         "verdict": v.mark,
                         "enough_votes": not v.short,
