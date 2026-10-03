@@ -470,9 +470,7 @@ def test_every_mounted_dialect_receives_the_session_cwd(tmp_path):
     session = SimpleNamespace(cwd=tmp_path)
     for name in sorted(SHELL_TOOL_NAMES):
         args: dict = {}
-        server._inject_tool_arguments(
-            name, args, session, SimpleNamespace(sandbox="workspace-write")
-        )
+        server._inject_tool_arguments(name, args, session, "workspace-write")
         assert args["workdir"] == str(tmp_path), name
         assert args["workspace"] == str(tmp_path), name
         assert args["sandbox"] == "workspace-write", name
@@ -482,9 +480,7 @@ def test_a_dialect_that_is_not_mounted_receives_nothing(tmp_path):
     """The set is a set, not a wildcard: an unknown tool is left alone."""
     server = _instantiate()
     args: dict = {}
-    server._inject_tool_arguments(
-        "read", args, SimpleNamespace(cwd=tmp_path), SimpleNamespace(sandbox="workspace-write")
-    )
+    server._inject_tool_arguments("read", args, SimpleNamespace(cwd=tmp_path), "workspace-write")
     assert args == {}
 
 

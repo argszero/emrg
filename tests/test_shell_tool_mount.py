@@ -27,7 +27,6 @@ from types import SimpleNamespace
 import pytest
 
 from emrg.config import load_sandbox_config
-from emrg.protocol import TaskRequest
 from emrg.server.daemon import EmrgServer
 from emrg.tools import ToolRegistry
 from emrg.tools.bash_tool_v2 import BashToolV2
@@ -147,7 +146,7 @@ def injected(tmp_path):
 
     def call(tool: str, args: dict, *, sandbox: str | None = None, cwd: Path | None = None):
         session = SimpleNamespace(cwd=cwd or tmp_path)
-        EmrgServer._inject_tool_arguments(tool, args, session, TaskRequest(sandbox=sandbox))
+        EmrgServer._inject_tool_arguments(tool, args, session, sandbox)
         return args
 
     return call

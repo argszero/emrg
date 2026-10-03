@@ -3644,7 +3644,9 @@ class EmrgServer:
                     })
 
     @staticmethod
-    def _inject_tool_arguments(tc_name: str, args: dict, session, req: TaskRequest) -> None:
+    def _inject_tool_arguments(
+        tc_name: str, args: dict, session, tier: str | None
+    ) -> None:
         """Inject the parts of a tool call the model must not choose.
 
         Two rules, and both exist because the value decides a boundary rather
@@ -3661,10 +3663,21 @@ class EmrgServer:
           workspace" (design §2.4). A sandbox that takes its authorization root
           from the agent is not a sandbox, so this is one ``and`` fixing the root
           cause rather than a new concept.
-        * **the sandbox tier is the task's, not the agent's** (rant
+        * **the tier a call runs under is the caller's, not the agent's** (rant
           2026-08-20T15:46:50). ``write``/``edit`` also receive it, together with
           the workspace boundary, so that under read-only they cannot clobber the
           host's uncommitted tree (community issue #979).
+
+        The tier arrives as a **value** rather than as a ``TaskRequest``, so that
+        a caller with no request can state its own without fabricating one -
+        measured 2026-10-03 (`cyc20261003-090949`): the memory-reflection loop
+        passed no tier at all and its tools resolved to ``danger-full-access``
+        with ``workspace_root`` = the *daemon's* process cwd (``policy.DEFAULT_MODE``
+        plus ``os.getcwd()``), so background reflection wrote unconfined, wherever
+        the daemon happened to be started. The main loop passes ``req.sandbox``,
+        byte for byte what it passed before this signature changed; the reflection
+        loop passes ``resolve_client_tier(session)``, the tier the session itself
+        runs at. Three sites, one rule, one home.
 
         ``workspace`` is a new key for the shell tools and the old executor
         ignores it (it reads ``command``/``timeout``/``workdir``/``sandbox``
@@ -3682,15 +3695,17 @@ class EmrgServer:
         :param tc_name: the tool the model called.
         :param args: the call's arguments, updated in place.
         :param session: the session the call belongs to (its ``cwd`` is the value).
-        :param req: the request carrying the task's configured tier.
+        :param tier: the sandbox tier this call runs under, or ``None`` when the
+            caller has none to state (then no boundary keys are injected and the
+            tool's own default applies — ``danger-full-access``, unconfined).
         """
         cwd = str(session.cwd)
         if tc_name in SHELL_TOOL_NAMES or tc_name == "glob":
             args["workdir"] = cwd
         elif tc_name == "grep" and "path" not in args:
             args["path"] = cwd
-        if tc_name in SHELL_TOOL_NAMES | {"write", "edit"} and req.sandbox:
-            args["sandbox"] = req.sandbox
+        if tc_name in SHELL_TOOL_NAMES | {"write", "edit"} and tier:
+            args["sandbox"] = tier
             args["workspace"] = cwd
 
     async def _apply_escalation(
@@ -4367,7 +4382,7 @@ class EmrgServer:
                     })
 
                     # The pieces of a call the model must not choose (D1).
-                    self._inject_tool_arguments(tc_name, args, session, req)
+                    self._inject_tool_arguments(tc_name, args, session, req.sandbox)
 
                     # Execute
                     refusal = await self._apply_escalation(
@@ -6574,6 +6589,22 @@ class EmrgServer:
 
                         tool = self.tools.get(tc_name)
                         if tool:
+                            # The same two boundary values the main loop injects,
+                            # resolved from the session instead of from a request:
+                            # this loop has no TaskRequest, and its tools used to
+                            # run with none of them, so `write`/`edit`/`bash`
+                            # resolved `danger-full-access` with the *daemon's*
+                            # process cwd as their workspace (measured 2026-10-03,
+                            # `cyc20261003-090949`). Reflection writes the memory
+                            # of the session it belongs to, and both of that
+                            # session's memory directories — its own
+                            # `<session dir>/memory/` and the project's
+                            # `<cwd>/.emrg/memory/` — live under `session.cwd`,
+                            # so the session's own tier is the one that lets it
+                            # do its job and nothing else.
+                            self._inject_tool_arguments(
+                                tc_name, args, session, resolve_client_tier(session)
+                            )
                             try:
                                 result = await tool.execute(args)
                                 result_text = result.content

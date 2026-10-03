@@ -19,8 +19,10 @@ Two boundaries these tests exist to hold, each with its own guard below:
 from __future__ import annotations
 
 import asyncio
+import ast
 import inspect
 import json
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -174,7 +176,23 @@ def test_the_client_turn_path_resolves_the_tier_before_the_loop_starts():
 
     inject_source = inspect.getsource(EmrgServer._inject_tool_arguments)
     assert "session.sandbox" not in inject_source
-    assert "resolve_client_tier" not in inject_source
+    # The rule is about a **call**, not about the word: measured 2026-10-03
+    # (`cyc20261003-090949`), this leg was a substring check on the source text,
+    # so a docstring that *explains* who passes the tier (``resolve_client_tier
+    # (session)`` for the reflection loop, ``req.sandbox`` for the main loop)
+    # turned it red while the rule itself was intact. A prose mention is not a
+    # session lookup, so the assertion is now the structural one it always meant:
+    # no call to the resolver inside this function.
+    called = {
+        node.func.id
+        for node in ast.walk(ast.parse(textwrap.dedent(inject_source)))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "resolve_client_tier" not in called, (
+        "the injection rule must not resolve the tier itself - the callers do, "
+        "because the scheduler's turns and the upgrade session have tiers of "
+        "their own"
+    )
 
 
 # ── the daemon's one write path and its broadcast ─────────────────────────
