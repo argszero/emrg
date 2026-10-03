@@ -6,6 +6,8 @@ Config is stored at ~/.emrg/config.toml.
 
 from __future__ import annotations
 
+from emrg.read_errors import FILE_READ_ERRORS
+
 import os
 import sys
 from dataclasses import dataclass, field
@@ -196,7 +198,7 @@ def config_dir() -> Path:
 #: directory all returned their defaults, and a file holding `\xff` raised out of
 #: both of them — so the *same* input class (a config this reader cannot read)
 #: was answered two different ways depending on which byte was wrong.
-CONFIG_READ_ERRORS = (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError)
+CONFIG_READ_ERRORS = (*FILE_READ_ERRORS, tomllib.TOMLDecodeError)
 
 
 def config_path() -> Path:

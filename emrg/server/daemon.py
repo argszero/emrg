@@ -45,6 +45,7 @@ from emrg.config import (
     resolve_model_vision,
 )
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
+from emrg.read_errors import JSON_READ_ERRORS
 from emrg.server.abort_runs import AbortRuns
 from emrg.server.atomic import YAML_READ_ERRORS, atomic_write_bytes, atomic_write_yaml
 from emrg.server.config_reload import (
@@ -1285,7 +1286,7 @@ class EmrgServer:
                     data = json.loads(f.read_text(encoding="utf-8"))
                     if data.get("timestamp"):
                         disk += 1
-                except (json.JSONDecodeError, OSError):
+                except JSON_READ_ERRORS:
                     continue  # corrupt/partial write — don't count
         except OSError:
             pass
@@ -2916,7 +2917,7 @@ class EmrgServer:
                     "type": "rants_list",
                     "rants": rants,
                 })
-            except OSError as e:
+            except JSON_READ_ERRORS as e:
                 logger.exception("list_rants: failed to read %s", self._rants_log)
                 await self._send(ws, {"type": "rants_list", "rants": [], "error": str(e)})
 
@@ -3021,7 +3022,7 @@ class EmrgServer:
                             "impact": data.get("impact", []),
                             "operations": data.get("operations", []),
                         })
-                    except (json.JSONDecodeError, OSError):
+                    except JSON_READ_ERRORS:
                         continue
                 await self._send(ws, {
                     "type": "evolution_summary",
@@ -4954,7 +4955,7 @@ class EmrgServer:
                     if (ev.get("type") == "anchor_provider_drift"
                             and ev.get("session") == _PLANTED_FIRE_DRILL_SESSION):
                         n += 1
-        except OSError:
+        except JSON_READ_ERRORS:
             pass
         return n
 
@@ -5979,7 +5980,7 @@ class EmrgServer:
 
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except JSON_READ_ERRORS:
             meta = {}
         if meta.get("message_count", 0) <= 0:
             canonical = self._canonical_session_cwd(session_id)

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Iterable
 
 from emrg.memory import SessionMemoryStore
+from emrg.read_errors import JSON_READ_ERRORS
 from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.sessions_index import remove_session_index, upsert_session_index
 
@@ -328,7 +329,7 @@ class Session:
         if self._meta_path.exists():
             try:
                 meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except JSON_READ_ERRORS:
                 pass
         return meta.get("title", self.session_id)
 
@@ -596,7 +597,7 @@ class Session:
                     old = json.loads(self._meta_path.read_text(encoding="utf-8"))
                     if "title" in old:
                         meta["title"] = old["title"]
-                except (json.JSONDecodeError, OSError):
+                except JSON_READ_ERRORS:
                     pass
         self._meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         # Global cross-project index (rant 2026-08-13T16:42:22): record this
@@ -675,7 +676,7 @@ class Session:
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 results.append(meta)
-            except (json.JSONDecodeError, OSError):
+            except JSON_READ_ERRORS:
                 logger.warning("corrupt meta.json in %s, skipping", entry.name)
 
         # Rant 2026-09-30T10:27:20：按「最后活动」排序。仅看 created_at 时，一个天天在用的

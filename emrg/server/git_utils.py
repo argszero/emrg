@@ -12,6 +12,7 @@ from pathlib import Path
 
 from emrg._win import win32_no_window_kwargs
 from emrg.config import config_dir
+from emrg.read_errors import JSON_READ_ERRORS
 from emrg.server.atomic import atomic_write_bytes
 
 INSTALL_BIN = Path.home() / ".emrg" / "install" / "bin"
@@ -177,7 +178,7 @@ def _cached_tool_path(tool: str) -> str | None:
         data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
         value = data.get(f"{tool}_path")
         return str(value) if value else None
-    except (OSError, json.JSONDecodeError, AttributeError):
+    except (*JSON_READ_ERRORS, AttributeError):
         return None
 
 
@@ -200,7 +201,7 @@ def _cache_tool_paths(git: str, gh: str) -> None:
         if INSTALL_INFO.exists():
             try:
                 data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, AttributeError):
+            except (*JSON_READ_ERRORS, AttributeError):
                 data = {}
         data.update({"git_path": git, "gh_path": gh, "repo": "https://github.com/argszero/emrg.git"})
         tmp = INSTALL_INFO.with_name(INSTALL_INFO.name + ".tmp")

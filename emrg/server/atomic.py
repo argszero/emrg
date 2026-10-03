@@ -17,6 +17,8 @@ from pathlib import Path
 
 import yaml
 
+from emrg.read_errors import FILE_READ_ERRORS
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,7 +49,7 @@ logger = logging.getLogger(__name__)
 #: `submit_rant_tool._registered_project_names` and two `except Exception` sites in
 #: `daemon.py` — so the correct spelling was known in this codebase and the tuple was
 #: a spelling that drifted, not a decision.
-YAML_READ_ERRORS = (OSError, yaml.YAMLError, UnicodeDecodeError)
+YAML_READ_ERRORS = (*FILE_READ_ERRORS, yaml.YAMLError)
 
 
 def atomic_write_yaml(

@@ -71,6 +71,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+# The read-error home lives in the package (see `emrg/read_errors.py` for why the
+# decode shape is part of the same class); this script is standalone, so it has to
+# put the checkout on the path to reach it — the shape `scripts/recover-worktree.py`
+# uses. A non-UTF-8 index is the shape whose answer used to differ from the other
+# two: this reader promises "unreadable index -> none".
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from emrg.read_errors import JSON_READ_ERRORS  # noqa: E402
+
 #: Where the daemon writes its received-message record, and where it keeps the index
 #: of session directories that the second source is read from.
 DEFAULT_LOG_DIR = Path.home() / ".emrg"
@@ -283,7 +292,7 @@ def index_roots(index: Path) -> list[Path]:
     """Session directories the daemon's index names. Unreadable index -> none."""
     try:
         payload = json.loads(index.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except JSON_READ_ERRORS:
         return []
     if not isinstance(payload, dict):
         return []

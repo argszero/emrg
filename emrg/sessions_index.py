@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 from emrg.config import config_dir
+from emrg.read_errors import JSON_READ_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ def _load(index_path: Path) -> dict[str, str]:
         return {}
     try:
         data = json.loads(index_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except JSON_READ_ERRORS:
         logger.warning("corrupt sessions index %s — resetting", index_path)
         return {}
     if not isinstance(data, dict):
@@ -104,7 +105,7 @@ def _read_meta_session_id(meta_path: Path) -> str | None:
     """Return the session_id from a meta.json, or None if missing/corrupt."""
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except JSON_READ_ERRORS:
         return None
     sid = meta.get("session_id")
     return str(sid) if sid else None
