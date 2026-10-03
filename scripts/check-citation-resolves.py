@@ -48,6 +48,32 @@ not a citation rather than because it is inconvenient:
 * a **class** (`tests/test_ws_e2e.py::TestWSVibeCheck`) - pytest collects a class
   as written, so there is nothing to qualify.
 
+Reading less than the tree
+--------------------------
+Measured 2026-10-03 (`cyc20261003-083317`): this scan had three ways to see a
+subset of the tree and answer about the whole of it, and a fourth the exit table
+below had always promised and the code had never asked. Each was read on a tree
+that really holds the defect, once with the subject reachable and once with it
+not:
+
+* a **directory** that cannot be listed - the defect behind `hidden/` answered
+  `0` ("every citation names a node id pytest collects") with `chmod 000` on
+  that directory, and `1` on the same tree with the mode restored;
+* a **file** that cannot be read - the site the citation is written in, same two
+  readings;
+* a **cited module** that cannot be parsed - already reported;
+* the tree holding **no test module at all** - a root without `tests/` answered
+  `0`, over a module set that was empty by construction.
+
+All four are one fact - the question was not answered - so all four are one
+channel: the subject is named with its reason on stderr and the verdict is `2`.
+A **skip is not a coverage measure**: the count a green verdict rests on is the
+count of subjects the scan could not read, and a walk can only account for what
+it read. The rule is held mechanically as well -
+`tests/test_a_skipped_subject_is_reported.py` scans every guard in `scripts/`
+for a filesystem subject dropped by a bare `continue`, with a one-entry
+justification registry.
+
 Which tree answered
 -------------------
 The scan takes its tree as an **argument** (defaulting to `.`), and until 2026-09-25
@@ -127,19 +153,43 @@ class Finding(NamedTuple):
     needed: str
 
 
-def text_files(root: Path) -> list[Path]:
+def _named(path: Path, root: Path) -> str:
+    """`path` as the report names it: relative to the tree when it is inside it.
+
+    :param path: the subject to name.
+    :param root: the tree being scanned.
+    :returns: the relative spelling when there is one, else the absolute path.
+    """
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def text_files(root: Path) -> tuple[list[Path], list[str]]:
     """Every readable text file under `root`, minus the skipped directories.
 
+    A directory that cannot be listed is **reported, not skipped** (measured
+    2026-10-03, cycle cyc20261003-083317): a walk that drops one answers about a
+    subset of the tree while its sentence claims the tree, and a citation inside
+    it is one this scan never considered. The same shape as the tree the caller
+    never stood in, which this file's `tree:` line already records.
+
     :param root: the tree to walk.
-    :returns: the files, in a stable order.
+    :returns: `(files, unreadable)` - the files in a stable order, and one
+        sentence per directory that could not be listed.
     """
     out: list[Path] = []
+    unreadable: list[str] = []
     stack = [root]
     while stack:
         current = stack.pop()
         try:
             entries = sorted(current.iterdir())
-        except OSError:
+        except OSError as exc:
+            unreadable.append(
+                f"{_named(current, root)}/ (directory could not be listed: {exc})"
+            )
             continue
         for entry in entries:
             if entry.is_dir():
@@ -147,7 +197,7 @@ def text_files(root: Path) -> list[Path]:
                     stack.append(entry)
             elif entry.suffix in TEXT_SUFFIXES:
                 out.append(entry)
-    return sorted(out)
+    return sorted(out), unreadable
 
 
 def node_ids(path: Path) -> Optional[tuple[set[str], dict[str, list[str]]]]:
@@ -177,21 +227,33 @@ def node_ids(path: Path) -> Optional[tuple[set[str], dict[str, list[str]]]]:
 def scan(root: Path) -> tuple[list[Finding], list[str]]:
     """Check every citation under `root`.
 
+    Three subjects this scan cannot read are collected rather than skipped - a
+    **directory** it could not list, a **file** it could not read, a **cited
+    module** it could not parse - plus the fourth case the docstring's exit table
+    always named and the code never implemented: a tree with **no test module at
+    all**, where every citation's target is unreadable by construction and a
+    green verdict would be a reading over an empty set. All four are one channel
+    because they are one fact: the question was not answered.
+
     :param root: the tree to scan.
-    :returns: `(findings, unreadable_sites)` - the second is every file a
-        citation was found in but that could not be parsed, so an empty finding
-        list beside a non-empty one is reported instead of passed.
+    :returns: `(findings, unreadable)` - so an empty finding list beside a
+        non-empty second one is reported instead of passed.
     """
-    files = text_files(root)
+    files, unreadable = text_files(root)
     modules = {p for p in files if p.suffix == ".py" and p.is_relative_to(root / "tests")}
+    if not modules:
+        unreadable.append(
+            f"{_named(root / 'tests', root)}/ (no test module under it, so every "
+            "citation's target is unreadable)"
+        )
     parsed: dict[Path, Optional[tuple[set[str], dict[str, list[str]]]]] = {}
-    unreadable: list[str] = []
     findings: list[Finding] = []
 
     for site in files:
         try:
             text = site.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as exc:
+            unreadable.append(f"{_named(site, root)} (could not be read: {exc})")
             continue
         for match in CITATION.finditer(text):
             cited_path, name = match.group(1), match.group(2)
@@ -202,7 +264,9 @@ def scan(root: Path) -> tuple[list[Finding], list[str]]:
                 parsed[target] = node_ids(target)
             collected = parsed[target]
             if collected is None:
-                unreadable.append(cited_path)
+                unreadable.append(
+                    f"{cited_path} (a cited test module that could not be parsed)"
+                )
                 continue
             module_level, methods = collected
             if "::" in name:
@@ -280,10 +344,12 @@ def main(argv: list[str] | None = None) -> int:
     findings, unreadable = scan(root)
     if unreadable:
         print(
-            f"could not measure: {len(unreadable)} cited test module(s) could not be "
-            f"parsed ({', '.join(sorted(set(unreadable)))})",
+            f"could not measure: {len(unreadable)} subject(s) of this tree could not be "
+            "read, so a verdict would be a reading over a subset of it:",
             file=sys.stderr,
         )
+        for entry in unreadable:
+            print(f"  {entry}", file=sys.stderr)
         return 2
     if not findings:
         print("every citation names a node id pytest collects")

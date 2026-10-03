@@ -182,3 +182,75 @@ def test_the_real_tree_cites_no_class_method_without_its_class(mod):
     findings, unreadable = mod.scan(REPO_ROOT)
     assert unreadable == [], f"unmeasurable: {unreadable}"
     assert findings == [], "\n".join(f"{f.site}:{f.line}: {f.cited} -> {f.needed}" for f in findings)
+
+
+# --- reading less than the tree -------------------------------------------------
+#
+# Measured 2026-10-03 (`cyc20261003-083317`): each of these three answered `0`
+# ("every citation names a node id pytest collects") over a tree that really holds
+# the defect. Every leg below is paired with the same tree read *reachable*, so the
+# red is attributable to the mode and not to the fixture.
+
+
+def _notes(citation: str) -> str:
+    """The site text used by `_tree`, so a moved site keeps the same claim."""
+    return f"The reading is in `{citation}` today.\n"
+
+
+def test_a_directory_this_scan_cannot_list_is_reported_not_skipped(mod, tmp_path, capsys):
+    """The defect can live one directory down; an unlistable one hid it."""
+    root = _tree(tmp_path, "`tests/test_thing.py::test_inside_a_class`")
+    (root / "notes.md").unlink()
+    hidden = root / "hidden"
+    hidden.mkdir()
+    (hidden / "notes.md").write_text(
+        _notes("tests/test_thing.py::test_inside_a_class"), encoding="utf-8"
+    )
+    try:
+        hidden.chmod(0o000)
+        assert mod.main([str(root)]) == 2
+        err = capsys.readouterr().err
+        assert "could not measure" in err and "hidden/" in err
+    finally:
+        hidden.chmod(0o755)
+    # The control: the same tree, the same defect, reachable.
+    assert mod.main([str(root)]) == 1
+    assert "TestHolder" in capsys.readouterr().out
+
+
+def test_a_site_this_scan_cannot_read_is_reported_not_skipped(mod, tmp_path, capsys):
+    """The site the citation is written in is a subject of the scan too."""
+    root = _tree(tmp_path, "`tests/test_thing.py::test_inside_a_class`")
+    notes = root / "notes.md"
+    try:
+        notes.chmod(0o000)
+        assert mod.main([str(root)]) == 2
+        err = capsys.readouterr().err
+        assert "could not measure" in err and "notes.md" in err
+    finally:
+        notes.chmod(0o644)
+    assert mod.main([str(root)]) == 1
+
+
+def test_a_tree_with_no_test_module_answers_unmeasurable(mod, tmp_path, capsys):
+    """The exit table promised this reading before the code asked for it.
+
+    Measured before the fix: a root with no `tests/` answered `0` over an empty
+    module set - the one exit code this file's own docstring says that case is for.
+    """
+    root = tmp_path / "notests"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "x.md").write_text(
+        _notes("tests/test_thing.py::test_inside_a_class"), encoding="utf-8"
+    )
+    findings, unreadable = mod.scan(root)
+    assert findings == []
+    assert len(unreadable) == 1 and "tests/" in unreadable[0], unreadable
+    assert mod.main([str(root)]) == 2
+    assert "could not measure" in capsys.readouterr().err
+
+
+def test_a_reachable_tree_reports_nothing_unreadable(mod, tmp_path):
+    """The control for all three above: a whole tree yields an empty second list."""
+    root = _tree(tmp_path, "`tests/test_thing.py::test_at_module_level`")
+    assert mod.scan(root) == ([], [])
