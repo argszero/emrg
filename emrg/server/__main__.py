@@ -113,8 +113,21 @@ def main() -> None:
     # end in — also records the effective PATH in emrgd.log, where the next
     # occurrence is one grep away.
     ensure_tool_dirs()
-    config = load_config()
+    # Startup is inside the guard, not only the event loop. `load_config()` used to
+    # run before it, so a corrupt `~/.emrg/config.toml` — measured on the host
+    # 2026-09-27: a stray `probe` line appended to line 48 by a sandbox probe — raised
+    # out of `main()` **having called no logger at all**. `emrgd.log` received nothing,
+    # and by then `_redirect_std_streams()` had already re-pointed this child's own
+    # stderr at `emrgd-crash.log`, so the captured stderr was empty as well. The
+    # client's failure report reads exactly those two channels
+    # (`client/daemon_manager.py::_startup_failure_detail`), so the host was told
+    # "the child is already exited (exit=1)" with both channels silent — while the
+    # traceback, naming the file, the line and the column, was one file over, in a
+    # file no failure report reads. The guard is the fix: every startup failure now
+    # reaches `emrgd.log` (the channel that report *does* read) and the exit record,
+    # whatever the crash log keeps as the low-level sink.
     try:
+        config = load_config()
         result = asyncio.run(run_server(config.llm))
     except KeyboardInterrupt:
         # SIGINT delivered at the event-loop poll point escapes the main

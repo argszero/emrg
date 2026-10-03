@@ -383,7 +383,7 @@ jobs:
             --wait --timeout 20m --output-format json 2>&1)" || NOTARY_RC=$?
           echo "$NOTARY_OUT"
           if [ "$NOTARY_RC" -ne 0 ]; then
-            echo "::error::xcrun notarytool submit exited $NOTARY_RC - the SUBMISSION was refused, so this is not a notarization verdict. Apple's own reply is the output above. Usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement that needs accepting. A verdict failure looks different: it takes minutes, exits 0, and reports status=Invalid."
+            echo "::error::xcrun notarytool submit exited $NOTARY_RC - the SUBMISSION was refused, so this is not a notarization verdict. Apple's own reply is the output above. Usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement that needs accepting. A verdict failure looks different: it takes minutes, exits 0, and reports status=Invalid. Reproduce it at home before re-tagging, with the same three variables this step sends: APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them, and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
           fi
           # 解析提交 ID 与状态（--output-format json 输出 {"id","message","status"}）
           SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
