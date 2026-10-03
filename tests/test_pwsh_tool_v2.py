@@ -27,6 +27,7 @@ the single ``@needs_windows`` case above is where CI's ``windows-2025`` leg pins
 """
 
 import asyncio
+import locale
 import ntpath
 import os
 import subprocess
@@ -624,6 +625,86 @@ def test_the_two_twins_cut_a_long_stderr_the_same_way():
     assert ours.startswith(stderr[:500]), "the head is kept: it names what ran"
     assert ours.endswith(stderr[-500:]), "the tail is kept: it carries the error"
     assert "head+tail kept" in ours, "and the notice says which end the reader got"
+
+
+def test_the_two_twins_decode_the_same_bytes_the_same_way(monkeypatch):
+    """The decoding policy is shared, and this reads it rather than trusting it.
+
+    The pair above pins the twin **constants**; this one measures the one twin
+    function that is a policy rather than a value, on the same bytes.  It was
+    the half no assertion reached, and the two had in fact drifted: bash tried
+    the console's own code page strictly before UTF-8, while pwsh ignored its
+    ``os_name`` argument altogether — so on the platform this module exists for,
+    every non-UTF-8 byte of a command's output became ``\ufffd``.
+
+    Both directions are carried by the matrix: a code page that *is* the answer
+    (the GBK row) and one where the bytes are genuinely unreadable (the stray
+    ``\\xff\\xfe`` row), so a copy that always took the locale codec fails on the
+    second half just as one that never takes it fails on the first.
+    """
+    from emrg.tools import bash_tool_v2 as bash
+
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *_: "gbk")
+    cases = [
+        (b"", "nt"),
+        (b"", "posix"),
+        ("中文输出".encode("gbk"), "nt"),
+        ("中文输出".encode("gbk"), "posix"),
+        (b"\xff\xfe", "nt"),
+        (b"\xff\xfe", "posix"),
+        ("café".encode(), "nt"),
+        ("café".encode(), "posix"),
+    ]
+    for data, os_name in cases:
+        theirs = bash._decode_output(data, os_name=os_name)
+        ours = pwsh._decode_output(data, os_name=os_name)
+        assert ours == theirs, (data, os_name, ours, theirs)
+
+
+def test_the_windows_dialect_decodes_its_console_code_page(monkeypatch):
+    """The measured case: a GBK console, read by the dialect that runs on Windows.
+
+    The bash twin's tests cover this rule for bash; the Windows dialect is the
+    one it matters more for, and it had no decode assertion of any kind.  The
+    positives are the rule; the POSIX leg is the control that stops "always use
+    the locale codec" from satisfying it, because a POSIX child emits UTF-8 and
+    decoding those bytes as GBK would invent text that was never sent.
+    """
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *_: "gbk")
+    raw = "中文输出".encode("gbk")
+
+    assert pwsh._decode_output(raw, os_name="nt") == "中文输出"
+    # The production path passes no ``os_name`` at all (``run_command`` calls this
+    # with the bytes alone), so the default is what a real Windows host takes —
+    # pinned here because a rule that only works when the caller names the
+    # platform would not have fixed anything on the machine it is about.
+    monkeypatch.setattr(os, "name", "nt")
+    assert pwsh._decode_output(raw) == "中文输出"
+
+    # Control, other direction, read **under the same console code page**: POSIX
+    # output is UTF-8, so these bytes are simply unreadable there and must be
+    # replaced rather than guessed at.  The locale patch deliberately stays in
+    # place — under the host's own UTF-8 locale the last-resort decode answers
+    # the same way whether or not the rule is guarded by the platform, which is
+    # how a control leg with no power reads green (measured: undoing it here let
+    # "apply the codec everywhere" survive, `cyc20261003-134135`).
+    monkeypatch.setattr(os, "name", "posix")
+    posix = pwsh._decode_output(raw, os_name="posix")
+    assert set(posix) == {"\ufffd"} and posix != "中文输出"
+    assert pwsh._decode_output(b"", os_name="nt") == ""
+
+
+def test_the_windows_dialect_still_yields_when_the_console_codec_declines(monkeypatch):
+    """A UTF-8-emitting child on a narrow console must not lose its text.
+
+    The locale codec is tried strictly first, so a console that cannot decode a
+    UTF-8 child's bytes has to fall through to UTF-8 rather than replace them —
+    this is the second half of the same rule the bash twin states, read here on
+    this module's copy so the two cannot drift apart again.
+    """
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *_: "ascii")
+
+    assert pwsh._decode_output("café".encode(), os_name="nt") == "café"
 
 
 def test_the_pwsh_module_does_not_import_the_bash_executor():

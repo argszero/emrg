@@ -30,7 +30,8 @@ Two halves, deliberately different in kind
      program* is one that writes the Windows console code page
      (`_CONSOLE_PROGRAMS`);
   2. the locale codec (`locale.getpreferredencoding()` and friends) must not be
-     named at all, except in the one file whose subject is the console code page.
+     named at all, except in the files whose subject is the console code page
+     (`_CONSOLE_DECODE_ALLOWED` — the two shell executors and their twins).
   This half covers call sites no test drives, which is where the surviving
   instances lived: `sync-master-from-api.py`'s API fallback only runs when the
   primary path 403s, and `reader_fix_latency.py` is a manual reporting tool with
@@ -158,6 +159,20 @@ _CONSOLE_DECODE_ALLOWED = {
         "P7 the old file is deleted and this one inherits the exemption above it "
         "rather than adding a second one. Its own tests pin the decoder both ways: "
         "tests/test_bash_v2_boundary.py, tests/test_bash_v2_policy.py"
+    ),
+    "emrg/tools/pwsh_tool_v2.py": (
+        "The bash executor's peer dialect, and the one that actually ships on "
+        "Windows (design §14: the mounted tool is the platform's shell). Its "
+        "subject is the console code page more directly than bash's is — the "
+        "children it runs on a Windows host are cmd.exe, powershell, taskkill and "
+        "friends, all of which `_CONSOLE_PROGRAMS` exempts by name one list down, "
+        "beside the git/gh calls that speak UTF-8. It was exempted at the file "
+        "level only after 2026-10-03 (cyc20261003-134135) found that the copy had "
+        "dropped the rule altogether and ignored its own `os_name`: a GBK console "
+        "turned every one of a command's bytes into U+FFFD. Its tests pin the "
+        "decoder both ways: tests/test_pwsh_tool_v2.py "
+        "::test_the_two_twins_decode_the_same_bytes_the_same_way and the two legs "
+        "beside it."
     ),
 }
 
@@ -522,7 +537,7 @@ def test_no_locale_codec_is_used_to_decode_subprocess_output() -> None:
     Rule one catches the *implicit* form (`subprocess.run(..., text=True)` with no
     `encoding=`). This catches the explicit one: a name like
     `locale.getpreferredencoding()` in a file that runs subprocesses is the same
-    policy written out loud. Only the two `bash` executors are allowed it, because
+    policy written out loud. Only the shell executors are allowed it, because
     their subject really is the Windows console code page - they run whatever the
     user asked for, and `cmd.exe`/`dir` answer in the console code page; the
     exemption is tied to the file by `_CONSOLE_DECODE_ALLOWED`, and the dead-entry

@@ -42,6 +42,7 @@ measurement.  Nothing in this module spawns ``pwsh`` in a test.
 from __future__ import annotations
 
 import asyncio
+import locale
 import logging
 import ntpath
 import os
@@ -465,14 +466,34 @@ def _truncate_stdout(stdout: str, remaining: int) -> str:
 def _decode_output(data: bytes, os_name: str | None = None) -> str:
     """Decode a stream while keeping one unreadable byte from losing the run.
 
-    :param data: the raw bytes.
-    :param os_name: the platform whose console code page to fall back on.
+    The policy is the bash twin's, because this is the dialect that runs on the
+    platform it is about: POSIX output is UTF-8, while the Windows console
+    writes its **console code page** and git/gh emit UTF-8 — so there the locale
+    codec is tried strictly first and UTF-8 second, with replacement last (rant
+    2026-08-08T09:35:30: U+FFFD garbage from decoding GBK bytes as UTF-8).
+
+    This once read ``os_name`` not at all, so on a host whose console code page
+    is not UTF-8 every byte of a command's output — a Chinese Windows path, a
+    compiler's diagnostic — came back as ``\ufffd`` … and the parameter's own
+    documentation promised the opposite.  Measured 2026-10-03
+    (``cyc20261003-134135``): GBK bytes under a GBK console gave ``'中文输出'``
+    through the bash helper and ``'\\ufffd\\ufffd\\ufffd\\ufffd\\ufffd'`` through
+    this one.
+
+    :param data: the bytes read from the pipe.
+    :param os_name: injectable for tests; defaults to ``os.name``.
     :returns: the decoded text.
     """
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return data.decode("utf-8", errors="replace")
+    if not data:
+        return ""
+    if (os_name or os.name) == "nt":
+        codec = locale.getpreferredencoding(False) or "utf-8"
+        for candidate in (codec, "utf-8"):
+            try:
+                return data.decode(candidate)  # strict
+            except (LookupError, UnicodeDecodeError):
+                continue
+    return data.decode("utf-8", errors="replace")
 
 
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
