@@ -317,6 +317,106 @@ def test_a_leading_mark_decides_the_line(mod):
     assert mod.classify("I can't LGTM this") == "veto"
 
 
+#: The apostrophe a host's own system types in place of the ASCII byte. U+2019 is what
+#: macOS and Word produce by default; U+2018 is the opening form an editor may leave.
+SMART_APOSTROPHE = "\u2019"
+OPEN_APOSTROPHE = "\u2018"
+
+
+class TestARefusalWrittenWithASmartQuote:
+    """A refusal is a veto however the apostrophe was typed.
+
+    Measured 2026-10-03 (`cyc20261003-170703`) on `3987ab68`: the negation vocabulary
+    spelled the **ASCII** apostrophe only (`can'?t`), so every one of these classified as
+    an **approval** - `can\u2019t`/`don\u2019t`/`doesn\u2019t`/`isn\u2019t`/`won\u2019t LGTM` all read
+    `approve` while their ASCII spellings read `veto`:
+
+        can't LGTM     -> veto          can\u2019t LGTM   -> approve
+        don't LGTM     -> veto          don\u2019t LGTM   -> approve
+        doesn't LGTM   -> veto          doesn\u2019t LGTM -> approve
+
+    That is the worst of the two asymmetric directions the module docstring names. A veto
+    read as a *comment* only fails to reset the run; a veto read as an **approval** does
+    not merely leave the stale votes standing, it adds a vote - so a PR a reviewer
+    refused could be carried to `READY 3/3` by the refusals written against it. The
+    typographic mark is not exotic here: it is what the host's own system substitutes
+    for the byte this list used to spell.
+    """
+
+    def test_every_negation_reads_as_a_veto_in_either_apostrophe(self, mod):
+        for stem in ("can", "don", "doesn", "isn", "won"):
+            for ap in ("'", SMART_APOSTROPHE, OPEN_APOSTROPHE):
+                body = f"{stem}{ap}t LGTM - cycle `c`"
+                assert mod.classify(body) == "veto", (
+                    f"{body!r} was read as {mod.classify(body)!r}; a refusal counted as a "
+                    f"vote is the direction that inflates the count"
+                )
+
+    def test_the_controls_are_unmoved_by_the_widening(self, mod):
+        """Widening the apostrophe must change *which* refusals are seen, and nothing else.
+
+        Each of these was already correct, and each is the shape a careless widening
+        breaks: a plain approval, an approval that mentions the other mark, the
+        "not bad" praise the four-character window exists for, and a bare ✅.
+        """
+        assert mod.classify("\u2705 LGTM - cycle `c`") == "approve"
+        assert mod.classify("Results: no \u274c, LGTM - cycle `c`") == "approve"
+        assert mod.classify("Not bad, LGTM - cycle `c`") == "approve"
+        assert mod.classify("\u2705 - third vote at this head") == "approve"
+        assert mod.classify("Results: no \u274c anywhere in this diff") == "comment"
+
+    def test_nothing_about_the_spelling_is_approving(self, mod):
+        """`approve` must not be reachable from a line that says it refuses.
+
+        The coarser check the assertions above imply, stated once: over the whole
+        apostrophe matrix, no refusal spelling is an approval.
+        """
+        approving = [
+            f"{stem}{ap}t LGTM - cycle `c`"
+            for stem in ("can", "don", "doesn", "isn", "won")
+            for ap in ("'", SMART_APOSTROPHE, OPEN_APOSTROPHE)
+            if mod.classify(f"{stem}{ap}t LGTM - cycle `c`") == "approve"
+        ]
+        assert approving == [], f"refusals read as approvals: {approving}"
+
+    def test_the_apostrophe_has_one_home(self, mod):
+        """The vocabulary's apostrophe is stated once and substituted, not typed nine times.
+
+        The last third of this reads the **source**, and measurement is why: inlining the
+        same widened class (`...replace("'", "['\\u2019\\u2018]")`) produces an equal *value*,
+        so a comparison of values cannot see the difference - that mutation **SURVIVED**
+        this test on 2026-10-03, and the arm was correct. What it could not change is the
+        derivation, which is also what a later edit is likeliest to undo: adding a tenth
+        word beside the widened ones with a literal ASCII apostrophe is exactly how this
+        defect arrived. The class and the spellings are read off the module rather than
+        retyped here, so the assertions are about the property and not about a copy.
+        """
+        assert SMART_APOSTROPHE in mod._APOSTROPHE and OPEN_APOSTROPHE in mod._APOSTROPHE
+        assert "'" in mod._APOSTROPHE, "the ASCII byte a terminal produces must still count"
+        assert mod._NEGATION_WORDS == mod._NEGATION_SPELLINGS.replace("'", mod._APOSTROPHE)
+        assert mod._APOSTROPHE in mod._NEGATION_WORDS
+
+        # ...and the assignment itself: `_NEGATION_WORDS = _NEGATION_SPELLINGS.replace(…, _APOSTROPHE)`.
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        assignment = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Assign)
+            and any(getattr(t, "id", "") == "_NEGATION_WORDS" for t in n.targets)
+        )
+        call = assignment.value
+        assert isinstance(call, ast.Call), ast.dump(call)
+        assert isinstance(call.func, ast.Attribute) and call.func.attr == "replace", ast.dump(call)
+        # `.replace`'s receiver is `call.func.value`; `call.args` is what it is *called with*.
+        base = call.func.value
+        assert isinstance(base, ast.Name) and base.id == "_NEGATION_SPELLINGS", ast.dump(call)
+        assert len(call.args) == 2, ast.dump(call)
+        replacement = call.args[1]
+        assert isinstance(replacement, ast.Name) and replacement.id == "_APOSTROPHE", (
+            "the apostrophe must be *substituted* from _APOSTROPHE, not typed into the "
+            "spellings - a literal here is how the ASCII-only defect arrived"
+        )
+
+
 def test_an_approval_mentioning_a_veto_does_not_reset_the_run(mod, monkeypatch, capsys):
     """The regression above, at the level that decides a merge.
 

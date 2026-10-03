@@ -483,13 +483,29 @@ _DECORATION = "*_~`#>|[]()- \t"
 # "1. ❌ ..." / "2) ✅ ..." - an ordered list item, which `_DECORATION` misses.
 _ORDERED_ITEM_RE = re.compile(r"^\d+[.)]\s*")
 
+#: The apostrophe a negation may be written with: the ASCII byte a terminal produces, and
+#: the two typographic quotation marks a host's *own* system substitutes for it. Measured
+#: 2026-10-03 (`cyc20261003-170703`): the vocabulary below spelled the ASCII apostrophe
+#: only, so `can't`/`cannot` were vetos while "can\u2019t" (U+2019 - what macOS and Word type
+#: by default, and what the host's own input path produces) classified as an **approval**.
+#: A refusal read as a vote *for* is the one direction the module docstring calls the worst
+#: of the two: it does not merely fail to reset the run, it adds to it. U+02BC is
+#: deliberately absent - it is a *letter* (`\w`), so including it would change what the
+#: `[^\w]{0,4}` window below can reach across, which is a different rule.
+_APOSTROPHE = "['\u2019\u2018]"
+
 # A mark preceded by a negation is prose *about* the mark, not a statement of it.
 # `[^\w]{0,4}` bounds the gap by non-word characters, so this cannot cross a word:
-# "not bad, LGTM" is an approval, "not LGTM" is not.
-_NEGATION_WORDS = (
+# "not bad, LGTM" is an approval, "not LGTM" is not. The spellings here write their
+# apostrophe as `'`; `_NEGATION_WORDS` substitutes `_APOSTROPHE` for it, so the
+# vocabulary's apostrophe has one home rather than nine.
+_NEGATION_SPELLINGS = (
     r"\b(?:not|no|never|without|nothing|isn'?t|aren'?t|wasn'?t|weren'?t|"
     r"don'?t|doesn'?t|didn'?t|cannot|can'?t|won'?t)\b"
 )
+
+#: `_NEGATION_SPELLINGS` with every apostrophe widened - what the detectors below read.
+_NEGATION_WORDS = _NEGATION_SPELLINGS.replace("'", _APOSTROPHE)
 
 
 def _negation(exclude: str = "") -> str:
