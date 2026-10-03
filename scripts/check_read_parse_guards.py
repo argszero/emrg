@@ -35,7 +35,7 @@ Two halves of one rule, because the decode happens at the **read** in both:
 
 The second half was added 2026-10-03 (`cyc20261003-222355`). The first version asked
 only about readers that parse, and it reported a clean tree over **19** sites that read
-a file's text under a handler naming no decode error and parse nothing — a question
+a file's text under a handler naming no decode error and parse nothing -- a question
 narrower than the rule it claimed to hold. Eleven of those were real readers; the other
 eight are read with `open` in a binary or write mode, or with an `errors=` that makes
 the decode unfailable, and telling those apart is most of what the code below does.
@@ -95,7 +95,7 @@ _NESTED_SCOPES = (ast.Try, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 
 
 def _call_names(node: ast.AST, *, skip_nested_code: bool) -> set[str]:
-    """Call names reachable from `node` — the same walk as `_call_nodes`.
+    """Call names reachable from `node` -- the same walk as `_call_nodes`.
 
     Derived rather than written twice: two walkers with the same nesting rule are two
     places for it to drift, and this rule has already been wrong once (the root-node
@@ -235,7 +235,7 @@ def _caught_names(handler: ast.ExceptHandler, consts: dict[str, set[str]]) -> se
 
 
 def scan(root: Path) -> tuple[list[str], list[str]]:
-    """(findings, unmeasured) — never a single list, so "clean" and "could not read"
+    """(findings, unmeasured) -- never a single list, so "clean" and "could not read"
     stay distinguishable (the family's rule: a report that cannot measure has not
     passed)."""
     findings: list[str] = []
@@ -264,7 +264,7 @@ def scan(root: Path) -> tuple[list[str], list[str]]:
             if not isinstance(node, ast.Try):
                 continue
             if not node.handlers:
-                # A `try`/`finally` with no `except` is not an error guard — it has no
+                # A `try`/`finally` with no `except` is not an error guard -- it has no
                 # answer to be right or wrong about, and judging it would report the
                 # absence of a decision as a wrong one.
                 continue
