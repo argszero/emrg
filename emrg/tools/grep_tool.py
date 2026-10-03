@@ -57,8 +57,9 @@ class GrepTool(ToolExecutor):
                     "glob": {
                         "type": "string",
                         "description": (
-                            "Only search files matching this glob pattern. "
-                            "Examples: '*.py', '*.{py,rs}', 'src/**/*.ts'. "
+                            "Only search files matching this glob pattern "
+                            "(standard glob syntax: *, ?, [seq], ** for recursive). "
+                            "Examples: '*.py', '*.[ch]', 'src/**/*.ts'. "
                             "Default: all text files."
                         ),
                     },
@@ -269,7 +270,14 @@ class GrepTool(ToolExecutor):
 
     @staticmethod
     def _collect_files(root: Path, file_glob: str | None) -> list[Path]:
-        """Collect files recursively, skipping hidden/ignored dirs."""
+        """Collect files recursively, skipping hidden/ignored dirs.
+
+        The pattern goes straight to ``Path.rglob``, which honours ``*``, ``?``,
+        ``[seq]`` and ``**`` but does **not** expand braces — ``*.{py,rs}`` matches
+        nothing, so a caller who follows it is told "No matches (searched 0 files)".
+        The ``glob`` parameter's description names the honoured syntax for exactly
+        that reason.
+        """
         skip_dirs = {"__pycache__", "node_modules", ".git", ".venv"}
         glob_pattern = file_glob or "*"
 

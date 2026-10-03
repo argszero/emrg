@@ -380,3 +380,51 @@ class TestTheCountSaysWhenItIsAFloor:
         assert result.content.index("floor") < result.content.index("output truncated"), (
             "the summary has to carry its own caveat, not depend on the note at the end"
         )
+
+
+class TestTheAdvertisedGlobExamplesAreOnesTheCollectorHonours:
+    """The ``glob`` parameter advertised ``*.{py,rs}``, but the collector is
+    ``Path.rglob``, which does **not** expand braces: a caller who followed that
+    example searched 0 files and was told "No matches (searched 0 files)" — a silent
+    zero that reads as "nothing in the tree", when the tree is full of ``.py``/``.rs``.
+
+    Both directions are pinned here: the description must not advertise a form the
+    collector cannot honour, and every example it does show must match a file in a
+    tree built to satisfy that example.
+    """
+
+    @staticmethod
+    def _glob_description() -> str:
+        props = GrepTool().definition().parameters["properties"]
+        return props["glob"]["description"]
+
+    def test_the_description_does_not_advertise_brace_expansion(self):
+        description = self._glob_description()
+        assert "{" not in description, (
+            f"the glob description shows a brace pattern: {description!r} — but the "
+            f"collector (Path.rglob) does not expand braces, so following the example "
+            f"silently searches 0 files"
+        )
+
+    def test_the_description_names_the_syntax_the_collector_honours(self):
+        assert "[seq]" in self._glob_description(), (
+            "the description should name the syntax the collector honours (as the "
+            "sibling glob tool does), so a reader does not have to infer it"
+        )
+
+    def test_every_advertised_example_matches_a_file_it_names(self, tmp_path):
+        # A tree built so that each example the description shows can match.
+        (tmp_path / "a.py").write_text("x", encoding="utf-8")
+        (tmp_path / "b.c").write_text("x", encoding="utf-8")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "m.ts").write_text("x", encoding="utf-8")
+
+        examples = re.findall(r"'([^']+)'", self._glob_description())
+        assert examples, "the description shows no examples for this check to honour"
+
+        for pattern in examples:
+            files = GrepTool._collect_files(tmp_path, pattern)
+            assert files, (
+                f"the description advertises the glob example {pattern!r}, but the "
+                f"collector matched no file for it in a tree built to satisfy it"
+            )
