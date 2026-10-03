@@ -38,6 +38,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 import types
 from datetime import datetime, timezone
@@ -1116,18 +1117,119 @@ def test_the_report_names_the_checkout_and_the_branch_it_read(mod, monkeypatch, 
     assert " on " in lines[0], lines[0]
 
 
-def test_a_detached_head_is_a_state_not_a_failure(mod):
+def _scratch_repo(tmp_path: Path, *, commit: bool = True) -> Path:
+    """A real checkout for `local_tree` to read.
+
+    `commit=False` leaves it with an unborn branch: `symbolic-ref` answers (`master`)
+    while `rev-parse HEAD` exits 128 with nothing on stdout - the third state this
+    reader has to keep apart from a detached HEAD and from a `git` that cannot run.
+    """
+    repo = tmp_path / ("repo-empty" if not commit else "repo")
+    (repo / "scripts").mkdir(parents=True)
+
+    def git(*args: str) -> str:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert proc.returncode == 0, f"git {' '.join(args)} failed: {proc.stderr}"
+        return proc.stdout.strip()
+
+    git("init", "-q", "-b", "master")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    git("config", "commit.gpgsign", "false")
+    if commit:
+        (repo / "f.txt").write_text("x\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", "x")
+        git("checkout", "-q", "--detach", "HEAD")
+    return repo
+
+
+def test_a_detached_head_is_a_state_not_a_failure(mod, monkeypatch, tmp_path):
     """`symbolic-ref` exits non-zero when HEAD is detached, which is how CI checks out.
 
     A branch reading that treated that as unreadable would print a failure on every CI
     run; a branch reading that did not read at all would print `master` for a checkout
     that is not on master, which is the one thing this line exists to prevent.
+
+    The detached state is *made* here rather than hoped for. Run against the live
+    checkout, as this test did until 2026-10-03 (`cyc20261003-120332`), it could not
+    fail for the reason it names: the working tree was on a branch, `branch` was that
+    branch's name, and the assertion passed without a detached HEAD ever existing.
+
+    The same tree then yields the two *other* absences, and none of the three may come
+    back as another's word: a `git` that cannot run at all, and a `git` that runs and
+    answers nothing. Both are *said*, the way the siblings say them
+    (`check-doc-count.py`, `check-node-test-count.py`), never rendered as the state
+    above.
     """
+    repo = _scratch_repo(tmp_path)
+    monkeypatch.setattr(mod, "SCRIPTS_DIR", repo / "scripts")
+
     root, branch, head = mod.local_tree()
 
-    assert root == str(REPO_ROOT)
-    assert branch, "a checkout always has a state to name, detached included"
-    assert len(head) in (8, 40) or head == "????????", head
+    assert root == str(repo)
+    assert branch == "(detached HEAD)", (
+        f"a detached checkout must name that state, not {branch!r}"
+    )
+    assert len(head) in (8, 40), head
+
+    def cannot_run(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(mod.subprocess, "run", cannot_run)
+    root, branch, head = mod.local_tree()
+
+    assert "unreadable" in branch and "detached" not in branch, (
+        f"`git` could not be run and the reader answered {branch!r} - a state nothing "
+        "measured is worse than a stated absence, and this is the one line that says "
+        "which tree answered"
+    )
+    assert head == "", f"head is {head!r}: render the revision only when one was read"
+
+    monkeypatch.undo()
+    unborn = _scratch_repo(tmp_path, commit=False)
+    monkeypatch.setattr(mod, "SCRIPTS_DIR", unborn / "scripts")
+    root, branch, head = mod.local_tree()
+
+    assert "unreadable" in branch and "detached" not in branch, (
+        f"`git` ran and answered nothing (an unborn branch) and the reader answered "
+        f"{branch!r}"
+    )
+    assert head == "", head
+
+
+def test_the_tree_line_says_an_unreadable_read_rather_than_a_state(
+    mod, monkeypatch, capsys
+):
+    """The line a reader takes first: which tree answered.
+
+    With `git` unable to run, the printed line has to carry the absence. `(detached
+    HEAD)` is a state, and a state nothing measured is a wrong answer to the only
+    question this line asks.
+    """
+    monkeypatch.setattr(
+        mod,
+        "local_tree",
+        lambda: (str(REPO_ROOT), "revision unreadable (FileNotFoundError)", ""),
+    )
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    rc = _run(mod, monkeypatch, votes, fresh, ["1"])
+    first = capsys.readouterr().out.splitlines()[0]
+
+    assert rc == 0
+    assert first == (
+        f"tree: {REPO_ROOT} on revision unreadable (FileNotFoundError)"
+    ), first
+    assert "detached HEAD" not in first, (
+        "an unreadable git read was rendered as the state 'detached HEAD'"
+    )
 
 
 def test_the_tree_line_says_so_when_the_working_tree_is_at_an_open_prs_head(

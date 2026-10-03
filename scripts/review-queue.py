@@ -1031,30 +1031,56 @@ def local_tree() -> tuple[str, str, str]:
     cycle was about to look for. Nothing in this report said which tree had answered, so
     the only thing that caught it was the content looking wrong — which is luck, not a
     reading. Naming the branch is what makes it a reading.
+
+    A read that could not happen is *said*, never filled with a state: measured
+    2026-10-03 (`cyc20261003-120332`) with `git` off `PATH`, this reader answered
+    `(detached HEAD)` for a checkout that is not detached, while its two siblings —
+    `check-doc-count.py` and `check-node-test-count.py`, which ask the same question
+    of the same tree — answered `revision unreadable (FileNotFoundError)`. A state
+    nothing measured is the worse of the two, because the tree line exists so a
+    reader knows *which* tree answered and a wrong state is a wrong answer to that.
+    `head` comes back empty rather than a placeholder for the same reason: the report
+    renders the revision only when there is one.
     """
 
-    def git(*args: str) -> str | None:
-        try:
-            proc = subprocess.run(
-                ["git", *args],
-                cwd=SCRIPTS_DIR,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-        except OSError:
-            return None
-        return proc.stdout.strip() if proc.returncode == 0 else None
+    def git(*args: str) -> str:
+        """One `git` read here, or `""` when it did not answer.
 
-    branch = git("symbolic-ref", "--short", "-q", "HEAD")
-    if not branch:
-        # `symbolic-ref` exits non-zero for a detached HEAD, which is a state and not a
-        # failure — the same distinction the readings below keep between "not read" and
-        # a value.
-        branch = "(detached HEAD)"
-    head = git("rev-parse", "HEAD") or "????????"
-    return str(SCRIPTS_DIR.parent), branch, head
+        `""` for a non-zero exit: `symbolic-ref` exits non-zero for a detached HEAD,
+        which is a state and not a failure. An `OSError` — no `git` binary — is left to
+        the caller, which is how the two siblings draw the same line: "this machine
+        cannot run git" is a different absence from "this checkout is detached", and
+        this is the reader where telling them apart has to happen.
+        """
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=SCRIPTS_DIR,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
+    try:
+        branch = git("symbolic-ref", "--short", "-q", "HEAD")
+        head = git("rev-parse", "HEAD")
+    except OSError as exc:
+        return (
+            str(SCRIPTS_DIR.parent),
+            f"revision unreadable ({exc.__class__.__name__})",
+            "",
+        )
+    if not head:
+        return (
+            str(SCRIPTS_DIR.parent),
+            "revision unreadable (git rev-parse said nothing)",
+            "",
+        )
+    # `symbolic-ref` exits non-zero for a detached HEAD, which is a state and not a
+    # failure — the same distinction the readings below keep between "not read" and
+    # a value.
+    return str(SCRIPTS_DIR.parent), branch or "(detached HEAD)", head
 
 
 def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = None) -> str:
@@ -1221,7 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
         # The family's convention — a guard that reads a working tree names it before it
         # gives a verdict — and it applies here for the reason `local_tree` records: the
         # readings are this clone's, and so is any file the reader opens next.
-        print(f"tree: {root} on {branch} ({head[:8]})")
+        print(f"tree: {root} on {branch}" + (f" ({head[:8]})" if head else ""))
         here = [reading.pr for reading, _ in readings if reading.head == head]
         if here:
             print(
