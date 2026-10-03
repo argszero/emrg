@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -314,3 +316,266 @@ def test_the_preflight_sends_the_variables_the_release_sends() -> None:
         f"{sorted(next(iter(n)) for n in sent.values())} — the host would be checking "
         f"credentials the build does not use"
     )
+
+
+# ── The host has to be able to find it ────────────────────────────────────────
+
+
+def test_development_md_documents_the_preflight_and_its_contract() -> None:
+    """A host-side counterpart the host cannot reach is not one, and this is the half
+    that decays.
+
+    The script asks the question CI can only ask *after* a tag is pushed, so it exists for
+    a host whose release round just went red — and they look in the docs, not in the source
+    tree. Measured 2026-10-03 (`cyc20261003-090905`): the file was named nowhere outside its
+    own docstring, its test, and the evolution memory, which is a private record the host
+    does not read. Exit codes are pinned with the command because the contract is the part
+    a bare path cannot carry: `2` means no verdict was reached, and a host who reads that
+    as "fine" pays the wasted build round the preflight exists to prevent.
+    """
+    text = (REPO / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    assert "scripts/check-notary-credentials.py" in text, (
+        "DEVELOPMENT.md does not name scripts/check-notary-credentials.py — the host "
+        "troubleshooting a refused notarization has no documented way to reach the "
+        "preflight, so it is a host-side counterpart only in name"
+    )
+    assert "never a pass" in text, (
+        "DEVELOPMENT.md documents the command without its contract — exit 2 means no "
+        "verdict was reached, and folding that into a pass is the conflation this file "
+        "exists to keep out"
+    )
+    assert "MACOS_NOTARY_APP_PASSWORD" in text, (
+        "the documented invocation must name the variables the release uses, so a host can "
+        "run it without reconstructing the secret names from the workflow"
+    )
+
+
+# ── The documented command has to RUN ─────────────────────────────────────────
+#
+# Measured 2026-10-03 (`cyc20261003-133828`, and first reported by `pm25coder`'s review of
+# `cyc20261003-115810` on PR #1828): the block this file's pin above blesses shipped with
+# **two** backslash bytes at the end of each continued line. Inside a ```bash fence that is
+# an escaped backslash rather than a line continuation, so the documented command ran `\` as
+# a command twice and reached the preflight with **none** of the three variables set -
+# producing the exit-`2` reading ("the exchange did not complete, so no verdict was reached
+# - never a pass") that the paragraph directly beneath the block exists to prevent.
+#
+# The pin above could not see it: every word it asserts is present in a block nobody can
+# run. Naming a command is not shipping one, which is what these two arms restore - one on
+# the text, one on the executed shell.
+
+#: Written as `chr(92)` so this file carries **no backslash literal at all**. The defect was
+#: a doubled one, and a pin on a doubled literal is a pin a future edit can get wrong the
+#: same way; `_BS * 2` cannot.
+_BS = chr(92)
+
+#: Every ```bash fenced block in a document, in order.
+_FENCE = re.compile(r"```bash\n(.*?)```", re.S)
+
+_PREFLIGHT_STUB = '''#!/usr/bin/env python3
+"""Stand in for the preflight, and report which variables actually reached it."""
+import os
+
+for name in ("APPLE_ID", "MACOS_NOTARY_APP_PASSWORD", "MACOS_NOTARY_TEAM_ID"):
+    print(f"{name}={os.environ.get(name, '<unset>')}")
+'''
+
+
+def _preflight_block() -> str:
+    """The one fenced block in `DEVELOPMENT.md` that runs the preflight.
+
+    Found by content rather than by position: the document carries several `bash` blocks,
+    and a pin that read whichever came first would be about a different command the moment
+    one is inserted above it.
+    """
+    text = (REPO / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    runs = [block for block in _FENCE.findall(text) if SCRIPT.name in block]
+    assert len(runs) == 1, (
+        f"expected exactly one fenced block naming {SCRIPT.name}, found {len(runs)} - the "
+        f"pin cannot say which command it read"
+    )
+    return runs[0]
+
+
+def test_the_documented_command_continues_each_line_with_one_backslash() -> None:
+    """The text half: exactly one backslash, on a line that continues something.
+
+    Two bytes make the shell escape a backslash and stop continuing, so the rest of the
+    command becomes separate lines that never reach the preflight as its arguments.
+    """
+    lines = _preflight_block().splitlines()
+    doubled = [line for line in lines if line.rstrip().endswith(_BS * 2)]
+    assert not doubled, (
+        "these lines end in TWO backslashes, which inside a bash fence is an escaped "
+        "backslash and not a line continuation - the documented command does not run as "
+        "written and the preflight is invoked without its variables, which answers the "
+        f"exit-2 'no verdict was reached' reading the block exists to prevent: {doubled}"
+    )
+    continued = [line for line in lines if line.rstrip().endswith(_BS)]
+    assert len(continued) >= 1, (
+        "no line of the documented command continues onto the next - either the block "
+        "stopped being a multi-line command, or this pin is reading the wrong thing"
+    )
+
+
+def _shell_path(path, *, nt: bool | None = None) -> str:
+    """A path the shell reads back as one argument, on either platform.
+
+    Measured on the Windows leg of run `37100806753` (`cyc20261003-155509`): interpolating
+    `str(sys.executable)` **unquoted** into the documented block produced
+
+        `documented-block.sh: line 1: D:aemrgemrg.venvScriptspython.exe: command not found`
+
+    — exit 127 on a block that was correct. The backslashes that separate a Windows path are
+    *escape characters* to bash, so they are consumed and the path collapses. The same class as
+    the doubled backslash this file's pins are about, one layer out: a backslash where a shell
+    reads it. Forward slashes plus one level of quoting is what a shell needs, and it costs a
+    POSIX path nothing.
+
+    `nt` is a parameter rather than a read of `os.name` so **both branches are testable from
+    either platform** - a conversion that only runs on the CI leg that found the bug is exactly
+    the code that regresses unnoticed.
+    """
+    text = str(path)
+    if (os.name == "nt") if nt is None else nt:
+        text = text.replace("\\", "/")
+    return shlex.quote(text)
+
+
+def _run_the_documented_block(shell: str, block: str, tmp_path, env: dict) -> subprocess.CompletedProcess[str]:
+    """Write the block out and run it as a shell script, or skip if the shell cannot run one."""
+    probe = subprocess.run(
+        [shell, "--noprofile", "--norc", "-c", "echo probe-ok"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if "probe-ok" not in (probe.stdout or ""):
+        # Measured precedent (CI, 2026-10-02, the Windows leg of run 36959438654): on that
+        # runner `bash` resolved to the WSL launcher, which answers "Windows Subsystem for
+        # Linux has no installed distributions" and exits 1. An arm that ran anyway would
+        # measure the shell's absence rather than the block, so it reports instead of failing.
+        pytest.skip(
+            f"`{shell}` cannot run a script here ({probe.stdout!r} / {probe.stderr!r}), so a "
+            f"run would measure the shell's absence rather than the documented block"
+        )
+    script = tmp_path / "documented-block.sh"
+    script.write_text(block, encoding="utf-8")
+    return subprocess.run(
+        [shell, "--noprofile", "--norc", str(script)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def test_a_windows_path_survives_being_handed_to_a_shell() -> None:
+    """The conversion, measured against a real shell rather than asserted about a string.
+
+    On Windows `sys.executable` is `D:\\a\\emrg\\emrg\\.venv\\Scripts\\python.exe`. Handed to
+    bash unquoted, the backslashes are consumed and the path collapses to
+    `D:aemrgemrg.venvScriptspython.exe` - measured on the Windows leg of run 37100806753. This
+    is the arm that keeps the fix: it asks a real bash what it read back, on a platform where
+    bash and the Windows path shape are both available.
+    """
+    shell = shutil.which("bash")
+    if shell is None:
+        pytest.skip("no POSIX shell is available to read the path back")
+
+    windows = "D:\\a\\emrg\\emrg\\.venv\\Scripts\\python.exe"
+    # A space, so the *quoting* half is load-bearing too: unquoted, the shell splits this into
+    # two words and the path that arrives is truncated at the space.
+    posix = "/home/runner/work/my project/emrg/.venv/bin/python"
+
+    for path, nt, expected in (
+        (windows, True, "D:/a/emrg/emrg/.venv/Scripts/python.exe"),
+        (posix, False, posix),
+    ):
+        quoted = _shell_path(path, nt=nt)
+        read_back = subprocess.run(
+            [shell, "--noprofile", "--norc", "-c", f"printf '%s' {quoted}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert read_back.stdout == expected, (
+            f"a shell read {quoted!r} back as {read_back.stdout!r}, expected {expected!r} - "
+            f"a path that arrives mangled is a command that never runs"
+        )
+
+    # And the shape that actually failed: without the conversion the shell loses the
+    # separators, which is the measurement this helper exists for.
+    collapsed = subprocess.run(
+        [shell, "--noprofile", "--norc", "-c", f"printf '%s' {windows}"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert collapsed.stdout == "D:aemrgemrg.venvScriptspython.exe", (
+        f"the unquoted Windows path no longer collapses in this shell ({collapsed.stdout!r}) - "
+        f"re-measure the failure this helper exists for before trusting it"
+    )
+
+
+def test_the_documented_command_carries_its_variables_into_the_preflight(tmp_path) -> None:
+    """The executed half: run the documented block and read what reached the command.
+
+    The text pin above names the property; this one proves it, because the failure it
+    guards is a *shell* behaviour rather than a spelling. The preflight is replaced by a
+    stand-in that prints the three variables it can see, and the three are removed from the
+    environment first - so the only way they can reach it is along the documented line, and
+    a block that fails to continue prints `<unset>` three times.
+
+    The `<...>` placeholders are substituted before the run: they are the host's to fill,
+    and leaving them in would exercise the shell's redirect syntax rather than the
+    continuation this arm is about. Nothing here reaches Apple or spends a credential - the
+    script is never invoked.
+    """
+    shell = shutil.which("bash")
+    if shell is None:
+        pytest.skip("no POSIX shell is available to run the documented block")
+
+    filled = _preflight_block()
+    for placeholder, value in (
+        ("APPLE_ID=<id>", "APPLE_ID=ID-VALUE"),
+        ("MACOS_NOTARY_APP_PASSWORD=<app-specific-password>", "MACOS_NOTARY_APP_PASSWORD=PW-VALUE"),
+        ("MACOS_NOTARY_TEAM_ID=<team>", "MACOS_NOTARY_TEAM_ID=TEAM-VALUE"),
+    ):
+        filled = filled.replace(placeholder, value)
+    # The stand-in lives in a directory whose name contains a **space**, so an unquoted
+    # interpolation is caught here rather than only on the Windows leg that found the bug:
+    # unquoted, the shell splits the path at the space and runs a command that does not exist.
+    stub = tmp_path / "stand in" / "preflight-stand-in.py"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text(_PREFLIGHT_STUB, encoding="utf-8")
+    filled = filled.replace(
+        "uv run --no-sync python3 scripts/check-notary-credentials.py",
+        f"{_shell_path(sys.executable)} {_shell_path(stub)}",
+    )
+    assert "check-notary-credentials.py" not in filled, (
+        "the stand-in never replaced the preflight invocation, so this arm would run the real "
+        "script - which spends a credential and asks Apple"
+    )
+
+    env = dict(os.environ)
+    for name in (APPLE_ID_VAR, PASSWORD_VAR, TEAM_ID_VAR):
+        env.pop(name, None)
+
+    # Deliberately without the workflow's `-e`: this arm is about which variables arrive, not
+    # about how the shell gives up. A host pasting the block into an interactive shell gets no
+    # `-e` either.
+    result = _run_the_documented_block(shell, filled, tmp_path, env)
+    for name, value in (
+        (APPLE_ID_VAR, "ID-VALUE"),
+        (PASSWORD_VAR, "PW-VALUE"),
+        (TEAM_ID_VAR, "TEAM-VALUE"),
+    ):
+        assert f"{name}={value}" in result.stdout, (
+            f"the documented command did not carry {name} into the preflight.\n"
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
