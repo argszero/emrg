@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Do the notarization credentials work — answered before a tag is pushed, not after.
+r"""Do the notarization credentials work — answered before a tag is pushed, not after.
 
 Measured on tag `v0.3.8`, run `36956685533` (2026-10-02): the macOS **Notarize pkg** step
 died three seconds after it started, the `release` job was skipped because of it, and
@@ -55,6 +55,14 @@ Usage:
     APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \
         MACOS_NOTARY_TEAM_ID=<team> \
         uv run --no-sync python3 scripts/check-notary-credentials.py
+
+This docstring is **raw** - the opening triple quote carries an `r` - and the two carriers of that
+command are why. A single backslash at the end of a line inside a non-raw literal is Python's own
+line continuation: it is removed, and the three lines above become one before any shell reads them.
+So the source can show either two backslashes, which a reader copying them out of the file runs as
+an escaped backslash, or one, which the string literal then eats. Raw is the only spelling where
+the backslash the reader copies is the backslash the shell continues with - the shape
+`test_shell_continuations.py` reads for.
 """
 
 from __future__ import annotations

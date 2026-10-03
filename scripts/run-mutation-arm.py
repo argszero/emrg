@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one mutation arm and judge it, separating "the test failed" from "nothing ran".
+r"""Run one mutation arm and judge it, separating "the test failed" from "nothing ran".
 
 The class this exists for
 -------------------------
