@@ -638,8 +638,23 @@ class Reading:
         — `read-first`, with a `--mergeability-wait 60` that can never answer, because
         GitHub computes no mergeability for a merged PR. The state is read from the
         counter's verdict, so a finished PR is answered here rather than mis-filled.
+
+        The vocabulary is read from the counter too, for the reason `votes_needed`
+        states one function up: a second copy of a list is a second answer to "which
+        states mean the PR is over", and the copy that is not read drifts when the
+        original moves. Measured 2026-10-03 (`cyc20261003-231313`): this property
+        spelled `("MERGED", "CLOSED")` by hand while the counter's `TERMINAL_STATES`
+        was introduced as "the one spelling of 'the PR is over' in the family" — the
+        sibling it named (`check-merge-freshness.py`) asks it, and this file, which is
+        the one that reads the state off the verdict, did not.
+
+        `self.state` is asked first, and an empty one returns before the counter is
+        touched: `""` means "not read", which is the state of a row whose count could
+        not be read at all (`unread`). Asking the sibling there would turn one failure
+        into two — measured 2026-10-03 (`cyc20261003-231313`) on this file's own
+        `Boom` fake, which raises from `check_pr` and carries no vocabulary.
         """
-        return self.state in ("MERGED", "CLOSED")
+        return bool(self.state) and self.state in tuple(vote_counter().TERMINAL_STATES)
 
     @property
     def conflict(self) -> bool:

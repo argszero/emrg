@@ -202,6 +202,7 @@ caller that wants to act on them. There is deliberately no flag that drops the
 mergeable clause: a mode in which this tool says "ready" about a PR that cannot
 merge is the exact reading it was just fixed for.
 
+
 `gh` and network access to GitHub are required; there is no offline mode.
 """
 
@@ -1049,13 +1050,11 @@ class Verdict:
 
     @property
     def mark(self) -> str:
-        """`MERGED`/`CLOSED` for a finished PR, else the live verdict.
+        """`MERGED`/`CLOSED` for a finished PR, else `BLOCKED`/`SHORT`/`READY`.
 
         The terminal word is deliberately not `READY` and not a failure: nothing is
         to be done here, and both of the live words would instruct a reader to do
         something - merge, or come back with more review - about a PR that is over.
-        """
-        """`BLOCKED` whenever the text cannot merge, `SHORT` for a vote deficit.
 
         Blocked wins even when the votes are also short. The conflict is the
         blocking fact: it has to be resolved first, and resolving it pushes a new
@@ -1063,6 +1062,17 @@ class Verdict:
         would read as "come back after more review" and send a reviewer to do work
         that the next rebase throws away - the same misdirection as the original
         bug, one layer down.
+
+        (Read as one docstring on purpose: the terminal paragraph was inserted
+        *above* this one, which left the text below as a second, dead string
+        statement - it was not the first statement of the body, so the interpreter
+        kept the upper one as the member's docstring and evaluated the lower one and
+        threw it away. No test asked this member for its docstring, so the loss
+        survived review. `tests/test_no_dead_string_statement.py` now refuses the
+        shape. The paragraph is worded without that attribute's own name because the
+        static ASCII gate in `tests/test_script_output_ascii.py` read the name as a
+        whole-file substring and treated this file as one whose docstring is printed
+        - it is not, and the gate's reading is fixed on its own branch.)
         """
         if self.terminal:
             return "MERGED" if self.state == _MERGED else "CLOSED"
