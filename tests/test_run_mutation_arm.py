@@ -425,21 +425,52 @@ class TestTheSmallReadings:
 _VERDICT_NAMES = ("KILLED", "SURVIVED", "UNJUDGEABLE", "TARGET-BROKEN", "NO-MUTATION",
                   "RESTORE-MISMATCH")
 
+#: Written as `chr(92)` so **no source line in this file ends in a backslash**: the rule the
+#: fixtures below are about lives at line ends, and a file that tripped a sweep of its own
+#: subject would be its own counterexample. Same spelling as the rule file's own constant.
+BACKSLASH = chr(92)
+
+
+def _continues(line: str) -> bool:
+    """Does a shell read this line as continuing onto the next one?
+
+    The shell's own rule, and it is one line: a line continues when it ends in an **odd**
+    number of backslashes. An even number is an escaped backslash followed by an end of
+    line — the command splits there — and a backslash followed by whitespace escapes the
+    *space*, so the line ends there too.
+
+    Measured in bash on a two-line script, one line per shape: 1 and 3 backslashes join the
+    next line into the same command, 2 and 4 run it as a second one, and a backslash
+    followed by a space ends the first command where it stands: `printf '<%s>` + a literal
+    backslash + `n' one ` + a backslash + a SPACE prints `<one>` and a literal `< >`, then
+    runs the next line as its own command.
+
+    The run is counted from the **end** of the line, and never after trimming it. That is
+    what makes the whitespace case fall out of the same test rather than needing one of its
+    own: a line ending in a space has no trailing backslashes at all, so its run is zero and
+    it is not a continuation. Trimming first is what would get it wrong — and a reader that
+    gets it wrong does not fail loudly, it reads a shorter or longer block than the shell
+    would run. (A mutation arm measured the trimming guard this replaced as *equivalent*,
+    which is why it is gone.)
+    """
+    return (len(line) - len(line.rstrip(BACKSLASH))) % 2 == 1
+
 
 def _documented_invocation(doc: str) -> str:
     """The shell block in `doc` that invokes the arm runner, continuation lines included.
 
     Located by the tool's own name rather than by line number, so an edit above it cannot
-    make this measure a different block; the block ends at the first line that is not a
-    backslash continuation.
+    make this measure a different block; the block ends at the first line the shell would
+    not continue — see `_continues`, which is the shell's rule and not "ends in a
+    backslash".
     """
     lines = doc.splitlines()
     for index, line in enumerate(lines):
-        if "run-mutation-arm.py" in line and line.rstrip().endswith("\\"):
+        if "run-mutation-arm.py" in line and _continues(line):
             block = [line]
             for following in lines[index + 1:]:
                 block.append(following)
-                if not following.rstrip().endswith("\\"):
+                if not _continues(following):
                     break
             return "\n".join(block)
     return ""
@@ -579,3 +610,73 @@ class TestTheDocumentNamesTheTool:
             str(mod.EXIT_RESTORE_MISMATCH): mod.RESTORE_MISMATCH,
         }
         assert spelled == expected
+
+
+class TestTheContinuationRuleTheBlockReaderUses:
+    """The block reader stops where the *shell* stops.
+
+    `_documented_invocation` cuts a documented block at the first line that is not a
+    continuation, and everything measured from that block — the five flags the invocation
+    must carry, the flags compared against argparse's own list — is measured from whatever
+    it returned. A reader that over-runs reads a line the shell would have run as a
+    *separate* command, and reports that line's words as this tool's invocation.
+
+    Both shapes below were measured in bash on a two-line script (this file's own header
+    records the run): a doubled backslash is an *escaped* backslash and ends the line, and a
+    backslash followed by a space escapes the space and ends the line, while one or three
+    backslashes really do join the next line. The rule is the shell's, and it is the same
+    rule PR #1832 states in the same repository on the same day — the two must not disagree.
+    """
+
+    def test_a_doubled_backslash_does_not_continue(self) -> None:
+        """The shell splits here, so this is not a continued block — and the reader says so.
+
+        The old predicate read the *next* line into the block, which is a command the shell
+        would have run separately: its words then counted as this tool's invocation. Refusing
+        is the honest answer, and it is loud — `test_the_document_invokes_the_arm_runner`
+        fails naming the document, which is the defect (the line is not a continuation).
+        """
+        first = f"uv run --no-sync python3 scripts/run-mutation-arm.py {BACKSLASH}{BACKSLASH}"
+        following = "    --file <file> --not-a-real-flag x"
+        assert _documented_invocation(f"{first}\n{following}\n") == ""
+
+    def test_a_backslash_that_escapes_a_space_does_not_continue(self) -> None:
+        """`\\ <space>` ends the line: the backslash escapes the space, not the newline."""
+        first = f"uv run --no-sync python3 scripts/run-mutation-arm.py {BACKSLASH} "
+        following = "    --file <file>"
+        assert _documented_invocation(f"{first}\n{following}\n") == ""
+
+    def test_one_backslash_continues(self) -> None:
+        """The control: the shape the real document is written in must still join."""
+        first = f"uv run --no-sync python3 scripts/run-mutation-arm.py {BACKSLASH}"
+        second = f"    --file <file> --old <old> {BACKSLASH}"
+        third = "    --node <node> --expect <text>"
+        assert _documented_invocation(f"{first}\n{second}\n{third}\n") == (
+            f"{first}\n{second}\n{third}"
+        )
+
+    def test_three_backslashes_continue(self) -> None:
+        """An odd run continues — the direction "one or two backslashes" gets wrong.
+
+        The line really does join the next one (a stray backslash is carried into the
+        command, which is a different defect in the *document*), so a reader that stopped
+        here would truncate the block it is measuring.
+        """
+        first = "uv run --no-sync python3 scripts/run-mutation-arm.py " + BACKSLASH * 3
+        second = "    --file <file>"
+        assert _documented_invocation(f"{first}\n{second}\n") == f"{first}\n{second}"
+
+    def test_a_line_the_shell_would_split_is_never_read_as_this_invocation(self) -> None:
+        """The consequence, in the reader's own vocabulary: which flags it says are spelled.
+
+        This is the assertion the over-run moved: with the doubled backslash read as a
+        continuation, the *following* line's `--not-a-real-flag` is reported as a flag the
+        document spells for this tool, and the comparison against argparse's list fails
+        naming a line the invocation never reached. One command's flag is not another's.
+        """
+        doc = (
+            f"uv run --no-sync python3 scripts/run-mutation-arm.py {BACKSLASH}{BACKSLASH}\n"
+            "    --file <file> --not-a-real-flag x\n"
+        )
+        assert _documented_tool_flags(doc) == set()
+        assert "--not-a-real-flag" not in _documented_tool_flags(doc)
