@@ -170,18 +170,31 @@ def continuations_that_continue_nothing(body: str) -> list[tuple[int, str, int]]
     reason anyone writes that: they meant to join the two. Trailing spaces after the
     backslashes are cosmetic and ignored.
 
+    **The line terminator is stripped first, whichever it is.** The subject is the
+    *logical* line — what the shell sees between two newlines — so a body whose lines end
+    `\r\n` must get the same verdict as one ending `\n`. This is not hypothetical: measured
+    on 2026-10-03 (`cyc20261003-102534`), the identical text with CRLF endings produced
+    **0 hits** against 2 for LF, because the `\r` sits where the backslashes are counted and
+    the parity reads as zero — a rule that answers "nothing here" about text it was handed.
+    The guard's own readers are safe today only because `Path.read_text()` applies
+    universal newlines (`\r\n` -> `\n` on the way in, measured here: the same file read by
+    `read_text` carries no `\r`, while `open(..., newline="")` — a mode this repo *does* use
+    elsewhere for byte fidelity — hands the `\r` straight through). Normalising inside the
+    rule removes the dependency on which mode a caller chose, and
+    `test_the_verdict_does_not_depend_on_the_line_ending` pins both directions.
+
     Returns `(line number within the block, the line, how many backslashes)`.
     """
     lines = body.split("\n")
     hits: list[tuple[int, str, int]] = []
     for index, line in enumerate(lines[:-1]):
-        stripped = line.rstrip(" \t")
-        trailing = len(stripped) - len(stripped.rstrip("\\"))
+        logical = line.rstrip("\r\n").rstrip(" \t")
+        trailing = len(logical) - len(logical.rstrip("\\"))
         if trailing < 2 or trailing % 2:
             continue
         following = lines[index + 1]
-        if following[:1] in (" ", "\t") and following.strip():
-            hits.append((index + 1, line, trailing))
+        if following[:1] in (" ", "\t") and following.rstrip("\r\n").strip():
+            hits.append((index + 1, logical, trailing))
     return hits
 
 
@@ -405,6 +418,80 @@ def test_the_shape_that_motivated_this_guard_is_caught() -> None:
         "    MACOS_NOTARY_TEAM_ID=TEAM \\\\",
     ], f"the measured shape was not caught: {hits!r}"
     assert [count for _, _, count in hits] == [2, 2]
+
+
+def test_the_verdict_does_not_depend_on_the_line_ending() -> None:
+    """The rule reads logical lines, so CRLF text gets the LF text's verdict.
+
+    Measured 2026-10-03 (`cyc20261003-102534`): before this was pinned, the identical text
+    with `\\r\\n` endings produced **0 hits** against 2 for `\\n` — the `\\r` lands exactly
+    where the backslash run is counted, so the parity reads as zero and the rule answers
+    "nothing here" about text it was handed. That is the failure mode this whole file
+    exists to keep out of *other* instruments, and it was one line away from being in this
+    one: the guard's readers are normalised by `Path.read_text()`'s universal newlines, so
+    nothing in the tree could have shown it.
+
+    Both halves: the counts agree, and the shape is still *caught* in CRLF text (an
+    equality that said "0 == 0" would be a rule that reads nothing, twice).
+    """
+    lf = (
+        "APPLE_ID=a@b.c MACOS_NOTARY_APP_PASSWORD=pw \\\\\n"
+        "    MACOS_NOTARY_TEAM_ID=TEAM \\\\\n"
+        "    uv run --no-sync python3 scripts/check-notary-credentials.py\n"
+    )
+    crlf = lf.replace("\n", "\r\n")
+
+    hits_lf = continuations_that_continue_nothing(lf)
+    hits_crlf = continuations_that_continue_nothing(crlf)
+    assert len(hits_lf) == 2, hits_lf
+    assert hits_crlf == hits_lf, (
+        "the same lines got a different verdict under CRLF endings — the line terminator is "
+        f"being counted as content:\n  LF:   {hits_lf}\n  CRLF: {hits_crlf}"
+    )
+    assert not any("\r" in line for _, line, _ in hits_crlf), (
+        "a reported line still carries its line terminator, so the message prints a stray CR"
+    )
+
+    good_lf = "APPLE_ID=a@b.c \\\n    echo ok\n"
+    assert continuations_that_continue_nothing(good_lf.replace("\n", "\r\n")) == []
+
+
+def test_the_reader_chain_gives_the_same_offences_for_lf_and_crlf() -> None:
+    """The whole chain — fence reader, then rule, then the message — under both endings.
+
+    The rule is only one link. A `\\r` left in the body by a reader, or a fence opener that
+    stops being recognised, would break the pipeline while the rule itself stayed correct,
+    so this compares the *offences* (path, line number, line text, count) and not just a
+    count: a message that prints a stray CR, or a line number that shifts, is a different
+    answer even when the number of findings matches.
+
+    End-to-end in this direction because a reader is only ever handed text by a caller, and
+    the caller's newline mode is what varies (`Path.read_text` normalises; `newline=""`
+    does not — measured 2026-10-03, `cyc20261003-102534`).
+    """
+    block = (
+        "APPLE_ID=a@b.c MACOS_NOTARY_APP_PASSWORD=pw \\\\\n"
+        "    MACOS_NOTARY_TEAM_ID=TEAM \\\\\n"
+        "    uv run --no-sync python3 scripts/check-notary-credentials.py\n"
+    )
+    doc = "# Doc\n\n```bash\n" + block + "```\n\nprose\n"
+    crlf = doc.replace("\n", "\r\n")
+
+    lf_blocks = shell_blocks(doc)
+    crlf_blocks = shell_blocks(crlf)
+    assert [n for n, _ in lf_blocks] == [n for n, _ in crlf_blocks], (
+        "the fence reader found the block at a different line under CRLF "
+        f"({lf_blocks} vs {crlf_blocks})"
+    )
+    assert len(lf_blocks) == 1 and len(crlf_blocks) == 1
+
+    lf_offences = _offenders_in("x.md", lf_blocks)
+    crlf_offences = _offenders_in("x.md", crlf_blocks)
+    assert len(lf_offences) == 2, lf_offences
+    assert crlf_offences == lf_offences, (
+        "the same document produced different findings under CRLF endings:\n"
+        f"  LF:   {lf_offences}\n  CRLF: {crlf_offences}"
+    )
 
 
 def test_a_real_continuation_is_not_flagged() -> None:
