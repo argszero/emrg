@@ -314,3 +314,35 @@ def test_the_preflight_sends_the_variables_the_release_sends() -> None:
         f"{sorted(next(iter(n)) for n in sent.values())} — the host would be checking "
         f"credentials the build does not use"
     )
+
+
+# ── The host has to be able to find it ────────────────────────────────────────
+
+
+def test_development_md_documents_the_preflight_and_its_contract() -> None:
+    """A host-side counterpart the host cannot reach is not one, and this is the half
+    that decays.
+
+    The script asks the question CI can only ask *after* a tag is pushed, so it exists for
+    a host whose release round just went red — and they look in the docs, not in the source
+    tree. Measured 2026-10-03 (`cyc20261003-090905`): the file was named nowhere outside its
+    own docstring, its test, and the evolution memory, which is a private record the host
+    does not read. Exit codes are pinned with the command because the contract is the part
+    a bare path cannot carry: `2` means no verdict was reached, and a host who reads that
+    as "fine" pays the wasted build round the preflight exists to prevent.
+    """
+    text = (REPO / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    assert "scripts/check-notary-credentials.py" in text, (
+        "DEVELOPMENT.md does not name scripts/check-notary-credentials.py — the host "
+        "troubleshooting a refused notarization has no documented way to reach the "
+        "preflight, so it is a host-side counterpart only in name"
+    )
+    assert "never a pass" in text, (
+        "DEVELOPMENT.md documents the command without its contract — exit 2 means no "
+        "verdict was reached, and folding that into a pass is the conflation this file "
+        "exists to keep out"
+    )
+    assert "MACOS_NOTARY_APP_PASSWORD" in text, (
+        "the documented invocation must name the variables the release uses, so a host can "
+        "run it without reconstructing the secret names from the workflow"
+    )

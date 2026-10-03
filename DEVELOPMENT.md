@@ -238,6 +238,20 @@ python3 scripts/check-extension-load.py --python <path> --keep
 
 Exit `0` = a wheel's compiled module loaded; `1` = it did **not** (the load decides, not the codesign reading — an interpreter without the entitlement can still load, and vice versa); `2` = could not measure (no such interpreter, it cannot run, or no wheel for this platform) — never a pass. CI runs the same check as step 15 of `packaging/smoke-test.sh`, so host and CI ask one question in one place.
 
+**The host-side counterpart of the release's notarize step.** The macOS job of `build-release.yml` is the only place notarization is verified, and the tag is its only trigger — so a credential Apple refuses fails that step in **seconds**, skips the `release` job because of it, and publishes nothing at all (measured on v0.3.8, run `36956685533`; the other three platforms built green). Ask at home first, with the same three variables the workflow fills from secrets:
+
+```bash
+APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \\
+    MACOS_NOTARY_TEAM_ID=<team> \\
+    uv run --no-sync python3 scripts/check-notary-credentials.py
+# keep them out of the shell history instead:
+#   uv run --no-sync python3 scripts/check-notary-credentials.py --env-file ~/.emrg/notary.env
+```
+
+Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's own reply is printed (usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); `2` = the exchange did not complete, so **no verdict was reached — never a pass**, and CI must fail on it too. After fixing, resume the run that failed with `gh run rerun <run-id> --failed`: a tag already pushed is not re-pushed.
+
+The step's two failure modes are told apart by **duration**, not by the exit code: a refused *submission* dies in seconds, while a notarization *verdict* takes minutes, exits 0 and reports `status=Invalid` (the step parses that status and fetches Apple's rejection log for it). `Notarize pkg` names the preflight in its own `::error::` when the submission is refused, so the remedy arrives with the failure.
+
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 > **Self-evolution from source**: the evolution workspace expects the repo at `~/.emrg/evolution/emrg`. Packaged installs self-heal (clone on demand + auto-bootstrap projects/tasks); source installs should clone there explicitly if you want the evolution daemon to work on this repo.

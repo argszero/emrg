@@ -270,6 +270,31 @@ def test_a_refused_submission_prints_apples_reply_and_still_fails(tmp_path) -> N
 
 
 @_posix_shell_only
+def test_a_refused_submission_names_the_remedy_the_host_can_run_at_home(tmp_path) -> None:
+    """The remedy has to arrive with the failure, in the log the host is already reading.
+
+    Measured 2026-10-03 (`cyc20261003-090905`): `scripts/check-notary-credentials.py` asks
+    Apple the same question before a tag is pushed, and no host-facing document named it, so
+    the host met this failure with a remedy they could only find in the evolution memory.
+    The step's own `::error::` now carries the command and its exit-code contract.
+
+    Pinned *executed* rather than as a substring of the body, so the two halves stay
+    together: the annotation helps only while the refusal reaches the log at all, which is
+    the defect the arm above measures.
+    """
+    result = _run_step(tmp_path, "refused")
+    assert "scripts/check-notary-credentials.py" in result.stdout, (
+        "a refused submission did not name the host-side preflight in its annotation — the "
+        "host is left to reconstruct the diagnosis after the tag is already pushed.\n"
+        f"stdout={result.stdout!r}"
+    )
+    assert "never a pass" in result.stdout, (
+        "the annotation names the command without its contract: a preflight that answered "
+        f"`could not measure` must not read as one that passed.\nstdout={result.stdout!r}"
+    )
+
+
+@_posix_shell_only
 def test_an_accepted_submission_keeps_the_step_green(tmp_path) -> None:
     """The other direction: the fix must not turn the step red on the happy path.
 
