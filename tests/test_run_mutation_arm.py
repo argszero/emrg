@@ -39,6 +39,13 @@ from pathlib import Path
 
 import pytest
 
+from tests import shell_lines
+
+#: One backslash. Written as `chr(92)` so this file spells **no** backslash literal at all:
+#: the defect these tests are about was a literal run of two, and a pin that spells its own
+#: subject is a pin a later edit can get wrong the same way. `_BS * 2` cannot.
+_BS = chr(92)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "run-mutation-arm.py"
 DOC = REPO_ROOT / "DEVELOPMENT.md"
@@ -431,18 +438,67 @@ def _documented_invocation(doc: str) -> str:
 
     Located by the tool's own name rather than by line number, so an edit above it cannot
     make this measure a different block; the block ends at the first line that is not a
-    backslash continuation.
+    continuation **as a shell reads one** — an odd run of trailing backslashes, which is
+    `tests/shell_lines.continues`, the one home for that rule.
+
+    Read here as `endswith("\\")` until 2026-10-03, which is `True` for a run of two — so a
+    block whose lines ended in `\\` was read as this invocation and answered with all five
+    flags, while a shell runs it as three separate commands with the tool receiving no
+    arguments at all (measured: `cyc20261003-194054`). The guard was silent on exactly the
+    defect its own document had been fixed for one PR earlier.
     """
     lines = doc.splitlines()
     for index, line in enumerate(lines):
-        if "run-mutation-arm.py" in line and line.rstrip().endswith("\\"):
+        if "run-mutation-arm.py" in line and shell_lines.continues(line):
             block = [line]
             for following in lines[index + 1:]:
                 block.append(following)
-                if not following.rstrip().endswith("\\"):
+                if not shell_lines.continues(following):
                     break
             return "\n".join(block)
     return ""
+
+
+def _lines_naming_the_tool_that_do_not_continue(doc: str) -> list[str]:
+    """Lines that name the tool and end a command — the shape a reader mistakes for one.
+
+    Read by `_documented_invocation` above, which returns `""` for it: the invocation is
+    named but never continued, so the flags that make it this tool's call are on lines the
+    shell runs as separate commands. Named separately so the failure says which of the two
+    shapes it is (the document lost the invocation, or the invocation no longer runs),
+    because a reader sent to look for a missing paragraph when the real edit was a second
+    backslash is a reader sent the wrong way.
+    """
+    return [
+        line
+        for line in doc.splitlines()
+        if "run-mutation-arm.py" in line and not shell_lines.continues(line)
+    ]
+
+
+def _assert_the_document_invokes_the_arm_runner(text: str) -> None:
+    """The guard's body, on any text — so its failure on a broken document is testable.
+
+    Takes the text rather than reading `DOC` itself: the reading below is only exercised
+    through the real document, which is correct today, so a guard that had stopped failing
+    on a doubled block would leave every test green.
+    """
+    invocation = _documented_invocation(text)
+    named_but_ended = _lines_naming_the_tool_that_do_not_continue(text)
+    assert named_but_ended, (
+        "the document no longer shows how to run scripts/run-mutation-arm.py - the tool "
+        "was documented 2026-10-03 because cycles were hand-rolling arms instead"
+    )
+    assert invocation.strip(), (
+        "the document names scripts/run-mutation-arm.py but does not continue the line, so "
+        "a shell runs this as separate commands and the tool receives none of its "
+        "arguments. The line that names it ends a command: "
+        f"{named_but_ended[0]!r} - a trailing run of backslashes has to be ODD for the "
+        "shell to read the next line as part of the same command (two backslashes are one "
+        "escaped backslash, and the command ends there)"
+    )
+    for flag in ("--file", "--old", "--new", "--node", "--expect"):
+        assert flag in invocation, f"the documented invocation dropped {flag}"
 
 
 def _flags_in(text: str) -> set[str]:
@@ -531,13 +587,45 @@ class TestTheDocumentNamesTheTool:
     """
 
     def test_the_document_invokes_the_arm_runner(self) -> None:
-        invocation = _documented_invocation(DOC.read_text(encoding="utf-8"))
-        assert invocation.strip(), (
-            "DEVELOPMENT.md no longer shows how to run scripts/run-mutation-arm.py - the "
-            "tool was documented 2026-10-03 because cycles were hand-rolling arms instead"
+        _assert_the_document_invokes_the_arm_runner(DOC.read_text(encoding="utf-8"))
+
+    def test_the_guard_fires_on_a_block_that_does_not_continue(self) -> None:
+        """The guard's own behaviour on the shape it was blind to, not just its parts.
+
+        Without this, the reading above is pinned only through the real document — which is
+        correct today — so a guard that could no longer fail on a doubled block would leave
+        every test green. Found by an arm against this file: making the assertion accept the
+        not-continued shape (`invocation.strip() or named_but_ended`) SURVIVED all 57 tests,
+        which is this gap. The document is edited **in memory** here, so nothing on disk
+        moves — the mutation that produced the defect is one byte on two lines.
+        """
+        lines = DOC.read_text(encoding="utf-8").splitlines()
+        # The line that **invokes** the tool: the document also names it in the prose
+        # paragraph below the block, so "the line naming it" is not one line (measured while
+        # writing this test — the first version picked both and failed on its own premise).
+        starts = [
+            i for i, ln in enumerate(lines)
+            if "run-mutation-arm.py" in ln and shell_lines.continues(ln)
+        ]
+        assert len(starts) == 1, f"expected one invoking line, got {starts}"
+        start = starts[0]
+        for i in range(start, len(lines)):
+            if not shell_lines.continues(lines[i]):
+                end = i
+                break
+        else:  # pragma: no cover - a document that never ends its command cannot be read
+            raise AssertionError("the documented invocation never ends")
+        doubled = lines[:]
+        for i in range(start, end + 1):
+            doubled[i] = doubled[i] + _BS
+        assert doubled != lines
+
+        with pytest.raises(AssertionError) as failure:
+            _assert_the_document_invokes_the_arm_runner("\n".join(doubled))
+        assert "does not continue the line" in str(failure.value), (
+            "the guard failed for the wrong reason - a doubled backslash must be reported "
+            f"as an invocation that does not run, not as a missing paragraph: {failure.value}"
         )
-        for flag in ("--file", "--old", "--new", "--node", "--expect"):
-            assert flag in invocation, f"the documented invocation dropped {flag}"
 
     def test_every_flag_the_document_spells_is_a_flag_the_tool_has(self, mod, capsys) -> None:
         documented = _documented_tool_flags(DOC.read_text(encoding="utf-8"))
@@ -579,3 +667,107 @@ class TestTheDocumentNamesTheTool:
             str(mod.EXIT_RESTORE_MISMATCH): mod.RESTORE_MISMATCH,
         }
         assert spelled == expected
+
+
+class TestTheContinuationTheShellPerforms:
+    """The reader behind this file's doc guard, against the shell's own rule.
+
+    Every assertion here is about one byte — how many backslashes end a line — and each is
+    paired with what the **shell** does with that shape, so the pair is the evidence. The
+    counts are written as `_BS * n`, never as a literal run: a pin on a literal run is a pin
+    a later edit can get wrong the same way the defect did.
+    """
+
+    @pytest.mark.parametrize("count,expected", [(0, False), (1, True), (2, False), (3, True), (4, False)])
+    def test_only_an_odd_run_continues(self, count, expected) -> None:
+        """The rule, at the boundary: an even run is whole escaped backslashes."""
+        line = "uv run --no-sync python3 scripts/run-mutation-arm.py " + _BS * count
+        assert shell_lines.continues(line) is expected
+        assert shell_lines.trailing_backslashes(line) == count
+
+    def test_a_backslash_with_whitespace_after_it_continues_nothing(self) -> None:
+        """The shape `rstrip()` gets wrong: `x \\ ` escapes the **space**, not the newline.
+
+        Measured 2026-10-03: the shipped reader called this a continuation, because it
+        stripped the space away before asking whether the line ended in a backslash — the
+        same defect as the doubled run, reached from the other side.
+        """
+        assert shell_lines.continues("uv run --no-sync python3 x.py " + _BS + " ") is False
+        assert shell_lines.trailing_backslashes("x " + _BS + " ") == 0
+
+    def test_the_reader_tells_the_two_shapes_apart(self) -> None:
+        """The measurement that produced this class, on the reader it was measured on.
+
+        One byte differs between the docs below. In a shell the first is one command and
+        the second is three, so a reader that answers the same for both is not reading the
+        document a shell would run — it was answering "3 lines, five flags" for each.
+        """
+        continued = "\n".join([
+            "uv run --no-sync python3 scripts/run-mutation-arm.py " + _BS,
+            "    --file <file> --old <text> --new <text> " + _BS,
+            "    --node <id> --expect <text>",
+        ])
+        ended = continued.replace(" " + _BS + "\n", " " + _BS * 2 + "\n")
+        assert ended != continued
+
+        assert _documented_invocation(continued).count("\n") == 2
+        assert _documented_invocation(ended) == "", (
+            "a block whose lines end in TWO backslashes was read as the documented "
+            "invocation — a shell runs that as three commands, the first of which passes no "
+            "argument to the tool at all"
+        )
+        # And the reading it must not silently become: flags found in lines the shell never
+        # joins. `_documented_tool_flags` follows `_documented_invocation`, so it is empty
+        # for the ended shape rather than full. (`--no-sync` is `uv`'s, so the comparison is
+        # the tool's own flags — the cut this file already makes for that reason.)
+        assert _documented_tool_flags(ended) == set()
+        assert _documented_tool_flags(continued) == {
+            "--file", "--old", "--new", "--node", "--expect"
+        }
+
+    def test_the_document_must_not_be_read_past_the_command_it_ends(self) -> None:
+        """The other direction: prose after the block is not part of the invocation.
+
+        A reader that counts "is there a backslash" instead of the run swallows the next
+        line, and the flag comparison then **accuses** the document of spelling an option
+        for this tool that its invocation never mentions — a false failure whose remedy
+        sends the reader to delete a flag that is not in the command.
+        """
+        doc = "\n".join([
+            "uv run --no-sync python3 scripts/run-mutation-arm.py " + _BS,
+            "    --file <file> " + _BS * 2,
+            "Prose naming another tool's option: --only-in-prose.",
+            "uv run --no-sync python3 scripts/run-mutation-arm.py " + _BS,
+            "    --file <file>",
+        ])
+        invocation = _documented_invocation(doc)
+        assert "--only-in-prose" not in invocation, (
+            "the reader read past the end of the command and counted a prose line as part "
+            "of it, so a flag the invocation never spells is reported as one it does"
+        )
+        assert "--file" in invocation
+
+    def test_a_block_that_ends_mid_command_keeps_its_last_line(self) -> None:
+        """An input that stops mid-command is reported by what it has, not by what it lost.
+
+        `commands` is the whole-block mirror of `continues`; a trailing continuation with no
+        successor must not drop a line, which is what a reader that only ever looks *ahead*
+        would do.
+        """
+        lines = ["a " + _BS, "b", "c " + _BS]
+        assert shell_lines.commands(lines) == [["a " + _BS, "b"], ["c " + _BS]]
+
+    def test_the_guards_message_names_the_shape_it_actually_saw(self) -> None:
+        """A doubled backslash is not a missing paragraph, and the remedy differs.
+
+        The guard's failure text used to be one sentence — "no longer shows how to run" —
+        which sends the reader looking for a deleted block when the real edit was a second
+        backslash on a line that is still there.
+        """
+        ended = (
+            "uv run --no-sync python3 scripts/run-mutation-arm.py " + _BS * 2 + "\n"
+            "    --file <file> --old <t> --new <t>\n"
+        )
+        named = _lines_naming_the_tool_that_do_not_continue(ended)
+        assert named, "the reader did not even see the line that names the tool"
+        assert _documented_invocation(ended) == ""
