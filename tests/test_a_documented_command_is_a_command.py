@@ -274,12 +274,22 @@ def test_no_shell_text_in_the_tree_continues_with_an_even_number_of_backslashes(
 def test_the_scan_reads_every_carrier_it_names() -> None:
     """The control leg: a scan that read nothing would pass the rule above.
 
-    A floor per carrier, because the failure this catches is one carrier silently dropping
-    out — a reader that returns nothing for every workflow still leaves the markdown rule
-    green, and the carrier no one reads is exactly the one that decays. The floors come
-    from measured populations, not taste: `DEVELOPMENT.md` alone carried 16 shell fences
-    and the tree 67; the two workflows carry 20 block scalars between them (a real YAML
-    parser's count of `run` keys is pinned separately below); there are 10 tracked `*.sh`.
+    Three readings, because each is blind to a different break, and the third exists
+    because the first two were:
+
+    * **Floors per carrier** (a listing that yields nothing still passes a rule that scans
+      nothing, so `len(...) >= n` is what refuses it). From measured populations, not
+      taste: `DEVELOPMENT.md` alone carried 16 shell fences and the tree 67; the two
+      workflows carry 20 block scalars between them; there are 10 tracked `*.sh`.
+    * **Counts per file** (a *reader* that returns nothing while the listing is fine -
+      a fence reader that reads no file, a run-block regex that matches nothing).
+    * **The switchboard agrees with the listings** — every path `_carriers()` hands the rule
+      is one the three listings named, and every path they named is one it hands over. This
+      is the reading a mutation arm added on 2026-10-03 (`cyc20261003-100623`): dropping the
+      workflow carrier from `_carriers()` left the first two readings **green**, because
+      they call the listings and the readers directly while the *rule* goes through
+      `_carriers()`. A carrier quietly dropped from the switchboard is a carrier nothing
+      scans, and it was invisible to every other leg in this file.
     """
     md = tracked_markdown()
     wf = tracked_workflows()
@@ -310,6 +320,15 @@ def test_the_scan_reads_every_carrier_it_names() -> None:
 
     script_lines = sum(len(shell_scripts(p)[0][1].split("\n")) for p in sh)
     assert script_lines >= 200, f"the {len(sh)} tracked scripts hold only {script_lines} lines"
+
+    expected = set(md) | set(wf) | set(sh)
+    carried = {path for path, _ in _carriers()}
+    assert carried == expected, (
+        "the carriers the rule scans and the files the listings name are not the same set, so "
+        "some file this guard's docstring puts in scope is not being read at all:\n"
+        f"  scanned but not listed: {sorted(carried - expected)}\n"
+        f"  listed but not scanned: {sorted(expected - carried)}"
+    )
 
 
 def test_the_run_reader_counts_what_a_real_yaml_parser_counts() -> None:
