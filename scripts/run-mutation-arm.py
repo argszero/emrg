@@ -179,6 +179,13 @@ _PASSED = re.compile(r"(\d+) passed")
 #: they are not assertions, and a caller who pasted one would get UNJUDGEABLE again.
 _ECHOED_ASSERTION = re.compile(r"^[>E]\s+(?P<text>.*\bassert\b.*)$")
 
+#: pytest's explanation line, `E   TypeError: ...` - what a *collection* failure says
+#: about itself. Read for the interrupted verdict, whose reason used to name a cause
+#: this tool had already excluded by compiling the mutated text (the interrupted branch
+#: below records the measurement).
+_ERROR_LINE = re.compile(r"^E\s+(?P<text>\S.*)$")
+_ERROR_MAX_CHARS = 200
+
 #: How many candidates the report prints, and how long each may be: the report is read
 #: from a terminal, and the first few lines of a failure are where its assertion is.
 _ASSERTION_CANDIDATES = 5
@@ -294,7 +301,27 @@ def _syntax_error(text: str, name: str) -> str:
     return ""
 
 
-def _why_unjudgeable(rc: int, expect: str, out: str, syntax_error: str = "") -> str:
+def _error_line(out: str) -> str:
+    """The first explanation line pytest wrote, or "" when it wrote none.
+
+    Read from the same text the verdict is judged from, and for the same reason
+    `_assertion_lines` is read: it is what the run really said, so the report can
+    hand back a cause instead of a guess at one.
+    """
+    for line in out.splitlines():
+        match = _ERROR_LINE.match(line)
+        if match:
+            return match.group("text").strip()[:_ERROR_MAX_CHARS]
+    return ""
+
+
+def _why_unjudgeable(
+    rc: int,
+    expect: str,
+    out: str,
+    syntax_error: str = "",
+    syntax_checked: bool = False,
+) -> str:
     if syntax_error:
         # Determinate, and it comes first: the mutated text does not parse, which is
         # *this arm's* doing, so no code the run returned needs interpreting.
@@ -311,10 +338,30 @@ def _why_unjudgeable(rc: int, expect: str, out: str, syntax_error: str = "") -> 
             "this is not a kill"
         )
     if rc == PYTEST_INTERRUPTED:
+        # The parse clause that used to stand here is *false whenever this branch is
+        # reached*: a non-parsing mutation is read above and never gets this far, so
+        # reaching this line means the mutated text was compiled and compiled clean.
+        # Measured 2026-10-04 (`cyc20261004-000004`) on the tool's own mini tree: a
+        # mutation that parses and raises at import (`raise RuntimeError` where the
+        # subject's docstring was) is reported by the old text as "the usual cause is
+        # that the mutated file ... no longer parses", while `_syntax_error` had just
+        # answered "" for that very file - the message named the one cause the tool had
+        # ruled out, and named nothing else, though pytest had printed
+        # `E   RuntimeError: boom at import` one line above the verdict.
+        if syntax_checked:
+            state = (
+                "the mutated file parses (it was compiled before the run), so the "
+                "failure is in what collection imports"
+            )
+        else:
+            state = (
+                "the mutated file is not Python and was not compiled, so whether it "
+                "parses is not known here"
+            )
+        named = f"; pytest's own line was: {error}" if (error := _error_line(out)) else ""
         return (
-            "pytest exited 2 (interrupted): collection itself failed, so no test ran "
-            "against the mutation - the usual cause is that the mutated file is imported "
-            "while tests are collected and no longer parses. Not a kill"
+            f"pytest exited 2 (interrupted): collection itself failed, so no test ran "
+            f"against the mutation - {state}{named}. Not a kill"
         )
     if rc == PYTEST_NO_TESTS:
         return "pytest exited 5: no test was collected, so nothing judged the mutation"
@@ -362,6 +409,10 @@ class Arm:
         #: verdict never has to infer the cause from an exit code that means two
         #: different things depending on how the target was named.
         self.syntax_error = ""
+        #: whether that read was taken at all (the mutated file is Python). The
+        #: interrupted reason distinguishes "compiled and clean" from "not compiled",
+        #: because only the first is a fact this tool can state.
+        self.syntax_checked = False
 
     def decide(self, verdict: str, why: str, code: int) -> None:
         self.verdict, self.why, self.code = verdict, why, code
@@ -379,6 +430,7 @@ class Arm:
             "mutated_passed": self.mutated_passed,
             "assertions": list(self.assertions),
             "syntax_error": self.syntax_error,
+            "syntax_checked": self.syntax_checked,
             "restored": self.restored,
             "verdict": self.verdict,
             "why": self.why,
@@ -487,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
     # syntax is this arm's own doing, and it is the one cause whose exit code varies
     # with how the target was named (`_syntax_error` records that measurement).
     if target.suffix == ".py":
+        arm.syntax_checked = True
         arm.syntax_error = _syntax_error(mutated, target.name)
 
     home = Path(tempfile.mkdtemp(prefix="emrg-arm-"))
@@ -540,7 +593,11 @@ def main(argv: list[str] | None = None) -> int:
                     arm.decide(
                         UNJUDGEABLE,
                         _why_unjudgeable(
-                            proc.returncode, args.expect, out, arm.syntax_error
+                            proc.returncode,
+                            args.expect,
+                            out,
+                            arm.syntax_error,
+                            arm.syntax_checked,
                         ),
                         EXIT_UNJUDGEABLE,
                     )

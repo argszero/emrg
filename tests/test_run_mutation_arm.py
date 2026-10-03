@@ -92,9 +92,9 @@ def tree(tmp_path: Path) -> Path:
 
 
 def _arm(mod, tree: Path, *, old: str, new: str, node: str = HELLO_NODE, expect: str = "hello x",
-         json_out: bool = False) -> int:
+         json_out: bool = False, file: str = "subject.py") -> int:
     argv = [
-        "--file", "subject.py",
+        "--file", file,
         "--old", old,
         "--new", new,
         "--node", node,
@@ -652,6 +652,122 @@ class TestANonParsingMutationIsNamedNotGuessed:
         _arm(mod, tree, old=GREETING, new='return "hello " + (')
         capsys.readouterr()
         assert (tree / "subject.py").read_text(encoding="utf-8") == before
+
+
+class TestAnInterruptedCollectionNamesItsOwnCause:
+    """The interrupted verdict's reason may not name a cause this tool has excluded.
+
+    Measured 2026-10-04 (`cyc20261004-000004`) on this mini tree: a mutation that
+    **parses** and raises while the module is imported — the subject's docstring
+    replaced by `raise RuntimeError("boom at import")` — is reported by the reason that
+    stood here as "the usual cause is that the mutated file is imported while tests are
+    collected and **no longer parses**". The tool had compiled that very file one step
+    earlier and answered "" for it, so the sentence named the one cause the arm had
+    ruled out, and named no other, while pytest had printed
+    `E   RuntimeError: boom at import` immediately above the verdict.
+
+    The clause is not merely stale, it is **unreachable-when-true**: a non-parsing
+    mutation is read by `_syntax_error` and short-circuits before this branch, so every
+    run that reaches it has a mutated file that compiles. A branch whose stated cause
+    is impossible is the same defect as a field that reports a measurement nobody took.
+    """
+
+    def test_a_mutation_that_parses_and_fails_at_import_is_not_blamed_on_the_syntax(
+        self, mod, tree, capsys
+    ) -> None:
+        """The measured shape: `helper(1)` where `helper()` stood, in an imported module.
+
+        `boom.py` is imported at collection time by the test that covers it, so a
+        mutation that parses and raises while it is imported interrupts collection -
+        and the interrupted branch is the one whose reason is pinned here.
+        """
+        (tree / "boom.py").write_text(
+            "def helper():\n"
+            "    return 1\n"
+            "\n"
+            "\n"
+            "VALUE = helper()\n",
+            encoding="utf-8",
+        )
+        (tree / "tests" / "test_boom.py").write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parent.parent))\n"
+            "\n"
+            "import boom\n"
+            "\n"
+            "\n"
+            "def test_the_module_imported():\n"
+            "    assert boom.VALUE == 1\n",
+            encoding="utf-8",
+        )
+        rc = _arm(
+            mod, tree,
+            file="boom.py",
+            old="VALUE = helper()",
+            new="VALUE = helper(1)",
+            node="tests/test_boom.py",
+            expect="assert boom.VALUE == 1",
+        )
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_UNJUDGEABLE, out
+        assert "verdict: UNJUDGEABLE" in out, out
+        assert "no longer parses" not in out, (
+            "the mutated file was compiled clean before the run, so nothing may say it "
+            f"does not parse:\n{out}"
+        )
+        assert "it was compiled before the run" in out, out
+        assert "TypeError" in out, (
+            "the cause is one line of output away, and the report is where it belongs "
+            f"- an unjudgeable verdict whose reason names no cause sends the caller to "
+            f"re-run by hand:\n{out}"
+        )
+
+    def test_the_reason_says_which_read_was_taken(self, mod) -> None:
+        """Compiled-and-clean and not-compiled are different states, and are said so."""
+        checked = mod._why_unjudgeable(2, "assert", "", syntax_checked=True)
+        assert "it was compiled before the run" in checked, checked
+        unchecked = mod._why_unjudgeable(2, "assert", "", syntax_checked=False)
+        assert "not known here" in unchecked, unchecked
+        assert "compiled before the run" not in unchecked, unchecked
+
+    def test_a_non_parsing_mutation_still_wins_the_interrupted_code(self, mod) -> None:
+        """The control: the parse reading is still first, so the order was not disturbed.
+
+        A syntax error and an interrupted collection can carry the same code, and the
+        determinate reading has to keep winning — otherwise the new legs above would be
+        satisfied by a reason that never mentions the parse at all.
+        """
+        reason = mod._why_unjudgeable(
+            2, "assert", "", syntax_error="'(' was never closed at line 2", syntax_checked=True
+        )
+        assert "no longer parses" in reason, reason
+        assert "it was compiled before the run" not in reason, reason
+
+    def test_the_error_line_reader_takes_what_pytest_explained(self, mod) -> None:
+        """`_error_line` reads the `E` line, and not the `>` source line above it.
+
+        The two differ in what they say - `>` echoes the line that raised, `E` says what
+        went wrong - so the expected string is written from the `E` line. A reader that
+        took both would answer with the source line and pass a weaker leg, which is why
+        the fixture here has the two disagreeing.
+        """
+        out = (
+            "tests/test_x.py:4: in <module>\n"
+            "    VALUE = helper(1)\n"
+            "E   TypeError: helper() takes 0 positional arguments but 1 was given\n"
+            "!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!\n"
+        )
+        assert mod._error_line(out) == (
+            "TypeError: helper() takes 0 positional arguments but 1 was given"
+        ), mod._error_line(out)
+        assert mod._error_line(">   assert helper() == 1\nE   assert 2 == 1\n") == (
+            "assert 2 == 1"
+        ), mod._error_line(">   assert helper() == 1\nE   assert 2 == 1\n")
+        assert mod._error_line("no explanation here\n") == "", (
+            "an empty answer is the honest one, and the reason has to survive it"
+        )
 
 
 def _parse_bullet() -> str:
