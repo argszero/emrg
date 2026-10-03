@@ -214,13 +214,21 @@ def _cause_excerpt(lines: list[str], tail: int) -> tuple[list[str], int, str]:
 
     The annotation read is the **first** one, not the last. Steps run in order and the
     runner's teardown runs after all of them, so the earliest `##[error]` is the earliest
-    thing that went wrong; a log whose post-job cleanup **also** errors carries a second
-    annotation last, and anchoring there printed the cleanup block under this function's
-    own "the failing step's block" label while burying the step that actually failed
-    (measured 2026-10-04 with a two-annotation log - the v0.3.8 run has one, so this is a
-    shape its own reading does not reach). `_annotation_lines` still lists every annotation
-    up to `_MAX_ANNOTATIONS`, so a second one is visible in the output rather than being
-    lost by this choice.
+    point the log annotates as an error; a log whose post-job cleanup **also** errors
+    carries a second annotation last, and anchoring there printed the cleanup block under
+    this function's own "the failing step's block" label while burying the step that
+    actually failed (measured 2026-10-04 with a two-annotation log - the v0.3.8 run has
+    one, so this is a shape its own reading does not reach). `_annotation_lines` still
+    lists every annotation up to `_MAX_ANNOTATIONS`, so a second one is visible in the
+    output rather than being lost by this choice.
+
+    The assumption this makes: the first annotation is the failing step's own. An earlier
+    step that emits `::error::` and still succeeds would displace it, and that shape cannot
+    be ruled out from here - job logs are `403` to an unauthenticated fetch (measured
+    2026-10-04), so the only logs this rule was driven from are ones the payload's own
+    failing-step list agrees with. It is preferred to the last annotation because the
+    cleanup case is the one the *measured* log shows, while the displacing case is a shape
+    no reading here has produced.
 
     When the log carries no `##[error]` line the whole tail is returned, and the third
     element names which rule answered, because the two are not the same reading: the first
