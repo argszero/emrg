@@ -309,6 +309,33 @@ def test_touch_project_keeps_the_entries_it_can_read(tmp_path, monkeypatch) -> N
     assert {e["path"] for e in written} == {"/tmp/alpha", str(work)}
 
 
+def test_touch_project_still_survives_an_entry_whose_path_is_not_a_string(
+    tmp_path, monkeypatch
+) -> None:
+    """`TypeError` was caught here for a *different* failure and must stay caught.
+
+    A record whose `path` is a list reaches `os.path.realpath` and raises `TypeError`
+    — a wrongly-typed entry, not a read failure, which is why this reader's tuple
+    carries a member the others do not. Its tuple was rewritten in this cycle to name
+    the shared home, so this is the pin that the rewrite did not drop what it was not
+    about: measured by mutating that line back to the home alone (arm A6), which
+    leaves this test as the only thing that fails.
+    """
+    monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path)
+    server = daemon_mod.EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    projects_file = _write(
+        tmp_path / "projects.yml", b"- name: broken\n  path:\n    - not\n    - a path\n"
+    )
+    server._projects_log = projects_file
+    work = tmp_path / "work" / "beta"
+    work.mkdir(parents=True)
+
+    server._touch_project(str(work))
+
+    written = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+    assert [e["path"] for e in written] == [str(work)]
+
+
 # ── readers 7 and 8: the two project commands ───────────────────────────────
 
 
