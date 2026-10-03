@@ -149,6 +149,11 @@ class Verdict:
     #: head" — the case the clause refuses to judge).
     push_time: str = PUSHED_BEFORE_THE_WINDOW
     push_time_exact: bool = True
+    #: The counter's answer for a finished PR (issue #1837) - distinct from the two
+    #: fields above, which are about the head. Modelled for the same reason they are:
+    #: a fake that cannot receive a field hides a call site that reads it.
+    state: str = "OPEN"
+    terminal: bool = False
 
 
 def vote(cycle=CYCLE, *, kind="approve", counted=True, why="", at="2026-09-15T18:19:36Z"):
@@ -1833,3 +1838,57 @@ def test_a_dry_run_refuses_a_wrong_tree_claim_too(mod, monkeypatch, capsys, body
     assert "dry run" not in capsys.readouterr().out, (
         "the refusal comes before the dry-run line, so the run never reads as a pass"
     )
+
+
+# --- a finished PR is not votable (#1837) ------------------------------------
+
+
+def _approval_body(body_file):
+    return body_file(f"\u2705 LGTM \u2014 cycle {CYCLE}\n")
+
+
+def test_it_refuses_to_vote_on_a_pr_that_is_already_merged(mod, monkeypatch, body_file, capsys):
+    counter = FakeCounter(Verdict(pr=1, state="MERGED", terminal=True))
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", _approval_body(body_file), "--cycle", CYCLE, "--dry-run"],
+    )
+    assert rc == 2
+    assert "is MERGED" in capsys.readouterr().err
+    assert gh.calls == [], "nothing may be posted to a finished PR"
+
+
+def test_the_terminal_state_outranks_this_cycle_s_own_window(mod, monkeypatch, body_file, capsys):
+    """Which refusal wins, asserted in both directions.
+
+    The head is pushed *inside* this cycle's own window, so the abstention clause would
+    refuse too. The PR's state is read first, because it is the answer about the PR
+    rather than about this cycle - and the two call for different things. The control
+    below is the same head and the same cycle with the PR open, so this is a genuine
+    ordering test rather than a case that would have been refused anyway.
+    """
+    inside_the_window = _push(2026, 9, 16, 2, 0, 0)
+    argv = ["1255", "--body-file", _approval_body(body_file), "--cycle", CYCLE]
+
+    terminal = FakeCounter(
+        Verdict(pr=1, state="MERGED", terminal=True, push_time=inside_the_window)
+    )
+    gh = FakeGh()
+    assert _run(mod, monkeypatch, terminal, gh, list(argv)) == 2
+    assert "is MERGED" in capsys.readouterr().err
+    assert gh.calls == []
+
+    still_open = FakeCounter(Verdict(pr=1, push_time=inside_the_window))
+    gh = FakeGh()
+    assert _run(mod, monkeypatch, still_open, gh, list(argv)) == 2
+    control = capsys.readouterr().err
+    # The clause's own sentence, so the control is known to have refused for the
+    # clause's reason rather than for some third one.
+    assert "inside the window this cycle" in control
+    assert "is MERGED" not in control
+    assert gh.calls == []
+

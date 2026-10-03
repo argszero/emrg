@@ -169,7 +169,10 @@ Usage
 
 Exit codes
 ----------
-    0  every head contains master's tip - CI's merge base is master itself
+    0  every head contains master's tip - CI's merge base is master itself.
+       Also 0 for a **terminal** PR (`MERGED` / `CLOSED`): the PR is finished, so
+       there is no merge for a verdict to be about. Reported as its state, never as
+       `STALE` - a determinate fault reported about landed work was issue #1837
     1  at least one head does NOT contain master's tip - the verdict is stale
     2  the check could not be made (bad PR, gh failed, unreadable response) -
        fail loud; never report "fresh" for a question that was not answered
@@ -239,6 +242,15 @@ _KIND_NO_RUN = "no_run"  # master is an ancestor but nothing ever judged the hea
 _KIND_RUNNING = "running"  # a run exists and has not concluded
 _KIND_FAILING = "failing"  # a run concluded non-success
 
+# A fifth way the question is *decided* rather than answered: the PR is finished.
+# Issue #1837 measured this gate reporting a determinate fault (`STALE`, exit 1) about
+# a merged PR - work that has already landed has no tree for a verdict to be about, so
+# there is nothing to refresh and no branch to price. Read from the PR's `state`,
+# which is the discriminator: a closed-**unmerged** PR keeps real ancestry.
+_OPEN_STATE = "OPEN"
+_TERMINAL_STATES = ("MERGED", "CLOSED")
+_KIND_TERMINAL = "terminal"
+
 # How many times the run lookup is asked before an empty answer is taken as *the*
 # answer, and the gap between the asks. The reason is in the module docstring and
 # in `_latest_run_for_head`: an empty answer here is not a missing measurement, it
@@ -280,15 +292,22 @@ class Verdict:
     pr: int
     title: str
     head_sha: str
-    merge_base: str
-    ahead_by: int
-    behind_by: int
-    run_created_at: str | None
-    run_conclusion: str | None
-    stale: bool
-    reason: str
-    # Which of the four ways (one of the `_KIND_*` names); "" when fresh.
+    # The tree readings. Optional because a **terminal** PR has no tree to read: the
+    # early return in `check_pr` never asks the compare endpoint, so these stay at
+    # their "not measured" values and `stale_kind` names the case. Zero here is not a
+    # reading - `pr_state` says which kind of verdict this is.
+    merge_base: str = ""
+    ahead_by: int = 0
+    behind_by: int = 0
+    run_created_at: str | None = None
+    run_conclusion: str | None = None
+    stale: bool = False
+    reason: str = ""
+    # Which of the five ways (one of the `_KIND_*` names); "" when fresh.
     stale_kind: str = ""
+    #: The PR's `state` (`OPEN` / `MERGED` / `CLOSED`), read *before* ancestry: a
+    #: finished PR's ancestry is not a question, so `stale_kind` is `terminal`.
+    pr_state: str = _OPEN_STATE
 
 
 def _latest_run_for_head(head: str) -> dict | None:
@@ -389,11 +408,40 @@ def check_pr(number: int) -> Verdict:
             "-R",
             REPO,
             "--json",
-            "number,title,headRefOid",
+            "number,title,state,headRefOid",
         ]
     )
     assert isinstance(view, dict)
     head_sha = str(view["headRefOid"])
+    state = str(view.get("state") or "")
+    if not state:
+        raise RuntimeError(
+            f"#{number}: PR payload has no `state` - refusing to read ancestry "
+            "without knowing whether the PR is still open, since an absent state "
+            "would read as open"
+        )
+
+    # Read *before* the compare, because a finished PR has no tree for this verdict
+    # to be about: reporting `STALE` - a determinate fault - about work that has
+    # already landed prices a refresh for a branch that will never be merged (issue
+    # #1837). Not `fresh` either: `FRESH` is a claim about a merge that cannot
+    # happen. Its own kind, and exit 0, because the question *is* decided.
+    if state in _TERMINAL_STATES:
+        return Verdict(
+            pr=number,
+            title=str(view["title"]),
+            head_sha=head_sha,
+            stale=False,
+            stale_kind=_KIND_TERMINAL,
+            pr_state=state,
+            reason=(
+                f"the PR is {state} - it has already landed, so there is no tree this "
+                "verdict would be about and no branch to refresh"
+                if state == "MERGED"
+                else "the PR was closed without merging - there is no merge for this "
+                "verdict to be about"
+            ),
+        )
 
     cmp_raw = _gh_json(
         [
@@ -736,6 +784,7 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "pr": v.pr,
                         "head": v.head_sha,
+                        "state": v.pr_state,
                         "merge_base": v.merge_base,
                         "ahead_by": v.ahead_by,
                         "behind_by": v.behind_by,
@@ -756,6 +805,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         for v in verdicts:
+            if v.stale_kind == _KIND_TERMINAL:
+                # Neither `FRESH` nor `STALE`: both are claims about a merge, and a
+                # finished PR has none. The state itself is the mark (issue #1837).
+                print(f"#{v.pr} {v.pr_state} (head {v.head_sha[:8]}) - {v.reason}")
+                continue
             mark = "STALE" if v.stale else "FRESH"
             print(f"#{v.pr} {mark} (head {v.head_sha[:8]}, base {v.merge_base[:8]}) - {v.reason}")
 

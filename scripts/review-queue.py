@@ -623,6 +623,13 @@ class Reading:
     stale_reason: str = ""
     behind_by: int | None = None
     unread: str = ""
+    #: The PR's `state` (`OPEN` / `MERGED` / `CLOSED`) and whether it is finished. A
+    #: terminal row is decided before any other branch — there is no head to gate, so
+    #: `votes`, `stale` and the abstention clause are all moot for it. Only reachable
+    #: through the scan race (a merge landing between `gh pr list` and the read) or an
+    #: explicit PR number, since the queue lists open PRs only.
+    state: str = "OPEN"
+    terminal: bool = False
 
     @property
     def conflict(self) -> bool:
@@ -685,6 +692,16 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
 
     out.head = str(verdict.head_sha)
     out.title = str(verdict.title)
+    # A terminal PR is answered here and nothing below is a question about it: the
+    # freshness tool's ancestry reading is about a merge that cannot happen (its own
+    # terminal branch exists for the standalone gate, but asking it here would be a
+    # second `gh` round trip for a row already decided). Measured 2026-10-03: a cycle
+    # whose scan raced a merge got `read-first` plus a `--mergeability-wait 60` that
+    # could never succeed (issue #1837).
+    if verdict.terminal:
+        out.state = str(verdict.state)
+        out.terminal = True
+        return out
     out.votes = int(verdict.valid_count)
     out.mergeable = str(verdict.mergeable)
     out.merge_state = str(verdict.merge_state)
@@ -757,6 +774,20 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
       reading whose absence stalled a cycle.
     """
     pr = reading.pr
+    if reading.terminal:
+        # First, because a finished PR has no head to gate: every branch below would
+        # be a decision about a merge that cannot happen, and the `read-first` branch
+        # in particular handed the reader a `--mergeability-wait` that can never
+        # succeed (issue #1837). The row names no command, because there is none.
+        landed = (
+            "has already landed"
+            if reading.state == "MERGED"
+            else "was closed without merging"
+        )
+        return Action(
+            kind="landed",
+            why=f"#{pr} is {reading.state} - the PR {landed}; nothing to vote on or merge",
+        )
     if reading.votes is None:
         # The command carries the counter's own wait flag because this branch is
         # where a not-yet-computed mergeability lands: the same question, asked with
@@ -970,7 +1001,13 @@ def render(reading: Reading, action: Action) -> str:
         # when the tool could not resolve the window it belongs to.
         marks.append(f"pushed {reading.head_pushed_at}")
     suffix = f"  [{', '.join(marks)}]" if marks else ""
-    lines = [f"#{reading.pr} {votes} votes  head {head}  {action.kind}{suffix}"]
+    if reading.terminal:
+        # The state stands where the vote count stands: a finished PR has no count to
+        # report, and `#1836 - votes` would read as a broken column rather than as the
+        # determinate answer (issue #1837).
+        lines = [f"#{reading.pr} {reading.state}  head {head}  {action.kind}{suffix}"]
+    else:
+        lines = [f"#{reading.pr} {votes} votes  head {head}  {action.kind}{suffix}"]
     lines.append(f"    {action.why}")
     if action.command:
         lines.append(f"    $ {action.command}")
@@ -1076,6 +1113,8 @@ def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = 
             "pr": reading.pr,
             "head": reading.head,
             "title": reading.title,
+            "state": reading.state,
+            "terminal": reading.terminal,
             "votes": reading.votes,
             "needed": reading.needed,
             "mergeable": reading.mergeable,
@@ -1204,7 +1243,15 @@ def main(argv: list[str] | None = None) -> int:
         window,
     )
 
-    unread = [reading.pr for reading, _ in readings if reading.votes is None]
+    # A terminal row has `votes=None` too, but it is *measured* - the counter answered
+    # with the PR's state - so it is not "unread". Counting it as one turned a
+    # finished PR into `rc=2` and "unmeasurable", which is issue #1837's own defect
+    # (a determinate answer reported as an unanswerable question) at the queue level.
+    unread = [
+        reading.pr
+        for reading, _ in readings
+        if reading.votes is None and not reading.terminal
+    ]
 
     # Read after the PR rows rather than before: an unreadable ledger is reported
     # alongside the PR reading, not instead of it, so a cycle still gets the half that

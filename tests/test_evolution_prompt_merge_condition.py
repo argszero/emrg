@@ -247,6 +247,7 @@ class _FakeGh:
             return {
                 "number": 1,
                 "title": "t",
+                "state": "OPEN",
                 "headRefOid": HEAD,
                 "mergeable": "MERGEABLE",
                 "mergeStateStatus": "CLEAN",

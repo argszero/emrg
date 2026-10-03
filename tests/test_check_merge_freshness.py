@@ -126,8 +126,14 @@ def _compare(status: str, ahead: int, behind: int, base: str = BASE) -> dict:
     return {"status": status, "ahead_by": ahead, "behind_by": behind, "merge_base": base}
 
 
-def _view(sha: str = HEAD, branch: str = "feature/x") -> dict:
-    return {"number": 1, "title": "t", "headRefOid": sha, "headRefName": branch}
+def _view(sha: str = HEAD, branch: str = "feature/x", state: str = "OPEN") -> dict:
+    return {
+        "number": 1,
+        "title": "t",
+        "state": state,
+        "headRefOid": sha,
+        "headRefName": branch,
+    }
 
 
 def _run_(sha: str = HEAD, conclusion: str = "success", at: str = "2026-09-11T00:00:00Z") -> dict:
@@ -998,3 +1004,45 @@ def test_the_tools_own_document_does_not_offer_a_rebase(mod) -> None:
         "the docstring's own statement of the refresh route must not offer a rebase"
     )
     assert "force-push" in mod.__doc__, "the docstring must name what publishing a rebase costs"
+
+
+# --- a finished PR has no tree for this verdict to be about (#1837) ----------
+
+
+def test_a_merged_pr_is_reported_as_its_state_not_stale(mod, monkeypatch, capsys):
+    """`STALE` is a determinate *fault*; a landed PR must not be given one.
+
+    Measured 2026-10-03 on #1836: this gate printed `STALE (head 8199bacd, base
+    6c87ec38) - head does not contain master` and exit 1 for a PR that had been
+    merged, and priced a branch refresh for a branch that is finished.
+    """
+    fake = FakeGh(pr_view=_view(state="MERGED"), compare=_compare("diverged", 0, 3), runs=[])
+    _install(mod, monkeypatch, fake)
+    assert mod.main(["1"]) == 0
+    out = capsys.readouterr().out
+    assert "#1 MERGED" in out
+    assert "STALE" not in out
+    # Neither the compare nor the run lookup is a question about a landed PR, so
+    # neither is asked - the reading is decided from the state alone.
+    assert not [c for c in fake.calls if any("/compare/" in a for a in c)], fake.calls
+    assert not [c for c in fake.calls if any("actions/runs" in a for a in c)], fake.calls
+
+
+def test_a_closed_unmerged_pr_is_terminal_too(mod, monkeypatch, capsys):
+    fake = FakeGh(pr_view=_view(state="CLOSED"), compare=_compare("behind", 0, 1), runs=[])
+    _install(mod, monkeypatch, fake)
+    assert mod.main(["1"]) == 0
+    out = capsys.readouterr().out
+    assert "#1 CLOSED" in out
+    assert "closed without merging" in out
+
+
+def test_the_json_names_the_state_rather_than_a_staleness(mod, monkeypatch, capsys):
+    fake = FakeGh(pr_view=_view(state="MERGED"), compare=_compare("diverged", 0, 3), runs=[])
+    _install(mod, monkeypatch, fake)
+    assert mod.main(["1", "--json"]) == 0
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["state"] == "MERGED"
+    assert row["stale"] is False
+    assert row["stale_kind"] == "terminal"
+

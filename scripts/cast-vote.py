@@ -185,7 +185,8 @@ Exit codes
        **approval** is read only from the first line, so a ✅ stated below it reads as a
        plain comment (a ❌ lower down is still found, so the asymmetry is on the approval
        side, which is the one that loses a vote silently); `count-unreadable`: the vote count could
-       not be read; `already-voted`: this cycle already has a counted vote or a
+       not be read; `terminal-pr`: the PR is already merged or closed, so there is
+       nothing to vote on and no review can move it; `already-voted`: this cycle already has a counted vote or a
        veto here; `own-head-window`: the abstention clause is why nothing was
        posted — either the head was pushed by this cycle or by the one immediately
        before it, or the head itself could not be judged because the window cannot
@@ -251,6 +252,7 @@ RC2_CAUSES = (
     "cycle-id",          # no cycle id, several of them, or --cycle disagrees
     "verdict-mark",      # the counter reads no verdict out of the body: it would skip the review
     "count-unreadable",  # the sibling counter raised
+    "terminal-pr",       # the PR is already merged or closed: no review can move it
     "already-voted",     # this cycle already has a counted vote or a veto here
     "own-head-window",   # the head is this cycle's own, or its window cannot be decided
     "landing-tree",      # the body names a tree that is not the one this merge would land
@@ -702,10 +704,15 @@ def verdict_unreadable(body: str) -> str:
 def _state_of(verdict: object, cycle: str) -> tuple[str, str]:
     """How the counter reads this cycle's existing vote: `(state, why)`.
 
-    `state` is one of `"none"`, `"counted"`, `"void"`, `"veto"`. Read from the
-    counter's own `counted` column rather than recomputed here: a valid vote can
-    still fail to count (a second vote from a cycle already in the run), and that
+    `state` is one of `"none"`, `"counted"`, `"void"`, `"veto"`, `"terminal"`. Read
+    from the counter's own `counted` column rather than recomputed here: a valid vote
+    can still fail to count (a second vote from a cycle already in the run), and that
     distinction is the counter's to make.
+
+    `"terminal"` is not about *this cycle's* vote at all: it is the PR's own state.
+    It is first because nothing below it can change the answer — a merged PR accepts
+    reviews, but no review can move it, and the counter now answers it determinate
+    rather than refusing (issue #1837).
 
     Every vote this cycle ever cast is examined, not just the first one. A cycle
     can own several: a review submitted before a head push is void, and the same
@@ -713,6 +720,11 @@ def _state_of(verdict: object, cycle: str) -> tuple[str, str]:
     defect produced. Returning on the first match would report `"void"` for the
     cycle that has since been counted, and would keep reporting it forever.
     """
+    if getattr(verdict, "terminal", False):
+        return "terminal", (
+            f"#{verdict.pr} is {verdict.state} - the PR has already landed, so there "
+            "is nothing to vote on or merge"
+        )
     mine = [
         (index, vote) for index, vote in enumerate(verdict.votes) if vote.cycle == cycle
     ]
@@ -799,6 +811,11 @@ def confirm(
             )
         if state == "void":
             return "void", why
+        if state == "terminal":
+            # A definite answer, so it does not join the retry loop: the PR became
+            # finished between the pre-post check and this read, and waiting cannot
+            # make it open again.
+            return "terminal", why
     return "none", (
         f"the review never appeared in the counter's reading of #{pr} after "
         f"{max(1, attempts)} attempt(s) - posted, but not readable as a vote"
@@ -897,6 +914,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - the counter fails loud; say why, post nothing
         print(f"refusing to post: the vote count could not be read ({exc})", file=sys.stderr)
         return 2  # cause: count-unreadable
+    if state == "terminal":
+        # Refused here and not after the post: a review on a finished PR is spent in
+        # silence (the counter reads it, but nothing it says can move a merged PR),
+        # so the honest moment to stop is before the write (issue #1837).
+        print(f"refusing to post: {note}", file=sys.stderr)
+        return 2  # cause: terminal-pr
     if state in {"counted", "veto"}:
         print(f"refusing to post: {note}", file=sys.stderr)
         return 2  # cause: already-voted
@@ -975,6 +998,15 @@ def main(argv: list[str] | None = None) -> int:
             "The vote was spent for nothing. Nothing is rolled back by re-posting: a "
             "second review from this cycle contributes nothing either, so fix the body "
             "and let a later cycle vote.",
+            file=sys.stderr,
+        )
+        return 1
+    if state == "terminal":
+        print(
+            f"#{args.pr}: review POSTED but the PR is finished - {note}\n"
+            "A review on a finished PR cannot change its state, and it counts for no "
+            "merge: nothing is rolled back by re-posting, so act on the state rather "
+            f"than re-reading it (scripts/check-vote-count.py {args.pr}).",
             file=sys.stderr,
         )
         return 1

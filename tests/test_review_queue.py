@@ -174,10 +174,14 @@ class FakeVotes:
 
     def __init__(self, reviews: list[dict] | None = None, mergeable: str = "MERGEABLE",
                  state: str = "CLEAN", head: str = HEAD, valid: int | None = None,
-                 push: str | None = None, exact: bool = True):
+                 push: str | None = None, exact: bool = True, pr_state: str = "OPEN"):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
+        #: The PR's own `state` (issue #1837), distinct from `state` above, which is
+        #: the *merge* state - the two names collide in GitHub's vocabulary and the
+        #: distinction is the whole point of the row it drives.
+        self.pr_state = pr_state
         self.head = head
         self.forced_valid = valid
         #: When this head was pushed — the datum the abstention clause compares
@@ -225,6 +229,7 @@ class FakeVotes:
             push_time_exact=self.exact,
             mergeable=self.mergeable,
             merge_state=self.state,
+            state=self.pr_state,
             votes=votes,
             counted=[],
             valid_count=run if self.forced_valid is None else self.forced_valid,
@@ -679,6 +684,8 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
         "pr": 1,
         "head": HEAD,
         "title": "pr 1",
+        "state": "OPEN",
+        "terminal": False,
         "votes": 1,
         "needed": 3,
         "mergeable": "MERGEABLE",
@@ -1789,3 +1796,64 @@ def test_a_closed_pull_request_is_not_read_as_a_declaring_issue(monkeypatch):
 
     assert rant.closed_issues == []
     assert "no issue yet" in tool.render_rant(rant)
+
+
+# --- a finished PR is a row, not a wait (#1837) ------------------------------
+#
+# The queue lists open PRs, so this row is reachable only when a merge lands between
+# `gh pr list` and the read - which is exactly how issue #1837 was measured. The old
+# row was `read-first` plus `check-vote-count.py <PR> --mergeability-wait 60`: a
+# minute-long wait, on a PR that was finished, for a value GitHub never computes.
+
+
+def test_a_merged_pr_gets_a_landed_row_that_names_no_command(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[], pr_state="MERGED")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    assert mod.main(["1"]) == 0
+    out = capsys.readouterr().out
+    assert "landed" in out
+    assert "#1 MERGED" in out
+    assert "--mergeability-wait" not in out, "a wait that cannot succeed must not be printed"
+    # Ancestry is not a question about a landed PR: the sibling is never asked, so a
+    # `STALE` from it can never become this row's reason.
+    assert fresh.calls == [], fresh.calls
+
+
+def test_a_terminal_row_is_not_counted_as_unmeasurable(mod, monkeypatch, capsys):
+    """A determinate answer must not be reported as an unanswerable question.
+
+    `unmeasurable` and `rc=2` are the queue's "could not measure" verdict, and the
+    counter's own defect (#1837) was exactly this confusion one level down: a
+    terminal row has `votes=None` *and* is fully measured.
+    """
+    votes = FakeVotes(reviews=[], pr_state="MERGED")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    assert mod.main(["1"]) == 0
+    out = capsys.readouterr().out
+    assert "unmeasurable" not in out
+    assert "1 PR(s): landed 1" in out
+
+
+def test_a_closed_unmerged_pr_is_terminal_too(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[], pr_state="CLOSED")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    assert mod.main(["1"]) == 0
+    out = capsys.readouterr().out
+    assert "#1 CLOSED" in out
+    assert "closed without merging" in out
+
+
+def test_the_json_row_carries_the_state(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[], pr_state="MERGED")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    assert mod.main(["1", "--json"]) == 0
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["state"] == "MERGED"
+    assert row["terminal"] is True
+    assert row["action"] == "landed"
+    assert row["command"] == ""
+

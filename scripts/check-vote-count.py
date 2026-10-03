@@ -182,19 +182,25 @@ Usage
 mergeability lazily, so a head pushed a moment ago reports "not answered yet",
 and this tool refuses rather than guess. With a budget it re-asks the same
 question until GitHub answers or the budget runs out - the refusal is unchanged
-when the budget is exhausted, and the default (`0`) asks exactly once.
+when the budget is exhausted, and the default (`0`) asks exactly once. A PR that
+is **already merged or closed** is answered from its `state` on the first ask
+whatever the budget: its `UNKNOWN` is the permanent one, so there is nothing to
+wait for.
 
 Exit codes
 ----------
     0  every PR has >= --min-votes valid votes **and** is
        `MERGEABLE`/`CLEAN` **and** has a CI run for its head commit
        (`--min-votes` defaults to `DEFAULT_MIN_VOTES`; `--help` prints it, so this
-       spec states the name rather than a second copy of the number)
+       spec states the name rather than a second copy of the number). Also 0 for a
+       **terminal** PR (`MERGED` / `CLOSED`): its verdict is `MERGED`/`CLOSED` with
+       `ok` false, because the question was answered - `UNKNOWN` mergeability read
+       as "not computed yet" was issue #1837
     1  at least one PR is SHORT (too few votes) or BLOCKED (cannot be merged:
        conflicting, a non-clean merge state, or no CI run for the head)
     2  the check could not be made (gh failed, unparseable response, mergeability
-       not computed yet, merge state not recognised) - fail loud; never report a
-       count for a question that was not answered
+       not computed yet **on an open PR**, merge state not recognised) - fail loud;
+       never report a count for a question that was not answered
 
 The count is printed either way, so a PR that is BLOCKED still reports its votes;
 `--json` carries `valid_votes` and the merge states as separate fields for a
@@ -231,6 +237,19 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 _MERGEABLE = "MERGEABLE"
 _CONFLICTING = "CONFLICTING"
 _UNKNOWN_MERGEABILITY = "UNKNOWN"
+
+# A PR's *state*, which decides whether mergeability is a question at all. GitHub
+# does not compute mergeability for a PR that is already finished, so a merged PR
+# answers `UNKNOWN` **permanently** - not "not computed yet" but "never computed,
+# because there is nothing to merge". Measured 2026-10-03 on eleven merged PRs
+# spanning ~30 hours (issue #1837); a closed-unmerged PR is unaffected and keeps a
+# real value (`#1710`: CONFLICTING/DIRTY), so the discriminator is the state.
+#
+# Named, and read **before** `mergeable`, because reading `UNKNOWN` first turns a
+# determinate answer (this PR is finished) into an unmeasurable one - the same
+# defect as reporting "could not measure" as a pass, reflected.
+_OPEN_STATE = "OPEN"
+_TERMINAL_STATES = ("MERGED", "CLOSED")
 
 # How long one poll of a not-yet-computed mergeability waits before asking again.
 # Only the *gap* is fixed here; how long to keep asking is the caller's decision
@@ -923,6 +942,9 @@ class Verdict:
     push_time_exact: bool
     mergeable: str = ""
     merge_state: str = ""
+    #: The PR's `state` (`OPEN` / `MERGED` / `CLOSED`). Read first, because a finished
+    #: PR has no computed mergeability and its `UNKNOWN` is permanent.
+    state: str = _OPEN_STATE
     votes: list[Vote] = field(default_factory=list)
     # Parallel to `votes`: whether each one contributes to `valid_count`. A valid
     # approval whose cycle already appears earlier in the run does not, and the
@@ -932,9 +954,18 @@ class Verdict:
     needed: int = DEFAULT_MIN_VOTES
 
     @property
+    def terminal(self) -> bool:
+        """The PR is finished — merged or closed — so there is no merge to gate."""
+        return _is_terminal(self.state)
+
+    @property
     def short(self) -> bool:
-        """Too few votes. A statement about review, not about mergeability."""
-        return self.valid_count < self.needed
+        """Too few votes. A statement about review, not about mergeability.
+
+        A terminal PR is never short: it needs no more review, and a vote deficit
+        reported for finished work is the misdirection the state check removes.
+        """
+        return not self.terminal and self.valid_count < self.needed
 
     @property
     def blocked(self) -> bool:
@@ -957,8 +988,13 @@ class Verdict:
         three historical PRs (`c0860a35`, `af2e0efd`, `5358d294`: zero runs, all
         `MERGEABLE`/`CLEAN`). So the third conjunct is checked against the run
         itself, not against the state that is documented not to carry it.
+
+        A **terminal** PR is not blocked either: nothing has to be made mergeable
+        for work that has already landed, and reporting a determinate fault (exit 1)
+        about it is the same defect as the counter's `UNKNOWN` reading, one layer
+        down.
         """
-        return (
+        return not self.terminal and (
             self.mergeable == _CONFLICTING
             or self.merge_state in _NON_CLEAN_STATES
             or not self.push_time_exact
@@ -982,7 +1018,13 @@ class Verdict:
 
     @property
     def ok(self) -> bool:
-        return not self.short and not self.blocked
+        """Whether the merge may proceed **now**.
+
+        A terminal PR is not `ok`: there is nothing left to merge. Its exit code is
+        still 0 (see `main`) because the question *was* answered, but "ready" would
+        be a claim about a gate that no longer exists.
+        """
+        return not self.terminal and not self.short and not self.blocked
 
     @property
     def mark(self) -> str:
@@ -994,7 +1036,13 @@ class Verdict:
         would read as "come back after more review" and send a reviewer to do work
         that the next rebase throws away - the same misdirection as the original
         bug, one layer down.
+
+        A terminal PR's mark **is its state** (`MERGED` / `CLOSED`) - the determinate
+        answer, so a reader sees that the gate is moot instead of being told the
+        votes fell short.
         """
+        if self.terminal:
+            return self.state
         if self.blocked:
             return "BLOCKED"
         if self.short:
@@ -1088,11 +1136,37 @@ def _pr_view(number: int) -> dict:
             "-R",
             REPO,
             "--json",
-            "number,title,headRefOid,mergeable,mergeStateStatus",
+            "number,title,state,headRefOid,mergeable,mergeStateStatus",
         ]
     )
     assert isinstance(view, dict)
     return view
+
+
+def _pr_state(view: dict) -> str:
+    """The PR's `state` (`OPEN` / `MERGED` / `CLOSED`), checked.
+
+    Required rather than defaulted, for the same reason `_merge_state` requires its
+    two fields: an absent value would read as "open", and "open" is the reading that
+    sends a caller to ask about a merge that cannot happen.
+    """
+    state = str(view.get("state") or "")
+    if not state:
+        raise RuntimeError(
+            "PR payload has no `state` - refusing to interpret mergeability without "
+            "knowing whether the PR is still open, since an absent state would read "
+            "as open"
+        )
+    return state
+
+
+def _is_terminal(state: str) -> bool:
+    """Whether this state means the PR is finished (merged or closed).
+
+    Unknown values are *not* terminal: a state this version does not know may well
+    be an open one, and treating it as terminal would silence a live PR's gate.
+    """
+    return state in _TERMINAL_STATES
 
 
 def _view_with_computed_mergeability(number: int, wait: float) -> dict:
@@ -1110,6 +1184,12 @@ def _view_with_computed_mergeability(number: int, wait: float) -> dict:
     this tool could not read is still never reported as a verdict. Default `0.0`
     asks exactly once, which is the behaviour everything that does not opt in
     keeps.
+
+    A **terminal** PR returns on the first ask whatever the wait is: its `UNKNOWN`
+    is not a pending answer but the permanent one, so polling for a value GitHub
+    will never compute is the "wait that can never succeed" issue #1837 measured -
+    a `--mergeability-wait 60` on a merged PR slept the full budget to reach the
+    identical refusal.
     """
     if wait <= 0:
         return _pr_view(number)
@@ -1118,6 +1198,8 @@ def _view_with_computed_mergeability(number: int, wait: float) -> dict:
         view = _pr_view(number)
         mergeable = str(view.get("mergeable") or "")
         if mergeable in {_MERGEABLE, _CONFLICTING}:
+            return view
+        if _is_terminal(str(view.get("state") or "")):
             return view
         remaining = wait - (time.monotonic() - started)
         if remaining <= 0:
@@ -1134,6 +1216,23 @@ def check_pr(
 ) -> Verdict:
     view = _view_with_computed_mergeability(number, mergeability_wait)
     head = str(view["headRefOid"])
+    state = _pr_state(view)
+
+    # The state is read **before** mergeability, because a finished PR never gets a
+    # computed mergeability at all (issue #1837). Its `UNKNOWN` is the permanent
+    # answer rather than a pending one, so interpreting it as "not answered yet"
+    # reported a determinate fact - this PR is merged - as an unmeasurable one, and
+    # handed the caller a wait that could never succeed. Nothing below is a question
+    # about a PR that has already landed, so this is the whole verdict.
+    if _is_terminal(state):
+        return Verdict(
+            pr=number,
+            title=str(view["title"]),
+            head_sha=head,
+            push_time="",
+            push_time_exact=False,
+            state=state,
+        )
 
     mergeable, merge_state = _merge_state(view)
     # GitHub computes mergeability lazily, so a freshly pushed head reports UNKNOWN
@@ -1281,6 +1380,7 @@ def check_pr(
         push_time_exact=exact,
         mergeable=mergeable,
         merge_state=merge_state,
+        state=state,
         votes=votes,
         counted=counted,
         valid_count=run,
@@ -1347,6 +1447,8 @@ def main(argv: list[str] | None = None) -> int:
                         "needed": v.needed,
                         "mergeable": v.mergeable,
                         "merge_state": v.merge_state,
+                        "state": v.state,
+                        "terminal": v.terminal,
                         "ci_ran": v.push_time_exact,
                         "blocked": v.blocked,
                         "verdict": v.mark,
@@ -1360,6 +1462,18 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         for v in verdicts:
+            if v.terminal:
+                # The determinate line: a finished PR has no head to gate, so there is
+                # no merge state to read and no vote list to print. Reported as the
+                # fact it is (`MERGED`), never as a vote deficit - that misreading is
+                # what issue #1837 measured.
+                landed = (
+                    "has already landed"
+                    if v.mark == "MERGED"
+                    else "was closed without merging"
+                )
+                print(f"#{v.pr} {v.mark} - the PR {landed}; nothing to vote on or merge")
+                continue
             mark = v.mark
             # A missing run is both a caveat about the count *and* the CI conjunct
             # unverified, so the line says which: `mark` is already BLOCKED here,

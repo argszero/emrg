@@ -125,12 +125,16 @@ class FakeGh:
         exact: bool = True,
         mergeable: str = "MERGEABLE",
         merge_state: str = "CLEAN",
+        state: str = "OPEN",
     ):
         self.reviews = reviews
         self.push_time = push_time
         self.exact = exact
         self.mergeable = mergeable
         self.merge_state = merge_state
+        #: The PR's own state. Required by the tool (issue #1837 reads it *before*
+        #: mergeability), so the fake answers it the way the real projection does.
+        self.state = state
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> object:
@@ -140,6 +144,7 @@ class FakeGh:
             return {
                 "number": 1,
                 "title": "t",
+                "state": self.state,
                 "headRefOid": HEAD,
                 "mergeable": self.mergeable,
                 "mergeStateStatus": self.merge_state,
@@ -647,6 +652,10 @@ def test_the_pr_view_actually_requests_the_merge_fields(mod, monkeypatch, capsys
     assert seen, "the tool must ask gh for the PR"
     fields = " ".join(seen[0])
     assert "mergeable" in fields and "mergeStateStatus" in fields, seen[0]
+    # The state is asked for in the same projection, and for the same reason: a
+    # payload that lost it must fail loud rather than read as still open - the
+    # reading issue #1837 is about a finished PR being given.
+    assert "state" in fields, seen[0]
 def test_a_veto_stated_below_a_prose_intro_is_still_a_veto(mod):
     """Found in cyc20260911-153707 by probing `classify` itself.
 
@@ -1814,3 +1823,87 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_
         cycles_log=log,
     )
     assert not counted and why == ""
+
+
+# --- a finished PR is a determinate answer, not an unmeasurable one (#1837) --
+#
+# GitHub does not compute mergeability for a PR that is already merged, so it answers
+# `UNKNOWN` for it **permanently**. Reading that as "not computed yet" reported a
+# determinate fact as an unanswerable question, and handed the reader a
+# `--mergeability-wait` that could never succeed - measured on #1836, where
+# `--mergeability-wait 5` slept 6.2s to reach the identical refusal. The PR's `state`
+# is read first, and for a terminal one it is the whole verdict.
+
+
+def test_a_merged_pr_is_answered_by_its_state_and_exits_zero(mod, monkeypatch, capsys):
+    fake = FakeGh(_three_votes(), state="MERGED")
+    assert _run(mod, monkeypatch, fake) == 0
+    out = capsys.readouterr().out
+    assert "#1 MERGED" in out
+    # Neither a vote deficit nor a block: both are claims about a merge that cannot
+    # happen, and the count is not even read or printed.
+    assert "SHORT" not in out and "BLOCKED" not in out
+    assert "valid votes" not in out
+
+
+def test_a_closed_unmerged_pr_is_terminal_too(mod, monkeypatch, capsys):
+    fake = FakeGh(_three_votes(), state="CLOSED")
+    assert _run(mod, monkeypatch, fake) == 0
+    out = capsys.readouterr().out
+    assert "#1 CLOSED" in out
+    assert "closed without merging" in out
+
+
+def test_a_terminal_pr_does_not_poll_for_a_mergeability_never_computed(mod, monkeypatch):
+    """The budget is not spent, and the question is not asked twice.
+
+    `UNKNOWN` on a finished PR is the *permanent* answer, not a pending one, so the
+    old behaviour - re-asking for the whole budget and then refusing identically - was
+    a wait that could never succeed. Asserted as the mechanism (one view, no sleep)
+    rather than as wall-clock, which would be a measurement of the runner.
+    """
+    fake = FakeGh(
+        _three_votes(), state="MERGED", mergeable="UNKNOWN", merge_state="UNKNOWN"
+    )
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    slept: list[float] = []
+    monkeypatch.setattr(mod.time, "sleep", slept.append)
+    assert mod.main(["1", "--mergeability-wait", "60"]) == 0
+    views = [call for call in fake.calls if call[:2] == ["pr", "view"]]
+    assert len(views) == 1, views
+    assert slept == [], slept
+
+
+def test_the_terminal_answer_is_carried_in_the_json(mod, monkeypatch, capsys):
+    fake = FakeGh(_three_votes(), state="MERGED")
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    assert mod.main(["1", "--json"]) == 0
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["state"] == "MERGED"
+    assert row["terminal"] is True
+    # The question *was* answered, so `ok` is false without the exit code saying
+    # "failed" - the distinction the two fields exist to keep.
+    assert row["ready"] is False
+
+
+def test_a_payload_with_no_state_fails_loud(mod, monkeypatch, capsys):
+    """An absent state must not default to "open".
+
+    "Open" is the reading that goes on to ask mergeability about a merge that may not
+    exist, and this file already refuses the same shape for `mergeable` /
+    `mergeStateStatus` ("an absent conflict is indistinguishable from no conflict").
+    """
+
+    class NoState(FakeGh):
+        def __call__(self, args):
+            payload = super().__call__(args)
+            if isinstance(payload, dict) and "headRefOid" in payload:
+                payload = dict(payload)
+                payload.pop("state", None)
+            return payload
+
+    fake = NoState(_three_votes())
+    assert _run(mod, monkeypatch, fake) == 2
+    assert "no `state`" in capsys.readouterr().err
