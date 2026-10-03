@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -346,3 +347,133 @@ def test_development_md_documents_the_preflight_and_its_contract() -> None:
         "the documented invocation must name the variables the release uses, so a host can "
         "run it without reconstructing the secret names from the workflow"
     )
+
+
+# ── The documented command has to RUN ─────────────────────────────────────────
+#
+# Measured 2026-10-03 (`cyc20261003-133828`, and first reported by `pm25coder`'s review of
+# `cyc20261003-115810` on PR #1828): the block this file's pin above blesses shipped with
+# **two** backslash bytes at the end of each continued line. Inside a ```bash fence that is
+# an escaped backslash rather than a line continuation, so the documented command ran `\` as
+# a command twice and reached the preflight with **none** of the three variables set -
+# producing the exit-`2` reading ("the exchange did not complete, so no verdict was reached
+# - never a pass") that the paragraph directly beneath the block exists to prevent.
+#
+# The pin above could not see it: every word it asserts is present in a block nobody can
+# run. Naming a command is not shipping one, which is what these two arms restore - one on
+# the text, one on the executed shell.
+
+#: Written as `chr(92)` so this file carries **no backslash literal at all**. The defect was
+#: a doubled one, and a pin on a doubled literal is a pin a future edit can get wrong the
+#: same way; `_BS * 2` cannot.
+_BS = chr(92)
+
+#: Every ```bash fenced block in a document, in order.
+_FENCE = re.compile(r"```bash\n(.*?)```", re.S)
+
+_PREFLIGHT_STUB = '''#!/usr/bin/env python3
+"""Stand in for the preflight, and report which variables actually reached it."""
+import os
+
+for name in ("APPLE_ID", "MACOS_NOTARY_APP_PASSWORD", "MACOS_NOTARY_TEAM_ID"):
+    print(f"{name}={os.environ.get(name, '<unset>')}")
+'''
+
+
+def _preflight_block() -> str:
+    """The one fenced block in `DEVELOPMENT.md` that runs the preflight.
+
+    Found by content rather than by position: the document carries several `bash` blocks,
+    and a pin that read whichever came first would be about a different command the moment
+    one is inserted above it.
+    """
+    text = (REPO / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    runs = [block for block in _FENCE.findall(text) if SCRIPT.name in block]
+    assert len(runs) == 1, (
+        f"expected exactly one fenced block naming {SCRIPT.name}, found {len(runs)} - the "
+        f"pin cannot say which command it read"
+    )
+    return runs[0]
+
+
+def test_the_documented_command_continues_each_line_with_one_backslash() -> None:
+    """The text half: exactly one backslash, on a line that continues something.
+
+    Two bytes make the shell escape a backslash and stop continuing, so the rest of the
+    command becomes separate lines that never reach the preflight as its arguments.
+    """
+    lines = _preflight_block().splitlines()
+    doubled = [line for line in lines if line.rstrip().endswith(_BS * 2)]
+    assert not doubled, (
+        "these lines end in TWO backslashes, which inside a bash fence is an escaped "
+        "backslash and not a line continuation - the documented command does not run as "
+        "written and the preflight is invoked without its variables, which answers the "
+        f"exit-2 'no verdict was reached' reading the block exists to prevent: {doubled}"
+    )
+    continued = [line for line in lines if line.rstrip().endswith(_BS)]
+    assert len(continued) >= 1, (
+        "no line of the documented command continues onto the next - either the block "
+        "stopped being a multi-line command, or this pin is reading the wrong thing"
+    )
+
+
+def test_the_documented_command_carries_its_variables_into_the_preflight(tmp_path) -> None:
+    """The executed half: run the documented block and read what reached the command.
+
+    The text pin above names the property; this one proves it, because the failure it
+    guards is a *shell* behaviour rather than a spelling. The preflight is replaced by a
+    stand-in that prints the three variables it can see, and the three are removed from the
+    environment first - so the only way they can reach it is along the documented line, and
+    a block that fails to continue prints `<unset>` three times.
+
+    The `<...>` placeholders are substituted before the run: they are the host's to fill,
+    and leaving them in would exercise the shell's redirect syntax rather than the
+    continuation this arm is about. Nothing here reaches Apple or spends a credential - the
+    script is never invoked.
+    """
+    shell = shutil.which("bash")
+    if shell is None:
+        pytest.skip("no POSIX shell is available to run the documented block")
+
+    filled = _preflight_block()
+    for placeholder, value in (
+        ("APPLE_ID=<id>", "APPLE_ID=ID-VALUE"),
+        ("MACOS_NOTARY_APP_PASSWORD=<app-specific-password>", "MACOS_NOTARY_APP_PASSWORD=PW-VALUE"),
+        ("MACOS_NOTARY_TEAM_ID=<team>", "MACOS_NOTARY_TEAM_ID=TEAM-VALUE"),
+    ):
+        filled = filled.replace(placeholder, value)
+    stub = tmp_path / "preflight-stand-in.py"
+    stub.write_text(_PREFLIGHT_STUB, encoding="utf-8")
+    filled = filled.replace(
+        "uv run --no-sync python3 scripts/check-notary-credentials.py",
+        f"{sys.executable} {stub}",
+    )
+    assert str(stub) in filled, "the stand-in never replaced the preflight invocation"
+
+    script = tmp_path / "documented-block.sh"
+    script.write_text(filled, encoding="utf-8")
+
+    env = dict(os.environ)
+    for name in (APPLE_ID_VAR, PASSWORD_VAR, TEAM_ID_VAR):
+        env.pop(name, None)
+
+    # Deliberately without the workflow's `-e`: this arm is about which variables arrive,
+    # not about how the shell gives up. A host pasting the block into an interactive shell
+    # gets no `-e` either.
+    result = subprocess.run(
+        [shell, "--noprofile", "--norc", str(script)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    for name, value in (
+        (APPLE_ID_VAR, "ID-VALUE"),
+        (PASSWORD_VAR, "PW-VALUE"),
+        (TEAM_ID_VAR, "TEAM-VALUE"),
+    ):
+        assert f"{name}={value}" in result.stdout, (
+            f"the documented command did not carry {name} into the preflight.\n"
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
