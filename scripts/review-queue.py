@@ -654,6 +654,34 @@ def _note(*parts: str) -> str:
     return "; ".join(part for part in parts if part)[:400].replace("\n", " ")
 
 
+#: Said on both stale rows, because both name the same two gates and both are answered
+#: by a fetch: the gates ask `origin` for `pull/<N>/head`, and `origin` is not always the
+#: URL it reads as — a `url.<base>.insteadOf` rewrite points it at a local directory,
+#: where that ref does not exist and the pair answers `could not measure`. That is
+#: neither a verdict nor a pass, and the head's objects are still reachable through the
+#: API, so the row names the path that works instead. Measured 2026-10-03
+#: (`cyc20261003-171443`) on #1832: both gates exited 2, and the landing tree was read
+#: by materializing the head and asking git to merge it.
+_FETCH_FALLBACK_WHY = (
+    " Both gates fetch `pull/<N>/head` from `origin`, so where that fetch cannot work "
+    "(a redirected `origin`) they answer `could not measure` - never a pass: bring the "
+    "head in through the API and read the landing tree from git instead"
+)
+
+
+def fetch_fallback(repo: str, head: str) -> list[str]:
+    """The two commands that read a landing tree when the gates cannot fetch the head.
+
+    The head is spelled out rather than left a placeholder: the row already read it, and
+    `--ref` takes the object name the API resolves — the same one
+    `push-branch-from-api.py` and the review of a stale head already work from.
+    """
+    return [
+        f"{RUNNER} scripts/sync-master-from-api.py --repo {repo} --ref {head}",
+        f"git merge-tree --write-tree master {head}",
+    ]
+
+
 def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
             needed: int = 3, mergeability_wait: float = 0.0,
             window: Window | None = None,
@@ -841,9 +869,13 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                 why=f"{reading.votes}/{reading.needed} votes, but "
                     + reading.stale_reason
                     + " - measure the landing tree before merging; the head does not "
-                      "move, so the votes that carried it here stay valid",
+                      "move, so the votes that carried it here stay valid"
+                    + _FETCH_FALLBACK_WHY,
                 command=f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
-                extra=[f"{RUNNER} scripts/check-merge-tree-health.py"],
+                extra=[
+                    f"{RUNNER} scripts/check-merge-tree-health.py",
+                    *fetch_fallback(repo, reading.head),
+                ],
             )
         return Action(
             kind="merge",
@@ -870,10 +902,12 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                 + " - measure the tree this merge would land and vote on that reading; "
                   "the head does not move, so the standing votes survive - and read the "
                   "landing diff before voting, because `diff(master, head)` on this head "
-                  "shows the base's own later commits as reversals this PR does not make",
+                  "shows the base's own later commits as reversals this PR does not make."
+                + _FETCH_FALLBACK_WHY,
             command=f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
             extra=[
                 f"{RUNNER} scripts/check-merge-landing-diff.py {pr}",
+                *fetch_fallback(repo, reading.head),
                 vote_cmd,
             ],
         )

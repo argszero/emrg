@@ -416,6 +416,40 @@ def test_a_stale_head_is_sent_to_the_landing_diff_before_the_vote(mod, monkeypat
     assert "reversals" in out
 
 
+def test_a_stale_head_names_the_path_that_works_when_gates_cannot_fetch(
+        mod, monkeypatch, capsys):
+    """Both gates a stale row names are answered by a fetch, and on a redirected
+    `origin` that fetch cannot work — so the remedy has to include a path that does.
+
+    Measured 2026-10-03 (`cyc20261003-171443`) on #1832: `check-merge-plan-suite.py`
+    and `check-merge-landing-diff.py` both exited 2 ("could not fetch PR #1832"), which
+    is neither a verdict nor a pass, while the head's objects were still reachable
+    through the API and the landing tree was read by materializing the head and asking
+    git to merge it. A row whose whole remedy is two commands that cannot run leaves the
+    reader to invent the third, so the row names it — with the head this row is about
+    rather than a placeholder, because that is what makes it runnable as printed.
+    """
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh(stale=True, kind="ancestry", behind=3,
+                      reason="head does not contain master")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"sync-master-from-api.py --repo argszero/emrg --ref {HEAD}" in out
+    assert f"git merge-tree --write-tree master {HEAD}" in out
+    # The failure it answers is stated, so a reader cannot take the pair for a pass.
+    assert "could not measure" in out
+    assert "never a pass" in out
+    commands = [line for line in out.splitlines() if line.strip().startswith("$ ")]
+    landing_diff = next(i for i, c in enumerate(commands)
+                        if "check-merge-landing-diff.py 1" in c)
+    fallback = next(i for i, c in enumerate(commands)
+                    if "sync-master-from-api.py" in c)
+    merge_tree = next(i for i, c in enumerate(commands) if "merge-tree" in c)
+    vote = next(i for i, c in enumerate(commands) if "cast-vote.py 1" in c)
+    assert landing_diff < fallback < merge_tree < vote, commands
+
+
 def test_a_fresh_head_is_not_sent_to_the_landing_diff(mod, monkeypatch, capsys):
     """The negative control, so the line above is a reading of staleness and not a
     constant: on a head that contains master the two diffs coincide, and naming a
@@ -428,11 +462,16 @@ def test_a_fresh_head_is_not_sent_to_the_landing_diff(mod, monkeypatch, capsys):
     assert rc == 0
     assert "cast-vote.py 1" in out
     assert "check-merge-landing-diff" not in out
+    # The same control for the fallback: a head that contains master has nothing to
+    # land, so neither the API materialization nor a merge of it belongs on the row.
+    assert "sync-master-from-api.py" not in out
+    assert "merge-tree" not in out
 
 
 def test_enough_votes_on_a_stale_head_measures_before_merging(mod, monkeypatch, capsys):
     """Merging a stale head merges a tree no CI judged, so the vote count alone is
-    not the green light."""
+    not the green light — and this row names the same two fetch-bound gates as the
+    vote row, so it carries the same reachable path (`fetch_fallback`)."""
     votes = FakeVotes(reviews=[_review(cycle=f"cyc20260917-1{n}") for n in range(3)])
     fresh = FakeFresh(stale=True, kind="ancestry", behind=2)
     rc = _read(mod, monkeypatch, votes, fresh)
@@ -440,6 +479,8 @@ def test_enough_votes_on_a_stale_head_measures_before_merging(mod, monkeypatch, 
     assert rc == 0
     assert "measure-then-merge" in out
     assert "gh pr merge" not in out
+    assert f"sync-master-from-api.py --repo argszero/emrg --ref {HEAD}" in out
+    assert f"git merge-tree --write-tree master {HEAD}" in out
 
 
 # --- the three CI states, which are not one state -------------------------
