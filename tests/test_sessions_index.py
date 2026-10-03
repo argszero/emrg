@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
+
+import pytest
 
 from emrg.session import Session
 from emrg.sessions_index import (
@@ -206,3 +209,224 @@ def test_sessions_index_path_is_under_config_dir():
     """The default index path lives under ~/.emrg (config_dir)."""
     p = sessions_index_path()
     assert p.name == "sessions_index.json"
+
+
+class TestALivenessCheckThatCouldNotAnswer:
+    """The prune acts only on a **measured** absence (cycle cyc20261003-110524).
+
+    `rebuild_sessions_index` deletes rows and then rewrites the whole index, so
+    the liveness reading decides whether a row is destroyed. It used to be
+    `Path(sdir).exists()` inside `except (OSError, ValueError): alive = False`,
+    which read "I could not look" as "it is not there". Measured on this host
+    before the fix: with the whole `sessions` tree unreadable, the rebuild
+    answered **0** and replaced the index with `{}` — every project's session
+    rows gone, no exception raised, and the daemon's log line discarded (server
+    logs go to DEVNULL). The directories were still on disk.
+
+    The pairs below are the point: the *confirmed* absence must still prune
+    (otherwise the fix would silence the feature), and the *unanswerable* one
+    must not.
+    """
+
+    def _make_session(self, root: Path, sid: str) -> Path:
+        return TestRebuild()._make_session(root, sid)
+
+    def test_a_confirmed_gone_directory_is_pruned(self, tmp_path):
+        """The control: the feature this guard could silence must stay alive."""
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        dead = tmp_path / "dead"
+        dead.mkdir()
+        (cfg / "sessions_index.json").write_text(
+            json.dumps({"s_dead": str(dead)}), encoding="utf-8"
+        )
+        shutil.rmtree(dead)
+
+        rebuild_sessions_index(cfg)
+
+        assert "s_dead" not in _load(cfg / "sessions_index.json")
+
+    def test_the_three_answers_are_not_two(self, tmp_path):
+        """`liveness` distinguishes present / gone / could-not-look."""
+        from emrg.sessions_index import GONE, PRESENT, UNMEASURABLE, liveness
+
+        there = tmp_path / "there"
+        there.mkdir()
+        assert liveness(there) == PRESENT
+        assert liveness(tmp_path / "never-existed") == GONE
+
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        _chmod(blocked, 0o000)
+        try:
+            if not _is_unreadable(blocked / "child"):
+                pytest.skip("this filesystem does not enforce the mode")
+            assert liveness(blocked / "child") == UNMEASURABLE
+        finally:
+            _chmod(blocked, 0o755)
+
+    def test_an_unreadable_entry_is_kept_and_the_index_survives(self, tmp_path):
+        """The measured disaster, in the smallest reproduction of it.
+
+        A directory whose parent refuses traversal is neither present nor gone
+        from here — and the whole index must survive it.
+        """
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        sessions = cfg / ".emrg" / "sessions"
+        sessions.mkdir(parents=True)
+        buried = sessions / "s_buried"
+        buried.mkdir()
+        (buried / "meta.json").write_text(
+            json.dumps({"session_id": "s_buried"}), encoding="utf-8"
+        )
+        # An entry pointing outside the scanned root, so the scan half of the
+        # rebuild cannot re-add it: only the prune loop can decide its fate.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (cfg / "sessions_index.json").write_text(
+            json.dumps({"s_buried": str(buried), "s_outside": str(outside)}),
+            encoding="utf-8",
+        )
+
+        _chmod(sessions, 0o000)
+        try:
+            if not _is_unreadable(sessions / "s_buried"):
+                pytest.skip("this filesystem does not enforce the mode")
+            count = rebuild_sessions_index(cfg)
+        finally:
+            _chmod(sessions, 0o755)
+
+        data = _load(cfg / "sessions_index.json")
+        assert data, "the index was emptied by a reading that could not be made"
+        assert data.get("s_outside") == str(outside)
+        assert count >= 2, f"the rebuild counted {count} with both rows still indexed"
+
+    def test_the_kept_entries_are_named_in_a_warning(self, tmp_path, caplog):
+        """The state has a producer: a reader of the log can see the partial run."""
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        _chmod(blocked, 0o000)
+        (cfg / "sessions_index.json").write_text(
+            json.dumps({"s_kept": str(blocked / "child")}), encoding="utf-8"
+        )
+        try:
+            if not _is_unreadable(blocked / "child"):
+                pytest.skip("this filesystem does not enforce the mode")
+            with caplog.at_level("WARNING", logger="emrg.sessions_index"):
+                rebuild_sessions_index(cfg)
+        finally:
+            _chmod(blocked, 0o755)
+
+        text = caplog.text
+        assert "could not be checked" in text, text
+        assert "s_kept" in text, "the warning must name the rows it kept"
+
+
+    def test_one_unreadable_session_dir_is_reported_and_the_scan_continues(
+        self, tmp_path, caplog
+    ):
+        """`sessions` is listable; one *entry* inside it is not.
+
+        Run through a **registered project path**, not the recursive walk: on the
+        walk, `os.walk`'s own `onerror` already names a directory it cannot
+        descend into, so the same mutation was invisible there (two producers of
+        one report — the second one is what makes the first unfalsifiable). The
+        other entries must still be read, and the unreadable one must be named.
+        """
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        project = tmp_path / "proj"
+        readable = project / ".emrg" / "sessions" / "s_readable"
+        readable.mkdir(parents=True)
+        (readable / "meta.json").write_text(
+            json.dumps({"session_id": "s_readable"}), encoding="utf-8"
+        )
+        blocked = project / ".emrg" / "sessions" / "s_blocked"
+        blocked.mkdir()
+        _chmod(blocked, 0o000)
+
+        try:
+            if not _is_unreadable(blocked / "meta.json"):
+                pytest.skip("this filesystem does not enforce the mode")
+            with caplog.at_level("WARNING", logger="emrg.sessions_index"):
+                count = rebuild_sessions_index(cfg, project_paths=[str(project)])
+        finally:
+            _chmod(blocked, 0o755)
+
+        assert count >= 1, "an unreadable entry aborted the scan"
+        assert "s_readable" in _load(cfg / "sessions_index.json")
+        assert str(blocked) in caplog.text, caplog.text
+
+    def test_a_directory_the_scan_could_not_read_is_reported(self, tmp_path, caplog):
+        """`os.walk` ignores a failed listing by default, so a subtree that could
+        not be read and an empty subtree arrived as the same result."""
+        cfg = tmp_path / "cfg"
+        self._make_session(cfg, "s_scanned")
+        blocked = cfg / "blocked"
+        blocked.mkdir()
+        _chmod(blocked, 0o000)
+
+        try:
+            # Probe a *child*: mode 000 on a directory leaves `stat` of the
+            # directory itself working (that needs search on its parent), so
+            # asking about `blocked` would answer PRESENT and skip every run.
+            if not _is_unreadable(blocked / "child"):
+                pytest.skip("this filesystem does not enforce the mode")
+            with caplog.at_level("WARNING", logger="emrg.sessions_index"):
+                rebuild_sessions_index(cfg)
+        finally:
+            _chmod(blocked, 0o755)
+
+        assert "could not be read" in caplog.text, caplog.text
+        assert "lower bound" in caplog.text, caplog.text
+
+    def test_a_registered_project_that_cannot_be_listed_is_reported(self, tmp_path, caplog):
+        """It used to raise into a blanket `except OSError: continue`: one
+        unreadable project contributed nothing and the rebuild said so nowhere."""
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        project = tmp_path / "proj"
+        sessions = project / ".emrg" / "sessions"
+        sessions.mkdir(parents=True)
+        _chmod(sessions, 0o000)
+
+        try:
+            if not _is_unreadable(sessions / "x"):
+                pytest.skip("this filesystem does not enforce the mode")
+            with caplog.at_level("WARNING", logger="emrg.sessions_index"):
+                rebuild_sessions_index(cfg, project_paths=[str(project)])
+        finally:
+            _chmod(sessions, 0o755)
+
+        assert "could not be read" in caplog.text, caplog.text
+        # The exact directory, not merely "a project": naming the caller's
+        # placeholder would satisfy a vaguer assertion while the guard that reads
+        # the directory was gone.
+        assert str(sessions) in caplog.text, caplog.text
+
+
+def _chmod(path: Path, mode: int) -> None:
+    if os.name == "nt":  # Windows has no POSIX mode bits; the tests skip instead.
+        return
+    os.chmod(path, mode)
+
+
+def _is_unreadable(path: Path) -> bool:
+    """Whether this filesystem really refuses to answer about `path`.
+
+    Asserted rather than assumed (as root, mode 000 does not block), and measured
+    with `os.stat` **directly** rather than through `liveness`: a precondition
+    probe that calls the function under test turns every mutation of that
+    function into a `skip`, and a skipped test is not a failing one. Measured
+    2026-10-03 (`cyc20261003-110524`): two arms survived on exactly that.
+    """
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return False
