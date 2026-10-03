@@ -652,3 +652,36 @@ class TestANonParsingMutationIsNamedNotGuessed:
         _arm(mod, tree, old=GREETING, new='return "hello " + (')
         capsys.readouterr()
         assert (tree / "subject.py").read_text(encoding="utf-8") == before
+
+
+def _parse_bullet() -> str:
+    """The docstring's bullet about a mutation that does not parse, or "" if it is gone."""
+    text = _module_docstring(SCRIPT)
+    if "the mutation did not parse" not in text:
+        return ""
+    return text.split("the mutation did not parse", 1)[1].split("\n* **", 1)[0]
+
+
+def test_the_parse_bullet_keeps_every_code_that_bullet_has_now_been_wrong_about() -> None:
+    """The one part of the header nothing mechanical reads — and it has been wrong twice.
+
+    Its first version gave **4** for a non-parsing mutation (true for a node-id target,
+    false for a path one); the version this branch first carried gave 1 or 2 and said it
+    is *not* 4 (the reverse, measured 2026-10-03). The behaviour is pinned end to end in
+    `TestANonParsingMutationIsNamedNotGuessed`, which is the stronger half; this is the
+    weaker one, and it is deliberate: a *presence* check has no false-verdict class when
+    the prose goes missing, and it cannot certify that a sentence still present is
+    still true. What it does certify is that a future edit cannot drop a code from a
+    bullet whose whole job is to state them.
+    """
+    bullet = _parse_bullet()
+    assert bullet, (
+        "the docstring no longer has a bullet about a mutation that does not parse - "
+        "re-measure before trusting this check's silence"
+    )
+    for code in ("**1**", "**2**", "**4**"):
+        assert code in bullet, f"the parse bullet stopped naming {code}:\n{bullet}"
+    assert "node-id" in bullet or "node id" in bullet, (
+        "the bullet has to name the target form that decides between 2 and 4, which is "
+        f"the distinction it was rewritten for:\n{bullet}"
+    )
