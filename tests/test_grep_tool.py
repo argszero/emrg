@@ -1,6 +1,7 @@
 """Tests for the grep tool."""
 
 import asyncio
+import os
 import re
 import sys
 import tempfile
@@ -251,6 +252,157 @@ def test_no_skip_is_announced_when_nothing_was_skipped(temp_cwd):
     # collected (a skip dir), so four are read and all four are read.
     assert searched == 4
     assert sum(1 for p in temp_cwd.rglob("*") if p.is_file()) == 5
+
+
+# ---------------------------------------------------------------------------
+# A directory that cannot be listed: `rglob` swallows the error, so the files
+# inside it are not merely skipped — they are never known to exist.
+# ---------------------------------------------------------------------------
+
+_UNLISTABLE_RE = re.compile(r"could not list (\d+) director(?:y|ies) \(([^)]*)\)")
+
+#: `chmod 000` does not stop root, so this whole section is vacuous there.
+_not_root = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores directory permissions, so nothing here could be unlistable",
+)
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX directory permissions; on Windows the shape does not exist to measure",
+)
+
+
+@pytest.fixture
+def blocked_tree():
+    """A tree whose `blocked/` holds the only matching file, unlistable for the run.
+
+    The permission is restored before the temporary directory is removed - a `chmod
+    000` directory makes the fixture's own cleanup fail, which would turn this into a
+    test that errors on teardown rather than one that measures the tool.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "visible").mkdir()
+        (root / "visible" / "y.txt").write_text("nothing here\n")
+        (root / "blocked").mkdir()
+        (root / "blocked" / "x.txt").write_text("MAKE_ME_MATCH\n")
+        os.chmod(root / "blocked", 0o000)
+        try:
+            yield root
+        finally:
+            os.chmod(root / "blocked", 0o755)
+
+
+@_posix_only
+@_not_root
+def test_a_matching_file_inside_an_unlistable_directory_is_not_silence(blocked_tree):
+    """Measured 2026-10-03 (`cyc20261003-171744`) on master `3987ab68`.
+
+    `Path.rglob` swallows the `PermissionError`, so with the file there but its
+    directory unlistable the tool answered, with `error=False`:
+
+        No matches for 'MAKE_ME_MATCH' in <tree> (searched 1 files)
+
+    — a confident "not there" about a tree it never finished reading, which is the
+    same failure the sibling guard (`check-citation-resolves.py`) has a fix for. The
+    summary must carry the hole; it cannot carry the match, because the tool still
+    cannot read the directory.
+    """
+    tool = GrepTool()
+    result = _run(tool.execute({"pattern": "MAKE_ME_MATCH", "path": str(blocked_tree)}))
+
+    assert not result.error
+    assert "No matches" in result.content
+    match = _UNLISTABLE_RE.search(result.content)
+    assert match, f"the unlistable directory is not named: {result.content!r}"
+    assert match.group(1) == "1"
+    assert "blocked" in match.group(2), "the hole must be named by the path a reader can go to"
+
+
+@_posix_only
+def test_the_same_tree_listable_finds_the_match_and_names_no_hole(blocked_tree):
+    """The control, on the same tree: it is the permission that changes the answer.
+
+    Without this leg a tool that named "could not list" unconditionally would pass
+    the test above while claiming a hole over every readable tree.
+    """
+    os.chmod(blocked_tree / "blocked", 0o755)
+    tool = GrepTool()
+    result = _run(tool.execute({"pattern": "MAKE_ME_MATCH", "path": str(blocked_tree)}))
+
+    assert "Found 1 matches" in result.content
+    assert "could not list" not in result.content
+
+
+@_posix_only
+@_not_root
+def test_a_skip_directory_is_not_a_hole_in_the_coverage(blocked_tree):
+    """A directory the search never means to enter is out of scope, not unread.
+
+    `node_modules` (here, with the same unreadable permission) is a directory this
+    tool skips by design, so reporting it would be a false hole - and it is the shape
+    that makes the probe and the collection need **one** answer to "which directories
+    are in scope", which is `GrepTool._left_out`.
+    """
+    os.chmod(blocked_tree / "blocked", 0o755)  # the in-scope one is fine
+    (blocked_tree / "node_modules").mkdir()
+    (blocked_tree / "node_modules" / "pkg.txt").write_text("MAKE_ME_MATCH\n")
+    os.chmod(blocked_tree / "node_modules", 0o000)
+    try:
+        result = _run(
+            GrepTool().execute({"pattern": "MAKE_ME_MATCH", "path": str(blocked_tree)})
+        )
+    finally:
+        os.chmod(blocked_tree / "node_modules", 0o755)
+
+    assert "could not list" not in result.content, (
+        "a directory the search skips by design was reported as a hole in its coverage"
+    )
+    # ...and the same tree, were it in scope, WOULD be reported - the assertion above
+    # is about scope and not about the probe being disconnected. Checked by asking the
+    # predicate both ways rather than by a second tree.
+    assert GrepTool._left_out(("node_modules", "pkg.txt")) is True
+    assert GrepTool._left_out(("blocked", "x.txt")) is False
+
+
+@_posix_only
+@_not_root
+def test_a_hidden_directory_is_not_a_hole_either(blocked_tree):
+    """The other half of the same predicate: a dotted directory is skipped by design."""
+    os.chmod(blocked_tree / "blocked", 0o755)
+    (blocked_tree / ".cache").mkdir()
+    (blocked_tree / ".cache" / "c.txt").write_text("MAKE_ME_MATCH\n")
+    os.chmod(blocked_tree / ".cache", 0o000)
+    try:
+        result = _run(
+            GrepTool().execute({"pattern": "MAKE_ME_MATCH", "path": str(blocked_tree)})
+        )
+    finally:
+        os.chmod(blocked_tree / ".cache", 0o755)
+
+    assert "could not list" not in result.content
+    assert GrepTool._left_out((".cache", "c.txt")) is True
+
+
+@_posix_only
+@_not_root
+def test_the_hole_is_named_in_the_match_summary_too(blocked_tree):
+    """Both branches render one clause, so a search that *did* match still reports it.
+
+    The match comes from `visible/` - the one inside `blocked/` is not found, because
+    the tool genuinely cannot read it. What is asserted is the *other* half: finding
+    something is not a reason to stop saying that part of the tree was unread.
+    """
+    (blocked_tree / "visible" / "z.txt").write_text("MAKE_ME_MATCH\n")
+    result = _run(
+        GrepTool().execute({"pattern": "MAKE_ME_MATCH", "path": str(blocked_tree)})
+    )
+
+    assert "Found 1 matches" in result.content
+    assert "visible/z.txt" in result.content, "the readable match went missing"
+    assert _UNLISTABLE_RE.search(result.content), (
+        "a match elsewhere hid the unread directory: " + result.content
+    )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="path separator differs (\\ vs /)")

@@ -7,6 +7,7 @@ returns matching lines with filename:line_number prefixes.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -17,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 MAX_RESULTS = 200  # Cap matches to prevent excessive result volume
 MAX_FILE_SIZE = 512 * 1024  # 512KB — skip files larger than this
+
+#: Directories the search never enters. Module-level because two passes read it — the
+#: file collection and the unlistable-directory probe — and they must agree on which
+#: directories are in scope (see `GrepTool._left_out`).
+SKIP_DIRS = frozenset({"__pycache__", "node_modules", ".git", ".venv"})
 
 
 class GrepTool(ToolExecutor):
@@ -122,11 +128,11 @@ class GrepTool(ToolExecutor):
             pattern, root, file_glob, ignore_case,
         )
 
-        # Collect files
+        # Collect files. A single named file has no directories to fail to list.
         if root.is_file():
-            files = [root]
+            files, unreadable_dirs = [root], []
         else:
-            files = self._collect_files(root, file_glob)
+            files, unreadable_dirs = self._collect_files(root, file_glob)
 
         # Search
         results: list[str] = []
@@ -201,7 +207,7 @@ class GrepTool(ToolExecutor):
                         search_cut = True
                         break
 
-        coverage = self._coverage(files_searched, files_skipped)
+        coverage = self._coverage(files_searched, files_skipped, unreadable_dirs)
 
         if not results:
             return ToolResult(
@@ -277,13 +283,20 @@ class GrepTool(ToolExecutor):
         return ToolResult(name="grep", content=summary + "\n".join(results))
 
     @staticmethod
-    def _coverage(files_searched: int, files_skipped: int) -> str:
+    def _coverage(
+        files_searched: int, files_skipped: int, unreadable_dirs: list[str]
+    ) -> str:
         """The search's coverage clause — the single rendering both summaries use.
 
         ``files_searched`` counts the files the pattern was actually run against;
         the files this tool skips by design (over ``MAX_FILE_SIZE``, or not UTF-8
         text) are named separately, so a summary never implies a search was
         complete when part of the tree was never read.
+
+        ``unreadable_dirs`` is a **different** kind of incompleteness and is named
+        separately for that reason: a skipped file is one this tool chose not to read,
+        while a directory it could not list holds files it *never knew existed*. Named
+        by path rather than counted, because the reader's next act is to go and look.
         """
         text = f"searched {files_searched} files"
         if files_skipped:
@@ -291,24 +304,88 @@ class GrepTool(ToolExecutor):
                 f", skipped {files_skipped} "
                 f"(over {MAX_FILE_SIZE // 1024}KB or not UTF-8 text)"
             )
+        if unreadable_dirs:
+            text += (
+                f", and could not list {len(unreadable_dirs)} director"
+                f"{'y' if len(unreadable_dirs) == 1 else 'ies'} "
+                f"({', '.join(unreadable_dirs)}) - files inside those were never searched"
+            )
         return text
 
     @staticmethod
-    def _collect_files(root: Path, file_glob: str | None) -> list[Path]:
-        """Collect files recursively, skipping hidden/ignored dirs."""
-        skip_dirs = {"__pycache__", "node_modules", ".git", ".venv"}
+    def _left_out(parts: tuple[str, ...]) -> bool:
+        """Would the search pass over this relative path on purpose?
+
+        One home, because **two passes** ask it: the file collection, and the probe for
+        directories that could not be listed. Without a shared answer the probe reports
+        a directory the search never meant to enter (a ``node_modules`` this tool skips
+        by design is not a hole in its coverage), and the two would drift apart the
+        first time a skip directory is added to one of them.
+        """
+        if any(p.startswith(".") and p != ".emrg" for p in parts):
+            return True
+        return any(p in SKIP_DIRS for p in parts)
+
+    @staticmethod
+    def _unlistable_dirs(root: Path) -> list[str]:
+        """Directories under `root` this process cannot list, as relative spellings.
+
+        `Path.rglob` **swallows** the `PermissionError`: the files inside a directory it
+        cannot open simply never appear, nothing is raised, and the search answers
+        `No matches for '<pattern>' in <root> (searched N files)` over a tree it never
+        finished reading. Measured 2026-10-03 (`cyc20261003-171744`) on a tree whose
+        `blocked/` held a matching file: listable, the tool found it; `chmod 000`, the
+        answer was `No matches ... (searched 1 files)` with `error=False`.
+
+        `os.walk` takes an `onerror` hook where `rglob` has none, so this walks a second
+        time. It opens no file, so it costs a directory listing per directory on top of
+        the one the collection already does — not a second read of the tree's contents,
+        which is what the search itself spends its time on. Measured 2026-10-03 on this
+        checkout: a whole-repo `grep` (757 files searched, 10 skipped) takes **0.34s**,
+        so the walk is not the cost. The alternative, matching the glob and collecting
+        the files from this walk, would be a **second implementation of `rglob`'s
+        pattern semantics**; measured the same day, `Path.match` agreed with `rglob` on
+        every documented shape over this checkout, and that agreement is exactly the
+        kind of thing a later Python release changes quietly.
+        """
+        unreadable: list[str] = []
+
+        def on_error(exc: OSError) -> None:
+            name = getattr(exc, "filename", None)
+            if not name:
+                return
+            path = Path(name)
+            try:
+                unreadable.append(str(path.relative_to(root)))
+            except ValueError:  # a path the walk reached from outside `root`
+                unreadable.append(str(path))
+
+        for dirpath, dirnames, _files in os.walk(root, onerror=on_error):
+            # Prune before descending: a directory the search skips by design is not a
+            # hole in its coverage, and pruning keeps this from reporting one.
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not GrepTool._left_out((Path(dirpath) / name).relative_to(root).parts)
+            ]
+        return sorted(set(unreadable))
+
+    @staticmethod
+    def _collect_files(root: Path, file_glob: str | None) -> tuple[list[Path], list[str]]:
+        """Collect files recursively, skipping hidden/ignored dirs.
+
+        Returns `(files, unlistable_dirs)`: the files the search will run against, and
+        the directories whose contents it could not enumerate at all.
+        """
         glob_pattern = file_glob or "*"
 
         # Filter first (cheap), then sort (expensive on large repos)
         files: list[Path] = []
         for path in root.rglob(glob_pattern):
-            parts = path.relative_to(root).parts
-            if any(p.startswith(".") and p not in (".emrg",) for p in parts):
-                continue
-            if any(p in skip_dirs for p in parts):
+            if GrepTool._left_out(path.relative_to(root).parts):
                 continue
             if path.is_file():
                 files.append(path)
 
         files.sort()
-        return files
+        return files, GrepTool._unlistable_dirs(root)
