@@ -40,7 +40,11 @@ from pathlib import Path
 
 import pytest
 
-from emrg.tools.base import read_text_or_refusal, resolve_tool_path
+from emrg.tools.base import (
+    not_a_regular_file,
+    read_text_or_refusal,
+    resolve_tool_path,
+)
 from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
@@ -443,3 +447,138 @@ def test_the_guard_covers_every_tool_module_it_claims_to():
     # ...and the scan is not vacuous: the six probed shapes are all reachable here.
     assert callable(inspect.getsource)  # the module list came from disk, not a fixture
     assert re.search(r"def execute\(", (TOOLS_DIR / "read_tool.py").read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# A path that is not a file at all: the call does not fail, it never returns.
+# ---------------------------------------------------------------------------
+
+def _fifo(tmp_path, name="pipe"):
+    path = tmp_path / name
+    os.mkfifo(path)
+    return path
+
+
+class TestAPathThatIsNotARegularFile:
+    """Measured 2026-10-04 (`cyc20261004-032325`) on master `a3d0a5ea`.
+
+    A named pipe created with `os.mkfifo` blocks `open()` until the other end
+    appears — so `read`, `edit` and `write` on one **never returned**: the probe's
+    own alarm killed them at 3.00-3.01 s, and there is no timeout anywhere in the
+    tool path (`grep`/`glob` answer at once, because they collect with
+    `Path.is_file()`, which is False for a FIFO). A call that never returns wedges
+    the turn: the client's busy state never clears and no frame follows.
+    """
+
+    @_posix_only
+    def test_read_answers_instead_of_blocking(self, tmp_path):
+        result = _run(ReadTool(), {"file_path": str(_fifo(tmp_path))})
+
+        assert result.error is True
+        assert "FIFO" in result.content and "not a regular file" in result.content
+
+    @_posix_only
+    def test_edit_answers_instead_of_blocking(self, tmp_path):
+        result = _run(
+            EditTool(),
+            {"file_path": str(_fifo(tmp_path)), "old_string": "a", "new_string": "b"},
+        )
+
+        assert result.error is True
+        assert "FIFO" in result.content
+
+    @_posix_only
+    def test_write_answers_instead_of_blocking(self, tmp_path):
+        result = _run(WriteTool(), {"file_path": str(_fifo(tmp_path)), "content": "x"})
+
+        assert result.error is True
+        assert "FIFO" in result.content
+
+    @_posix_only
+    def test_a_character_device_is_named_not_read(self, tmp_path):
+        """The same rule, one kind over: a device is not a file whose contents end."""
+        result = _run(ReadTool(), {"file_path": "/dev/null"})
+
+        assert result.error is True
+        assert "character device" in result.content
+
+    @_posix_only
+    def test_the_fifo_is_still_there_afterwards(self, tmp_path):
+        """The refusal reads nothing, so it must not have opened the pipe either.
+
+        A refusal that had already opened the FIFO would have blocked — this leg is
+        what separates "answered" from "answered after the fact".
+        """
+        pipe = _fifo(tmp_path)
+        result = _run(ReadTool(), {"file_path": str(pipe)})
+
+        assert result.error is True
+        assert not os.path.isfile(pipe), "a FIFO is still a FIFO"
+        assert os.path.exists(pipe)
+
+    @_posix_only
+    def test_a_socket_is_named(self):
+        import socket
+        import tempfile
+
+        # `pytest`'s tmp_path is too long for an AF_UNIX path (macOS caps it near
+        # 104 bytes), so this one case makes its own short directory.
+        with tempfile.TemporaryDirectory(prefix="s") as short:
+            path = Path(short) / "s.sock"
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.bind(str(path))
+                result = _run(ReadTool(), {"file_path": str(path)})
+            finally:
+                sock.close()
+
+        assert result.error is True
+        assert "socket" in result.content
+
+    @_posix_only
+    def test_grep_over_a_tree_holding_one_still_answers(self, tmp_path):
+        """Control: the two tools that were already safe must stay safe.
+
+        They collect with `Path.is_file()`, which is False for a FIFO, so a named
+        pipe in the tree was never read — this pins that, because the natural way to
+        "fix" the hang above is to add a stat check everywhere and turn these two
+        into a refusal they do not need.
+        """
+        (tmp_path / "ok.txt").write_text("hello\n")
+        _fifo(tmp_path)
+        result = _run(GrepTool(), {"pattern": "hello", "path": str(tmp_path)})
+
+        assert result.error is not True
+        assert "Found 1 matches" in result.content
+
+
+class TestTheRegularFilePredicate:
+    """The one home, asked directly — including the shapes it must NOT claim."""
+
+    @_posix_only
+    def test_a_regular_file_is_not_refused(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("x")
+        assert not_a_regular_file(f) is None
+
+    @_posix_only
+    def test_a_missing_path_is_not_refused(self, tmp_path):
+        """A stat that never ran is not a claim about what the path is."""
+        assert not_a_regular_file(tmp_path / "nope") is None
+
+    @_posix_only
+    def test_a_directory_is_named_when_asked(self, tmp_path):
+        assert "a directory" in not_a_regular_file(tmp_path)
+
+    @_posix_only
+    def test_a_symlink_to_a_regular_file_is_fine(self, tmp_path):
+        real = tmp_path / "real.txt"
+        real.write_text("x")
+        link = tmp_path / "link.txt"
+        os.symlink(real, link)
+
+        assert not_a_regular_file(link) is None
+
+    @_posix_only
+    def test_a_fifo_names_itself(self, tmp_path):
+        assert "FIFO (named pipe)" in not_a_regular_file(_fifo(tmp_path))

@@ -3,18 +3,19 @@
 Follows the Codex ToolExecutor pattern: a tool defines its spec
 (via definition()) and executes via execute(arguments).
 
-It also carries the two refusals every path-taking tool owes its caller, because
-each of them was measured raising instead (2026-10-04, `cyc20261004-030427`): a
-path the process cannot stat and a file it cannot read are both *answers* — the
-tool can say what it could not do — and a raised exception loses the tool's name
-and any remedy on its way to the caller, which sees the daemon's generic
-``Tool execution error: [Errno 13] Permission denied: '/…'``. Five tools resolve a
-caller-supplied path and three of them read one, so the rule lives here rather
-than five times over.
+It also carries the three refusals every path-taking tool owes its caller, because
+each of them was measured *not* being answered (2026-10-04, `cyc20261004-030427`,
+`cyc20261004-032325`): a path the process cannot stat, a file it cannot read, and a
+path that is not a regular file at all. The first two raised, so the caller saw the
+daemon's generic ``Tool execution error: [Errno 13] Permission denied: '/…'``
+instead of an answer; the third **never returned**. Five tools resolve a
+caller-supplied path and three of them read or write one, so the rule lives here
+rather than five times over.
 """
 
 from __future__ import annotations
 
+import stat
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -100,6 +101,59 @@ def resolve_tool_path(value: str) -> tuple[Path | None, str | None]:
         return None, f"Error: cannot use path {value!r}: {_refusal_reason(exc)}"
 
 
+def not_a_regular_file(path: Path) -> str | None:
+    """Why this path cannot be read or written as a file, or ``None`` when it can.
+
+    A sentence, not a boolean, for the same reason the other two refusals are: the
+    caller has to be told *what* it named, and "it is a FIFO (named pipe)" is the
+    whole of the answer — a reader who asked for a path on purpose knows what a
+    pipe is, and one who did not has just learned where the mistake is.
+
+    Measured 2026-10-04 (`cyc20261004-032325`) on master `a3d0a5ea`, Python 3.13.9,
+    this host, against a tree holding one named pipe made with ``os.mkfifo``:
+
+    ========================  ==========================================
+    the call                  what it did
+    ========================  ==========================================
+    ``read`` the FIFO         **blocked past 3.01 s**, killed by the probe's own
+                              alarm — it never returned on its own
+    ``edit`` the FIFO         same, 3.00 s
+    ``write`` the FIFO        same, 3.01 s
+    ``grep``/``glob`` the tree  answered at once (they collect with
+                              ``Path.is_file()``, which is False for a FIFO)
+    ========================  ==========================================
+
+    That is why this is a *refusal* rather than a slowdown: a tool call has no
+    timeout, so a call that never returns wedges the turn — the client's busy state
+    never clears and no frame follows (the class PR #1669 records). ``stat`` says
+    which kind it is; the kinds below are the ones a filesystem can report that are
+    not a regular file. A path that does not exist is **not** this predicate's
+    business — the callers' own existence checks answer that, and answering "not a
+    regular file" for a missing file would be a claim about a stat that never ran.
+
+    :param path: the target, already resolved.
+    :returns: the refusal sentence, or ``None`` when it is a regular file.
+    """
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return None
+    kinds = (
+        (stat.S_ISFIFO, "a FIFO (named pipe)"),
+        (stat.S_ISSOCK, "a socket"),
+        (stat.S_ISCHR, "a character device"),
+        (stat.S_ISBLK, "a block device"),
+        (stat.S_ISDIR, "a directory"),
+    )
+    for test, kind in kinds:
+        if test(mode):
+            return (
+                f"Error: {path} is {kind}, not a regular file — this tool reads and "
+                f"writes regular files, and opening this one can block indefinitely"
+            )
+    return None
+
+
 def read_text_or_refusal(
     path: Path, *, newline: str | None = None
 ) -> tuple[str | None, str | None]:
@@ -128,6 +182,9 @@ def read_text_or_refusal(
     :param newline: passed through to ``Path.open`` — ``""`` keeps terminator bytes.
     :returns: the text, or the refusal sentence.
     """
+    refusal = not_a_regular_file(path)
+    if refusal:
+        return None, refusal
     try:
         return path.open("r", encoding="utf-8", newline=newline).read(), None
     except UnicodeDecodeError:

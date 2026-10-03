@@ -9,7 +9,7 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, resolve_tool_path
+from emrg.tools.base import ToolExecutor, not_a_regular_file, resolve_tool_path
 from emrg.tools.file_policy import resolve_file_target
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,15 @@ class WriteTool(ToolExecutor):
             path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             return ToolResult(name="write", content=f"Error creating directory: {e}", error=True)
+
+        # A target that exists and is not a regular file is refused here rather than
+        # opened: `open(path, "w")` on a FIFO blocks until a reader appears, and a
+        # tool call has no timeout, so the turn would never finish
+        # (`cyc20261004-032325`, measured: 3.01 s and still blocked). A path that
+        # does not exist stat-fails inside the predicate and is created as before.
+        kind_refusal = not_a_regular_file(path)
+        if kind_refusal:
+            return ToolResult(name="write", content=kind_refusal, error=True)
 
         try:
             existed = path.exists()
