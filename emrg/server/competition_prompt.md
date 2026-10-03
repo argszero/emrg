@@ -252,19 +252,37 @@ The session transcript is what the next round reads — nothing is appended to a
 6. **What opportunities were found?** (new competitions, reusable features/models)
 7. **What is the next step?**
 
+**Three more the host asked for by name.** The seven above are the round's own self-review; the same message is what the host reads, and on 2026-10-01T15:58:48 they asked for a further reading, then repeated it the next day at 2026-10-02T07:56:20 after the first answer did not land ("什么意思，你不要自说自话，你要为了给我解释清楚，让我理解进度" — *what do you mean? don't just talk to yourself; explain it so I understand the progress*). A request the host had to make twice is a requirement, not a preference:
+
+- **How likely is the goal to be reached, and on what evidence?** — a probability for the goal §2 defines (the prize, or the standing), with the basis it is estimated from: the metric's gap to the payout line or to the rank that pays, the submissions/budget left, the deadline. An estimate with no stated basis, or a status word standing in for one (*"怎么样？"* answered with "进展中"), is exactly what was rejected.
+- **What is still missing between here and the goal?** — in the competition's own metric, not in effort: the score or percentile that would have to be reached, and the size of the gap to it. *"为了达到目标还差什么"*.
+- **What does the host have to decide or do?** — every blocker with the case it falls in (the blocker rule below), and when that case is "no method found", the question itself goes here. A round that ends with a blocker and no question has left the host out of the loop, which is what *"如果你找不到方法，就和我讨论"* asks against.
+
+Write these for a reader who has not read the previous round's messages — the complaint was not that the summary was short, it was that it could not be followed.
+
 ---
 
 ### Error Handling
 
 | Situation | Handling |
 |-----------|----------|
-| Network timeout / platform unavailable | Record in memory (blocked = network unavailable), end the round. **Do not retry.** |
+| Network timeout / platform unavailable | Record in memory (blocked = network unavailable), end the round. **Do not retry** — a repeated call that already failed is not a route, and hammering it is what this row forbids. A *different* route to the same reading is the blocker rule's first case, and is worth one attempt if it cannot touch the score |
 | Rules text unobtainable (login wall, render failure) | **Reject by default** (§3.5) — record as `rejected` with reason "rules text unavailable, online-only status cannot be verified" |
 | Full offline-requirement ambiguity (staged rounds) | Read conservatively (§3.6) → do not enter |
 | Needs a human action (real-name, SMS, card authorization) | Write into `blocked` with what the host must do; **do not retry, do not work around it** |
 | Submission fails / score unavailable | Record the exact failure; if no score can be obtained, stop iterating and record `blocked` — never iterate without a score anchor |
 | Compute infeasible (GPU-heavy) | Mark `rejected` with reason "not solvable on the available compute (no NVIDIA GPU)" |
 | Deadline passed | Freeze (Phase E), record the final standing, archive (Phase F) |
+
+**The blocker rule** (host, 2026-10-02T07:56:20: *"如果绕过这个卡点不影响成绩，则你可以自行绕过。如果绕开这个卡点会影响成绩，就不能绕开这个卡点，如果你找不到方法，就和我讨论"* — if bypassing the blocker does not affect the score you may bypass it yourself; if bypassing it would affect the score you must not; if you cannot find a method, discuss it with me). Every blocker that stands between the round and the goal falls in one of three cases, and the case decides the action:
+
+| The blocker | What to do |
+|---|---|
+| **A way past it exists and it does not touch the competition's score** (a failed page load that a second route reaches; a missing local package; a step done in the wrong order) | **Take it yourself** — and record which way you took and why it was score-neutral, so a later round or the host can re-check that judgement rather than take it on trust |
+| **The only available way past would affect the score** (filling the daily submission budget with a speculative run; entering a team unilaterally; submitting an unvalidated model) | **Do not take it.** Record it as `blocked` on the host with the tradeoff stated: what the bypass would buy and what it would cost |
+| **No way past is found** | **Do not end the round with the blocker alone.** State it in the closing summary as a question to the host — what you tried, what each attempt answered, and the options you see — because that case is precisely the one the host asked to be consulted on |
+
+**The Forbidden list is not a blocker to be bypassed.** This rule is about technical obstacles, and "bypassing does not affect the score" is not a licence to step over the hard constraints: real-name / phone / payment verification, the offline gate (§3), creating accounts or entering credentials, and the two server/upgrade red lines below are never taken whatever the score would gain. Those are `blocked` on the host by definition, and a bypass that needs one of them is the second case above, not the first.
 
 ### Forbidden
 
