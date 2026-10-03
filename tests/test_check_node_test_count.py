@@ -48,15 +48,42 @@ def mod():
     return _load_module()
 
 
+def _runner_that_cannot_start(mod, cwd=None) -> str | None:
+    """Why this host cannot ask the runners, or ``None`` when `npm` answers.
+
+    **`which` answers "is this name on PATH", which is not "is there a runner".**
+    Measured 2026-10-03 (`cyc20261003-123253`) on the evolution host: `which("npm")`
+    returns `/Users/…/.asdf/shims/npm`, an asdf shim whose interpreter is gone, so the
+    name resolves and the process exits rc=126 with `No such file or directory`. A gate
+    written on `which(...) is None` therefore does not fire on a host that cannot ask,
+    and the row fails where its docstring promised a skip - the defect #1825 describes,
+    one layer down, which is why #1826's `which`-based helper left this host red.
+
+    So the probe **runs** the runner and requires a version back. The two halves are
+    named apart on purpose: "not on PATH" and "on PATH and cannot start" are different
+    facts about a host, and a caller reading the skip message needs to know which one.
+    """
+    if mod.shutil.which("npm") is None:
+        return "no `npm` on PATH"
+    cwd = mod.RENDERER_ROOT if cwd is None else cwd
+    try:
+        out = mod._run(["npm", "--version"], cwd)
+    except (mod.NodeCountError, OSError) as exc:
+        return f"`npm` is on PATH but cannot start: {exc}"
+    if not re.match(r"\d+\.\d+", out.strip()):
+        return f"`npm --version` answered {out.strip()[:80]!r}, which is not a version"
+    return None
+
+
 def _cannot_ask_the_runners(mod) -> str | None:
-    """The precondition this host fails, or ``None`` when both are met.
+    """The precondition this host fails, or ``None`` when both halves are met.
 
     There are **two**, and the pair is the point: the tool resolves `npm` through
     PATH and then runs it inside a directory it expects to hold `node_modules`.
     Having one is not having the other.
 
     Measured 2026-10-03 (`cyc20261003-065523`) on the evolution host: the
-    renderer's `node_modules` is present while `npm`, `node` and `npx` are all
+    renderer's `node_modules` is present while `npm`, `node`, and `npx` are all
     absent from PATH. The integration test let the run through on the
     `node_modules` check alone, so `_run` raised `NodeCountError: cannot run 'npm'`
     and a host that simply *cannot ask* reported a failure - while the docstring
@@ -64,12 +91,13 @@ def _cannot_ask_the_runners(mod) -> str | None:
     already skips for exactly this reason and states it ("a missing toolchain is
     not a defect in `_run`"); this helper is that rule, applied to the one test that
     needs both halves.
+
+    The executable half is `_runner_that_cannot_start`, which *runs* the runner:
+    a name on PATH is not a runner that starts (`cyc20261003-123253`).
     """
     if not (mod.RENDERER_ROOT / "node_modules").exists():
         return f"no node_modules under {mod.RENDERER_ROOT}"
-    if mod.shutil.which("npm") is None:
-        return "no `npm` on PATH"
-    return None
+    return _runner_that_cannot_start(mod)
 
 
 def test_the_runner_precondition_names_which_half_is_missing(
@@ -82,29 +110,58 @@ def test_the_runner_precondition_names_which_half_is_missing(
     toolchain - so the three directions are the whole content: the modules missing,
     the executable missing, and neither. The third is what keeps the helper from
     turning an askable host into a permanent skip.
+
+    "The executable missing" has **two** states, and they are the subject of
+    `cyc20261003-123253`: a name `which` cannot find, and a name `which` finds that
+    cannot start. The second is the one this host is in, and a gate that only asked
+    the first left it red - so both are pinned, and the message has to name which.
     """
     installed = tmp_path / "renderer"
     installed.mkdir()
     monkeypatch.setattr(mod, "RENDERER_ROOT", installed)
-
-    # `npm` present, no node_modules: the modules are what is missing.
     monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
-    assert "node_modules" in (_cannot_ask_the_runners(mod) or ""), (
-        "a host without the renderer's node_modules must be told so by name"
+
+    # `npm` present, no node_modules: the modules are what is missing. Asserted on the
+    # whole message, not on the substring: `_run`'s own error also says `node_modules`
+    # ("<cwd> has no node_modules; run `npm install`"), so a substring test passed with
+    # this check deleted - measured 2026-10-03, the mutation survived.
+    reason = _cannot_ask_the_runners(mod) or ""
+    assert reason.startswith("no node_modules under"), (
+        f"a host without the renderer's node_modules must be told so by its own "
+        f"message; got {reason!r}"
     )
 
-    # node_modules present, no `npm`: the executable is what is missing. This is
-    # the half the integration test used to walk past - measured on the evolution
-    # host, where node_modules is installed and no node is on PATH at all.
     (installed / "node_modules").mkdir()
+
+    # node_modules present, no `npm` on PATH at all.
     monkeypatch.setattr(mod.shutil, "which", lambda name: None)
-    assert "npm" in (_cannot_ask_the_runners(mod) or ""), (
-        "a host with node_modules but no `npm` must be told so by name - checking "
-        "the modules alone let this host reach `_run` and report a failure"
+    reason = _cannot_ask_the_runners(mod) or ""
+    assert "npm" in reason and "on PATH" in reason and "cannot start" not in reason, (
+        f"a host with node_modules but no `npm` must be told so by name - checking "
+        f"the modules alone let this host reach `_run` and report a failure; got "
+        f"{reason!r}"
     )
 
-    # Both present: nothing is missing, so the integration test has to run.
+    # node_modules present, `npm` on PATH, and the process cannot start. This is the
+    # state the evolution host is actually in, and the one a `which`-only gate misses.
     monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def dead_shim(cmd, cwd, **kwargs):
+        raise mod.NodeCountError(
+            f"`{cmd[0]}` in {cwd} failed (rc=126):\n"
+            "/usr/bin/npm: exec: /gone/asdf: cannot execute: No such file or directory"
+        )
+
+    monkeypatch.setattr(mod, "_run", dead_shim)
+    reason = _cannot_ask_the_runners(mod) or ""
+    assert "cannot start" in reason and "rc=126" in reason, (
+        f"a name that resolves and cannot start must be told apart from one that "
+        f"does not resolve, and the reason carried through; got {reason!r}"
+    )
+
+    # Both present and the runner answers: nothing is missing, so the integration
+    # test has to run.
+    monkeypatch.setattr(mod, "_run", lambda cmd, cwd, **kwargs: "10.9.8\n")
     assert _cannot_ask_the_runners(mod) is None, (
         "an askable host must not be skipped - a helper that always answers "
         "would make the integration test green forever by never running"
@@ -436,7 +493,7 @@ def test_real_tree_is_consistent() -> None:
     mod = _load_module()
     blocked = _cannot_ask_the_runners(mod)
     if blocked is not None:
-        pytest.skip(f"{blocked}: cannot ask the runners")
+        pytest.skip(f"cannot ask the npm runners: {blocked}")
     renderer = mod.measured_renderer()
     gui = mod.measured_gui()
     documented = mod.documented_counts((REPO_ROOT / "Agent.md").read_text(encoding="utf-8"))
@@ -666,10 +723,20 @@ def test_a_bare_name_starts_the_real_runner(mod, fake_cwd) -> None:
     `which`; this asserts the result is usable.
 
     Skipped, not failed, where no runner is installed: this repo's pytest job can
-    run before `npm ci`, and a missing toolchain is not a defect in `_run`.
+    run before `npm ci`, and a missing toolchain is not a defect in `_run`. The gate
+    is `_runner_that_cannot_start`, the same one the integration test uses - one home
+    for "can this host ask the runners at all", so a fix to it reaches both call
+    sites. (`cyc20261003-123253`: a `which(...) is None` gate let this row reach
+    `_run` and report rc=126 as a failure.)
     """
-    if mod.shutil.which("npm") is None:
-        pytest.skip("npm is not on PATH")
+    blocked = _runner_that_cannot_start(mod, fake_cwd)
+    if blocked is not None:
+        # The message names the toolchain on purpose: `tests/test_ci_workflow_toolchain.py`
+        # decides from the *call's own arguments* whether the suite really has a
+        # skip-on-missing-node probe, and a skip whose argument is a bare name it cannot
+        # follow reads as no probe at all (measured 2026-10-03: abstracting this message
+        # turned that guard red).
+        pytest.skip(f"cannot ask the npm runners: {blocked}")
     out = mod._run(["npm", "--version"], fake_cwd)  # bare name, as the tool calls it
     assert re.match(r"\d+\.\d+", out.strip()), (
         f"a bare `npm` must start a real runner through the resolution; got {out!r}"
