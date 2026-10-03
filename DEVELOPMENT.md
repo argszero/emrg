@@ -277,6 +277,25 @@ Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's
 
 The step's two failure modes are told apart by **duration**, not by the exit code: a refused *submission* dies in seconds, while a notarization *verdict* takes minutes, exits 0 and reports `status=Invalid` (the step parses that status and fetches Apple's rejection log for it). `Notarize pkg` names the preflight in its own `::error::` when the submission is refused, so the remedy arrives with the failure.
 
+**The readable path to a failed run's cause.** `gh run view <id> --log` and `--log-failed` answer
+**0 bytes with exit 0** on a current host for every run, green or red (measured 2026-10-04 on `gh`
+2.58.0: v0.3.8's failed build `36956685533`, v0.3.7's green build `36658495939`, and a recent `Test`
+run all return nothing on stdout *and* stderr, rc 0) — a silent empty answer that reads exactly like
+"this run has no log". `gh api` is unaffected (the same job's log is 689 KB), so:
+
+```bash
+uv run --no-sync python3 scripts/read-run-failure.py <run-id>            # the failed job, its step, its output
+uv run --no-sync python3 scripts/read-run-failure.py <run-id> --tail 60  # more of the failing step's block
+```
+
+It prints the job the payload marks failed, the **step** that failed (only the payload names it — a
+step that dies silently leaves no line in the log at all, which is exactly the notarize case above),
+the runner's `##[error]` annotation, and the failing step's block **up to** that annotation rather
+than the log's tail — the tail is the runner's own teardown (17 lines of `Post job cleanup` on the run
+above, which bury the cause). Exit `0` = a cause was printed; `1` = the run has no failed job; `2` =
+the question could not be answered (bad id, `gh` failed, no jobs listed, or a failed job's log came
+back empty) — **never a pass**.
+
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 > **Self-evolution from source**: the evolution workspace expects the repo at `~/.emrg/evolution/emrg`. Packaged installs self-heal (clone on demand + auto-bootstrap projects/tasks); source installs should clone there explicitly if you want the evolution daemon to work on this repo.
