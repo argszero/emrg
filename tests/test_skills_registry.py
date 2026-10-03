@@ -363,12 +363,15 @@ class TestUpdate:
         assert result["updated"] == []
         assert runner.calls == []
 
-    def test_api_down_skips_silently(self, tmp_home, with_cli):
+    def test_api_down_names_the_entry_it_could_not_check(self, tmp_home, with_cli):
+        """读不出来的检查要点名（2026-10-04）——旧名写着 "skips silently"，
+        而那正是缺陷：空摘要被下游渲染成 All up to date.。"""
         ensure_catalog_file()
         self._seed_state({"browser-harness": {"version": "0.1.3", "installed_at": "2026-08-08T00:00:00+08:00", "managed": True}})
         runner = FakeRunner(skill_output=VALID_SKILL_MD)
         result = _run(installer.update_managed_skills(runner=runner, http_get=FakeHttp(tag=None)))
         assert result["updated"] == []
+        assert result["unreadable"] == ["browser-harness"]
         assert read_state()["browser-harness"]["version"] == "0.1.3"
 
     def test_skips_when_cli_missing(self, tmp_home, no_cli):
@@ -408,4 +411,5 @@ class TestUpdate:
     def test_no_state_noop(self, tmp_home, with_cli):
         ensure_catalog_file()
         result = _run(installer.update_managed_skills(runner=FakeRunner(VALID_SKILL_MD), http_get=FakeHttp("v0.1.8")))
-        assert result == {"checked": 0, "updated": [], "skipped": [], "errors": []}
+        assert result == {"checked": 0, "updated": [], "skipped": [], "errors": [],
+                          "unreadable": [], "unknown": []}

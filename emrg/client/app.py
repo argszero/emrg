@@ -1913,6 +1913,13 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     updated = data.get("updated", [])
                     skipped = data.get("skipped", [])
                     errors = data.get("errors", [])
+                    # Entries whose comparison did not happen. They are rows of
+                    # their own, and they veto "All up to date." — a check that
+                    # could not be read is not a clean one (measured
+                    # 2026-10-04: with api.github.com unreachable every other
+                    # list is empty and this row claimed the host was current).
+                    unreadable = data.get("unreadable", [])
+                    unknown = data.get("unknown", [])
                     if err:
                         chat.add("system", f"Skill update failed: {err}")
                     else:
@@ -1923,7 +1930,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             lines.append(f"Skipped (CLI missing): {', '.join(skipped)}")
                         if errors:
                             lines.append(f"Failed: {', '.join(errors)}")
-                        if not updated and not skipped and not errors:
+                        if unreadable:
+                            lines.append(f"Not checked (release unreadable): {', '.join(unreadable)}")
+                        if unknown:
+                            lines.append(f"Not checked (no catalog entry): {', '.join(unknown)}")
+                        if not (updated or skipped or errors or unreadable or unknown):
                             lines.append("All up to date.")
                         chat.add("system", "\n".join(lines))
                     status.update(center=server_id or "emrg")

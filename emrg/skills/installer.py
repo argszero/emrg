@@ -264,21 +264,39 @@ async def update_managed_skills(
 
     Background-deterministic: never installs a missing CLI silently, never
     touches non-managed (host-modified) skill files. Returns a summary:
-      {"checked": int, "updated": [names], "skipped": [names], "errors": [names]}
+
+      {"checked": int, "updated": [names], "skipped": [names],
+       "errors": [names], "unreadable": [names], "unknown": [names]}
+
+    ``checked`` counts the managed entries; **an entry whose comparison did
+    not happen is named in one of the two lists that follow, never silently
+    counted in ``checked``** — otherwise a caller that renders "nothing was
+    updated or failed" as "all up to date" reports a check that never ran as
+    a clean one (measured 2026-10-04: an unreachable api.github.com leaves
+    every list empty, and the TUI row read *All up to date.*).
+
+      ``unreadable`` — the release read itself failed (network/API); the
+      entry's version is unchanged and the next run retries.
+      ``unknown``    — the catalog no longer lists it, so there is nothing
+      to compare a version against.
     """
     state = read_state()
     managed = {k: v for k, v in state.items() if v.get("managed")}
     updated: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
+    unreadable: list[str] = []
+    unknown: list[str] = []
 
     for name, info in managed.items():
         entry = find_catalog_skill(name)
         if entry is None:
+            unknown.append(name)
             continue
         latest = await _fetch_latest_tag(entry.get("repo", ""), http_get)
         if latest is None:
-            continue  # network/API failure — try again next cycle
+            unreadable.append(name)  # network/API failure — try again next cycle
+            continue
         if latest == info.get("version"):
             continue  # up to date
         if not cli_available():
@@ -302,13 +320,22 @@ async def update_managed_skills(
         "updated": updated,
         "skipped": skipped,
         "errors": errors,
+        "unreadable": unreadable,
+        "unknown": unknown,
     }
 
 
 async def run_update_check_once() -> dict:
-    """One-shot update check (used by the daemon TTL loop)."""
+    """One-shot update check (used by the daemon TTL loop).
+
+    The summary's shape is ``update_managed_skills``'; a caller that renders
+    it must keep ``unreadable``/``unknown`` apart from an empty result — the
+    failure branch below is one more way the check does not happen, and it
+    says so with ``error`` rather than by omitting itself.
+    """
     try:
         return await update_managed_skills()
     except Exception:
         logger.debug("skills update check failed", exc_info=True)
-        return {"checked": 0, "updated": [], "skipped": [], "errors": [], "error": "update check failed"}
+        return {"checked": 0, "updated": [], "skipped": [], "errors": [],
+                "unreadable": [], "unknown": [], "error": "update check failed"}

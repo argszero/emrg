@@ -1135,6 +1135,10 @@ class EmrgServer:
                 self.skills = load_skills()
             elif result.get("errors"):
                 logger.warning("skills update errors: %s", result["errors"])
+            elif result.get("unreadable"):
+                # The release read failed: the check did not happen. Named here
+                # so the tick's log does not read as a clean one (2026-10-04).
+                logger.debug("skills update check could not read: %s", result["unreadable"])
             await asyncio.sleep(_UPDATE_TTL_SECONDS)
 
     async def _upgrade_tick_loop(self) -> None:
