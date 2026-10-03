@@ -46,7 +46,7 @@ from emrg.config import (
 )
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.abort_runs import AbortRuns
-from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
+from emrg.server.atomic import YAML_READ_ERRORS, atomic_write_bytes, atomic_write_yaml
 from emrg.server.config_reload import (
     POLL_INTERVAL_SECONDS,
     ConfigReloader,
@@ -1028,7 +1028,7 @@ class EmrgServer:
                             for e in data
                             if isinstance(e, dict) and e.get("path")
                         ]
-                except (yaml.YAMLError, OSError):
+                except YAML_READ_ERRORS:
                     pass
             count = rebuild_sessions_index(config_dir(), project_paths)
             logger.info("sessions index rebuilt: %d sessions indexed", count)
@@ -1822,7 +1822,7 @@ class EmrgServer:
                             entry.pop("auto_evolve", None)
                             entry.pop("interval", None)
                             projects[key] = entry
-            except (yaml.YAMLError, TypeError, OSError):
+            except (TypeError, *YAML_READ_ERRORS):
                 logger.warning(
                     "_touch_project: failed to parse %s, rebuilding",
                     self._projects_log,
@@ -5724,7 +5724,7 @@ class EmrgServer:
                          "latest_session_at": at}
                         for (p, at), repo in zip(ordered, repos)
                     ]
-        except (yaml.YAMLError, OSError):
+        except YAML_READ_ERRORS:
             logger.exception("Failed to read projects.yml")
         await self._send(ws, {
             "type": "projects_list",
@@ -5751,7 +5751,7 @@ class EmrgServer:
             return
         try:
             data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
-        except (yaml.YAMLError, OSError):
+        except YAML_READ_ERRORS:
             logger.exception("remove_project: failed to read %s", self._projects_log)
             await self._send(ws, {
                 "type": "project_removed",

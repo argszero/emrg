@@ -36,7 +36,7 @@ from emrg.connect import connect_to_server
 from emrg.sandbox.policy import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
-from emrg.server.atomic import atomic_write_yaml
+from emrg.server.atomic import YAML_READ_ERRORS, atomic_write_yaml
 from emrg.server.git_utils import (
     _detect_git_remote,
     ensure_local_exclude,
@@ -350,7 +350,7 @@ def read_table(path: Path | None = None) -> list[dict]:
         return [dict(DEFAULT_TASK_RECORD)]
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (yaml.YAMLError, OSError) as exc:
+    except YAML_READ_ERRORS as exc:
         raise TableUnreadable(f"{path}: {exc}") from exc
     if data is None:
         raise TableUnreadable(f"{path}: empty document")
@@ -470,7 +470,7 @@ def _resolve_project_path(name: str) -> str | None:
         return None
     try:
         data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
-    except (yaml.YAMLError, OSError):
+    except YAML_READ_ERRORS:
         return None
     if not isinstance(data, list):
         return None
@@ -493,7 +493,7 @@ def _load_project_config(name: str, source_dir: str) -> dict:
         return {}
     try:
         data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
-    except (yaml.YAMLError, OSError):
+    except YAML_READ_ERRORS:
         return {}
     if not isinstance(data, list):
         return {}
@@ -3148,7 +3148,7 @@ class TaskScheduler:
                         "%r -> %s", existing, entry["path"],
                     )
                     break
-        except (yaml.YAMLError, OSError) as e:
+        except YAML_READ_ERRORS as e:
             logger.warning(
                 "TaskScheduler: projects.yml self-heal failed: %s", e
             )
