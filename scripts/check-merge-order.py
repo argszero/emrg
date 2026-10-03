@@ -336,7 +336,14 @@ def _fetch_head(repo: str, number: int) -> str:
         # Not `--quiet`: it suppresses the rejection diagnostic as well, which is
         # how this surfaced as an undiagnosable "unknown error" with empty stderr.
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
-        raise RuntimeError(f"could not fetch PR #{number}: {detail}")
+        # The remote's *URL*, because `origin` is not always the URL it reads as: a
+        # `url.<base>.insteadOf` rewrite can point it at a local directory, where
+        # `refs/pull/<N>/head` does not exist and the fetch fails for a reason no
+        # reader can see in git's sentence alone (`merge_tree.remote_url`).
+        raise RuntimeError(
+            f"could not fetch PR #{number} from 'origin' "
+            f"({merge_tree.remote_url('origin', _run)}): {detail}"
+        )
     # The commit, and the ref dropped again as soon as it is read: the name is
     # mutable in a way a SHA is not, so nothing downstream wants it back, and a ref
     # left behind pins that head's objects forever (measured 2026-09-17: this gate

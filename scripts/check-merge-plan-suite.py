@@ -576,7 +576,14 @@ def _fetch_head(number: int) -> str:
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
-        raise MeasurementError(f"could not fetch PR #{number}: {detail}")
+        # The remote's *URL*, because `origin` is not always the URL it reads as: a
+        # `url.<base>.insteadOf` rewrite can point it at a local directory, where
+        # `refs/pull/<N>/head` does not exist and the fetch fails for a reason no
+        # reader can see in git's sentence alone (`merge_tree.remote_url`).
+        raise MeasurementError(
+            f"could not fetch PR #{number} from 'origin' "
+            f"({merge_tree.remote_url('origin', _run)}): {detail}"
+        )
     commit = _rev_parse(ref)
     # Best-effort and never raised on: the ref is a by-product of a measurement, so a
     # tool that cannot delete it still has to report the measurement, and the next

@@ -483,6 +483,51 @@ def drop_ref(
     return run(["git", "update-ref", "-d", ref])
 
 
+def remote_url(
+    remote: str,
+    run: Callable[..., subprocess.CompletedProcess],
+) -> str:
+    """The URL `remote` really fetches from, with the caller's rewrites applied.
+
+    `git fetch <remote>` does not read `remote.<name>.url` verbatim:
+    `url.<base>.insteadOf` is applied first, so the transport a run really uses can
+    be something else entirely. Measured on this host 2026-10-03
+    (`cyc20261003-095256`), whose `.git/config` carries
+
+        url.C:/Users/Administrator/.emrg/evolution/emrg/.insteadof https://github.com/argszero/emrg.git
+
+    - so `origin` is that **local directory**, and every gate in this family asking
+    it for a PR head answered
+
+        could not fetch PR #1826: fatal: couldn't find remote ref pull/1826/head
+
+    which reads as "PR #1826 has no head" about a PR that was open, with head
+    `c6eff015` on GitHub. `refs/pull/<N>/head` exists on the remote the PR lives on,
+    not in whatever local clone a rewrite points `origin` at, so that failure is the
+    configuration's - and the message named neither the remote nor its URL, which is
+    why a reader who ran a *merge gate* had nothing to act on.
+
+    The rewrite is not the defect (it is this host's offline fallback); the silence
+    was. This helper exists so the five fetch sites - which each spell the same
+    message - can say where the fetch went, and it lives here for the reason the
+    module does: five copies of a rule drift, and no amount of repairing them one at
+    a time converges. `git remote get-url` is the instrument that expands the
+    rewrite; it is also why this is a call and not a read of the config file.
+
+    Never raises and never guesses: a URL this module cannot read - git absent, the
+    remote not configured, an empty answer - is the word ``unknown``. The caller
+    prints it to explain a failure that has already happened, and a wrong URL there
+    would be worse than none.
+    """
+    try:
+        proc = run(["git", "remote", "get-url", remote])
+    except OSError:
+        return "unknown"
+    if proc.returncode != 0:
+        return "unknown"
+    return proc.stdout.strip() or "unknown"
+
+
 def merge_commit(
     a: str,
     b: str,
