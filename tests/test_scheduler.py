@@ -3563,6 +3563,151 @@ def test_a_stalled_cycle_frees_the_slot_and_records_why(tmp_path, monkeypatch, c
     assert not hb.exists(), "a reported marker is consumed, so it is reported once"
 
 
+def test_a_cycle_queued_behind_a_busy_session_is_not_a_stall(tmp_path, monkeypatch, caplog):
+    """A busy session's silence is not a wedge, and the difference is the ending.
+
+    Measured 2026-10-02 (issue #1815): the competition task's cycle began while the
+    host's own turn held that session, the daemon answered `task_queued`, and the
+    marker it left read `stalled / tools=0` — the 600s round bound, exactly — for a
+    turn that never began. Both silences look identical on the wire; the ending is
+    what tells the next cycle whether to investigate a fault or nothing at all.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
+         "position": 1},
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._QUEUED, (
+        "the daemon held this cycle's request instead of starting it, so the "
+        f"silence is a busy session, not a turn that stopped reporting — got {reason!r}"
+    )
+    assert reason != handler._STALLED, "the two endings must not be the same string"
+    assert handler.evolutions == [], (
+        "a cycle that never ran is not an evolution, however it ended"
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "nothing is wedged here, so nothing may be logged as an error — an ERROR "
+        f"for a busy session is the false alarm this ending removes: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("queued behind a busy session" in m for m in messages), messages
+    assert any("position 1" in m for m in messages), (
+        "the position the daemon named is the evidence this reading rests on: "
+        f"{messages}"
+    )
+
+
+def test_a_queued_request_that_is_served_inside_the_wait_is_a_normal_cycle(
+    tmp_path, monkeypatch,
+):
+    """The other direction: `task_queued` is not a verdict on the cycle.
+
+    The queue can drain inside the same wait — that is what the pending injection
+    is for — and a cycle whose own turn then reports must end the way any cycle
+    ends. A flag set by the first frame and never cleared would turn every such
+    cycle into a `queued` ending, which is the same defect mirrored.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
+         "position": 1},
+        {"type": "steer_committed", "request_id": "evolution-x", "session_id": "s"},
+        {"type": "tool_start", "tool_name": "bash", "arguments": {"command": "true"}},
+        {"type": "tool_end", "tool_name": "bash", "content": "ok", "error": False},
+        {"request_id": "evolution-x", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ])
+
+    reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._CLEAN_END, (
+        "a cycle that started after being queued is an ordinary completed cycle "
+        f"— got {reason!r}"
+    )
+    assert len(handler.evolutions) == 1, "it ran, so it counts"
+
+
+def test_silence_after_a_queued_cycle_started_is_a_stall_again(tmp_path, monkeypatch, caplog):
+    """The flag belongs to the wait, not to the cycle.
+
+    A request that was queued and then served is a running turn, and a running
+    turn that goes silent is the stall the watchdog exists for. Without the
+    clearing, one busy session relabels every later silence this cycle meets —
+    the same defect mirrored, and a wedge would be filed as a busy session.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
+         "position": 1},
+        {"type": "tool_start", "tool_name": "bash", "arguments": {"command": "true"}},
+        {"type": "tool_end", "tool_name": "bash", "content": "ok", "error": False},
+    ])
+
+    with caplog.at_level(logging.ERROR):
+        reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._STALLED, (
+        "these frames are this cycle's own turn reporting, so the silence after "
+        f"them is a wedged turn, not a busy session — got {reason!r}"
+    )
+    assert any("stalled: no frame for" in r.getMessage() for r in caplog.records), (
+        f"a wedged turn is logged at ERROR: {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+def test_a_queued_cycle_leaves_a_marker_that_names_the_busy_session(
+    tmp_path, monkeypatch, caplog,
+):
+    """The marker and the restart report must not call it a stall.
+
+    The ending is written into the marker rather than erased, and a later wake
+    prints it in one grep-able phrase — so the phrase is part of the reading, not
+    a log detail: a host reading `stalled` here would go looking for a wedge that
+    does not exist.
+    """
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
+         "position": 2},
+    ])
+    handler._cycle_running = True
+
+    reason = asyncio.run(handler._run_cycle_bounded())
+
+    assert reason == handler._QUEUED
+    hb = handler._task_runs_dir / "emrg-task.heartbeat.json"
+    data = json.loads(hb.read_text(encoding="utf-8"))
+    assert data["status"] == "queued", (
+        f"the marker must carry the ending, not the stall's — got {data['status']!r}"
+    )
+
+    with caplog.at_level(logging.WARNING):
+        handler._report_interrupted_cycle()
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("was queued behind a busy session" in m for m in messages), messages
+    assert not any("stalled (no frame past the bound" in m for m in messages), (
+        f"the stall's phrase must not appear for a queued cycle: {messages}"
+    )
+    assert not hb.exists(), "a reported marker is consumed, so it is reported once"
+
+
 def test_a_stalled_cycle_does_not_hold_the_task_slot_forever(tmp_path, monkeypatch):
     """Requirement 5.2, end to end: the next run is scheduled again.
 
