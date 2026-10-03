@@ -106,10 +106,11 @@ class FakeGh:
     """
 
     def __init__(self, jobs: list[dict], logs: dict[int, str] | None = None,
-                 jobs_rc: int = 0):
+                 jobs_rc: int = 0, total_count: int | None = None):
         self.jobs = jobs
         self.logs = logs or {}
         self.jobs_rc = jobs_rc
+        self.total_count = total_count
         self.calls: list[str] = []
 
     def __call__(self, path: str) -> str:
@@ -120,7 +121,10 @@ class FakeGh:
                 raise RuntimeError(
                     f"gh api {path} failed (rc=1): gh: Not Found (HTTP 404)"
                 )
-            return json.dumps({"jobs": self.jobs})
+            payload = {"jobs": self.jobs}
+            if self.total_count is not None:
+                payload["total_count"] = self.total_count
+            return json.dumps(payload)
         if "/logs" in path:
             job_id = int(path.split("/actions/jobs/")[1].split("/")[0])
             if job_id not in self.logs:
@@ -224,6 +228,67 @@ def test_an_empty_job_log_is_never_reported_as_a_cause(mod, monkeypatch, capsys)
     assert "not a cause" in captured.out
     assert rc == 2, "a failed job with an empty log was not explained"
     assert "came back empty" in captured.err
+
+
+def test_a_truncated_jobs_listing_is_not_an_answer(mod, monkeypatch, capsys):
+    """One page of a longer listing must not read as "no failed job".
+
+    `gh api` does not follow pagination, so the request asks for at most 100 jobs; the
+    payload's own `total_count` is what says whether that page was the whole run. Without
+    the check a large build matrix whose failure sits past the first page lists 100
+    successes here, and the tool prints "no failed job" and exits **1** - a determinate
+    answer to a question the reading never covered, which is precisely the confusion this
+    tool exists to prevent. Measured 2026-10-04 with `total_count` 150 and 100 successful
+    jobs on the page.
+    """
+    fake = FakeGh(
+        [_job(name=f"build{i}", conclusion="success", job_id=i) for i in range(100)],
+        total_count=150,
+    )
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    captured = capsys.readouterr()
+    assert rc == 2, "a partial listing is not a run with nothing failed"
+    assert "no failed job" not in captured.out
+    assert "one page of 150" in captured.err, captured.err
+
+
+def test_a_complete_listing_still_answers_normally(mod, monkeypatch, capsys):
+    """Control leg: when `total_count` matches the page, nothing changes."""
+    fake = FakeGh([_job()], {1: _STEP_BLOCK}, total_count=1)
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    assert rc == 0
+    assert "FAILED JOB: build" in capsys.readouterr().out
+
+
+def test_a_failing_post_job_step_does_not_displace_the_cause(mod, monkeypatch, capsys):
+    """The teardown's own annotation must not become "the failing step's block".
+
+    Steps run in order and the runner's post-job cleanup runs after all of them, so a log
+    whose cleanup **also** errors carries its second `##[error]` last. Anchoring the
+    excerpt there printed the cleanup block under this tool's own "the failing step's
+    block" label and dropped the step that actually failed. The v0.3.8 run has a single
+    annotation (its post-job steps all succeeded), so this shape is driven from a log built
+    the way the real one is: a step block, its annotation, then a cleanup group that fails.
+    """
+    cleanup = (
+        "2026-10-02T03:06:21.0000000Z ##[group]Post job cleanup\n"
+        "2026-10-02T03:06:21.1000000Z   removing temp credentials\n"
+        "2026-10-02T03:06:21.2000000Z ##[endgroup]\n"
+        "2026-10-02T03:06:21.3000000Z ##[error]Post job cleanup failed\n"
+    )
+    fake = FakeGh([_job()], {1: _STEP_BLOCK + cleanup})
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "APPLE_ID: ***" in out, (
+        "the excerpt must be the failing step's block, not the cleanup that followed it"
+    )
+    # The cleanup's annotation is still listed (a second annotation is not hidden)...
+    assert "##[error]Post job cleanup failed" in out
+    # ...but the excerpt itself anchors on the step that failed.
+    excerpt = out.split("the failing step's block")[1]
+    assert "Post job cleanup" not in excerpt, excerpt
+    assert "Process completed with exit code 1." in excerpt
 
 
 def test_a_run_that_cannot_be_listed_is_unmeasurable(mod, monkeypatch, capsys):

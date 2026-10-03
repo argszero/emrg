@@ -118,7 +118,21 @@ def _gh_api(path: str) -> str:
 
 
 def _jobs(run_id: int, repo: str) -> list[dict]:
-    """The run's jobs, as GitHub reports them."""
+    """The run's jobs, as GitHub reports them - or a refusal if the listing is a page.
+
+    The request asks for one page of at most 100 (`gh api` does not follow pagination on
+    its own), and the payload's own `total_count` is what says whether that page was the
+    whole listing. This is checked rather than ignored because the failure it prevents is
+    the tool's own: a run with more than 100 jobs - a large build matrix - whose failure
+    sits past the first page lists 100 successes here, and the caller then prints
+    **"no failed job"** and exits 1. That is a determinate answer to a question the
+    reading did not cover, which is the one thing this tool exists to keep apart from a
+    real one ("never report could-not-measure as a pass"). Measured 2026-10-04 against a
+    payload with `total_count` 150 and 100 successful jobs on the page.
+
+    An **absent** `total_count` is not evidence of truncation - a fixture, or an older API
+    shape - so it is left alone rather than treated as zero.
+    """
     payload = json.loads(_gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"))
     jobs = payload.get("jobs") if isinstance(payload, dict) else None
     if not isinstance(jobs, list):
@@ -126,7 +140,15 @@ def _jobs(run_id: int, repo: str) -> list[dict]:
             f"the jobs listing for run {run_id} carried no 'jobs' list "
             f"(keys: {sorted(payload)[:8] if isinstance(payload, dict) else type(payload).__name__})"
         )
-    return [job for job in jobs if isinstance(job, dict)]
+    found = [job for job in jobs if isinstance(job, dict)]
+    reported = payload.get("total_count")
+    if isinstance(reported, int) and reported > len(found):
+        raise RuntimeError(
+            f"the jobs listing for run {run_id} is one page of {reported}: {len(found)} "
+            "came back, so a job that failed past the first 100 would not be seen - this "
+            "run's cause cannot be answered from one page"
+        )
+    return found
 
 
 def _job_log(job_id: int, repo: str) -> str:
@@ -180,7 +202,7 @@ def _annotation_lines(log: str) -> list[str]:
 
 
 def _cause_excerpt(lines: list[str], tail: int) -> tuple[list[str], int, str]:
-    """`(lines to print, how many the block held, which rule produced them)`.
+    """`(lines to print, how many the block held, which rule produced it)`.
 
     Anchored on the **failure point**, not on the end of the log. Measured 2026-10-04 on
     the v0.3.8 run: the failing step's own block ends at its `##[error]` line (line 6219 of
@@ -189,6 +211,16 @@ def _cause_excerpt(lines: list[str], tail: int) -> tuple[list[str], int, str]:
     cause. The excerpt is therefore the block from the last `##[group]` marker at or before
     that error up to the error line itself - the step's script header, its output, and the
     annotation - bounded to `tail` lines from its end.
+
+    The annotation read is the **first** one, not the last. Steps run in order and the
+    runner's teardown runs after all of them, so the earliest `##[error]` is the earliest
+    thing that went wrong; a log whose post-job cleanup **also** errors carries a second
+    annotation last, and anchoring there printed the cleanup block under this function's
+    own "the failing step's block" label while burying the step that actually failed
+    (measured 2026-10-04 with a two-annotation log - the v0.3.8 run has one, so this is a
+    shape its own reading does not reach). `_annotation_lines` still lists every annotation
+    up to `_MAX_ANNOTATIONS`, so a second one is visible in the output rather than being
+    lost by this choice.
 
     When the log carries no `##[error]` line the whole tail is returned, and the third
     element names which rule answered, because the two are not the same reading: the first
@@ -199,6 +231,7 @@ def _cause_excerpt(lines: list[str], tail: int) -> tuple[list[str], int, str]:
     for index, line in enumerate(lines):
         if _ANNOTATION in line:
             error_at = index
+            break
     if error_at is None:
         return (lines[-tail:] if tail > 0 else [], len(lines), "the log tail (no annotation)")
     start = 0
