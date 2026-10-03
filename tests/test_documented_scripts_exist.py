@@ -58,6 +58,38 @@ def missing_scripts(text: str, exists) -> list[str]:
     return [name for name in referenced_scripts(text) if not exists(name)]
 
 
+#: A script written **bare** - no directory part - as a document's own token. This is the
+#: other half of the same question, and the anchored rule above cannot see it: `scripts/x.py`
+#: carries the directory to search under, while `x.py` written alone carries no anchor at
+#: all, so a reader that looks only for the first shape never reads the second.
+#:
+#: The class is **syntactic**, not defined by what the name currently resolves to. That
+#: distinction is the whole point: a rule whose class is "bare names that resolve into
+#: `scripts/`" would drop a name out of its own class the moment that script was renamed -
+#: exactly when the rule is needed - and would then be silent forever (measured
+#: 2026-10-03, `cyc20261003-132521`). Reading the token that is written, and requiring it to
+#: resolve, is the direction that stays live under the rename it exists to catch.
+#:
+#: Deliberately narrow: the token has to be the *entire* backticked span. `` `x.py --flag` ``
+#: and `` `python3 x.py` `` are prose about a command, and widening to them would need the
+#: exemption list this file's other arm argues against.
+BARE_REFERENCE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:py|sh))`")
+
+
+def bare_referenced_scripts(text: str) -> list[str]:
+    """The bare script names a document writes, deduplicated and sorted."""
+    return sorted(set(BARE_REFERENCE.findall(text)))
+
+
+def unresolvable_bare_scripts(text: str, resolve) -> list[str]:
+    """The bare names that resolve to no tracked file, per the `resolve` predicate.
+
+    `resolve` is injected for the same reason `exists` is above: the real corpus is clean,
+    so only an arm that supplies its own index can show the rule discriminates.
+    """
+    return [name for name in bare_referenced_scripts(text) if not resolve(name)]
+
+
 def _tracked_markdown() -> list[str]:
     """Every tracked Markdown file, relative to the repository root.
 
@@ -81,6 +113,63 @@ def _tracked_markdown() -> list[str]:
 
 def _exists(name: str) -> bool:
     return (REPO_ROOT / "scripts" / name).exists()
+
+
+def _tracked_file_basenames() -> dict[str, list[str]]:
+    """Tracked path basename -> the paths carrying it, over the whole tree.
+
+    The bare-name rule cannot look under `scripts/`: a bare name carries no directory, so
+    the question it asks is "is this a file *this repository* has, anywhere". `git ls-files`
+    answers for the tracked tree, which is also what keeps the rule off host-local state.
+
+    Fails loudly when `git` cannot answer, for the reason `_tracked_markdown` records: an
+    empty index would make every bare name unresolvable, and reporting every document as a
+    fault is the same class of error as reporting none.
+    """
+    proc = subprocess.run(
+        ["git", "ls-files"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert proc.returncode == 0, (
+        f"`git ls-files` failed (rc={proc.returncode}), so the tracked tree was never "
+        f"measured: {proc.stderr.strip()!r}"
+    )
+    index: dict[str, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        if line.strip():
+            index.setdefault(Path(line).name, []).append(line)
+    return index
+
+
+#: `git ls-files` is the expensive part and the index is a property of the tree, not of a
+#: document, so it is read once per process. The first version of this rule built it inside
+#: the predicate, which the real-tree arm then called once per name.
+_TRACKED_BASENAMES: dict[str, list[str]] | None = None
+
+
+def _resolves_to_a_tracked_file(name: str) -> bool:
+    """Whether this repository has a file with that basename. The rule's live predicate.
+
+    Presence, not uniqueness: `__main__.py` is carried by three tracked files
+    (`emrg/__main__.py`, `emrg/client/__main__.py`, `emrg/server/__main__.py`) and a
+    document naming it bare is **not** wrong - it is ambiguous about which one it means,
+    which is a thing to read, not a fault to fail. Asserting uniqueness here would report
+    three correct documents as broken, and the exemptions that would follow are how this
+    rule widens until it is ignored.
+
+    Kept as a named function rather than an inline `name in index` so it is the *one* place
+    the real documents are judged by, and a mutation can be aimed at it: the first version
+    of this rule had this helper and a second, inline spelling in the arm, so mutating the
+    helper changed nothing and the arm survived (measured 2026-10-03,
+    `cyc20261003-132521`).
+    """
+    global _TRACKED_BASENAMES
+    if _TRACKED_BASENAMES is None:
+        _TRACKED_BASENAMES = _tracked_file_basenames()
+    return name in _TRACKED_BASENAMES
 
 
 def test_the_document_class_is_not_empty() -> None:
@@ -189,4 +278,89 @@ def test_the_references_the_documents_carry_are_found_individually() -> None:
     assert len(prompt) >= 5, (
         f"evolution_prompt.md names only {len(prompt)} scripts: {prompt} - it is the "
         f"instruction set every cycle runs, and a reference there is a command"
+    )
+
+
+def test_every_bare_script_a_document_writes_resolves_to_a_tracked_file() -> None:
+    """The second half of the rule: `x.py` written alone is also a command a reader types.
+
+    The anchored rule above reads `scripts/x.py` and cannot see this shape at all, so a
+    rename of `x.py` leaves every bare mention of it pointing at nothing and nothing in the
+    tree notices. Measured on this tree when the arm was written (2026-10-03,
+    `cyc20261003-132521`): 17 distinct bare names across the tracked documents, all of them
+    resolving - a coverage gap, not a current fault, which is why it is a rule and not a fix.
+    """
+    index = _tracked_file_basenames()
+    assert index, (
+        "`git ls-files` answered with no tracked file at all, so every bare name below "
+        "would be reported as unresolvable"
+    )
+    offenders: list[str] = []
+    for name in _tracked_markdown():
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        for unresolved in unresolvable_bare_scripts(text, _resolves_to_a_tracked_file):
+            offenders.append(
+                f"{name} writes `{unresolved}`, which is not the basename of any tracked file"
+            )
+
+    assert not offenders, (
+        "a document writes a bare script name that this repository does not have, so the "
+        "command it gives a reader fails at the shell:\n  " + "\n  ".join(sorted(offenders))
+    )
+
+
+def test_the_bare_name_class_is_not_empty_and_is_read_from_real_documents() -> None:
+    """The premise: the bare-name reader finds something, or the rule above is vacuous.
+
+    An arm that reported "no bare name is unresolvable" over a reader that matched nothing
+    at all would look exactly like a clean tree. This is the same shape as the premise arm
+    for the anchored rule, kept separate because the two readers can fail independently.
+    """
+    carrying = {
+        name: bare_referenced_scripts((REPO_ROOT / name).read_text(encoding="utf-8"))
+        for name in _tracked_markdown()
+    }
+    found = {name: names for name, names in carrying.items() if names}
+    # Measured on this tree 2026-10-03 (`cyc20261003-132521`): **2** tracked documents carry
+    # bare names (`Agent.md` 15, `DEVELOPMENT.md` 3). The floor is the measured population
+    # rather than a round number - this arm exists to notice the reader going blind, and a
+    # floor above what the corpus really has would fail for a reason that is not the reader.
+    assert len(found) >= 2, (
+        f"only {len(found)} tracked document(s) carry a bare script name - the reader is "
+        f"finding almost nothing, so the rule above is not about anything: {found}"
+    )
+    assert len(carrying["Agent.md"] if "Agent.md" in carrying else []) >= 10, (
+        f"Agent.md carries only {carrying.get('Agent.md')} bare names - it is the document "
+        f"this reader was written for, and a reader that stopped reaching it would leave "
+        f"the rule above passing over an empty set"
+    )
+
+
+def test_a_bare_name_that_is_not_a_tracked_file_is_reported() -> None:
+    """The failing direction, on a synthetic document.
+
+    The real corpus is clean, so this is the arm that shows the rule discriminates rather
+    than merely being silent - the same reason the anchored rule has its own.
+    """
+    text = "Then run `bump-version.py 0.3.9` and `rename-me.py` when you are done.\n"
+    found = unresolvable_bare_scripts(text, lambda name: name == "bump-version.py")
+    # `bump-version.py 0.3.9` is not a bare token - the backticked span carries arguments -
+    # so the only bare name here is `rename-me.py`, and it is the only thing reported.
+    assert found == ["rename-me.py"], f"expected exactly the absent name, got {found!r}"
+
+
+def test_a_command_written_in_backticks_is_not_a_bare_name() -> None:
+    """The other direction of the reader, and the boundary this rule deliberately keeps.
+
+    `` `x.py --flag` `` and `` `python3 x.py` `` are prose about a command, not a document's
+    own token for a file. Widening to them would mean reading flags and interpreters as part
+    of a filename, and the exemptions that would follow are the failure mode the anchored
+    rule's own boundary arm argues against.
+    """
+    text = (
+        "Run `check-doc-count.py --measure` or `python3 check-doc-count.py`; the bare form "
+        "`check-doc-count.py` is the one this rule reads.\n"
+    )
+    assert bare_referenced_scripts(text) == ["check-doc-count.py"], (
+        f"a command line was read as a bare file name: {bare_referenced_scripts(text)!r}"
     )
