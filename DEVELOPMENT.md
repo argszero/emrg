@@ -241,8 +241,8 @@ Exit `0` = a wheel's compiled module loaded; `1` = it did **not** (the load deci
 **The host-side counterpart of the release's notarize step.** The macOS job of `build-release.yml` is the only place notarization is verified, and the tag is its only trigger — so a credential Apple refuses fails that step in **seconds**, skips the `release` job because of it, and publishes nothing at all (measured on v0.3.8, run `36956685533`; the other three platforms built green). Ask at home first, with the same three variables the workflow fills from secrets:
 
 ```bash
-APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \\
-    MACOS_NOTARY_TEAM_ID=<team> \\
+APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \
+    MACOS_NOTARY_TEAM_ID=<team> \
     uv run --no-sync python3 scripts/check-notary-credentials.py
 # keep them out of the shell history instead:
 #   uv run --no-sync python3 scripts/check-notary-credentials.py --env-file ~/.emrg/notary.env
