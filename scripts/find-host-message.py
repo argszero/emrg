@@ -6,6 +6,8 @@ Usage
     uv run --no-sync python3 scripts/find-host-message.py --pattern '每个issue应该'
     uv run --no-sync python3 scripts/find-host-message.py --pattern '拒绝' --since 2026-09-26
     uv run --no-sync python3 scripts/find-host-message.py --measure   # the inventory
+                                                                     # (rc 2 if it is
+                                                                     # a lower bound)
 
 Why this exists
 ---------------
@@ -72,9 +74,9 @@ history on the machine. Both spans are printed, so the answer is always bounded 
 span a reader can see; `--since` before either span is reported as ``2`` rather than as
 absence. Messages the host typed into a client that never reached the daemon left no
 record anywhere and are outside both sources — as is any channel this repo does not
-know about. A session row truncated *before* its `"user"` marker is not counted either,
-because the prefilter that makes an 11 MB log affordable is what decides which lines
-reach the parser; that bound is stated in `read_sessions` rather than papered over.
+know about. A session row that cannot be read is counted like any other hole: reading
+every line is what makes that possible, so there is no second, unreported bound on what
+reaches the parser.
 
 Exit codes
 ----------
@@ -83,7 +85,10 @@ the pattern, both sources covered the span, and **no record went unread**. ``2``
 question could not be answered: no source, a `--since` older than what either source
 reaches back to, or a record either source wrote that this reader could not read.
 ``2`` is not a ``1``: an unmeasured window is never evidence of absence, and neither is
-a window with a hole in it.
+a window with a hole in it. **``--measure`` follows the same rule** rather than being an
+exception to it: it prints the rows either way, labels its count a lower bound and exits
+``2`` when there is a hole, because a count is exactly the answer a hole changes in
+silence.
 """
 
 from __future__ import annotations
@@ -307,17 +312,19 @@ def read_sessions(
     compacted one may hold a host message only in the current file. Rows are deduped
     on `(timestamp, session, text)`, so reading both is not a double count.
 
-    A line that passes the `"user"` prefilter and then fails to parse is **counted**
-    (the fifth value): it announced itself as a host row and this reader could not read
-    it, so an absence reported over it is an absence reported over a hole. Measured
-    2026-10-03 (`cyc20261003-083317`): a single truncated row made a phrase it contains
-    answer `NOT FOUND` (rc=1) on a tree where the same row, well formed, answers
-    `FOUND` (rc=0).
+    A line that cannot be read is **counted** (the fifth value), whether it failed to
+    parse or parsed to something that is not a record: it is a record this reader could
+    not read, so an absence reported over it is an absence reported over a hole.
+    Measured 2026-10-03 (`cyc20261003-083317`): a single truncated row made a phrase it
+    contains answer `NOT FOUND` (rc=1) on a tree where the same row, well formed,
+    answers `FOUND` (rc=0).
 
-    The prefilter bounds this count, and that bound is stated rather than papered over:
-    a row truncated *before* its `"user"` marker never reaches the parser and is not
-    counted. Widening it means `json.loads` on every line of an 11 MB log, which is the
-    cost the prefilter exists to avoid.
+    Every line is parsed, with no prefilter. There was one - `'"user"' in line` - and it
+    was the one bound this reader could not report: a row truncated *before* its
+    `"user"` marker was neither read nor counted, so it was invisible rather than
+    named. That bound is now removed rather than documented (the cost is measured in the
+    loop below; `Session.append_message` writes one `json.dumps` record per line, so a
+    line that does not parse is a hole and nothing else).
     """
     messages: list[Message] = []
     scanned: list[Path] = []
@@ -333,13 +340,29 @@ def read_sessions(
             bad = 0
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 for line in handle:
-                    # Cheap prefilter: the expensive part is json.loads on 11 MB of
-                    # one-line records, and a non-user row can never be a host message.
-                    if '"user"' not in line:
-                        continue
+                    # Every line is parsed. There used to be a `'"user"' in line`
+                    # prefilter here, justified by the cost of parsing the whole file -
+                    # and it hid exactly the rows that matter: a row truncated *before*
+                    # its `"user"` marker never reached the parser, so it was neither
+                    # read nor counted, and absence was reported over it.
+                    #
+                    # Measured on this host 2026-10-03 (`cyc20261003-112023`), 17 files /
+                    # 41.3 MB / 24,982 lines: `json.loads` on every line costs **152 ms**
+                    # against **26 ms** for the substring pass - and `read_sessions` is
+                    # not the call that dominates this tool's runtime (a full search is
+                    # ~0.38 s wall). The history writer is
+                    # `json.dumps(entry) + "\n"` per record (`Session.append_message`),
+                    # so one line is one record by construction: a line that does not
+                    # parse is a hole, not a different kind of line, and the honest read
+                    # is the only one that can say so.
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
+                        bad += 1
+                        continue
+                    if not isinstance(row, dict):
+                        # Parses, but is not a record: `[]`/`null`/`"x"`. Same answer as
+                        # unparseable - it announced no role this reader can read.
                         bad += 1
                         continue
                     if row.get("role") != "user":
@@ -377,14 +400,31 @@ def read_sessions(
     return messages, scanned, min(stamps), max(stamps), unreadable
 
 
-def index_roots(index: Path) -> list[Path]:
-    """Session directories the daemon's index names. Unreadable index -> none."""
+def index_roots(index: Path) -> tuple[list[Path], str | None]:
+    """Session directories the daemon's index names, **and why it named none**.
+
+    The second value is the point of this function. It used to return `[]` for every
+    way of failing to read the index, and the caller then searched whatever it could
+    reach (`./.emrg/sessions`) and reported absence over that - a smaller set of
+    directories, silently. Measured 2026-10-03 (`cyc20261003-112023`), a covering log
+    plus an index holding `{}`: a host message that lives in another project's session
+    answered **`NOT FOUND`, rc 1** ("the host never said it") instead of `FOUND`, and the
+    only trace was `1 dir(s)` where an honest tree prints `2`.
+
+    That state is not hypothetical: `{}` is exactly what the index rebuild wrote while
+    its liveness check could not answer (`cyc20261003-110524`), and a missing index is
+    the normal state of a host that has never written one. A caller who knows the set of
+    session directories says so with `--sessions`, and then this reading is not used at
+    all - which is what makes refusing here safe rather than obstructive.
+    """
+    if not index.exists():
+        return [], f"the session index {index} does not exist"
     try:
         payload = json.loads(index.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], f"the session index {index} could not be read ({type(exc).__name__})"
     if not isinstance(payload, dict):
-        return []
+        return [], f"the session index {index} is not a mapping of session to directory"
     seen: list[Path] = []
     for value in payload.values():
         if not isinstance(value, str):
@@ -392,7 +432,9 @@ def index_roots(index: Path) -> list[Path]:
         path = Path(value)
         if path not in seen:
             seen.append(path)
-    return seen
+    if not seen:
+        return [], f"the session index {index} names no session directory"
+    return seen, None
 
 
 def matches(
@@ -475,8 +517,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.sessions:
         roots = [Path(p) for p in args.sessions]
+        # The caller named the set, so the index is not consulted and its state cannot
+        # narrow the search - which is the escape hatch that makes refusing below safe.
+        roots_problem: str | None = None
     else:
-        roots = index_roots(Path(args.index))
+        roots, roots_problem = index_roots(Path(args.index))
         here = Path.cwd() / ".emrg" / "sessions"
         if here.is_dir():
             roots.extend(p for p in here.iterdir() if p.is_dir() and p not in roots)
@@ -486,6 +531,11 @@ def main(argv: list[str] | None = None) -> int:
           f"{log_oldest or 'none'} -> {log_newest or 'none'})")
     print(f"sessions: {len(session_dirs)} dir(s) with a history, "
           f"{ses_oldest or 'none'} -> {ses_newest or 'none'}")
+    if roots_problem:
+        # Printed on every run, not only when a verdict is refused: the count on the
+        # line above is the visible symptom, and a reader who is about to trust it
+        # should see the cause next to it.
+        print(f"sessions: search set incomplete - {roots_problem}")
     if since:
         print(f"window: messages at or after {since}")
 
@@ -493,9 +543,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.measure:
         found, skipped = matches(messages, re.compile(".*"), since, not args.all)
         host = [m for m in found if not m.text.startswith(TASK_PROMPT_PREFIX)]
-        print(f"{len(host)} host message(s), {skipped} scheduled prompt(s) set aside")
+        # The inventory is a *count*, and a count is the one answer a hole changes
+        # silently: "74 host messages" over three unreadable records is a lower bound
+        # printed as an exact number. Measured 2026-10-03 (`cyc20261003-112023`): before
+        # this, `--measure` on a tree with holes printed the count and exited 0 with
+        # nothing on stderr - while the search path in the same run refused (rc 2). The
+        # rows are still printed (the inventory is useful either way); the *verdict* is
+        # what a hole must move, so the count is labelled and the exit code says
+        # unmeasurable.
+        holes = log_holes + session_holes
+        short: list[str] = list(holes)
+        if roots_problem:
+            # A partial search set is a second way this count is a lower bound, and it
+            # is not a hole *inside* a source - it is a source that was never opened.
+            short.append(roots_problem)
+        if short:
+            print(f"{len(host)} host message(s) at least (lower bound - see below), "
+                  f"{skipped} scheduled prompt(s) set aside")
+        else:
+            print(f"{len(host)} host message(s), {skipped} scheduled prompt(s) set aside")
         for message in sorted(host, key=lambda m: m.ts):
             print(describe(message))
+        if short:
+            print("unmeasurable: " + "; ".join(short)
+                  + " - this inventory is a lower bound, not a count of what the host "
+                  "sent", file=sys.stderr)
+            return 2
         return 0
 
     if not args.pattern:
@@ -519,6 +592,14 @@ def main(argv: list[str] | None = None) -> int:
     # Absence is reported only over a span both sources reached back past. A window
     # that neither source covers is unmeasurable, never empty.
     uncovered: list[str] = []
+    if roots_problem:
+        # The session source's *size* is part of its coverage: a search over a set that
+        # could not be read answers a question about a different set of directories, and
+        # the two are indistinguishable in the answer it produces. Measured 2026-10-03
+        # (`cyc20261003-112023`): a covering log + an index holding `{}` turned a real
+        # host message into `NOT FOUND`, with only `1 dir(s)` vs `2` to show for it.
+        uncovered.append(f"{roots_problem}, so the session source searched an "
+                         f"incomplete set of directories")
     for label, oldest, count in (("the log", log_oldest, len(log_files)),
                                  ("session histories", ses_oldest, len(session_dirs))):
         if oldest is None or count == 0:

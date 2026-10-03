@@ -388,6 +388,187 @@ class TestAHostRowThatCannotBeReadIsAHole:
         assert done.returncode == 0, done.stdout + done.stderr
 
 
+class TestASearchSetThatCouldNotBeRead:
+    """The session source's *size* is part of its coverage (cyc20261003-112023).
+
+    The index names every session directory this tool reads, and a failure to read it
+    used to yield `[]` silently: the search then covered only `./.emrg/sessions` and
+    reported absence over that smaller set. Measured: a covering log plus an index
+    holding `{}` turned a host message that lives in another project into `NOT FOUND`
+    (rc 1), with `1 dir(s)` where an honest tree prints `2` as the only trace. `{}` is
+    not hypothetical - it is what the index rebuild wrote while its liveness check could
+    not answer (`cyc20261003-110524`).
+
+    Every other test in this file passes `--sessions`, so this path had no coverage at
+    all until now; the refusal it pins is why the escape hatch matters.
+    """
+
+    def _two_projects(self, tmp_path: Path) -> dict:
+        """A cwd session, another project's session, and a log covering the window."""
+        cwd = tmp_path / "cwd"
+        other = tmp_path / "other"
+        for root, sid, text in ((cwd, "s_cwd", "an unrelated note"),
+                                (other, "s_other", "THE-HOST-MESSAGE-I-WANT")):
+            session = root / ".emrg" / "sessions" / sid
+            session.mkdir(parents=True)
+            (session / "history.jsonl").write_text(
+                session_row("2026-09-15T10:00:00.000000+08:00", text) + "\n",
+                encoding="utf-8")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        # A log that covers the window, so the *log* is never the reason a verdict is
+        # refused - that would make every case below pass for the wrong cause.
+        (log_dir / "emrgd.log").write_text(
+            "2026-09-15 10:00:00 [DEBUG] [-] [-] emrg.server.daemon: a span line\n",
+            encoding="utf-8")
+        return {"cwd": cwd, "other": other, "log_dir": log_dir,
+                "index": tmp_path / "sessions_index.json"}
+
+    def _run(self, tree: dict, *extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--pattern", "THE-HOST-MESSAGE-I-WANT",
+             "--index", str(tree["index"]), "--log-dir", str(tree["log_dir"]), *extra],
+            cwd=str(tree["cwd"]), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+
+    def test_the_index_readable_finds_the_message_in_the_other_project(self, tmp_path):
+        """The control: with an index that names the directory, it is found."""
+        tree = self._two_projects(tmp_path)
+        tree["index"].write_text(json.dumps(
+            {"s_other": str(tree["other"] / ".emrg" / "sessions" / "s_other")}),
+            encoding="utf-8")
+        done = self._run(tree)
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "THE-HOST-MESSAGE-I-WANT" in done.stdout
+
+    @pytest.mark.parametrize("label,body", [
+        ("an empty mapping", "{}"),
+        ("a list", "[]"),
+        ("a string", '"s_cwd"'),
+        ("a truncated file", '{"s_other": "/tmp/x"'),
+    ])
+    def test_an_index_that_cannot_supply_roots_refuses_absence(self, tmp_path, label, body):
+        """The measured defect: rc 1 (`the host never said it`) over a partial search.
+
+        The four bodies are four ways of failing to supply roots, and one verdict
+        covers them: the tool cannot tell a complete small set from a truncated large
+        one, so it must not claim absence over either.
+        """
+        tree = self._two_projects(tmp_path)
+        tree["index"].write_text(body, encoding="utf-8")
+        done = self._run(tree)
+        assert done.returncode == 2, f"{label}: {done.stdout}{done.stderr}"
+        assert "NOT FOUND" not in done.stdout, f"{label}: absence was claimed"
+        assert "incomplete" in done.stdout + done.stderr, done.stdout + done.stderr
+
+    def test_a_missing_index_is_the_same_answer(self, tmp_path):
+        """A host that never wrote an index is indistinguishable from one whose index
+        was lost, and both leave the search unbounded. `--sessions` is the escape."""
+        tree = self._two_projects(tmp_path)
+        assert not tree["index"].exists()
+        done = self._run(tree)
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "does not exist" in done.stdout + done.stderr
+
+    def test_the_escape_hatch_is_naming_the_directories(self, tmp_path):
+        """With `--sessions` the caller owns the set, so nothing is refused and the
+        message is found even though the index is garbage."""
+        tree = self._two_projects(tmp_path)
+        tree["index"].write_text("{}", encoding="utf-8")
+        done = self._run(tree, "--sessions",
+                         str(tree["other"] / ".emrg" / "sessions" / "s_other"))
+        assert done.returncode == 0, done.stdout + done.stderr
+
+    def test_the_inventory_is_a_lower_bound_over_a_partial_set(self, tmp_path):
+        """`--measure` follows the same rule: rows printed, count labelled, rc 2."""
+        tree = self._two_projects(tmp_path)
+        tree["index"].write_text("{}", encoding="utf-8")
+        done = subprocess.run(
+            [sys.executable, str(SCRIPT), "--measure", "--index", str(tree["index"]),
+             "--log-dir", str(tree["log_dir"])],
+            cwd=str(tree["cwd"]), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "at least" in done.stdout, done.stdout
+        assert "lower bound" in done.stderr, done.stderr
+
+    def test_a_match_still_wins_over_a_partial_set(self, tmp_path):
+        """Refusing must not hide a message the tool did find."""
+        tree = self._two_projects(tmp_path)
+        tree["index"].write_text("{}", encoding="utf-8")
+        done = self._run(tree, "--sessions",
+                         str(tree["cwd"] / ".emrg" / "sessions" / "s_cwd"))
+        # the cwd session does not contain it, and --sessions names a complete set,
+        # so this is a real absence rather than a refusal
+        assert done.returncode == 1, done.stdout + done.stderr
+        # `--sessions` is `action="append"`, so two directories are two flags - a bare
+        # second path is a usage error, which the test above found rather than assumed.
+        found = self._run(tree, "--sessions",
+                          str(tree["cwd"] / ".emrg" / "sessions" / "s_cwd"),
+                          "--sessions",
+                          str(tree["other"] / ".emrg" / "sessions" / "s_other"))
+        assert found.returncode == 0, found.stdout + found.stderr
+
+
+class TestARowThePrefilterWouldHaveHidden:
+    """`read_sessions` reads every line (cyc20261003-112023).
+
+    A `'"user"' in line` prefilter stood between the file and the parser, so a row
+    truncated *before* its `"user"` marker was neither read nor counted - the one bound
+    this reader could not report, documented instead of removed. `Session.append_message`
+    writes one `json.dumps` record per line, so a line that does not parse is a hole and
+    nothing else; the cost of reading them all is measured in the function.
+    """
+
+    def _tree(self, tmp_path: Path, raw_lines: list[str]) -> dict:
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        (log_dir / "emrgd.log").write_text(
+            "2026-09-15 10:00:00 [DEBUG] [-] [-] emrg.server.daemon: a span line\n",
+            encoding="utf-8")
+        session = tmp_path / "sessions" / "sess-a"
+        session.mkdir(parents=True)
+        (session / "history.jsonl").write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+        return {"log_dir": log_dir, "sessions": tmp_path / "sessions"}
+
+    def test_a_row_truncated_before_its_user_marker_is_counted(self, tmp_path):
+        """The row is cut inside the leading `{"type": "message", "role": ` so the
+        prefilter could never see `"user"` - and the phrase it contains must not be
+        reported absent."""
+        full = session_row("2026-09-16T10:00:00.000000+08:00", "the phrase is maplesyrup")
+        cut = full.split('"user"')[0]
+        tree = self._tree(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "hi"),
+            cut,
+        ])
+        done = run(["--pattern", "maplesyrup", *both(tree)])
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "could not be read" in done.stderr, done.stderr
+
+    def test_the_same_tree_with_the_row_whole_is_a_real_absence(self, tmp_path):
+        """The control, so the leg above cannot pass by refusing everything."""
+        tree = self._tree(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "hi"),
+            session_row("2026-09-16T10:00:00.000000+08:00", "the phrase is maplesyrup"),
+        ])
+        absent = run(["--pattern", "nobody-said-this", *both(tree)])
+        assert absent.returncode == 1, absent.stdout + absent.stderr
+        found = run(["--pattern", "maplesyrup", *both(tree)])
+        assert found.returncode == 0, found.stdout + found.stderr
+
+    def test_a_line_that_parses_to_a_non_record_is_a_hole_too(self, tmp_path):
+        """`[]` is on disk, so a record the writer meant is not readable as one."""
+        tree = self._tree(tmp_path, [
+            session_row("2026-09-15T10:00:00.000000+08:00", "hi"),
+            "[]",
+        ])
+        done = run(["--pattern", "nobody-said-this", *both(tree)])
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "could not be read" in done.stderr, done.stderr
+
+
 class TestTheTemplateCarriesTheStep:
     """A tool nothing tells a cycle to run is dead code (measured, this cycle)."""
 
