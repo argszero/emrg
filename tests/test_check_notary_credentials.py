@@ -83,6 +83,13 @@ if scenario == "server_error":
 if scenario == "transport":
     sys.stderr.write("Error: unable to connect to Apple (DNS lookup failed)\\n")
     sys.exit(1)
+if scenario == "history_null":
+    # `--output-format json` with a `history` of `null`: exit 0 and the asked-for JSON, so
+    # the shape reads as a pass, and the count used to reach `len(None)` — an uncaught
+    # `TypeError` out of `main`, which is exit 1, this script's code for Apple's refusal.
+    json.dump({"history": None}, sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
 if scenario == "not_json":
     # A wrapper or a wrong `xcrun` answering successfully with something else: rc 0 is not
     # a credentials verdict unless the asked-for answer came back.
@@ -116,6 +123,7 @@ def _run(
     credentials: bool = True,
     xcrun: str | None = None,
     empty_path: bool = False,
+    env_file: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -133,6 +141,8 @@ def _run(
         env[TEAM_ID_VAR] = "TEAMID1234"
 
     argv = [sys.executable, str(SCRIPT)]
+    if env_file is not None:
+        argv += ["--env-file", env_file]
     if xcrun is not None:
         argv += ["--xcrun", xcrun]
     elif empty_path:
@@ -579,3 +589,149 @@ def test_the_documented_command_carries_its_variables_into_the_preflight(tmp_pat
             f"the documented command did not carry {name} into the preflight.\n"
             f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
         )
+
+
+# ── The option the documented remedy offers cannot answer with a refusal ──────
+#
+# `DEVELOPMENT.md` offers `--env-file` as the way to "keep them out of the shell history",
+# and the paragraph directly under that block defines the exit codes the reader will act
+# on: `1` = "Apple refused them". Measured on PR #1828's head `a1b181d1` (2026-10-03,
+# `cyc20261003-191957`), that option ended the process at exit **1** through an uncaught
+# exception for all three ordinary accidents — a path that does not exist, a directory, and
+# a file that is not UTF-8 — so the documented remedy told a host with a typo to go and
+# rotate a password Apple had never been asked about.
+#
+# This is the same conflation the file's own header calls load-bearing for every other
+# lookalike: a reading of *this host's* file path is not a reading of the account. The arms
+# below are what the pins above cannot be — executed, and in both directions.
+
+#: A file that is not valid UTF-8. Written as bytes because that is the whole point: the
+#: `open(..., encoding="utf-8")` in `_read_env_file` is what fails, not a missing path.
+_NOT_UTF8 = b"# notary credentials\nAPPLE_ID=dev@example.invalid\n\xff\xfe\x00broken\n"
+
+
+def _broken_env_file(tmp_path: Path) -> list[tuple[str, str]]:
+    """The three shapes a wrong `--env-file` takes, with a name for each arm."""
+    directory = tmp_path / "a-directory"
+    directory.mkdir(exist_ok=True)
+    not_utf8 = tmp_path / "not-utf8.env"
+    not_utf8.write_bytes(_NOT_UTF8)
+    return [
+        ("a path that does not exist", str(tmp_path / "no-such-notary.env")),
+        ("a directory", str(directory)),
+        ("a file that is not UTF-8", str(not_utf8)),
+    ]
+
+
+@_posix_only
+@pytest.mark.parametrize(
+    "shape", ["a path that does not exist", "a directory", "a file that is not UTF-8"]
+)
+def test_an_unreadable_env_file_is_never_apples_refusal(tmp_path, shape) -> None:
+    """`unmeasurable`, named, and Apple is never asked.
+
+    The scenario is `refused` and the credentials *are* in the environment, so every wrong
+    way of handling this reaches a different observable: an escaping exception prints a
+    traceback and exits 1 (the defect), swallowing the error lets the probe run and prints
+    `REFUSED` (the mutation the assertion below catches), and only reporting it as
+    unmeasurable leaves the exit code at 2 with neither.
+    """
+    path = dict(_broken_env_file(tmp_path))[shape]
+
+    result = _run(tmp_path, "refused", env_file=path)
+
+    assert result.returncode == 2, (
+        f"an unreadable --env-file ({shape}) did not answer `could not measure` — exit 1 is "
+        f"this script's code for 'Apple refused the credentials', which is a verdict about "
+        f"an account that was never asked about.\nstdout={result.stdout!r}\n"
+        f"stderr={result.stderr!r}"
+    )
+    assert "Traceback (most recent call last)" not in result.stderr, (
+        f"an unreadable --env-file ({shape}) raised out of the script instead of being "
+        f"reported.\nstderr={result.stderr!r}"
+    )
+    assert "--env-file" in result.stdout and path in result.stdout, (
+        f"the reading does not name the file it could not read ({shape}), so the host is "
+        f"left to guess which path was wrong.\nstdout={result.stdout!r}"
+    )
+    assert "REFUSED" not in result.stdout, (
+        "the credentials were asked about anyway — the failure to read the file must not be "
+        f"silently downgraded into a probe with whatever else was in the environment.\n"
+        f"stdout={result.stdout!r}"
+    )
+
+
+@_posix_only
+def test_a_readable_env_file_still_carries_the_variables(tmp_path) -> None:
+    """The control: the option has to keep working for the case it exists for.
+
+    Without this, returning 2 for every `--env-file` would satisfy the arm above while
+    making the documented alternative useless.
+    """
+    env_file = tmp_path / "notary.env"
+    env_file.write_text(
+        "# comment, ignored\n"
+        "\n"
+        f"{APPLE_ID_VAR}=from-the-file@example.invalid\n"
+        f"{PASSWORD_VAR}={PASSWORD}\n"
+        f"{TEAM_ID_VAR}=TEAMIDFROMFILE\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path, "accepted", credentials=False, env_file=str(env_file))
+
+    assert result.returncode == 0, (
+        f"a readable --env-file did not reach the verdict.\nstdout={result.stdout!r}\n"
+        f"stderr={result.stderr!r}"
+    )
+    assert f"apple-id: from-the-file@example.invalid" in result.stdout, (
+        "the variables in the file did not reach the preflight — the option is documented as "
+        "the way to keep them out of the shell history, so this is the reading it must give."
+    )
+
+
+@_posix_only
+def test_a_history_that_is_not_a_list_is_not_a_pass(tmp_path) -> None:
+    """Exit 0 with the asked-for JSON is a pass only while its shape is the one expected.
+
+    `history: null` is the shape that used to reach `len(None)`: an uncaught `TypeError`,
+    exit 1, and the reader sent to rotate a password that had just been proven to work.
+    """
+    result = _run(tmp_path, "history_null")
+
+    assert result.returncode == 2, (
+        f"a `history` that is not a list was not reported as unmeasurable.\n"
+        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    assert "Traceback (most recent call last)" not in result.stderr, result.stderr
+    assert "NoneType" in result.stdout, (
+        f"the reading does not name the shape it got, so the host cannot tell an Apple "
+        f"change from a wrapper's answer.\nstdout={result.stdout!r}"
+    )
+
+
+def test_the_documented_option_is_one_the_script_defines() -> None:
+    """Premise: the remedy the docs offer is an option the script still has.
+
+    `DEVELOPMENT.md` offers `--env-file`, and the arms above execute it — but a document and
+    a command line are two readers of one contract, and only the pair being in step makes
+    the reading the host acts on the reading the script gives. A stale doc is the failure
+    this pins, and it is a real one here: the paragraph under the block defines `1` as
+    "Apple refused them", so an option that leaves the command line silently changes what a
+    host is told when they run it.
+    """
+    documented = (REPO / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "--env-file" in documented, (
+        "DEVELOPMENT.md no longer offers --env-file — if the option was removed, the arms "
+        "above are now about nothing and this comment is the only pointer to them"
+    )
+    assert '"--env-file"' in script, (
+        "DEVELOPMENT.md documents `--env-file` and the script no longer defines it: the "
+        "remedy in the docs is a command that cannot run"
+    )
+    assert "Exit 1 is spent on Apple's answer and on nothing else" in script, (
+        "the script no longer states the rule that makes exit 1 mean what the documented "
+        "paragraph under the block says it means (`1` = Apple refused them)"
+    )
