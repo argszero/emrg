@@ -57,21 +57,37 @@ def _load(index_path: Path) -> dict[str, str]:
 
 
 def _write(data: dict[str, str], index_path: Path) -> None:
-    """Atomically write the index (tmp file + os.replace); never raises."""
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        dir=str(index_path.parent), prefix=".sessions_index_", suffix=".tmp"
-    )
+    """Atomically write the index (tmp file + os.replace); never raises.
+
+    The claim is load-bearing rather than decorative: `Session._save_meta_with_title`
+    calls this on every meta save — session creation, every append, compact, rename,
+    clear and delete — and its comment says why it may ignore the result ("a failed
+    index write must not break session creation or message persistence").
+
+    It was false for the two statements that come **before** the guard. Measured
+    2026-10-04: a parent that is a regular file raises `FileExistsError` out of
+    `mkdir`, and a directory that refuses new files raises `PermissionError` out of
+    `tempfile.mkstemp` — both `OSError`s the `except` below never saw, so the raise
+    travelled up the meta-save path the comment says cannot be broken. The fix is
+    the contract the docstring already states: everything that can fail is inside
+    the guard, and the cleanup runs only when there is a temp file to clean.
+    """
+    tmp_path: str | None = None
     try:
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(index_path.parent), prefix=".sessions_index_", suffix=".tmp"
+        )
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, index_path)
     except OSError:
         logger.warning("failed to write sessions index %s", index_path, exc_info=True)
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def _upsert(session_id: str, session_dir: str, index_path: Path) -> None:

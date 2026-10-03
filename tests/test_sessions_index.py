@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import shutil
 from pathlib import Path
+
+import pytest
 
 from emrg.session import Session
 from emrg.sessions_index import (
@@ -206,3 +210,67 @@ def test_sessions_index_path_is_under_config_dir():
     """The default index path lives under ~/.emrg (config_dir)."""
     p = sessions_index_path()
     assert p.name == "sessions_index.json"
+
+
+# ── the write keeps the promise its caller relies on ──────────────────
+
+_posix_only = pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "the arm denies a directory by mode, which Windows does not enforce — without "
+        "POSIX permissions the run measures nothing rather than the guard."
+    ),
+)
+
+
+class TestTheWriteKeepsItsPromise:
+    """`_write` says "never raises", and that claim is why its caller ignores it.
+
+    `Session._save_meta_with_title` runs on every meta save (create, append, compact,
+    rename, clear, delete) and its comment says the index write "must not break
+    session creation or message persistence". Measured 2026-10-04: the two statements
+    before the guard — `mkdir` and `mkstemp` — raised out of this function, so a
+    host whose index directory cannot be written could not save a session at all.
+    """
+
+    def test_a_parent_that_is_a_file_does_not_raise(self, tmp_path: Path, caplog):
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_text("x", encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger="emrg.sessions_index"):
+            _write({"a": "b"}, blocker / "sessions_index.json")  # must not raise
+        assert blocker.read_text(encoding="utf-8") == "x", "the blocker is untouched"
+        assert "failed to write sessions index" in caplog.text, "and it is reported"
+
+    @_posix_only
+    def test_a_directory_that_refuses_new_files_does_not_raise(self, tmp_path: Path, caplog):
+        target_dir = tmp_path / "ro"
+        target_dir.mkdir()
+        os.chmod(target_dir, 0o500)
+        try:
+            with caplog.at_level(logging.WARNING, logger="emrg.sessions_index"):
+                _write({"a": "b"}, target_dir / "sessions_index.json")  # must not raise
+        finally:
+            os.chmod(target_dir, 0o700)
+        assert "failed to write sessions index" in caplog.text
+
+    def test_a_target_that_can_be_written_is_still_written(self, tmp_path: Path):
+        """Control leg: the guard must not turn a success into a silent nothing."""
+        target = tmp_path / "nested" / "sessions_index.json"
+
+        _write({"a": "b"}, target)
+
+        assert json.loads(target.read_text(encoding="utf-8")) == {"a": "b"}
+        leftovers = [p.name for p in target.parent.iterdir() if p.name != target.name]
+        assert leftovers == [], f"no temp file may survive a successful write; got {leftovers!r}"
+
+    def test_a_failed_write_leaves_no_temp_file_behind(self, tmp_path: Path):
+        """The cleanup has to survive the guard moving: a temp file is only unlinked
+        when one was really made."""
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_text("x", encoding="utf-8")
+
+        _write({"a": "b"}, blocker / "sessions_index.json")
+
+        assert not list(tmp_path.glob(".sessions_index_*")), (
+            "nothing may be left in the directory the write failed in"
+        )
