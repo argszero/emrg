@@ -102,7 +102,7 @@ def _redirect_std_streams() -> None:
 
 
 def main() -> None:
-    from emrg.config import load_config
+    from emrg.config import CONFIG_READ_ERRORS, config_path, load_config
 
     _configure_logging()
     _redirect_std_streams()
@@ -113,7 +113,37 @@ def main() -> None:
     # end in — also records the effective PATH in emrgd.log, where the next
     # occurrence is one grep away.
     ensure_tool_dirs()
-    config = load_config()
+    try:
+        config = load_config()
+    except CONFIG_READ_ERRORS as exc:
+        # The daemon's own config could not be read, so there is no server to run
+        # — and this is the one stop path that used to reach neither the log nor
+        # the record, because it happens *above* the try below. Measured
+        # 2026-10-03 (`cyc20261003-211427`) by running this entry as a child with
+        # HOME pinned to a scratch tree, for each shape in `CONFIG_READ_ERRORS`:
+        #
+        #     config        child rc  emrgd-exit.log  what the host was told
+        #     not UTF-8     1         NO RECORD       nothing but the PATH line
+        #     corrupt TOML  1         NO RECORD       nothing but the PATH line
+        #     missing       1         NO RECORD       nothing but the PATH line
+        #     valid         143       A RECORD        the exit record, reason named
+        #
+        # The traceback went to `emrgd-crash.log`, which the client's failed-start
+        # explainer deliberately does not read: it reads `emrgd.log` on purpose,
+        # so a cause that never reaches the logging system is a cause the host is
+        # not shown. The row for a valid config is the control — the record is
+        # written on every path that reaches `run_server`, and only those.
+        #
+        # So both halves are written here: the cause through the logger (one line,
+        # naming the file), and the durable record the module above promises for
+        # *every* daemon stop, normal or abnormal.
+        cfg_path = config_path()
+        cause = f"{type(exc).__name__}: {exc}"
+        logging.getLogger("emrg.server").critical(
+            "daemon cannot start: %s could not be read — %s", cfg_path, cause
+        )
+        DaemonExit(f"config: {cause}", 1, None).write_record()
+        sys.exit(1)
     try:
         result = asyncio.run(run_server(config.llm))
     except KeyboardInterrupt:
