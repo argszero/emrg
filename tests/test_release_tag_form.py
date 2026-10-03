@@ -44,6 +44,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.tool_preflight import starts
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -171,8 +172,8 @@ def test_the_tag_check_refuses_a_lightweight_tag(tmp_path) -> None:
     `--jq '.object.type'`.
     """
     shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("no POSIX shell is available for the ground-truth run")
+    if not starts(shell):
+        pytest.skip("no POSIX shell that starts is available for the ground-truth run")
     jobs = _jobs()
     steps = (jobs.get("verify-tag") or {}).get("steps") or []
     # Which body this arm executes: the one that asks the API for the tag object's type,

@@ -36,6 +36,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.tool_preflight import starts
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-patch-files.py"
@@ -297,8 +298,10 @@ def test_a_real_git_patch_agrees_with_gits_own_file_list(tmp_path, mod, capsys):
     import shutil
     import subprocess
 
-    if shutil.which("git") is None:
-        pytest.skip("git is not reachable")
+    if not starts(shutil.which("git")):
+        # "not reachable" has two states - a name `which` cannot find, and a name that
+        # resolves and cannot run - and this is the gate that has to tell them apart.
+        pytest.skip("no `git` that starts is reachable")
 
     def run(*args):
         return subprocess.run(

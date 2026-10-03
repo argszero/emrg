@@ -38,6 +38,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.tool_preflight import starts
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -214,8 +215,8 @@ def _run_step(tmp_path, scenario: str, rejection: str = "no rejection detail"):
     the WSL launcher, and a run that measures its absence says nothing about the step.
     """
     shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("no POSIX shell is available for the ground-truth run")
+    if not starts(shell):
+        pytest.skip("no POSIX shell that starts is available for the ground-truth run")
 
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)

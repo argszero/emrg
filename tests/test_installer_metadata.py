@@ -38,6 +38,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.tool_preflight import starts
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MAKE_INSTALLER = REPO_ROOT / "packaging" / "make-installer.sh"
@@ -154,8 +155,8 @@ def _render(tmp_path, version: str) -> str:
     **测不到**，不是通过（这与「读文本」是两回事，也是本函数的全部价值）。
     """
     shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("本机没有 bash —— 渲染路径无法测量（CI 冒烟步骤用的正是 bash）")
+    if not starts(shell):
+        pytest.skip("本机没有能启动的 bash —— 渲染路径无法测量（CI 冒烟步骤用的正是 bash）")
     script = tmp_path / "gen.sh"
     script.write_text("\n".join(_heredoc_lines()) + "\n", encoding="utf-8")
     env = {

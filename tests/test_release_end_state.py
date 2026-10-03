@@ -38,6 +38,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.tool_preflight import starts
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -267,8 +268,8 @@ def test_the_end_state_check_refuses_every_way_a_release_can_be_incomplete(tmp_p
     `sleep 10` would make this arm cost a minute to measure a loop it is not testing.
     """
     shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("no POSIX shell is available for the ground-truth run")
+    if not starts(shell):
+        pytest.skip("no POSIX shell that starts is available for the ground-truth run")
     body = str(_end_state_step()["run"])
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -397,8 +398,8 @@ def test_the_end_state_check_is_what_convicts_a_draft_release(tmp_path) -> None:
     the answer, which is why the arm above executes the body rather than reading it.
     """
     shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("no POSIX shell is available for the ground-truth run")
+    if not starts(shell):
+        pytest.skip("no POSIX shell that starts is available for the ground-truth run")
     body = str(_end_state_step()["run"])
     assert "exit 1" in body, "the step carries no failing exit for the arm to flatten"
     flattened = body.replace("exit 1", "exit 0")

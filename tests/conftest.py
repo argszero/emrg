@@ -137,12 +137,6 @@ def _redirect_the_config_path(monkeypatch, tmp_path):
     monkeypatch.setattr(cr_mod, "config_path", lambda: cfg_path)
 
 
-#: `git` executable path -> whether that executable actually starts. Keyed by the
-#: resolved path, not by "is it on PATH", so a dead shim and a real git are two
-#: entries and a test that repoints PATH gets its own answer rather than a cached one.
-_GIT_RUNS: dict[str, bool] = {}
-
-
 def _starts(exe: str | None) -> bool:
     """Whether `exe` is a program that starts, as opposed to a name that resolves.
 
@@ -153,27 +147,13 @@ def _starts(exe: str | None) -> bool:
     this host has for `npm`/`node`/`npx`, whose asdf shims point at a removed
     interpreter. So the probe starts the program and reads its exit code.
 
-    Cached per path because the fixture is autouse: this runs once per distinct git
-    rather than once per test.
+    The discriminator itself lives in `tests/tool_preflight.py`, because the same
+    question is asked by the release and packaging tests and by the node-count probe;
+    this is the fixture's own name for it (`cyc20261003-150951`).
     """
-    if not exe:
-        return False
-    if exe not in _GIT_RUNS:
-        import subprocess
+    from tests.tool_preflight import starts
 
-        try:
-            proc = subprocess.run(
-                [exe, "--version"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
-            )
-            _GIT_RUNS[exe] = proc.returncode == 0
-        except (OSError, subprocess.SubprocessError, ValueError):
-            _GIT_RUNS[exe] = False
-    return _GIT_RUNS[exe]
+    return starts(exe)
 
 
 @pytest.fixture(autouse=True)

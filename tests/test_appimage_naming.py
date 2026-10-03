@@ -34,6 +34,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.tool_preflight import starts
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = REPO_ROOT / "packaging" / "make-installer.sh"
@@ -90,8 +91,8 @@ def _run_line(tmp_path: Path, line: str, machine: str, **env: str) -> tuple[list
     一个没生效的替身会让本文件静默地量宿主，而不是量被测的那一行。
     """
     shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("no POSIX shell is available to execute the installer line")
+    if not starts(shell):
+        pytest.skip("no POSIX shell that starts is available to execute the installer line")
     dist = tmp_path / "dist"
     (dist / "artifacts").mkdir(parents=True)
     script = f'uname() {{ echo "{machine}"; }}\necho "PROBE:$(uname -m)"\n{line}\n'

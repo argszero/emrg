@@ -22,11 +22,11 @@ This is not a hypothetical host shape: it is this machine's state for
 
 What is pinned
 --------------
-* `_starts` — the discriminator — in **both** directions, on real files this test
-  creates, because a check that cannot produce its own failure state is the defect
-  one level up.
-* that `which` and `_starts` really disagree on a dead shim (the measured pair the
-  old gate collapsed), and
+* `starts` — the discriminator, `tests/tool_preflight.py` — in **both** directions, on
+  real files this test creates, because a check that cannot produce its own failure
+  state is the defect one level up.
+* that `which` and `starts` really disagree on a dead shim (the measured pair the old
+  gate collapsed), and
 * the fixture's own decision on a PATH this test owns.
 """
 from __future__ import annotations
@@ -36,6 +36,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from tests.tool_preflight import starts
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -83,18 +85,18 @@ def test_starts_reads_the_exit_code_not_the_name(tmp_path):
 
     dead = _dead_git(tmp_path / "deadbin")
     assert dead.exists(), "the shim has to exist for this test to be about running it"
-    assert conftest._starts(str(dead)) is False, (
+    assert starts(str(dead)) is False, (
         "a program that exists and cannot run is not a program that starts — and "
         "that is exactly the state `shutil.which` calls present"
     )
 
     real = shutil.which("git") or sys.executable
-    assert conftest._starts(real) is True, (
+    assert starts(real) is True, (
         f"{real!r} runs, so it must be reported as starting, or the fixture would "
         "repair a host that needs nothing"
     )
-    assert conftest._starts(None) is False
-    assert conftest._starts(str(tmp_path / "not-there" / "git")) is False
+    assert starts(None) is False
+    assert starts(str(tmp_path / "not-there" / "git")) is False
 
 
 def test_which_and_starts_disagree_on_a_dead_shim(tmp_path, monkeypatch):
@@ -118,7 +120,7 @@ def test_which_and_starts_disagree_on_a_dead_shim(tmp_path, monkeypatch):
         "the shim is supposed to be unable to run; a passing `git --version` means "
         "this test built a working git and so measures nothing"
     )
-    assert conftest._starts(shutil.which("git")) is False, (
+    assert starts(shutil.which("git")) is False, (
         "`which` found a path and the program did not start — the fixture must not "
         "read that as 'git already reachable'"
     )
@@ -149,7 +151,7 @@ def test_the_repair_is_reached_when_path_git_cannot_start(tmp_path, monkeypatch)
     good = goodbin / "git"
     good.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
     good.chmod(0o755)
-    assert conftest._starts(str(good)) is True, "the stand-in git must start"
+    assert starts(str(good)) is True, "the stand-in git must start"
 
     monkeypatch.setenv("PATH", str(deadbin.parent))
     monkeypatch.setattr(git_utils, "_cached_tool_path", lambda tool: str(good))
