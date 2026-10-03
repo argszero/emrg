@@ -167,6 +167,18 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "verdict, so the rule is measured here even though the member is not in the bare "
         "loop above"
     ),
+    "check-unlanded-branches.py": (
+        "takes an optional ref glob, and its default subject is a *fetched remote "
+        "namespace* (`refs/remotes/origin/fix/*`): a bare checkout has no such refs, and "
+        "the guard's documented answer to matching none is rc 2 (`no ref matches ... there "
+        "is nothing to audit here`), so the bare run this suite performs is not its "
+        "invocation. It does read this checkout - git refs and the blobs behind them, root "
+        "derived from its own file, the same local-git subject `check-merge-landed.py` was "
+        "reclassified for - and it names it on its first line before any verdict, which "
+        "even the rc 2 path prints. That naming IS verified rather than classified: "
+        "`tests/test_check_unlanded_branches.py` builds `tmp_path` repositories, points the "
+        "guard's root at each, and pins the line against the tree it was pointed at"
+    ),
 }
 
 #: Answers about something other than a working tree, so the rule does not apply - each
