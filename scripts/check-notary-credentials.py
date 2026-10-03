@@ -52,8 +52,8 @@ Exit codes, the family's contract:
 
 Usage:
 
-    APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \\
-        MACOS_NOTARY_TEAM_ID=<team> \\
+    APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \
+        MACOS_NOTARY_TEAM_ID=<team> \
         uv run --no-sync python3 scripts/check-notary-credentials.py
 """
 
