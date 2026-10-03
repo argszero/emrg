@@ -1075,6 +1075,10 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal _resume_pending_sid
         nonlocal _replay_pending
 
+        # Told at most once per session: a server that repeats a frame this
+        # client cannot read would otherwise fill the screen with the same row.
+        _frame_warned = False
+
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
             nonlocal conn, busy, _elapsed_task
@@ -2091,6 +2095,28 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     continue
 
             except json.JSONDecodeError: pass
+            except Exception:
+                # One frame this client cannot read must not end the reader
+                # (measured 2026-10-04). `read_server` is the only consumer of
+                # server frames, so when it raises the whole loop ends: the
+                # websocket stays open, the client keeps rendering as if it
+                # were connected, and no frame it is sent is ever processed
+                # again — silently, because the task's exception is only
+                # retrieved at shutdown. The daemon's mirrored loop was
+                # hardened for exactly this (`daemon.py` `_process_message`);
+                # the body below reads ~114 frame fields, so which of them the
+                # next daemon version re-shapes is not knowable here. Log it,
+                # tell the host once, and keep reading. A `ConnectionClosed`
+                # raised by one of the body's own sends lands here too and costs
+                # nothing: the loop's next iteration is its own `recv`, which
+                # re-raises it into the `_reconnect()` branch above (R11) — only
+                # the silent death is gone, not the reconnect path.
+                logger.exception("ignored a server frame this client could not read")
+                if not _frame_warned:
+                    _frame_warned = True
+                    chat.add("system", "⚠ Ignored a server frame this client could not read — see .emrg/emrg-client.log")
+                    chat.dirty = True
+                    term.render()
 
     read_task = asyncio.create_task(read_server())
 

@@ -8,6 +8,7 @@ emrg.client.daemon_manager.asyncio.create_subprocess_exec。
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import tempfile
@@ -621,6 +622,41 @@ class TestDaemonConnection:
     def test_recv_empty_frame_returns_none(self):
         conn = self._conn(["   "])
         assert asyncio.run(conn.recv(timeout=1)) is None
+
+    @pytest.mark.parametrize("frame", ["[]", "42", '"hi"', "true", "null", '["a"]'])
+    def test_recv_refuses_a_valid_json_non_object(self, frame, caplog):
+        """有效 JSON 但不是对象 ⇒ 拒绝并点名，不是原样交出（2026-10-04）。
+
+        `recv` 的返回类型是 `dict | None`，`read_stream` 声明
+        `AsyncIterator[dict]`，调用方按字段读（`data.get("type")`）。把一个 list
+        交回去，等于把「这帧我读不了」变成消费者里的一次 AttributeError —— 而
+        TUI 读循环只接 `json.JSONDecodeError`，那一帧会顺手结束整条读取循环。
+        """
+        conn = self._conn([frame])
+        with caplog.at_level(logging.WARNING, logger="emrg.client.daemon_manager"):
+            data = asyncio.run(conn.recv(timeout=1))
+        assert data is None
+        assert any("non-object frame ignored" in r.getMessage() for r in caplog.records), \
+            f"拒绝必须点名（{frame!r}）"
+
+    def test_recv_still_returns_an_object_frame(self):
+        """控制腿：合法对象帧照旧通过——上面的拒绝不是「什么都不给」。"""
+        conn = self._conn([json.dumps({"type": "pong", "n": 1})])
+        assert asyncio.run(conn.recv(timeout=1)) == {"type": "pong", "n": 1}
+
+    def test_read_stream_never_yields_a_non_object(self):
+        """`read_stream` 声明 `AsyncIterator[dict]`，就得只吐 dict。"""
+        conn = self._conn(["[]", json.dumps({"a": 1}), "42"])
+
+        async def _run():
+            out = []
+            async for frame in conn.read_stream():
+                out.append(frame)
+                if frame == {"a": 1}:
+                    break
+            return out
+
+        assert asyncio.run(_run()) == [{"a": 1}]
 
     def test_recv_connection_closed_propagates(self):
         from websockets.exceptions import ConnectionClosedError

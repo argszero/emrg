@@ -733,6 +733,12 @@ class DaemonConnection:
         - timeout=None：阻塞直到有帧（asyncio.wait_for(coro, None) 无超时）
         - timeout=N：超时返回 None（静默，不抛）
         - 坏 JSON/空帧/空白帧：返回 None + log warning（不返回 error dict）
+        - **有效 JSON 但不是对象**（`[]` / `42` / `"x"` / `true`）：同样返回 None +
+          log warning。本方法的返回类型是 `dict | None`，`read_stream` 声明的是
+          `AsyncIterator[dict]`，而调用方按字段读（`data.get("type")`）：把一个
+          list 交过去，就是把「这帧我读不了」翻译成调用方的一次 AttributeError。
+          daemon 侧对它自己读的每个 json 载荷都做了同一件事
+          （`emrg/server/daemon.py` 的 `if not isinstance(data, dict)`）。
         - ConnectionClosed：不捕获，向上传播（R11——否则断线重连功能被破坏）
         """
         try:
@@ -745,10 +751,14 @@ class DaemonConnection:
         if not text:
             return None
         try:
-            return json.loads(text)
+            payload = json.loads(text)
         except json.JSONDecodeError:
             logger.warning("bad JSON frame ignored: %.120r", text[:120])
             return None
+        if not isinstance(payload, dict):
+            logger.warning("non-object frame ignored: %.120r", text[:120])
+            return None
+        return payload
 
     async def read_stream(self) -> AsyncIterator[dict]:
         """事件流 yield 每帧（GUI 桥接用，Phase 2 预留）。
