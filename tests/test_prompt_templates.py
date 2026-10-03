@@ -49,6 +49,7 @@ from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.server import scheduler as mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.scheduler import TaskHandler
+from tests.shell_lines import continues as _continues
 from tests.task_handler_factory import make_handler
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1469,6 +1470,21 @@ def _create_calls(text: str) -> list[str]:
 
     Only fenced blocks are read: the template also *talks* about `gh pr create` in prose and in
     capability tables, and a rule about the command must not be satisfiable by the sentence.
+
+    "Its continuations" is the **shell's** question, asked of `tests/shell_lines` — an odd run
+    of trailing backslashes. Read as `line.rstrip().endswith("\\")` until 2026-10-03, which is
+    `True` for a run of two: a shell reads `a \\` as a whole number of escaped backslashes, ends
+    the command there, and runs the next line as a command of its own. Measured with a stub
+    `gh` on the template's own block (`cyc20261003-200222`):
+
+        shipped (`\\` x1) -> gh called with: pr create -R o/r --head user:br --title x
+        doubled (`\\` x2) -> gh called with: pr create -R o/r \\
+                             line 2: --head: command not found
+                             line 3: --title: command not found
+
+    So the doubled shape ships a **bare** create call and the guard below still found the head —
+    on a template whose whole PR step does not run. The two shapes are distinguished in the
+    assertions added with this reading, not only by the template happening to be correct today.
     """
     calls: list[str] = []
     for block in _fenced_blocks(text):
@@ -1477,7 +1493,7 @@ def _create_calls(text: str) -> list[str]:
                 continue
             call = [line]
             j = i
-            while block[j].rstrip().endswith("\\") and j + 1 < len(block):
+            while _continues(block[j]) and j + 1 < len(block):
                 j += 1
                 call.append(block[j])
             calls.append(" ".join(part.strip() for part in call))
@@ -1708,3 +1724,106 @@ def test_the_prompt_path_scan_answers_both_ways() -> None:
     # The `.github/` exclusion is a decision rather than an oversight — the open-source flow reads the
     # *target* project's conventions. Pinned here so widening the scope is a visible change.
     assert _repo_paths_named_in("cat .github/pull_request_template.md 2>/dev/null") == []
+
+
+# ── The create call has to be a command the shell will run ───────────────────
+#
+# The join above asks "does this line continue" of the **shell**, and the answer it changed
+# to is an odd run of trailing backslashes (`tests/shell_lines`, one home for that rule).
+# Measured 2026-10-03 (`cyc20261003-200222`) with a stub `gh` on the template's own block:
+#
+#     shipped (`\` once)  -> gh called with: pr create -R o/r --head user:br --title x
+#     doubled (`\` twice) -> gh called with: pr create -R o/r \
+#                            line 2: --head: command not found
+#                            line 3: --title: command not found
+#
+# So the doubled shape ships a **bare** `gh pr create -R <owner>/<repo>` — no head, no title,
+# no body — and the three following lines are each run as a command that does not exist. A
+# reader that asks `endswith("\\")` joins them anyway, finds `--head` on line 2, and passes.
+#
+# This is the shape the repository has already shipped twice: `DEVELOPMENT.md:244-245` (fixed
+# by `cyc20261003-094115`) and the notarize preflight block (fixed by `cyc20261003-114502`).
+# The arms below are what make this reader see it — the assertions could not, because the
+# shipped template is correct.
+
+#: One backslash, as `chr(92)`, so this file spells no backslash literal in these arms: the
+#: defect was a repeated literal, and a pin that spells its own subject can be edited into the
+#: same mistake. `_BS * 2` cannot.
+_BS = chr(92)
+
+
+def _template_with_doubled_continuations(text: str) -> str:
+    """`text` with one backslash added to every line that ends a continuation.
+
+    The edit is the measured one byte, applied to the whole document rather than to the create
+    block alone: the block is found by the reader under test, so pointing this helper at a line
+    number would make the arm depend on the very layout it is meant to be independent of.
+    """
+    out = []
+    for line in text.split("\n"):
+        stripped = line.rstrip()
+        if stripped.endswith(_BS) and not stripped.endswith(_BS * 2):
+            out.append(line + _BS)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+class TestTheCreateCallIsACommand:
+    """The join, in both directions, on a real shell's rule rather than on a spelling."""
+
+    def test_a_doubled_backslash_ends_the_call(self) -> None:
+        """The shape that ran a bare `gh pr create`: it must not be one call."""
+        doubled = (
+            "```bash\n"
+            "gh pr create -R o/r " + _BS * 2 + "\n"
+            '  --head "$(gh api user -q .login):br" ' + _BS * 2 + "\n"
+            '  --title "x"\n'
+            "```"
+        )
+        single = doubled.replace(_BS * 2, _BS)
+        assert _create_calls(doubled) == ["gh pr create -R o/r " + _BS * 2], (
+            "a doubled backslash ends the command in a shell, so this block is three commands "
+            "and the create call is the bare first one — reading the `--head` on line 2 as part "
+            "of it is how a template whose PR step does not run passes this guard"
+        )
+        # The control: the same block with one backslash is the shipped shape and is one call.
+        assert len(_create_calls(single)) == 1
+        assert "--head" in _create_calls(single)[0]
+
+    def test_a_backslash_before_whitespace_ends_the_call(self) -> None:
+        """`x \\ ` escapes the **space**, not the newline — and `rstrip()` hides that."""
+        text = (
+            "```bash\n"
+            "gh pr create -R o/r " + _BS + " \n"
+            '  --head "$(gh api user -q .login):br"\n'
+            "```"
+        )
+        assert _create_calls(text) == ["gh pr create -R o/r " + _BS], (
+            "a backslash followed by a space escapes the space and continues nothing, so the "
+            "`--head` on the next line is a separate command"
+        )
+
+    def test_the_shipped_template_is_read_as_one_call_that_names_its_head(self) -> None:
+        """The control the whole file rests on: the rule change did not break the real shape."""
+        text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+        calls = [c for c in _create_calls(text) if "gh pr create" in c]
+        assert len(calls) == 1, f"expected one create call in the template, got {len(calls)}"
+        assert _CREATE_HEAD.search(calls[0]), calls[0]
+        assert _CREATE_RESOLVED_HEAD.search(calls[0]), calls[0]
+
+    def test_the_template_with_a_doubled_backslash_is_caught(self) -> None:
+        """End to end, on the real document: the edit that shipped twice must fail this file.
+
+        Both scans, because the first fires only when the head is lost and the second only when
+        it is spelled literally — and the doubled shape loses it, which is the point. Read in
+        memory, so nothing on disk moves.
+        """
+        text = (PROMPTS_DIR / "open_source_prompt.md").read_text(encoding="utf-8")
+        doubled = _template_with_doubled_continuations(text)
+        assert doubled != text, "the helper changed nothing, so this arm would measure nothing"
+        assert _create_calls_without_a_head(doubled), (
+            "a template whose continued lines end in TWO backslashes was not flagged: a shell "
+            "runs `gh pr create -R o/r` bare and then `--head: command not found`, and the "
+            "scans above saw the head because they joined lines the shell never joins"
+        )
