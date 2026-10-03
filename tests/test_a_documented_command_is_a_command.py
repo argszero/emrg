@@ -24,22 +24,45 @@ landing at ``uv: command not found`` (the tool is absent, so it *did* reach the 
 never invoking it at all. That block is the host-facing remedy for a release that failed
 in CI, so a host who copies it gets three failures instead of one diagnosis.
 
+**The subject is the shell text this repo ships, in every carrier it ships it in** — the
+fence a human copies is the motivating case, not the only one:
+
+| carrier | read as | why it is in scope |
+|---|---|---|
+| fenced `bash`/`sh`/`shell`/`zsh`/`console` blocks in tracked `*.md` | `shell_blocks` | a reader copies the block and runs it |
+| `run:` block scalars in `.github/workflows/*.yml` | `workflow_run_blocks` | **CI** runs it; the same arithmetic decides it, and the failure is a step that never invoked what it names |
+| tracked `*.sh` files | `shell_scripts` | the host runs them |
+
+Widened 2026-10-03 (`cyc20261003-100623`), one cycle after the rule was written, because the
+carrier that matters most was the one not read: a `run:` block with this bug is not a doc
+that misleads a host, it is **CI skipping the work the step names** while reporting a
+failure that points at nothing. Population of the two new carriers, measured before adding
+them: 32 `run:` keys across the two workflows (20 of them block scalars, which is what can
+carry the shape; a one-line `run:` cannot — its next line is another YAML key), and 10
+tracked `*.sh` files. The shape occurs **0 times** in either, so this widening changes no
+verdict today and closes a blind spot rather than fixing an instance.
+
 **Population, measured 2026-10-03**: 67 shell fences across 16 tracked `*.md`; the shape
 above occurs **twice**, both on that one PR's branch, and never on master. This guard is
-therefore narrow on purpose — it is the one slice of "the documented command runs" that is
-decidable from the text, and a rule with a measured false-positive rate of zero over the
-whole tree is a rule worth keeping narrow (the wider sibling — "every path a doc names
-exists" — was measured the same day at 29 hits, all of them either a bare basename whose
-directory is prose, or a path the doc explicitly guards with `2>/dev/null || echo`, so it
-was **not** added).
+therefore narrow on purpose — it is the one slice of "the command runs" that is decidable
+from the text, and a rule with a measured false-positive rate of zero over the whole tree is
+a rule worth keeping narrow. Two wider siblings were measured the same day and **not**
+added: "every path a doc names exists" (29 hits, all a bare basename whose directory is
+prose or a path the doc guards with `2>/dev/null || echo`), and "the block parses under
+`bash -n`" (7 of 67 fences fail, **all** of them on an angle-bracket metavariable such as
+`<修复后commit>` or `{{ source_dir }}`, which is a placeholder and not a defect — a rule whose
+false positives outnumber its true ones is not a rule).
 
 What this cannot see: a block that is syntactically one command and still wrong (an option
-the tool does not take, a variable it never reads), and a fence whose language string is
-not in `SHELL_FENCES`. Both are stated so a green run is read as what it is.
+the tool does not take, a variable it never reads); a fence whose language string is not in
+`SHELL_FENCES`; and a `run:` written as a one-line scalar, which cannot carry the shape (its
+next line is another key) but is also not read as a block. Stated so a green run is read as
+what it is.
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -60,8 +83,34 @@ def tracked_markdown() -> list[str]:
     `Path(...).as_posix()` because git emits the index path with the *platform*
     separator — Windows hands back `emrg\\server\\x.md`.
     """
+    return _tracked("*.md")
+
+
+def tracked_workflows() -> list[str]:
+    """Repo-relative `/`-separated paths of the tracked workflow files.
+
+    `*.yml`/`*.yaml` under `.github/workflows/`, not every YAML in the repo: the
+    question here is what **CI executes**, and a YAML file that is not a workflow has no
+    `run:` for anything to run.
+    """
+    return [p for p in _tracked("*.yml", "*.yaml") if p.startswith(".github/workflows/")]
+
+
+def tracked_shell_scripts() -> list[str]:
+    """Repo-relative `/`-separated paths of the tracked shell scripts.
+
+    By extension, and the extension is the whole claim: a `.sh` file is a script the
+    host or a build runs, so its every line is shell. A file without the suffix that
+    happens to hold shell (a heredoc writer, say) is not read — stated in the module
+    docstring rather than guessed at.
+    """
+    return _tracked("*.sh")
+
+
+def _tracked(*patterns: str) -> list[str]:
+    """`git ls-files` restricted to `patterns`, normalised to `/`-separated paths."""
     out = subprocess.run(
-        ["git", "ls-files", "--", "*.md"],
+        ["git", "ls-files", "--", *patterns],
         cwd=str(REPO),
         capture_output=True,
         text=True,
@@ -136,43 +185,172 @@ def continuations_that_continue_nothing(body: str) -> list[tuple[int, str, int]]
     return hits
 
 
+def workflow_run_blocks(text: str) -> list[tuple[int, str]]:
+    """Every `run:` block scalar in a workflow, as `(line of its first body line, body)`.
+
+    Only the **block scalar** forms (`run: |`, `run: |-`, `run: |+`, `run: >`, `run: >-`,
+    `run: >+`), because a one-line `run: <command>` cannot carry the shape this guard
+    looks for: a doubled continuation needs a line to *continue*, and in the one-line form
+    the next line is the next YAML key, not part of the command. Making that explicit here
+    is the difference between "not read" and "cannot apply".
+
+    The body is the following lines more indented than the `run:` key, exactly as YAML
+    defines a block scalar. Blank lines are kept (they are part of the block and YAML
+    treats them as content), and the block ends at the first line that is not blank and
+    not more indented — the next key.
+
+    What this does not do: parse YAML. A `run:` key inside a quoted string or a comment
+    would be read as a block here where a parser would not, and a folded (`>`) scalar's
+    real text differs from the source lines. Both are acceptable for a rule about *what a
+    line ends with* — the source line is the thing being judged, not the scalar's value —
+    and the control leg pins the population against a real parser's count.
+    """
+    blocks: list[tuple[int, str]] = []
+    lines = text.split("\n")
+    pattern = re.compile(r"^(\s*)run:\s*[|>][+-]?\s*(?:#.*)?$")
+    for index, line in enumerate(lines):
+        match = pattern.match(line)
+        if not match:
+            continue
+        indent = len(match.group(1))
+        body: list[str] = []
+        for following in lines[index + 1:]:
+            if following.strip() and len(following) - len(following.lstrip(" ")) <= indent:
+                break
+            body.append(following)
+        while body and not body[-1].strip():
+            body.pop()
+        blocks.append((index + 2, "\n".join(body)))
+    return blocks
+
+
+def shell_scripts(path: str) -> list[tuple[int, str]]:
+    """A tracked `*.sh` file as one block: the whole file is shell by construction."""
+    return [(1, (REPO / path).read_text(encoding="utf-8"))]
+
+
 # ── The rule, over the tree ───────────────────────────────────────────────────
 
 
-def test_no_tracked_markdown_continues_with_an_even_number_of_backslashes() -> None:
-    offenders: list[str] = []
+def _carriers() -> list[tuple[str, list[tuple[int, str]]]]:
+    """Every `(path, blocks)` this rule governs, from all three carriers.
+
+    One home for "which text is in scope", so the rule and the control leg cannot come to
+    disagree about it — the shape that lets a rule quietly stop reading a carrier.
+    """
+    carried: list[tuple[str, list[tuple[int, str]]]] = []
     for path in tracked_markdown():
-        text = (REPO / path).read_text(encoding="utf-8")
-        for start, body in shell_blocks(text):
-            for offset, line, count in continuations_that_continue_nothing(body):
-                offenders.append(
-                    f"{path}:{start + offset - 1} ends with {count} backslashes and the "
-                    f"next line is indented, so bash runs {count // 2 + 1} commands and the "
-                    f"variables never reach the last one: {line!r}"
-                )
+        carried.append((path, shell_blocks((REPO / path).read_text(encoding="utf-8"))))
+    for path in tracked_workflows():
+        carried.append((path, workflow_run_blocks((REPO / path).read_text(encoding="utf-8"))))
+    for path in tracked_shell_scripts():
+        carried.append((path, shell_scripts(path)))
+    return carried
+
+
+def _offenders_in(path: str, blocks: list[tuple[int, str]]) -> list[str]:
+    found: list[str] = []
+    for start, body in blocks:
+        for offset, line, count in continuations_that_continue_nothing(body):
+            found.append(
+                f"{path}:{start + offset - 1} ends with {count} backslashes and the "
+                f"next line is indented, so bash runs {count // 2 + 1} commands and the "
+                f"variables never reach the last one: {line!r}"
+            )
+    return found
+
+
+def test_no_shell_text_in_the_tree_continues_with_an_even_number_of_backslashes() -> None:
+    offenders: list[str] = []
+    for path, blocks in _carriers():
+        offenders += _offenders_in(path, blocks)
     assert not offenders, (
-        "a documented shell command does not run as written — the line ends with an even "
-        "number of backslashes, which is a literal backslash, not a line continuation. "
+        "a shell command this repo ships does not run as written — the line ends with an "
+        "even number of backslashes, which is a literal backslash, not a line continuation. "
         "Write one backslash (an odd number) to join the lines:\n  " + "\n  ".join(offenders)
     )
 
 
-def test_the_scan_reads_the_tree_it_names() -> None:
+def test_the_scan_reads_every_carrier_it_names() -> None:
     """The control leg: a scan that read nothing would pass the rule above.
 
-    `DEVELOPMENT.md` alone carried 16 shell fences when this was written, and the whole
-    tree 67, so a floor of 10 there and 40 overall is a floor a silent scanner cannot
-    clear — and it fails loudly if the reader itself breaks.
+    A floor per carrier, because the failure this catches is one carrier silently dropping
+    out — a reader that returns nothing for every workflow still leaves the markdown rule
+    green, and the carrier no one reads is exactly the one that decays. The floors come
+    from measured populations, not taste: `DEVELOPMENT.md` alone carried 16 shell fences
+    and the tree 67; the two workflows carry 20 block scalars between them (a real YAML
+    parser's count of `run` keys is pinned separately below); there are 10 tracked `*.sh`.
     """
-    files = tracked_markdown()
-    assert len(files) >= 10, f"only {len(files)} tracked *.md files — is this the repo?"
-    per_file = {path: len(shell_blocks((REPO / path).read_text(encoding="utf-8"))) for path in files}
-    total = sum(per_file.values())
+    md = tracked_markdown()
+    wf = tracked_workflows()
+    sh = tracked_shell_scripts()
+    assert len(md) >= 10, f"only {len(md)} tracked *.md files — is this the repo?"
+    assert len(wf) >= 2, f"only {len(wf)} tracked workflows: {wf}"
+    assert len(sh) >= 5, f"only {len(sh)} tracked *.sh files: {sh}"
+
+    per_file = {p: len(shell_blocks((REPO / p).read_text(encoding="utf-8"))) for p in md}
     assert per_file.get("DEVELOPMENT.md", 0) >= 10, (
         f"DEVELOPMENT.md yielded {per_file.get('DEVELOPMENT.md', 0)} shell fences, expected "
         f"at least 10 — the fence reader is not reading it. Per-file counts: {per_file}"
     )
-    assert total >= 40, f"{total} shell fences across {len(files)} files, expected at least 40"
+    total = sum(per_file.values())
+    assert total >= 40, f"{total} shell fences across {len(md)} files, expected at least 40"
+
+    run_blocks = {
+        p: len(workflow_run_blocks((REPO / p).read_text(encoding="utf-8"))) for p in wf
+    }
+    assert run_blocks.get(".github/workflows/build-release.yml", 0) >= 10, (
+        f"build-release.yml yielded {run_blocks.get('.github/workflows/build-release.yml', 0)} "
+        f"run blocks, expected at least 10 — the block-scalar reader is not reading it. "
+        f"Per-file counts: {run_blocks}"
+    )
+    assert sum(run_blocks.values()) >= 15, (
+        f"{sum(run_blocks.values())} run blocks across {len(wf)} workflows, expected at least 15"
+    )
+
+    script_lines = sum(len(shell_scripts(p)[0][1].split("\n")) for p in sh)
+    assert script_lines >= 200, f"the {len(sh)} tracked scripts hold only {script_lines} lines"
+
+
+def test_the_run_reader_counts_what_a_real_yaml_parser_counts() -> None:
+    """The block-scalar reader against the authority on what a `run:` block is.
+
+    `workflow_run_blocks` is a line scanner, so the risk is that it agrees with itself and
+    with nothing else. A real parser is the independent path: every multi-line `run:` value
+    this file finds must be one the parser also sees, and the parser must see no *more*
+    multi-line runs than the scanner — a one-line `run:` is deliberately out of scope, and
+    the two counts differing in that direction would mean the scanner is missing blocks.
+
+    The comparison is on counts rather than text: PyYAML strips the block's indentation and
+    a folded scalar's value is not the source lines, so matching by value would be a
+    comparison of two different things. But a missing *block* changes the count, which is
+    the property that matters here.
+    """
+    import yaml
+
+    def run_values(node: object, out: list[str]) -> list[str]:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "run" and isinstance(value, str):
+                    out.append(value)
+                run_values(value, out)
+        elif isinstance(node, list):
+            for value in node:
+                run_values(value, out)
+        return out
+
+    scanned = 0
+    parsed = 0
+    for path in tracked_workflows():
+        text = (REPO / path).read_text(encoding="utf-8")
+        scanned += len(workflow_run_blocks(text))
+        values: list[str] = []
+        parsed += sum(1 for value in run_values(yaml.safe_load(text), values) if "\n" in value)
+    assert parsed >= 10, f"PyYAML found only {parsed} multi-line runs — is this a workflow?"
+    assert scanned >= parsed, (
+        f"the scanner found {scanned} run blocks where PyYAML found {parsed} multi-line "
+        f"runs — the scanner is missing blocks, which is the direction that hides a defect"
+    )
 
 
 def test_every_fence_in_the_tree_is_closed() -> None:
