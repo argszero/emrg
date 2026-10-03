@@ -137,6 +137,45 @@ def _redirect_the_config_path(monkeypatch, tmp_path):
     monkeypatch.setattr(cr_mod, "config_path", lambda: cfg_path)
 
 
+#: `git` executable path -> whether that executable actually starts. Keyed by the
+#: resolved path, not by "is it on PATH", so a dead shim and a real git are two
+#: entries and a test that repoints PATH gets its own answer rather than a cached one.
+_GIT_RUNS: dict[str, bool] = {}
+
+
+def _starts(exe: str | None) -> bool:
+    """Whether `exe` is a program that starts, as opposed to a name that resolves.
+
+    **`shutil.which` answers "is this name on PATH", which is not "will this
+    program run".** Measured 2026-10-03 (`cyc20261003-130332`): with a `git` shim
+    whose interpreter is gone at the front of PATH, `which("git")` returns its path
+    while a bare `git` call exits 126 (`No such file or directory`) - the same shape
+    this host has for `npm`/`node`/`npx`, whose asdf shims point at a removed
+    interpreter. So the probe starts the program and reads its exit code.
+
+    Cached per path because the fixture is autouse: this runs once per distinct git
+    rather than once per test.
+    """
+    if not exe:
+        return False
+    if exe not in _GIT_RUNS:
+        import subprocess
+
+        try:
+            proc = subprocess.run(
+                [exe, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+            _GIT_RUNS[exe] = proc.returncode == 0
+        except (OSError, subprocess.SubprocessError, ValueError):
+            _GIT_RUNS[exe] = False
+    return _GIT_RUNS[exe]
+
+
 @pytest.fixture(autouse=True)
 def _ensure_git_on_path(monkeypatch):
     """Make bare ``git`` subprocess calls work on hosts without PATH git.
@@ -146,27 +185,43 @@ def _ensure_git_on_path(monkeypatch):
     code resolves git through git_utils.resolve_git_gh() (install-info cache
     → bundled ~/.emrg/install → PATH). On packaged installs git is NOT on
     PATH, so those tests raise FileNotFoundError even though the daemon works
-    (2026-08-24: 3/972 failures on a PATH-less host). When PATH has no git,
-    prepend the directory of the same resolved git binary the product would
+    (2026-08-24: 3/972 failures on a PATH-less host). When PATH has no *working*
+    git, prepend the directory of the same resolved git binary the product would
     use (same tier order, no cache write). No-op on dev/CI where git is on
-    PATH.
+    PATH and starts.
+
+    "No working git" is **two** states, and the fixture used to read only the
+    first, by asking `shutil.which("git")`. Measured 2026-10-03
+    (`cyc20261003-130332`): with a `git` shim at the front of PATH whose
+    interpreter is gone, `which` is truthy so the fixture returned early and did
+    no repair, and the two tests it exists for failed with rc=126 - the exact
+    failure this fixture was added to remove, one state narrower than the PATH-less
+    host it was written for. The gate is now `_starts`, which runs the binary; and
+    each candidate from the product's own tier order is checked the same way, so a
+    tier that resolves to another dead shim is passed over rather than prepended.
     """
     import os
     import shutil
 
-    if shutil.which("git"):
-        return  # git already reachable (dev / CI) — nothing to do
+    if _starts(shutil.which("git")):
+        return  # the git PATH resolves really starts (dev / CI) — nothing to do
 
     from emrg.server.git_utils import _cached_tool_path, _tool_in_install
 
-    git = _cached_tool_path("git")
-    if not (git and Path(git).exists()):
-        git = _tool_in_install("git") or shutil.which("git")
-    if not git:
-        return  # no git anywhere — let the tests fail with their own error
-
-    git_dir = str(Path(git).resolve().parent)
-    monkeypatch.setenv("PATH", git_dir + os.pathsep + os.environ.get("PATH", ""))
+    for candidate in (
+        _cached_tool_path("git"),
+        _tool_in_install("git"),
+    ):
+        if candidate and Path(candidate).exists() and _starts(candidate):
+            git_dir = str(Path(candidate).resolve().parent)
+            monkeypatch.setenv(
+                "PATH", git_dir + os.pathsep + os.environ.get("PATH", "")
+            )
+            return
+    # No git that starts anywhere — let the tests fail with their own error. (PATH's
+    # first entry may still be a dead shim; that is the state the caller has to see
+    # rather than one this fixture can paper over.)
+    return
 
 
 @pytest.fixture(autouse=True)
