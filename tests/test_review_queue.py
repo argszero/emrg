@@ -174,10 +174,16 @@ class FakeVotes:
 
     def __init__(self, reviews: list[dict] | None = None, mergeable: str = "MERGEABLE",
                  state: str = "CLEAN", head: str = HEAD, valid: int | None = None,
-                 push: str | None = None, exact: bool = True):
+                 push: str | None = None, exact: bool = True,
+                 pr_state: str = "OPEN", merged_at: str = ""):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
+        #: GitHub's *lifecycle* state, which is a different field from `state` above
+        #: (the merge state). Kept under its own name so a test cannot pass the merge
+        #: state where the lifecycle one is read and still look right.
+        self.pr_state = pr_state
+        self.merged_at = merged_at
         self.head = head
         self.forced_valid = valid
         #: When this head was pushed — the datum the abstention clause compares
@@ -225,6 +231,8 @@ class FakeVotes:
             push_time_exact=self.exact,
             mergeable=self.mergeable,
             merge_state=self.state,
+            state=self.pr_state,
+            merged_at=self.merged_at,
             votes=votes,
             counted=[],
             valid_count=run if self.forced_valid is None else self.forced_valid,
@@ -620,6 +628,49 @@ def test_an_empty_queue_is_an_empty_one(mod, monkeypatch, capsys):
     assert "nothing to review" in out
 
 
+def test_a_finished_pr_is_answered_as_over_and_hands_out_no_command(
+    mod, monkeypatch, capsys
+):
+    """Issue #1837. The row this tool used to print for a PR that had just merged.
+
+    Measured 2026-10-03 (`cyc20261003-224625`): a parallel cycle merged #1836 four
+    seconds after this cycle's scan listed it open, so the queue read a finished PR as
+    a live one and answered `read-first` with
+    `check-vote-count.py <PR> --mergeability-wait 60` — a minute of waiting on a
+    question GitHub never answers for a merged PR (measured live: 6.2 s and the same
+    failure). The state now decides the row, and the freshness half is not read at all:
+    it prices a branch refresh for a branch that is finished.
+    """
+    votes = FakeVotes(pr_state="MERGED", merged_at="2026-10-03T14:46:59Z")
+    fresh = FakeFresh(stale=True, kind="ancestry", behind=2)
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0, "an answered question is not a failure to measure"
+    assert "terminal" in out
+    assert "MERGED" in out and "2026-10-03T14:46:59Z" in out
+    assert "0/3 votes" not in out, "a finished PR has no review left to count"
+    assert "$" not in out, "there is no command to hand a cycle here"
+    assert "--mergeability-wait" not in out, "the wait that cannot succeed"
+    assert fresh.calls == [], "no ancestry question about a PR with no merge left"
+
+
+def test_a_closed_pr_is_not_reported_as_merged(mod, monkeypatch, capsys):
+    """Closed-unmerged is the other terminal state, and it did not land.
+
+    A single "finished" word would be wrong half the time: `CLOSED` says the branch is
+    out of play, and a reader who acted on `MERGED` would look for it on master.
+    """
+    votes = FakeVotes(pr_state="CLOSED")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "CLOSED" in out
+    assert "MERGED" not in out
+
+
 # --- the queue the tool is asked about -------------------------------------
 
 
@@ -683,6 +734,9 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
         "needed": 3,
         "mergeable": "MERGEABLE",
         "merge_state": "CLEAN",
+        "state": "OPEN",
+        "terminal": False,
+        "merged_at": None,
         "block_reason": "",
         "veto_at_head": False,
         "voted_by_this_cycle": False,

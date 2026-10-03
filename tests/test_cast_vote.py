@@ -149,6 +149,15 @@ class Verdict:
     #: head" — the case the clause refuses to judge).
     push_time: str = PUSHED_BEFORE_THE_WINDOW
     push_time_exact: bool = True
+    #: GitHub's lifecycle state, and the counter's own predicate over it — asked of the
+    #: counter rather than re-spelled here, because `cast-vote.py` refuses on *that*
+    #: predicate and a lookalike could disagree with the tool under test (issue #1837).
+    state: str = "OPEN"
+    merged_at: str = ""
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in _the_counter().TERMINAL_STATES
 
 
 def vote(cycle=CYCLE, *, kind="approve", counted=True, why="", at="2026-09-15T18:19:36Z"):
@@ -162,6 +171,8 @@ def verdict_with(
     pr=1,
     push_time=PUSHED_BEFORE_THE_WINDOW,
     push_time_exact=True,
+    state="OPEN",
+    merged_at="",
 ):
     counted = [v.valid for v in votes] if counted is None else list(counted)
     return Verdict(
@@ -171,6 +182,8 @@ def verdict_with(
         valid_count=valid_count,
         push_time=push_time,
         push_time_exact=push_time_exact,
+        state=state,
+        merged_at=merged_at,
     )
 
 
@@ -454,6 +467,61 @@ def test_a_quoted_cycle_id_is_not_a_second_one(mod, monkeypatch, capsys, body_fi
     assert quoting_gh.calls == [], "nothing reaches the network for a body with no cycle id"
     assert quoting_counter.calls == [], "the count is not worth reading for a refused post"
     assert "no cycle id" in err
+
+
+def test_a_finished_pr_is_refused_before_anything_is_posted(
+    mod, monkeypatch, capsys, body_file
+):
+    """The race this refusal exists for: merged seconds after the state was read.
+
+    Measured 2026-10-03 (`cyc20261003-224625`): a parallel cycle merged #1836 four
+    seconds after this cycle's scan listed it **open**. From this tool's side a
+    finished PR is the one case `_state_of` cannot see — the counter reports it with no
+    votes at all, so this cycle's state reads `none`, exactly like a PR nobody has
+    reviewed. Posting then lands a review that cannot count for anything, and the
+    confirmation reads "posted but not readable as a vote" (exit 1): an unmeasurable
+    outcome reported for a known one. So it is refused *before* the network call, from
+    the counter's own terminal reading.
+    """
+    counter = FakeCounter(verdict_with(state="MERGED", merged_at="2026-10-03T14:46:59Z"))
+    gh = FakeGh()
+    path = body_file(f"{CYCLE} \u2014 \u2705 LGTM\n")
+    rc = _run(mod, monkeypatch, counter, gh, ["1836", "--body-file", path])
+    err = capsys.readouterr().err
+    assert rc == 2, "nothing was posted, so nothing has to be rolled back"
+    assert gh.calls == [], "no review reaches the network on a finished PR"
+    assert "is MERGED" in err
+    assert "2026-10-03T14:46:59Z" in err, "the merge time tells the caller which race"
+    assert "nothing to vote on" in err
+    assert "never appeared" not in err, "this is a known outcome, not an unmeasurable one"
+
+
+def test_a_closed_pr_is_refused_as_closed_not_as_merged(
+    mod, monkeypatch, capsys, body_file
+):
+    """Only one of the two terminal states landed, so the refusal says which."""
+    counter = FakeCounter(verdict_with(state="CLOSED"))
+    gh = FakeGh()
+    path = body_file(f"{CYCLE} \u2014 \u2705 LGTM\n")
+    rc = _run(mod, monkeypatch, counter, gh, ["1", "--body-file", path])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert gh.calls == []
+    assert "is CLOSED" in err
+    assert "MERGED" not in err
+
+
+def test_an_open_pr_still_reaches_the_network(mod, monkeypatch, capsys, body_file):
+    """The other direction: the state check must not swallow a live PR."""
+    counter = FakeCounter(
+        verdict_with(),
+        verdict_with([vote()], counted=[True], valid_count=1),
+    )
+    gh = FakeGh()
+    path = body_file(f"{CYCLE} \u2014 \u2705 LGTM\n")
+    rc = _run(mod, monkeypatch, counter, gh, ["1", "--body-file", path])
+    assert rc == 0
+    assert len(gh.calls) == 1
 
 
 # ── the verdict must be where the counter reads it: the first line ─────────
