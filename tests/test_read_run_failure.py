@@ -24,7 +24,10 @@ the replacement could still be the same kind of instrument:
   the defect this file is about: printed so the reading is visible, **and** exit 2 so a
   failed job that explained nothing is never a run that was explained.
 * `test_an_unreadable_log_makes_the_run_unmeasurable` - exit 2, and it must not be 0
-  while a failed job went unexplained.
+  while a failed job went unexplained - **and** a fetch that failed must not be reported
+  as a log that came back empty, which is a reading nobody took (measured 2026-10-04,
+  `cyc20261004-070930`; `test_the_two_ways_a_log_can_be_absent_are_told_apart_in_json`
+  pins the machine-readable half).
 * `test_a_silent_step_is_still_named_by_the_job_payload` - the v0.3.8 case exactly:
   the step printed nothing at all, so the log cannot name it and only the payload can.
 * `test_the_matcher_reads_the_annotation_form_the_runner_writes` - and, the
@@ -203,12 +206,66 @@ def test_a_run_with_no_failed_job_is_a_determinate_answer_not_a_failure(
 
 
 def test_an_unreadable_log_makes_the_run_unmeasurable(mod, monkeypatch, capsys):
-    """A failed job whose log cannot be fetched is exit 2, and never reported as explained."""
+    """A failed job whose log cannot be fetched is exit 2, and never reported as explained.
+
+    The negative half is the one that was missing (measured 2026-10-04, `cyc20261004-070930`):
+    a fetch that **fails** also arrives at `main`'s loop as an empty string, so the tool used
+    to report *both* "gh api ... failed" **and** "the log came back empty" about one job - and
+    the second of those is a reading it never took. With the fetch forced to fail, the output
+    was byte-identical to a genuinely empty log: `LOG EMPTY` on stdout, "came back empty" on
+    stderr. That is the defect this tool exists to remove, committed by the tool itself, so
+    both halves are asserted: "no such reading was taken" is as load-bearing as "exit 2".
+    """
     fake = FakeGh([_job()], {})  # no log for job 1 -> gh returns rc 1
     rc = _run(mod, monkeypatch, fake, ["42"])
     captured = capsys.readouterr()
     assert rc == 2, "one unexplained failed job is not a run that was explained"
     assert "could not read" in captured.err
+    assert "came back empty" not in captured.err, (
+        "the fetch failed - saying the log 'came back empty' reports a reading that was "
+        "never taken, and makes the failure indistinguishable from a genuinely empty log"
+    )
+    assert "LOG EMPTY" not in captured.out, (
+        "no log was fetched, so there are no 'no lines' to report"
+    )
+    assert "LOG NOT READ" in captured.out, (
+        "the reader of stdout must be told the log was never in hand, not left to infer it "
+        "from stderr"
+    )
+    assert captured.err.count("build") == 1, (
+        "the same job is listed once with its real reason, not a second time with a "
+        "fabricated one"
+    )
+
+
+def test_the_two_ways_a_log_can_be_absent_are_told_apart_in_json(
+    mod, monkeypatch, capsys
+):
+    """`log_read` is the field that separates them, because both report `log_lines: 0`.
+
+    A machine consumer reading only `log_lines` sees the same shape twice, and the two are
+    not the same fact about the run: "the log came back empty" is a measurement, "the log was
+    never read" is a limitation of the reading. Asserted in **both** directions, since a field
+    that is always `False` (or always `True`) separates nothing.
+    """
+    failed_fetch = FakeGh([_job()], {})
+    assert _run(mod, monkeypatch, failed_fetch, ["42", "--json"]) == 2
+    unread = json.loads(capsys.readouterr().out)["jobs"][0]
+
+    empty_log = FakeGh([_job()], {1: ""})
+    assert _run(mod, monkeypatch, empty_log, ["42", "--json"]) == 2
+    empty = json.loads(capsys.readouterr().out)["jobs"][0]
+
+    assert unread["log_read"] is False and empty["log_read"] is True, (
+        "the fetch that failed and the log that answered nothing must not read alike"
+    )
+    assert unread["log_lines"] == empty["log_lines"] == 0, (
+        "the premise: the old field genuinely cannot tell them apart"
+    )
+    assert "never read" in unread["excerpt_basis"]
+    assert "never read" not in empty["excerpt_basis"], (
+        "for a log that was fetched, the basis is the rule that answered it"
+    )
 
 
 def test_an_empty_job_log_is_never_reported_as_a_cause(mod, monkeypatch, capsys):

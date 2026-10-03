@@ -316,20 +316,35 @@ def main(argv: list[str] | None = None) -> int:
     for job in failed_jobs:
         steps, unknown = _step_cause(job)
         name = str(job.get("name"))
+        log_read = True
         try:
             log = _job_log(int(job["id"]), args.repo)
         except Exception as exc:  # noqa: BLE001
             unreadable.append(f"{name}: {exc}")
             log = ""
+            log_read = False
         lines = [_clean(line) for line in log.splitlines()]
-        if not lines:
+        if log_read and not lines:
             # Fetched, and empty: the reading is real and is printed below, but a failed job
             # that printed nothing has not explained itself, so it also lands in the
             # unreadable set and the run exits 2. Either half alone is wrong - dropping the
             # message hides a fact, and leaving exit 0 reports an unexplained failure as a
             # reading that was taken.
+            #
+            # `log_read` guards this: a log whose **fetch** failed also arrives here as an
+            # empty string, and without the guard the tool says *both* "gh failed" and "the
+            # log came back empty" about one job - the second of which is a reading it never
+            # took, and the exact confusion this tool exists to remove (measured 2026-10-04:
+            # with the fetch forced to fail, `unreadable` held the same job twice and the
+            # output was byte-identical to a genuinely empty log).
             unreadable.append(f"{name}: the log came back empty")
-        excerpt, block_lines, basis = _cause_excerpt(lines, args.tail)
+        if log_read:
+            excerpt, block_lines, basis = _cause_excerpt(lines, args.tail)
+        else:
+            # No rule answered, because there was no log to answer from. `_cause_excerpt([])`
+            # would return its "the log tail (no annotation)" label, which asserts a reading
+            # this branch did not take - so the basis names what actually happened.
+            excerpt, block_lines, basis = [], 0, "the log was never read"
         reports.append(
             {
                 "job": name,
@@ -342,6 +357,11 @@ def main(argv: list[str] | None = None) -> int:
                 "excerpt_basis": basis,
                 "excerpt_of": block_lines,
                 "log_lines": len(lines),
+                # Said in the machine-readable form too, because the two shapes are the
+                # same shape to a consumer reading only `log_lines` (both 0) and only one
+                # of them is a reading: "the log came back empty" is a fact about the run,
+                # "the log was never read" is a fact about this tool.
+                "log_read": log_read,
             }
         )
 
@@ -359,7 +379,13 @@ def main(argv: list[str] | None = None) -> int:
                 print("  step(s): the job payload names no failed step")
             if report["other_conclusions"]:
                 print("  other: " + "; ".join(report["other_conclusions"]))
-            if not report["log_lines"]:
+            if not report["log_read"]:
+                # Not "LOG EMPTY": no fetch answered, so there is no reading to report - only
+                # a reason, which is on stderr below. Printing the empty-log line here would
+                # assert a fact about the run that this cycle never measured.
+                print("  LOG NOT READ: the fetch failed, so no line of this job's log was "
+                      "seen - the reason is on stderr, and this is not a cause")
+            elif not report["log_lines"]:
                 print("  LOG EMPTY: the log came back with no lines - this is not a cause")
             else:
                 for line in report["annotations"]:
