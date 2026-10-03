@@ -68,23 +68,29 @@ def load_events(path: Path) -> tuple[list[dict], int]:
     Returns (events, malformed_count). A missing or unreadable file raises
     SystemExit(1) with a message — the script must not guess when its input
     is gone (the "guard stopped running" failure mode).
+
+    "Unreadable" includes "the bytes are not UTF-8", and that is why the read
+    happens **inside** the guard: `open` decodes lazily, so a `for line in fh`
+    outside the `try` raises `UnicodeDecodeError` at a place no handler covers —
+    measured 2026-10-03 (`cyc20261003-222355`), where adding the shape to the
+    `except` around `open` alone left the same input raising a traceback.
     """
     try:
-        fh = open(path, "r", encoding="utf-8")
-    except OSError as exc:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
         print(f"error: cannot read {path}: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     events: list[dict] = []
     malformed = 0
-    with fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except (ValueError, TypeError):
-                malformed += 1
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except (ValueError, TypeError):
+            malformed += 1
     return events, malformed
 
 

@@ -29,6 +29,7 @@ import yaml
 
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
+from emrg.read_errors import FILE_READ_ERRORS
 # The tier vocabulary, from the module that owns it: the legacy scanner kept its
 # own literal too, and `tests/test_bash_v2_policy.py` pins the two equal until P7
 # deletes that file (issue #1675). Reading it from here is what makes this the
@@ -417,12 +418,18 @@ def _custom_templates() -> list[str]:
 
 
 def _read_custom_template(name: str) -> str | None:
-    """Read a user template's prompt text; None if missing."""
+    """Read a user template's prompt text; None if missing.
+
+    None is the whole answer for "I could not read it", which is why the guard is
+    `FILE_READ_ERRORS` and not `OSError`: a template whose bytes are not UTF-8 is a
+    template this reader could not read, and `read_text` raises `UnicodeDecodeError`
+    (a `ValueError`) for it -- past an `OSError` handler and out of the caller.
+    """
     p = _task_templates_dir() / f"{name}.md"
     try:
         if p.exists():
             return p.read_text(encoding="utf-8")
-    except OSError:
+    except FILE_READ_ERRORS:
         pass
     return None
 
@@ -3277,7 +3284,10 @@ class TaskScheduler:
                 p = Path(__file__).parent / TASK_TEMPLATES[name]
                 if p.exists():
                     prompt = p.read_text(encoding="utf-8")
-            except OSError:
+            except FILE_READ_ERRORS:
+                # 读不了就是读不了: the fallback below is the same for a missing file
+                # and for one whose bytes are not UTF-8, and `FILE_READ_ERRORS` is the
+                # spelling that says so (`UnicodeDecodeError` is a `ValueError`).
                 pass
             result.append({
                 "name": name,

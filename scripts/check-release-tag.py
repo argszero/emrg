@@ -88,7 +88,7 @@ def declared_version(root: Path) -> str | None:
     """
     try:
         text = (root / VERSION_SOURCE).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     found = _DECLARATION.findall(text)
     if len(found) != 1:

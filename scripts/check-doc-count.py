@@ -486,7 +486,7 @@ def _resolve_conflict_mode() -> int:
     target = REPO_ROOT / "Agent.md"
     try:
         text = target.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         print(f"error: cannot read {target}: {exc}", file=sys.stderr)
         return 2
 

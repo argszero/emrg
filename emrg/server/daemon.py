@@ -45,7 +45,7 @@ from emrg.config import (
     resolve_model_vision,
 )
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
-from emrg.read_errors import JSON_READ_ERRORS
+from emrg.read_errors import FILE_READ_ERRORS, JSON_READ_ERRORS
 from emrg.server.abort_runs import AbortRuns
 from emrg.server.atomic import YAML_READ_ERRORS, atomic_write_bytes, atomic_write_yaml
 from emrg.server.config_reload import (
@@ -6732,13 +6732,18 @@ def _append_usage_anchor_event(record: dict, path: Path | None = None) -> int:
     ``total`` is the cumulative event count, so the metric is readable as a
     plain number without parsing every line. Callers swallow OSError — a
     stats write must never take the daemon down.
+
+    The count reads the file as text, so the three shapes of "I could not read
+    this file" are one class here too: `FILE_READ_ERRORS`, not `OSError` — a
+    stats file whose bytes are not UTF-8 is not a reason to raise out of a
+    function whose docstring promises the callers swallow this.
     """
     path = path or _USAGE_ANCHOR_STATS_PATH
     total = 0
     try:
         with open(path, "r", encoding="utf-8") as fh:
             total = sum(1 for _ in fh)
-    except OSError:
+    except FILE_READ_ERRORS:
         pass  # first event / unreadable file — start the count at 0
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

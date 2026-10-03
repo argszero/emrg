@@ -327,7 +327,7 @@ def scan_tree(root: Path, files: tuple[str, ...] | None = None) -> tuple[list[Si
         path = root / rel
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             missing.append(rel)
             continue
         sites.extend(scan(text, rel))

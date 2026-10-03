@@ -28,11 +28,23 @@ miss was found **twenty times**, in three spellings, by three independent sweeps
 The twenty were not twenty decisions. The correct spelling was already in the tree,
 in three readers that caught the class whole; the tuple was a spelling that drifted.
 So the rule is not "add a word to a tuple" — it is the invariant an automated check
-can hold: **a `try` that reads a file's text and parses it must name a decode error**,
-or one shape of an unreadable file gets a different answer from the other two.
+can hold: **a `try` that reads a file's text must name a decode error**, whether or
+not it parses what it read, or one shape of an unreadable file gets a different
+answer from the other two. (The "whether or not it parses" half was added
+2026-10-03, `cyc20261003-222355`: the check first asked only about readers that
+parse, and a census of this tree found **19** read-only text reads naming no decode
+error while the check reported a clean tree — it was answering a question narrower
+than its own rule. Eleven of them were real; the rest were reads that cannot fail,
+which is what taught it that `open(path, "wb")` and `errors="replace"` are not
+decodes at all.)
 
-`tests/test_a_file_read_guard_names_its_three_shapes.py` is that check. It resolves
-the constants below by name, so naming one of them counts as naming what it holds.
+`tests/test_check_read_parse_guards.py` is that check. It resolves the constants
+below by name, so naming one of them counts as naming what it holds.
+
+(The first version of this paragraph cited a test file that does not exist. No
+guard caught it: `check-citation-resolves.py` reads `path::node` citations, and
+a bare `tests/...py` path carries no node id. Corrected 2026-10-03,
+`cyc20261003-222355` — worth knowing when a document cites a file by name.)
 
 This module is a **leaf**: it imports nothing from `emrg` and only stdlib, so both
 `emrg/` (core) and `emrg/server/` (the daemon) may import it downward. `json` lives

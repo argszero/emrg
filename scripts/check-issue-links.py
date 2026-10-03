@@ -594,7 +594,7 @@ def load_rant_rows(path: Path) -> list[dict]:
     """
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise RuntimeError(
             f"the rant ledger could not be read ({path}): {exc}"
         ) from exc

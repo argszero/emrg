@@ -363,7 +363,10 @@ def main(argv: list[str] | None = None) -> int:
     except NodeCountError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # `UnicodeDecodeError` is a `ValueError`, not an `OSError`: without it a
+        # document that cannot be decoded leaves `main` as a traceback, whose exit
+        # code is 1 - this tool's "the doc and the runner disagree" verdict.
         print(f"error: cannot read {DOC}: {exc}", file=sys.stderr)
         return 2
 

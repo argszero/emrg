@@ -28,6 +28,7 @@ from typing import Callable, Optional
 import httpx
 
 from emrg.config import UpdateConfig
+from emrg.read_errors import FILE_READ_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -191,12 +192,16 @@ def _installed_versions() -> tuple:
     writes `{{ target_tag }}`), so the leading `v` is stripped before parsing;
     `parse_version` would drop it anyway, but saying so keeps the two readers in
     step with `_read_local_version`.
+
+    Defensively includes "the bytes are not UTF-8": `FILE_READ_ERRORS` is the
+    read half of the class, and a version file a process cannot decode is exactly
+    as absent as one that is not there.
     """
     versions = []
     for path in (VERSION_FILE, PREVIOUS_VERSION_FILE):
         try:
             text = path.read_text(encoding="utf-8").strip()
-        except OSError:
+        except FILE_READ_ERRORS:
             continue
         if text:
             versions.append(text.lstrip("v"))
@@ -415,10 +420,14 @@ class UpgradeManager:
 
         Normalized without the leading 'v' — the target tag keeps its 'v'
         prefix when passed to the template/agent (git tag lookup needs it).
+
+        "" is the answer for every shape of "I could not read it", which is what
+        `FILE_READ_ERRORS` spells and `OSError` does not: a `version.txt` whose
+        bytes are not UTF-8 raises `UnicodeDecodeError` (a `ValueError`).
         """
         try:
             text = VERSION_FILE.read_text(encoding="utf-8").strip()
-        except OSError:
+        except FILE_READ_ERRORS:
             return ""
         return text.lstrip("v")
 

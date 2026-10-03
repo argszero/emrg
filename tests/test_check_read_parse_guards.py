@@ -116,6 +116,69 @@ class TestItFires:
         assert proc.returncode == 2, proc.stdout + proc.stderr
         assert "UNMEASURABLE" in proc.stderr
 
+    def test_a_read_that_parses_nothing_is_reported(self, tmp_path) -> None:
+        """The rule's second half — added 2026-10-03 (`cyc20261003-222355`).
+
+        `read_text` is where the decode happens, so a reader that parses nothing
+        decodes exactly as much as one that does. The first version of the rule asked
+        only about readers that parse and reported a clean tree over nineteen of these.
+        """
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            def read(path):
+                try:
+                    return path.read_text(encoding="utf-8")
+                except OSError:
+                    return None
+            """,
+        )
+        proc = _run(tree)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "read_text" in proc.stdout and "UnicodeDecodeError" in proc.stdout
+
+    def test_an_open_in_a_read_mode_that_parses_nothing_is_reported(self, tmp_path) -> None:
+        """The same half, spelled with `open` — the shape `check-node-test-count.py` had."""
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            def read(path):
+                try:
+                    with open(path, encoding="utf-8") as handle:
+                        return handle.readline()
+                except OSError:
+                    return ""
+            """,
+        )
+        assert _run(tree).returncode == 1
+
+    def test_a_nested_try_that_is_a_direct_statement_is_its_own_scope(self, tmp_path) -> None:
+        """The bug this half found first, reproduced: the inner try owns its read.
+
+        Measured on `emrg/server/daemon.py`'s `file_content` handler, where the inner
+        try catches `UnicodeDecodeError` and the outer one was blamed for it. The
+        existing nested-try leg above puts the inner try inside a `for`; a walk that
+        only filters *children* passes that leg and fails this one, because here the
+        inner `try` **is** a direct statement of the outer try's body.
+        """
+        tree = _tree(
+            tmp_path,
+            good="""\
+            def read(path):
+                try:
+                    if not path.exists():
+                        return None
+                    try:
+                        return path.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        return None
+                except OSError:
+                    return None
+            """,
+        )
+        proc = _run(tree)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
 
 class TestItStaysSilent:
     def test_the_shared_home_counts_as_naming_the_shape(self, tmp_path) -> None:
@@ -270,6 +333,90 @@ class TestItStaysSilent:
             """,
         )
         assert _run(tree).returncode == 0, _run(tree).stdout
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            # A write truncates; it does not decode, and `open`'s mode is the
+            # *first* positional argument for the method and the second for the
+            # builtin. Reading one position for both is the bug that produced the
+            # first version of this half.
+            """\
+            def use(path):
+                try:
+                    with path.open('w', encoding='utf-8') as handle:
+                        handle.write('x')
+                except OSError:
+                    return None
+            """,
+            """\
+            def use(path):
+                try:
+                    with open(path, 'a', encoding='utf-8') as handle:
+                        handle.write('x')
+                except OSError:
+                    return None
+            """,
+            # Binary mode hands back bytes — no decode, no decode error.
+            """\
+            def use(path):
+                try:
+                    return path.read_bytes()
+                except OSError:
+                    return None
+            """,
+            """\
+            def use(path):
+                try:
+                    with open(path, 'rb') as handle:
+                        return handle.read()
+                except OSError:
+                    return None
+            """,
+            # A non-strict `errors=` makes the decode unfailable, which is the
+            # property the rule exists to protect, not a way around it.
+            """\
+            def use(path):
+                try:
+                    return path.read_text(encoding='utf-8', errors='replace')
+                except OSError:
+                    return None
+            """,
+            """\
+            def use(path):
+                try:
+                    with open(path, encoding='utf-8', errors='surrogateescape') as handle:
+                        return handle.read()
+                except OSError:
+                    return None
+            """,
+        ],
+        ids=["method-open-w", "builtin-open-a", "read_bytes", "open-rb", "read_text-replace", "open-surrogateescape"],
+    )
+    def test_reads_that_decode_nothing_are_not_reported(self, tmp_path, source) -> None:
+        """The other direction of the new half: what this rule has no business in.
+
+        Each of these was measured on this tree before the rule was allowed to fire,
+        and each is a call that *looks* like a text read. `errors='strict'` is absent
+        on purpose: it is the default, so it names the raise rather than preventing it.
+        """
+        tree = _tree(tmp_path, good=source)
+        proc = _run(tree)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    def test_a_strict_errors_is_not_an_exemption(self, tmp_path) -> None:
+        """`errors='strict'` is the default spelled out, so it still raises."""
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            def read(path):
+                try:
+                    return path.read_text(encoding="utf-8", errors="strict")
+                except OSError:
+                    return None
+            """,
+        )
+        assert _run(tree).returncode == 1, _run(tree).stdout
 
 
 class TestThisCheckout:
