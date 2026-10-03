@@ -662,6 +662,12 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
     # test of the environment. `test_the_json_document_keeps_its_shape_and_carries_the_
     # same_fact` pins the live reading.
     monkeypatch.setattr(mod, "local_tree", lambda: ("/checkout", "some-branch", "b" * 40))
+    # The origin too: the URL this checkout's `git` really goes to is a fact about the
+    # runner (CI checks out a real clone; the evolution host carries an `insteadOf`
+    # rewrite), and the shape has to be the same everywhere.
+    monkeypatch.setattr(
+        mod, "origin_resolution", lambda: "https://github.com/argszero/emrg.git"
+    )
     # `--prev-cycle` rather than the default cycle-record directory: the shape has to
     # be the same everywhere, and the inferred window is a fact about the host.
     rc = mod.main(
@@ -676,6 +682,8 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
         "subject": "pr",
         "tree": "/checkout",
         "branch": "some-branch",
+        "origin": "https://github.com/argszero/emrg.git",
+        "origin_local": False,
         "pr": 1,
         "head": HEAD,
         "title": "pr 1",
@@ -1189,6 +1197,128 @@ def test_the_json_document_keeps_its_shape_and_carries_the_same_fact(
     assert payload[0]["tree"] == str(REPO_ROOT)
     assert payload[0]["branch"] == "feature/x"
     assert "tree: " not in out, "the prose line must not be emitted into the JSON document"
+# --- where `origin` really goes, not where it is written ---------------------
+#
+# The tree line names the clone. It does not name where that clone's `git` would go, and
+# on a checkout carrying `[url "<path>"] insteadOf = https://github.com/...` those are two
+# different places: every `git fetch origin` reads the local directory **and reports
+# success**, so a reading taken through it is the clone's while looking like the remote's.
+# Measured on the evolution host 2026-10-03 (`cyc20261003-083413`): `git pull origin
+# master` answered "Already up to date" and `git push origin master --dry-run` answered
+# "Everything up-to-date" with github.com unreachable — and that dry run is the reading the
+# evolution template takes as its role check, so it could not settle that question there.
+# The note is what turns the surprise into a sentence.
+
+
+def test_the_local_origin_forms_are_told_from_the_network_ones(mod):
+    """Both directions of one predicate, because a rule that only matches never fires.
+
+    The near miss is git's scp form (`git@github.com:o/r.git`): scheme-less, so a reader
+    keying on "has no `://`" would call a network host local. It starts with a name, not a
+    path separator, which is what separates them here.
+    """
+    locals_ = (
+        "C:/Users/x/emrg",
+        "C:\\Users\\x\\emrg",
+        "C:/Users/x/emrg/",
+        "/srv/git/emrg.git",
+        "./emrg",
+        "../emrg",
+        "\\\\server\\share\\emrg.git",
+        "file:///srv/git/emrg.git",
+    )
+    networks = (
+        "https://github.com/argszero/emrg.git",
+        "git@github.com:argszero/emrg.git",
+        "ssh://git@github.com/argszero/emrg.git",
+        "git://github.com/argszero/emrg.git",
+        "/srv/git/../x",  # still a path: the form is what is judged, not the route
+    )
+    for url in locals_:
+        assert mod.resolves_to_this_machine(url) is True, url
+    for url in networks:
+        if url == "/srv/git/../x":
+            assert mod.resolves_to_this_machine(url) is True, url
+            continue
+        assert mod.resolves_to_this_machine(url) is False, url
+
+
+def test_a_local_origin_is_named_on_the_tree_line(mod, monkeypatch, capsys):
+    """The arm that would have caught the false dry run: the tree line says where it goes."""
+    monkeypatch.setattr(mod, "origin_resolution", lambda: "C:/work/emrg/")
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    rc = _run(
+        mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE]
+    )
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert rc == 0
+    assert lines[0].startswith("tree: "), lines[0]
+    assert "origin resolves to C:/work/emrg/" in lines[0]
+    assert "a path on this machine" in lines[0]
+    assert "never GitHub" in lines[0]
+    # The row is still the line after the tree line: the clause lengthens that line rather
+    # than adding one, which is what keeps this family's readers (and three other tests
+    # here) reading the first row where they expect it. `--cycle`/`--prev-cycle` are given
+    # so no window note sits between the two.
+    assert lines[1].startswith("#1 "), lines[:2]
+
+
+def test_a_network_origin_leaves_the_tree_line_alone(mod, monkeypatch, capsys):
+    """The control: on an ordinary clone the clause is absent, so its presence means something.
+
+    A clause appended whatever the origin was would be decoration, and decoration beside a
+    reading is what a reader learns to skim.
+    """
+    monkeypatch.setattr(
+        mod, "origin_resolution", lambda: "https://github.com/argszero/emrg.git"
+    )
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    rc = _run(
+        mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE]
+    )
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert rc == 0
+    assert "origin" not in lines[0], lines[0]
+    assert lines[1].startswith("#1 "), lines[:2]
+
+
+def test_an_unreadable_origin_is_stated_rather_than_assumed(mod, monkeypatch, capsys):
+    """`git` could not say where it would go, so the report says that instead of a value.
+
+    The temptation is to print nothing here — and "nothing" reads exactly like a network
+    origin, which is the one answer that must not be inferred from silence.
+    """
+    monkeypatch.setattr(mod, "origin_resolution", lambda: None)
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    rc = _run(mod, monkeypatch, votes, fresh, ["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "origin could not be read" in out
+
+
+def test_the_json_origin_field_keeps_the_third_state(mod, monkeypatch, capsys):
+    """`origin_local` is three-valued: unread is not "not local".
+
+    A consumer folding `None` into `False` would read an unmeasured destination as a
+    network one, which is the family's "never a pass" rule one field over — so the pin is
+    on the value, not on the field's presence.
+    """
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    monkeypatch.setattr(mod, "origin_resolution", lambda: None)
+    _run(mod, monkeypatch, votes, fresh, ["1", "--prev-cycle", PREV_CYCLE, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["origin"] is None
+    assert payload[0]["origin_local"] is None
+
+    monkeypatch.setattr(mod, "origin_resolution", lambda: "/srv/git/emrg.git")
+    _run(mod, monkeypatch, votes, fresh, ["1", "--prev-cycle", PREV_CYCLE, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["origin"] == "/srv/git/emrg.git"
+    assert payload[0]["origin_local"] is True
+
+
 def test_a_windowed_run_prints_no_such_note(mod, monkeypatch, capsys):
     """The control: with `--cycle` and a previous cycle in hand the clause *is*
     applied in full, and a note printed anyway would be a claim about a gap that is not

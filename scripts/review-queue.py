@@ -1016,6 +1016,93 @@ def render_rant(rant: Rant) -> str:
     return "\n".join(lines)
 
 
+def _git_stdout(*args: str) -> str | None:
+    """`git <args>`'s stdout, or None when it could not be run or exited non-zero.
+
+    One implementation for the two environment readings below (`local_tree` and
+    `origin_resolution`), because both have to keep the same three states apart — `git`
+    absent, the command refusing, an empty answer — and all three are `None` here, which
+    is why each caller renders "unread" rather than a value.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=SCRIPTS_DIR,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+#: An `origin` that resolves onto *this* machine rather than a network host: an absolute
+#: POSIX path, a Windows drive or UNC path, a relative path, or a `file:` URL. A
+#: scheme-less `host:path` (git's scp form, `git@github.com:o/r.git`) is deliberately
+#: *not* here — it starts with a name, not a path separator, and it is a network.
+_LOCAL_ORIGIN = re.compile(r"^(?:[A-Za-z]:[\\/]|[\\/]|\.{1,2}[\\/]|file:)")
+
+#: `get-url` expands `insteadOf`, which is the whole point of asking it rather than
+#: reading `remote.origin.url` out of the config: the rewrite is what a fetch obeys.
+_ORIGIN_ARGS = ("remote", "get-url", "origin")
+
+
+def resolves_to_this_machine(url: str) -> bool:
+    """Is this remote URL a place on this machine, not a network host?"""
+    return bool(_LOCAL_ORIGIN.match(url.strip()))
+
+
+def origin_resolution() -> str | None:
+    """The URL `origin` really resolves to, or None when that cannot be read.
+
+    The tree line above the readings names the clone; this names **where its `git`
+    would go**, because a rewrite in `.git/config` can point `origin` at a directory,
+    and then every `git fetch origin ...` in this family reads that directory *and
+    reports success* — the reading is this clone's while it looks like the remote's.
+
+    Measured 2026-10-03 (`cyc20261003-083413`), on this host with github.com
+    unreachable: this checkout carries
+
+        [url "<checkout>/"]  insteadOf = https://github.com/argszero/emrg.git
+
+    so `git pull origin master` answered "Already up to date" and
+    `git push origin master --dry-run` answered "Everything up-to-date" — the dry run
+    being the reading the evolution template takes as its role check, which is why it
+    could not have settled that question here. The same URL spelled without `.git` (so
+    the rewrite does not apply) hung for three minutes, and that is how the rewrite was
+    found. Neither answer above is about the remote; this function is what lets the
+    report say so.
+    """
+    return _git_stdout(*_ORIGIN_ARGS)
+
+
+def origin_clause() -> str:
+    """The origin half of the tree line — empty for an ordinary network origin.
+
+    On the tree line rather than a line under it, because this family's readers take the
+    line after the tree line to be the first reading (`tests/test_review_queue.py` pins
+    that in three places, and a cycle reads rows that way too) — and the clause is a fact
+    about that same tree, so the line that names the tree is where it belongs. Only the
+    surprising resolution lengthens the line: a network origin adds nothing, and a clause
+    printed every run is what teaches a reader to skim the ones that matter.
+    """
+    origin = origin_resolution()
+    if origin is None:
+        return (
+            " - origin could not be read, so where a `git fetch` here would go is "
+            "unmeasured"
+        )
+    if resolves_to_this_machine(origin):
+        return (
+            f" - origin resolves to {origin}, a path on this machine, so `git fetch` / "
+            "`git push origin` here reads that directory and never GitHub, and reports "
+            "success either way: the readings below are this clone's, not the remote's"
+        )
+    return ""
+
+
 def local_tree() -> tuple[str, str, str]:
     """(this checkout, the branch it is on, its HEAD) — read, or said unreadable.
 
@@ -1034,18 +1121,7 @@ def local_tree() -> tuple[str, str, str]:
     """
 
     def git(*args: str) -> str | None:
-        try:
-            proc = subprocess.run(
-                ["git", *args],
-                cwd=SCRIPTS_DIR,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-        except OSError:
-            return None
-        return proc.stdout.strip() if proc.returncode == 0 else None
+        return _git_stdout(*args)
 
     branch = git("symbolic-ref", "--short", "-q", "HEAD")
     if not branch:
@@ -1068,11 +1144,19 @@ def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = 
     # row rather than only the rants: a consumer that had to infer "no `pr` key means a
     # rant" would be reading a shape by absence.
     root, branch, _head = local_tree()
+    # The origin rides as a field for the same reason the tree and branch do: the prose
+    # note that states it in the human report would be a second kind of line here.
+    origin = origin_resolution()
     rows = [
         {
             "subject": "pr",
             "tree": root,
             "branch": branch,
+            "origin": origin,
+            # Three states, not two: an origin that could not be read is not "not local",
+            # and a consumer that folded the two would read an unmeasured destination as a
+            # network one - the family's "never a pass" rule, one field over.
+            "origin_local": None if origin is None else resolves_to_this_machine(origin),
             "pr": reading.pr,
             "head": reading.head,
             "title": reading.title,
@@ -1221,7 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
         # The family's convention — a guard that reads a working tree names it before it
         # gives a verdict — and it applies here for the reason `local_tree` records: the
         # readings are this clone's, and so is any file the reader opens next.
-        print(f"tree: {root} on {branch} ({head[:8]})")
+        print(f"tree: {root} on {branch} ({head[:8]}){origin_clause()}")
         here = [reading.pr for reading, _ in readings if reading.head == head]
         if here:
             print(
