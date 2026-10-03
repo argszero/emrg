@@ -126,6 +126,11 @@ from pathlib import Path
 #: repository's pytest (2026-09-26). `PYTEST_TEST_FAILED` is also what pytest returns
 #: for an *error* - a fixture that blew up loading a module that cannot parse - which
 #: is why `--expect` is required rather than optional.
+
+#: A carriage return followed by a newline, spelled via `chr` so no source line here
+#: carries a literal CRLF inside a string. The anchor reader compares against it.
+CRLF = chr(13) + chr(10)
+
 PYTEST_OK = 0
 PYTEST_TEST_FAILED = 1
 PYTEST_INTERRUPTED = 2
@@ -170,6 +175,28 @@ _ECHOED_ASSERTION = re.compile(r"^[>E]\s+(?P<text>.*\bassert\b.*)$")
 #: from a terminal, and the first few lines of a failure are where its assertion is.
 _ASSERTION_CANDIDATES = 5
 _ASSERTION_MAX_CHARS = 200
+
+#: How many lines of the pre-flight run's own output a refusal prints. TARGET-BROKEN is the
+#: one verdict whose cause is *outside* this tool - a node id that does not resolve, a module
+#: that cannot import, an interpreter that has no pytest - and it was the one verdict that
+#: printed no output at all: the run's result was reduced to a count and its text thrown
+#: away. Measured 2026-10-03 (`cyc20261003-183203`): run under an interpreter without
+#: pytest, the refusal said "check the node id (a class method needs its class)" while the
+#: child had said `No module named pytest` - the diagnosis named the wrong cause, and
+#: nothing in the report could correct it, because the sentence that would have was gone.
+_REFUSAL_TAIL_LINES = 20
+
+#: Said when an anchor occurs nowhere in a file whose lines end with CRLF, but would occur
+#: once if its line endings matched the way this reader reads the file. Measured 2026-10-03
+#: (`cyc20261003-183203`): this repository's `scripts/*.py` are CRLF in a Windows checkout
+#: and `read_text()` reads them with universal newlines, so an anchor copied from an editor
+#: occurs **0 times** - reported as `the anchor occurs 0 time(s)`, which reads as "you
+#: mistyped the anchor" and sends the caller to re-copy the wrong thing.
+_ANCHOR_LINE_ENDINGS_WHY = (
+    "the anchor is written with CRLF line endings and this tool reads the file with "
+    "universal newlines, so the text it matches against has `\\n`: the same anchor written "
+    "that way matches exactly once"
+)
 
 
 def _purge_bytecode(target: Path) -> list[str]:
@@ -283,6 +310,31 @@ def _why_unjudgeable(rc: int, expect: str, out: str) -> str:
     return f"pytest exited {rc}, which separates neither outcome"
 
 
+def _tail(text: str, lines: int = _REFUSAL_TAIL_LINES) -> str:
+    """The last `lines` non-blank lines of a run's output, for a refusal to show."""
+    return "\n".join([line for line in text.splitlines() if line.strip()][-lines:])
+
+
+def _anchor_line_ending_note(anchor: str, original: str, target: Path) -> str:
+    """Why an anchor that occurs nowhere may be about line endings, not a typo.
+
+    Returns `""` when there is nothing to say: an anchor whose CRLF form is not the
+    form this reader reads is a different anchor, and blaming line endings for it
+    would be the same mistake in the other direction.
+    """
+    if CRLF not in anchor:
+        return ""
+    if original.count(anchor.replace(CRLF, "\n")) != 1:
+        return ""
+    on_disk = target.read_bytes().count(CRLF.encode())
+    ending = (
+        f"the file's lines end with CRLF on disk ({on_disk} of them)"
+        if on_disk
+        else "the file has no CRLF bytes on disk at all"
+    )
+    return f"{_ANCHOR_LINE_ENDINGS_WHY} - {ending}"
+
+
 def _apply(text: str, old: str, new: str) -> str | None:
     """The mutated text, or None when the anchor is not uniquely present."""
     if text.count(old) != 1:
@@ -313,6 +365,10 @@ class Arm:
         #: `--expect` - printed when the verdict is UNJUDGEABLE, which is the one
         #: state where the caller has to retype the fragment.
         self.assertions: list[str] = []
+        #: the pre-flight run's own output, kept for the one verdict that has to be
+        #: diagnosed by someone else: the refusal. Bounded, because a terminal is what
+        #: reads this report.
+        self.preflight_output: str = ""
 
     def decide(self, verdict: str, why: str, code: int) -> None:
         self.verdict, self.why, self.code = verdict, why, code
@@ -329,6 +385,8 @@ class Arm:
             "mutated_rc": self.mutated_rc,
             "mutated_passed": self.mutated_passed,
             "assertions": list(self.assertions),
+            "interpreter": sys.executable,
+            "preflight_output": self.preflight_output,
             "restored": self.restored,
             "verdict": self.verdict,
             "why": self.why,
@@ -345,6 +403,10 @@ def _report(arm: Arm, as_json: bool) -> None:
     # The tree first, before any verdict: this tool writes to the tree it names, and
     # a reader has to be able to tell which checkout was modified.
     print(f"tree: {arm.cwd}")
+    # The interpreter the target ran under comes before the verdict: a refusal from an
+    # interpreter that cannot import pytest is a different fact from a node id that does
+    # not resolve, and this is the line that tells the two apart at a glance.
+    print(f"interpreter: {sys.executable}")
     print(f"file: {arm.target}")
     print(f"target: {', '.join(arm.args.node)}")
     print(f"preflight: {arm.preflight}")
@@ -352,6 +414,12 @@ def _report(arm: Arm, as_json: bool) -> None:
     print(f"failed node: {arm.failed_node or '-'}")
     print(f"restored byte-for-byte: {arm.restored}")
     print(f"verdict: {arm.verdict} - {arm.why}")
+    if arm.verdict == TARGET_BROKEN and arm.preflight_output:
+        # Printed only for the refusal, which is the verdict a reader has to diagnose
+        # from outside this tool - and the state whose evidence used to be discarded.
+        print("the pre-flight run this refuses printed:")
+        for line in arm.preflight_output.splitlines():
+            print(f"  {line}")
     if arm.verdict == UNJUDGEABLE and arm.assertions:
         # Printed only for the verdict whose reader has to retype the fragment. For
         # KILLED the expectation already matched, and for the other states the reason
@@ -419,11 +487,18 @@ def main(argv: list[str] | None = None) -> int:
     mutated = _apply(original, args.old, args.new)
     if mutated is None:
         occurrences = original.count(args.old)
+        # `occurrences == 0` has two causes and they need different remedies: the
+        # anchor is not in the file, or it is and its line endings are not the ones
+        # this reader reads. The second is named when it is the one that holds.
+        note = (
+            _anchor_line_ending_note(args.old, original, target) if occurrences == 0 else ""
+        )
         arm.decide(
             NO_MUTATION,
             f"the anchor occurs {occurrences} time(s) in {target.name}; a replacement "
             "needs exactly one site, or the arm mutates something other than what it "
-            "names",
+            "names"
+            + (f". Also: {note}" if note else ""),
             EXIT_NO_MUTATION,
         )
         _report(arm, args.json)
@@ -438,19 +513,27 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.no_preflight:
             proc = _run_target(args.node, cwd, home)
-            passed = _passed_count(_combined(proc))
+            output = _combined(proc)
+            passed = _passed_count(output)
             if proc.returncode != PYTEST_OK or passed < 1:
                 # A refusal is a verdict like any other, so it goes through the same
                 # report path: an unattributed non-zero exit is the failure this tool
                 # exists to prevent, and that includes this tool's own.
                 arm.preflight = f"refused (rc={proc.returncode}, {passed} passed)"
+                # The run is kept, not just its exit code. The node id is one cause of
+                # this refusal and the sentence below said so, but a missing dependency
+                # and a module that cannot import reach the same state - and they are
+                # told apart by the child's own words, which used to be thrown away.
+                arm.preflight_output = _tail(output)
                 arm.decide(
                     TARGET_BROKEN,
                     f"before any mutation the target exited {proc.returncode} with "
                     f"{passed} passed. An arm can only attribute a failure to its "
                     "mutation if the target collected and passed first - check the node "
                     "id (a class method needs its class: "
-                    "tests/test_x.py::TestC::test_y)",
+                    "tests/test_x.py::TestC::test_y), and read the run's own output "
+                    "below: a wrong node id, an interpreter without pytest and a module "
+                    "that cannot import all look like this from here",
                     EXIT_TARGET_BROKEN,
                 )
             else:
