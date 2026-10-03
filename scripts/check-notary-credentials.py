@@ -41,6 +41,14 @@ only as strong as "the asked-for JSON came back"; nothing here reads a field ins
 The password is read from the environment and never printed — not in the reading, and not
 in a subprocess error echoed back (see `_redact`).
 
+**Exit 1 is spent on Apple's answer and on nothing else.** Every other way this can fail — an
+unreadable `--env-file`, a reply whose `history` is not a list, no `xcrun`, no variables to
+send, a timeout, a transport error — is a failure to *measure* and exits 2. Measured
+2026-10-03 (`cyc20261003-141219`) on this tree: before this was stated, four such paths
+(`--env-file` missing, a directory, not UTF-8, and a `history` of `null`) each ended the
+process at exit **1** through an uncaught exception, so a host with a typo in a path was
+told to go rotate a password that had never been asked about.
+
 Exit codes, the family's contract:
 
     0  Apple accepted the credentials
@@ -157,7 +165,27 @@ def probe(xcrun: str | None, env: dict[str, str]) -> tuple[str, str]:
                 f"asks for, so no credentials verdict was reached. Output: "
                 f"{_redact(result.stdout.strip()[:200], secrets)!r}"
             )
-        count = len(parsed.get("history", [])) if isinstance(parsed, dict) else None
+        count = None
+        if isinstance(parsed, dict):
+            # Key *membership*, not `parsed.get("history")`: a `.get` answers `None` both for
+            # a key that is absent and for one whose value is null, and those are two
+            # different readings — the first has never failed a release, the second used to
+            # reach `len(None)` (the `.get(key, default)` default fires only on absence).
+            history = parsed["history"] if "history" in parsed else []
+            if isinstance(history, list):
+                count = len(history)
+            else:
+                # Not the submission history `--output-format json` asks for, and the shape
+                # that used to end this process at **exit 1** — the code reserved for Apple's
+                # refusal (measured 2026-10-03, `cyc20261003-141219`).
+                return "unmeasurable", (
+                    "the call exited 0 but answered with a `history` that is not a list "
+                    f"({type(history).__name__}), so no credentials verdict was reached. "
+                    f"Output: {_redact(result.stdout.strip()[:200], secrets)!r}"
+                )
+        # A JSON object with no `history` key keeps the reading it has always had: the reply
+        # is `--output-format json`'s shape as far as this transcript can tell, and
+        # narrowing it here would refusal-ify an answer that has never failed a release.
         where = f"{count} past submission(s) on record" if count is not None else "a JSON reply"
         return "works", f"Apple answered the submission-history request ({where})"
 
@@ -174,13 +202,18 @@ def probe(xcrun: str | None, env: dict[str, str]) -> tuple[str, str]:
     )
 
 
-def check(env: dict[str, str], xcrun: str | None) -> int:
+def check(env: dict[str, str], xcrun: str | None, env_file_error: str | None = None) -> int:
     """Print the reading and return the exit code."""
     print("notary credentials preflight")
     print(f"  apple-id: {env.get(APPLE_ID_VAR) or '(unset)'}")
     print(f"  team-id:  {env.get(TEAM_ID_VAR) or '(unset)'}")
     print(f"  password: {'set' if env.get(PASSWORD_VAR) else '(unset)'}")
     print(f"  xcrun:    {xcrun or '(not on PATH)'}")
+    if env_file_error is not None:
+        # The credentials were never read, so there is nothing to ask Apple about. Reading
+        # this as a refusal would be a reading of the *host's* shell rather than of Apple.
+        print(f"not measurable: {env_file_error}")
+        return 2
     state, detail = probe(xcrun, env)
     if state == "works":
         print(f"OK: {detail}")
@@ -225,10 +258,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     env = dict(os.environ)
+    env_file_error: str | None = None
     if args.env_file is not None:
-        env.update(_read_env_file(args.env_file))
+        try:
+            env.update(_read_env_file(args.env_file))
+        except (OSError, UnicodeDecodeError) as exc:
+            # `--env-file` exists so a host can keep the password out of the shell history,
+            # which makes a wrong path an ordinary accident rather than an exotic one, and
+            # all three shapes are reachable: missing, a directory, and a file that is not
+            # UTF-8. Each used to raise out of `main` and end the process at **exit 1** —
+            # this script's code for "Apple refused your credentials" — so a host with a
+            # typo in a path was sent to rotate a password that had never been asked about
+            # (measured 2026-10-03, `cyc20261003-141219`).
+            env_file_error = (
+                f"cannot read --env-file {args.env_file}: {exc} - the credentials the "
+                f"release would send were never read, so nothing was measured"
+            )
     xcrun = args.xcrun if args.xcrun is not None else shutil.which("xcrun")
-    return check(env, xcrun)
+    return check(env, xcrun, env_file_error)
 
 
 def _read_env_file(path: str) -> dict[str, str]:
