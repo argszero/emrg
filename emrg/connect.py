@@ -26,7 +26,7 @@ import socket as _socket
 from pathlib import Path
 
 from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import WebSocketException
 
 from emrg.config import config_dir
 
@@ -88,14 +88,36 @@ async def connect_to_server():
         max_size=16 * 1024 * 1024,
     )
     await ws.send(json.dumps({"type": "auth", "token": token}))
-    # Wait for auth_ok: received → ready; ConnectionClosed (rejected) /
-    # timeout (no response) → AuthError.
+    # Wait for auth_ok. Every way the daemon can *decline* has to leave here as
+    # an AuthError, because `emrg server stop` reads the exception's type, not
+    # its text: `__main__._stop_failure_message` answers "daemon not running."
+    # for anything that is not an AuthError, which is a lie the moment a daemon
+    # actually stood there and answered — and the docstring above names "daemon
+    # version mismatch" as an AuthError, which is precisely the case that
+    # arrives as a frame this client cannot read. So both halves are guarded:
+    #   - the socket closing (ConnectionClosed), the 10 s budget expiring, or a
+    #     protocol error (InvalidMessage / PayloadTooBig) — a daemon speaking
+    #     something this client cannot parse;
+    #   - a frame that arrives but is not this client's `auth_ok`: not JSON, or
+    #     JSON that is not an object (`.get` on a list is an AttributeError).
+    # A genuine transport failure is raised before this point — the missing
+    # token's FileNotFoundError at the read above, ConnectionRefusedError at
+    # `connect` — and still propagates, because that really is "not running".
     try:
-        ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-    except (ConnectionClosed, asyncio.TimeoutError):
+        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+    except (WebSocketException, asyncio.TimeoutError):
         await ws.close()
-        raise AuthError("authentication failed — check token / daemon version")
-    if ack.get("type") != "auth_ok":
+        raise AuthError(
+            "authentication failed — check token / daemon version"
+        ) from None
+    try:
+        ack = json.loads(frame)
+    except (ValueError, TypeError):
+        # ValueError is json.JSONDecodeError for a non-JSON frame; TypeError is
+        # `recv()` handing back something json.loads cannot take at all.
+        await ws.close()
+        raise AuthError(f"unexpected auth response (not JSON): {frame!r}") from None
+    if not isinstance(ack, dict) or ack.get("type") != "auth_ok":
         await ws.close()
         raise AuthError(f"unexpected auth response: {ack!r}")
     return ws

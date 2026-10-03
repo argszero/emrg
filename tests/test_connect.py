@@ -4,7 +4,32 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+import websockets.exceptions as wexc
+
 from emrg.connect import CONNECT_ID, AuthError, cleanup_server, get_server_path, is_server_running_sync
+
+# The shapes a daemon's first frame can take that are NOT this client's
+# `auth_ok`. Every one of them means the same thing to `emrg server stop` — a
+# daemon answered and this client could not accept it (see
+# TestTheHandshakeNamesItsRefusal) — so every one of them must be an AuthError.
+# Measured on master when this catalogue was written (2026-10-04): four of the
+# five frames and two of the four raised shapes escaped un-guarded; the legs
+# that already passed are the control against widening the guard into a no-op.
+_DECLINED_FRAMES = [
+    "not json at all",             # not JSON → JSONDecodeError on master
+    "[1,2,3]",                     # JSON, not an object → AttributeError on master
+    "123",                         # a JSON scalar
+    '"auth_ok"',                   # a JSON string, not the object
+    json.dumps({"type": "bye"}),   # an object with the wrong `type` (guarded before)
+]
+
+_DECLINED_RAISES = [
+    wexc.ConnectionClosed(None, None),   # daemon closed the socket (guarded before)
+    wexc.InvalidMessage("bad frame"),    # protocol error → escaped on master
+    wexc.PayloadTooBig(20 * 1024 * 1024, 16 * 1024 * 1024),  # over max_size → escaped on master
+    asyncio.TimeoutError(),              # no answer inside the budget (guarded before)
+]
 
 
 class TestGetServerPath:
@@ -164,3 +189,117 @@ class TestConnectToServer:
         assert captured["uri"] == f"ws://127.0.0.1:{connect_mod.EMRGD_PORT}"
         assert captured["kwargs"]["proxy"] is None
         assert captured["kwargs"]["max_size"] == 16 * 1024 * 1024
+
+
+def _handshake(monkeypatch, tmp_path, *, frame=None, raises=None):
+    """Point `connect_to_server` at a fake daemon that answers with `frame` or
+    raises `raises` on its first `recv()`. Returns the module under test."""
+    from emrg import connect as connect_mod
+
+    class FakeWS:
+        async def send(self, data):
+            pass
+
+        async def recv(self):
+            if raises is not None:
+                raise raises
+            return frame
+
+        async def close(self):
+            pass
+
+    async def fake_connect(uri, **kwargs):
+        return FakeWS()
+
+    monkeypatch.setattr(connect_mod, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr(connect_mod, "connect", fake_connect)
+    (tmp_path / f"{CONNECT_ID}.token").write_text("token", encoding="utf-8")
+    return connect_mod
+
+
+def _attempt(connect_mod):
+    """Run the handshake, returning the ws on success or the raised exception."""
+    try:
+        return asyncio.run(connect_mod.connect_to_server())
+    except BaseException as exc:  # noqa: BLE001 — the point is to see what escapes
+        return exc
+
+
+class TestTheHandshakeNamesItsRefusal:
+    """Every way a daemon can decline the handshake leaves as AuthError.
+
+    `emrg server stop` reads the exception's TYPE, not its text:
+    `__main__._stop_failure_message` answers "daemon not running." for anything
+    that is not an AuthError. So a daemon that answers with a frame this client
+    cannot read as its `auth_ok` — a version mismatch, the case this module's
+    own docstring names as AuthError — must not escape as a raw
+    JSONDecodeError / AttributeError / websockets error: the host would be told
+    to go hunting for a daemon process that is standing right there. Measured on
+    master before the fix (2026-10-04): six of the nine shapes below escaped
+    un-guarded — the four frames that are not a `{"type": ...}` object (`not
+    json at all`, `[1,2,3]`, `123`, `"auth_ok"`) as a raw JSONDecodeError or
+    AttributeError, and `InvalidMessage` / `PayloadTooBig` as raw websockets
+    errors.
+    """
+
+    def test_the_population_is_what_the_guard_reads(self):
+        """The catalogues are closed over the shapes the guard names.
+
+        Each entry drives one branch of `connect_to_server`'s two `except`
+        clauses plus the `isinstance`/`type` check. Keeping the lists (and
+        asserting their size) is what stops the guard from silently widening or
+        narrowing without a test.
+        """
+        assert len(_DECLINED_FRAMES) == 5
+        assert len(_DECLINED_RAISES) == 4
+
+    def test_a_valid_ack_returns_the_socket(self, monkeypatch, tmp_path):
+        """Control leg: the one answer the client wants still returns a ws."""
+        mod = _handshake(monkeypatch, tmp_path, frame=json.dumps({"type": "auth_ok"}))
+        result = _attempt(mod)
+        assert not isinstance(result, BaseException)
+
+    @pytest.mark.parametrize("frame", _DECLINED_FRAMES)
+    def test_a_frame_the_client_cannot_accept(self, monkeypatch, tmp_path, frame):
+        mod = _handshake(monkeypatch, tmp_path, frame=frame)
+        assert isinstance(_attempt(mod), AuthError)
+
+    @pytest.mark.parametrize("exc", _DECLINED_RAISES, ids=lambda e: type(e).__name__)
+    def test_a_raised_transport_error(self, monkeypatch, tmp_path, exc):
+        """ConnectionClosed / protocol errors / timeout all mean "no auth_ok"."""
+        mod = _handshake(monkeypatch, tmp_path, raises=exc)
+        assert isinstance(_attempt(mod), AuthError)
+
+
+class TestTheHandshakeKeepsRealTransportFailures:
+    """Control legs in the other direction: what the guard must NOT swallow.
+
+    A daemon that is genuinely absent (the token file gone, or nothing bound to
+    the fixed port) really is "not running", and `emrg server stop` must be able
+    to say so. Collapsing these into AuthError would trade one lie for another.
+    """
+
+    def test_a_missing_token_file_still_raises(self, monkeypatch, tmp_path):
+        from emrg import connect as connect_mod
+
+        monkeypatch.setattr(connect_mod, "config_dir", lambda: tmp_path)
+
+        result = _attempt(connect_mod)
+
+        assert isinstance(result, FileNotFoundError)
+        assert not isinstance(result, AuthError)
+
+    def test_a_refused_connection_still_raises(self, monkeypatch, tmp_path):
+        from emrg import connect as connect_mod
+
+        async def refused(uri, **kwargs):
+            raise ConnectionRefusedError(61, "Connection refused")
+
+        monkeypatch.setattr(connect_mod, "config_dir", lambda: tmp_path)
+        monkeypatch.setattr(connect_mod, "connect", refused)
+        (tmp_path / f"{CONNECT_ID}.token").write_text("token", encoding="utf-8")
+
+        result = _attempt(connect_mod)
+
+        assert isinstance(result, ConnectionRefusedError)
+        assert not isinstance(result, AuthError)
