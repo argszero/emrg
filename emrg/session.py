@@ -451,18 +451,50 @@ class Session:
     # ── History reading ───────────────────────────────────────
 
     def _read_history(self) -> list[dict]:
-        """Read all records from history.jsonl."""
+        """Read all records from history.jsonl.
+
+        Tolerant per line, at both levels a line can be unreadable, because this
+        is the one file the product itself rewrites while a reader may be
+        reading it: `_write_history` truncates and rewrites the whole file,
+        `append` writes one line at a time, and the daemon, a second client and
+        this session's own later reads can each see the file mid-write.
+
+        `errors="replace"` is the second level, and the one a single byte
+        reaches. The file is UTF-8, and a reader that decodes it *strictly*
+        raises `UnicodeDecodeError` out of this method — which is not an answer
+        about one record but about **every** record: the caller gets no history
+        at all. Measured 2026-10-04 on a three-record file whose second record
+        holds one invalid byte: `_read_history`, `get_messages_for_llm`,
+        `compact` and `drop_history_records` each raised, so the session could
+        not be read, answered, compacted or rewound — and it was not repairable
+        through any product path, because every repair path reads first. The
+        same file read the way this codebase's other host-file readers read it
+        yields all three records, and one that really is unparseable is skipped
+        by the branch below, exactly as before.
+
+        A torn multibyte character is not a hypothetical: it is what a write cut
+        in half produces, which is the same condition `_index_for_prompt`'s
+        docstring measures for a MEMORY.md being rewritten ("37 of 121 reads
+        raised"). A replacement character inside one record is a smaller loss
+        than the whole history, and it is the policy the sibling reader of this
+        same file already uses (`scripts/find-host-message.py`).
+        """
         if not self._history_path.exists():
             return []
         records = []
-        with open(self._history_path, encoding="utf-8") as f:
-            for line in f:
+        with open(self._history_path, encoding="utf-8", errors="replace") as f:
+            for index, line in enumerate(f):
                 line = line.strip()
-                if line:
-                    try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        logger.warning("corrupt line in history.jsonl, skipping")
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    # Named by its line, because a skipped record is a reading
+                    # of this file and an unnamed one is indistinguishable from
+                    # a line the writer never wrote — the position is the only
+                    # handle a reader is left with.
+                    logger.warning("corrupt line %d in history.jsonl, skipping", index + 1)
         return records
 
     def get_messages_for_llm(self) -> list[dict]:
