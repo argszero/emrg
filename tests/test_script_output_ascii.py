@@ -203,19 +203,57 @@ def test_nested_print_literal_is_both_flagged_and_fatal(tmp_path: Path) -> None:
     assert b"UnicodeEncodeError" in proc.stderr, proc.stderr
 
 
+def _reaches_the_module_docstring(tree: ast.Module) -> bool:
+    """Whether the script touches its module docstring as *code*.
+
+    Three shapes reach it: the bare name (``description=__doc__``), the attribute
+    (``sys.modules[__name__].__doc__``) and the name as a string
+    (``getattr(mod, "__doc__")``). A sentence that *quotes* the name is none of
+    them: a docstring or a comment is a single ``Constant`` whose value is the
+    whole sentence, so it is not the name.
+
+    This replaced a whole-file substring test, and the measurement that forced it
+    (2026-10-03, `cyc20261003-231313`) is worth stating, because the failure was
+    invisible in the direction reviewers look. A paragraph added to
+    `scripts/check-vote-count.py`'s module docstring *explained* that no test read
+    that member's docstring - it named the attribute in prose - and
+    ``"__doc__" in src`` read the sentence as the script printing its own
+    docstring. The file's own parser builds its description from a constant and it
+    names the attribute nowhere in code, so the gate opened on prose and closed on
+    nothing: an unrelated edit made the suite fail, while the docstring it dragged
+    in (which carries U+2014 and the check marks) was never output at all.
+
+    All eight scripts that reach the docstring today do it through a bare ``Name``
+    (ten call sites), and this reading still covers them: measured over ``scripts/``
+    on the same day, the two readers agree on all 36 files and part only where the
+    mention is prose - the case that failed. Narrowing it therefore changes no
+    verdict this tree carries today.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "__doc__":
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == "__doc__":
+            return True
+        if isinstance(node, ast.Constant) and node.value == "__doc__":
+            return True
+    return False
+
+
 def _help_text_literals(path: Path) -> list[tuple[str, str]]:
     """Literals argparse writes to stdout on ``--help``.
 
     ``description`` (conventionally ``__doc__``), ``epilog`` and every
     ``help=`` are printed by argparse, so they reach a caller's console exactly
     like a ``print()`` does. The module docstring is included when the script
-    references ``__doc__``, which is the usual way it becomes help text.
+    references ``__doc__`` **as code** - the usual way it becomes help text - which
+    ``_reaches_the_module_docstring`` reads from the tree; naming the attribute in
+    a sentence is not a reference, and reading it as one is the false positive that
+    function records.
     """
-    src = path.read_text(encoding="utf-8")
-    tree = ast.parse(src)
+    tree = ast.parse(path.read_text(encoding="utf-8"))
 
     found: list[tuple[str, str]] = []
-    if "__doc__" in src:
+    if _reaches_the_module_docstring(tree):
         doc = ast.get_docstring(tree, clean=False)
         if doc:
             found.append(("module docstring (printed as __doc__)", doc))
@@ -260,6 +298,108 @@ def test_script_help_text_is_ascii() -> None:
         "help text and docstrings printed by argparse must be ASCII-only so "
         "`--help` survives any console codec; found non-ASCII in:\n  "
         + "\n  ".join(offenders)
+    )
+
+
+# --------------------------------------------------------------------------
+# static: whose docstring is help text
+# --------------------------------------------------------------------------
+
+
+def _synthetic_script(tmp_path: Path, body: str) -> Path:
+    """A script on disk, because ``_help_text_literals`` reads a path."""
+    script = tmp_path / "synthetic.py"
+    script.write_text(textwrap.dedent(body), encoding="utf-8")
+    return script
+
+
+def test_a_docstring_that_mentions_the_attribute_is_not_help_text(tmp_path: Path) -> None:
+    """The measured false positive, reduced to the sentence that caused it.
+
+    ``"__doc__" in src`` asked whether the characters appear *anywhere* in the
+    file, which is a different question from the one the rule states ("the module
+    docstring, **when the script prints it**"). A paragraph explaining that nothing
+    reads the attribute opened the gate; the em dash in that paragraph is only a
+    defect if the text is output, and nothing outputs it.
+    """
+    script = _synthetic_script(
+        tmp_path,
+        '''
+        """A note for the next reader: this script never prints its own __doc__ — see below.
+
+        The em dash above is the payload. It is only a defect if this text is output.
+        """
+        import argparse
+
+        parser = argparse.ArgumentParser(description="a constant, not the docstring")
+        ''',
+    )
+    source = script.read_text(encoding="utf-8")
+    assert "__doc__" in source, "the premise: the substring the old gate read is here"
+    reported = [where for where, _ in _help_text_literals(script)]
+    assert "module docstring (printed as __doc__)" not in reported, (
+        "a sentence that names the attribute is not the script printing its "
+        f"docstring, though the description= literal beside it is real help text: {reported}"
+    )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        'argparse.ArgumentParser(description=__doc__)',
+        'argparse.ArgumentParser(description=sys.modules[__name__].__doc__)',
+        'argparse.ArgumentParser(description=getattr(sys.modules[__name__], "__doc__"))',
+    ],
+)
+def test_every_shape_that_reaches_the_docstring_is_still_read(
+    tmp_path: Path, reference: str
+) -> None:
+    """The control for the leg above: the rule must still open where it should.
+
+    A gate narrowed to "nothing is help text" would pass the false-positive leg for
+    the worst possible reason, so each of the three shapes that reach the module
+    docstring is driven here — the bare name, the attribute, and the name as a
+    string handed to ``getattr``.
+    """
+    script = _synthetic_script(
+        tmp_path,
+        f'''
+        """Help text, printed by argparse."""
+        import sys
+        import argparse
+
+        {reference}
+        ''',
+    )
+    reported = [where for where, _ in _help_text_literals(script)]
+    assert "module docstring (printed as __doc__)" in reported, reported
+
+
+def test_the_scripts_that_reach_their_docstring_are_read() -> None:
+    """The real tree, in both directions: the gate is open where it must be.
+
+    The two scripts this file's own history names as ``description=__doc__`` users
+    (fixed in the original incident) must be read; and the gate must not be open on
+    every script, or "this file's docstring is output" would be decoration. Both
+    halves read the tree, so neither can be satisfied by a helper that answers the
+    same thing to every file.
+    """
+    scripts = sorted(SCRIPTS.glob("*.py"))
+    reading = {
+        script.name: [where for where, _ in _help_text_literals(script)]
+        for script in scripts
+    }
+    reported = {
+        name for name, where in reading.items()
+        if "module docstring (printed as __doc__)" in where
+    }
+    assert {"reader_fix_latency.py", "push-branch-from-api.py"} <= reported, (
+        "the incident scripts named in this file's module docstring are not read: "
+        f"{sorted(reported)}"
+    )
+    assert reported != set(reading), (
+        "every script reads as one that prints its docstring, which is the reading a "
+        "gate that never closes would give"
     )
 
 
