@@ -365,12 +365,23 @@ _PLACEHOLDER_NAME = re.compile(
 
 RETIRED_PLACEHOLDERS = ("uptime", "evolution_count", "evolution_cwd")
 
-# The one exemption from the reverse direction below, and it is temporary: PR #1729
-# (issue #1732) deletes the `- Instance: {{ instance_id }} @ {{ host_name }}` line
-# from the five built-in templates that carry it. Until that lands those two keys
-# still have a reader, so this module must not report them; the cycle that merges
-# #1729 deletes this tuple, and the guard then reports the keys by itself. Nothing
-# else belongs here — a key whose last template was deleted should be deleted too.
+# The one exemption from the reverse direction below, and it is **permanent**, not a
+# backlog item: these two keys have a reader this repository cannot see.
+# `TaskHandler._build_evolution_prompt` renders `self._template_path`, and for a custom
+# task type that path is the host's own `~/.emrg/task-templates/<type>.md`
+# (`scheduler._resolve_task_template`), rendered through this same context — so "no
+# built-in template reads it" and "nothing reads it" are not the same claim.
+#
+# This comment used to describe the exemption as temporary, with an expiry that has since
+# passed: it read "PR #1729 deletes the identity line from the five built-in templates;
+# the cycle that merges #1729 deletes this tuple, and the guard then reports the keys by
+# itself". #1729 landed and the built-in line is gone
+# (`test_no_builtin_template_names_the_per_daemon_identity` holds it gone), so following
+# that instruction now means emptying this tuple — measured 2026-10-04
+# (cyc20261004-063900), it turns `test_every_context_key_has_a_consumer` red. Finishing
+# the removal the old sentence pointed at — deleting the two keys from the builder — is
+# the worse half: it breaks every custom template that names them. The premise is asserted
+# in that test, in both halves, so it cannot go stale unnoticed again.
 KEYS_AWAITING_THEIR_TEMPLATE_LINE = ("instance_id", "host_name")
 
 
@@ -476,6 +487,25 @@ def test_every_context_key_has_a_consumer(tmp_path, monkeypatch) -> None:
     assert set(RETIRED_PLACEHOLDERS).isdisjoint(captured), (
         f"a retired placeholder is back in the render context: "
         f"{sorted(set(RETIRED_PLACEHOLDERS) & set(captured))}"
+    )
+
+    # The exemption's premise, in both halves, because a description of *why* an exemption
+    # is allowed is the one part of it a reader cannot check: the two keys must really reach
+    # the context (so the exemption is doing something), and no built-in template may read
+    # them (so the readers are the host's own templates under `~/.emrg/task-templates/`,
+    # which render through this same builder). Without the first, `captured` having stopped
+    # carrying them would make the exemption look like the reason the guard is quiet — and
+    # anyone "finishing" the removal it used to ask for would delete the keys and break
+    # custom templates.
+    exempt = set(KEYS_AWAITING_THEIR_TEMPLATE_LINE)
+    assert exempt <= set(captured), (
+        f"the builder no longer provides {sorted(exempt - set(captured))}, which the "
+        f"exemption is written for: either the keys are gone (drop the tuple and this "
+        f"assertion) or this capture stopped reaching them"
+    )
+    assert exempt.isdisjoint(used), (
+        f"a built-in template reads {sorted(exempt & used)} — then the key has the reader "
+        f"the reverse direction is looking for, and it is not an exemption any more"
     )
 
 
