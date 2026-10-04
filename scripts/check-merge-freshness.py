@@ -162,6 +162,19 @@ its question. The count is read from the sibling tool that owns it (one extra
 line says so and prices the refresh pessimistically, rather than reporting `0`,
 which is the direction that quietly spends votes.
 
+A finished PR is a third outcome, not a stale one (issue #1837)
+---------------------------------------------------------------
+The question above is about a merge still to come, and a PR that is already **MERGED**
+or **CLOSED** has none. Both halves of the reading then answer *determinately* and
+wrongly: `compare/master...<head>` reports a diverged head (master has moved past a
+merge that landed), and the run lookup finds the passing run CI concluded before it.
+So the tool used to print `STALE (diverged, behind_by=2) - the head does not contain
+master`, price a branch refresh, and exit **1** - a determinate fault about work that
+had already landed. Measured 2026-10-03 (`cyc20261003-224625`) on the merged #1836.
+The state is therefore read first, in the same `gh pr view` the head comes from, and a
+terminal PR is reported as its state with exit **0**: the tool asked its question and
+the answer is "there is no such verdict here", which is a reading rather than a fault.
+
 Usage
 -----
     uv run --no-sync python3 scripts/check-merge-freshness.py <PR> [<PR> ...]
@@ -169,7 +182,8 @@ Usage
 
 Exit codes
 ----------
-    0  every head contains master's tip - CI's merge base is master itself
+    0  every head contains master's tip - CI's merge base is master itself - or the
+       PR is over (MERGED / CLOSED), which is a determinate reading rather than a fault
     1  at least one head does NOT contain master's tip - the verdict is stale
     2  the check could not be made (bad PR, gh failed, unreadable response) -
        fail loud; never report "fresh" for a question that was not answered
@@ -289,6 +303,16 @@ class Verdict:
     reason: str
     # Which of the four ways (one of the `_KIND_*` names); "" when fresh.
     stale_kind: str = ""
+    #: GitHub's lifecycle state (`OPEN`, `MERGED`, `CLOSED`). A terminal PR is not a
+    #: stale verdict and not a fresh one - it has no merge left for a verdict to be
+    #: about (issue #1837, and `_terminal` below).
+    state: str = ""
+    merged_at: str = ""
+
+    @property
+    def terminal(self) -> bool:
+        """The PR is over: merged, or closed without merging."""
+        return self.state in votes_counter().TERMINAL_STATES
 
 
 def _latest_run_for_head(head: str) -> dict | None:
@@ -389,11 +413,43 @@ def check_pr(number: int) -> Verdict:
             "-R",
             REPO,
             "--json",
-            "number,title,headRefOid",
+            "number,title,state,mergedAt,headRefOid",
         ]
     )
     assert isinstance(view, dict)
     head_sha = str(view["headRefOid"])
+    state = str(view.get("state") or "")
+    merged_at = str(view.get("mergedAt") or "")
+
+    if state in votes_counter().TERMINAL_STATES:
+        # Answered before the compare and before the run lookup, and that order is the
+        # point: both ask a question about a merge still to come, and on a finished PR
+        # each produces a *determinate* answer to a question that no longer exists.
+        # Measured 2026-10-03 (`cyc20261003-224625`) on the merged #1836: this tool
+        # returned exit 1 with `STALE (diverged, behind_by=2) - the head does not
+        # contain master`, plus a remedy that prices a branch refresh - work that has
+        # already landed, reported as a fault to fix. Exit 1 is "the verdict is stale";
+        # there is no verdict here to be stale, and `stale=False` (with the terminal
+        # mark in `main`) keeps a caller from reading it as a fault or as FRESH.
+        return Verdict(
+            pr=number,
+            title=str(view["title"]),
+            head_sha=head_sha,
+            merge_base="",
+            ahead_by=0,
+            behind_by=0,
+            run_created_at=None,
+            run_conclusion=None,
+            stale=False,
+            state=state,
+            merged_at=merged_at,
+            reason=(
+                f"the PR is {state}"
+                + (f" (merged {merged_at})" if merged_at else "")
+                + " - it is over, so there is no merge left for a CI verdict to be "
+                "about: this is neither a stale verdict nor a fresh one"
+            ),
+        )
 
     cmp_raw = _gh_json(
         [
@@ -742,6 +798,13 @@ def main(argv: list[str] | None = None) -> int:
                         "stale": v.stale,
                         "reason": v.reason,
                         "stale_kind": v.stale_kind,
+                        # Beside `stale`, because the three-valued outcome
+                        # (fresh / stale / over) does not fit in a boolean: a consumer
+                        # reading `"stale": false` off a merged PR would conclude the
+                        # verdict is current.
+                        "state": v.state,
+                        "terminal": v.terminal,
+                        "merged_at": v.merged_at or None,
                         # Both halves of the price. `valid_votes` alone reads as "0
                         # means free" for a head whose only vote is a standing veto -
                         # the reading #1562 is about - so the veto count is emitted
@@ -756,8 +819,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         for v in verdicts:
-            mark = "STALE" if v.stale else "FRESH"
-            print(f"#{v.pr} {mark} (head {v.head_sha[:8]}, base {v.merge_base[:8]}) - {v.reason}")
+            # A finished PR gets its own mark: `FRESH` would say a verdict about the
+            # merge is current, and there is no merge (issue #1837). `STALE` is what
+            # this tool said about the merged #1836 before - a determinate fault about
+            # work that had landed.
+            mark = v.state if v.terminal else ("STALE" if v.stale else "FRESH")
+            # No `base` for a terminal PR: the merge base is not read (nothing will be
+            # merged), and `base ` with nothing after it reads as a measurement that
+            # came back empty rather than as one that was never taken.
+            base = "" if v.terminal else f", base {v.merge_base[:8]}"
+            print(f"#{v.pr} {mark} (head {v.head_sha[:8]}{base}) - {v.reason}")
 
     if any(v.stale for v in verdicts):
         print(

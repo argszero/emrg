@@ -34,6 +34,7 @@ pinned too — an unreadable count is `?` (not `0/3`), an unreadable queue is ex
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -171,13 +172,24 @@ class FakeVotes:
     """
 
     DEFAULT_MIN_VOTES = 3
+    #: The lifecycle states that mean the PR is over. Carried for the same reason as
+    #: the threshold above: the tool asks the counter rather than spelling a second
+    #: copy, so a fake that did not carry it would fail here — which is how the
+    #: second copy was found (measured 2026-10-03, `cyc20261003-231313`).
+    TERMINAL_STATES = ("MERGED", "CLOSED")
 
     def __init__(self, reviews: list[dict] | None = None, mergeable: str = "MERGEABLE",
                  state: str = "CLEAN", head: str = HEAD, valid: int | None = None,
-                 push: str | None = None, exact: bool = True):
+                 push: str | None = None, exact: bool = True,
+                 pr_state: str = "OPEN", merged_at: str = ""):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
+        #: GitHub's *lifecycle* state, which is a different field from `state` above
+        #: (the merge state). Kept under its own name so a test cannot pass the merge
+        #: state where the lifecycle one is read and still look right.
+        self.pr_state = pr_state
+        self.merged_at = merged_at
         self.head = head
         self.forced_valid = valid
         #: When this head was pushed — the datum the abstention clause compares
@@ -225,6 +237,8 @@ class FakeVotes:
             push_time_exact=self.exact,
             mergeable=self.mergeable,
             merge_state=self.state,
+            state=self.pr_state,
+            merged_at=self.merged_at,
             votes=votes,
             counted=[],
             valid_count=run if self.forced_valid is None else self.forced_valid,
@@ -620,6 +634,122 @@ def test_an_empty_queue_is_an_empty_one(mod, monkeypatch, capsys):
     assert "nothing to review" in out
 
 
+def test_a_finished_pr_is_answered_as_over_and_hands_out_no_command(
+    mod, monkeypatch, capsys
+):
+    """Issue #1837. The row this tool used to print for a PR that had just merged.
+
+    Measured 2026-10-03 (`cyc20261003-224625`): a parallel cycle merged #1836 four
+    seconds after this cycle's scan listed it open, so the queue read a finished PR as
+    a live one and answered `read-first` with
+    `check-vote-count.py <PR> --mergeability-wait 60` — a minute of waiting on a
+    question GitHub never answers for a merged PR (measured live: 6.2 s and the same
+    failure). The state now decides the row, and the freshness half is not read at all:
+    it prices a branch refresh for a branch that is finished.
+    """
+    votes = FakeVotes(pr_state="MERGED", merged_at="2026-10-03T14:46:59Z")
+    fresh = FakeFresh(stale=True, kind="ancestry", behind=2)
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0, "an answered question is not a failure to measure"
+    assert "terminal" in out
+    assert "MERGED" in out and "2026-10-03T14:46:59Z" in out
+    assert "0/3 votes" not in out, "a finished PR has no review left to count"
+    assert "$" not in out, "there is no command to hand a cycle here"
+    assert "--mergeability-wait" not in out, "the wait that cannot succeed"
+    assert fresh.calls == [], "no ancestry question about a PR with no merge left"
+
+
+def test_a_closed_pr_is_not_reported_as_merged(mod, monkeypatch, capsys):
+    """Closed-unmerged is the other terminal state, and it did not land.
+
+    A single "finished" word would be wrong half the time: `CLOSED` says the branch is
+    out of play, and a reader who acted on `MERGED` would look for it on master.
+    """
+    votes = FakeVotes(pr_state="CLOSED")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "CLOSED" in out
+    assert "MERGED" not in out
+
+
+def test_which_states_are_terminal_is_read_from_the_counter(mod, monkeypatch):
+    """The vocabulary has one home, and this tool asks it instead of keeping a copy.
+
+    Measured 2026-10-03 (`cyc20261003-231313`): `Reading.terminal` spelled
+    `("MERGED", "CLOSED")` by hand while the counter introduced `TERMINAL_STATES` as
+    "the one spelling of 'the PR is over' in the family" and the *other* sibling
+    (`check-merge-freshness.py`) already asked it. This file is the one that reads the
+    state off the verdict, so it is the one a drifted copy would mislead.
+
+    The leg narrows the counter's list and requires the row to follow it: a copy in
+    this file would keep saying `MERGED` is terminal and pass a test written the other
+    way round. It is the behavioural half of `test_it_does_not_spell_the_words_itself`.
+    """
+    class _Narrowed:
+        TERMINAL_STATES = ("CLOSED",)
+
+    monkeypatch.setattr(mod, "vote_counter", lambda: _Narrowed)
+    assert mod.Reading(pr=1, head="", state="CLOSED").terminal is True
+    assert mod.Reading(pr=1, head="", state="MERGED").terminal is False, (
+        "the counter says MERGED is not terminal here, so this row must follow it"
+    )
+
+
+def test_an_unread_state_is_not_a_second_failure(mod, monkeypatch):
+    """`""` means "not read", and asking the vocabulary there would raise again.
+
+    Measured 2026-10-03 (`cyc20261003-231313`): making the property ask the counter
+    broke `test_an_unreadable_count_is_a_question_mark_not_zero`, whose fake raises
+    from `check_pr` and carries no vocabulary at all. A row whose count could not be
+    read has no state either, and one failure must not become two.
+    """
+    class _Boom:
+        # No TERMINAL_STATES: touching this fake from here is the defect.
+        def __getattr__(self, name):
+            raise AssertionError(f"the counter was asked for {name!r} despite no state")
+
+    monkeypatch.setattr(mod, "vote_counter", lambda: _Boom())
+    assert mod.Reading(pr=1, head="", state="").terminal is False
+
+
+def test_it_does_not_spell_the_words_itself(mod):
+    """The source half of the same rule, kept beside the behavioural one.
+
+    A rule with two homes is free to drift, and the drift is invisible until the two
+    disagree — which is exactly the state this file was in. The words belong to
+    `check-vote-count.py`; every other tool asks for the list.
+
+    Read with `ast`, not with a substring search: the docstring above `terminal`
+    **quotes** the old spelling while explaining why it is gone, and a text search
+    cannot tell a rule's explanation from a rule's violation. (The first version of
+    this leg was written that way and failed on its own prose — the same lesson
+    `scripts/check_read_parse_guards.py` records about reading what a call is fed
+    rather than the line it sits on.)
+    """
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    copies = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Tuple, ast.Set, ast.List))
+        and {
+            e.value
+            for e in node.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str)
+        }
+        >= {"MERGED", "CLOSED"}
+    ]
+    assert not copies, (
+        "review-queue.py spells the terminal states again at line(s) "
+        f"{copies} - read them from the counter (`vote_counter().TERMINAL_STATES`), the "
+        "way `votes_needed` reads the threshold"
+    )
+
+
 # --- the queue the tool is asked about -------------------------------------
 
 
@@ -683,6 +813,9 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
         "needed": 3,
         "mergeable": "MERGEABLE",
         "merge_state": "CLEAN",
+        "state": "OPEN",
+        "terminal": False,
+        "merged_at": None,
         "block_reason": "",
         "veto_at_head": False,
         "voted_by_this_cycle": False,

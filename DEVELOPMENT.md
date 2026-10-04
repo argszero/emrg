@@ -277,6 +277,32 @@ Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's
 
 The step's two failure modes are told apart by **duration**, not by the exit code: a refused *submission* dies in seconds, while a notarization *verdict* takes minutes, exits 0 and reports `status=Invalid` (the step parses that status and fetches Apple's rejection log for it). `Notarize pkg` names the preflight in its own `::error::` when the submission is refused, so the remedy arrives with the failure.
 
+**The host-side counterpart of the workflow gate.** CI runs `actionlint` over
+`.github/workflows/` on every push (`rhysd/actionlint@v1.7.12`, in `test.yml`; the gate
+exists because #441 reached a push with a workflow that referenced the `secrets` context
+in an `if:`), and a workflow edit used to have no local way to be checked first: the
+instructed `actionlint .github/workflows/*.yml` is a command this host does **not** have
+(measured 2026-10-04: actionlint, shellcheck, node and npm are all absent from PATH here,
+while `brew` and `docker` are present). So the check is one command, and it answers
+honestly when the tool is missing rather than looking like a pass:
+
+```bash
+uv run --no-sync python3 scripts/check-workflows.py          # every workflow in this checkout
+uv run --no-sync python3 scripts/check-workflows.py --root <checkout>
+```
+
+It reads the pinned version **out of the workflow file itself** (no second copy of the
+number) and prints both that and the build it found. Exit `0` = the pinned actionlint ran
+over every workflow file and reported nothing; `1` = it reported a problem, quoted
+verbatim; `2` = **could not measure — never a pass**, with the reason: no actionlint on
+PATH (the remedy, including the pinned version, is printed), no workflow file in the tree,
+a tree whose workflows run no actionlint, or a local build that is **not** the pinned one
+— a different build's clean answer is not that gate's verdict, while a *finding* from any
+build is still exit `1`. Install with `brew install actionlint` (check the version it
+gives you; the releases page has the pinned build). CI remains authoritative: this runs
+the same tool at the same version over the same files, not a second implementation of its
+rules.
+
 **The readable path to a failed run's cause.** `gh run view <id> --log` and `--log-failed` answer
 **0 bytes with exit 0** on a current host for every run, green or red (measured 2026-10-04 on `gh`
 2.58.0: v0.3.8's failed build `36956685533`, v0.3.7's green build `36658495939`, and a recent `Test`
