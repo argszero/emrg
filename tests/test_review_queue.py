@@ -1552,6 +1552,35 @@ def test_all_rants_prints_the_withheld_rows_and_the_line_disappears(
     )
 
 
+def test_the_all_rants_help_states_the_withheld_set_the_predicate_defines(mod, capsys):
+    """The `--help` sentence is the only statement of the flag's scope a reader meets.
+
+    It was wrong here: it said the default counts "a rant naming another project (or none)",
+    while `rendered_here` renders a project-less row by default - pinned above, and for the
+    reason that an undeclared row is not *another* project's work. A sentence restating a
+    rule that lives elsewhere is a second copy of it; this holds the copy against the
+    original, the predicate's three answers beside the sentence's two claims.
+    """
+    rendered = [
+        mod.rendered_here(project, mod.REPO)
+        for project in ("emrg", "silicon-science-cs", "")
+    ]
+    assert rendered == [True, False, True], (
+        "the rule the sentence states: this repo's rows, and the rows naming no project"
+    )
+
+    with pytest.raises(SystemExit):
+        mod.main(["--help"])
+    # argparse wraps the text at the terminal width, so a phrase can span a line break: the
+    # claims are read from the help text with its whitespace collapsed, not from its lines.
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert "rendered_here" in out, "the sentence names the rule that decides it"
+    assert "naming no project is still printed" in out, (
+        "the one case the sentence had wrong, now stated the way the predicate reads"
+    )
+
+
 def test_the_json_document_keeps_every_rant_row_and_labels_it(mod, monkeypatch, capsys):
     """A consumer must not silently receive a shorter list than the ledger holds.
 

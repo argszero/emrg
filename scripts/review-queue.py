@@ -1307,8 +1307,9 @@ def main(argv: list[str] | None = None) -> int:
         "--all-rants",
         action="store_true",
         help="print every open rant's row, including other projects' - the default "
-             "renders this repo's rows and counts the rest, because a rant naming "
-             "another project (or none) is not work this repo can declare",
+             "renders the rows `rendered_here` accepts (this repo's, and the rows "
+             "naming no project: naming no project is still printed, because "
+             "undeclared is not another project's work) and counts the rest",
     )
     parser.add_argument(
         "--json", action="store_true", help="emit the readings as JSON instead of prose"
