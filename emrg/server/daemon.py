@@ -6249,6 +6249,19 @@ class EmrgServer:
             return
 
         all_lines = text.split("\n")
+        # A file that ends with a newline splits into one element more than it has
+        # lines: the trailing '' is the position *after* the last terminator, not a
+        # line of the file. Counting it made this frame report `total_lines` one too
+        # high for every terminated file and set `truncated` true when the window
+        # covered the whole file, so a client was offered a next page whose only line
+        # is empty. Measured on master `bc114ab`, 2026-10-02: a 10-line terminated file
+        # came back as `total_lines: 11`, `truncated: true`. The same two lines drop the
+        # element in `MemoryIndex.from_text` (emrg/memory.py); this is that rule, at a
+        # reader that missed it. An unterminated non-empty file is unaffected; a
+        # zero-byte file has no lines at all, and this is the only spelling of the
+        # condition that says so.
+        if all_lines and all_lines[-1] == "":
+            all_lines.pop()
         total = len(all_lines)
         try:
             start = max(1, int(start_line or 1))

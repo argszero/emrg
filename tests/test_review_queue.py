@@ -34,6 +34,7 @@ pinned too — an unreadable count is `?` (not `0/3`), an unreadable queue is ex
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -171,13 +172,24 @@ class FakeVotes:
     """
 
     DEFAULT_MIN_VOTES = 3
+    #: The lifecycle states that mean the PR is over. Carried for the same reason as
+    #: the threshold above: the tool asks the counter rather than spelling a second
+    #: copy, so a fake that did not carry it would fail here — which is how the
+    #: second copy was found (measured 2026-10-03, `cyc20261003-231313`).
+    TERMINAL_STATES = ("MERGED", "CLOSED")
 
     def __init__(self, reviews: list[dict] | None = None, mergeable: str = "MERGEABLE",
                  state: str = "CLEAN", head: str = HEAD, valid: int | None = None,
-                 push: str | None = None, exact: bool = True):
+                 push: str | None = None, exact: bool = True,
+                 pr_state: str = "OPEN", merged_at: str = ""):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
+        #: GitHub's *lifecycle* state, which is a different field from `state` above
+        #: (the merge state). Kept under its own name so a test cannot pass the merge
+        #: state where the lifecycle one is read and still look right.
+        self.pr_state = pr_state
+        self.merged_at = merged_at
         self.head = head
         self.forced_valid = valid
         #: When this head was pushed — the datum the abstention clause compares
@@ -225,6 +237,8 @@ class FakeVotes:
             push_time_exact=self.exact,
             mergeable=self.mergeable,
             merge_state=self.state,
+            state=self.pr_state,
+            merged_at=self.merged_at,
             votes=votes,
             counted=[],
             valid_count=run if self.forced_valid is None else self.forced_valid,
@@ -620,6 +634,122 @@ def test_an_empty_queue_is_an_empty_one(mod, monkeypatch, capsys):
     assert "nothing to review" in out
 
 
+def test_a_finished_pr_is_answered_as_over_and_hands_out_no_command(
+    mod, monkeypatch, capsys
+):
+    """Issue #1837. The row this tool used to print for a PR that had just merged.
+
+    Measured 2026-10-03 (`cyc20261003-224625`): a parallel cycle merged #1836 four
+    seconds after this cycle's scan listed it open, so the queue read a finished PR as
+    a live one and answered `read-first` with
+    `check-vote-count.py <PR> --mergeability-wait 60` — a minute of waiting on a
+    question GitHub never answers for a merged PR (measured live: 6.2 s and the same
+    failure). The state now decides the row, and the freshness half is not read at all:
+    it prices a branch refresh for a branch that is finished.
+    """
+    votes = FakeVotes(pr_state="MERGED", merged_at="2026-10-03T14:46:59Z")
+    fresh = FakeFresh(stale=True, kind="ancestry", behind=2)
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0, "an answered question is not a failure to measure"
+    assert "terminal" in out
+    assert "MERGED" in out and "2026-10-03T14:46:59Z" in out
+    assert "0/3 votes" not in out, "a finished PR has no review left to count"
+    assert "$" not in out, "there is no command to hand a cycle here"
+    assert "--mergeability-wait" not in out, "the wait that cannot succeed"
+    assert fresh.calls == [], "no ancestry question about a PR with no merge left"
+
+
+def test_a_closed_pr_is_not_reported_as_merged(mod, monkeypatch, capsys):
+    """Closed-unmerged is the other terminal state, and it did not land.
+
+    A single "finished" word would be wrong half the time: `CLOSED` says the branch is
+    out of play, and a reader who acted on `MERGED` would look for it on master.
+    """
+    votes = FakeVotes(pr_state="CLOSED")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "CLOSED" in out
+    assert "MERGED" not in out
+
+
+def test_which_states_are_terminal_is_read_from_the_counter(mod, monkeypatch):
+    """The vocabulary has one home, and this tool asks it instead of keeping a copy.
+
+    Measured 2026-10-03 (`cyc20261003-231313`): `Reading.terminal` spelled
+    `("MERGED", "CLOSED")` by hand while the counter introduced `TERMINAL_STATES` as
+    "the one spelling of 'the PR is over' in the family" and the *other* sibling
+    (`check-merge-freshness.py`) already asked it. This file is the one that reads the
+    state off the verdict, so it is the one a drifted copy would mislead.
+
+    The leg narrows the counter's list and requires the row to follow it: a copy in
+    this file would keep saying `MERGED` is terminal and pass a test written the other
+    way round. It is the behavioural half of `test_it_does_not_spell_the_words_itself`.
+    """
+    class _Narrowed:
+        TERMINAL_STATES = ("CLOSED",)
+
+    monkeypatch.setattr(mod, "vote_counter", lambda: _Narrowed)
+    assert mod.Reading(pr=1, head="", state="CLOSED").terminal is True
+    assert mod.Reading(pr=1, head="", state="MERGED").terminal is False, (
+        "the counter says MERGED is not terminal here, so this row must follow it"
+    )
+
+
+def test_an_unread_state_is_not_a_second_failure(mod, monkeypatch):
+    """`""` means "not read", and asking the vocabulary there would raise again.
+
+    Measured 2026-10-03 (`cyc20261003-231313`): making the property ask the counter
+    broke `test_an_unreadable_count_is_a_question_mark_not_zero`, whose fake raises
+    from `check_pr` and carries no vocabulary at all. A row whose count could not be
+    read has no state either, and one failure must not become two.
+    """
+    class _Boom:
+        # No TERMINAL_STATES: touching this fake from here is the defect.
+        def __getattr__(self, name):
+            raise AssertionError(f"the counter was asked for {name!r} despite no state")
+
+    monkeypatch.setattr(mod, "vote_counter", lambda: _Boom())
+    assert mod.Reading(pr=1, head="", state="").terminal is False
+
+
+def test_it_does_not_spell_the_words_itself(mod):
+    """The source half of the same rule, kept beside the behavioural one.
+
+    A rule with two homes is free to drift, and the drift is invisible until the two
+    disagree — which is exactly the state this file was in. The words belong to
+    `check-vote-count.py`; every other tool asks for the list.
+
+    Read with `ast`, not with a substring search: the docstring above `terminal`
+    **quotes** the old spelling while explaining why it is gone, and a text search
+    cannot tell a rule's explanation from a rule's violation. (The first version of
+    this leg was written that way and failed on its own prose — the same lesson
+    `scripts/check_read_parse_guards.py` records about reading what a call is fed
+    rather than the line it sits on.)
+    """
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    copies = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Tuple, ast.Set, ast.List))
+        and {
+            e.value
+            for e in node.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str)
+        }
+        >= {"MERGED", "CLOSED"}
+    ]
+    assert not copies, (
+        "review-queue.py spells the terminal states again at line(s) "
+        f"{copies} - read them from the counter (`vote_counter().TERMINAL_STATES`), the "
+        "way `votes_needed` reads the threshold"
+    )
+
+
 # --- the queue the tool is asked about -------------------------------------
 
 
@@ -683,6 +813,9 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
         "needed": 3,
         "mergeable": "MERGEABLE",
         "merge_state": "CLEAN",
+        "state": "OPEN",
+        "terminal": False,
+        "merged_at": None,
         "block_reason": "",
         "veto_at_head": False,
         "voted_by_this_cycle": False,
@@ -1473,11 +1606,12 @@ class FakeLinks:
     live queue instead of here.
     """
 
-    def __init__(self, rows, issues=(), path="/tmp/rants.jsonl"):
+    def __init__(self, rows, issues=(), path="/tmp/rants.jsonl", closed_issues=()):
         self.rows = rows
         self.issues = [{"number": n, "body": b} for n, b in issues]
+        self.closed_issues = [{"number": n, "body": b} for n, b in closed_issues]
         self.path = Path(path)
-        self.queue_calls: list[str] = []
+        self.queue_calls: list[tuple[str, str, str | None]] = []
         self.read: Path | None = None
         self.origins_asked: list[list[dict]] = []
 
@@ -1488,8 +1622,12 @@ class FakeLinks:
         self.read = path
         return self.rows
 
-    def load_queue(self, repo):
-        self.queue_calls.append(repo)
+    def load_queue(self, repo, state="open", since=None):
+        """The sibling's loader, mirroring its signature — including the bounded closed
+        reading `open_rant_rows` spends for rants with no open declaring issue."""
+        self.queue_calls.append((repo, state, since))
+        if state == "closed":
+            return types.SimpleNamespace(issues=self.closed_issues)
         return types.SimpleNamespace(issues=self.issues)
 
     def declared_origins(self, issues):
@@ -1503,8 +1641,8 @@ class FakeLinks:
         return found
 
 
-def _links(monkeypatch, tool, rows, issues=(), path="/tmp/rants.jsonl"):
-    links = FakeLinks(rows, issues, path)
+def _links(monkeypatch, tool, rows, issues=(), path="/tmp/rants.jsonl", closed_issues=()):
+    links = FakeLinks(rows, issues, path, closed_issues)
     monkeypatch.setattr(tool, "issue_links", lambda: links)
     return links
 
@@ -1597,11 +1735,190 @@ def test_an_issue_declaring_a_rant_is_attached_to_that_rants_row(monkeypatch):
 
 
 def test_the_ledger_the_override_names_is_the_one_read(monkeypatch):
-    """`--rants` is the whole of how a host with a ledger elsewhere is reached."""
+    """`--rants` is the whole of how a host with a ledger elsewhere is reached.
+
+    The two calls are pinned as a **rule**, not as a count: the open reading is always
+    spent, and the closed one only for a rant the open reading could not place, bounded by
+    that rant's own instant normalised to UTC. `+08:00` in a query string is a space to
+    the API, so the spelling here is the whole reason the bound is expressible at all.
+    """
     tool = _fresh_tool()
     links = _links(monkeypatch, tool, [_row("2026-09-30T09:17:54+08:00")])
 
     tool.open_rant_rows("/elsewhere/rants.jsonl", tool.REPO)
 
     assert links.read == Path("/elsewhere/rants.jsonl")
-    assert links.queue_calls == [tool.REPO]
+    assert links.queue_calls == [
+        (tool.REPO, "open", None),
+        (tool.REPO, "closed", "2026-09-30T01:17:54Z"),
+    ], links.queue_calls
+
+
+def test_another_projects_rants_do_not_widen_the_closed_window(monkeypatch):
+    """The bound is the oldest instant that can *place* a row, and only this repo's rants can.
+
+    Measured 2026-10-02: 40 open rants, 39 of them `silicon-science-cs` reaching back to
+    2026-09-11, and the one `emrg` rant 8 hours old. Letting the other project set the
+    bound spent **48.8s / 668 rows** on a reading whose usable window costs **5.8s / 6
+    rows** — for a repo that can never place a row for a rant it cannot declare.
+    """
+    tool = _fresh_tool()
+    emrg_stamp = "2026-10-02T07:48:41.525323+08:00"
+    other_stamp = "2026-09-11T23:51:35.442412+08:00"
+    links = _links(
+        monkeypatch,
+        tool,
+        [
+            _row(emrg_stamp),
+            {"timestamp": other_stamp, "status": "pending", "message": "theirs",
+             "project": "silicon-science-cs"},
+        ],
+    )
+
+    rows = tool.open_rant_rows(None, tool.REPO)
+
+    assert links.queue_calls == [
+        (tool.REPO, "open", None),
+        (tool.REPO, "closed", "2026-10-01T23:48:41Z"),
+    ], links.queue_calls
+    assert len(rows) == 2, (
+        "the narrowing is about the *reading*, not the rows: another project's rant is "
+        "still rendered with its project named, so the cycle reading the queue alone can "
+        f"skip it - got {rows!r}"
+    )
+    assert [r.project for r in rows] == ["emrg", "silicon-science-cs"], (
+        "newest first, each row carrying its own project"
+    )
+
+
+def test_a_foreign_project_alone_spends_no_closed_reading(monkeypatch):
+    """No rant this repo could declare means no second call at all.
+
+    The reading exists to tell `never filed` from `filed and closed` *in this repo*. With
+    only another project's rants open, this repo has nothing to look up: the call would
+    return rows that cannot place any of them.
+    """
+    tool = _fresh_tool()
+    links = _links(
+        monkeypatch,
+        tool,
+        [{"timestamp": "2026-09-11T23:51:35.442412+08:00", "status": "pending",
+          "message": "theirs", "project": "silicon-science-cs"}],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert links.queue_calls == [(tool.REPO, "open", None)], links.queue_calls
+    assert (rant.issues, rant.closed_issues) == ([], [])
+
+
+def test_the_two_spellings_of_this_project_both_match(monkeypatch):
+    """`emrg` and `argszero/emrg` are the same project, and R5's own rule says so.
+
+    The template matches a rant to a task by either spelling, so a bound that recognised
+    only one would silently stop placing rows for rants written the other way — and a
+    row that stops being placed is the `no issue yet` defect this reading removes.
+    """
+    tool = _fresh_tool()
+    assert tool.could_declare_here("emrg", tool.REPO) is True
+    assert tool.could_declare_here(tool.REPO, tool.REPO) is True
+    assert tool.could_declare_here("silicon-science-cs", tool.REPO) is False
+    assert tool.could_declare_here("", tool.REPO) is False, (
+        "a rant naming no project belongs to no task, so no repo can declare it"
+    )
+    assert tool.could_declare_here("emrg-other", tool.REPO) is False, (
+        "a prefix is not the project: `emrg-other` is another ledger row's name"
+    )
+
+    stamp = "2026-10-02T07:48:41.525323+08:00"
+    links = _links(
+        monkeypatch, tool,
+        [{"timestamp": stamp, "status": "pending", "message": "ours",
+          "project": tool.REPO}],
+        closed_issues=[(1807, f"Origin: rant {stamp}\n\nbody")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert [call[1] for call in links.queue_calls] == ["open", "closed"], links.queue_calls
+    assert rant.closed_issues == [1807]
+
+
+def test_a_rant_whose_issue_was_closed_says_so_instead_of_no_issue_yet(monkeypatch):
+    """The measured case, 2026-10-02: the release rant rendered `no issue yet` while its
+    issue #1807 existed and had been closed when its own PR #1808 merged."""
+    tool = _fresh_tool()
+    stamp = "2026-10-02T07:48:41.525323+08:00"
+    _links(
+        monkeypatch,
+        tool,
+        [_row(stamp)],
+        closed_issues=[(1807, f"Origin: rant {stamp}\n\nbody")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert rant.issues == []
+    assert rant.closed_issues == [1807]
+    out = tool.render_rant(rant)
+    assert f"rant {stamp}  pending  #1807 closed" in out, out
+    assert "no issue yet" not in out, out
+
+
+def test_an_open_declaring_issue_spends_no_closed_reading(monkeypatch):
+    """The second call is a bound, not a habit: a rant the open reading places costs one
+    request, exactly as it did before this reading existed."""
+    tool = _fresh_tool()
+    stamp = "2026-09-30T09:17:54+08:00"
+    links = _links(
+        monkeypatch,
+        tool,
+        [_row(stamp)],
+        issues=[(1771, f"Origin: rant {stamp}\n\nbody")],
+        closed_issues=[(1772, f"Origin: rant {stamp}\n\nbody")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert rant.issues == [1771]
+    assert rant.closed_issues == []
+    assert links.queue_calls == [(tool.REPO, "open", None)], links.queue_calls
+    assert "#1771" in tool.render_rant(rant)
+    assert "closed" not in tool.render_rant(rant)
+
+
+def test_neither_state_is_still_no_issue_yet(monkeypatch):
+    """The words keep their meaning: they are printed only when both readings found
+    nothing, so a cycle reading them is being told to file one."""
+    tool = _fresh_tool()
+    _links(
+        monkeypatch,
+        tool,
+        [_row("2026-09-30T09:35:04+08:00")],
+        issues=[(1771, "Origin: rant 2026-09-30T09:17:54+08:00\n\nbody")],
+        closed_issues=[(1772, "no origin line here")],
+    )
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert (rant.issues, rant.closed_issues) == ([], [])
+    assert "  no issue yet  " in tool.render_rant(rant)
+
+
+def test_a_closed_pull_request_is_not_read_as_a_declaring_issue(monkeypatch):
+    """`Origin:` is an issue's line, and the issues endpoint returns PRs among them."""
+    tool = _fresh_tool()
+    stamp = "2026-09-30T09:17:54+08:00"
+    links = _links(monkeypatch, tool, [_row(stamp)])
+    links.closed_issues = [
+        {
+            "number": 1773,
+            "body": f"Origin: rant {stamp}\n\nbody",
+            "pull_request": {"url": "https://api.github.com/repos/x/y/pulls/1773"},
+        }
+    ]
+
+    (rant,) = tool.open_rant_rows(None, tool.REPO)
+
+    assert rant.closed_issues == []
+    assert "no issue yet" in tool.render_rant(rant)

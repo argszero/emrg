@@ -195,6 +195,9 @@ uv run python -m emrg     # launch TUI
 uv run python -c "from emrg.client.app import run_client"   # import check
 uv run python -m emrg --help
 uv run --no-sync python3 scripts/check-rant-citations.py    # every citation names its public record
+uv run --no-sync python3 scripts/run-mutation-arm.py \
+    --file <file> --old <text> --new <text> \
+    --node <pytest node id> --expect <the assertion text>   # one judged mutation arm
 ```
 
 `scripts/check-rant-citations.py` answers one question about the instruction prose
@@ -209,6 +212,28 @@ covers the **running** copy — the one resolved from the loaded module, i.e.
 are swept like every other file's and the frozen-debt list is empty (the mechanisms that
 hold a site out of the rule are exercised by synthetic tests rather than by a real
 entry). `--measure` prints the whole inventory.
+
+`scripts/run-mutation-arm.py` runs **one mutation arm and judges it** — the evidence that a test depends
+on the line it claims to test. Break the line and the test must die; a test that survives it is not
+testing what it says. It exists because "the run failed, so the mutation was caught" is wrong in ways
+that look identical to success: a node id that does not resolve — a class method named without its
+class — makes pytest exit **4** having run *nothing*, and a mutation that breaks the module's syntax
+makes pytest *error* rather than fail, with a code that depends on **how the target was named**:
+**1** when a fixture imports the module at run time (the same code as a failing test), **2** when
+collection imports it and the target was named as a **path**, and **4** when it was named as a **node
+id** (pytest reports an uncollectable node as a usage error, so on that form the parse failure and a
+mistyped target are one code). The tool compiles the mutated text and names the syntax error it finds,
+so the report says which of the two it was. The judgement
+is three-valued rather than pass/fail — `KILLED`
+(the target failed on the `--expect` text), `SURVIVED` (it still passed), `UNJUDGEABLE` (the run
+separates neither; the reason is named and the assertion lines the run really echoed are printed, so the
+retry is one step). Exit `0`/`1`/`2` are those three; `3` TARGET-BROKEN (the target did not collect or
+pass *before* the mutation), `4` NO-MUTATION (the anchor does not occur exactly once), `5`
+RESTORE-MISMATCH. It snapshots the file, pre-flights the target unmutated, pins `HOME`/`TMPDIR` for the
+child only, and restores **byte for byte** on every path, including its own failure — so an arm cannot
+leave a mutated tree behind. `--expect` is the failing assertion's own source line, not the test's
+message: pytest echoes that line, and a fragment copied from a message can be missed when an earlier
+assertion in the same test fires first.
 
 ### Electron GUI
 
@@ -237,6 +262,20 @@ python3 scripts/check-extension-load.py --python <path> --keep
 ```
 
 Exit `0` = a wheel's compiled module loaded; `1` = it did **not** (the load decides, not the codesign reading — an interpreter without the entitlement can still load, and vice versa); `2` = could not measure (no such interpreter, it cannot run, or no wheel for this platform) — never a pass. CI runs the same check as step 15 of `packaging/smoke-test.sh`, so host and CI ask one question in one place.
+
+**The host-side counterpart of the release's notarize step.** The macOS job of `build-release.yml` is the only place notarization is verified, and the tag is its only trigger — so a credential Apple refuses fails that step in **seconds**, skips the `release` job because of it, and publishes nothing at all (measured on v0.3.8, run `36956685533`; the other three platforms built green). Ask at home first, with the same three variables the workflow fills from secrets:
+
+```bash
+APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \
+    MACOS_NOTARY_TEAM_ID=<team> \
+    uv run --no-sync python3 scripts/check-notary-credentials.py
+# keep them out of the shell history instead:
+#   uv run --no-sync python3 scripts/check-notary-credentials.py --env-file ~/.emrg/notary.env
+```
+
+Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's own reply is printed (usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); `2` = the exchange did not complete, so **no verdict was reached — never a pass**, and CI must fail on it too. After fixing, resume the run that failed with `gh run rerun <run-id> --failed`: a tag already pushed is not re-pushed.
+
+The step's two failure modes are told apart by **duration**, not by the exit code: a refused *submission* dies in seconds, while a notarization *verdict* takes minutes, exits 0 and reports `status=Invalid` (the step parses that status and fetches Apple's rejection log for it). `Notarize pkg` names the preflight in its own `::error::` when the submission is refused, so the remedy arrives with the failure.
 
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
