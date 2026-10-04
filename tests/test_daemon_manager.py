@@ -122,26 +122,84 @@ class TestStartDaemon:
 # ── check_and_restart_if_stale ───────────────────────────────
 
 class TestCheckAndRestartIfStale:
-    def test_no_token_file_returns_early(self, tmp_path):
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager.is_running", return_value=True)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_no_token_file_returns_early(self, mock_connect, mock_kill, mock_cleanup,
+                                         mock_running, mock_src, tmp_path):
+        """`returns early` is a fact about a connection that was never attempted.
+
+        Until 2026-10-05 this test asserted nothing at all — `# no exceptions = pass` —
+        so it passed whether the early return survived or not, under a name that claims
+        one. The reading of "early" is the connection: `get_server_path` naming a file
+        that does not exist is the whole premise, and a client that opened a socket
+        anyway would be checking a daemon it had already decided not to check.
+
+        The rest of the state is pinned too, and that is not tidiness: a mutation that
+        drops the early return sends the code down the path this test never meant to
+        exercise, where an unpatched `os.kill` fires at the fixture's pid for real
+        (`scripts/run-mutation-arm.py` measured exactly that here on 2026-10-05 — the
+        first version of this test pinned the connection but not the signal). With the
+        source mtime, the kill and the cleanup all mocked, the same mutation reaches
+        the assertion below and fails there.
+        """
+        mock_connect.return_value = FakeWS([_ping_pong_frame()])
+
         with patch("emrg.client.daemon_manager.get_server_path",
                    return_value=str(tmp_path / "nope.token")):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
-        # no exceptions = pass
+
+        assert not mock_connect.called, (
+            "no port file means there is nothing to ping: the early return is the "
+            "absence of that connection, and this is the assertion that can fail")
+        assert mock_kill.call_args_list == [], (
+            "and nothing was signalled on the way — this test's premise is that there "
+            "is no daemon to reach")
 
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.is_running", return_value=True)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
-    def test_mtime_unchanged_no_restart(self, mock_connect, mock_running,
-                                        mock_src, tmp_path):
+    def test_mtime_unchanged_no_restart(self, mock_connect, mock_kill, mock_cleanup,
+                                        mock_running, mock_src, tmp_path):
+        """A source tree that is not newer than the server's start signals nothing.
+
+        The premise is asserted rather than assumed: the mtime the check reads (0.0) is
+        older than the `started_at` the pong reports, so the comparison the code makes
+        really does land in the no-restart branch — the frame is a fixture, and if it
+        ever moved into the past this test would otherwise start meaning something else.
+
+        Both effects are patched, not just observed: before 2026-10-05 this test had no
+        assertion (`# We only assert connect was used` — a comment naming an assertion
+        that was not there), and on a regression that reversed the comparison it would
+        have sent the real SIGTERM path its fixture asks for, `os.kill(9999, ...)`, to a
+        live PID. The signal and the cleanup are now mock calls this test reads.
+        """
+        server_start = datetime.fromisoformat(
+            json.loads(_ping_pong_frame())["started_at"]).timestamp()
+        assert mock_src.return_value <= server_start, (
+            "the fixture's mtime must not be newer than the frame's start, or this "
+            "test is not about the no-restart branch")
+
         token_file = tmp_path / "emrgd.token"
         token_file.write_text("token\n")
-        mock_connect.return_value = FakeWS([_ping_pong_frame()])
+        ws = FakeWS([_ping_pong_frame()])
+        mock_connect.return_value = ws
 
         with patch("emrg.client.daemon_manager.get_server_path",
                    return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
-        # No restart: the frame's started_at (2026) > mtimes (0), so no SIGTERM.
-        # We only assert connect was used (ping roundtrip happened).
+
+        assert ws.sent, (
+            "the reading is a ping roundtrip: a client that asked nothing learned "
+            "nothing, so the assertions below would be about a check that never ran")
+        assert mock_kill.call_args_list == [], (
+            "an unchanged source must not signal the daemon")
+        assert not mock_cleanup.called, (
+            "no restart means the port file is not released and re-created")
 
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.is_running", return_value=True)
@@ -336,15 +394,33 @@ class TestCheckAndRestartIfStale:
         assert mock_cleanup.called, "and the port file is still released after it"
 
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
-    def test_server_unreachable_silent(self, mock_connect, mock_src, tmp_path):
+    def test_server_unreachable_silent(self, mock_connect, mock_kill, mock_cleanup,
+                                       mock_src, tmp_path):
+        """A refused connection is a fact the caller tolerates, not a restart reason.
+
+        `silent` is the absence of an effect, so it needs the effects patched to be
+        read at all: until 2026-10-05 this test was `asyncio.run(...)  # no raise` and
+        could not tell "nothing happened" from "the daemon was restarted", which is the
+        distinction its own sibling (`test_server_auth_error_propagates`) exists for on
+        the other side of the same `except`.
+        """
         token_file = tmp_path / "emrgd.token"
         token_file.write_text("token\n")
         mock_connect.side_effect = ConnectionRefusedError("no daemon")
 
         with patch("emrg.client.daemon_manager.get_server_path",
                    return_value=str(token_file)):
-            asyncio.run(daemon_manager.check_and_restart_if_stale())  # no raise
+            asyncio.run(daemon_manager.check_and_restart_if_stale())
+
+        assert mock_kill.call_args_list == [], (
+            "a daemon that could not be reached tells us nothing about its source, "
+            "so there is nothing to signal")
+        assert not mock_cleanup.called, (
+            "and nothing to clean up: the port file is the only way back to a "
+            "running daemon")
 
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
