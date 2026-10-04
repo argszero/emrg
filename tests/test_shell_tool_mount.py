@@ -15,8 +15,19 @@ Two subjects, both of which are about *who decides*:
   ``workdir`` was injected only when the model had not supplied one, so the model
   could name the very root it was trusted in (``workdir=/Users/<host>``), and the
   sandbox took its authorization root from the agent it was confining.
+
+A third subject joined them: **the text that names the mounted shell** (§14.5
+item 6).  The prompt was repaired to name the registered tool, and the repair was
+guarded at the template — but the prompt is not the only thing the model reads.
+Three other carriers still sent it to ``bash``: the read tool's description and
+its two size-limit hints, the grep tool's "instead of 'bash grep'", and the
+daemon's placeholder for an image a non-vision model cannot see.  On Windows each
+named a tool that is not mounted — the accident itself, one carrier over.
 """
 
+import asyncio
+import json
+import re
 import importlib
 import importlib.util
 import inspect
@@ -32,7 +43,16 @@ from emrg.server.daemon import EmrgServer
 from emrg.tools import ToolRegistry
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
-from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
+from emrg.tools.read_tool import MAX_IMAGE_SIZE, MAX_READ_SIZE, ReadTool
+from emrg.tools.shell_dialects import (
+    SHELL_TOOL_NAME_POSIX,
+    SHELL_TOOL_NAME_WINDOWS,
+    SHELL_TOOL_NAMES,
+)
+
+
+def _run(coro):
+    return asyncio.run(coro)
 
 
 def _write_config(tmp_path: Path, body: str) -> None:
@@ -237,3 +257,119 @@ def test_the_injection_runs_before_every_execution(injected):
     source = inspect.getsource(daemon.EmrgServer._run_tool_loop)
     assert source.count("_inject_tool_arguments(") == 1
     assert 'args["workdir"] = ' not in source
+
+
+# ── the text that names it (§14.5 item 6, at the carriers the prompt misses) ──
+
+
+def _other_dialect(name: str) -> str:
+    """The dialect a host that mounted ``name`` did *not* mount."""
+    return next(n for n in sorted(SHELL_TOOL_NAMES) if n != name)
+
+
+def test_no_registered_tool_advertises_a_shell_this_host_does_not_mount():
+    """The repair named the mounted tool in the prompt; the prompt is one carrier.
+
+    Everything a tool's ``definition()`` carries is model-facing — the daemon
+    sends it verbatim through ``to_openai_tools()`` — and the read tool used to
+    send the model to a tool this platform does not mount ("use the bash tool",
+    three times: the description and both size-limit hints).  Swept from the
+    registry rather than from a list of files, so a carrier added tomorrow is
+    covered here without editing this test.
+
+    What is matched is the *tool* reference — the dialect's name followed by the
+    word ``tool``, the same phrase the prompt's own guard asserts on — and the
+    name forbidden is the *other* dialect's, so the test says the same thing on
+    both platforms (on POSIX ``bash`` is the correct answer and ``pwsh`` the
+    load-bearing absence).
+
+    **The shapes measured on master, and which of them this catches.**  Three
+    were found.  The read tool's "use the bash tool" is a *tool* reference and the
+    pattern catches it.  ``submit_rant``'s "never rewrite the file with
+    hand-written bash/python" names a *language* — the idiom for a hand-written
+    script — and claims no tool; it is the control arm, and it must keep passing.
+    grep's "instead of 'bash grep'" names a *command* the platform lacks and the
+    sweep cannot reach it, because the text never said "tool": it is fixed and
+    pinned in ``tests/test_grep_tool.py``.  The pattern is the phrase rather than
+    the bare word precisely so the honest ``submit_rant`` sentence survives — a
+    guard that flags the true sentence is a guard that gets deleted.
+    """
+    server = _instantiate()
+    mounted = server._mounted_shell_tool_name()
+    other = _other_dialect(mounted)
+    pattern = re.compile(rf"\b{other}\s+tool\b", re.IGNORECASE)
+    offenders = []
+    for tool in server.tools.to_openai_tools():
+        fn = tool["function"]
+        text = f"{fn.get('description', '')} {json.dumps(fn.get('parameters', {}))}"
+        if pattern.search(text):
+            offenders.append(fn["name"])
+    assert offenders == [], (
+        f"these tools name the `{other}` tool, which this host does not mount "
+        f"(it mounts `{mounted}`): {offenders}"
+    )
+    # The control arm, on synthetic text so it cannot decay with someone else's
+    # prose: the pattern must read the tool reference, not the bare dialect name.
+    assert pattern.search(f"never rewrite the file with hand-written {other}/python") is None
+    assert pattern.search(f"use the {other} tool to finish the job") is not None
+
+
+def test_the_read_tools_text_names_the_shell_it_sends_you_to(monkeypatch, tmp_path):
+    """Both directions, at the three carriers the sweep above cannot enumerate.
+
+    The description is read by the model on every request; the two hints are read
+    when the read tool refuses a job it cannot do.  All three send the model to a
+    shell, and all three used to send it to ``bash`` whatever the platform.
+
+    ``definition()`` answers for the host, so the platform is asked about
+    directly — the module's own ``shell_tool_name`` is the seam that exists for
+    exactly this ("a test can ask the question about Windows without being on
+    Windows").
+    """
+    from emrg.tools import read_tool
+
+    for mounted, absent in (
+        (SHELL_TOOL_NAME_WINDOWS, SHELL_TOOL_NAME_POSIX),
+        (SHELL_TOOL_NAME_POSIX, SHELL_TOOL_NAME_WINDOWS),
+    ):
+        monkeypatch.setattr(read_tool, "shell_tool_name", lambda p=None, _m=mounted: _m)
+
+        desc = ReadTool().definition().description
+        assert f"the {mounted} tool" in desc
+        assert f"{absent} tool" not in desc
+
+        big = tmp_path / f"big-{mounted}.txt"
+        big.write_text("x" * (MAX_READ_SIZE + 1))
+        got = _run(ReadTool().execute({"file_path": str(big), "intent": "read it"}))
+        assert got.error, got.content
+        assert f"the {mounted} tool" in got.content
+        assert f"{absent} tool" not in got.content
+
+        img = tmp_path / f"big-{mounted}.png"
+        img.write_bytes(b"\x00" * (MAX_IMAGE_SIZE + 1))
+        got = _run(ReadTool().execute({"file_path": str(img), "intent": "read it"}))
+        assert got.error, got.content
+        assert f"the {mounted} tool" in got.content
+        assert f"{absent} tool" not in got.content
+
+
+def test_the_non_vision_placeholder_names_the_mounted_shell(tmp_path):
+    """What the daemon substitutes for an image a non-vision model cannot see.
+
+    It is the same question the prompt asks — ``_mounted_shell_tool_name`` — so
+    it must get the same answer, and the answer must be the registry's rather
+    than the platform's.  Before this, the placeholder said ``bash`` on Windows,
+    where the model has no such tool to call.
+    """
+    server = _instantiate()
+    mounted = server._mounted_shell_tool_name()
+    other = _other_dialect(mounted)
+    server.llm.config.vision = False
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x00" * 8)
+    out = server._tool_content_for_llm(
+        json.dumps({"type": "image", "path": str(img), "mime": "image/png"})
+    )
+    assert isinstance(out, str)
+    assert f"the {mounted} tool" in out
+    assert f"{other} tool" not in out

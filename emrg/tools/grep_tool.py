@@ -34,8 +34,9 @@ class GrepTool(ToolExecutor):
                 "Returns matching lines prefixed with filename:line_number. "
                 "Supports -i (case-insensitive), context lines before/after matches, "
                 "file glob filtering, and output truncation caps. "
-                "Use this instead of 'bash grep' for cross-platform pattern search "
-                "with automatic binary/hidden file skipping."
+                "Use this instead of a shell text search (`grep` on POSIX, "
+                "`Select-String` in PowerShell) for pattern search with automatic "
+                "binary/hidden file skipping."
             ),
             parameters={
                 "type": "object",

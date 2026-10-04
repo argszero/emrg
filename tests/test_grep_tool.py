@@ -380,3 +380,26 @@ class TestTheCountSaysWhenItIsAFloor:
         assert result.content.index("floor") < result.content.index("output truncated"), (
             "the summary has to carry its own caveat, not depend on the note at the end"
         )
+
+
+# ── the alternative it advertises ─────────────────────────────────────────
+
+
+def test_the_description_does_not_offer_a_posix_only_alternative():
+    """Retired wording, pinned so a copy-paste from the old text cannot bring it back.
+
+    The description used to say *"Use this instead of 'bash grep'"* — measured
+    2026-10-04.  On Windows that names two things the host has neither of: a
+    ``bash`` tool (Windows mounts ``pwsh`` and has no ``bash`` row at all — see
+    ``emrg/tools/shell_dialects.py``) and a ``grep`` command (PowerShell's is
+    ``Select-String``).  The replacement names each platform's own command, the
+    same way the system prompt's grep line does, so neither reader is sent to a
+    technique that does not exist on their host.
+
+    The sweep in ``tests/test_shell_tool_mount.py`` cannot reach this one: the
+    defect is a *command* the platform lacks, and the text never said "tool".
+    So it is pinned here, on the retired phrase itself.
+    """
+    description = GrepTool().definition().description
+    assert "bash grep" not in description
+    assert "Select-String" in description, "the PowerShell reader is left without one"

@@ -12,8 +12,17 @@ from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
+from emrg.tools.shell_dialects import shell_tool_name
 
 logger = logging.getLogger(__name__)
+
+# This tool's model-facing text sends the model to a shell to finish a job the
+# read tool cannot do (PDFs, oversized files, oversized images). The shell it
+# names is the one this host mounts — ``bash`` on POSIX, ``pwsh`` on Windows —
+# never the literal ``bash``: Windows mounts ``pwsh`` and has no ``bash`` row at
+# all, so a hint saying "use the bash tool" would point at a tool the model
+# cannot call. That is the accident ``system.j2`` repairs for the prompt (design
+# §14.5 item 6); the prompt is not the only carrier the model reads.
 
 MAX_LINES = 2000  # Default max lines per read (matches Claude Code)
 MAX_READ_SIZE = 256 * 1024  # 256KB — file size cap (matches Claude Code)
@@ -44,6 +53,7 @@ class ReadTool(ToolExecutor):
     """Read file contents with optional start_line/line_limit and line numbers."""
 
     def definition(self) -> ToolDefinition:
+        shell = shell_tool_name()
         return ToolDefinition(
             name="read",
             description=(
@@ -53,8 +63,8 @@ class ReadTool(ToolExecutor):
                 "Can read text files. For images (.png/.jpg/.jpeg/.gif/.webp), "
                 "returns a vision-format image block so the model can see the picture "
                 "(requires a vision-capable model; otherwise a text placeholder is "
-                "returned). For PDFs and notebooks, use the bash tool with appropriate "
-                "commands instead."
+                "returned). For PDFs and notebooks, use the "
+                f"{shell} tool with appropriate commands instead."
             ),
             parameters={
                 "type": "object",
@@ -162,7 +172,8 @@ class ReadTool(ToolExecutor):
                     name="read",
                     content=(
                         f"Image is too large ({file_size:,} bytes, "
-                        f"limit {MAX_IMAGE_SIZE:,}). Use the bash tool to "
+                        f"limit {MAX_IMAGE_SIZE:,}). Use the "
+                        f"{shell_tool_name()} tool to "
                         f"resize/compress it first (e.g. sips -Z 1024 <file> "
                         f"on macOS or convert -resize on ImageMagick)."
                     ),
@@ -184,8 +195,8 @@ class ReadTool(ToolExecutor):
                 content=(
                     f"File is too large ({file_size:,} bytes). "
                     f"Use start_line and line_limit parameters to read specific "
-                    f"portions of the file, or use the bash tool with "
-                    f"head/tail/sed to search for specific content.\n\n"
+                    f"portions of the file, or use the "
+                    f"{shell_tool_name()} tool to search for specific content.\n\n"
                     f"Example: read with start_line=1, line_limit={MAX_LINES} "
                     f"to read the first {MAX_LINES} lines."
                 ),

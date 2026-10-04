@@ -3377,7 +3377,15 @@ class EmrgServer:
         path = ref.get("path", "")
         mime = ref.get("mime", "image/png")
         if not self.llm.config.vision:
-            return f"[Image: {path} — current model does not support image understanding; use the bash tool to inspect it]"
+            # The placeholder sends the model to a shell to look at the image it
+            # cannot see. Name the tool this daemon actually mounted, not ``bash``
+            # — the same repair ``system.j2`` makes for the prompt (design §14.5
+            # item 6); a Windows host has no ``bash`` row to send it to.
+            shell = self._mounted_shell_tool_name()
+            return (
+                f"[Image: {path} — current model does not support image "
+                f"understanding; use the {shell} tool to inspect it]"
+            )
         try:
             b64 = base64.b64encode(Path(path).read_bytes()).decode()
         except (OSError, FileNotFoundError) as e:
