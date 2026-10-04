@@ -14,7 +14,7 @@ import json
 from datetime import datetime, timedelta
 
 import emrg.server.abort_runs as mod
-from emrg.server.abort_runs import RUN_TTL_DAYS, AbortRuns
+from emrg.server.abort_runs import RUN_TTL_DAYS, AbortRuns, default_path
 
 
 def test_the_first_abort_opens_a_run(tmp_path):
@@ -173,12 +173,34 @@ def test_a_hand_edited_stamp_is_dropped_rather_than_crashing(tmp_path):
 
 
 def test_the_default_path_is_under_the_daemons_log_directory(tmp_path, monkeypatch):
-    """Beside the task-run records the host already reads."""
-    monkeypatch.setattr(mod, "config_dir", lambda: tmp_path / "home")
-    monkeypatch.setattr(mod, "default_path",
-                        lambda: mod.config_dir() / "logs" / mod.STATE_FILENAME)
+    """Beside the task-run records the host already reads.
 
-    assert mod.default_path() == tmp_path / "home" / "logs" / "abort-runs.json"
+    Read through **this file's own by-value import**, not through `mod.default_path`:
+    the autouse redirect in `tests/conftest.py` replaces the *module attribute*, so
+    in every test of the suite `mod.default_path` is the redirect's lambda. An
+    assertion on it measures the redirect, never the resolution.
+
+    This test did worse than that — it installed a lambda of its own and asserted
+    its own arithmetic back out — and it was hollow for it. Measured 2026-10-04 with
+    `scripts/run-mutation-arm.py`, moving the state off the daemon's log directory
+    (`config_dir() / "state" / STATE_FILENAME`) left it **SURVIVED**: the line the
+    test exists to pin was unguarded, and the file could be relocated without one
+    red row.
+
+    The by-value name is the real function, and it resolves `config_dir` at call
+    time, so patching that input is what points it at this test's tree. The sibling
+    below reads the other way round **on purpose** — it asserts the redirect through
+    the module attribute — which is the same pair
+    `tests/test_config.py::test_config_path` (by value) and
+    `test_the_default_config_path_is_redirected_into_the_scratch_tree` (through the
+    module) already records for the config path.
+    """
+    monkeypatch.setattr(mod, "config_dir", lambda: tmp_path / "home")
+
+    # Spelled as literals rather than as `mod.STATE_FILENAME` under a directory the
+    # module also names: the assertion is where the state lives, so a rename of
+    # either half has to reach it.
+    assert default_path() == tmp_path / "home" / "logs" / "abort-runs.json"
 
 
 def test_the_test_suite_is_not_pointed_at_the_hosts_state(tmp_path):
@@ -198,5 +220,7 @@ def test_the_test_suite_is_not_pointed_at_the_hosts_state(tmp_path):
     """
     # Read through the module, not a name imported at collection time: the
     # fixture patches the module attribute, so an early-bound name would keep
-    # pointing at the real function and quietly assert nothing.
+    # pointing at the real function and quietly assert nothing — which is the
+    # reading the sibling above wants, and the only one that can see the
+    # resolution rather than the redirect.
     assert mod.default_path() == tmp_path / "abort-runs.json"
