@@ -66,6 +66,17 @@ def _key(cause: str, session_id: str) -> str:
     return f"{cause}:{session_id}"
 
 
+def _in_local_zone(value: datetime) -> datetime:
+    """A clock reading with a zone. A naive one is local — the only reading it can have.
+
+    One home for one rule, used by both halves of the comparison: `_parse` for a *stored*
+    stamp (a hand-edited file carries no offset) and `note` for an *injected* clock (a
+    caller writing `datetime(2026, 9, 27)`). They must agree — an aware cutoff compared
+    with a naive stamp is a `TypeError`, not a verdict — and this is the answer both give.
+    """
+    return value.astimezone() if value.tzinfo is None else value
+
+
 def _parse(stamp: object) -> datetime | None:
     """An ISO stamp back to a comparable instant, or ``None`` if it is not one."""
     if not isinstance(stamp, str):
@@ -74,12 +85,7 @@ def _parse(stamp: object) -> datetime | None:
         parsed = datetime.fromisoformat(stamp)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        # Written with an offset (``datetime.now().astimezone()``), so a naive
-        # one can only be a hand-edit: read it as local, which is what a hand
-        # edit means.
-        parsed = parsed.astimezone()
-    return parsed
+    return _in_local_zone(parsed)
 
 
 class AbortRuns:
@@ -108,8 +114,22 @@ class AbortRuns:
         The record carries ``count`` (how many in a row), ``first_at`` (when the
         run began) and ``last_at`` — the three facts the reading is made of, and
         the three a log line is worth printing.
+
+        ``now`` is **the clock for this call**, and it governs the write as well as the
+        stamp: the save below prunes against it. That was not always so, and the way the
+        half-wired version failed is worth keeping — with the stamp injected and the prune
+        taken from the wall, a call whose clock sat more than :data:`RUN_TTL_DAYS` in the
+        past **deleted the run it had just written** and returned ``count: 1`` for what
+        should have been a continuation. Measured 2026-10-04 (`cyc20261004-105148`): the
+        fixture in `test_consecutive_aborts_extend_one_run_and_keep_its_start` froze the
+        clock at 2026-09-27/28, and the test passed for a week and then failed — on a tree
+        nobody had touched — the day the wall clock reached 7 days past its fixture.
+        Production passes no clock (both calls are "now"), which is why only a test could
+        see it; a seam that means two different instants in one call is a seam that has to
+        be read as one.
         """
-        stamp = (now or datetime.now().astimezone()).isoformat(timespec="seconds")
+        clock = _in_local_zone(now or datetime.now().astimezone())
+        stamp = clock.isoformat(timespec="seconds")
         state = self._load()
         entry = state.get(_key(cause, session_id))
         if entry is None:
@@ -124,7 +144,7 @@ class AbortRuns:
         else:
             entry["count"] = int(entry.get("count", 0)) + 1
             entry["last_at"] = stamp
-        self._save()
+        self._save(now=clock)
         return dict(entry)
 
     def clear(self, cause: str, session_id: str) -> None:
@@ -162,9 +182,16 @@ class AbortRuns:
             if isinstance(key, str) and isinstance(entry, dict)
         }
 
-    def _save(self) -> None:
+    def _save(self, *, now: datetime | None = None) -> None:
+        """Write the state, dropping the runs this instant says are history.
+
+        `now` is passed straight to `_prune`, for the reason `note` records: a caller that
+        named an instant has named it for the whole call, and the write that follows the
+        stamp is part of that call. Defaulting it here is what keeps `clear` (which aborts
+        happen "now") unchanged.
+        """
         state = self._load()
-        _prune(state)
+        _prune(state, now=now)
         try:
             atomic_write_bytes(
                 json.dumps(state, ensure_ascii=False, indent=1, sort_keys=True) + "\n",

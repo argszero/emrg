@@ -28,7 +28,16 @@ def test_the_first_abort_opens_a_run(tmp_path):
 
 
 def test_consecutive_aborts_extend_one_run_and_keep_its_start(tmp_path):
-    """The three facts the reading is made of: how many, since when, last when."""
+    """The three facts the reading is made of: how many, since when, last when.
+
+    The dates below are **absolute**, and that is deliberate: both aborts name the same
+    clock, so the test says the same thing on any day it is run. It did not always — the
+    prune used to be taken from the wall while the stamp came from the injected clock, so
+    this fixture quietly became "an abort 8 days before the TTL" once the calendar caught
+    up with it, and the test failed on a tree nobody had touched
+    (`cyc20261004-105148`). `test_an_injected_clock_governs_the_prune_as_well_as_the_stamp`
+    is the leg that pins the property this one now relies on.
+    """
     runs = AbortRuns(tmp_path / "abort-runs.json")
     first = runs.note("content_filter", "s_1", now=datetime(2026, 9, 27, 10, 0))
     second = runs.note("content_filter", "s_1", now=datetime(2026, 9, 28, 10, 0))
@@ -37,6 +46,52 @@ def test_consecutive_aborts_extend_one_run_and_keep_its_start(tmp_path):
     assert second["first_at"] == first["first_at"], "the run's start is the first abort"
     assert second["last_at"] != first["last_at"]
     assert runs.run("content_filter", "s_1")["count"] == 2
+
+
+def test_an_injected_clock_governs_the_prune_as_well_as_the_stamp(tmp_path):
+    """A call's clock is the clock for the whole call, write included.
+
+    The failure this pins, measured 2026-10-04 (`cyc20261004-105148`): with the stamp taken
+    from the injected clock and the prune from the wall, `note(now=<21 days ago>)` **deleted
+    the run it had just written** and returned `count: 1` for a continuation. Nothing in
+    production passes a clock, so only a test could see it — and one did, a week late, on a
+    tree nobody had changed.
+
+    Written against the wall clock on purpose: `long_ago` is three TTLs back, so the two
+    aborts are an hour apart *by the clock they name* while being three weeks old by the
+    wall clock. Under the old code this test fails on every day of the year, which is what
+    makes it a pin rather than a calendar.
+    """
+    runs = AbortRuns(tmp_path / "abort-runs.json")
+    long_ago = datetime.now().astimezone() - timedelta(days=RUN_TTL_DAYS * 3)
+
+    runs.note("content_filter", "s_1", now=long_ago)
+    second = runs.note("content_filter", "s_1", now=long_ago + timedelta(hours=1))
+
+    assert second["count"] == 2, (
+        "the run this call just extended was pruned by a different clock — the stamp and "
+        "the prune disagreed about what 'now' means"
+    )
+    assert runs.run("content_filter", "s_1")["count"] == 2
+
+
+def test_the_ttl_still_drops_a_run_the_injected_clock_calls_a_week_old(tmp_path):
+    """The other direction: threading the clock must not disable the TTL.
+
+    Without this leg, a `_save` that simply stopped pruning would pass the test above.
+    Both instants are relative to each other and to nothing else — 21 days back and 13 days
+    back by the wall clock, 8 days apart by the clock the calls name — so the verdict is the
+    same on every day it is run.
+    """
+    runs = AbortRuns(tmp_path / "abort-runs.json")
+    t = datetime.now().astimezone() - timedelta(days=RUN_TTL_DAYS * 3)
+
+    runs.note("content_filter", "old", now=t)
+    runs.note("content_filter", "new", now=t + timedelta(days=RUN_TTL_DAYS + 1))
+
+    snapshot = runs.snapshot()
+    assert "content_filter:old" not in snapshot
+    assert "content_filter:new" in snapshot
 
 
 def test_a_round_the_cause_did_not_block_ends_the_run(tmp_path):
