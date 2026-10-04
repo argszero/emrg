@@ -654,6 +654,13 @@ def test_a_missing_run_is_told_to_re_trigger_rather_than_refresh(mod, monkeypatc
     assert "re-trigger CI on the same head" in err
     assert "keeps the votes" in err
     assert "Re-merge master into the branch" not in err
+    # The re-trigger script is bash, and the file's own `RUNNER` is python: spelled
+    # behind it, the command hands python a bash file (`SyntaxError`, rc 1), which is
+    # what the sibling row in `review-queue.py` was measured doing. Here the cheap
+    # renewal has to name a command that can actually re-fire the run.
+    assert "bash scripts/re-trigger-ci.sh" in err, (
+        "the re-trigger remedy must spell the shell script `bash scripts/re-trigger-ci.sh`"
+    )
 
 
 def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
@@ -695,16 +702,23 @@ def test_a_failing_remedy_names_the_reading_that_produces_the_cause(
     """`fix the failure` is undirected without a way to read *why* it failed.
 
     Measured 2026-10-04: `gh run view <id> --log-failed` answers **0 bytes with rc 0**
-    on this host for every run, green ones included, so a remedy that leaves the reader
-    to reach for it hands over a failure to measure in the shape of a pass. The reading
-    that answers is `scripts/read-run-failure.py <run-id>`, and whose failure it is comes
-    first: a base-level row turns every open PR red, and the plan suite names that.
+    here for every run measured, a red one included, so a remedy that leaves the reader
+    to reach for it hands over a failure to measure in the shape of a pass. The claim is
+    deliberately not a universal - a reviewer on the same host measured one run as
+    answering its whole log - but it covers the case this remedy exists for, where a
+    *red* run's `--log` and `--log-failed` are both empty and exit 0.
+
+    The reading that answers is `scripts/read-run-failure.py <run-id>`, and whose failure
+    it is comes first: a base-level row turns every open PR red, and the plan suite names
+    that. **Both** commands carry the runner: a `scripts/x.py` is mode 644 here, so a bare
+    path exits 126, and this remedy used to spell one command with the runner and the one
+    beside it without (reviewed on #1851).
     """
     fake = FakeGh(_view(), _compare("ahead", 1, 0), [_run_(conclusion="failure")])
     _votes(mod, monkeypatch, 3)
     _run(mod, monkeypatch, fake)
     err = capsys.readouterr().err
-    assert f"scripts/read-run-failure.py {RUN_ID}" in err, (
+    assert f"{mod.RUNNER} scripts/read-run-failure.py {RUN_ID}" in err, (
         "the failing remedy must name the reading that produces the cause, with this "
         "run's id so the command runs as printed"
     )
@@ -712,9 +726,9 @@ def test_a_failing_remedy_names_the_reading_that_produces_the_cause(
         "the remedy offers `gh run view --log-failed`, which answers 0 bytes with "
         "exit 0 here - a failure to measure wearing the shape of a pass"
     )
-    assert "check-merge-plan-suite.py 1" in err, (
-        "whose failure it is has to be askable: a row the base fails too is not this "
-        "head's, and nothing in the remedy says where that is read"
+    assert f"{mod.RUNNER} scripts/check-merge-plan-suite.py 1" in err, (
+        "whose failure it is has to be askable, and askable as printed: a row the base "
+        "fails too is not this head's, and a bare `scripts/x.py` is mode 644 here"
     )
 
 

@@ -162,6 +162,13 @@ def could_declare_here(project: str, repo: str = REPO) -> bool:
 #: commands carry the runner the docstrings and the docs prescribe — a bare
 #: `scripts/x.py` is not executable on this host, so printing one would hand the
 #: reader a command that fails.
+#:
+#: The rule is **by file type**, and the shell half was got wrong here: a `.py`
+#: tool takes this runner, while a `.sh` tool takes `bash` and must never be given
+#: to python. Measured 2026-10-04: `uv run --no-sync python3 scripts/re-trigger-ci.sh`
+#: exits 1 with `SyntaxError: invalid syntax` on line 11 (`set -euo pipefail`) — the
+#: re-trigger row used to print exactly that, so the one row whose remedy is
+#: "re-trigger CI on the same head" handed over a command that could not run.
 RUNNER = "uv run --no-sync python3"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -880,7 +887,7 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             why=reading.stale_reason
             + " - re-triggering fires a run on the same head, which keeps the votes a "
               "refresh would spend",
-            command=f"{RUNNER} scripts/re-trigger-ci.sh <branch-of-{pr}>",
+            command=f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>",
         )
     if reading.stale_read and reading.stale_kind == "running":
         # The verb is the instruction: "wait" told the reader to block until the run

@@ -507,6 +507,19 @@ def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsy
     assert "retrigger-ci" in out
     assert "cast-vote.py" not in out
     assert "git merge FETCH_HEAD" not in out
+    # The command has to run as printed, and this row's did not: `re-trigger-ci.sh` is
+    # a **bash** script, and it was printed behind the python runner, which hands python
+    # a bash file. Measured 2026-10-04: `uv run --no-sync python3 scripts/re-trigger-ci.sh`
+    # exits 1 with `SyntaxError: invalid syntax`; `bash scripts/re-trigger-ci.sh` runs.
+    # The one row whose whole remedy is "re-trigger CI" was the one handing over a
+    # command that could not re-trigger anything.
+    assert "$ bash scripts/re-trigger-ci.sh" in out, (
+        "the re-trigger row must print a command that runs: `bash scripts/re-trigger-ci.sh`"
+    )
+    assert "uv run --no-sync python3 scripts/re-trigger-ci.sh" not in out, (
+        "the re-trigger row hands a bash script to python, which exits 1 with a "
+        "SyntaxError - the command cannot run as printed"
+    )
 
 
 def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
