@@ -1424,25 +1424,33 @@ def main(argv: list[str] | None = None) -> int:
                 f"{len(rants)} open rant(s) across {len(counts)} project(s) - {across} - "
                 "each needs an issue and its PR (R5) once it is this task's; the prompt's "
                 "rant section matches a rant to a task by `project` (this task's project, "
-                "or its owner/repo), so a row naming another project - or none - is not "
-                "this cycle's work:"
+                "or its owner/repo), so a row naming another project is not this cycle's "
+                "work and is withheld by default - one naming no project is undeclared "
+                "rather than another project's, and is rendered (`rendered_here` decides "
+                "both):"
             )
-            # Rendered by default: the rows this repo could declare. Another project's
-            # rows are **counted above and not printed** — the header keeps the ledger
-            # whole, so nothing is hidden, and their bodies are what this section's cost
-            # was made of (measured 2026-10-04 on this host: 40 open rants, 39 of them
-            # `silicon-science-cs`, ~8.7KB of a ~9.7KB report, paid by a cycle for whom
-            # the prompt itself says they are not its work). `--all-rants` prints them all.
+            # Rendered by default: the rows `rendered_here` accepts - this repo's, and the
+            # ones naming no project (a second predicate, `could_declare_here`, is **not**
+            # the rendering rule: it is false for a project-less row too, so it separates
+            # nothing here). Another project's rows are **counted above and not printed** —
+            # the header keeps the ledger whole, so nothing is hidden, and their bodies are
+            # what this section's cost was made of (measured 2026-10-04 on this host: 40 open
+            # rants, 39 of them `silicon-science-cs`, ~8.7KB of a ~9.7KB report, paid by a
+            # cycle for whom the prompt itself says they are not its work). `--all-rants`
+            # prints them all.
             rendered = rants if args.all_rants else [
                 rant for rant in rants if rendered_here(rant.project, args.repo)
             ]
             withheld = len(rants) - len(rendered)
             if withheld:
                 print(
-                    f"{withheld} of them name another project, so "
+                    f"{withheld} of them "
+                    + ("names" if withheld == 1 else "name")
+                    + " another project, so "
                     + ("its row is" if withheld == 1 else "their rows are")
-                    + " counted above and not printed here - no issue in "
-                    f"{args.repo} can declare them. "
+                    + " counted above and not printed here: `rendered_here` withholds "
+                    "another project's rows and only those - a row naming no project is "
+                    "undeclared, not another project's, so it is not withheld either. "
                     f"`{RUNNER} scripts/review-queue.py --all-rants` prints every row."
                 )
             print()

@@ -1492,11 +1492,16 @@ def test_another_projects_rant_is_counted_and_not_printed(mod, monkeypatch, caps
         "the count stays the ledger's: withholding a row is not hiding it"
     )
     withheld = next(line for line in out.splitlines() if "not printed here" in line)
-    assert "1 of them name another project" in withheld, withheld
+    assert "1 of them names another project" in withheld, withheld
     assert "--all-rants" in withheld, (
         "a withheld row must come with the way to see it, or the reader has no remedy"
     )
-    assert "no issue in argszero/emrg can declare them" in withheld, withheld
+    assert "`rendered_here` withholds another project's rows and only those" in withheld, (
+        "the reason must name the axis that withholds. It used to say `no issue in "
+        "argszero/emrg can declare them`, which is also true of the project-less row this "
+        "report prints - so it separated nothing (see "
+        "test_the_rant_header_and_the_withheld_line_name_what_withholds)"
+    )
 
 
 def test_a_project_less_rant_is_still_printed_though_it_can_declare_nothing_here(
@@ -1578,6 +1583,58 @@ def test_the_all_rants_help_states_the_withheld_set_the_predicate_defines(mod, c
     assert "rendered_here" in out, "the sentence names the rule that decides it"
     assert "naming no project is still printed" in out, (
         "the one case the sentence had wrong, now stated the way the predicate reads"
+    )
+
+
+def test_the_rant_header_and_the_withheld_line_name_what_withholds(
+    mod, monkeypatch, capsys
+):
+    """Both sentences a cycle reads on every run, held against the predicate that decides.
+
+    The `--help` copy was fixed for this on the same branch and the report's **header** was
+    not: it still told the reader that "a row naming another project - or none - is not this
+    cycle's work", one line above the project-less row it then printed. The withheld line
+    gave a reason that does not discriminate either - "no issue in argszero/emrg can declare
+    them" is equally true of that project-less row, because `could_declare_here("")` is False
+    too. The rule is `rendered_here`, spelled once, and these are its two copies.
+    """
+    rendered = [
+        mod.rendered_here(project, mod.REPO)
+        for project in ("emrg", "silicon-science-cs", "")
+    ]
+    assert rendered == [True, False, True], (
+        "the rule both sentences state: this repo's rows, and the rows naming no project"
+    )
+    assert mod.could_declare_here("silicon-science-cs", mod.REPO) is False
+    assert mod.could_declare_here("", mod.REPO) is False, (
+        "the reason the withheld line used to give is true of a row this report prints, so "
+        "it is not the reason anything is withheld - which is what this test keeps true"
+    )
+
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], ""),
+    )
+    mod.main([])
+    # The sentences are read with their whitespace collapsed, so the assertions are about
+    # the claim and not about where a line happens to break.
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert out.count("rendered_here") >= 2, (
+        "both sentences name the rule that decides them, the way the --help copy does"
+    )
+    assert "or none" not in out, (
+        "the header's own clause, the defect this pins: a row naming no project is not "
+        "withheld, and a report saying so is contradicted by the row it prints beside it"
+    )
+    assert "one naming no project is undeclared rather than another project's" in out, (
+        "the case the header had wrong, stated the way the predicate reads"
+    )
+    assert "rant 2026-09-30T09:30:16+08:00" in out, (
+        "and the row the header is about really is printed"
     )
 
 
