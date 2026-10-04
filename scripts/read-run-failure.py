@@ -18,9 +18,13 @@ failing at the notarize step since 2026-10-02):
 All three exit **0** with zero bytes on stdout *and* stderr - a silent empty answer, which
 reads exactly like "this run has no log" and is the same class as reporting "could not
 measure" as a pass. It is not about that run: the identical three commands return 0 bytes
-on a green run (`36658495939`, v0.3.7) and on a recent `Test` run (`37141994658`), so the
-log path is unusable on this host for every run. The API is not: the one call this tool
-makes returns the whole job log (689KB for the run above, measured).
+on a green run (`36658495939`, v0.3.7) and on a recent `Test` run (`37141994658`). The
+empty answer is the shape to expect rather than a rule without exceptions: re-measured
+2026-10-04 (`cyc20261004-214803`, the same `gh` 2.58.0), the `Test` run `37203340165`
+returned its whole log with rc 0 - so an empty answer is not evidence that a run has no
+log, and it is **this tool's own rc 2**, not the emptiness, that says the log could not be
+read. The API is not affected: the one call this tool makes returns the whole job log
+(689KB for the run above, measured).
 
 So the log is one request away, and the difference between this tool and `gh run view
 --log` is not convenience: this one distinguishes **"the run has no failure"** from **"the

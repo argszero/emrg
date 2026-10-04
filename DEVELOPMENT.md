@@ -304,10 +304,13 @@ the same tool at the same version over the same files, not a second implementati
 rules.
 
 **The readable path to a failed run's cause.** `gh run view <id> --log` and `--log-failed` answer
-**0 bytes with exit 0** on a current host for every run, green or red (measured 2026-10-04 on `gh`
-2.58.0: v0.3.8's failed build `36956685533`, v0.3.7's green build `36658495939`, and a recent `Test`
-run all return nothing on stdout *and* stderr, rc 0) — a silent empty answer that reads exactly like
-"this run has no log". `gh api` is unaffected (the same job's log is 689 KB), so:
+**0 bytes with exit 0** on a current host (measured 2026-10-04 on `gh` 2.58.0: v0.3.8's failed build
+`36956685533`, v0.3.7's green build `36658495939`, and a recent `Test` run all return nothing on
+stdout *and* stderr, rc 0) — a silent empty answer that reads exactly like "this run has no log".
+The empty answer is the shape to expect rather than a rule without exceptions: re-measured
+2026-10-04 (`cyc20261004-214803`, same `gh` 2.58.0), the `Test` run `37203340165` returned its whole
+log with rc 0 — so an empty answer is not evidence that a run has no log, and it is the reading below,
+not the silence, that settles it. `gh api` is unaffected (the same job's log is 689 KB), so:
 
 ```bash
 uv run --no-sync python3 scripts/read-run-failure.py <run-id>            # the failed job, its step, its output
