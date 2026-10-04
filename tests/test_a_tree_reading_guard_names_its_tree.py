@@ -147,6 +147,15 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "measures a separately installed interpreter (~/.emrg/install/bin/python), "
         "which a clean CI checkout does not have"
     ),
+    "check-workflows.py": (
+        "lints this tree's `.github/workflows/` with the actionlint build CI pins, which "
+        "a clean checkout - and this host - does not ship (measured 2026-10-04: no "
+        "actionlint, shellcheck, node or npm on PATH). It reads a working tree and names "
+        "it, and that naming IS verified rather than classified: "
+        "`tests/test_check_workflows.py::test_the_tree_it_read_is_named_first` runs it as "
+        "a subprocess against a `tmp_path` tree and asserts the first line, which holds "
+        "with or without the binary because the tree line is printed before the search"
+    ),
     "check-merge-landed.py": (
         "needs `gh` and the network for the review half. It was classified as a "
         "NON-tree-reader when #1618 added it, by the bucket entry that says it 'reads "
