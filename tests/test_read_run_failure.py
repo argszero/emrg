@@ -40,6 +40,7 @@ the replacement could still be the same kind of instrument:
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import re
 import subprocess
@@ -725,3 +726,121 @@ def test_every_flag_the_document_spells_is_a_flag_the_tool_has(mod, capsys) -> N
         "flag leaves the document showing a command that cannot run"
     )
     assert "--tail" in documented, "the documented invocation lost the flag that shows more output"
+
+
+# --- the way out: the report is remote text, and the console decides what it can carry --
+#
+# Measured 2026-10-04 (cycle `cyc20261004-111232`, on a Windows host whose
+# `sys.stdout.encoding` is `gbk`): the excerpt loop raised
+#
+#     UnicodeEncodeError: 'gbk' codec can't encode character '\u2705'
+#
+# out of `main`, and an exception leaving `main` exits **1** - the code this tool defines
+# as "the run has no failed job". So the crash answered the question with the opposite of
+# the truth, for the very run `check-release-published.py` names this tool to explain.
+# 56 of that run's 6236 log lines cannot survive a `gbk` console. Both tests below drive
+# that console deliberately, on a host whose own stdout is utf-8.
+
+
+def _console(encoding: str):
+    """A stdout whose codec is `encoding`, sitting on a sink this test can read.
+
+    The chain is the real one (`TextIOWrapper` over a buffered writer over a raw sink),
+    and it is block-buffered the way a piped stdout is - which is what makes the second
+    test below able to see *when* a line left the process.
+    """
+    sink = _Sink()
+    stream = io.TextIOWrapper(
+        io.BufferedWriter(sink), encoding=encoding, line_buffering=False
+    )
+    return stream, sink
+
+
+class _Sink(io.RawIOBase):
+    """The bytes that actually reached the console, in the order they reached it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.data = bytearray()
+
+    def writable(self) -> bool:  # noqa: D102 - io.RawIOBase's protocol
+        return True
+
+    def seekable(self) -> bool:  # noqa: D102
+        return False
+
+    def readable(self) -> bool:  # noqa: D102
+        return False
+
+    def write(self, b) -> int:  # noqa: D102
+        self.data += bytes(b)
+        return len(b)
+
+
+def test_a_character_the_console_cannot_carry_does_not_steal_the_exit_code(mod, monkeypatch):
+    """The report survives a gbk console: `?` for the mark, rc 0 for the reading.
+
+    The character is in the log this tool's whole docstring is built on - the runner's
+    own `✅` on run 36956685533 - and the requirement is not cosmetic: without the remedy
+    the UnicodeEncodeError leaves `main`, and `main` leaving with an exception exits 1,
+    which is indistinguishable from "the run has no failed job" for a caller scripting
+    the remedy. `errors="replace"` (not `encoding="utf-8"`) is what keeps this host's
+    Chinese log lines readable, so the assertion is on the substitution.
+    """
+    log = _STEP_BLOCK.replace(
+        "##[error]Process completed with exit code 1.",
+        "##[error]All good \u2705 but the step still exited 1",
+    )
+    fake = FakeGh([_job()], {1: log})
+    stream, sink = _console("gbk")
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    rc = _run(mod, monkeypatch, fake, ["42"])
+
+    stream.flush()
+    printed = sink.data.decode("gbk", errors="replace")
+    assert rc == 0, "the crash is what makes this 1, and 1 means 'no failed job' here"
+    assert "18. Notarize pkg (macOS only)" in printed, "the answer must still be printed"
+    assert "\u2705" not in printed, "the console cannot carry it, so it must not be sent"
+    assert "?" in printed, "errors='replace' is the substitution that keeps the report"
+
+
+def test_the_report_reaches_a_merged_reader_before_the_refusal(mod, monkeypatch):
+    """`2>&1 | tail` is how a cycle reads this tool, and program order is the promise.
+
+    The tool prints its report to stdout and its `could not read:` refusal to stderr. A
+    piped stdout is block-buffered and stderr is not, so without `line_buffering=True` the
+    refusal overtakes the report - the family's measured inversion
+    (`tests/test_guard_report.py`), in the one tool of it whose two streams are both
+    reachable in a single run.
+
+    Driven through the real chain rather than by asserting on a flag: the sink records the
+    order bytes arrived in, which is what the reader sees. The empty log is what makes
+    both streams fire in one run, and it needs no network.
+    """
+    fake = FakeGh([_job()], {1: ""})
+    stream, sink = _console("utf-8")
+
+    class _Bare:
+        """stderr: unbuffered, as the real one is, writing into the same sink."""
+
+        def write(self, text: str) -> int:
+            sink.data += text.encode("utf-8")
+            return len(text)
+
+        def flush(self) -> None:  # noqa: D102
+            pass
+
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setattr(sys, "stderr", _Bare())
+
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    stream.flush()
+
+    merged = sink.data.decode("utf-8")
+    assert rc == 2, "an empty log is not a cause - both halves have to fire for this test"
+    assert "could not read:" in merged, "the refusal is the stderr half of this reading"
+    assert merged.index("repo: argszero/emrg") < merged.index("could not read:"), (
+        "the refusal overtook the report: without line_buffering=True the piped reader "
+        f"gets the verdict before the subject. Merged output was:\n{merged}"
+    )
