@@ -91,10 +91,20 @@ def _load(name: str, script: str):
 
 
 def _fake_run(calls: list[list[str]], fetch_rc: int = 0, stderr: str = ""):
-    """A subprocess runner that records argv and answers fetch/rev-parse/update-ref."""
+    """A subprocess runner that records argv and answers fetch/rev-parse/update-ref.
+
+    `gh` answers with the same commit the fetch produced, because the landing-diff gate
+    checks the head it fetched against the head GitHub names (`_check_head_is_the_prs`,
+    measured 2026-10-04: a stale minted `refs/pull/<N>/head` made that gate report a
+    conflict about a head it had not measured). A runner that answered `gh` with nothing
+    would turn this file's "returns a sha and drops its ref" arm into a refusal - the
+    reading would be about the fake, not about the gate.
+    """
 
     def run(argv, *args, **kwargs):
         calls.append(list(argv))
+        if argv[:2] == ["gh", "api"]:
+            return subprocess.CompletedProcess(argv, 0, SHA + "\n", "")
         if argv[:2] == ["git", "fetch"] and fetch_rc != 0:
             return subprocess.CompletedProcess(argv, fetch_rc, "", stderr)
         if argv[:2] == ["git", "rev-parse"]:

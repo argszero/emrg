@@ -139,6 +139,20 @@ own fixture with the file named `中文.txt`, the tool answered *clean* where th
 same repo names `src/app.py` as reading backwards inside, and printed a name no
 resolver can open. See `_changed_paths`.
 
+The head is the PR's head, or there is no reading
+-------------------------------------------------
+`head` is fetched (`git fetch origin +pull/<N>/head`) and then checked against the head
+GitHub names for that PR, because a fetch is not evidence about the PR: `origin` is not
+always the remote the PR lives on (`url.<base>.insteadOf` is applied before the
+transport reads a URL, and this host rewrites it to a local checkout), where
+`refs/pull/<N>/head` exists only if an earlier run minted it - indistinguishable, at the
+fetch, from one the remote serves. Measured 2026-10-04 (`cyc20261004-183629`): this tool
+reported *"the merge conflicts"* about #1841 while the PR's head was `f90ad8a4`, because
+the ref in this clone was the stale `2154873` an earlier cycle had left there. A head
+that is not the PR's subject, and a head no other reading can confirm, are both exit 2 -
+see `_fetch_head`. Every per-PR line names the head it measured, so which commit a tree
+was computed on is never left to be inferred from the base alone.
+
 Exit codes
 ----------
     0  nothing reads backwards: every path `diff(base, head)` lists is both a path the
@@ -147,8 +161,8 @@ Exit codes
        or the reading inside it is not the landing), and it is named. This is a
        *reading* hazard, not a defect in the PR and not a blocker - the change the PR
        really lands is printed above it
-    2  the question could not be answered (git/gh failure): fail loud, never report
-       health that was not measured
+    2  the question could not be answered (a git/gh failure, or a head that is not the
+       PR's head): fail loud, never report health that was not measured
     3  the merge conflicts, so there is no landing tree to diff. Not a verdict:
        that question belongs to `check-merge-sequence.py`
 """
@@ -413,8 +427,66 @@ def _open_pr_numbers(repo: str) -> list[int]:
     return sorted(numbers)
 
 
-def _fetch_head(number: int) -> str:
-    """Fetch a PR's real head into a temp ref and return its SHA.
+#: The repository this tool's heads are checked against. Named once because the
+#: verification below asks GitHub *about* the PR, and the owner/name `main` passes as
+#: `--repo` is the same subject - two copies of it would be two things to keep in step.
+_DEFAULT_REPO = "argszero/emrg"
+
+
+def _head_github_names(number: int, repo: str) -> tuple[str, str]:
+    """What GitHub says PR #`number`'s head is: `(sha, "")` or `("", why)`.
+
+    One question, asked once, and answered in three ways that stay apart: an object
+    name, a sentence saying why GitHub could not be asked, and - never given here - a
+    guess. `_fetch_head` is the only caller, and it is the caller's job to decide what
+    an unanswerable question means (see `check_pr`'s `github=` note: what a reading
+    *means* is the reader's mapping).
+    """
+    proc = _run(["gh", "api", f"repos/{repo}/pulls/{number}", "--jq", ".head.sha"])
+    if proc.returncode != 0:
+        return "", f"`gh api repos/{repo}/pulls/{number}` failed ({_diagnosis(proc)})"
+    named = proc.stdout.strip()
+    if not merge_tree.is_object_name(named):
+        return "", (
+            f"`gh api repos/{repo}/pulls/{number}` named the head as {named!r}, which is "
+            "not an object name"
+        )
+    return named, ""
+
+
+def _check_head_is_the_prs(number: int, repo: str, head: str) -> None:
+    """Raise `MeasurementError` unless `head` is the head GitHub names for PR #`number`.
+
+    Split from `_fetch_head` so this check can be exercised without a fetch: it is the
+    one direction a caller must never invent - "the commit in hand is this PR's
+    subject" - and it is written once and named rather than implied by a fetch that
+    merely exited 0.
+
+    Two answers are refusals, and they are different sentences: GitHub naming a different
+    commit (the fetch read something that is not this PR - a stale minted ref), and
+    GitHub not answering at all (no other reading can confirm the head, and `_refresh_base`
+    states the rule this shares: never a quiet continuation against a ref that could not
+    be verified).
+    """
+    named, why = _head_github_names(number, repo)
+    if why:
+        raise MeasurementError(
+            f"could not establish that the head fetched for PR #{number} is the PR's "
+            f"head: {why}. This tool reads `pull/{number}/head` from `origin`, and a head "
+            "nothing confirms is not a subject a landing tree may be computed on"
+        )
+    if named != head:
+        raise MeasurementError(
+            f"PR #{number}: the head fetched from `origin` is {head}, but GitHub names the "
+            f"PR's head {named} - so the reading would be about a commit that is not this "
+            f"PR's subject. A local `origin` can hold a stale `refs/pull/{number}/head` "
+            "minted by an earlier run: correct it (or read the head through the API) and "
+            "ask again"
+        )
+
+
+def _fetch_head(number: int, repo: str = _DEFAULT_REPO) -> str:
+    """Fetch a PR's head into a temp ref, check it is the PR's head, return its SHA.
 
     The refspec is forced (`+`): PR heads here are routinely re-pushed to a commit
     that is not a descendant of the previous one (every conflict resolution does),
@@ -424,6 +496,27 @@ def _fetch_head(number: int) -> str:
     The parked ref is dropped before this returns (`merge_tree.drop_ref`): the
     caller wants the SHA, and a ref left behind pins that head's objects for the
     life of the clone (measured 2026-09-17: this gate had 25 of them resident).
+
+    **A fetch that exited 0 is not evidence about the PR**, and that is what the check
+    after it is for. `origin` is not necessarily the remote the PR lives on -
+    `url.<base>.insteadOf` is applied before the transport reads a remote's URL, and
+    this host rewrites `origin` to a local checkout (the offline fallback; see
+    `origin-is-a-local-checkout`) - and there `refs/pull/<N>/head` exists only if an
+    earlier run put it there with `git update-ref`. A ref minted for an older head is
+    not distinguishable, at the fetch, from one the remote serves: measured 2026-10-04
+    (`cyc20261004-183629`), this tool answered
+
+        #1841: the merge conflicts, so there is no clean-merge tree to measure
+
+    about a PR whose head was `f90ad8a4`, because this clone's `refs/pull/1841/head`
+    was the stale `2154873` - and a *false conflict* is the one verdict this family
+    must never invent (`merge_tree`'s docstring, on the named tree). So the head the
+    fetch produced is checked against the head GitHub names, and a mismatch is a
+    measurement error rather than a conflict or a clean merge: the reading would be
+    about a tree of a commit that is not the PR.
+
+    `repo` is threaded from `check_pr` so the check asks about the PR that was asked
+    for; the default is `main`'s `--repo` default.
     """
     ref = f"refs/emrg-landing-diff/pr{number}"
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
@@ -432,6 +525,7 @@ def _fetch_head(number: int) -> str:
         raise MeasurementError(f"could not fetch PR #{number}: {detail}")
     sha = _rev_parse(ref)
     merge_tree.drop_ref(ref, run=_run)
+    _check_head_is_the_prs(number, repo, sha)
     return sha
 def _diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
     """What git said, from both streams - a failure must not report itself as empty."""
@@ -762,20 +856,26 @@ def check_pr(
     Returns `(state, report)` with state in `{"clean", "backwards", "conflict"}`.
 
     `github=True` adds the PR page's reading beside the landing change (module
-    docstring). It is opt-in because it is the only network reading here, and it cannot
+    docstring). It is opt-in because it is not needed for the verdict, and it cannot
     change the state or the exit code: a rendering that disagrees is not a defect in the
-    PR, and one that could not be read is printed as unreadable.
+    PR, and one that could not be read is printed as unreadable. The *head's* agreement
+    with the one GitHub names is a different question - that one decides what the
+    verdict is about, so it is asked by `_fetch_head` whether or not this flag is given.
+
+    The head measured is on every line this returns, because the base is not the only
+    ref a tree is computed from: a reader who has to ask which commit `landing tree`
+    belongs to has no way to see that the reading's subject moved.
     """
-    head = _fetch_head(number)
+    head = _fetch_head(number, repo)
     try:
         tree, landed, apparent, backwards, reversed_inside = landing_reading(base, head)
     except Conflict as exc:
-        return "conflict", f"  #{number}: {exc}"
+        return "conflict", f"  #{number} head {head[:8]}: {exc}"
     behind = _behind_by(base, head)
 
     lines = [
-        f"  #{number} landing tree {tree[:12]} ({tree}) - merging it changes "
-        f"{len(landed)} path(s) on the base:"
+        f"  #{number} head {head[:8]} landing tree {tree[:12]} ({tree}) - merging it "
+        f"changes {len(landed)} path(s) on the base:"
     ]
     if landed:
         # The count beside the path, not only the path (`_line_counts`): a modification
@@ -836,7 +936,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "prs", nargs="*", type=int, help="PR numbers (default: all open, ascending)"
     )
-    parser.add_argument("--repo", default="argszero/emrg", help="owner/name")
+    parser.add_argument("--repo", default=_DEFAULT_REPO, help="owner/name")
     parser.add_argument("--base", default="origin/master", help="the ref to land on")
     parser.add_argument(
         "--github",

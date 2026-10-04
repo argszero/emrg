@@ -150,7 +150,7 @@ def test_the_report_names_the_landing_change_and_the_backwards_paths(
     """What the reviewer is handed: the change first, the misleading paths named."""
     repo, base, head = _behind_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     state, report = mod.check_pr(1, base)
 
@@ -172,18 +172,27 @@ def test_the_landing_tree_is_published_complete(mod, tmp_path, monkeypatch) -> N
     asking git whether a published sha names an object means `git cat-file -t`, which
     needs all 40 characters. Measured (cyc20260918-000146): a cycle holding a
     12-character step tree sha re-ran a whole plan (~116s) rather than trust it.
+
+    The *head* is named on the same line, and the assert below is what makes that a
+    reading rather than decoration: a tree is computed from two commits, and a report
+    that names only the base leaves the other one to be inferred (measured
+    2026-10-04, `cyc20261004-183629`: this tool reported a conflict about a head it had
+    not measured, and the report could not show it).
     """
     repo, base, head = _behind_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     tree, _, _, _, _ = mod.landing_reading(base, head)
     state, report = mod.check_pr(1, base)
 
     assert state == "backwards"
-    match = re.search(r"#1 landing tree ([0-9a-f]{12}) \(([0-9a-f]{40})\)", report)
+    match = re.search(
+        r"#1 head ([0-9a-f]{8}) landing tree ([0-9a-f]{12}) \(([0-9a-f]{40})\)", report
+    )
     assert match, report
-    short, full = match.group(1), match.group(2)
+    named_head, short, full = match.group(1), match.group(2), match.group(3)
+    assert head.startswith(named_head)
     assert full.startswith(short)
     # The published identity is the tree the reading was computed on - not the head's -
     # and git agrees it names a tree, which the prefix alone could not establish.
@@ -292,7 +301,7 @@ def test_the_report_names_a_path_that_reads_backwards_inside(
     """What the reviewer is handed: the landing first, then the path to distrust."""
     repo, base, head = _same_file_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     state, report = mod.check_pr(1, base)
 
@@ -356,7 +365,7 @@ def test_a_conflict_is_its_own_state_not_a_reading(mod, tmp_path, monkeypatch) -
     """No landing tree: an unanswerable reading, and never health."""
     repo, base, head = _conflict_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     with pytest.raises(mod.Conflict):
         mod.landing_reading(base, head)
@@ -364,6 +373,10 @@ def test_a_conflict_is_its_own_state_not_a_reading(mod, tmp_path, monkeypatch) -
     state, report = mod.check_pr(1, base)
     assert state == "conflict"
     assert "no landing tree" in report
+    # This path names the head too, and it is the one that needs it most: a conflict is
+    # a claim about the PR, and the measurement that produced a false one was measured on
+    # a commit nobody could see was the wrong one (module docstring, `_fetch_head`).
+    assert f"#1 head {head[:8]}" in report
 
 
 def test_a_git_failure_is_a_measurement_error_not_health(mod, tmp_path, monkeypatch) -> None:
@@ -410,7 +423,7 @@ def test_the_base_reaches_merge_tree_as_a_resolved_commit(
     """`master` goes in; a 40-hex commit must come out, at every entry point."""
     repo, _, head = _fresh_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
     seen: dict[str, str] = {}
     real = mod._merge_tree
 
@@ -448,13 +461,13 @@ def test_main_exit_codes(mod, tmp_path, monkeypatch, capsys) -> None:
     """0 = nothing reads backwards, 1 = the trap, 2 = could not measure, 3 = conflict."""
     repo, base, head = _behind_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
     assert mod.main(["1", "--base", base]) == 1
     assert "reads backwards" in capsys.readouterr().err
 
     repo2, base2, head2 = _fresh_repo(tmp_path)
     monkeypatch.chdir(repo2)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head2)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head2)
     assert mod.main(["1", "--base", base2]) == 0
     assert "no path reads backwards" in capsys.readouterr().out
 
@@ -463,16 +476,115 @@ def test_main_exit_codes(mod, tmp_path, monkeypatch, capsys) -> None:
 
     repo3, base3, head3 = _conflict_repo(tmp_path)
     monkeypatch.chdir(repo3)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head3)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head3)
     assert mod.main(["1", "--base", base3]) == 3
     assert "No landing tree" in capsys.readouterr().err
 
-    def boom(number: int) -> str:
+    def boom(number: int, repo: str = "") -> str:
         raise mod.MeasurementError("gh pr list failed")
 
     monkeypatch.setattr(mod, "_fetch_head", boom)
     assert mod.main(["1", "--base", base3]) == 2
     assert "could not measure" in capsys.readouterr().err
+
+
+# --- the head is the PR's head, or there is no reading ---------------------------
+#
+# `_fetch_head` reads `pull/<N>/head` from `origin`, and `origin` is not always the
+# remote the PR lives on: `url.<base>.insteadOf` is applied before the transport reads a
+# remote's URL, and this host rewrites `origin` to a local checkout, where
+# `refs/pull/<N>/head` exists only if an earlier run minted it with `git update-ref`. A
+# ref minted for an older head is indistinguishable at the fetch from one the remote
+# serves: measured 2026-10-04 (`cyc20261004-183629`), this tool answered *"the merge
+# conflicts, so there is no landing tree to diff"* about #1841 - this clone's
+# `refs/pull/1841/head` was the stale `2154873` while the PR's head was `f90ad8a4`.
+#
+# So the fetched head is checked against the head GitHub names, and three answers stay
+# apart: the same commit, a different one, and GitHub not answering at all. The last two
+# are exit 2 (`could not measure`) - never exit 3, which is a statement about the PR.
+
+
+class _Done:
+    """A `CompletedProcess` stand-in: the three attributes the readers touch."""
+
+    def __init__(self, stdout: str = "", returncode: int = 0, stderr: str = "") -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def _fetch_runner(head: str, github_says: str, github_rc: int = 0):
+    """A runner for the whole fetch: git answers locally, `gh` answers with GitHub's head.
+
+    `gh` has no default - a call the check did not make fails the `assert` rather than
+    being quietly answered, so a tool that stopped asking GitHub cannot pass here.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(argv, cwd=None, env=None):
+        calls.append(argv)
+        if argv[0] == "gh":
+            return _Done(github_says + "\n", github_rc, "" if github_rc == 0 else "HTTP 502")
+        if argv[1] == "fetch":
+            return _Done()
+        if argv[1] == "rev-parse":
+            return _Done(head + "\n")
+        if argv[1] in ("show-ref", "update-ref"):
+            return _Done()
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    return fake_run, calls
+
+
+def test_a_head_github_names_is_accepted(mod, monkeypatch) -> None:
+    """The control arm: agreement is not a finding, and the fetch still returns."""
+    head = "a" * 40
+    fake_run, _ = _fetch_runner(head, head)
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    assert mod._check_head_is_the_prs(1841, "o/r", head) is None
+    assert mod._fetch_head(1841, "o/r") == head
+
+
+def test_a_head_github_calls_something_else_is_unmeasurable(mod, monkeypatch) -> None:
+    """The measured defect: the stale minted ref is not the PR's head, so not a conflict.
+
+    Exit 3 would say "there is no landing tree to diff" - a fact about the PR - while
+    this is a fact about the checkout, and the two must not share a sentence.
+    """
+    fetched, named = "2" * 40, "f" * 40
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None, env=None: _Done(named + "\n"))
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._check_head_is_the_prs(1841, "o/r", fetched)
+
+    message = str(excinfo.value)
+    assert fetched in message and named in message
+    assert not isinstance(excinfo.value, mod.Conflict), message
+
+
+def test_a_head_no_other_reading_can_confirm_is_unmeasurable(mod, monkeypatch) -> None:
+    """GitHub unreachable is exit 2 - not a quiet continuation with the fetched head."""
+    monkeypatch.setattr(
+        mod, "_run", lambda argv, cwd=None, env=None: _Done("", 1, "HTTP 502")
+    )
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._check_head_is_the_prs(1841, "o/r", "2" * 40)
+
+    assert "502" in str(excinfo.value)
+
+
+def test_the_fetch_asks_github_about_the_head_it_just_read(mod, monkeypatch) -> None:
+    """The wiring: the check runs inside `_fetch_head`, so no reader can skip it."""
+    fetched, named = "3" * 40, "e" * 40
+    fake_run, calls = _fetch_runner(fetched, named)
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    with pytest.raises(mod.MeasurementError):
+        mod._fetch_head(1841, "o/r")
+
+    assert any(call[0] == "gh" for call in calls), calls
 
 
 # --- the base is refreshed, not taken on faith ----------------------------------
@@ -923,7 +1035,7 @@ def test_main_refreshes_the_base_before_measuring(mod, monkeypatch, capsys) -> N
 
     monkeypatch.setattr(mod, "_run", lambda argv, cwd=None, env=None: _Done())
     monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
-    monkeypatch.setattr(mod, "_fetch_head", lambda n: "1" * 40)
+    monkeypatch.setattr(mod, "_fetch_head", lambda n, repo: "1" * 40)
     monkeypatch.setattr(mod, "_merge_tree", lambda a, b: None)  # conflict: stops early
 
     rc = mod.main(["1"])
@@ -1189,7 +1301,7 @@ def test_the_report_names_a_non_ascii_path_as_it_is(mod, tmp_path, monkeypatch) 
     name = "中文.txt"
     repo, base, head = _named_same_file_repo(tmp_path, name, "cjk-report")
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     state, report = mod.check_pr(1, base)
 
@@ -1299,7 +1411,7 @@ def test_a_superset_rendering_names_the_paths_that_are_not_this_change(
     """
     repo, base, head, recorded = _merged_master_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
     monkeypatch.setattr(
         mod,
         "_github_rendering",
@@ -1326,7 +1438,7 @@ def test_a_rendering_that_agrees_says_so(mod, tmp_path, monkeypatch) -> None:
     """
     repo, base, head = _fresh_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
     monkeypatch.setattr(
         mod, "_github_rendering", lambda number, r: (base, 1, 4, 0, ["src/feature.txt"])
     )
@@ -1347,7 +1459,7 @@ def test_an_unreadable_rendering_is_not_a_pass(mod, tmp_path, monkeypatch) -> No
     """
     repo, base, head = _fresh_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     def boom(number, r):
         raise mod.MeasurementError("gh api pulls/1 failed: not authenticated")
@@ -1370,7 +1482,7 @@ def test_the_network_reading_is_off_unless_asked(mod, tmp_path, monkeypatch) -> 
     """
     repo, base, head = _fresh_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     def refuse(number, r):
         raise AssertionError("the GitHub reading was called without --github")
@@ -1387,7 +1499,7 @@ def test_main_carries_the_flag_to_the_reading(mod, tmp_path, monkeypatch, capsys
     """`--github` reaches `check_pr`, and the exit code is unmoved (0 = clean)."""
     repo, base, head, recorded = _merged_master_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
     monkeypatch.setattr(
         mod,
         "_github_rendering",
@@ -1439,7 +1551,7 @@ def test_the_landing_change_states_what_each_path_costs(
     """
     repo, base, head = _rewriting_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     state, report = mod.check_pr(1, base)
 
@@ -1461,11 +1573,11 @@ def test_a_modified_file_reports_both_numbers_not_only_the_larger(
     """
     repo, base, head = _rewriting_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
     _git(repo, "checkout", "-q", "feature")
     _write(repo, "src/kept.txt", "kept, reworded\n")
     head = _commit(repo, "and rewords one line")
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     state, report = mod.check_pr(1, base)
 
@@ -1495,7 +1607,7 @@ def test_a_binary_path_says_binary_rather_than_a_zero(
     _write(repo, "notes.md", "one\ntwo\n")
     head = _commit(repo, "the PR changes a binary and a text file")
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     state, report = mod.check_pr(1, base)
 
@@ -1516,7 +1628,7 @@ def test_counts_that_could_not_be_read_are_named_not_zeroed(
     """
     repo, base, head = _rewriting_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     def boom(a, b):
         raise mod.MeasurementError("git diff --numstat failed: boom")
@@ -1543,7 +1655,7 @@ def test_the_paths_that_read_backwards_carry_no_counts(
     """
     repo, base, head = _behind_repo(tmp_path)
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo: head)
 
     state, report = mod.check_pr(1, base)
 
