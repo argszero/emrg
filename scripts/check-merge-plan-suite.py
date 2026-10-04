@@ -127,8 +127,10 @@ Exit codes
     3  the plan has no final tree - a step conflicts. Not a health verdict: there
        is no tree to judge. That question belongs to `check-merge-sequence.py`.
 
-The plan and the tree that was measured are named in the output. "Which tree
-answered?" is the defect this family exists to remove.
+The plan, the heads it fetched, and the tree that was measured are named in the
+output. "Which tree answered?" is the defect this family exists to remove - and a
+tree is only traceable when the commits it was built from are named beside it, so the
+report prints each PR's fetched head as well as the PR number.
 
 The tree answers, and its sources are the only copy that answers
 ---------------------------------------------------------------
@@ -571,6 +573,15 @@ def _fetch_head(number: int) -> str:
     it parked. A release in another function is indistinguishable there from no
     release at all - correctly, because "somewhere in the file something deletes
     something" is not a property, while "the call that made the ref deletes it" is.
+
+    The fetched head is named in the report (`heads: #<N> <sha>`), because this
+    fetch's success is not evidence about *which* commit it brought: on a host whose
+    `origin` is a redirected checkout, `+pull/<N>/head` reads that checkout's own
+    `refs/pull/<N>/head`, and an earlier cycle can have pinned it to the PR's previous
+    head (measured 2026-10-05, `cyc20261005-070014`). Naming it lets a reader hold it
+    against the head `review-queue.py` asks the API for; verifying the head here needs
+    the network, which this gate's subprocess-driven tests cannot yet stub (ledger note
+    on `fix/the-head-is-the-one-github-names`).
     """
     ref = f"{PLAN_REF_PREFIX}{number}"
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
@@ -1442,6 +1453,17 @@ def main(argv: list[str] | None = None) -> int:
         # is ambiguous, and a header that reports `origin/master` for a commit that is
         # not master is how the wrong-tree defect stays invisible.
         print(f"base {base[:8]} ({base_ref}), {len(numbers)} PR(s) planned")
+        # The heads are named, not only the PR numbers. This gate judges a tree and
+        # names it; a tree nobody can trace back to the commits it was built from is
+        # the same defect one level up. Measured 2026-10-05 (`cyc20261005-070014`): on
+        # this host `origin` is a redirected checkout whose `refs/pull/<N>/head` an
+        # earlier cycle had pinned to the PR's *previous* head, so the gate fetched
+        # that stale commit, judged its tree and printed `suite OK` with nothing in the
+        # output to hold against the head `review-queue.py` names from the API. A named
+        # head makes the two readings comparable; verifying it is the half that needs
+        # the network (`fix/the-head-is-the-one-github-names`), which this gate's
+        # subprocess-driven tests cannot yet stub (see the ledger note).
+        print("heads: " + " ".join(f"#{number} {sha}" for number, sha in heads))
 
         try:
             tip = build_plan_tip(base, heads)

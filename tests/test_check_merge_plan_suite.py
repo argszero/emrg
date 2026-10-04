@@ -336,6 +336,39 @@ def test_a_reordered_plan_is_reported_in_the_order_it_was_given(
     assert "plan: #7 -> #3" in proc.stdout
 
 
+def test_the_report_names_the_head_it_fetched(queue: tuple[Path, Path]) -> None:
+    """A verdict about a tree that names no head cannot be checked against anything.
+
+    The tree this gate judges is built from the heads it fetched, so the report names
+    each one beside its PR number. Measured 2026-10-05 (`cyc20261005-070014`): on this
+    host `origin` is a redirected checkout whose `refs/pull/<N>/head` an earlier cycle
+    had pinned to the PR's previous commit, so the gate fetched that stale head, built
+    its tree and printed a confident `suite OK` - with nothing in the output to hold
+    against the head `review-queue.py` names from the API. Naming the head makes the
+    two readings comparable; *verifying* it needs the network, which the parked
+    `fix/the-head-is-the-one-github-names` cannot yet wire here (this file's tests
+    spawn the tool as a subprocess, so an in-process stub cannot reach the ask).
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"notes.md": "one\n"})
+    _branch_with(repo, "two", {"other.md": "two\n"})
+    first = _publish(repo, origin, 1, "one")
+    second = _publish(repo, origin, 2, "two")
+
+    proc = _run_tool(repo, "1", "2")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    heads = next(
+        line for line in proc.stdout.splitlines() if line.startswith("heads:")
+    )
+    assert f"#1 {first}" in heads, (
+        f"the report must name each fetched head: {heads}"
+    )
+    assert f"#2 {second}" in heads, (
+        f"the report must name each fetched head: {heads}"
+    )
+
+
 def test_a_step_that_conflicts_leaves_no_final_tree(queue: tuple[Path, Path]) -> None:
     """A conflict is not a health verdict: there is no tree to judge."""
     repo, origin = queue
