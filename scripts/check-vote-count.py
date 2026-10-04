@@ -211,7 +211,6 @@ import argparse
 import importlib.util
 import json
 import re
-import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -373,6 +372,31 @@ def distinct_cycle_ids(body: str) -> list[str]:
 # not silently depend on which cycle records happen to sit on the reading host.
 
 _review_queue: object | None = None
+
+#: `scripts/gh_read.py`: the one place that decides which channel reads GitHub
+#: (`cyc20261004-074903`). This tool used to own a `subprocess.run(["gh", …])`, so on a
+#: host with **no token** it could count nothing at all - measured 2026-10-04
+#: (`cyc20261004-083214`), `check-vote-count.py 1841` exited 2 with "gh failed (rc=4)"
+#: while every path it asks for (`pulls/<n>`, `pulls/<n>/reviews`, `actions/runs`,
+#: `commits/<sha>`) answers `200` anonymously. The merge gate was unmeasurable on the
+#: hosts that most needed to ask it.
+_gh_read_module: object | None = None
+
+
+def gh_read():
+    """The shared reader, loaded by path the way this family loads its siblings."""
+    global _gh_read_module
+    if _gh_read_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "gh_read", _SCRIPTS_DIR / "gh_read.py"
+        )
+        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
+            raise RuntimeError("could not load scripts/gh_read.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _gh_read_module = module
+    return _gh_read_module
 
 
 def review_queue():
@@ -651,28 +675,47 @@ def _verdict_line(body: str) -> str:
 
 
 def _gh_json(args: list[str]) -> object:
-    """Run `gh` and parse JSON, failing loud rather than guessing.
+    """One GitHub read, as JSON, failing loud rather than guessing.
 
-    `args` excludes the program name, which is prepended here so no call site can
-    omit it (a call site that passed bare gh arguments once ran the POSIX `pr`
-    utility instead, whose error names neither gh nor the mistake).
+    `args` excludes the program name, and they are kept exactly as this tool wrote them:
+    `gh_read.py` is the one place that decides which channel can answer them, so a host
+    with **no token** reads these paths through `api.github.com` instead of the counter
+    answering `rc=2` about data it could have read.
+
+    The projection this tool used to put in a `--jq` filter is Python now (see `_required`
+    and the call sites): a jq filter is the one argv `gh_read` refuses to approximate, and
+    refusing it would have left the counter exactly as unreadable as before.
     """
-    proc = subprocess.run(
-        ["gh", *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if proc.returncode != 0:
+    return json.loads(gh_read().api_text(args))
+
+
+def _required(payload: object, *keys: str) -> dict:
+    """`payload` with the named keys present, or a refusal naming what is missing.
+
+    Not defaulted, because the default lies in the direction this gate must not lie in.
+    Every field read through here feeds a **vote-voiding or vote-counting** decision: a
+    missing `submitted_at` would be `""`, and `"" <= push_time` is true, so a vote whose
+    timestamp could not be read would be **voided**; a missing `created_at` would say the
+    head has no CI run, which is the other half of `blocked`. The old `--jq` projections
+    made the same values `null` and the `assert isinstance(...)` lines below raised - so
+    requiring them by name keeps the fail-loud property the filter had.
+    """
+    if not isinstance(payload, dict):
         raise RuntimeError(
-            f"gh failed (rc={proc.returncode}): gh {' '.join(args)}\n{proc.stderr.strip()}"
+            f"the payload for this read is {type(payload).__name__}, not an object - "
+            "the reading was not answered"
         )
-    return json.loads(proc.stdout)
+    missing = [k for k in keys if k not in payload]
+    if missing:
+        raise RuntimeError(
+            f"the payload for this read has no {missing} (keys: {sorted(payload)[:8]}) - "
+            "refusing to read an absent field as its permissive default"
+        )
+    return payload
 
 
-def _gh_json_paginated(args: list[str]) -> list:
-    """Every page of a list endpoint, as one list.
+def _gh_json_paginated(path: str) -> list:
+    """Every page of a REST list endpoint, as one list.
 
     Needed because a single request truncates silently: the reviews endpoint
     returns 30 by default and orders **oldest first**, so a PR with more than 30
@@ -681,34 +724,29 @@ def _gh_json_paginated(args: list[str]) -> list:
     7 reviews and #1136 has been through three unblocks; this is a merge gate, so
     the count must not depend on how busy a PR has been.
 
-    `--paginate` with a `.[] | {…}` filter emits one JSON object per line across
-    pages; parsed per line rather than as one document, since concatenated page
-    arrays are not valid JSON.
-
-    **The filter belongs to the caller.** An earlier version appended
-    `--jq ".[]"` here, so a call site that also passed `--jq` gave gh two of them:
-    the later flag won, the projection was dropped, and every review came back
-    with its raw field names. The tool then read `at` as `None` for every vote, and
-    since `"" <= push_time` is true it voided **all** of them - a PR with two valid
-    votes reported 0/3. It was invisible in the tests because the fake returns
-    dicts directly and never models the jq contract, and invisible in the count
-    (which only looked short, a plausible state). Found by running it against the
-    live PRs after the change; the caller now owns the filter, and the shape is
-    asserted instead of assumed.
+    **The filter is gone, and with it the class of defect above.** `gh_read` refuses a
+    `--jq` argv rather than approximating it, and this tool cannot use one anyway on a
+    tokenless host, so the projection is Python: every page is read by the shared reader's
+    own pager (which follows the `Link` relation and raises rather than truncating in
+    silence), and `.[] | {at, body}` is now an explicit dict per item. The `at` check at the
+    call site stays - it no longer guards against a dropped jq flag, but against a payload
+    whose `submitted_at` is absent, which would void every vote the same way.
     """
-    proc = subprocess.run(
-        ["gh", *args, "--paginate"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if proc.returncode != 0:
+    payload = json.loads(gh_read().api_text(["api", path, "--paginate"]))
+    if not isinstance(payload, list):
         raise RuntimeError(
-            f"gh failed (rc={proc.returncode}): gh {' '.join(args)} --paginate\n"
-            f"{proc.stderr.strip()}"
+            f"the paginated read of {path} answered a {type(payload).__name__}, not a "
+            "list - every page of a list endpoint is one list, and a page this tool "
+            "cannot read is not an empty page"
         )
-    return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+    return [
+        {
+            "at": item.get("submitted_at"),
+            "body": item.get("body"),
+        }
+        for item in payload
+        if isinstance(item, dict)
+    ]
 
 
 def classify(body: str) -> str:
@@ -1016,17 +1054,28 @@ def _earliest_run_created_at(head: str) -> str:
     the only way a later reader can tell flakiness from a one-off.
     """
     for attempt in range(_RUN_LOOKUP_ATTEMPTS):
-        runs = _gh_json(
-            [
-                "api",
-                f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
-                "--jq",
-                '{t: ([.workflow_runs[].created_at] | sort | .[0] // "")}',
-            ]
+        payload = _gh_json(
+            ["api", f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100"]
         )
-        assert isinstance(runs, dict)
-        created = runs.get("t")
-        if isinstance(created, str) and created:
+        # `{t: ([.workflow_runs[].created_at] | sort | .[0] // "")}` in Python. The
+        # minimum, not the first: the API lists newest first, and the push time is the
+        # *earliest* run for this SHA. `_required` first, so a payload without the key
+        # fails loud instead of reading as "no run exists" - which is a fact `blocked`
+        # turns on.
+        _required(payload, "workflow_runs")
+        listed = payload["workflow_runs"]
+        if not isinstance(listed, list):
+            raise RuntimeError(
+                f"the runs API listed a {type(listed).__name__} where the workflow runs "
+                "belong - a payload this tool cannot read is not an empty one"
+            )
+        stamps = [
+            r["created_at"]
+            for r in listed
+            if isinstance(r, dict) and isinstance(r.get("created_at"), str) and r["created_at"]
+        ]
+        created = min(stamps) if stamps else ""
+        if created:
             if attempt:
                 print(
                     f"note: the runs API listed no run for head {head[:8]} and then "
@@ -1051,9 +1100,10 @@ def _head_push_time(head: str) -> tuple[str, bool]:
     if created:
         return created, True
 
-    commit = _gh_json(["api", f"repos/{REPO}/commits/{head}", "--jq", "{t: .commit.committer.date}"])
-    assert isinstance(commit, dict)
-    committer_date = commit.get("t")
+    commit = _required(_gh_json(["api", f"repos/{REPO}/commits/{head}"]), "commit")
+    inner = _required(commit["commit"], "committer")
+    committer = _required(inner["committer"], "date")
+    committer_date = committer["date"]
     if not isinstance(committer_date, str) or not committer_date:
         raise RuntimeError(f"cannot determine a push time for head {head[:8]}")
     return committer_date, False
@@ -1162,14 +1212,7 @@ def check_pr(
     # Every page, not the first 30: a truncated list drops the newest reviews,
     # which are exactly the votes that count (and the endpoint orders oldest
     # first, so the loss is invisible in the output - it just looks short).
-    reviews = _gh_json_paginated(
-        [
-            "api",
-            f"repos/{REPO}/pulls/{number}/reviews",
-            "--jq",
-            ".[] | {at: .submitted_at, body: .body}",
-        ]
-    )
+    reviews = _gh_json_paginated(f"repos/{REPO}/pulls/{number}/reviews")
     reviews.sort(key=lambda r: str(r.get("at") or ""))
 
     votes: list[Vote] = []
@@ -1187,8 +1230,8 @@ def check_pr(
         if not r.get("at"):
             raise RuntimeError(
                 f"review payload for #{number} has no `at` field (keys: "
-                f"{sorted(r)[:5]}) - the --jq projection did not apply, so vote "
-                "times are unknown; refusing to report a count"
+                f"{sorted(r)[:5]}) - the projection found no `submitted_at` on the "
+                "review, so vote times are unknown; refusing to report a count"
             )
         body = str(r.get("body") or "")
         at = str(r.get("at"))

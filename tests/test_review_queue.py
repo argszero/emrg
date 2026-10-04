@@ -1789,3 +1789,64 @@ def test_a_closed_pull_request_is_not_read_as_a_declaring_issue(monkeypatch):
 
     assert rant.closed_issues == []
     assert "no issue yet" in tool.render_rant(rant)
+
+
+# --- the transport: the instrument §1.1 runs must run on a tokenless host ----
+#
+# `cyc20261004-083214`. This tool made exactly one `gh` call of its own
+# (`pr list --json number`) while everything else it reports came from the two siblings,
+# so it was the **last** of the family to become readable - and it is the reading the
+# prompt tells every cycle to take before it reviews anything. Measured 2026-10-04:
+# `review-queue.py` exited 2 with "gh failed (rc=4)" while its listing path answers `200`
+# anonymously.
+
+
+def test_open_prs_reads_through_the_shared_reader(mod, monkeypatch):
+    """The listing goes through `gh_read.py`, with this tool's own argv unchanged.
+
+    Pinned at the seam rather than by behaviour: with and without the leaf the behaviour is
+    identical on a host **with** a token - every CI leg - so a reverted swap would keep this
+    suite green and be wrong only where it matters.
+    """
+    asked: list[list[str]] = []
+
+    class Reader:
+        def api_text(self, args: list[str]) -> str:
+            asked.append(list(args))
+            return json.dumps([{"number": 1838}, {"number": 1841}])
+
+    monkeypatch.setattr(mod, "_gh_read_cache", [Reader()])
+    assert mod.open_prs() == [1838, 1841]
+    assert asked and asked[0][:2] == ["pr", "list"], asked
+    assert "--state" in asked[0] and "open" in asked[0], (
+        f"the request must still say which PRs it wants: {asked[0]}"
+    )
+
+
+def test_the_listing_is_read_through_the_shape_gh_read_translates(mod, monkeypatch):
+    """The argv this tool passes has to be one the leaf *can* translate.
+
+    A push that swapped the transport but left an argv the leaf refuses (`--jq`, or a shape
+    it has no table for) would read exactly as well as before, i.e. not at all. So the argv
+    is asserted against the leaf's own set rather than against a copy of it.
+    """
+    leaf = mod._load_gh_read()
+    seen: list[list[str]] = []
+
+    monkeypatch.setattr(
+        mod.gh_read(), "api_text", lambda args: seen.append(list(args)) or "[]"
+    )
+    assert mod.open_prs() == []
+    assert seen, "the listing must have been asked for"
+    for args in seen:
+        assert args[:2] in (["pr", "list"], ["pr", "view"], ["api"]), args
+        assert "--jq" not in args and "-q" not in args, args
+    assert leaf is not None
+
+
+def test_the_pr_list_translation_refuses_a_field_it_has_no_table_for(mod):
+    """Both halves: `number` is translated, an unmeasured field is refused by name."""
+    leaf = mod._load_gh_read()
+    with pytest.raises(RuntimeError) as excinfo:
+        leaf.pr_list(["number", "labels"])  # type: ignore[arg-type]
+    assert "labels" in str(excinfo.value)

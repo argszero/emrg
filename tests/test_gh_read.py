@@ -204,21 +204,22 @@ def test_a_jq_filter_is_refused_not_dropped(mod, monkeypatch):
 
 
 def test_a_shape_with_no_translation_is_refused_by_name(mod, monkeypatch):
-    """`pr list --json number` is `gh`'s composition of a REST listing, not a REST path.
+    """`issue list --json number` is `gh`'s composition, not a REST path.
 
     Refusing is the honest half of the two: the caller keeps `gh`, and the refusal says
     which shape could not be translated rather than returning a listing whose shape it
-    guessed at. `pr view` is *no longer* in this category - it has a per-field table and its
-    own legs below - which is exactly why this test names a shape that still has none.
+    guessed at. `pr view` and `pr list` are *no longer* in this category - each has a
+    per-field table and its own legs below - which is exactly why this test names a shape
+    that still has none.
     """
     gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
     asked: list[str] = []
     public_says(mod, monkeypatch, {}, record=asked)
     with pytest.raises(RuntimeError) as excinfo:
-        mod.api_text(["pr", "list", "--json", "number"])
+        mod.api_text(["issue", "list", "--json", "number"])
     message = str(excinfo.value)
     assert "pr view" in message, "the refusal must name the shapes it does translate"
-    assert "'pr'" in message, "and the shape it was handed"
+    assert "'issue'" in message, "and the shape it was handed"
     assert asked == []
 
 
@@ -553,3 +554,193 @@ def test_check_issue_links_reads_through_this_module():
         "runs `gh` itself is unmeasurable on a host with no token"
     )
     assert "subprocess.run" not in body, "and must not keep a second gh implementation"
+
+
+# --- a 403 has two causes, and they need opposite actions -------------------
+#
+# `cyc20261004-083214`, found by measuring this cycle's own work: every queue reading began
+# answering 403, and the module reported "api.github.com answered HTTP 403 … anonymously" -
+# the wording its own docstring reserves for a **private** endpoint. The real cause was the
+# anonymous allowance, which this instance had just spent (60/60, `x-ratelimit-remaining:
+# 0`). One cause says "give up on this channel"; the other says "wait, it resets at T".
+# A refusal that names the wrong one sends a reader hunting a permissions problem that does
+# not exist, which is this family's defect in miniature.
+
+
+def rate_limited(mod, monkeypatch, *, remaining: str, reset: str = "1791074357"):
+    """Answer every anonymous request with a 403 carrying these rate-limit headers."""
+    headers = {"x-ratelimit-remaining": remaining}
+    if reset:
+        headers["x-ratelimit-reset"] = reset
+
+    def fake_urlopen(request, timeout=None):
+        raise mod.urllib.error.HTTPError(
+            request.full_url, 403, "Forbidden", headers, None
+        )
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+
+
+def test_an_exhausted_budget_is_not_reported_as_a_private_endpoint(mod, monkeypatch):
+    """The measured case. It must name the budget *and* when the budget comes back."""
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    rate_limited(mod, monkeypatch, remaining="0")
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(["api", "repos/argszero/emrg/pulls/1841"])
+    message = str(excinfo.value)
+    assert "anonymous allowance" in message, message
+    assert "1791074357" not in message, "the epoch is not what a reader acts on"
+    assert "2026-10-04T" in message, f"the reset instant must be named: {message}"
+
+
+def test_a_private_endpoint_is_not_reported_as_an_exhausted_budget(mod, monkeypatch):
+    """The other direction: a 403 with budget left is the endpoint refusing, full stop.
+
+    Pinned in both directions because their remedies are opposites - telling a reader to
+    wait out a budget that was never spent is worse than the phrasing this replaced.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    rate_limited(mod, monkeypatch, remaining="57")
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(["api", "repos/argszero/emrg/actions/jobs/1/logs"])
+    message = str(excinfo.value)
+    assert "HTTP 403" in message, message
+    assert "anonymous allowance" not in message, message
+    assert "reset" not in message, message
+
+
+def test_a_403_without_the_header_claims_neither_cause(mod, monkeypatch):
+    """No rate-limit header means this module did not measure which of the two it is.
+
+    A middlebox, a proxy or a redirect can produce a 403 with no GitHub headers at all, and
+    the honest answer is the status and nothing more - the *absence* of the evidence is not
+    evidence for the other cause.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    rate_limited(mod, monkeypatch, remaining="", reset="")
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(["api", "repos/argszero/emrg/pulls/1841"])
+    message = str(excinfo.value)
+    assert "HTTP 403" in message, message
+    assert "anonymous allowance" not in message, message
+
+
+# --- the `pr list` translation ----------------------------------------------
+#
+# `review-queue.py` - the instrument that puts a row on every open PR, and the one §1.1
+# tells every cycle to run - makes exactly one `gh` call of its own, `pr list --json
+# number`, while everything else it reports comes through the two tools fixed in
+# `cyc20261004-081356` and `-083214`. So this shape was the family's last blocker.
+
+
+def listing_url(state: str = "open", per_page: int = 100) -> str:
+    return f"https://api.github.com/repos/argszero/emrg/pulls?state={state}&per_page={per_page}"
+
+
+def test_a_pr_list_is_translated_when_gh_refuses(mod, monkeypatch):
+    """The argv `review-queue.py` already passes now reads without a token."""
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    asked: list[str] = []
+    public_says(
+        mod,
+        monkeypatch,
+        {listing_url(): [pull(number=1841), pull(number=1838)]},
+        record=asked,
+    )
+    text = mod.api_text(
+        [
+            "pr", "list", "-R", "argszero/emrg", "--limit", "100",
+            "--state", "open", "--json", "number",
+        ]
+    )
+    assert asked == [listing_url()], "the listing must be read by its REST path"
+    assert json.loads(text) == [{"number": 1841}, {"number": 1838}]
+
+
+def test_a_pr_list_projects_the_same_fields_as_a_pr_view(mod, monkeypatch):
+    """One table, two shapes - because REST returns the same pull object for both.
+
+    The three value translations are the point: a listing that carried REST's raw
+    `mergeable` boolean would make a *conflicting* PR look mergeable in the queue row, which
+    is the direction `review-queue.py` acts on.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(
+        mod,
+        monkeypatch,
+        {listing_url(): [pull(mergeable=False, mergeable_state="dirty")]},
+    )
+    text = mod.api_text(
+        [
+            "pr", "list", "-R", "argszero/emrg", "--limit", "100",
+            "--state", "open", "--json", "number,mergeable,mergeStateStatus",
+        ]
+    )
+    assert json.loads(text) == [
+        {"number": 1841, "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}
+    ]
+
+
+def test_a_pr_list_state_gh_can_express_but_rest_cannot_is_refused(mod, monkeypatch):
+    """`--state merged` is refused by name, because REST has no merged state.
+
+    `gh` supports four states (`open`, `closed`, `merged`, `all`); REST supports three, and
+    `merged` can only be had by paging every closed pull request and filtering on
+    `merged_at`. That listing can come back short, and a short listing is a queue that looks
+    empty - the failure this whole family exists to remove.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    asked: list[str] = []
+    public_says(mod, monkeypatch, {}, record=asked)
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(
+            ["pr", "list", "-R", "argszero/emrg", "--state", "merged", "--json", "number"]
+        )
+    assert "merged" in str(excinfo.value)
+    assert asked == [], "no request may be made for a filter this module cannot express"
+
+
+def test_a_pr_list_filter_that_cannot_be_translated_is_refused(mod, monkeypatch):
+    """A dropped filter does not fail - it answers about a *larger* set than was asked for.
+
+    For a review queue that is a queue padded with PRs nobody asked about, so `--author`
+    and `--label` are refused rather than ignored.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(mod, monkeypatch, {})
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(
+            ["pr", "list", "-R", "argszero/emrg", "--author", "@me", "--json", "number"]
+        )
+    assert "--author" in str(excinfo.value)
+
+
+def test_a_pr_list_limit_larger_than_a_page_pages(mod, monkeypatch):
+    """`--limit 150` cannot be one request: REST caps `per_page` at 100.
+
+    Truncating to the first 100 would be invisible - a listing that looks like 100 open PRs
+    when there are more. The pager is asked for only in that case, so a listing nobody asked
+    to page does not spend the host's anonymous budget.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    asked: list[str] = []
+    second = "https://api.github.com/repos/argszero/emrg/pulls?state=open&per_page=100&page=2"
+    routes = {
+        listing_url(): ([pull(number=n) for n in range(1, 101)], f'<{second}>; rel="next"'),
+        second: [pull(number=n) for n in range(101, 151)],
+    }
+    public_says(mod, monkeypatch, routes, record=asked)
+    text = mod.api_text(
+        ["pr", "list", "-R", "argszero/emrg", "--limit", "150", "--json", "number"]
+    )
+    assert asked == [listing_url(), second], asked
+    assert len(json.loads(text)) == 150
+
+
+def test_a_pr_list_without_the_json_flag_is_refused(mod, monkeypatch):
+    """Recognised as the `pr list` shape, so a missing part is refused with a reason."""
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(mod, monkeypatch, {})
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(["pr", "list", "-R", "argszero/emrg"])
+    assert "--json" in str(excinfo.value)

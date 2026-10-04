@@ -39,15 +39,18 @@ returns the text `gh` would have printed, whichever channel produced it:
 
 Two limits, stated because they are limits
 ------------------------------------------
-* **Two shapes are translated; every other `gh` composition is refused.** `api` (a REST
-  path, with the query string it carries) and `pr view <n> -R <repo> --json <fields>` are
-  translated - the second through a **per-field** table (:data:`_PR_VIEW_FIELDS`) because
-  `gh pr view` is `gh`'s own projection of one REST payload and three of its fields do not
-  agree with REST on the *value*, not merely the name (the table below). Everything else -
-  `pr list --json`, `run view`, the rest of the CLI's compositions - is refused **by
-  name**: a translation that renames a field *wrongly* would corrupt a merge gate's
-  reading, a worse outcome than the honest refusal it replaces. A field with no measured
-  translation is refused the same way, even inside a shape that is translated.
+* **Three shapes are translated; every other `gh` composition is refused.** `api` (a REST
+  path, with the query string it carries), `pr view <n> -R <repo> --json <fields>` and
+  `pr list -R <repo> [--state s] [--limit n] --json <fields>` are translated - the two `pr`
+  shapes through a **per-field** table (:data:`_PR_VIEW_FIELDS`, shared by both because
+  REST returns the same pull object either way) because three of the fields do not agree
+  with REST on the *value*, not merely the name (the table below). Everything else -
+  `run view`, `issue list`, the rest of the CLI's compositions - is refused **by name**: a
+  translation that renames a field *wrongly* would corrupt a merge gate's reading, a worse
+  outcome than the honest refusal it replaces. A field with no measured translation is
+  refused the same way, even inside a shape that is translated, and so is a filter set that
+  is not (`pr list --author`, `--label`): dropping a filter does not fail, it answers about
+  a broader set than the caller asked for.
 * **A `--jq` filter is refused rather than dropped.** Returning the unfiltered payload
   where a filter was asked for does not fail - it changes what the caller reads, silently,
   which is the class of defect this whole family exists to remove. `read-run-failure.py`
@@ -86,6 +89,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 #: Identifies this tool to api.github.com, which refuses requests without one.
 USER_AGENT = "emrg-gh-read"
@@ -199,9 +203,7 @@ def _http_json(url: str) -> tuple[object, str]:
             body = response.read().decode("utf-8", errors="replace")
             return json.loads(body), _next_link(response.headers.get("Link") or "")
     except urllib.error.HTTPError as exc:
-        raise PublicApiRefused(
-            f"api.github.com answered HTTP {exc.code} for {url} anonymously"
-        ) from exc
+        raise PublicApiRefused(_http_refusal(exc, url)) from exc
     except json.JSONDecodeError as exc:
         raise PublicApiRefused(
             f"api.github.com answered {url} with a body that is not JSON: {exc}"
@@ -211,6 +213,55 @@ def _http_json(url: str) -> tuple[object, str]:
             f"api.github.com could not be reached for {url} anonymously: "
             f"{type(exc).__name__}: {exc}"
         ) from exc
+
+
+def _rate_limit_headers(exc: urllib.error.HTTPError) -> tuple[str, str]:
+    """`(remaining, reset)` off an error response, as `""` when the header is absent."""
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        return "", ""
+    get = getattr(headers, "get", None)
+    if get is None:
+        return "", ""
+    return str(get("x-ratelimit-remaining") or ""), str(get("x-ratelimit-reset") or "")
+
+
+def _http_refusal(exc: urllib.error.HTTPError, url: str) -> str:
+    """What a non-200 from api.github.com *means*, from what the response says.
+
+    A `403` has two unrelated causes and they need opposite actions, which is why it is
+    not reported as one of them by default:
+
+    * **the host has spent its anonymous allowance** - 60 requests/hour per IP, shared by
+      every tokenless client on the machine. Measured 2026-10-04 (`cyc20261004-083214`),
+      this instance spent its own 60 while measuring, and every queue reading then answered
+      `403`. The response says so in `x-ratelimit-remaining: 0` and names the recovery
+      instant in `x-ratelimit-reset`. The action is *wait*; the reading is not wrong, it is
+      not yet available.
+    * **the endpoint is not public** - a job log is the one path in this family's repertoire
+      that does this, and it answers `403` with the budget untouched. The action is *give
+      up on this channel*, because the same request will be refused forever.
+
+    Reporting the first as the second is the family's own defect in miniature: it names a
+    cause it did not measure, and it sends a reader to look for a permissions problem when
+    the answer is on a clock. Reporting the second as the first would be worse - a tool
+    waiting out a budget that will never help.
+    """
+    remaining, reset = _rate_limit_headers(exc)
+    if remaining == "0":
+        when = ""
+        if reset.isdigit():
+            when = (
+                " and the budget resets at "
+                f"{datetime.fromtimestamp(int(reset), timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            )
+        return (
+            f"api.github.com refused {url} anonymously because this host has spent its "
+            f"anonymous allowance (60 requests/hour){when}. That is the budget, not a "
+            "private endpoint: both answer 403, and x-ratelimit-remaining=0 is what tells "
+            "them apart. The reading is not wrong, it is not yet available"
+        )
+    return f"api.github.com answered HTTP {exc.code} for {url} anonymously"
 
 
 def _public_api_text(path: str, paginate: bool) -> str:
@@ -292,6 +343,15 @@ def _translated(args: list[str]) -> str:
         except RuntimeError as exc:
             raise Untranslatable(f"that `pr view` call cannot be translated ({exc})") from exc
         return json.dumps(payload)
+    if args[:2] == ["pr", "list"]:
+        try:
+            fields, repo, state, limit = _pr_list_argv(args)
+            payload = pr_list(fields, repo, state, limit)
+        except PublicApiRefused:
+            raise
+        except RuntimeError as exc:
+            raise Untranslatable(f"that `pr list` call cannot be translated ({exc})") from exc
+        return json.dumps(payload)
     if args[:1] == ["api"]:
         path, paginate, refused = _api_path_and_flags(args)
         if refused:
@@ -303,10 +363,10 @@ def _translated(args: list[str]) -> str:
         return _public_api_text(path, paginate)
     shape = args[0] if args else "(no arguments)"
     raise Untranslatable(
-        f"it translates the `api` and `pr view` shapes only, and this is {shape!r}. "
-        "A shape it cannot translate is refused rather than guessed at: `pr list --json` "
-        "and every other `gh` composition rename fields, and a wrong rename corrupts a "
-        "merge gate's reading instead of failing"
+        f"it translates the `api`, `pr view` and `pr list` shapes only, and this is "
+        f"{shape!r}. A shape it cannot translate is refused rather than guessed at: every "
+        "other `gh` composition renames fields, and a wrong rename corrupts a merge gate's "
+        "reading instead of failing"
     )
 
 
@@ -498,6 +558,117 @@ def pr_view(number: int, fields: list[str], repo: str = "argszero/emrg") -> dict
         # unrelated `message` field is projected instead of being reported as an error.
         raise RuntimeError(f"#{number} could not be read: {payload['message']}")
     return {field: _PR_VIEW_FIELDS[field](payload) for field in fields}
+
+
+def pr_list(
+    fields: list[str],
+    repo: str = "argszero/emrg",
+    state: str = "open",
+    limit: int = 30,
+) -> list:
+    """Open (or closed) pull requests, shaped as `gh pr list --json <fields>` shapes them.
+
+    **The projection is `pr_view`'s**, deliberately: `/repos/<r>/pulls` returns the same
+    pull objects `/repos/<r>/pulls/<n>` does, so the three value translations (`state`,
+    `mergeable`, `mergeStateStatus`) apply unchanged and are written once. A second table
+    for the listing is exactly how the two would drift.
+
+    `state` is REST's own vocabulary (`open` / `closed` / `all`) and is passed through.
+    `gh`'s fourth value, **`merged`, is refused by name** - REST cannot express it in one
+    request, and the translation would mean paging every closed pull request and filtering
+    on `merged_at`, which is a listing that can silently come back short. A short listing
+    here is a queue that looks empty.
+    """
+    if state not in ("open", "closed", "all"):
+        raise RuntimeError(
+            f"no measured translation for `--state {state}` - this module translates "
+            f"REST's own vocabulary (open, closed, all), and gh's `merged` is not in it: "
+            "REST has no merged state, and the honest translation would page every closed "
+            "pull request and filter on `merged_at`, which can come back short"
+        )
+    unknown = sorted(set(fields) - set(_PR_VIEW_FIELDS))
+    if unknown:
+        raise RuntimeError(
+            f"no measured translation for {unknown} - `gh pr list --json` fields this "
+            f"module knows: {sorted(_PR_VIEW_FIELDS)}"
+        )
+    if limit < 1:
+        raise RuntimeError(f"--limit {limit} is not a number of pull requests")
+    per_page = min(limit, 100)
+    payload = json.loads(
+        _public_api_text(
+            f"repos/{repo}/pulls?state={state}&per_page={per_page}",
+            # Only when the caller asked for more than one page: an always-on pager would
+            # spend the host's anonymous budget on listings nobody asked for.
+            paginate=limit > per_page,
+        )
+    )
+    if not isinstance(payload, list):
+        raise RuntimeError(
+            f"the pull request listing is {type(payload).__name__}, not a list - the "
+            "listing was not answered"
+        )
+    return [
+        {field: _PR_VIEW_FIELDS[field](item) for field in fields}
+        for item in payload
+        if isinstance(item, dict)
+    ][:limit]
+
+
+def _pr_list_argv(args: list[str]) -> tuple[list[str], str, str, int]:
+    """`(fields, repo, state, limit)` out of a `pr list …` argv.
+
+    Defaults are `gh`'s own (`--state open`, `--limit 30`), so an argv that omits them
+    means here what it means there. A flag this module does not translate - `--author`,
+    `--label`, a bare argument - is refused rather than dropped: dropping a filter does not
+    fail, it answers about a *larger* set than was asked for, which for a review queue is a
+    queue padded with PRs nobody asked about.
+    """
+    rest = args[2:]
+    fields: list[str] = []
+    repo = ""
+    state = "open"
+    limit = 30
+    index = 0
+    while index < len(rest):
+        item = rest[index]
+        if item == "--json" and index + 1 < len(rest):
+            fields = [f.strip() for f in rest[index + 1].split(",") if f.strip()]
+            index += 2
+            continue
+        if item in ("-R", "--repo") and index + 1 < len(rest):
+            repo = rest[index + 1]
+            index += 2
+            continue
+        if item in ("-s", "--state") and index + 1 < len(rest):
+            state = rest[index + 1]
+            index += 2
+            continue
+        if item in ("-L", "--limit") and index + 1 < len(rest):
+            limit = _positive_int(rest[index + 1], "--limit")
+            index += 2
+            continue
+        raise RuntimeError(f"{item!r} is an argument this module does not translate")
+    if not fields:
+        raise RuntimeError("no `--json <fields>`")
+    if not repo:
+        raise RuntimeError(
+            "no `-R <owner/repo>` - this module reads a listing by REST path, so it needs "
+            "the repository named rather than inferred from the working directory"
+        )
+    return fields, repo, state, limit
+
+
+def _positive_int(raw: str, flag: str) -> int:
+    """`raw` as an int, refused by name when it is not one.
+
+    `gh` treats a non-numeric `--limit` as a usage error; a bare `int()` here would raise
+    with the flag nowhere in the message, and `int("3.5")` would raise at all.
+    """
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{flag} {raw!r} is not a number") from exc
 
 
 def main(argv: list[str] | None = None) -> int:

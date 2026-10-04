@@ -412,25 +412,44 @@ def votes_needed() -> int:
     return int(vote_counter().DEFAULT_MIN_VOTES)
 
 
-def _gh_json(args: list[str]) -> object:
-    """Run `gh` and parse JSON, failing loud rather than guessing.
+#: One loaded copy per process, the way the other siblings are cached here.
+_gh_read_cache: list = []
 
-    `args` excludes the program name, which is prepended here so no call site can
-    omit it — a call site that passed bare gh arguments once ran the POSIX `pr`
-    utility instead, whose error names neither gh nor the mistake.
+
+def gh_read():
+    """`scripts/gh_read.py`: the one place that decides which channel reads GitHub.
+
+    This tool used to own a `subprocess.run(["gh", …])` of its own, which on a host with
+    no token could read nothing - measured 2026-10-04 (`cyc20261004-083214`),
+    `review-queue.py` exited 2 with "gh failed (rc=4)" while the listing it asks for
+    answers `200` anonymously, and this is the reading the prompt tells every cycle to
+    take before it reviews anything.
     """
-    proc = subprocess.run(
-        ["gh", *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"gh failed (rc={proc.returncode}): gh {' '.join(args)}: {proc.stderr.strip()}"
-        )
-    return json.loads(proc.stdout)
+    return _gh_read_cache[0] if _gh_read_cache else _load_gh_read()
+
+
+def _load_gh_read():
+    module = _sibling("gh_read.py", "review_queue_gh_read")
+    _gh_read_cache.append(module)
+    return module
+
+
+def _gh_json(args: list[str]) -> object:
+    """One GitHub read, as JSON, failing loud rather than guessing.
+
+    `args` are kept exactly as this tool wrote them: `gh_read.py` is the one place that
+    decides which channel can answer them, so a host with **no token** reads this listing
+    through `api.github.com` instead of the queue reporting every row unmeasurable.
+    Measured 2026-10-04 (`cyc20261004-083214`): with `gh` unauthenticated this tool exited
+    2 without a reading, while its listing path answers `200` anonymously.
+
+    This is the **last** of the family to move, and the reason it was last is instructive:
+    everything else it reports comes from `check-vote-count.py` and
+    `check-merge-freshness.py`, which were fixed first - so until now the instrument the
+    prompt tells every cycle to run was the one thing that could not run on a tokenless
+    host.
+    """
+    return json.loads(gh_read().api_text(args))
 
 
 def open_prs(repo: str = REPO) -> list[int]:

@@ -23,6 +23,14 @@ must keep it SHORT - never infer the rule from the failing case alone.
 
 Nothing here touches the network: `_gh_json` is replaced, and the fake is asserted
 to be called, so a test cannot pass by never querying.
+
+The fixtures answer in **REST** shapes (`workflow_runs`, `commit.committer.date`,
+`submitted_at`), not in the tool's own projections. That is not decoration: the projections
+moved out of `--jq` and into Python (`cyc20261004-083214`), because a jq filter is the one
+argv `gh_read.py` refuses to approximate and refusing it left this merge gate **unreadable**
+on a host with no token - `check-vote-count.py <N>` exited 2 having read nothing, while all
+four paths it asks for answer `200` anonymously. A fixture written in the projected names
+would let the projection be deleted without a test going red.
 """
 
 from __future__ import annotations
@@ -146,16 +154,26 @@ class FakeGh:
             }
         if args[0] == "api":
             joined = " ".join(args)
+            # **REST payloads**, not the tool's own projections: the projections moved out
+            # of `--jq` and into Python (`cyc20261004-083214`), because a jq filter is the
+            # one argv `gh_read.py` refuses to approximate and refusing it left this gate
+            # unreadable on a host with no token. A fixture written in the projected names
+            # would let the projection be deleted without a test going red.
             if "actions/runs" in joined:
-                return {"t": self.push_time if self.exact else ""}
+                runs = [{"created_at": self.push_time}] if self.exact else []
+                return {"workflow_runs": runs}
             if "/commits/" in joined:
-                return {"t": self.push_time}
+                return {"commit": {"committer": {"date": self.push_time}}}
         raise AssertionError(f"unexpected gh call: {args}")
 
-    def paginated(self, args: list[str]) -> list:
-        """The reviews endpoint, which the tool reads page by page."""
-        self.calls.append(list(args))
-        assert args[0] == "api" and "/reviews" in " ".join(args), args
+    def paginated(self, path: str) -> list:
+        """The reviews endpoint, which the tool reads page by page.
+
+        Takes the REST path rather than an argv: the shared reader's own pager merges the
+        pages, so the helper no longer builds a `gh` command line at all.
+        """
+        self.calls.append(["api", path, "--paginate"])
+        assert "/reviews" in path, path
         return self.reviews
 
 
@@ -1204,7 +1222,10 @@ def test_an_empty_run_answer_is_re_asked_before_it_is_reported_as_no_run(mod, mo
             asked.append("runs")
             if len(asked) == 1:
                 base.calls.append(list(args))
-                return {"t": ""}  # the stale answer, verbatim shape
+                # The stale answer, in the payload shape the tool reads now: the key
+                # is present and the list is empty, which is what "listed no run yet"
+                # looks like from REST.
+                return {"workflow_runs": []}
         return base(args)
 
     monkeypatch.setattr(mod, "_gh_json", flaky)
@@ -1449,28 +1470,35 @@ def test_a_vote_beyond_the_first_page_still_counts(mod, monkeypatch, capsys):
     assert "READY 3/3" in capsys.readouterr().out
 
 
-def test_the_paginated_helper_passes_paginate_and_flattens_pages(mod, monkeypatch):
-    """`--paginate` + `--jq '.[]'` yields one object per line; the helper parses
-    every line. Concatenated page arrays are not valid JSON, so parsing the whole
-    stdout as one document would be the bug this guards against."""
-    import subprocess as sp
+def test_the_paginated_helper_asks_for_pages_and_projects_in_python(mod, monkeypatch):
+    """The reviews come back under REST's field names; the projection is this tool's job.
 
+    It used to be a `--jq ".[] | {at, body}"` on the command line. That cannot survive
+    `cyc20261004-083214`: a jq filter is the one argv `gh_read.py` refuses to approximate,
+    and refusing it left this gate unreadable on a host with no token. So both halves are
+    pinned here - the request still says `--paginate` (the endpoint truncates at 30 and
+    orders oldest first, so a truncated page drops the *newest* votes), and the mapping
+    `submitted_at`/`body` -> `at`/`body` happens in Python.
+    """
     seen: list[list[str]] = []
 
-    class _Done:
-        returncode = 0
-        stdout = '{"at": "a", "body": "b"}\n{"at": "c", "body": "d"}\n'
-        stderr = ""
+    class Reader:
+        def api_text(self, args: list[str]) -> str:
+            seen.append(list(args))
+            return json.dumps(
+                [
+                    {"id": 1, "submitted_at": "2026-09-11T01:00:00Z", "body": "b1", "state": "APPROVED"},
+                    {"id": 2, "submitted_at": "2026-09-11T02:00:00Z", "body": "b2", "state": "COMMENTED"},
+                ]
+            )
 
-    def fake_run(cmd, **kwargs):
-        seen.append(list(cmd))
-        return _Done()
-
-    monkeypatch.setattr(sp, "run", fake_run)
-    out = mod._gh_json_paginated(["api", "repos/x/pulls/1/reviews", "--jq", "{at, body}"])
-    assert out == [{"at": "a", "body": "b"}, {"at": "c", "body": "d"}]
-    assert "--paginate" in seen[0], seen[0]
-    assert seen[0][0] == "gh", seen[0]
+    monkeypatch.setattr(mod, "_gh_read_module", Reader())
+    out = mod._gh_json_paginated("repos/x/pulls/1/reviews")
+    assert out == [
+        {"at": "2026-09-11T01:00:00Z", "body": "b1"},
+        {"at": "2026-09-11T02:00:00Z", "body": "b2"},
+    ], out
+    assert seen == [["api", "repos/x/pulls/1/reviews", "--paginate"]], seen
 
 
 def test_reviews_are_ordered_before_the_run_is_walked(mod, monkeypatch, capsys):
@@ -1500,7 +1528,9 @@ def test_reviews_are_ordered_before_the_run_is_walked(mod, monkeypatch, capsys):
     assert "SHORT 1/3" in capsys.readouterr().out
 
 
-def test_a_lost_jq_projection_fails_loud_instead_of_voiding_every_vote(mod, monkeypatch, capsys):
+def test_a_review_with_no_submitted_at_fails_loud_instead_of_voiding_every_vote(
+    mod, monkeypatch, capsys
+):
     """The bug this shipped with, found by running it against the live PRs.
 
     `_gh_json_paginated` appended `--jq ".[]"` while the call site passed its own
@@ -1511,16 +1541,36 @@ def test_a_lost_jq_projection_fails_loud_instead_of_voiding_every_vote(mod, monk
 
     That is the worst shape of failure in a merge gate - not an exception, but a
     plausible-looking count in the safe direction, so a reviewer would simply wait
-    for votes that already existed. The test fake cannot catch it (it returns
-    dicts and never models the jq contract), which is why the check is a runtime
-    assertion on the payload's shape rather than a unit-test expectation.
+    for votes that already existed. The filter is gone (`cyc20261004-083214`), so what
+    the check guards against now is the same *outcome* reached the other way: a review
+    payload with no readable `submitted_at`, which the projection passes through as
+    `None` and the check turns into a refusal rather than a void vote.
+
+    The fixture is a **REST** review (no `at` key at all), fed through the reader seam,
+    so the projection itself is exercised rather than assumed.
     """
-    bad = [{"submitted_at": "2026-09-11T01:00:00Z", "body": "\u2705 LGTM - cycle `cyc20260911-090000`"}]
-    fake = FakeGh(bad)
-    rc = _run(mod, monkeypatch, fake)
-    assert rc == 2, "a missing `at` field must be a could-not-check, not a zero count"
+    reviewed = [
+        {"id": 1, "body": "\u2705 LGTM - cycle `cyc20260911-090000`"},
+        {"id": 2, "body": "\u2705 LGTM - cycle `cyc20260911-100000`"},
+    ]
+
+    class Reader:
+        """Answers the reviews path with reviews that carry no `submitted_at`.
+
+        The real `_gh_json_paginated` runs (it is *not* patched here), so this leg
+        exercises the projection itself rather than a fixture that has already done the
+        projecting - which is how the original defect hid.
+        """
+
+        def api_text(self, args: list[str]) -> str:
+            return json.dumps(reviewed)
+
+    monkeypatch.setattr(mod, "_gh_read_module", Reader())
+    monkeypatch.setattr(mod, "_gh_json", FakeGh([]))
+    rc = mod.main(["1"])
+    assert rc == 2, "an unreadable vote time must be a could-not-check, not a zero count"
     err = capsys.readouterr().err
-    assert "did not apply" in err
+    assert "submitted_at" in err, err
     assert "0/3" not in err
 
 
@@ -1814,3 +1864,144 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_
         cycles_log=log,
     )
     assert not counted and why == ""
+
+
+# --- the transport: one place decides, and no read is a `--jq` argv ---------
+#
+# `cyc20261004-083214`. This tool owns a `subprocess.run(["gh", …])`, so on a host with no
+# token it counted nothing: measured 2026-10-04, `check-vote-count.py 1841` exited 2 with
+# "gh failed (rc=4)" while `pulls/<n>`, `pulls/<n>/reviews`, `actions/runs` and
+# `commits/<sha>` all answer `200` anonymously. The merge gate - the reading R3 is decided
+# by - was unmeasurable on exactly the hosts that had to ask it. Its reads go through
+# `scripts/gh_read.py` now, and the three properties that make the swap real are pinned
+# here, each in the direction that fails silently if it is undone.
+
+
+def test_the_read_goes_through_the_shared_reader(mod, monkeypatch, capsys):
+    """The channel is decided in one file. If this file shells out itself, that is gone.
+
+    Pinned at the *seam* rather than by behaviour: with and without the leaf the behaviour
+    is identical on a host **with** a token, which is every CI leg, so a reverted swap
+    would keep this suite green and be wrong only on the hosts it was made for.
+    """
+    asked: list[list[str]] = []
+
+    class Reader:
+        def api_text(self, args: list[str]) -> str:
+            asked.append(list(args))
+            js = " ".join(args)
+            if args[:2] == ["pr", "view"]:
+                return json.dumps(
+                    {
+                        "number": 1,
+                        "title": "t",
+                        "headRefOid": HEAD,
+                        "mergeable": "MERGEABLE",
+                        "mergeStateStatus": "CLEAN",
+                    }
+                )
+            if "actions/runs" in js:
+                return json.dumps({"workflow_runs": [{"created_at": T0}]})
+            if "/reviews" in js:
+                return json.dumps([])
+            raise AssertionError(f"unexpected read: {args}")
+
+    monkeypatch.setattr(mod, "_gh_read_module", Reader())
+    rc = mod.main(["1"])
+    captured = capsys.readouterr()
+    assert asked, "nothing was read through the shared reader"
+    assert asked[0][:2] == ["pr", "view"], (
+        "the request must be the tool's own argv, unchanged: the swap replaces which "
+        f"channel answers it, not what was asked ({asked[0]})"
+    )
+    assert rc == 1, captured.out + captured.err
+
+
+def test_no_read_passes_a_jq_filter(mod, monkeypatch, capsys):
+    """`--jq` is the one argv the shared reader refuses, so all three had to move.
+
+    Measured 2026-10-04: the first attempt at this swap changed only the `pr view` shape,
+    and the tool stayed at exit 2 - the runs read answered "the anonymous fallback would
+    have to drop ['--jq'] from the request". Three filters were Python by the end
+    (`workflow_runs[].created_at`, `commit.committer.date`, and the reviews projection).
+    """
+    asked: list[list[str]] = []
+    fake = FakeGh([_approve("cyc20260911-090000", "2026-09-11T01:00:00Z")])
+
+    def record(args: list[str]) -> object:
+        asked.append(list(args))
+        return fake(args)
+
+    monkeypatch.setattr(mod, "_gh_json", record)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    assert mod.main(["1"]) == 1, capsys.readouterr().err
+    assert asked, "the tool must have read something"
+    for args in asked:
+        assert "--jq" not in args and "-q" not in args, (
+            f"a jq filter is a projection this tool cannot take to the tokenless channel: {args}"
+        )
+
+
+def test_a_payload_missing_a_field_is_refused_not_defaulted(mod, monkeypatch, capsys):
+    """The fail-loud property the `--jq` projections had for free, kept by hand.
+
+    `workflow_runs` is the field to pin it on because its absence lies in the direction
+    that *voids work*: read as "no run", it sets `blocked` and the head is told it has no
+    CI - and the commit-date fallback then approximates a push time, which can let a vote
+    count that should not. The old filter made it `null` and the `assert` below raised.
+    """
+    base = FakeGh([])
+
+    def broken_runs(args: list[str]) -> object:
+        # The `pr view` half must still answer, or the run dies on `headRefOid` first and
+        # this test would be pinning the wrong refusal (`cyc20261004-083214`).
+        if "actions/runs" in " ".join(args):
+            return {"nothing": "here"}
+        return base(args)
+
+    monkeypatch.setattr(mod, "_gh_json", broken_runs)
+    monkeypatch.setattr(mod, "_gh_json_paginated", base.paginated)
+    assert mod.main(["1"]) == 2
+    err = capsys.readouterr().err
+    # Both halves: the reason the refusal gives, and the field it refuses. A bare
+    # `KeyError` would also exit 2 and also name the field, so a test asserting only those
+    # two would stay green with the requirement deleted.
+    assert "refusing to read an absent field" in err, err
+    assert "workflow_runs" in err, err
+
+
+def test_the_runs_listing_is_read_in_rest_names_not_the_tools_own(mod, monkeypatch, capsys):
+    """The mapping `created_at` -> the push time is load-bearing, in both directions.
+
+    A `--jq` filter did it before, in a string no Python test could see into. The second
+    direction is the one that matters: a run written with the *projected* shape must not be
+    accepted, because "accept both spellings" is how a mapping stops being one - the two
+    names would then stay in step by coincidence until one of them moved.
+    """
+    votes = [_approve(f"cyc2026091{i}-090000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)]
+
+    class Projected(FakeGh):
+        def __call__(self, args):
+            self.calls.append(list(args))
+            if args[:2] == ["pr", "view"]:
+                return {
+                    "number": 1,
+                    "title": "t",
+                    "headRefOid": HEAD,
+                    "mergeable": self.mergeable,
+                    "mergeStateStatus": self.merge_state,
+                }
+            if "actions/runs" in " ".join(args):
+                return {"workflow_runs": [{"t": self.push_time}]}  # the *projected* name
+            if "/commits/" in " ".join(args):
+                return {"commit": {"committer": {"date": self.push_time}}}
+            raise AssertionError(f"unexpected read: {args}")
+
+    fake = Projected(votes)
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "BLOCKED" in out, out
+    assert "push time approximated by commit date" in out, out

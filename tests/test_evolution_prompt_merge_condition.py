@@ -252,16 +252,33 @@ class _FakeGh:
                 "mergeStateStatus": "CLEAN",
             }
         assert args and args[0] == "api", args
-        return {"t": PUSH}
+        # **REST shapes**, not the counter's own projections: the projections moved out of
+        # `--jq` and into Python (`cyc20261004-083214`) so the gate can be read on a host
+        # with no token. A fixture in the projected names would pin this cross-suite leg to
+        # a shape the tool no longer accepts.
+        joined = " ".join(args)
+        if "actions/runs" in joined:
+            return {"workflow_runs": [{"created_at": PUSH}]}
+        assert "/commits/" in joined, args
+        return {"commit": {"committer": {"date": PUSH}}}
 
-    def paginated(self, args: list[str]) -> list:
-        assert "/reviews" in " ".join(args), args
-        return self.reviews
+    def paginated(self, path: str) -> list:
+        """The pager's output, which is already projected (`submitted_at` -> `at`).
+
+        The projection itself is `check-vote-count.py`'s and has its own legs; this fake
+        stands in for the whole helper, so it returns what the helper returns.
+        """
+        assert "/reviews" in path, path
+        return [
+            {"at": r.get("submitted_at"), "body": r.get("body")} for r in self.reviews
+        ]
 
 
 def _counted(counter, monkeypatch, at: str) -> "object":
     reviews = [
-        {"at": at, "body": f"\u2705 LGTM — cycle {_cycle_id(i)}"} for i in range(1, 4)
+        # The reviews endpoint's own field names; the tool projects them.
+        {"submitted_at": at, "body": f"\u2705 LGTM — cycle {_cycle_id(i)}"}
+        for i in range(1, 4)
     ]
     fake = _FakeGh(reviews)
     monkeypatch.setattr(counter, "_gh_json", fake)
