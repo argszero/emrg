@@ -528,17 +528,23 @@ def test_measure_failure_names_the_invocation_and_how_to_fix_it(mod, monkeypatch
     assert f"`{mod.INVOCATION} --measure`" in str(excinfo.value)
 
 
-def test_a_missing_pytest_is_diagnosed_as_an_unsynced_checkout(monkeypatch) -> None:
+def test_a_missing_pytest_inside_the_venv_is_diagnosed_as_an_unsynced_checkout(
+    monkeypatch,
+) -> None:
     """The remedy must not be the command that just failed.
 
     Measured state this pins (2026-09-13, `cyc20260913-122923`): in a fresh
     review worktree the tool printed its own `INVOCATION` as the fix, and running
     that spelling produced byte-identical output, rc 2 - `uv run --no-sync` had
-    left an empty `.venv` there and both `python` and `python3` resolve to it, so
-    "use the project interpreter" is a circle. The message must name the
-    environment instead.
+    left an empty `.venv` there. The message must name the environment instead.
+
+    The arm is driven rather than left to the ambient interpreter: the same child
+    output means the opposite thing when the interpreter is *not* the checkout's
+    (the next test), and a test that only ever ran under the project venv could
+    not tell the two apart.
     """
     fresh = _load_module()
+    monkeypatch.setattr(fresh, "interpreter_is_the_checkouts", lambda *a, **k: True)
 
     class _Proc:
         returncode = 1
@@ -553,6 +559,88 @@ def test_a_missing_pytest_is_diagnosed_as_an_unsynced_checkout(monkeypatch) -> N
     assert "/some/checkout/.venv/bin/python3" in message, "the child's own words"
     assert "unsynced" in message, "the cause, named"
     assert "uv sync" in message, "a remedy that can actually work here"
+
+
+def test_a_missing_pytest_outside_the_venv_is_not_called_an_unsynced_checkout(
+    monkeypatch,
+) -> None:
+    """The other state of the same child output (measured 2026-10-05).
+
+    `cyc20261005-022216`: on a Windows host `.venv` holds pytest (9.1.1) while
+    `uv run --no-sync python3 ...` resolves outside it - uv's venv provides
+    `python.exe` and no `python3.exe`, so `python3` comes from PATH, where the
+    EMRG install is. The message that used to be printed here was false twice
+    over: it called a synced checkout unsynced, and it offered `uv sync` for a
+    cause `uv sync` cannot change.
+    """
+    fresh = _load_module()
+    monkeypatch.setattr(fresh, "interpreter_is_the_checkouts", lambda *a, **k: False)
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "C:\\install\\bin\\python3.exe: No module named pytest\n"
+
+    monkeypatch.setattr(fresh.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(fresh.DocCountError) as excinfo:
+        fresh.measured_count()
+    message = str(excinfo.value)
+    assert "No module named pytest" in message
+    assert "wrong-interpreter" in message, "the cause, named"
+    assert "unsynced" not in message, "the cause this is not"
+    assert "uv run --no-sync python scripts/check-doc-count.py" in message, (
+        "the remedy that fits this arm"
+    )
+
+
+def test_a_checkout_with_no_venv_reports_the_cause_as_unmeasurable(monkeypatch) -> None:
+    """Neither cause can be told apart from here, so neither is asserted.
+
+    The rule the guards live by, applied to a guard's own message: "could not
+    measure" is not one of the answers.
+    """
+    fresh = _load_module()
+    monkeypatch.setattr(fresh, "interpreter_is_the_checkouts", lambda *a, **k: None)
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "python3: No module named pytest\n"
+
+    monkeypatch.setattr(fresh.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(fresh.DocCountError) as excinfo:
+        fresh.measured_count()
+    message = str(excinfo.value)
+    assert "cannot be measured" in message
+    assert "unsynced" not in message
+
+
+def test_the_interpreter_predicate_reads_the_checkout_it_was_given(mod, tmp_path) -> None:
+    """The three answers, on a tree the test builds rather than the ambient one.
+
+    Driven on its own tree because that is the defect: the branch this feeds read
+    one environment and asserted it as the only case. A predicate tested only
+    against the machine it happens to run on repeats it.
+    """
+    checkout = tmp_path / "checkout"
+    scripts = checkout / ".venv" / "Scripts"
+    scripts.mkdir(parents=True)
+    inside = scripts / "python.exe"
+    inside.write_text("", encoding="utf-8")
+
+    outside_dir = tmp_path / "install" / "bin"
+    outside_dir.mkdir(parents=True)
+    outside = outside_dir / "python3.exe"
+    outside.write_text("", encoding="utf-8")
+
+    assert mod.interpreter_is_the_checkouts(str(inside), checkout) is True
+    assert mod.interpreter_is_the_checkouts(str(outside), checkout) is False
+
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert mod.interpreter_is_the_checkouts(str(outside), bare) is None, (
+        "no `.venv` to compare against is not the answer 'no'"
+    )
 
 
 def test_a_real_collection_failure_keeps_the_invocation_hint(monkeypatch) -> None:
