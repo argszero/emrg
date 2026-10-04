@@ -433,56 +433,18 @@ def _open_pr_numbers(repo: str) -> list[int]:
 _DEFAULT_REPO = "argszero/emrg"
 
 
-def _head_github_names(number: int, repo: str) -> tuple[str, str]:
-    """What GitHub says PR #`number`'s head is: `(sha, "")` or `("", why)`.
-
-    One question, asked once, and answered in three ways that stay apart: an object
-    name, a sentence saying why GitHub could not be asked, and - never given here - a
-    guess. `_fetch_head` is the only caller, and it is the caller's job to decide what
-    an unanswerable question means (see `check_pr`'s `github=` note: what a reading
-    *means* is the reader's mapping).
-    """
-    proc = _run(["gh", "api", f"repos/{repo}/pulls/{number}", "--jq", ".head.sha"])
-    if proc.returncode != 0:
-        return "", f"`gh api repos/{repo}/pulls/{number}` failed ({_diagnosis(proc)})"
-    named = proc.stdout.strip()
-    if not merge_tree.is_object_name(named):
-        return "", (
-            f"`gh api repos/{repo}/pulls/{number}` named the head as {named!r}, which is "
-            "not an object name"
-        )
-    return named, ""
-
-
 def _check_head_is_the_prs(number: int, repo: str, head: str) -> None:
-    """Raise `MeasurementError` unless `head` is the head GitHub names for PR #`number`.
+    """`merge_tree.check_head_is_the_prs`, with this tool's runner.
 
-    Split from `_fetch_head` so this check can be exercised without a fetch: it is the
-    one direction a caller must never invent - "the commit in hand is this PR's
-    subject" - and it is written once and named rather than implied by a fetch that
-    merely exited 0.
-
-    Two answers are refusals, and they are different sentences: GitHub naming a different
-    commit (the fetch read something that is not this PR - a stale minted ref), and
-    GitHub not answering at all (no other reading can confirm the head, and `_refresh_base`
-    states the rule this shares: never a quiet continuation against a ref that could not
-    be verified).
+    The reading lives in `merge_tree` - the module every gate in this family imports -
+    and not here, because "the commit in hand is the PR's subject" is one fact: a
+    second implementation of it is a second answer, and the sibling that most needs it
+    (`check-merge-plan-suite.py`) reads the same stale-able `pull/<N>/head` from the
+    same `origin`. This wrapper only supplies the runner the shared function cannot
+    know. See that function for the class it is written against and the measured false
+    conflict (`cyc20261004-183629`) that produced it.
     """
-    named, why = _head_github_names(number, repo)
-    if why:
-        raise MeasurementError(
-            f"could not establish that the head fetched for PR #{number} is the PR's "
-            f"head: {why}. This tool reads `pull/{number}/head` from `origin`, and a head "
-            "nothing confirms is not a subject a landing tree may be computed on"
-        )
-    if named != head:
-        raise MeasurementError(
-            f"PR #{number}: the head fetched from `origin` is {head}, but GitHub names the "
-            f"PR's head {named} - so the reading would be about a commit that is not this "
-            f"PR's subject. A local `origin` can hold a stale `refs/pull/{number}/head` "
-            "minted by an earlier run: correct it (or read the head through the API) and "
-            "ask again"
-        )
+    merge_tree.check_head_is_the_prs(repo, number, head, _run)
 
 
 def _fetch_head(number: int, repo: str = _DEFAULT_REPO) -> str:

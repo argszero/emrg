@@ -335,7 +335,7 @@ def _open_pr_numbers(repo: str) -> list[int]:
     return sorted(numbers)
 
 
-def _fetch_head(number: int) -> str:
+def _fetch_head(number: int, repo: str = "argszero/emrg") -> str:
     """Fetch a PR's real head into a temp ref and return its commit SHA.
 
     The refspec is forced (`+`): a PR head is routinely re-pushed to a commit
@@ -347,6 +347,25 @@ def _fetch_head(number: int) -> str:
     caller wants the commit - it rev-parses what comes back either way - and a ref
     left behind pins the head's objects for the life of the clone (measured
     2026-09-17: this gate had 40 of them resident).
+
+    **A fetch that exited 0 is not evidence about the PR**, so the commit it
+    produced is checked against the head GitHub names before this returns
+    (`merge_tree.check_head_is_the_prs`, the one home of that reading). `origin` is
+    not necessarily the remote the PR lives on - `url.<base>.insteadOf` is applied
+    before the transport reads a remote's URL, and this host rewrites `origin` to a
+    local checkout (the offline fallback; see `origin-is-a-local-checkout`) - and
+    there `refs/pull/<N>/head` exists only if an earlier run minted it with
+    `git update-ref`. A ref minted for an older head is not distinguishable, at the
+    fetch, from one the remote serves: measured 2026-10-04 (`cyc20261004-183629`),
+    the sibling `check-merge-landing-diff.py` answered "the merge conflicts" about
+    PR #1841 - a **false conflict**, the one verdict this family must never invent
+    - because this clone's `refs/pull/1841/head` was a stale object. Here the same
+    defect would read as `conflict` or `healthy` about a tree of a commit that is
+    not the PR, so a head GitHub does not name is a `MeasurementError` (this gate's
+    exit 2) rather than a verdict.
+
+    `repo` is threaded from `check_pr` so the check asks about the PR that was asked
+    for; the default is `main`'s `--repo` default.
     """
     ref = f"refs/emrg-tree-health/pr{number}"
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
@@ -355,6 +374,7 @@ def _fetch_head(number: int) -> str:
         raise MeasurementError(f"could not fetch PR #{number}: {detail}")
     sha = _rev_parse(ref)
     merge_tree.drop_ref(ref, run=_run)
+    merge_tree.check_head_is_the_prs(repo, number, sha, _run)
     return sha
 def _merge_tree_paths(
     a: str, b: str, cwd: str | None = None
@@ -490,7 +510,11 @@ def _guard_verdict(tree_sha: str, workdir: Path, cwd: str | None = None) -> tupl
 
 
 def check_pr(
-    number: int, base: str, workdir: Path, cwd: str | None = None
+    number: int,
+    base: str,
+    workdir: Path,
+    cwd: str | None = None,
+    repo: str = "argszero/emrg",
 ) -> tuple[str, str]:
     """Verdict for one PR: (state, report).
 
@@ -499,8 +523,12 @@ def check_pr(
     A conflict is not a health verdict: the merge cannot be made as it stands, so
     there is no merged tree to judge. Reporting it as unhealthy would be a
     verdict about a tree that does not exist.
+
+    `repo` is the repository the PR numbers belong to, passed through to
+    `_fetch_head` so the head it resolves is verified against the PR GitHub names
+    there (`merge_tree.check_head_is_the_prs`); `main` threads its `--repo`.
     """
-    head = _rev_parse(_fetch_head(number))
+    head = _rev_parse(_fetch_head(number, repo))
     paths, diagnosis = _merge_tree_paths(base, head, cwd=cwd)
     if paths is None:
         raise MeasurementError(f"merge-tree failed for PR #{number}: {diagnosis}")
@@ -546,7 +574,7 @@ def main(argv: list[str] | None = None) -> int:
         workdir = Path(tmp) / "tree"
         for number in numbers:
             try:
-                state, report = check_pr(number, base, workdir, cwd=cwd)
+                state, report = check_pr(number, base, workdir, cwd=cwd, repo=args.repo)
             except MeasurementError as exc:
                 print(f"  #{number}: could not measure: {exc}", file=sys.stderr)
                 return 2

@@ -483,6 +483,89 @@ def drop_ref(
     return run(["git", "update-ref", "-d", ref])
 
 
+def head_github_names(
+    repo: str,
+    number: int,
+    run: Callable[..., subprocess.CompletedProcess],
+) -> tuple[str, str]:
+    """What GitHub says PR #`number`'s head is: `(sha, "")` or `("", why)`.
+
+    One question, asked once, and answered three ways that stay apart: an object
+    name, a sentence saying why GitHub could not be asked, and - never given here -
+    a guess. What an unanswerable question *means* is the caller's mapping, so this
+    reports the third answer rather than deciding it.
+
+    It lives in this module, and not in each gate, because "the commit in hand is
+    the PR's subject" is one fact: `check-merge-freshness.py` and
+    `check-vote-count.py` already read `headRefOid` straight from GitHub, while
+    every gate that *fetches* a head read only the transport - so the same reading
+    had two homes and half the family had neither. A second implementation of a
+    reading is a second answer.
+    """
+    proc = run(["gh", "api", f"repos/{repo}/pulls/{number}", "--jq", ".head.sha"])
+    if proc.returncode != 0:
+        detail = (proc.stdout[-500:] + proc.stderr[-500:]).strip() or (
+            f"no output (exit {proc.returncode})"
+        )
+        return "", f"`gh api repos/{repo}/pulls/{number}` failed ({detail})"
+    named = proc.stdout.strip()
+    if not is_object_name(named):
+        return "", (
+            f"`gh api repos/{repo}/pulls/{number}` named the head as {named!r}, which "
+            "is not an object name"
+        )
+    return named, ""
+
+
+def check_head_is_the_prs(
+    repo: str,
+    number: int,
+    head: str,
+    run: Callable[..., subprocess.CompletedProcess],
+) -> str:
+    """`head` when GitHub names it as PR #`number`'s head; raise `MeasurementError` otherwise.
+
+    A gate that resolves a PR head by fetching `pull/<N>/head` from `origin` holds a
+    commit and no evidence it belongs to the PR: `origin` is not necessarily the
+    remote the PR lives on - `url.<base>.insteadOf` is applied before the transport
+    reads a remote's URL, and this host rewrites `origin` to a local checkout (the
+    offline fallback) - and there `refs/pull/<N>/head` exists only if an earlier run
+    put it there with `git update-ref`. A ref minted for an older head is *not
+    distinguishable at the fetch* from one the remote serves, and a fetch that exited
+    0 says only that the fetch succeeded. Measured 2026-10-04 (`cyc20261004-183629`):
+    `check-merge-landing-diff.py 1841` answered "the merge conflicts, so there is no
+    landing tree to diff" about a PR whose head was `f90ad8a4`, because this clone's
+    `refs/pull/1841/head` was the stale `2154873` - a **false conflict**, the one
+    answer this family must never invent.
+
+    Two answers are refusals, and they are different sentences: GitHub naming a
+    *different* commit (the fetch read something that is not this PR), and GitHub not
+    answering at all (no other reading can confirm the head - the rule `_refresh_base`
+    states for a base, that there is "never a quiet continuation against a ref that
+    could not be verified"). Both are measurement errors, never a conflict and never
+    a clean merge: the reading would be about a tree of a commit that is not the PR.
+
+    Returns `head` so a caller can write `sha = check_head_is_the_prs(...)` and know
+    the name it binds is the one verified, rather than the one fetched.
+    """
+    named, why = head_github_names(repo, number, run)
+    if why:
+        raise MeasurementError(
+            f"could not establish that the head fetched for PR #{number} is the PR's "
+            f"head: {why}. The reading is about `pull/{number}/head` on `origin`, and a "
+            "head nothing confirms is not a subject a merge reading may be computed on"
+        )
+    if named != head:
+        raise MeasurementError(
+            f"PR #{number}: the head fetched from `origin` is {head}, but GitHub names "
+            f"the PR's head {named} - so the reading would be about a commit that is not "
+            f"this PR's subject. A local `origin` can hold a stale "
+            f"`refs/pull/{number}/head` minted by an earlier run: correct it (or read the "
+            "head through the API) and ask again"
+        )
+    return head
+
+
 def merge_commit(
     a: str,
     b: str,

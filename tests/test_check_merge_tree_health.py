@@ -326,9 +326,37 @@ def _two_pr_repo(tmp_path: Path, theirs_doc: int = 2) -> tuple[Path, str, str]:
 
 def _drive(mod, repo: Path, master: str, head: str, tmp_path: Path, monkeypatch):
     """Point the tool at local objects, bypassing gh/fetch entirely."""
-    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number, repo="argszero/emrg": head)
     monkeypatch.setattr(mod, "_rev_parse", lambda ref: ref)
     return mod.check_pr(1, master, tmp_path / "work", cwd=str(repo))
+
+
+def test_the_fetched_head_is_checked_against_the_one_github_names(mod, monkeypatch) -> None:
+    """The wiring: this gate owns no copy of the check, it calls the shared one.
+
+    `_fetch_head` resolves the head by fetching `pull/<N>/head` from `origin`, which
+    on this host is a **local checkout** whose ref an earlier run may have minted, and
+    a fetch that exited 0 says only that the fetch succeeded (measured 2026-10-04,
+    `cyc20261004-183629`: a stale `refs/pull/1841/head` made the sibling gate answer
+    "the merge conflicts" about a different commit). So the commit the fetch produced
+    is checked against the head GitHub names for that PR - and the reading lives in
+    `merge_tree`, the module every gate in this family imports, so there is one answer
+    rather than one per tool.
+    """
+    seen: list[tuple[str, int, str]] = []
+
+    def fake_check(repo, number, head, run):
+        seen.append((repo, number, head))
+        raise mod.MeasurementError(f"GitHub names a different head for PR #{number}")
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _proc(0, ""))
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: "a" * 40)
+    monkeypatch.setattr(mod.merge_tree, "check_head_is_the_prs", fake_check)
+
+    with pytest.raises(mod.MeasurementError, match="different head for PR #7"):
+        mod._fetch_head(7, "some/fork")
+    # The repository asked about is the caller's, not this tool's own default.
+    assert seen == [("some/fork", 7, "a" * 40)]
 
 
 def test_a_clean_merge_that_lands_a_failing_tree_is_unhealthy(
@@ -809,7 +837,7 @@ def test_main_refreshes_the_base_before_measuring(mod, monkeypatch, capsys) -> N
 
     monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _Done())
     monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
-    monkeypatch.setattr(mod, "_fetch_head", lambda n: "refs/x")
+    monkeypatch.setattr(mod, "_fetch_head", lambda n, repo="argszero/emrg": "refs/x")
     monkeypatch.setattr(
         mod, "_merge_tree_paths", lambda a, b, cwd=None: ([], "stub: measured elsewhere")
     )
@@ -1059,7 +1087,9 @@ class TestTheRefusalCarriesWhatGitSaid:
     """The gate whose whole job is "can this merge be judged" must say why it cannot."""
 
     def _refusal(self, mod, monkeypatch, shallow: bool) -> str:
-        monkeypatch.setattr(mod, "_fetch_head", lambda number: "refs/x")
+        monkeypatch.setattr(
+            mod, "_fetch_head", lambda number, repo="argszero/emrg": "refs/x"
+        )
         monkeypatch.setattr(mod, "_rev_parse", lambda ref: "0" * 40)
         monkeypatch.setattr(mod, "_run", _a_refusing_git(shallow))
         with pytest.raises(mod.MeasurementError) as caught:
@@ -1095,7 +1125,7 @@ class TestTheVerdictSaysWhatItMeasured:
             monkeypatch.setattr(mod, "GUARD", guard)
         monkeypatch.setattr(mod, "_refresh_base", lambda ref: None)
         monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
-        monkeypatch.setattr(mod, "_fetch_head", lambda n: "refs/x")
+        monkeypatch.setattr(mod, "_fetch_head", lambda n, repo="argszero/emrg": "refs/x")
         monkeypatch.setattr(mod, "_merge_tree_paths", lambda a, b, cwd=None: ([], "stub"))
         monkeypatch.setattr(mod, "_merged_tree_sha", lambda a, b, cwd=None: "0" * 40)
         monkeypatch.setattr(

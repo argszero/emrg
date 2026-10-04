@@ -649,3 +649,71 @@ class TestAnUnansweredMergeAsksWhetherTheCloneIsShallow:
             text=True,
             encoding="utf-8",
         ).stdout.strip() == "false", "the reading is git's, spelled the same way"
+
+
+# --- "the head in hand is the PR's subject": one home, two refusals -----------
+#
+# Every gate in this family reads a PR's head with `git fetch origin +pull/<N>/head`,
+# and `origin` is not always the remote the PR lives on: this host rewrites it to a
+# local checkout (the offline fallback), where `refs/pull/<N>/head` exists only if an
+# earlier run minted it with `git update-ref`. A fetch that exited 0 says the fetch
+# succeeded, not that the commit is the PR's, so the two readings below are what turn
+# that into evidence - and they live here, once, because a second implementation of a
+# reading is a second answer (measured `cyc20261004-183629`: a stale minted ref made
+# `check-merge-landing-diff.py` answer a *false conflict* about a head it never read).
+
+
+def test_head_github_names_asks_about_the_pr_it_was_given(mod) -> None:
+    """The control: the answer is an object name, and the question names the PR."""
+    seen: list[list[str]] = []
+
+    def runner(argv, cwd=None, env=None):
+        seen.append(list(argv))
+        return _proc(argv, 0, "a" * 40 + "\n")
+
+    assert mod.head_github_names("o/r", 1841, runner) == ("a" * 40, "")
+    assert seen == [["gh", "api", "repos/o/r/pulls/1841", "--jq", ".head.sha"]]
+
+
+def test_head_github_names_says_why_when_the_answer_is_not_a_sha(mod) -> None:
+    """A third answer that is a sentence, never a guess: not an object name is a refusal."""
+    runner = lambda argv, cwd=None, env=None: _proc(argv, 0, "not-a-sha\n")  # noqa: E731
+
+    sha, why = mod.head_github_names("o/r", 7, runner)
+    assert sha == ""
+    assert "not an object name" in why
+
+
+def test_a_head_github_names_is_accepted(mod) -> None:
+    """The control arm: agreement is not a finding, and the verified name is what returns."""
+    head = "a" * 40
+    runner = lambda argv, cwd=None, env=None: _proc(argv, 0, head + "\n")  # noqa: E731
+
+    assert mod.check_head_is_the_prs("o/r", 1841, head, runner) == head
+
+
+def test_a_head_github_calls_something_else_is_unmeasurable(mod) -> None:
+    """The measured defect: a stale minted ref is not the PR's head, so not a verdict.
+
+    A mismatch must be an unanswerable reading, never a conflict and never a clean
+    merge - both are verdicts about a commit that is not the PR, and the false conflict
+    is the one answer this family must never invent.
+    """
+    fetched, named = "2" * 40, "f" * 40
+    runner = lambda argv, cwd=None, env=None: _proc(argv, 0, named + "\n")  # noqa: E731
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod.check_head_is_the_prs("o/r", 1841, fetched, runner)
+
+    message = str(excinfo.value)
+    assert fetched in message and named in message
+
+
+def test_a_head_no_other_reading_can_confirm_is_unmeasurable(mod) -> None:
+    """GitHub unreachable is a refusal - not a quiet continuation with the fetched head."""
+    runner = lambda argv, cwd=None, env=None: _proc(argv, 1, "", "HTTP 502")  # noqa: E731
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod.check_head_is_the_prs("o/r", 1841, "2" * 40, runner)
+
+    assert "502" in str(excinfo.value)
