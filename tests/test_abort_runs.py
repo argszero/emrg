@@ -39,6 +39,31 @@ def test_consecutive_aborts_extend_one_run_and_keep_its_start(tmp_path):
     assert runs.run("content_filter", "s_1")["count"] == 2
 
 
+def test_the_clock_note_was_given_governs_the_prune(tmp_path):
+    """`now` is the clock the operation is about, not merely the stamp's source.
+
+    The prune measures against the same instant, so a back-dated abort is not
+    dropped as stale by the wall clock. Without that the injected clock is only
+    half-honoured, and a test whose fixed stamp is older than ``RUN_TTL_DAYS``
+    fails on the day the calendar catches up rather than on a change — measured
+    2026-10-04: the sibling test's ``2026-09-27`` stamp left the 7-day window at
+    10:00 local and turned
+    ``test_consecutive_aborts_extend_one_run_and_keep_its_start`` red on master.
+
+    This pins the mechanism **without a fixed date**, so it cannot expire: the
+    run is older than the TTL in wall-clock terms the whole time, and it is only
+    the injected clock that keeps it alive.
+    """
+    runs = AbortRuns(tmp_path / "abort-runs.json")
+    old = datetime.now().astimezone() - timedelta(days=RUN_TTL_DAYS + 5)
+    runs.note("content_filter", "s_1", now=old)
+    second = runs.note("content_filter", "s_1", now=old + timedelta(days=1))
+
+    assert second["count"] == 2, (
+        "the prune must read the injected clock, so this stale run was not dropped"
+    )
+
+
 def test_a_round_the_cause_did_not_block_ends_the_run(tmp_path):
     """The count answers "how many in a row", so one success makes a new run."""
     runs = AbortRuns(tmp_path / "abort-runs.json")
