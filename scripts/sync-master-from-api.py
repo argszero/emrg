@@ -277,6 +277,12 @@ def _stop_lines(sha: str, parents: list[str], absent: list[str]) -> list[str]:
     *assumed* local. Labelling the root a merge would print a trust statement
     about an empty list ("trusting its 0 parent(s) to be local"), asserting
     something that is not a reading.
+
+    An absent parent gets two statements rather than one, because the gap has two
+    halves and the reader meets the second first: `merge-base --is-ancestor` and
+    `merge` swallow it *silently* (the measurement in `_absent_parents`), while a
+    command that walks history from the commit *fails* on it and leaves a checkout
+    standing there unable to leave with a bare `git checkout <branch>`.
     """
     if not parents:
         return [f"  (root commit {sha[:7]}: history ends here)"]
@@ -286,6 +292,22 @@ def _stop_lines(sha: str, parents: list[str], absent: list[str]) -> list[str]:
         lines.append("  ! parent(s) " + ", ".join(p[:7] for p in absent)
                      + " are NOT present locally - the commit graph is incomplete, and"
                      " git reads it as if it were whole")
+        # The half the line above does not carry, and the one a reader meets next:
+        # the *silent* gap is what `merge-base --is-ancestor` and `merge` do with it
+        # (`_absent_parents` records that measurement), but the loud half is what a
+        # command that walks history from this commit does - it fails, and a checkout
+        # standing on the commit cannot be left with `git checkout <branch>`. Both
+        # halves were measured 2026-10-04 on this host after `--ref <PR head>`: `git
+        # log --oneline -1` printed nothing and `fatal: Failed to traverse parents of
+        # commit <sha>`, and `git checkout master` answered `fatal: internal error in
+        # revision walk` and left HEAD detached at the materialized commit.
+        lines.append("  ! not everywhere, though: a walk from this commit dies on the"
+                     " missing parent (`git log` printed `fatal: Failed to traverse"
+                     " parents`, `git checkout <branch>` answered `fatal: internal error"
+                     " in revision walk` and left HEAD where it was) - so a checkout"
+                     " standing on it is left with `git symbolic-ref HEAD"
+                     " refs/heads/<branch> && git reset --hard`; a bare `git checkout"
+                     " <branch>` does not get you off it")
     return lines
 
 

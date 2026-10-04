@@ -421,6 +421,40 @@ def test_stop_lines_name_a_root_as_a_root_not_a_merge():
     assert any("NOT present locally" in ln for ln in warned)
 
 
+def test_the_absent_parent_warning_names_the_half_a_reader_meets_first():
+    """The gap is silent for some commands and loud for others, and the loud half
+    is the one a reader hits next - so the warning carries both, with the way out.
+
+    Measured 2026-10-04 on this host, after `--ref <a PR head>` and a checkout of
+    the materialized commit: `git log --oneline -1` printed nothing and
+    `fatal: Failed to traverse parents of commit <sha>`, and `git checkout master`
+    answered `fatal: internal error in revision walk` and left HEAD on that commit.
+    The cycle's own escape was `git symbolic-ref HEAD refs/heads/<branch>` followed
+    by `git reset --hard` - and a reader who is not told that is left standing on a
+    commit no ordinary git command can walk away from. The line is a claim about
+    behaviour, so it is pinned here rather than left as prose.
+    """
+    mod = _load_module()
+
+    warned = mod._stop_lines("b" * 40, ["c" * 40, "d" * 40], ["d" * 40])
+    text = "\n".join(warned)
+
+    # The silent half, and the commands that fail rather than swallow it.
+    assert "reads it as if it were whole" in text, text
+    assert "git log" in text and "Failed to traverse parents" in text, text
+    assert "git checkout <branch>" in text, text
+    assert "internal error in revision walk" in text, text
+    # The way out, which is not a bare `git checkout`.
+    assert "git symbolic-ref HEAD refs/heads/<branch>" in text, text
+    assert "git reset --hard" in text, text
+
+    # A walk whose parents are all present says none of this: the two statements
+    # belong to the absent case, not to every merge stop.
+    quiet = "\n".join(mod._stop_lines("b" * 40, ["c" * 40, "d" * 40], []))
+    assert "Failed to traverse parents" not in quiet, quiet
+    assert "symbolic-ref" not in quiet, quiet
+
+
 def test_an_object_name_ref_creates_no_ref():
     """`--ref <sha>` materializes a commit; it must not write a ref named after it.
 
