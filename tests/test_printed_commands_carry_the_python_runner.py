@@ -71,14 +71,31 @@ measurement applied to `cast-vote.py` one commit earlier (`afaeae0f`) finds the 
 mentions, **all 8 bare** - that is the second carrier this clause exists for, after the
 previous cycle's `review-queue.py` / `check-merge-freshness.py` pair (`60d77678`).
 
-**Docstrings are excluded**, and on purpose. Several tools copy their usage block into
-`--help`, and in those blocks the runner stands on the *previous line*
-(`uv run --no-sync python3 scripts/x.py` then the flags on the next) - a mention-level rule
-cannot see a line above it, and rewriting every usage block to satisfy it would be noise
-rather than a fix. The messages a reader meets at refusal time are ordinary literals and
-f-strings, which is the set this clause covers. The exclusion is a *scope*, not a licence:
-`cast-vote.py`'s prose pointer to `review-queue.py --cycle <id>` was given its runner in the
-same commit, by hand.
+**Docstrings are excluded**, and the reason is measured rather than assumed. The docstrings
+of `scripts/*.py` hold **65** command-shaped mentions against **31** in the strings the code
+actually prints, and the 9 bare ones among them are the family *naming* its readings rather
+than offering commands: four comparisons to a sibling's rule ("in the same shape as
+`scripts/bump-version.py --check`"), three usage lines in `llm-cost-report.py` (a file that
+never hands its docstring to the parser), one transcript line in `cast-vote.py`
+(`scripts/check-vote-count.py 1255`, the reading a reviewer is shown getting), and one
+argument value that merely looks like a command (`--file scripts/check-pr-base.py` in
+`run-mutation-arm.py`'s usage block). A rule keyed on command *shape* cannot tell a name from
+a command, and one that fired on those would be firing on the explanations it stands beside.
+So this clause reads the strings a tool hands a reader, and leaves the prose alone.
+
+The first version of this paragraph justified the same exclusion with a mechanism the matcher
+does not have - that in a usage block "the runner stands on the *previous line*" and "a
+mention-level rule cannot see a line above it". Measured 2026-10-05: the matcher does see it
+(the runner pattern is matched against the text before the mention, and its whitespace class
+spans newlines, so `uv run --no-sync python3` on one line with
+`    scripts/check-vote-count.py <PR>` on the next reads as carrying the runner), and of the
+10 command-shaped mentions in the family's own `--help` output, **9 carry the runner on the
+same line** - the tenth being the comparison above rather than a wrapped usage line. The
+exclusion is right; the reason given for it was not, and a rule whose stated justification is
+not what it does is a rule a reader cannot reason from.
+
+The exclusion is a *scope*, not a licence: `cast-vote.py`'s prose pointer to
+`review-queue.py --cycle <id>` was given its runner in the same commit, by hand.
 
 Both directions, because a check is only evidence if it can fail
 ----------------------------------------------------------------
