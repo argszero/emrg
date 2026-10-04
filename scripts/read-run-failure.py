@@ -58,6 +58,30 @@ not explained itself. It is therefore printed (the `LOG EMPTY` line, so the read
 visible) *and* counted as unmeasured (exit 2, by `main`'s `unreadable` set) - the two halves
 of "never report could-not-measure as a pass".
 
+The report is remote text, so the way **out** gets the same care as the way in
+-----------------------------------------------------------------------------
+The tool decodes defensively on the way in (`errors="replace"` on both the HTTP body and
+`gh`'s stdout) and that care was missing on the way out, where it costs more: this is the
+one output in the family whose content is not the tree's own ASCII - a job log carries the
+runner's own marks and, on this repo, mostly Chinese. Measured 2026-10-04, reproduced on
+this host with `sys.stdout.reconfigure(encoding="gbk")` (the reviewer's Windows console,
+reached deliberately): the excerpt loop raised
+
+    UnicodeEncodeError: 'gbk' codec can't encode character '\\u2705' in position 39
+
+out of `main`, and an exception leaving `main` exits **1** - the code this docstring defines
+as "the run has no failed job". So the crash did not merely lose the report; it answered the
+question with the opposite of the truth, for the very run the remedy in
+`check-release-published.py` names this tool to explain. 56 of that run's 6236 log lines
+cannot survive a `gbk` console (`•` x19, `✓` x14, `✔` x12, `🍺` x6, `⚠` x3, `✅` x1).
+
+Two flags, one call, at the top of `main`: `errors="replace"` keeps the console's own codec
+(so those Chinese lines still render instead of mojibaking) and prints `?` for the handful of
+characters it cannot carry; `line_buffering=True` is the family's ordering remedy, which this
+tool needs for its own reason - it writes the report to stdout and the `could not read:`
+refusal to stderr, so a piped reader would otherwise meet the refusal first. Both are pinned
+by tests; neither is prose.
+
 `gh` is preferred and `api.github.com` is the fallback, so **a tokenless host still gets
 an answer for everything except the log itself**: `gh` refuses every call without a
 token, while the public endpoints answer anonymously - the run's jobs (which name the
@@ -399,6 +423,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
     args = parser.parse_args(argv)
+
+    # Before anything is printed: the report echoes remote text, so an unencodable
+    # character must not be able to leave through `main`'s exit code (see the module
+    # docstring - a crash exits 1, which this tool defines as "the run has no failed
+    # job"), and the refusal on stderr must not overtake the report on stdout.
+    #
+    # `errors="replace"` rather than `encoding="utf-8"`: the console's own codec is kept,
+    # because these logs are mostly Chinese on a gbk host and forcing utf-8 would render
+    # all of it as mojibake; only the few marks it cannot carry become `?`.
+    #
+    # Guarded because a stream can legitimately be one that cannot be reconfigured (a
+    # bare writer an embedder installed, a closed pipe). `AttributeError` and `ValueError`
+    # are "this stream is not a reconfigurable TextIOWrapper" - not "the fix failed".
+    try:
+        sys.stdout.reconfigure(line_buffering=True, errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
     try:
         jobs = _jobs(args.run_id, args.repo)
