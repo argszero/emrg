@@ -529,7 +529,7 @@ def test_measure_failure_names_the_invocation_and_how_to_fix_it(mod, monkeypatch
 
 
 def test_a_missing_pytest_inside_the_venv_is_diagnosed_as_an_unsynced_checkout(
-    monkeypatch,
+    monkeypatch, tmp_path
 ) -> None:
     """The remedy must not be the command that just failed.
 
@@ -538,12 +538,18 @@ def test_a_missing_pytest_inside_the_venv_is_diagnosed_as_an_unsynced_checkout(
     that spelling produced byte-identical output, rc 2 - `uv run --no-sync` had
     left an empty `.venv` there. The message must name the environment instead.
 
-    The arm is driven rather than left to the ambient interpreter: the same child
-    output means the opposite thing when the interpreter is *not* the checkout's
-    (the next test), and a test that only ever ran under the project venv could
-    not tell the two apart.
+    Everything the message is decided from is driven here rather than read off the
+    machine this runs on: the same child output means the opposite thing when the
+    interpreter is *not* the checkout's (the next test's arm), the search would
+    otherwise consult the real `.venv` of whatever checkout is running the suite,
+    and the sentence itself turns on whether a `.venv` is there - which only the
+    tree this test builds can guarantee.
     """
     fresh = _load_module()
+    checkout = tmp_path / "checkout"
+    (checkout / ".venv" / "Scripts").mkdir(parents=True)
+    monkeypatch.setattr(fresh, "REPO_ROOT", checkout)
+    monkeypatch.setattr(fresh, "can_import_pytest", lambda python: False)
     monkeypatch.setattr(fresh, "interpreter_is_the_checkouts", lambda *a, **k: True)
 
     class _Proc:
@@ -561,19 +567,28 @@ def test_a_missing_pytest_inside_the_venv_is_diagnosed_as_an_unsynced_checkout(
     assert "uv sync" in message, "a remedy that can actually work here"
 
 
-def test_a_missing_pytest_outside_the_venv_is_not_called_an_unsynced_checkout(
-    monkeypatch,
+def test_the_refusal_says_when_the_interpreter_is_not_the_checkouts(
+    monkeypatch, tmp_path
 ) -> None:
-    """The other state of the same child output (measured 2026-10-05).
+    """The one thing the search cannot fix, said as the extra sentence it is.
 
-    `cyc20261005-022216`: on a Windows host `.venv` holds pytest (9.1.1) while
+    `cyc20261005-034541`: on this Windows host `.venv` holds pytest (9.1.1) while
     `uv run --no-sync python3 ...` resolves outside it - uv's venv provides
     `python.exe` and no `python3.exe`, so `python3` comes from PATH, where the
-    EMRG install is. The message that used to be printed here was false twice
-    over: it called a synced checkout unsynced, and it offered `uv sync` for a
-    cause `uv sync` cannot change.
+    EMRG install is. The search answers that case now; this arm is the one where
+    it could not, because nothing reachable has pytest, and the reader is still
+    owed the fact that the spelling they used reached a foreign interpreter.
+
+    What the message must not do is the old thing: call a checkout with a
+    populated `.venv` unsynced and offer `uv sync` for a cause it had just said
+    `uv sync` cannot change. An environment that was never built is exactly what
+    `uv sync` is for, whichever interpreter the caller's spelling reached.
     """
     fresh = _load_module()
+    checkout = tmp_path / "checkout"
+    (checkout / ".venv" / "Scripts").mkdir(parents=True)
+    monkeypatch.setattr(fresh, "REPO_ROOT", checkout)
+    monkeypatch.setattr(fresh, "can_import_pytest", lambda python: False)
     monkeypatch.setattr(fresh, "interpreter_is_the_checkouts", lambda *a, **k: False)
 
     class _Proc:
@@ -586,33 +601,104 @@ def test_a_missing_pytest_outside_the_venv_is_not_called_an_unsynced_checkout(
         fresh.measured_count()
     message = str(excinfo.value)
     assert "No module named pytest" in message
-    assert "wrong-interpreter" in message, "the cause, named"
-    assert "unsynced" not in message, "the cause this is not"
-    assert "uv run --no-sync python scripts/check-doc-count.py" in message, (
-        "the remedy that fits this arm"
+    assert "is not this checkout's own environment" in message, (
+        "the foreign interpreter, named as the sentence it is"
+    )
+    assert "cannot fix it" not in message, "the claim that was false here"
+    assert "uv sync" in message, "the remedy that does fit it"
+
+
+def test_the_refusal_distinguishes_a_missing_environment_from_an_empty_one(
+    mod, tmp_path
+) -> None:
+    """Both states of the environment, on trees this test builds.
+
+    `missing_pytest_remedy` takes the checkout as an argument, so it can be asked
+    about a layout the test owns instead of about the machine the suite happens to
+    run on: the message it replaced was written from one environment and read as
+    all of them. An absent `.venv` and an empty one are different facts, and the
+    sentence says which of the two was seen.
+    """
+    empty = tmp_path / "empty"
+    (empty / ".venv" / "Scripts").mkdir(parents=True)
+    text = mod.missing_pytest_remedy("/usr/bin/python3", empty, ["/usr/bin/python3"])
+    assert "unsynced" in text, "a `.venv` that is there and holds no pytest"
+    assert "uv sync" in text
+
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    text = mod.missing_pytest_remedy("/usr/bin/python3", bare, ["/usr/bin/python3"])
+    assert "never created" in text, "no `.venv` at all is a different sentence"
+    assert "uv sync" in text
+    assert "is not this checkout's own environment" not in text, (
+        "with no `.venv` there is nothing for an interpreter to be foreign to"
     )
 
 
-def test_a_checkout_with_no_venv_reports_the_cause_as_unmeasurable(monkeypatch) -> None:
-    """Neither cause can be told apart from here, so neither is asserted.
+def test_the_search_keeps_this_interpreters_answer_when_it_can_already_measure(
+    mod, monkeypatch, tmp_path
+) -> None:
+    """The documented invocation must keep measuring exactly what it measured.
 
-    The rule the guards live by, applied to a guard's own message: "could not
-    measure" is not one of the answers.
+    `measure_interpreter` is a fallback, not a substitution: an interpreter that
+    can already import pytest is the answer, and no candidate is probed - a search
+    that ran anyway could pick a different `.venv` and change what a working
+    invocation reports.
     """
-    fresh = _load_module()
-    monkeypatch.setattr(fresh, "interpreter_is_the_checkouts", lambda *a, **k: None)
+    probes: list[str] = []
+    monkeypatch.setattr(
+        mod, "can_import_pytest", lambda python: probes.append(python) or True
+    )
+    checkout = tmp_path / "checkout"
+    target = checkout / ".venv" / "Scripts" / "python.exe"
+    target.parent.mkdir(parents=True)
+    target.write_text("", encoding="utf-8")
 
-    class _Proc:
-        returncode = 1
-        stdout = ""
-        stderr = "python3: No module named pytest\n"
+    assert mod.measure_interpreter(own="/some/python", checkout=checkout) == "/some/python"
+    assert probes == ["/some/python"], "a working interpreter is not searched past"
 
-    monkeypatch.setattr(fresh.subprocess, "run", lambda *a, **k: _Proc())
-    with pytest.raises(fresh.DocCountError) as excinfo:
-        fresh.measured_count()
-    message = str(excinfo.value)
-    assert "cannot be measured" in message
-    assert "unsynced" not in message
+
+def test_the_search_finds_the_checkouts_own_interpreter_when_this_one_cannot(
+    mod, monkeypatch, tmp_path
+) -> None:
+    """The defect this exists for, on a tree the test owns (measured 2026-10-05).
+
+    `cyc20261005-034541`, on this host: the interpreter that ran this tool was the
+    EMRG install's `python3.exe`, which cannot import pytest, while the checkout's
+    `.venv` held pytest - so the count *could* be measured and the tool refused
+    instead. The `.venv` spelling is built here rather than found on this machine,
+    so the assertion holds on a leg whose environment is the POSIX one.
+    """
+    monkeypatch.setattr(
+        mod,
+        "can_import_pytest",
+        lambda python: python.replace("\\", "/").endswith(".venv/Scripts/python.exe"),
+    )
+    checkout = tmp_path / "checkout"
+    target = checkout / ".venv" / "Scripts" / "python.exe"
+    target.parent.mkdir(parents=True)
+    target.write_text("", encoding="utf-8")
+
+    resolved = mod.measure_interpreter(own="/host/python3", checkout=checkout)
+    assert resolved == str(target), "the environment one directory away, used"
+
+
+def test_the_search_answers_with_this_interpreter_when_the_checkout_has_none(
+    mod, monkeypatch, tmp_path
+) -> None:
+    """Nothing reachable can measure: the answer is the interpreter really tried.
+
+    The refusal that follows names an interpreter this machine can show, which is
+    why the search answers with the one it was given rather than inventing a path
+    that does not exist.
+    """
+    monkeypatch.setattr(mod, "can_import_pytest", lambda python: False)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    assert (
+        mod.measure_interpreter(own="/host/python3", checkout=checkout) == "/host/python3"
+    )
 
 
 def test_the_interpreter_predicate_reads_the_checkout_it_was_given(mod, tmp_path) -> None:

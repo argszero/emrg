@@ -57,9 +57,15 @@ export with no `.git`. There the two paths agree by construction (an export hold
 only tracked content); in a checkout the tracked path always wins, so a broken
 repository fails loud rather than quietly scanning something else.
 
-Run it with the project interpreter: `--measure` shells out to pytest, so a bare
-`python3` that cannot import pytest fails loud with that reason rather than
-reporting a bogus count.
+Run it with the project interpreter: `--measure` shells out to pytest, so the
+interpreter that answers must be one that can import it. *Which* interpreter that
+is, is asked rather than assumed: `measure_interpreter` keeps this tool's own
+interpreter when it can already import pytest, and otherwise uses the checkout's
+own `.venv` - so the documented `uv run --no-sync python3 ...` spelling still
+measures the tree on a host whose `python3` resolves outside the checkout, and a
+tree where nothing reachable has pytest is refused with that reason rather than
+reported as a bogus count (`_VENV_INTERPRETERS` and `measure_interpreter` below
+carry the measurement).
 """
 
 from __future__ import annotations
@@ -113,11 +119,17 @@ EXCLUDED_PREFIXES = ("tests/", "scripts/")
 # into it: "this form exits 0" is a property of a **synced** checkout. The
 # measurement above was taken in the main clone, which is synced. In a fresh
 # worktree the same spelling exits 2 without measuring anything, because
-# `uv run --no-sync` has created an empty `.venv` there and both `python` and
-# `python3` resolve to it - so the spelling is necessary but not sufficient, and
-# the hint it appears in must not be printed when the environment, not the
-# interpreter choice, is what is missing. See the pytest-missing branch in
-# `measured_count`.
+# `uv run --no-sync` has created an empty `.venv` there and nothing in it can
+# import pytest - so the spelling is necessary but not sufficient, and the hint it
+# appears in must not be printed when the environment, not the interpreter choice,
+# is what is missing. See the pytest-missing branch in `measured_count`.
+#
+# That note said both `python` and `python3` "resolve to it", which is the POSIX
+# half of a two-platform fact: measured 2026-10-05 (cyc20261005-034541) on
+# Windows, uv's venv provides `python.exe` and no `python3.exe`, so `python3`
+# leaves the venv and resolves on PATH. What fails in that fresh worktree is the
+# environment either way - but *which* interpreter answers is not something a
+# spelling decides, which is why `measure_interpreter` asks rather than assumes.
 INVOCATION = "uv run --no-sync python3 scripts/check-doc-count.py"
 
 # The stored form, as it appeared in Agent.md: the command followed by the count
@@ -219,18 +231,116 @@ def _git(*argv: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+# Where a checkout keeps the environment `uv sync` populates, relative to the
+# checkout root. Both spellings are tried on every platform, Windows first: a
+# candidate that is not there is skipped by `is_file()`, so the order costs
+# nothing and no `sys.platform` branch is needed - which is also why this is
+# testable on either leg. The same pair, for the same reason, is in
+# `check-merge-plan-suite.py`: the two tools answer one question, "which
+# interpreter measures a tree in this checkout", and two spellings of the project
+# environment are two answers free to drift apart.
+_VENV_INTERPRETERS: tuple[Path, ...] = (
+    Path(".venv") / "Scripts" / "python.exe",
+    Path(".venv") / "bin" / "python",
+)
+
+# The answer, once asked: which interpreter measures this tree is a property of
+# this machine and of this run, and finding it spawns a probe process.
+_MEASURE_INTERPRETER: str | None = None
+
+
+def can_import_pytest(python: str) -> bool:
+    """Whether `python` can import pytest - asked, never assumed from its name.
+
+    `--measure`'s first act is `-m pytest`, so the probe runs that import in the
+    interpreter in question and reads the exit code. Measured 2026-10-05 on this
+    host: `uv run --no-sync python3` reaches `~/.emrg/install/bin/python3.exe`,
+    which answers rc 1 with `No module named pytest`, while this checkout's
+    `.venv` python answers rc 0 - two paths whose names tell a reader nothing
+    about which is which.
+
+    An interpreter this machine cannot start at all - a removed path, a
+    `.venv/bin/python` shell script on Windows, a file without the execute bit -
+    answers *no* rather than raising: "this one cannot measure the tree" is a
+    fact about the candidate, and an `OSError` out of a search is a crash where a
+    fallback was asked for. `check-merge-plan-suite.py` probes its candidates the
+    same way, for the same reason.
+    """
+    try:
+        return subprocess.run(
+            [python, "-c", "import pytest"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ).returncode == 0
+    except OSError:
+        return False
+
+
+def tried_interpreters(checkout: Path) -> list[str]:
+    """Every interpreter `measure_interpreter` can reach, this tool's own first.
+
+    One definition, because two readers need the same list in the same order: the
+    search tries them in this order, and the refusal names the ones it tried - a
+    remedy that names no invocation leaves the reader where they were.
+    """
+    return [sys.executable] + [
+        str(checkout / relative) for relative in _VENV_INTERPRETERS
+    ]
+
+
+def measure_interpreter(own: str | None = None, checkout: Path | None = None) -> str:
+    """The interpreter that measures this tree: this tool's own, or the checkout's `.venv`.
+
+    Which interpreter runs the collection is not a detail: a spelling that reaches
+    an interpreter without pytest measures nothing, and what the caller gets is
+    `rc 2`, not a count. Measured 2026-10-05 on this host, the documented
+    `uv run --no-sync python3 scripts/check-doc-count.py --measure` reaches the
+    EMRG install's `python3.exe` and measures nothing, while this checkout's
+    `.venv` holds pytest - uv's venv provides `python.exe` and no `python3.exe`,
+    so `python3` leaves the venv and resolves on PATH. The tool used to read that
+    as a refusal; the answer it can act on is the environment this checkout
+    already has, so that is tried before refusing.
+
+    `check-merge-plan-suite.py` asks the same question (its `_suite_interpreter`),
+    and both must answer it the same way: "which interpreter judges a tree in this
+    checkout" is one fact about one machine.
+
+    `own` and `checkout` exist so a test can ask about a layout it owns instead of
+    about this machine's. An invocation whose interpreter can already import
+    pytest is answered with itself and no candidate is probed, so the documented
+    invocation keeps measuring exactly what it measured before.
+    """
+    global _MEASURE_INTERPRETER
+    cacheable = own is None and checkout is None
+    if cacheable and _MEASURE_INTERPRETER is not None:
+        return _MEASURE_INTERPRETER
+    interpreter = sys.executable if own is None else own
+    resolved = interpreter
+    if not can_import_pytest(interpreter):
+        root = REPO_ROOT if checkout is None else checkout
+        for relative in _VENV_INTERPRETERS:
+            candidate = root / relative
+            if candidate.is_file() and can_import_pytest(str(candidate)):
+                resolved = str(candidate)
+                break
+    if cacheable:
+        _MEASURE_INTERPRETER = resolved
+    return resolved
+
+
 def interpreter_is_the_checkouts(interpreter: str, checkout: Path) -> bool | None:
     """Whether `interpreter` is the one this checkout's own `.venv` provides.
 
-    The question `measured_count`'s pytest-missing branch needs and did not ask:
-    "No module named pytest" is the *shape* of two different states, and the
-    remedy differs between them - `uv sync` builds an environment that was never
-    built, and cannot put pytest into an interpreter that is not this checkout's
-    at all.
+    Asked by the refusal, because it is the one thing that explains a failed
+    invocation the search itself cannot fix: when the interpreter that ran this
+    tool is not this checkout's own environment, re-running the same spelling
+    changes nothing, and the reader is owed that sentence rather than left to
+    infer it from two path strings.
 
     `None` when the checkout has no `.venv` to compare against: the question has
-    no subject there, which is not the same answer as "no", and the two remedies
-    are not interchangeable.
+    no subject there, which is not the same answer as "no".
 
     :param interpreter: the path of the interpreter that ran this tool.
     :param checkout: the tree this tool is reading.
@@ -247,51 +357,56 @@ def interpreter_is_the_checkouts(interpreter: str, checkout: Path) -> bool | Non
     return venv.resolve() in exe.parents
 
 
-def missing_pytest_remedy(interpreter: str, checkout: Path) -> str:
-    """Which of the two causes was measured, and the remedy that fits *it*.
+def missing_pytest_remedy(
+    interpreter: str, checkout: Path, tried: list[str]
+) -> str:
+    """Which cause was measured, and the remedy that fits it.
 
-    Measured 2026-10-05 (cyc20261005-022216), against what this branch used to
-    say: it asserted "an unsynced checkout, not a wrong-interpreter problem",
+    Reached only after `measure_interpreter` has tried every interpreter this
+    checkout offers, so what is left to say is about the *environment*: nothing
+    reachable from here can import pytest, and every candidate is named, because a
+    remedy that names no invocation leaves the reader where they were.
+
+    Measured 2026-10-05 (cyc20261005-034541), against what this branch used to
+    print: it asserted "an unsynced checkout, not a wrong-interpreter problem",
     generalising one 2026-09-13 reading of a fresh worktree into the only case.
-    On a Windows host the other case is what actually happens - `.venv` holds
-    pytest (9.1.1 measured) while `sys.executable` is the EMRG install's
-    `bin\\python3.exe`, because uv's venv provides `python.exe` and no
-    `python3.exe`, so `uv run --no-sync python3 ...` leaves the venv and resolves
-    on PATH. `uv sync` cannot change that, and the claim that "`python` and
-    `python3` both resolve to it" is false there.
+    On this Windows host the other case is what happens - `.venv` held pytest
+    (9.1.1) while `sys.executable` was the EMRG install's `bin\\python3.exe`,
+    because uv's venv provides `python.exe` and no `python3.exe`, so
+    `uv run --no-sync python3 ...` leaves the venv and resolves on PATH. That case
+    is now answered by the search (`measure_interpreter`) rather than described
+    here, and the old sentence's second claim - that `uv sync` cannot fix it - is
+    gone with it: an environment that was never built is what `uv sync` is for,
+    whichever interpreter the caller's spelling happened to reach.
 
-    So each arm names its own cause and only the remedy that fits it. When the
-    checkout has no `.venv`, the two are indistinguishable from here and both are
-    named, neither asserted - the same rule the guards follow, where a question
-    that cannot be answered is reported unmeasurable rather than as a pass.
-
-    :param interpreter: the `sys.executable` this run is using.
+    :param interpreter: the interpreter that ran this tool.
     :param checkout: the tree this tool is reading.
+    :param tried: every interpreter the search reached, in the order it tried them.
     :returns: the paragraph the pytest-missing branch appends to its message.
     """
-    inside = interpreter_is_the_checkouts(interpreter, checkout)
-    if inside is True:
-        return (
-            "This is an unsynced checkout: the interpreter that ran this tool is "
-            "this checkout's own `.venv`, and that environment holds no pytest. "
-            "Run `uv sync` in this checkout first, or run this tool from a "
-            "checkout whose environment is already synced."
+    venv = checkout / ".venv"
+    if venv.is_dir():
+        state = (
+            f"This checkout's `.venv` is there but unsynced, so it holds no "
+            "pytest"
         )
-    if inside is False:
-        return (
-            "This is a wrong-interpreter problem, and `uv sync` cannot fix it: "
-            f"{interpreter} is not this checkout's `.venv` ({checkout / '.venv'}), "
-            "so it is not the environment this checkout's pytest lives in. On "
-            "Windows `uv run --no-sync python3 ...` leaves the venv and resolves "
-            "`python3` on PATH, because uv's venv provides `python.exe` and no "
-            "`python3.exe`; `uv run --no-sync python scripts/check-doc-count.py "
-            "--measure` picks up the checkout's own interpreter."
+    else:
+        state = (
+            "This checkout has no `.venv` at all, so its environment was never "
+            "created here"
+        )
+    foreign = ""
+    if interpreter_is_the_checkouts(interpreter, checkout) is False:
+        foreign = (
+            f" The interpreter that ran this tool ({interpreter}) is not this "
+            f"checkout's own environment (`{venv}`), so re-running the spelling "
+            "that produced this message cannot help by itself."
         )
     return (
-        "This checkout has no `.venv`, so which of the two causes this is cannot "
-        "be measured from here: either the environment was never created (run "
-        "`uv sync`), or the interpreter that ran this tool is not this checkout's "
-        f"own ({interpreter}). A `.venv` holding pytest settles it."
+        f"{state}, and no other interpreter this tool can reach has pytest "
+        f"either. Tried: {', '.join(tried)}.{foreign} Run `uv sync` in {checkout} "
+        "first, or run this tool from a checkout whose environment is already "
+        "synced."
     )
 
 
@@ -305,9 +420,25 @@ def measured_count() -> int:
     raised a bare `TypeError` past every handler). Any collected id or warning
     carrying a non-ASCII byte would do the same here on a cp936 host, so the
     decoding is pinned before that can happen.
+
+    The interpreter is `measure_interpreter`'s answer, not `sys.executable`: a
+    count measured by an interpreter that is not the one the caller named is still
+    a count of this tree, but *which* interpreter answered is part of the reading
+    when the two differ, so the difference is printed rather than left to be
+    discovered from a number.
     """
+    interpreter = measure_interpreter()
+    if interpreter != sys.executable:
+        # Said out loud, because which interpreter judged a tree is part of the
+        # reading: this tool's own interpreter cannot import pytest, and the
+        # count that follows comes from the checkout's environment instead.
+        print(
+            f"measuring interpreter: {interpreter} - this tool's own interpreter "
+            f"({sys.executable}) cannot import pytest",
+            file=sys.stderr,
+        )
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+        [interpreter, "-m", "pytest", "--collect-only", "-q"],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
@@ -321,23 +452,25 @@ def measured_count() -> int:
         )
     if proc.returncode != 0:
         detail = (proc.stdout[-2000:] + proc.stderr[-2000:]).strip()
-        # Two causes, two remedies. The 2026-09-13 measurement (cyc20260913-122923)
-        # of a fresh review worktree - `uv run --no-sync` had left an empty `.venv`
-        # there (`site-packages` holding only `_virtualenv.pth` and
-        # `_virtualenv.py`) - is one of them, and this branch used to print it as
-        # the only one ("an unsynced checkout, not a wrong-interpreter problem").
-        # Measured 2026-10-05 (cyc20261005-022216): on a Windows host the other
-        # one is what happens, and the sentence was false - `.venv` held pytest
-        # while `sys.executable` was a `python3` outside the checkout. Which one
-        # this is *is* measurable, from the one thing neither reading shares,
-        # so `missing_pytest_remedy` asks it and says only what it measured.
+        # Two causes, and this branch used to print one of them as the only one
+        # ("an unsynced checkout, not a wrong-interpreter problem"): the
+        # 2026-09-13 measurement (cyc20260913-122923) of a fresh review worktree
+        # - `uv run --no-sync` had left an empty `.venv` there (`site-packages`
+        # holding only `_virtualenv.pth` and `_virtualenv.py`) - is one of them.
+        # Measured 2026-10-05 (cyc20261005-034541): on this Windows host the
+        # other one is what happens, and the sentence was false - `.venv` held
+        # pytest while `sys.executable` was a `python3` outside the checkout. The
+        # search above answers that case now; what is left here is the one no
+        # search can fix, and `missing_pytest_remedy` says only what it read.
         if "No module named pytest" in detail:
             raise DocCountError(
-                "pytest is not installed in the interpreter running this tool "
-                f"({sys.executable}), so no test was collected:\n"
+                "pytest is not installed in the interpreter that ran the "
+                f"collection ({interpreter}), so no test was collected:\n"
                 + detail
                 + "\n\n"
-                + missing_pytest_remedy(sys.executable, REPO_ROOT)
+                + missing_pytest_remedy(
+                    interpreter, REPO_ROOT, tried_interpreters(REPO_ROOT)
+                )
             )
         raise DocCountError(
             f"pytest --collect-only failed (rc={proc.returncode}):\n"
