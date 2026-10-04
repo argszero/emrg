@@ -303,6 +303,32 @@ gives you; the releases page has the pinned build). CI remains authoritative: th
 the same tool at the same version over the same files, not a second implementation of its
 rules.
 
+**The readable path to a failed run's cause.** `gh run view <id> --log` and `--log-failed` answer
+**0 bytes with exit 0** on a current host for every run, green or red (measured 2026-10-04 on `gh`
+2.58.0: v0.3.8's failed build `36956685533`, v0.3.7's green build `36658495939`, and a recent `Test`
+run all return nothing on stdout *and* stderr, rc 0) — a silent empty answer that reads exactly like
+"this run has no log". `gh api` is unaffected (the same job's log is 689 KB), so:
+
+```bash
+uv run --no-sync python3 scripts/read-run-failure.py <run-id>            # the failed job, its step, its output
+uv run --no-sync python3 scripts/read-run-failure.py <run-id> --tail 60  # more of the failing step's block
+```
+
+It prints the job the payload marks failed, the **step** that failed (only the payload names it — a
+step that dies silently leaves no line in the log at all, which is exactly the notarize case above),
+the runner's `##[error]` annotation, and the failing step's block **up to** that annotation rather
+than the log's tail — the tail is the runner's own teardown (17 lines of `Post job cleanup` on the run
+above, which bury the cause). Exit `0` = a cause was printed; `1` = the run has no failed job; `2` =
+the question could not be answered (bad id, `gh` failed, no jobs listed, or a failed job's log came
+back empty) — **never a pass**.
+
+**It works without a GitHub token too**, which matters because `gh` refuses *every* call when it is
+unauthenticated ("please run: gh auth login") while the same paths answer anonymously: the tool falls
+back to `api.github.com` with no credentials, prints which channel answered, and reads the runner's
+annotations from the job's check run — so a tokenless host still gets the failed job and the failed
+step. The job **log** is the one part GitHub will not serve anonymously (`403`), and the report says
+so per job instead of reporting no cause.
+
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 > **Self-evolution from source**: the evolution workspace expects the repo at `~/.emrg/evolution/emrg`. Packaged installs self-heal (clone on demand + auto-bootstrap projects/tasks); source installs should clone there explicitly if you want the evolution daemon to work on this repo.

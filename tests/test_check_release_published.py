@@ -271,6 +271,44 @@ def test_a_red_run_names_the_jobs_that_failed(mod, monkeypatch, capsys):
     assert "gh run rerun" in out
 
 
+def test_the_remedy_names_a_reading_that_answers(mod, monkeypatch, capsys):
+    """The command a FAULT hands the reader has to be one that answers on a real host.
+
+    Measured 2026-10-04 on v0.3.8's red run (`36956685533`), while this tool's own FAULT
+    was being read: the remedy used to name `gh run view <id> --log-failed`, and that
+    command returns **0 bytes with exit 0** on this host - for this run, for a green one
+    and for a recent `Test` run, so it is the host's log path rather than one run's
+    problem. An empty answer that exits 0 reads as "nothing to see", which arrives at the
+    worst possible moment: the reader has just been told the release is missing. The
+    remedy therefore names `scripts/read-run-failure.py`, which asks the API and keeps
+    "no failed job" (rc 1) apart from "the log could not be read" (rc 2).
+
+    Both halves are asserted on the **printed output** rather than on the source: the
+    reading that matters is what a host sees, and a source-level `in` would pass for a
+    string that never reaches a terminal. The negative half is the one that would have
+    caught the defect - it pins that the broken command is not offered as an alternative
+    beside the working one, because a remedy that lists both hands the reader the broken
+    one at the moment they are least able to tell the difference.
+    """
+    routes = _routes(
+        runs=[_run(conclusion="failure")],
+        jobs=[{"name": "build (macos-15, arm64)", "conclusion": "failure"}],
+    )
+    code, out, _ = _check(mod, monkeypatch, capsys, routes)
+    assert code == 1
+    assert f"scripts/read-run-failure.py {RUN_ID}" in out, (
+        "the remedy must name the reading that answers, with this run's id so the command "
+        "is runnable as printed"
+    )
+    assert "--log-failed" not in out, (
+        "the remedy offers `gh run view --log-failed`, which answers 0 bytes with exit 0 "
+        "on a host this was measured on - the silent-empty shape that reading exists to "
+        "replace"
+    )
+    # The other half of the remedy is untouched: a re-run is still the next step.
+    assert f"gh run rerun {RUN_ID} --failed" in out
+
+
 def test_a_cancelled_run_is_a_fault_not_a_pass(mod, monkeypatch, capsys):
     routes = _routes(runs=[_run(conclusion="cancelled")], jobs=[])
     code, out, _ = _check(mod, monkeypatch, capsys, routes)
