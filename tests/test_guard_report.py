@@ -30,10 +30,10 @@ program's own order. So the verdict overtakes the identity line **only under a p
 The remedy, and why it is one line at each `main()`
 ---------------------------------------------------
 `sys.stdout.reconfigure(line_buffering=True)` makes every line leave the process when
-the program wrote it, so a merged reader gets program order. It is stated at each of
-the four gates rather than in a shared module because those four are independent
-tools that otherwise share nothing (`merge_tree.py` is the merge gates' module, and
-three of these four are not merge gates); the *rule* - all four must have it - is
+the program wrote it, so a merged reader gets program order. It is stated at each
+script rather than in a shared module because these are independent tools that
+otherwise share nothing (`merge_tree.py` is the merge gates' module, and most of them
+are not merge gates); the *rule* - every script with the shape must have it - is
 mechanised here instead of being left as prose.
 
 This test is the rule, in three parts
@@ -43,13 +43,26 @@ This test is the rule, in three parts
   about something else that happens to be true;
 * one real gate end-to-end, in a synthetic tree it cannot damage (the copy's
   `REPO_ROOT` is that tree, and `--resolve-conflict` refuses before writing anything);
-* an AST sweep over `scripts/check-*.py`: every gate that prints a `tree: ` line to
-  stdout *and* writes to stderr must carry the call - unconditionally, so a gate that
+* an AST sweep over `scripts/*.py`: every script that prints a `tree: ` line to
+  stdout *and* writes to stderr must carry the call - unconditionally, so a script that
   gains the shape without the remedy is caught wherever it came from. The sweep also
-  holds a baseline of the gates known to have the shape and asserts it has not *shrunk*,
+  holds a baseline of the scripts known to have the shape and asserts it has not *shrunk*,
   so a `tree: ` line that quietly disappears is visible; it deliberately allows the set
-  to grow, because a gate that gains the shape *and* the remedy has followed the rule
+  to grow, because a script that gains the shape *and* the remedy has followed the rule
   and should not be failed for it (`#1631` adds one).
+
+What the sweep reads, and what it used to read
+---------------------------------------------
+The membership test is the predicate below - a `tree: ` line out, a verdict to stderr -
+and that is the whole rule. Until 2026-10-04 the candidates were filtered first to the
+filename prefix `check*`, which is a *name* and no part of the rule, and the name had
+quietly become the scope: measured then (`cyc20261004-111232`), the predicate returns
+ten scripts and the prefix admitted eight of them. The two it left out are
+`review-queue.py` - the tool a cycle runs first, which prints a host's own rant text on
+stdout and an unmeasurable rant ledger on stderr - and `bump-version.py`, which prints
+the tree it read and then refuses on stderr. Both had the shape the remedy exists for
+and neither had the remedy: a filename is a poor place to keep a rule's boundary,
+because renaming a file moves it.
 
 What is deliberately out of scope
 ---------------------------------
@@ -76,16 +89,25 @@ SCRIPTS = REPO_ROOT / "scripts"
 # call, and two spellings of it would be one spelling too many.
 REMEDY = "sys.stdout.reconfigure(line_buffering=True)"
 
-# Measured 2026-09-26 by the sweep in the last test of this file: the gates that
-# print the family's identity line to stdout *and* write a verdict to stderr. Held as
-# a baseline the sweep must still cover - a gate losing either half leaves this set
-# and is caught there. It is not an upper bound: a gate that gains both halves and
+# Measured by the sweep in the last test of this file: the scripts that print the
+# family's identity line to stdout *and* write a verdict to stderr. Held as a
+# baseline the sweep must still cover - a script losing either half leaves this set
+# and is caught there. It is not an upper bound: a script that gains both halves and
 # carries the remedy is correct and passes without editing this.
+#
+# The 2026-09-26 measurement named four: check-citation-resolves, check-doc-count,
+# check-node-test-count, check-rant-citations. It was taken when the sweep looked only
+# at `check*.py`, which is why neither of the two names added below could be in it.
+# The other two here are what the *predicate* names once the filename prefix stops
+# standing in for the rule; measured 2026-10-04 (`cyc20261004-111232`), the predicate
+# returns ten scripts and the prefix admitted eight of them.
 SWEPT = {
+    "bump-version.py",
     "check-citation-resolves.py",
     "check-doc-count.py",
     "check-node-test-count.py",
     "check-rant-citations.py",
+    "review-queue.py",
 }
 
 
@@ -222,7 +244,7 @@ def _sweep() -> tuple[set[str], set[str]]:
 
     needs: set[str] = set()
     have: set[str] = set()
-    for path in sorted(SCRIPTS.glob("check*.py")):
+    for path in sorted(SCRIPTS.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         if not any(emits_tree_line(n) for n in ast.walk(tree)):
             continue

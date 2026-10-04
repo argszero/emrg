@@ -290,6 +290,16 @@ def bump(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A merged reader must see the `tree:` line before any verdict, and this
+    # family's docstrings promise that order. stdout is block-buffered when it is
+    # a pipe (how a cycle reads this report: `2>&1 | tail`) while stderr is not,
+    # so without this every stderr line overtakes the tree line. Behaviour and
+    # pin: tests/test_guard_report.py.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(
         description="Bump every EMRG version source (8 declarations in 8 files).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
