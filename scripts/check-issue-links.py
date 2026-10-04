@@ -232,6 +232,28 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+#: The scripts are not importable modules (hyphenated names, no package), so the shared
+#: reader is loaded by path. `scripts/gh_read.py` has no hyphen, but it is loaded the same
+#: way as every other sibling here so a caller cannot end up with two copies of one module
+#: (`sys.modules` is registered before exec, which dataclasses needs - see the same
+#: loader in `review-queue.py`).
+import importlib.util
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+
+
+def _load_gh_read():
+    spec = importlib.util.spec_from_file_location("gh_read", _SCRIPTS_DIR / "gh_read.py")
+    if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
+        raise RuntimeError("could not load scripts/gh_read.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+gh_read = _load_gh_read()
+
 #: The repo's own name, so a bare run answers about the queue a cycle is standing in.
 DEFAULT_REPO = "argszero/emrg"
 
@@ -464,23 +486,18 @@ class Refs:
 
 
 def _gh(args: list[str]) -> str:
-    """Run `gh`, failing loud: an unreadable queue is not an empty one."""
-    try:
-        proc = subprocess.run(
-            ["gh", *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except FileNotFoundError as exc:  # pragma: no cover - the CI legs install gh
-        raise RuntimeError(f"gh is not available on this machine ({exc})") from exc
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"gh failed (rc={proc.returncode}): gh {' '.join(args)}\n"
-            f"{proc.stderr.strip()}"
-        )
-    return proc.stdout
+    """Run `gh`, failing loud: an unreadable queue is not an empty one.
+
+    The transport is `gh_read.py`'s business, not this file's: every call this tool makes
+    is the `api` shape (a REST path, sometimes with `--paginate`), which is exactly the
+    shape that module translates, so a host with **no token** reads this queue through
+    `api.github.com` instead of reporting every row unmeasurable. Measured 2026-10-04
+    (`cyc20261004-074903`): on this host `gh` refuses every call without a token - it does
+    not even attempt the request - while the same paths answer anonymously, so this tool's
+    exit 2 was a reading withheld rather than a reading taken. Its refusal is still what
+    happens when *neither* channel answers, and the message then carries both reasons.
+    """
+    return gh_read.api_text(args)
 
 
 def _scan_claims(text: str) -> set[int]:

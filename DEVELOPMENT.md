@@ -303,6 +303,24 @@ annotations from the job's check run — so a tokenless host still gets the fail
 step. The job **log** is the one part GitHub will not serve anonymously (`403`), and the report says
 so per job instead of reporting no cause.
 
+**`scripts/gh_read.py` is where that choice lives**, so the next tool does not re-solve it: it takes
+the argv a caller would hand `gh` after the program name and returns the text `gh` would have printed,
+whichever channel produced it — `gh` first, then the same `api` path read anonymously. Two limits are
+deliberate and refused rather than approximated: a `--jq` filter (returning the unfiltered payload
+where a filter was asked for does not fail, it silently changes what the caller reads) and any argv
+that is not the `api` shape (`pr view --json …` needs GitHub's field renames — `headRefOid` versus
+`head.sha` — and a wrong rename would corrupt a merge gate's reading). `--paginate` is honoured by its
+own pager, merged into one array exactly as `gh api --paginate` prints it, with a page ceiling that is
+reported when hit rather than truncating in silence.
+
+```bash
+uv run --no-sync python3 scripts/gh_read.py repos/argszero/emrg   # which channel answers here?
+```
+
+That one-liner is the host-side way to ask "can this machine read GitHub at all, and how" — a
+question every reading at the top of a cycle asks, whose answer changes when a token is added or
+expires. `scripts/check-issue-links.py` already reads through it; the rest of the queue family follows.
+
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 > **Self-evolution from source**: the evolution workspace expects the repo at `~/.emrg/evolution/emrg`. Packaged installs self-heal (clone on demand + auto-bootstrap projects/tasks); source installs should clone there explicitly if you want the evolution daemon to work on this repo.
