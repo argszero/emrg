@@ -621,6 +621,11 @@ class Reading:
     stale: bool = False
     stale_kind: str = ""
     stale_reason: str = ""
+    #: The CI run the stale verdict is about, empty when there is none. The `ci-red`
+    #: row's remedy is built from it: "read why it failed" is runnable as printed only
+    #: if the row has the run, and the alternative - the id in the link `gh pr checks`
+    #: prints - is a command the reader has to assemble by hand.
+    ci_run_id: str = ""
     behind_by: int | None = None
     unread: str = ""
     #: GitHub's lifecycle state for the PR (`OPEN`, `MERGED`, `CLOSED`). Everything
@@ -759,6 +764,7 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
     out.stale = bool(fresh.stale)
     out.stale_kind = str(fresh.stale_kind)
     out.stale_reason = str(fresh.reason)
+    out.ci_run_id = str(getattr(fresh, "run_id", "") or "")
     out.behind_by = int(fresh.behind_by)
     return out
 
@@ -855,8 +861,18 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             kind="ci-red",
             why=reading.stale_reason
             + " - not votable: a vote at this head would be a vote about a tree whose "
-              "CI ran red, and a re-run only helps if the failure was a flake",
+              "CI ran red, and a re-run only helps if the failure was a flake. "
+              "`gh pr checks` names the failing check, not its cause, so read the cause "
+              "with the reading that answers - and before fixing anything, ask whether "
+              "the row is the head's own, because a base-level failure turns every open "
+              "PR red and `check-merge-plan-suite.py` reports the rows the base tree "
+              "fails too",
             command=f"gh pr checks {pr} -R {repo}",
+            extra=[
+                f"{RUNNER} scripts/read-run-failure.py "
+                f"{reading.ci_run_id or '<run-id from the link above>'}",
+                f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
+            ],
         )
     if reading.stale_read and reading.stale_kind == "no_run":
         return Action(

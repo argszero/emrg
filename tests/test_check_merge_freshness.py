@@ -66,6 +66,9 @@ SCRIPT = REPO_ROOT / "scripts" / "check-merge-freshness.py"
 HEAD = "a" * 40
 OTHER = "b" * 40
 BASE = "c" * 40
+# The actions run's own id, as the API reports it - the value a failing remedy hands over
+# so its command is runnable as printed.
+RUN_ID = "37194550758"
 
 
 def _load_module():
@@ -138,13 +141,17 @@ def _view(sha: str = HEAD, branch: str = "feature/x", state: str = "OPEN",
     }
 
 
-def _run_(sha: str = HEAD, conclusion: str = "success", at: str = "2026-09-11T00:00:00Z") -> dict:
+def _run_(sha: str = HEAD, conclusion: str = "success", at: str = "2026-09-11T00:00:00Z",
+          run_id: str = RUN_ID) -> dict:
     """A workflow run, as the actions/runs payload reports it.
 
     `name` is not decoration: the tool pins the verdict to the `Test` workflow, so
-    a fixture without it is a run the tool is right to ignore.
+    a fixture without it is a run the tool is right to ignore. `databaseId` is the id
+    the failing remedy hands over, so a fixture without one would make the printed
+    command a placeholder - the shape this fixture exists to rule out.
     """
-    return {"headSha": sha, "name": "Test", "conclusion": conclusion, "createdAt": at}
+    return {"headSha": sha, "name": "Test", "conclusion": conclusion, "createdAt": at,
+            "databaseId": run_id}
 
 
 def _install(mod, monkeypatch, fake: FakeGh) -> None:
@@ -680,6 +687,35 @@ def test_a_failing_run_is_told_to_fix_the_failure_not_to_refresh(mod, monkeypatc
     assert asked == []
     assert "fix the failure" in err
     assert "does not make a failing run pass" in err
+
+
+def test_a_failing_remedy_names_the_reading_that_produces_the_cause(
+    mod, monkeypatch, capsys
+):
+    """`fix the failure` is undirected without a way to read *why* it failed.
+
+    Measured 2026-10-04: `gh run view <id> --log-failed` answers **0 bytes with rc 0**
+    on this host for every run, green ones included, so a remedy that leaves the reader
+    to reach for it hands over a failure to measure in the shape of a pass. The reading
+    that answers is `scripts/read-run-failure.py <run-id>`, and whose failure it is comes
+    first: a base-level row turns every open PR red, and the plan suite names that.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [_run_(conclusion="failure")])
+    _votes(mod, monkeypatch, 3)
+    _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert f"scripts/read-run-failure.py {RUN_ID}" in err, (
+        "the failing remedy must name the reading that produces the cause, with this "
+        "run's id so the command runs as printed"
+    )
+    assert "--log-failed" not in err, (
+        "the remedy offers `gh run view --log-failed`, which answers 0 bytes with "
+        "exit 0 here - a failure to measure wearing the shape of a pass"
+    )
+    assert "check-merge-plan-suite.py 1" in err, (
+        "whose failure it is has to be askable: a row the base fails too is not this "
+        "head's, and nothing in the remedy says where that is read"
+    )
 
 
 def test_json_carries_the_kind_and_the_count(mod, monkeypatch, capsys):

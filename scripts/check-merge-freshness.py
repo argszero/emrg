@@ -303,6 +303,12 @@ class Verdict:
     reason: str
     # Which of the four ways (one of the `_KIND_*` names); "" when fresh.
     stale_kind: str = ""
+    #: The run's own id, so a remedy can hand over a command that is runnable as
+    #: printed. Empty when there is no run. Why it is carried rather than looked up
+    #: again by the reader: the only other place this id is visible is the link
+    #: `gh pr checks` prints, and a remedy whose command has to be assembled by hand
+    #: is one the reader can get wrong at the moment they are least able to tell.
+    run_id: str = ""
     #: GitHub's lifecycle state (`OPEN`, `MERGED`, `CLOSED`). A terminal PR is not a
     #: stale verdict and not a fresh one - it has no merge left for a verdict to be
     #: about (issue #1837, and `_terminal` below).
@@ -369,7 +375,7 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
             f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
             "--jq",
             "{runs: [.workflow_runs[] | {headSha: .head_sha, name, "
-            "createdAt: .created_at, conclusion}]}",
+            "createdAt: .created_at, conclusion, databaseId: .id}]}",
         ]
     )
     assert isinstance(payload, dict)
@@ -478,6 +484,7 @@ def check_pr(number: int) -> Verdict:
         behind_by=behind_by,
         run_created_at=created,
         run_conclusion=conclusion,
+        run_id=str(run.get("databaseId") or "") if run else "",
     )
 
     if status not in _FRESH_STATUSES and status not in _STALE_STATUSES:
@@ -654,8 +661,17 @@ def _valid_votes(pr: int) -> Price:
         return Price(None, unread=f"{type(exc).__name__}: {exc}".replace("\n", " ")[:200])
 
 
-def _remedy(pr: int, kind: str, price: Price) -> str:
+def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
     """One line: what to do about this verdict, and what it charges.
+
+    The failing kind's line names a **reading** as well as an action, and the reading
+    is handed over runnable as printed (`run_id` is the verdict's own). Measured
+    2026-10-04: "fix the failure" without a way to read *why* left the reader to
+    reach for `gh run view --log`, which on this host answers **0 bytes with rc 0**
+    for every run - a failure to measure wearing the shape of a pass, handed over at
+    the moment the reader is least able to tell. The old command is not repeated as a
+    thing to try, for the reason `scripts/check-release-published.py` records: a
+    remedy that lists both hands the reader the broken one.
 
     The price is attached only where it is actually paid - an ancestry-stale
     verdict is the one a refresh cures. The other three kinds get the action that
@@ -747,7 +763,12 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
         )
     return (
         f"#{pr}: fix the failure - a refresh costs every vote the branch has, and does not "
-        "make a failing run pass"
+        "make a failing run pass. Whose failure it is comes first: read the cause with the "
+        f"reading that answers (`uv run --no-sync python3 scripts/read-run-failure.py "
+        f"{run_id}` - the run's step and the block up to its `##[error]`), and ask whether "
+        f"the row is the head's own (`scripts/check-merge-plan-suite.py {pr}` names the "
+        "failing rows and reports the ones the base tree fails as well, and those belong to "
+        "the base)"
     )
 
 
@@ -798,6 +819,11 @@ def main(argv: list[str] | None = None) -> int:
                         "stale": v.stale,
                         "reason": v.reason,
                         "stale_kind": v.stale_kind,
+                        # The remedy's own input: a consumer that renders "read why it
+                        # failed" from this reading needs the run the failing verdict is
+                        # about, and re-deriving it means another `gh` query for a value
+                        # the tool already had.
+                        "run_id": v.run_id or None,
                         # Beside `stale`, because the three-valued outcome
                         # (fresh / stale / over) does not fit in a boolean: a consumer
                         # reading `"stale": false` off a merged PR would conclude the
@@ -842,7 +868,7 @@ def main(argv: list[str] | None = None) -> int:
             if not v.stale:
                 continue
             price = prices.get(v.pr, Price(None))
-            print("  " + _remedy(v.pr, v.stale_kind, price), file=sys.stderr)
+            print("  " + _remedy(v.pr, v.stale_kind, price, v.run_id), file=sys.stderr)
         return 1
     return 0
 
