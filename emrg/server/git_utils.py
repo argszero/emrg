@@ -290,12 +290,38 @@ def git_cmd(*args: str, cwd: str | None = None, timeout: int = 10) -> subprocess
     Falls back to bare ``git`` when no bundled binary is found (dev mode).
     The prompt-free environment guarantees no GCM/askpass popups from a
     background daemon (rant 2026-08-07T10:17:27).
+
+    A codec is not a policy, and pinning one was this function's whole answer
+    ----------------------------------------------------------------------
+    ``encoding="utf-8"`` says which codec to decode with; it does not say what to
+    do with a byte that codec rejects, so the default is `strict` and the command
+    raises instead of returning:
+
+        git_cmd("diff")   # a repository holding a latin-1 file
+        -> UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe9 in position 97
+
+    and an exception out of ``git_cmd`` is not the ``CompletedProcess`` every
+    caller destructures. Git's stdout is *not* guaranteed UTF-8 the way `gh`'s JSON
+    is: a repository's content is bytes, and `git diff` / `git show` / `git log -p`
+    emit those bytes verbatim, so the failure is a property of the data the
+    repository holds rather than of this host's locale.
+
+    ``errors="surrogateescape"`` rather than the ``errors="replace"`` used
+    elsewhere for remote text, because of the two things this function returns.
+    Every path it produces is *opened* by a caller (`repo_scope` roots the
+    ``info/exclude`` writer, `rev-parse --git-path` names the file written to), and
+    `replace` turns an undecodable byte into U+FFFD - a name that denotes no file,
+    so the write quietly lands somewhere else. A surrogate survives the round trip:
+    Python re-encodes it to the original bytes when the string goes back to the OS,
+    so the path still names the file it named. The trade is that an unprintable
+    character can now reach a `print`, which fails loudly rather than silently.
     """
     git, _ = resolve_git_gh()
     exe = git or "git"
     return subprocess.run(
         [exe, *args], cwd=cwd, capture_output=True, text=True,
-        encoding="utf-8", timeout=timeout, env=no_prompt_env(),
+        encoding="utf-8", errors="surrogateescape",
+        timeout=timeout, env=no_prompt_env(),
         **win32_no_window_kwargs(),
     )
 
