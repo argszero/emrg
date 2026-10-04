@@ -202,11 +202,30 @@ def test_start_row_offset():
 
 
 def test_truncation_at_buffer_height():
-    """Lines beyond buffer height are silently dropped."""
-    buf = Buffer(width=10, height=0)
-    lines = [make_line([Span(text="x")])]
-    # Should not crash
+    """Lines beyond buffer height are silently dropped — and this reads the drop.
+
+    The write loop stops at `y >= buf.height`, so at `height=0` every row is already
+    beyond the buffer and the only thing left to assert is that the call returned: that
+    is what this test did until 2026-10-05 (`# Should not crash`), under a name that
+    promises a dropped line and a body that could not tell a drop from a write. Two
+    rows and three lines puts the boundary inside the buffer, where the third line's
+    absence is an observation rather than an assumption.
+    """
+    buf = Buffer(width=10, height=2)
+    lines = [
+        make_line([Span(text="a")]),
+        make_line([Span(text="b")]),
+        make_line([Span(text="c")]),
+    ]
     write_lines_to_buffer(buf, lines)
+
+    rendered = {_cell_char(buf, x, y)
+                for x in range(buf.width) for y in range(buf.height)}
+    assert _cell_char(buf, 0, 0) == "a", "the first line is inside the buffer"
+    assert _cell_char(buf, 0, 1) == "b", "the second fills its last row"
+    assert "c" not in rendered, (
+        "the third line is past the height, so it is nowhere in the buffer — this is "
+        "the assertion the name makes and the old body did not")
 
 
 # ── Wide character handling ───────────────────────────────────
