@@ -528,6 +528,21 @@ class TestCli:
                 f"the message points at {name}, which does not exist in the repo"
             )
 
+        # ...and it points at it with the family's runner in front, because the pointer is a
+        # **command**, not a file name: a bare `scripts/x.py` runs under whatever `python3`
+        # the reader's PATH resolves, which on a clone is not the checkout's (the same rule
+        # `review-queue.py`'s RUNNER docstring states and `cast-vote.py` had to be given).
+        # Measured 2026-10-05: the bare spelling ran here only because this host's `python3`
+        # happens to be the install's own interpreter - the coincidence is the host's.
+        assert getattr(mod, "RUNNER", ""), (
+            "the file has to declare the family's runner constant for its printed "
+            "commands to be able to carry it"
+        )
+        assert mod.RUNNER in captured.out, (
+            "the hint must carry the runner the rest of the family prints: a bare "
+            f"`scripts/x.py` is not the checkout's interpreter: {captured.out!r}"
+        )
+
     def test_all_still_classifies_when_paths_are_unmerged(
         self, mod, tmp_path, capsys, monkeypatch
     ) -> None:

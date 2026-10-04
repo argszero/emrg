@@ -74,6 +74,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+#: How this file hands a reader one of the family's tools (`Agent.md`, "Test Commands").
+#: The same constant the other tools carry, for the same reason: `python3` is whatever
+#: interpreter is on PATH, and on a clone that is not the checkout's, so a printed command
+#: without it can fail on the reader's imports. Measured 2026-10-05: the bare path this file
+#: printed *ran* here only because this host's `python3` happens to be the install's own
+#: (`~/.emrg/install/bin/python3`); the coincidence is the host's, not the command's.
+#: A `.sh` takes `bash` rather than this constant — `uv run --no-sync python3 scripts/x.sh`
+#: hands python a bash file and exits 1 with a `SyntaxError`.
+RUNNER = "uv run --no-sync python3"
+
 # A conflict block. Deliberately the same shape as `check-doc-count.py`'s
 # CONFLICT_BLOCK: the opening marker, then ours, then the separator, then
 # theirs, then the closing marker. `(?!<<<<<<<)`-style guards are unnecessary
@@ -719,7 +729,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "no unmerged paths: the merge is clean or already resolved - "
                 "nothing to classify. A clean merge is not evidence of a healthy "
-                "tree; check the resulting tree with scripts/check-merge-sequence.py"
+                f"tree; check the resulting tree with {RUNNER} "
+                "scripts/check-merge-sequence.py <the PRs you merged>"
             )
             return 0
         print(
