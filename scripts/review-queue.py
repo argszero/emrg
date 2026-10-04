@@ -623,6 +623,38 @@ class Reading:
     stale_reason: str = ""
     behind_by: int | None = None
     unread: str = ""
+    #: GitHub's lifecycle state for the PR (`OPEN`, `MERGED`, `CLOSED`). Everything
+    #: else on this row is a question about a *live* PR, so this is read before any
+    #: of them is acted on — see `terminal`. Empty means "not read".
+    state: str = ""
+    merged_at: str = ""
+
+    @property
+    def terminal(self) -> bool:
+        """The PR is over: merged, or closed without merging.
+
+        Measured 2026-10-03 (`cyc20261003-224625`): a cycle hit a merge four seconds
+        after its scan, and the row for that PR was built from the state of a live one
+        — `read-first`, with a `--mergeability-wait 60` that can never answer, because
+        GitHub computes no mergeability for a merged PR. The state is read from the
+        counter's verdict, so a finished PR is answered here rather than mis-filled.
+
+        The vocabulary is read from the counter too, for the reason `votes_needed`
+        states one function up: a second copy of a list is a second answer to "which
+        states mean the PR is over", and the copy that is not read drifts when the
+        original moves. Measured 2026-10-03 (`cyc20261003-231313`): this property
+        spelled `("MERGED", "CLOSED")` by hand while the counter's `TERMINAL_STATES`
+        was introduced as "the one spelling of 'the PR is over' in the family" — the
+        sibling it named (`check-merge-freshness.py`) asks it, and this file, which is
+        the one that reads the state off the verdict, did not.
+
+        `self.state` is asked first, and an empty one returns before the counter is
+        touched: `""` means "not read", which is the state of a row whose count could
+        not be read at all (`unread`). Asking the sibling there would turn one failure
+        into two — measured 2026-10-03 (`cyc20261003-231313`) on this file's own
+        `Boom` fake, which raises from `check_pr` and carries no vocabulary.
+        """
+        return bool(self.state) and self.state in tuple(vote_counter().TERMINAL_STATES)
 
     @property
     def conflict(self) -> bool:
@@ -688,6 +720,19 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
     out.votes = int(verdict.valid_count)
     out.mergeable = str(verdict.mergeable)
     out.merge_state = str(verdict.merge_state)
+    out.state = str(getattr(verdict, "state", "") or "")
+    out.merged_at = str(getattr(verdict, "merged_at", "") or "")
+    if out.terminal:
+        # The freshness half is not read, and that is a decision rather than an
+        # economy: it asks whether a *green CI verdict* would still transfer to the
+        # tree this merge lands, and a finished PR has no merge to land. Measured
+        # 2026-10-03 (`cyc20261003-224625`) on the merged #1836: it reports
+        # `STALE (diverged, behind_by=2) - the head does not contain master` and
+        # prices a branch refresh for a branch that is finished. `head_pushed_at` is
+        # left empty for the same reason the counter's own line omits it: for a
+        # merged PR the timestamp the counter carries there is the *merge* time, and
+        # printing it as a push would misdate the head on the row that is about it.
+        return out
     out.head_pushed_at = str(verdict.push_time)
     out.head_pushed_exact = bool(verdict.push_time_exact)
     if window is not None:
@@ -729,7 +774,15 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
     is also the one that makes the rest moot. Each step is a rule from the
     docstring:
 
-    * an unreadable count is first, because every later branch is a decision about a
+    * **a finished PR is answered first** (issue #1837): a PR that is MERGED or CLOSED
+      is nothing to vote on, merge or refresh, and *every* branch below asks a
+      question about a live PR. Measured 2026-10-03 (`cyc20261003-224625`): a merge
+      landed four seconds after a scan listed the PR open, so this tool read a
+      finished PR as a live one and answered `read-first` with a
+      `--mergeability-wait 60` that provably cannot succeed - GitHub computes no
+      mergeability for a merged PR, so the wait is spent on a question with no
+      answer. The row names no command at all: there is nothing here to run;
+    * then an unreadable count, because every later branch is a decision about a
       number this one does not have;
     * a standing veto is "fix push", not "vote" — and it is checked before the
       count, because a veto has already reset the run: a `0/3` caused by a ❌ looks
@@ -757,6 +810,20 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
       reading whose absence stalled a cycle.
     """
     pr = reading.pr
+    if reading.terminal:
+        # No command, because there is none that helps: the PR is over. `read-first`
+        # below is what this used to answer - with a wait flag that cannot succeed -
+        # for a PR merged seconds after the scan listed it (issue #1837).
+        return Action(
+            kind="terminal",
+            why=(
+                f"#{pr} is {reading.state}"
+                + (f" (merged {reading.merged_at})" if reading.merged_at else "")
+                + ": this PR is over, so there is nothing here to vote on, merge or "
+                "refresh - and nothing to read first: the row would otherwise hand out "
+                "a mergeability wait that no merged PR can ever answer"
+            ),
+        )
     if reading.votes is None:
         # The command carries the counter's own wait flag because this branch is
         # where a not-yet-computed mergeability lands: the same question, asked with
@@ -956,21 +1023,35 @@ def window_note(window: Window | None) -> str:
 def render(reading: Reading, action: Action) -> str:
     """One PR's block: what is true, then what to do, then the exact command."""
     head = reading.head[:8] if reading.head else "????????"
-    votes = f"{reading.votes}/{reading.needed}" if reading.votes is not None else "?"
     marks = []
-    if reading.stale_read and reading.stale:
-        marks.append(f"stale:{reading.stale_kind}")
-    if reading.veto_at_head:
-        marks.append("veto")
-    if reading.voted_here:
-        marks.append("voted-here")
-    if reading.head_pushed_at:
-        # Printed on every row because it is the other half of "may this cycle vote
-        # here": a reader can apply the abstention clause by eye from this datum even
-        # when the tool could not resolve the window it belongs to.
-        marks.append(f"pushed {reading.head_pushed_at}")
+    if reading.terminal:
+        # The count slot carries the state where a live row carries `n/3 votes`: the
+        # number a merged PR's row would print is the history of a review that is
+        # over, and `0/3 votes` on a finished PR reads as work still to do. The
+        # marks are left off for the same reason - `stale:` describes a verdict that
+        # could fail to transfer, and `pushed …` would print the merge time as the
+        # push (the counter carries the merge time in that field for a merged PR).
+        count = reading.state
+        if reading.merged_at:
+            marks.append(f"merged {reading.merged_at}")
+    else:
+        count = (
+            f"{reading.votes}/{reading.needed} votes" if reading.votes is not None
+            else "? votes"
+        )
+        if reading.stale_read and reading.stale:
+            marks.append(f"stale:{reading.stale_kind}")
+        if reading.veto_at_head:
+            marks.append("veto")
+        if reading.voted_here:
+            marks.append("voted-here")
+        if reading.head_pushed_at:
+            # Printed on every row because it is the other half of "may this cycle vote
+            # here": a reader can apply the abstention clause by eye from this datum even
+            # when the tool could not resolve the window it belongs to.
+            marks.append(f"pushed {reading.head_pushed_at}")
     suffix = f"  [{', '.join(marks)}]" if marks else ""
-    lines = [f"#{reading.pr} {votes} votes  head {head}  {action.kind}{suffix}"]
+    lines = [f"#{reading.pr} {count}  head {head}  {action.kind}{suffix}"]
     lines.append(f"    {action.why}")
     if action.command:
         lines.append(f"    $ {action.command}")
@@ -1080,6 +1161,12 @@ def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = 
             "needed": reading.needed,
             "mergeable": reading.mergeable,
             "merge_state": reading.merge_state,
+            # The lifecycle state and its consequence, on every row: a consumer that
+            # read `votes: 0` off a finished PR would see the same number as a PR
+            # nobody has reviewed yet, and the two call for different actions.
+            "state": reading.state,
+            "terminal": reading.terminal,
+            "merged_at": reading.merged_at or None,
             "block_reason": reading.block_reason,
             "veto_at_head": reading.veto_at_head,
             "voted_by_this_cycle": reading.voted_here,
