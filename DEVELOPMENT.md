@@ -305,13 +305,24 @@ so per job instead of reporting no cause.
 
 **`scripts/gh_read.py` is where that choice lives**, so the next tool does not re-solve it: it takes
 the argv a caller would hand `gh` after the program name and returns the text `gh` would have printed,
-whichever channel produced it — `gh` first, then the same `api` path read anonymously. Two limits are
-deliberate and refused rather than approximated: a `--jq` filter (returning the unfiltered payload
-where a filter was asked for does not fail, it silently changes what the caller reads) and any argv
-that is not the `api` shape (`pr view --json …` needs GitHub's field renames — `headRefOid` versus
-`head.sha` — and a wrong rename would corrupt a merge gate's reading). `--paginate` is honoured by its
-own pager, merged into one array exactly as `gh api --paginate` prints it, with a page ceiling that is
-reported when hit rather than truncating in silence.
+whichever channel produced it — `gh` first, then the same read made anonymously. Two shapes are
+translated: an `api` path, and `pr view <n> -R <repo> --json <fields>`. Everything else is refused by
+name, as is a field with no measured translation. Three limits are deliberate and refused rather than
+approximated, each because the approximation fails *silently*:
+
+- a `--jq` filter (returning the unfiltered payload where a filter was asked for changes what the
+  caller reads);
+- any argv that is neither of the two shapes (`pr list --json …` and the rest of the CLI's
+  compositions rename fields);
+- **three of `pr view`'s fields whose *values* disagree with REST**, which is why the projection is a
+  table of functions and not of keys — `state` (`closed` **with** `merged: true` is `MERGED`, and a
+  merged PR reported as merely `CLOSED` sends a cycle to investigate a merge that landed), `mergeable`
+  (REST answers a **boolean**; the vote counter compares against the string `"CONFLICTING"`, so a
+  boolean `false` reads as *not blocked*), and `mergeStateStatus` (REST is lower case `clean`/`dirty`,
+  `_NON_CLEAN_STATES` is keyed in upper case).
+
+`--paginate` is honoured by its own pager, merged into one array exactly as `gh api --paginate` prints
+it, with a page ceiling that is reported when hit rather than truncating in silence.
 
 ```bash
 uv run --no-sync python3 scripts/gh_read.py repos/argszero/emrg   # which channel answers here?
@@ -319,7 +330,13 @@ uv run --no-sync python3 scripts/gh_read.py repos/argszero/emrg   # which channe
 
 That one-liner is the host-side way to ask "can this machine read GitHub at all, and how" — a
 question every reading at the top of a cycle asks, whose answer changes when a token is added or
-expires. `scripts/check-issue-links.py` already reads through it; the rest of the queue family follows.
+expires. `scripts/check-issue-links.py` and `scripts/check-merge-freshness.py` already read through it;
+`check-merge-freshness.py` also shows what a swap costs — its two `--jq` projections had to become
+Python, because a jq filter is the one thing `gh_read` will not approximate:
+
+```bash
+uv run --no-sync python3 scripts/check-merge-freshness.py 1841   # rc 2 on a tokenless host before the swap
+```
 
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 

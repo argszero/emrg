@@ -184,13 +184,39 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO = "argszero/emrg"
+#: The scripts are not importable modules (hyphenated names, no package), so the shared
+#: reader is loaded by path - the same loader shape this file already uses for
+#: `check-vote-count.py` (`_sibling` below), because two loaders with two idioms for the
+#: same job is how one of them ends up with two copies of a module in `sys.modules`.
+_GH_READ_PATH = Path(__file__).resolve().parent / "gh_read.py"
+_gh_read = None
+
+
+def gh_read():
+    """`scripts/gh_read.py`: the one place that decides which channel reads GitHub.
+
+    This tool used to own a `subprocess.run(["gh", …])` of its own, which meant that on a
+    host with no token it could read *nothing* - measured 2026-10-04 (`cyc20261004-081356`),
+    `check-merge-freshness.py <N>` exited 2 while every path it asks for (`pulls/<n>`,
+    `compare/…`, `actions/runs`) answers `200` anonymously. It now reads through the shared
+    leaf, so "which channel" is answered once for the whole family.
+    """
+    global _gh_read
+    if _gh_read is None:
+        spec = importlib.util.spec_from_file_location("gh_read", _GH_READ_PATH)
+        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
+            raise RuntimeError(f"could not load {_GH_READ_PATH}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _gh_read = module
+    return _gh_read
 
 # The gate this repo merges on, and therefore the number of votes a refresh puts
 # at risk. Passed to the sibling counter explicitly rather than defaulted on both
@@ -252,27 +278,50 @@ _RUN_LOOKUP_DELAY_SECONDS = 2.0
 
 
 def _gh_json(args: list[str]) -> object:
-    """Run `gh` and parse JSON, failing loud rather than guessing.
+    """One GitHub read, as JSON, failing loud rather than guessing.
 
-    `args` are gh's arguments *without* the program name; it is prepended here so
-    every call site cannot forget it. Measured 2026-09-11: a call site that passed
-    `["pr", "view", ...]` to a helper that also omitted the program name ran the
-    POSIX `pr` utility instead - which took `view` and the PR number as filenames
-    and failed with `pr: cannot open view`, a message that names neither gh nor
-    the real mistake.
+    `args` are gh's arguments *without* the program name, and they are kept exactly as this
+    tool wrote them - `gh_read` is the one place that decides which channel can answer them,
+    so a host with **no token** reads these paths through `api.github.com` instead of this
+    tool reporting every verdict unmeasurable. Measured 2026-10-04
+    (`cyc20261004-081356`): before the swap `check-merge-freshness.py 1841` exited 2 with
+    "gh failed (rc=4)", reading nothing, while the same three paths answer anonymously.
+
+    The two call sites that used `--jq` no longer do (see `_required`): a filter is a
+    projection `gh_read` refuses to approximate, and the projections here are three lines of
+    Python that can be *checked* - which is more than the jq string could be.
+
+    The message a reader gets when nothing answered carries **both** channels' reasons, and
+    the original failure is deliberately **not** re-typed: the docstring above
+    `_ask_latest_run_for_head` depends on a broken call staying broken - a call that raises
+    must not be retried into looking like an empty answer.
     """
-    proc = subprocess.run(
-        ["gh", *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if proc.returncode != 0:
+    return json.loads(gh_read().api_text(args))
+
+
+def _required(payload: object, *keys: str) -> dict:
+    """`payload` with the named keys present, or a refusal naming what is missing.
+
+    Not defaulted, and the reason is the direction the default would lie in. Every field
+    this tool reads has a permissive default that reads as **fresh**: `behind_by` absent
+    would mean 0, i.e. "the head contains master"; `status` absent would miss both the fresh
+    and the stale sets; `merge_base` absent would be `""`. The old `--jq` projections made
+    the same values `null`, and `int(None)` raised - so requiring them by name keeps the
+    fail-loud property the filter accidentally had, instead of trading it for a default
+    that says "safe to merge".
+    """
+    if not isinstance(payload, dict):
         raise RuntimeError(
-            f"gh failed (rc={proc.returncode}): gh {' '.join(args)}\n{proc.stderr.strip()}"
+            f"the payload for this read is {type(payload).__name__}, not an object - "
+            "the reading was not answered"
         )
-    return json.loads(proc.stdout)
+    missing = [k for k in keys if k not in payload]
+    if missing:
+        raise RuntimeError(
+            f"the payload for this read has no {missing} (keys: {sorted(payload)[:8]}) - "
+            "refusing to read an absent field as its permissive default"
+        )
+    return payload
 
 
 @dataclass
@@ -339,23 +388,29 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
     re-ask a *broken* call: a call that raises is not an empty answer, and must
     stay a failure rather than being retried into looking like a measurement.
     """
-    payload = _gh_json(
-        [
-            "api",
-            f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
-            "--jq",
-            "{runs: [.workflow_runs[] | {headSha: .head_sha, name, "
-            "createdAt: .created_at, conclusion}]}",
-        ]
+    payload = _required(
+        _gh_json(["api", f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100"]),
+        "workflow_runs",
     )
-    assert isinstance(payload, dict)
-    runs_raw = payload.get("runs")
+    runs_raw = payload["workflow_runs"]
     assert isinstance(runs_raw, list)
+    # The same projection the `--jq` filter used to do, in Python: `head_sha` -> `headSha`,
+    # `created_at` -> `createdAt`. A run that cannot be matched is dropped rather than
+    # defaulted, which is the opposite call from `_required` - and deliberately so: a
+    # defaulted `head_sha` would make *every* run this head's run, which is the one error
+    # that turns another branch's green into this branch's verdict. An absent date is not
+    # dropped: it sorts last under `max` (empty string precedes every ISO timestamp), so it
+    # can never displace a run that does carry the verdict.
     matching = [
-        r
+        {
+            "headSha": r.get("head_sha"),
+            "name": r.get("name"),
+            "createdAt": r.get("created_at"),
+            "conclusion": r.get("conclusion"),
+        }
         for r in runs_raw
         if isinstance(r, dict)
-        and r.get("headSha") == head
+        and r.get("head_sha") == head
         and r.get("name") == _VERDICT_WORKFLOW
     ]
     if not matching:
@@ -395,19 +450,18 @@ def check_pr(number: int) -> Verdict:
     assert isinstance(view, dict)
     head_sha = str(view["headRefOid"])
 
-    cmp_raw = _gh_json(
-        [
-            "api",
-            f"repos/{REPO}/compare/master...{head_sha}",
-            "--jq",
-            "{status, ahead_by, behind_by, merge_base: .merge_base_commit.sha}",
-        ]
+    cmp_raw = _required(
+        _gh_json(["api", f"repos/{REPO}/compare/master...{head_sha}"]),
+        "status",
+        "ahead_by",
+        "behind_by",
+        "merge_base_commit",
     )
-    assert isinstance(cmp_raw, dict)
+    merge_base_commit = _required(cmp_raw["merge_base_commit"], "sha")
     status = str(cmp_raw["status"])
     ahead_by = int(cmp_raw["ahead_by"])
     behind_by = int(cmp_raw["behind_by"])
-    merge_base = str(cmp_raw["merge_base"])
+    merge_base = str(merge_base_commit["sha"])
 
     run = _latest_run_for_head(head_sha)
     created = str(run.get("createdAt") or "") if run else None

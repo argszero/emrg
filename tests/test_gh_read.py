@@ -12,9 +12,16 @@ that is failing.
 The failure mode this module could reintroduce is subtler than "it did not fall back": a
 fallback that changes *what the caller reads* while appearing to replace only *which
 channel read it*. Two of those are pinned here as the silent direction - a `--jq` filter
-that would be dropped, and a non-`api` argv (`pr view --json headRefOid`) that would need
-field renaming to translate. Both are refused with a message, never approximated: an
+that would be dropped, and a shape the module has no translation for
+(`pr list --json number`). Both are refused with a message, never approximated: an
 approximation is not a failure, it is a wrong answer that looks like a right one.
+
+`pr view` is translated rather than refused (`cyc20261004-081356`), so the silent direction
+there is finer: the keys mostly agree and the **values** do not, for three fields -
+`state` (REST says `closed` for a merged PR), `mergeable` (REST answers a boolean where the
+vote counter compares against `"CONFLICTING"`), and `mergeStateStatus` (REST is lower
+case). Each of those three is pinned with **both** its values, because the failure is not
+"the field is missing" but "the field is present and reads as the opposite".
 """
 
 from __future__ import annotations
@@ -196,21 +203,215 @@ def test_a_jq_filter_is_refused_not_dropped(mod, monkeypatch):
     assert asked == [], "the unfiltered payload must not be fetched and handed back as if filtered"
 
 
-def test_a_non_api_argv_is_refused_by_name(mod, monkeypatch):
-    """`pr view --json …` needs field renaming, and a wrong rename corrupts a merge gate.
+def test_a_shape_with_no_translation_is_refused_by_name(mod, monkeypatch):
+    """`pr list --json number` is `gh`'s composition of a REST listing, not a REST path.
 
     Refusing is the honest half of the two: the caller keeps `gh`, and the refusal says
-    which shape could not be translated rather than returning a payload whose `headRefOid`
-    is missing because REST calls it `head.sha`.
+    which shape could not be translated rather than returning a listing whose shape it
+    guessed at. `pr view` is *no longer* in this category - it has a per-field table and its
+    own legs below - which is exactly why this test names a shape that still has none.
     """
     gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
     asked: list[str] = []
     public_says(mod, monkeypatch, {}, record=asked)
     with pytest.raises(RuntimeError) as excinfo:
-        mod.api_text(["pr", "view", "1841", "--json", "state,mergedAt"])
+        mod.api_text(["pr", "list", "--json", "number"])
     message = str(excinfo.value)
-    assert "only the" in message and "api" in message
+    assert "pr view" in message, "the refusal must name the shapes it does translate"
+    assert "'pr'" in message, "and the shape it was handed"
     assert asked == []
+
+
+# --- the `pr view` translation ----------------------------------------------
+#
+# One REST payload, projected into `gh`'s field names. The keys come from a table and the
+# values from a function per field, because three of the fields disagree with REST on the
+# *value* and a rename-only projection would pass them through silently wrong.
+
+#: A real `/repos/argszero/emrg/pulls/<n>` payload, reduced to the fields the projection
+#: reads. Measured 2026-10-04 against #1841 (open), #1834 (merged) and #1710 (conflicting),
+#: which is where each of the three disagreements below is visible.
+def pull(**over):
+    payload = {
+        "number": 1841,
+        "title": "the failed run's cause is readable without a token",
+        "state": "open",
+        "merged": False,
+        "merged_at": None,
+        "draft": False,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head": {"sha": "2" * 40, "ref": "feature/read-run-failure"},
+        "base": {"sha": "3" * 40, "ref": "master"},
+    }
+    payload.update(over)
+    return payload
+
+
+def pull_url(number: int = 1841, repo: str = "r/x") -> str:
+    return f"https://api.github.com/repos/{repo}/pulls/{number}"
+
+
+def test_a_pr_view_is_translated_when_gh_refuses(mod, monkeypatch):
+    """The payoff: the argv three queue tools already pass now reads without a token."""
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    asked: list[str] = []
+    public_says(mod, monkeypatch, {pull_url(repo="argszero/emrg"): pull()}, record=asked)
+    text = mod.api_text(
+        [
+            "pr", "view", "1841", "-R", "argszero/emrg",
+            "--json", "number,title,state,headRefOid,mergeable,mergeStateStatus",
+        ]
+    )
+    assert asked == [pull_url(repo="argszero/emrg")], (
+        "the pull request must be read by its REST path"
+    )
+    assert json.loads(text) == {
+        "number": 1841,
+        "title": "the failed run's cause is readable without a token",
+        "state": "OPEN",
+        "headRefOid": "2" * 40,
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+    }
+
+
+def test_a_working_gh_is_not_second_guessed_on_a_pr_view(mod, monkeypatch):
+    """Control leg: `gh` answered, so the anonymous budget is not spent on a second read.
+
+    Without this leg an always-on translation would still pass every test above, while
+    quietly replacing `gh`'s own answer on every host that has a token - and spending the
+    host's 60/hour anonymous allowance to do it.
+    """
+    gh_says(mod, monkeypatch, rc=0, out='{"number": 1841, "title": "from gh"}')
+    asked: list[str] = []
+    # The route is registered even though it must not be used: with an empty table the
+    # fallback would die inside the fixture ("unexpected anonymous URL") and this leg would
+    # be proving the fixture's strictness rather than the rule - the arm lesson from
+    # `cyc20261004-074903`, where the control leg's fake failed before the rule did.
+    public_says(mod, monkeypatch, {pull_url(repo="argszero/emrg"): pull()}, record=asked)
+    text = mod.api_text(["pr", "view", "1841", "-R", "argszero/emrg", "--json", "number,title"])
+    assert json.loads(text) == {"number": 1841, "title": "from gh"}
+    assert asked == [], "gh answered; api.github.com must not be asked at all"
+
+
+# --- the three value renames, both directions each --------------------------
+
+
+def test_a_merged_pr_is_not_reported_as_merely_closed(mod, monkeypatch):
+    """REST says `closed` for a merged PR; the counting tools' remedies differ by state.
+
+    `check-vote-count.py` prints `MERGED` or `CLOSED` and `check-merge-freshness.py` reads
+    "merged at <time>" or "closed without merging". A projection that passed REST's `state`
+    through would make every merged PR read as closed-and-abandoned, which is the state a
+    cycle is told to investigate.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(
+        mod,
+        monkeypatch,
+        {pull_url(): pull(state="closed", merged=True, merged_at="2026-10-01T00:00:00Z")},
+    )
+    assert json.loads(mod.api_text(["pr", "view", "1841", "-R", "r/x", "--json", "state"])) == {
+        "state": "MERGED"
+    }
+
+
+def test_a_closed_and_unmerged_pr_is_closed(mod, monkeypatch):
+    """The other half of the same branch: `merged: false` must not be read as merged."""
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(mod, monkeypatch, {pull_url(): pull(state="closed", merged=False)})
+    assert json.loads(mod.api_text(["pr", "view", "1841", "-R", "r/x", "--json", "state"])) == {
+        "state": "CLOSED"
+    }
+
+
+def test_a_conflicting_pr_is_reported_as_conflicting_not_as_true(mod, monkeypatch):
+    """REST answers `mergeable: false`; the counter compares against the **string**.
+
+    `check-vote-count.py`'s `blocked` reads `mergeable == "CONFLICTING"`. Handed a boolean
+    `False` - which is what a straight pass-through of the REST key gives - it reads a
+    conflicting PR as *not* blocked and can answer READY for a PR `gh pr merge` refuses.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(mod, monkeypatch, {pull_url(): pull(mergeable=False, mergeable_state="dirty")})
+    assert json.loads(
+        mod.api_text(["pr", "view", "1841", "-R", "r/x", "--json", "mergeable"])
+    ) == {"mergeable": "CONFLICTING"}
+
+
+def test_an_uncomputed_mergeability_is_unknown_not_false(mod, monkeypatch):
+    """REST's `null` means "not computed yet" and must not become `CONFLICTING`.
+
+    `UNKNOWN` is a question not yet answered and the tools poll on it; reporting it as a
+    conflict would tell a cycle to resolve a conflict that may not exist.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(mod, monkeypatch, {pull_url(): pull(mergeable=None, mergeable_state="unknown")})
+    assert json.loads(
+        mod.api_text(["pr", "view", "1841", "-R", "r/x", "--json", "mergeable,mergeStateStatus"])
+    ) == {"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"}
+
+
+def test_the_merge_state_is_upper_cased(mod, monkeypatch):
+    """REST spells `clean`; the counter's `_NON_CLEAN_STATES` is keyed in upper case.
+
+    A lower-case `dirty` would miss the dict and fall through the counter's "a state this
+    version does not know" refusal - loud, but about the wrong thing, and only on the host
+    that reached the fallback.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(mod, monkeypatch, {pull_url(): pull(mergeable=False, mergeable_state="blocked")})
+    assert json.loads(
+        mod.api_text(["pr", "view", "1841", "-R", "r/x", "--json", "mergeStateStatus"])
+    ) == {"mergeStateStatus": "BLOCKED"}
+
+
+def test_a_field_with_no_measured_translation_is_refused(mod, monkeypatch):
+    """A field the table does not carry is refused, never passed through under a guess."""
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    asked: list[str] = []
+    public_says(mod, monkeypatch, {pull_url(repo="argszero/emrg"): pull()}, record=asked)
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(["pr", "view", "1841", "-R", "r/x", "--json", "state,labels"])
+    assert "labels" in str(excinfo.value)
+
+
+def test_a_pr_view_without_a_repository_is_refused(mod, monkeypatch):
+    """`-R` is required here, unlike in `gh`, which infers it from the cwd's remote.
+
+    This module reads a REST path, so the repository has to be named: inferring one would
+    make the same argv answer about different repositories depending on where it ran.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    asked: list[str] = []
+    public_says(mod, monkeypatch, {}, record=asked)
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(["pr", "view", "1841", "--json", "number"])
+    assert "-R" in str(excinfo.value)
+    assert asked == [], "no request may be made for a call whose subject is unknown"
+
+
+def test_a_pr_view_without_a_number_is_refused(mod, monkeypatch):
+    """The `pr` argv shape is recognised, so a missing part is refused rather than retried."""
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(mod, monkeypatch, {})
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(["pr", "view", "-R", "r/x", "--json", "number"])
+    assert "PR number" in str(excinfo.value)
+
+
+def test_an_error_payload_is_not_projected(mod, monkeypatch):
+    """A `404` body arrives as `{"message": …}`; projecting it would answer with nulls.
+
+    Every projection of that object yields `None` for the fields, and `None` for `mergeable`
+    is the *absence* of a conflict - the exact direction the tools must not read.
+    """
+    gh_says(mod, monkeypatch, rc=4, err=GH_REFUSED)
+    public_says(mod, monkeypatch, {pull_url(): {"message": "Not Found"}})
+    with pytest.raises(RuntimeError) as excinfo:
+        mod.api_text(["pr", "view", "1841", "-R", "r/x", "--json", "state"])
+    assert "Not Found" in str(excinfo.value)
 
 
 # --- paging -----------------------------------------------------------------

@@ -116,14 +116,26 @@ class FakeGh:
             return self.pr_view
         if args[0] == "api":
             if any("actions/runs" in a for a in args):
-                return {"runs": self.runs if self.runs is not None else []}
+                return {"workflow_runs": self.runs if self.runs is not None else []}
             assert any(a.startswith("repos/") and "/compare/" in a for a in args), args
             return self.compare
         raise AssertionError(f"unexpected gh call: {args}")
 
 
+# The two payloads below are **REST** shapes, not the tool's own projections: the
+# projections moved out of `--jq` and into Python (`cyc20261004-081356`), because a jq
+# filter is the one thing `gh_read.py` refuses to approximate and refusing it left this
+# tool unreadable on a host with no token. `_required` re-imposes what the filter gave for
+# free - a field that is not there fails loud instead of arriving as a permissive default.
+
+
 def _compare(status: str, ahead: int, behind: int, base: str = BASE) -> dict:
-    return {"status": status, "ahead_by": ahead, "behind_by": behind, "merge_base": base}
+    return {
+        "status": status,
+        "ahead_by": ahead,
+        "behind_by": behind,
+        "merge_base_commit": {"sha": base},
+    }
 
 
 def _view(sha: str = HEAD, branch: str = "feature/x") -> dict:
@@ -131,12 +143,15 @@ def _view(sha: str = HEAD, branch: str = "feature/x") -> dict:
 
 
 def _run_(sha: str = HEAD, conclusion: str = "success", at: str = "2026-09-11T00:00:00Z") -> dict:
-    """A workflow run, as the actions/runs payload reports it.
+    """A workflow run, as the **actions/runs REST payload** reports it.
 
     `name` is not decoration: the tool pins the verdict to the `Test` workflow, so
-    a fixture without it is a run the tool is right to ignore.
+    a fixture without it is a run the tool is right to ignore. The field names are REST's
+    (`head_sha`, `created_at`); the tool maps them to its own `headSha` / `createdAt` after
+    reading, and a fixture written in the tool's names would let that mapping be deleted
+    without a test going red.
     """
-    return {"headSha": sha, "name": "Test", "conclusion": conclusion, "createdAt": at}
+    return {"head_sha": sha, "name": "Test", "conclusion": conclusion, "created_at": at}
 
 
 def _install(mod, monkeypatch, fake: FakeGh) -> None:
@@ -255,7 +270,7 @@ class _StaleRunAnswer(FakeGh):
             self.run_asks += 1
             if self.run_asks == 1:
                 self.calls.append(list(args))
-                return {"runs": []}
+                return {"workflow_runs": []}
         return super().__call__(args)
 
 
@@ -998,3 +1013,105 @@ def test_the_tools_own_document_does_not_offer_a_rebase(mod) -> None:
         "the docstring's own statement of the refresh route must not offer a rebase"
     )
     assert "force-push" in mod.__doc__, "the docstring must name what publishing a rebase costs"
+
+
+# --- the transport: one place decides, and no read is a `--jq` argv ---------
+#
+# `cyc20261004-081356`. This tool used to own a `subprocess.run(["gh", …])`, so on a host
+# with no token it could read nothing: measured 2026-10-04, `check-merge-freshness.py 1841`
+# exited 2 with "gh failed (rc=4)" while all three paths it asks for (`pulls/<n>`,
+# `compare/…`, `actions/runs`) answer `200` anonymously. It reads through
+# `scripts/gh_read.py` now - the same leaf `check-issue-links.py` uses - and the three
+# properties that make that swap real are pinned here, each in the direction that fails
+# silently if it is undone.
+
+
+def test_the_read_goes_through_the_shared_reader(mod, monkeypatch, capsys):
+    """The channel is decided in one file. If this file shells out itself, that is gone.
+
+    Pinned at the *seam* rather than by asserting behaviour, because the behaviour with
+    and without the leaf is identical on a host that has a token - which is every CI leg.
+    A swap that was reverted would therefore keep this file green on CI and be wrong only
+    on the hosts that have no token, i.e. exactly the hosts it was made for.
+    """
+    asked: list[list[str]] = []
+
+    class Reader:
+        def api_text(self, args: list[str]) -> str:
+            asked.append(list(args))
+            if args[:2] == ["pr", "view"]:
+                return json.dumps(_view())
+            if any("actions/runs" in a for a in args):
+                return json.dumps({"workflow_runs": [_run_()]})
+            return json.dumps(_compare("ahead", 4, 0))
+
+    monkeypatch.setattr(mod, "_gh_read", Reader())
+    assert mod.main(["1"]) == 0, capsys.readouterr().err
+    assert asked, "nothing was read through the shared reader"
+    assert asked[0][:2] == ["pr", "view"], (
+        "the request must be the tool's own argv, unchanged: the swap replaces which "
+        f"channel answers it, not what was asked ({asked[0]})"
+    )
+
+
+def test_no_read_passes_a_jq_filter(mod, monkeypatch, capsys):
+    """`--jq` is the one argv the shared reader refuses, so the projections had to move.
+
+    Measured 2026-10-04: with `--jq` on the compare read the leaf answered "the anonymous
+    fallback would have to drop ['--jq'] from the request" and the tool stayed at exit 2 -
+    the swap made no difference at all. Both remaining filters are Python now.
+    """
+    asked: list[list[str]] = []
+    fake = FakeGh(_view(), _compare("ahead", 4, 0), [_run_()])
+
+    def record(args: list[str]) -> object:
+        asked.append(list(args))
+        return fake(args)
+
+    monkeypatch.setattr(mod, "_gh_json", record)
+    assert mod.main(["1"]) == 0, capsys.readouterr().err
+    assert asked, "the tool must have read something"
+    for args in asked:
+        assert "--jq" not in args and "-q" not in args, (
+            f"a jq filter is a projection this tool cannot take to the tokenless channel: {args}"
+        )
+
+
+def test_a_payload_missing_a_field_is_refused_not_defaulted(mod, monkeypatch, capsys):
+    """The fail-loud property the `--jq` projections had for free, kept by hand.
+
+    `behind_by` is the field to pin it on because its absence lies in the dangerous
+    direction: read as `0` it says "the head contains master", which is the half of FRESH
+    that ancestry decides. The old filter made it `null` and `int(None)` raised; a
+    projection written carelessly would make it 0 and the verdict FRESH.
+    """
+    short = {"status": "ahead", "ahead_by": 1, "merge_base_commit": {"sha": BASE}}
+    monkeypatch.setattr(mod, "_gh_json", FakeGh(_view(), short, [_run_()]))
+    assert mod.main(["1"]) == 2
+    err = capsys.readouterr().err
+    # Both halves: the reason the refusal gives, and the field it refuses. The first is
+    # what separates this from the *other* way a missing key can end the run - a bare
+    # `KeyError`, which also exits 2 and also names `behind_by`, so a test asserting only
+    # those two would stay green with the requirement deleted.
+    assert "refusing to read an absent field" in err, err
+    assert "behind_by" in err, err
+
+
+def test_the_run_listing_is_read_in_rest_names_not_the_tools_own(mod, monkeypatch, capsys):
+    """The mapping `head_sha`/`created_at` -> `headSha`/`createdAt` is load-bearing now.
+
+    A `--jq` filter did it before, in a string no Python test could see into; the projection
+    is three lines of Python here, and it has a leg in **both** directions. The second is the
+    one that matters: a run written in the tool's *own* field names must not be accepted,
+    because "accept both spellings" is how a mapping like this stops being a mapping - the
+    two names would then stay in step by coincidence until one of them moved.
+    """
+    own_names = {
+        "headSha": HEAD,
+        "name": "Test",
+        "conclusion": "success",
+        "createdAt": "2026-09-11T00:00:00Z",
+    }
+    monkeypatch.setattr(mod, "_gh_json", FakeGh(_view(), _compare("ahead", 1, 0), [own_names]))
+    assert mod.main(["1"]) == 1, "a run that is not in the REST payload's names is not this head's run"
+    assert "NO Test run" in capsys.readouterr().out
