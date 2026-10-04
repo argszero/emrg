@@ -133,12 +133,16 @@ class FakeGh:
         exact: bool = True,
         mergeable: str = "MERGEABLE",
         merge_state: str = "CLEAN",
+        state: str = "OPEN",
+        merged_at: str = "",
     ):
         self.reviews = reviews
         self.push_time = push_time
         self.exact = exact
         self.mergeable = mergeable
         self.merge_state = merge_state
+        self.state = state
+        self.merged_at = merged_at
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> object:
@@ -148,6 +152,8 @@ class FakeGh:
             return {
                 "number": 1,
                 "title": "t",
+                "state": self.state,
+                "mergedAt": self.merged_at or None,
                 "headRefOid": HEAD,
                 "mergeable": self.mergeable,
                 "mergeStateStatus": self.merge_state,
@@ -461,6 +467,56 @@ def test_a_mergeable_pr_with_too_few_votes_is_still_short(mod, monkeypatch, caps
     rc = _run(mod, monkeypatch, fake)
     assert rc == 1
     assert "SHORT 1/3" in capsys.readouterr().out
+
+
+def test_a_merged_pr_is_a_terminal_reading_not_an_unmeasurable_one(mod, monkeypatch, capsys):
+    """Issue #1837. GitHub never computes mergeability for a merged PR.
+
+    Measured 2026-10-03 (`cyc20261003-224625`): eleven merged PRs spanning ~30 hours,
+    every one `mergeable=UNKNOWN` / `mergeStateStatus=UNKNOWN`. So `UNKNOWN` there is
+    not "not answered yet" — it is the permanent answer, and the refusal's explanation
+    ("until it finishes computing") was a transient story about a condition that never
+    changes. The count is still a determinate reading: the PR is over.
+
+    The wall-clock half is the one a reader cannot infer: `--mergeability-wait 60` on a
+    merged PR must return on its **first** read, because every further ask is a question
+    GitHub will never answer (measured on the live #1836: `--mergeability-wait 5` really
+    elapsed 6.2 s and then failed identically).
+    """
+    fake = FakeGh(_three_votes(), state="MERGED", merged_at="2026-10-03T14:46:59Z",
+                  mergeable="UNKNOWN", merge_state="UNKNOWN")
+    clock = _Clock()
+    monkeypatch.setattr(mod, "time", clock)
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    rc = mod.main(["1", "--mergeability-wait", "60"])
+    out = capsys.readouterr().out
+    assert rc == 0, "the question is answered, not unmeasurable: the PR is over"
+    assert "MERGED" in out
+    assert "2026-10-03T14:46:59Z" in out, "the merge time is the datum this line carries"
+    assert "nothing here to vote on" in out
+    assert "not a computed mergeability" not in out
+    assert clock.slept == [], "a merged PR is never polled: the value never arrives"
+    reads = [c for c in fake.calls if c[:2] == ["pr", "view"]]
+    assert len(reads) == 1, "one read, which is what carries the state as well"
+
+
+def test_a_closed_unmerged_pr_reads_as_closed_and_not_as_merged(mod, monkeypatch, capsys):
+    """The two terminal states are told apart, because they are not the same fact.
+
+    A **closed** PR keeps the mergeability it had — measured on `#1710`, the one
+    closed-unmerged PR in the last hundred: `CONFLICTING` / `DIRTY` — where a merged one
+    is permanently `UNKNOWN`. Both are over, and only one of them landed; a single
+    "finished" word would say the wrong one half the time.
+    """
+    fake = FakeGh(_three_votes(), state="CLOSED", mergeable="CONFLICTING",
+                  merge_state="DIRTY")
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "CLOSED" in out
+    assert "MERGED" not in out
+    assert "closed without merging" in out
 
 
 def test_an_uncomputed_mergeability_fails_loud(mod, monkeypatch, capsys):

@@ -138,8 +138,16 @@ def _compare(status: str, ahead: int, behind: int, base: str = BASE) -> dict:
     }
 
 
-def _view(sha: str = HEAD, branch: str = "feature/x") -> dict:
-    return {"number": 1, "title": "t", "headRefOid": sha, "headRefName": branch}
+def _view(sha: str = HEAD, branch: str = "feature/x", state: str = "OPEN",
+          merged_at: str = "") -> dict:
+    return {
+        "number": 1,
+        "title": "t",
+        "state": state,
+        "mergedAt": merged_at or None,
+        "headRefOid": sha,
+        "headRefName": branch,
+    }
 
 
 def _run_(sha: str = HEAD, conclusion: str = "success", at: str = "2026-09-11T00:00:00Z") -> dict:
@@ -875,6 +883,81 @@ def test_json_mode_is_machine_readable(mod, monkeypatch, capsys):
     assert payload[0]["stale"] is False
     assert payload[0]["head"] == HEAD
     assert payload[0]["merge_base"] == BASE
+
+
+# --- over: a finished PR is a third outcome, not a stale one (issue #1837) ---
+#
+# The two halves of this reading answer *determinately and wrongly* for a PR that is
+# already merged, and each is measured on the live #1836 (2026-10-03): the compare
+# reports a diverged head, because master has moved past a merge that landed, and the
+# run lookup finds the passing run CI concluded before it. So the tool printed a
+# determinate fault - `STALE (diverged, behind_by=2)` - priced a branch refresh, and
+# exited 1, about work that had already landed. The state is read first now, in the
+# same `gh pr view` the head comes from, and both of those questions are skipped
+# rather than answered.
+
+
+def test_a_merged_pr_is_reported_as_merged_and_not_as_stale(mod, monkeypatch, capsys):
+    fake = FakeGh(
+        _view(state="MERGED", merged_at="2026-10-03T14:46:59Z"),
+        _compare("diverged", 0, 2),
+        [_run_()],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr()
+    assert rc == 0, "the question is answered ('there is no merge left'), not a fault"
+    assert "MERGED" in out.out
+    assert "STALE" not in out.out
+    assert "FRESH" not in out.out, "and not fresh either: that says a verdict is current"
+    assert out.err == "", "nothing to remedy, so no remedy section"
+    assert len(fake.calls) == 1, (
+        "the compare and the run lookup are questions about a merge still to come: "
+        f"only the state read should have happened, got {fake.calls}"
+    )
+
+
+def test_a_closed_pr_reads_as_closed_and_not_as_merged(mod, monkeypatch, capsys):
+    """The two terminal states are told apart: only one of them landed."""
+    fake = FakeGh(_view(state="CLOSED"), _compare("diverged", 0, 2), [_run_()])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "CLOSED" in out
+    assert "MERGED" not in out
+
+
+def test_the_json_says_terminal_beside_stale(mod, monkeypatch, capsys):
+    """`"stale": false` alone is the wrong half of the reading for a merged PR.
+
+    A consumer scripting the queue would read it as "the verdict is current" and skip
+    the PR for the wrong reason, so the outcome is emitted with the field that names it.
+    """
+    fake = FakeGh(
+        _view(state="MERGED", merged_at="2026-10-03T14:46:59Z"),
+        _compare("diverged", 0, 2),
+        [_run_()],
+    )
+    rc = _run(mod, monkeypatch, fake, ["1", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload[0]["terminal"] is True
+    assert payload[0]["state"] == "MERGED"
+    assert payload[0]["merged_at"] == "2026-10-03T14:46:59Z"
+    assert payload[0]["stale"] is False
+
+
+def test_an_open_pr_with_unknown_mergeability_is_unchanged(mod, monkeypatch, capsys):
+    """The state read must not touch the open path: this tool never read mergeability.
+
+    Pinned because the fix adds a field to the same `gh pr view` projection, and the
+    cheap way to "handle" a finished PR — reading mergeability here too — would put a
+    transient GitHub value in front of a question that is about ancestry.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 4, 0), [_run_()])
+    rc = _run(mod, monkeypatch, fake)
+    assert rc == 0
+    assert "FRESH" in capsys.readouterr().out
+    assert len(fake.calls) == 3
 
 
 def test_no_function_has_an_unused_parameter() -> None:
