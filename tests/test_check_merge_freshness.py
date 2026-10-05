@@ -104,10 +104,19 @@ class FakeGh:
     nothing at all.
     """
 
-    def __init__(self, pr_view: dict, compare: dict, runs: list[dict] | None):
+    def __init__(self, pr_view: dict, compare: dict, runs: list[dict] | None,
+                 jobs: list[dict] | None = None, jobs_unreadable: bool = False):
         self.pr_view = pr_view
         self.compare = compare
         self.runs = runs
+        #: The jobs of the newest run, or `None` to mirror that run's own conclusion.
+        #: The default is what a real run looks like: a run concludes `failure` because a
+        #: job did, and that job is the one whose cause a reader can act on. A fixture that
+        #: answered `None` jobs for every failure run would leave the tool's own
+        #: jobs-reading branch (`_run_jobs`) unreachable from every test here - the shape
+        #: this file's sibling suites call a fixture that cannot reach the code.
+        self.jobs = jobs
+        self.jobs_unreadable = jobs_unreadable
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> object:
@@ -118,11 +127,25 @@ class FakeGh:
         if args[:2] == ["pr", "view"]:
             return self.pr_view
         if args[0] == "api":
+            if any("/jobs" in a for a in args):
+                if self.jobs_unreadable:
+                    raise RuntimeError("gh failed (rc=1): the jobs list is not served")
+                if self.jobs is not None:
+                    return {"jobs": self.jobs}
+                return {"jobs": _jobs_mirroring(self.runs)}
             if any("actions/runs" in a for a in args):
                 return {"runs": self.runs if self.runs is not None else []}
             assert any(a.startswith("repos/") and "/compare/" in a for a in args), args
             return self.compare
         raise AssertionError(f"unexpected gh call: {args}")
+
+
+def _jobs_mirroring(runs: list[dict] | None) -> list[dict]:
+    """One job carrying the newest run's own conclusion - the shape a real run has."""
+    if not runs:
+        return []
+    newest = max(runs, key=lambda r: str(r.get("createdAt") or ""))
+    return [{"name": "test", "conclusion": newest.get("conclusion")}]
 
 
 def _compare(status: str, ahead: int, behind: int, base: str = BASE) -> dict:
@@ -1131,3 +1154,91 @@ def test_the_tools_own_document_does_not_offer_a_rebase(mod) -> None:
         "the docstring's own statement of the refresh route must not offer a rebase"
     )
     assert "force-push" in mod.__doc__, "the docstring must name what publishing a rebase costs"
+
+
+# --- a run that stopped is not a run that judged (#1864's neighbour) ---------
+#
+# The workflow run's `conclusion` is an **aggregate** over its jobs, and GitHub counts a
+# *cancelled* job as a failed run. Measured 2026-10-06 (`cyc20261006-065715`), on this host:
+# head `50dea4e8`'s run `37372464666` reads `conclusion=failure`, and its jobs are
+# `test: cancelled` (0 steps, 15 minutes waiting for a runner) and `test-windows: success`.
+# This tool called that "a failing verdict, not a stale one; re-running will not make it
+# fresh", and the remedy its own docstring hands over for that kind
+# (`scripts/read-run-failure.py 37372464666`) answered **"no failed job … nothing to
+# explain"**. A verdict-shaped sentence about a run that reached no verdict, plus a remedy
+# that cannot produce a cause - so the jobs are now asked, and only a job that concluded
+# `failure` makes the run a judgment about the tree.
+#
+# Both directions, because a reading that answered `no_verdict` for every non-success run
+# would lose the cause of a genuinely red one - the reading the failing remedy exists for.
+
+
+def test_a_cancelled_job_is_a_run_that_judged_nothing(mod, monkeypatch, capsys):
+    """The measured shape: the run says `failure`, every job of it says `cancelled`."""
+    fake = FakeGh(
+        _view(),
+        _compare("ahead", 1, 0),
+        [_run_(conclusion="failure")],
+        jobs=[{"name": "test", "conclusion": "cancelled"},
+              {"name": "test-windows", "conclusion": "success"}],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "without judging the tree" in cap.out
+    assert "test: cancelled" in cap.out, (
+        "the row names which job stopped, or the reader cannot tell a cancellation from a "
+        "run that simply has no jobs"
+    )
+    assert "a failing verdict, not a stale one; re-running will not make it fresh" not in cap.out
+    assert "re-trigger CI on the same head" in cap.err, (
+        "a run that judged nothing is cured by re-running, which is the opposite of what "
+        "the failing remedy says"
+    )
+    assert "read-run-failure.py" not in cap.err, (
+        "the failing remedy's reading answers `no failed job … nothing to explain` for this "
+        "run - handing it over is the defect this kind exists to remove"
+    )
+
+
+def test_a_job_that_concluded_failure_is_still_a_judgment(mod, monkeypatch, capsys):
+    """The control: one failing job among cancellations keeps the run a red verdict."""
+    fake = FakeGh(
+        _view(),
+        _compare("ahead", 1, 0),
+        [_run_(conclusion="failure")],
+        jobs=[{"name": "test", "conclusion": "cancelled"},
+              {"name": "test-windows", "conclusion": "failure"}],
+    )
+    _votes(mod, monkeypatch, 3)
+    _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert "a failing verdict, not a stale one" in cap.out
+    assert "test-windows concluded `failure`" in cap.out, (
+        "the row has to name the job that failed: it is the cause the remedy's reading is "
+        "about, and a run can carry cancellations beside it"
+    )
+    assert f"{mod.RUNNER} scripts/read-run-failure.py {RUN_ID}" in cap.err
+    assert "re-trigger CI" not in cap.err
+
+
+def test_an_unreadable_jobs_list_is_reported_as_unmeasured(mod, monkeypatch, capsys):
+    """The third state, kept apart from both: the finer reading could not be made.
+
+    Reported rather than guessed - `no_verdict` for a list nobody could read would be a
+    verdict this tool did not measure, and so would `failing`. The coarse reading (the run's
+    own conclusion) stands, and the reason says which half is missing.
+    """
+    fake = FakeGh(
+        _view(), _compare("ahead", 1, 0), [_run_(conclusion="failure")], jobs_unreadable=True
+    )
+    _votes(mod, monkeypatch, 3)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "failing verdict, not a stale one" in cap.out
+    assert "jobs could not be read" in cap.out
+    assert "without judging the tree" not in cap.out, (
+        "an unread list answers neither question, so it may not be reported as the one that "
+        "says the run judged nothing"
+    )
