@@ -137,7 +137,14 @@ What the resolution reading does not cover
   2026-10-01: the row that documents this shape was reported as naming a missing file.
 * **A row that carries no link at all.** An index whose rows name their files in prose -
   the table shape `is_index_row` also reads - has no subject for this reading, and the
-  report says so rather than printing a count that reads as a pass.
+  report says so rather than printing a count that reads as a pass: in the aggregate when
+  **no** row carries a link (the table shape, and the sentence explains it), and one line
+  per row when **some** rows do and some do not. The per-row half was missing until
+  2026-10-06 (measured: an index of 98 rows with 3 unlinked ones read `row links 186,
+  unresolved: 0` · `OK` and said nothing about the three - the count was over the links
+  that existed and was read as a statement about every row). Neither half is a fault and
+  neither moves the exit code: the rule read here is "a row may not point at nothing", and
+  a row naming its file in prose points nowhere rather than at nothing.
 * A target with a URL-escape spelling (`%20`) is resolved as written: this tool
   does not guess a second spelling of a name the author wrote, and
   `check-citation-resolves.py`'s own limit section is the precedent for saying so
@@ -361,6 +368,30 @@ class Reading(NamedTuple):
                 out.append((line, target))
         return out
 
+    def rows_without_link(self) -> list[int]:
+        """The rows that carry no `](target)` link at all, as file line numbers.
+
+        The one home for that set, because two readers need it and they must not
+        disagree: `_report` names each such row, and it decides there whether to
+        speak per row or in the aggregate (an index whose rows *all* carry no
+        link gets the aggregate sentence, which explains the table shape).
+
+        Derived from the fields `measure` already fills rather than counted
+        again: a row is unlinked exactly when its line number is in `row_lines`
+        and in no `row_targets` entry. A recounted second walk over the text is
+        how the two readings come to disagree about what a row is.
+
+        These rows are **not** a fault: the rule this tool reads is "a row may
+        not point at nothing", and a row that names its file in prose points
+        nowhere rather than at nothing. What the docstring promises is that the
+        report *says* so, so that a count of the links that exist is not read as
+        a statement about every row.
+
+        :returns: the unlinked rows' line numbers, in file order.
+        """
+        linked = {line for line, _ in self.row_targets}
+        return [line for line in self.row_lines if line not in linked]
+
 
 def measure(path: Path) -> Reading:
     """Read one index and count what the rule counts.
@@ -451,6 +482,19 @@ def _report(reading: Reading) -> list[str]:
             "subject here - a table row names its detail file in prose, and this is "
             "not a statement that every row link resolves"
         )
+    elif reading.rows_without_link():
+        # The mixed index: some rows carry links and some do not, so the count above
+        # is over the links that exist - and until 2026-10-06 it was printed alone,
+        # which reads as a statement about every row. Measured on this host: an index
+        # of 98 rows, 3 of them carrying no link at all, reported `row links 186,
+        # unresolved: 0` and exited 0 with no line about the three, while this file's
+        # docstring promised the opposite ("the report says so rather than printing a
+        # count that reads as a pass"). One line per row, like the two findings above.
+        for line in reading.rows_without_link():
+            out.append(
+                f"  row at line {line} carries no ](target) link - the resolution "
+                "reading has no subject on it"
+            )
     for number, target in unresolved:
         out.append(
             f"  row at line {number} names {target}, "

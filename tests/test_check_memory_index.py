@@ -577,6 +577,67 @@ def test_an_index_whose_rows_carry_no_link_says_so(mod, tmp_path, capsys) -> Non
     assert "0 row link(s) read" in out, out
 
 
+def test_an_index_that_mixes_linked_and_unlinked_rows_names_the_unlinked(
+    mod, tmp_path, capsys
+) -> None:
+    """The half the aggregate sentence does not reach: some rows linked, some not.
+
+    Measured 2026-10-05 on this host's own index (`cyc20261005-231525`): 98 rows, 3 of
+    them carrying no link at all, and the report read `row links 191, unresolved: 0` ·
+    `OK` with **no** line about the three - because the sentence that covers this case
+    fired only when *no* row had a link. That count is over the links that exist, and
+    printed alone it reads as a statement about every row, which is the reading this
+    file's docstring promised not to produce.
+
+    Exit stays 0: the rule read here is "a row may not point at nothing", and a row
+    naming its file in prose points nowhere rather than at nothing.
+    """
+    _detail(tmp_path, "cycle-20260101-000000.md")
+    path = _index(
+        tmp_path,
+        "mixed.md",
+        [
+            "# Memory Index",
+            "",
+            "- [linked](cycle-20260101-000000.md) — rec: 26-01-01",
+            "- [unlinked, names its file in prose] — rec: 26-01-01",
+        ],
+    )
+
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "row links 1, unresolved: 0" in out, out
+    assert "row at line 4 carries no ](target) link" in out, out
+    # The linked row is not one of them, and the aggregate sentence is the *other*
+    # case's - so the two readings cannot be satisfied by one always-on line.
+    assert "row at line 3 carries no ](target) link" not in out, out
+    assert "the resolution reading had no subject here" not in out, out
+
+
+def test_an_index_whose_rows_all_carry_links_names_none_of_them(
+    mod, tmp_path, capsys
+) -> None:
+    """The control: the line above must be about the rows, not printed unconditionally."""
+    for name in ("cycle-20260101-000000.md", "cycle-20260101-000001.md"):
+        _detail(tmp_path, name)
+    path = _index(
+        tmp_path,
+        "linked.md",
+        [
+            "# Memory Index",
+            "",
+            "- [one](cycle-20260101-000000.md) — rec: 26-01-01",
+            "- [two](cycle-20260101-000001.md) — rec: 26-01-01",
+        ],
+    )
+
+    assert mod.main([str(path)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "row links 2, unresolved: 0" in out, out
+    assert "carries no ](target) link" not in out, out
+    assert "the resolution reading had no subject here" not in out, out
+
+
 # ── the embed budget, both directions ─────────────────────────────────────────
 
 
