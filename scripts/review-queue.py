@@ -116,8 +116,12 @@ vote on the head it had just refreshed and had to withdraw it by hand, and
 `cyc20260920-214143` found this tool answering `vote` for two heads the cycle
 immediately before it had pushed.
 
-*Who pushed a head* is not a fact GitHub records, so the clause has to be read off
-the clock, and a cycle id **is** its start time in the host's local zone
+*Who pushed a head* is not a field on the pull request, and the one place GitHub does
+record it — the repository's rolling events feed (`PushEvent.actor`) — is incomplete:
+measured 2026-10-05, it reached back to 10-02T17:42Z and still carried no `PushEvent`
+for `#1857`'s head, pushed 04:48Z. A reading absent for the very head it is asked about
+cannot decide the clause, so it has to be read off the clock, and a cycle id **is** its
+start time in the host's local zone
 (`cyc20260917-221117` began at 22:11:17 local). So the window is decidable from two
 datums this tool already has — the push time (the counter prints it) and the cycle's
 id — plus one it does not: **the previous cycle**, which `--prev-cycle` supplies and

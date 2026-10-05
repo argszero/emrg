@@ -805,6 +805,29 @@ def test_it_does_not_spell_the_words_itself(mod):
     )
 
 
+def test_the_pusher_claim_matches_what_github_records(mod):
+    """A stated reason must match what the instrument can read, not assert a universal.
+
+    The clause is read off the clock, and the reason given for it was "who pushed a head
+    is not a fact GitHub records" — refuted by one probe: the repository's events feed
+    carries the pusher as `PushEvent.actor` (measured 2026-10-05). What the feed cannot
+    do is answer for a *given* head — it is rolling, and over the window measured it
+    carried no `PushEvent` for `#1857`'s head while reaching back three days. So the
+    reason has to name that reading and its limit; a universal a reader can disprove with
+    one command is the family this repo keeps out of its prompts and scripts alike.
+    """
+    doc = ast.get_docstring(ast.parse(SCRIPT.read_text(encoding="utf-8"))) or ""
+    assert "is not a fact GitHub records" not in doc, (
+        "the pusher *is* recorded — the events feed carries `PushEvent.actor`; the clause "
+        "is read off the clock because that feed cannot answer for a given head, and the "
+        "reason has to say so rather than claim the fact is unrecorded"
+    )
+    assert "PushEvent.actor" in doc, (
+        "the clause's stated reason must name the reading it rests on (the rolling "
+        "events feed), not leave the clock unexplained"
+    )
+
+
 # --- the queue the tool is asked about -------------------------------------
 
 
