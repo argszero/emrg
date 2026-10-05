@@ -228,12 +228,14 @@ is three-valued rather than pass/fail — `KILLED`
 (the target failed on the `--expect` text), `SURVIVED` (it still passed), `UNJUDGEABLE` (the run
 separates neither; the reason is named and the assertion lines the run really echoed are printed, so the
 retry is one step). Exit `0`/`1`/`2` are those three; `3` TARGET-BROKEN (the target did not collect or
-pass *before* the mutation — the report names which cause it read: a target that does not resolve, or
-an interpreter that cannot import pytest, because the child is run with the interpreter this tool was
-invoked with), `4` NO-MUTATION (the anchor does not occur exactly once), `5`
+pass *before* the mutation — the report names which cause it read: a target that does not resolve, or an
+interpreter that cannot import pytest), `4` NO-MUTATION (the anchor does not occur exactly once), `5`
 RESTORE-MISMATCH. It snapshots the file, pre-flights the target unmutated, pins `HOME`/`TMPDIR` for the
 child only, and restores **byte for byte** on every path, including its own failure — so an arm cannot
-leave a mutated tree behind. `--expect` is the failing assertion's own source line, not the test's
+leave a mutated tree behind. The interpreter the arm is judged under is resolved the same way
+`check-merge-plan-suite.py` resolves the suite's — the invoking interpreter, or the checkout's own
+`.venv` when that one cannot import pytest at all — and the report prints it, so the evidence names its
+environment instead of implying it. `--expect` is the failing assertion's own source line, not the test's
 message: pytest echoes that line, and a fragment copied from a message can be missed when an earlier
 assertion in the same test fires first.
 

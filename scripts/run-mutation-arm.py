@@ -82,7 +82,10 @@ What it does, in order
    is the escape hatch for an arm whose target is already red, and says so in the
    verdict, because the attribution is then the reader's);
 3. apply the replacement and assert the file really changed;
-4. run the target: `HOME`/`TMPDIR`/`TMP`/`TEMP` are pinned to a fresh temporary
+4. run the target, under the interpreter `_pytest_interpreter` resolves once for both
+   runs (the invoking one, or the checkout's own `.venv` when that one cannot import
+   pytest - the rule is asked of `scripts/check-merge-plan-suite.py`, which owns it):
+   `HOME`/`TMPDIR`/`TMP`/`TEMP` are pinned to a fresh temporary
    directory **for the child only** (`emrg/server/evolution_prompt.md` states the
    rule: a temp-root home is itself a writable zone, so a *process-wide* pinned `HOME`
    turns a sandbox test red - a false red, not a regression), bytecode writing is
@@ -126,6 +129,7 @@ The file is restored on every path, including a failure inside this tool.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -211,8 +215,17 @@ def _purge_bytecode(target: Path) -> list[str]:
     return removed
 
 
-def _run_target(node: list[str], cwd: Path, home: Path) -> subprocess.CompletedProcess[str]:
+def _run_target(
+    node: list[str], cwd: Path, home: Path, python: str
+) -> subprocess.CompletedProcess[str]:
     """Run the named pytest target, with the child-only environment pinning.
+
+    `python` is the interpreter the arm is judged under, resolved by
+    `_pytest_interpreter` - not `sys.executable` unconditionally. The two differ only
+    when the interpreter this tool was invoked with cannot import pytest at all, which
+    is never a deliberate choice: an arm cannot be judged by an interpreter that has no
+    runner, so that case is a refusal today and is the wrong answer to the question the
+    caller asked (see `_pytest_interpreter` for the measurement).
 
     `HOME`/`TMPDIR`/`TMP`/`TEMP` are the *arm's* temp root and are passed to this child
     only - pinning them for the whole tool (or worse, for the whole suite) is the
@@ -227,7 +240,7 @@ def _run_target(node: list[str], cwd: Path, home: Path) -> subprocess.CompletedP
         PYTHONDONTWRITEBYTECODE="1",
     )
     return subprocess.run(
-        [sys.executable, "-m", "pytest", *node, "-q", "-p", "no:cacheprovider"],
+        [python, "-m", "pytest", *node, "-q", "-p", "no:cacheprovider"],
         cwd=str(cwd),
         capture_output=True,
         text=True,
@@ -344,37 +357,90 @@ def _apply(text: str, old: str, new: str) -> str | None:
     return text.replace(old, new, 1)
 
 
-def _why_target_broken(rc: int, passed: int, out: str) -> str:
+#: The gate that already owns the answer to *which interpreter runs pytest here*.
+#: Loaded from its file rather than copied, the same way `check-merge-plan-suite.py`
+#: loads `check-merge-sequence.py` and both load `merge_tree.py`: a rule with two
+#: implementations is a rule free to drift apart, and this one has already been answered
+#: twice on one host. Measured 2026-10-05 (`cyc20261005-212445`), under a bare `python3`
+#: (this host's resolves to the *installed* interpreter, which has no pytest):
+#:
+#:     check-merge-plan-suite._suite_interpreter() -> <checkout>/.venv/bin/python
+#:     run-mutation-arm: TARGET-BROKEN, "check the node id"
+#:
+#: One question, two answers - the gate resolved an interpreter that can run the thing it
+#: measures, and this tool refused the arm while naming a cause that was not the cause.
+_GATE = Path(__file__).resolve().parent / "check-merge-plan-suite.py"
+
+
+#: The answer, once loaded: the gate is asked per run, and re-executing its module on
+#: every call would be both wasteful and wrong for a reader who needs to see that this
+#: tool has one source for the rule (`_pytest_interpreter`'s callers include the tests
+#: that pin the delegation).
+_GATE_MODULE: object | None = None
+
+
+def _load_gate():
+    global _GATE_MODULE
+    if _GATE_MODULE is not None:
+        return _GATE_MODULE
+    spec = importlib.util.spec_from_file_location("check_merge_plan_suite", _GATE)
+    if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
+        raise RuntimeError(f"could not load {_GATE}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _GATE_MODULE = module
+    return module
+
+
+def _pytest_interpreter(own: str | None = None, root: Path | None = None) -> str:
+    """The interpreter the arm is judged under: the caller's, or one that can import pytest.
+
+    Asked of the gate, never re-implemented here. The gate's rule is "this interpreter if
+    it can import pytest, else the checkout's own `.venv`", and it is the right rule for an
+    arm for the same reason it is right for the suite: an arm judged by an interpreter with
+    no runner has measured nothing, and refusing is not more honest than using the
+    interpreter the checkout ships. The resolved path is reported, so the evidence names
+    the environment it came from rather than leaving it implied.
+    """
+    return _load_gate()._suite_interpreter(own, root)
+
+
+def _why_target_broken(rc: int, passed: int, out: str, interpreter: str) -> str:
     """Why the pre-flight refused, read from the run's own output.
 
     Two causes reach this refusal with different remedies, so the reason is read rather
     than assumed. Measured 2026-10-05 (`cyc20261005-191637`), on this host: running this
     tool with an interpreter that cannot import pytest - a bare `python3` here resolves
-    to the *installed* interpreter, not the checkout's, and this tool hands
-    `sys.executable` to the child - gave `rc=1, 0 passed`, and the message sent the
-    caller to re-check a node id that the same tool, under the checkout's runner, runs
-    green (`uv run --no-sync pytest <node>` -> `1 passed`). The output said which of the
-    two it was all along, and this function reads it: the interpreter is named in both
-    branches, so the two causes are separable from the report even when the detector
-    below does not fire.
+    to the *installed* interpreter, not the checkout's - gave `rc=1, 0 passed`, and the
+    message sent the caller to re-check a node id that the same tool, under the
+    checkout's runner, runs green (`uv run --no-sync pytest <node>` -> `1 passed`). The
+    output said which of the two it was all along, and this function reads it.
+
+    `interpreter` is the one the run *actually used*, so the message is about the thing
+    that ran: it must not name `sys.executable` when the resolver substituted a different
+    one. Both branches name it, so the two causes stay separable from the report even
+    when the detector below does not fire.
     """
     if _NO_PYTEST.search(out):
         line = next(text for text in out.splitlines() if _NO_PYTEST.search(text)).strip()
         return (
             f"before any mutation the target exited {rc} with {passed} passed, because "
             f"the interpreter this tool ran it with cannot import pytest: {line}. This "
-            f"tool runs the target with sys.executable ({sys.executable}), so the node "
-            "id is not the cause - run the arm through the checkout's runner "
-            "(uv run --no-sync python3) instead of a bare python3, which resolves to the "
-            "installed interpreter"
+            f"tool runs the target with the interpreter it resolved ({interpreter}), so "
+            "the node id is not the cause - and because the resolver already fell back to "
+            "the checkout's own `.venv`, more than one interpreter has been tried: "
+            "install pytest (`uv sync`) or run the arm through the checkout's runner "
+            "(uv run --no-sync python3)"
         )
     return (
         f"before any mutation the target exited {rc} with {passed} passed. An arm can "
         "only attribute a failure to its mutation if the target collected and passed "
         "first - check the node id (a class method needs its class: "
-        "tests/test_x.py::TestC::test_y). The run was made with sys.executable "
-        f"({sys.executable}); if that is not the checkout's interpreter, its pytest is "
-        "not the one this arm is about"
+        "tests/test_x.py::TestC::test_y). The run was made with the interpreter this "
+        f"tool resolved ({interpreter}); if that is not the one you meant, run the arm "
+        "through the checkout's runner(s) rather than a bare python3, which can resolve "
+        "to the installed interpreter"
     )
 
 
@@ -405,6 +471,11 @@ class Arm:
         #: verdict never has to infer the cause from an exit code that means two
         #: different things depending on how the target was named.
         self.syntax_error = ""
+        #: the interpreter both runs used, resolved before either of them. Printed
+        #: because the resolver can substitute the checkout's `.venv` for the caller's
+        #: interpreter, and evidence that does not name its environment is evidence a
+        #: reader has to guess about.
+        self.interpreter = ""
 
     def decide(self, verdict: str, why: str, code: int) -> None:
         self.verdict, self.why, self.code = verdict, why, code
@@ -416,6 +487,7 @@ class Arm:
             "label": self.args.label,
             "node": list(self.args.node),
             "expect": self.args.expect,
+            "interpreter": self.interpreter,
             "preflight": self.preflight,
             "failed_node": self.failed_node,
             "mutated_rc": self.mutated_rc,
@@ -440,6 +512,7 @@ def _report(arm: Arm, as_json: bool) -> None:
     print(f"tree: {arm.cwd}")
     print(f"file: {arm.target}")
     print(f"target: {', '.join(arm.args.node)}")
+    print(f"interpreter: {arm.interpreter or '(not resolved - the arm stopped first)'}")
     print(f"preflight: {arm.preflight}")
     print(f"mutated run: rc={arm.mutated_rc} passed={arm.mutated_passed}")
     print(f"failed node: {arm.failed_node or '-'}")
@@ -534,9 +607,14 @@ def main(argv: list[str] | None = None) -> int:
 
     home = Path(tempfile.mkdtemp(prefix="emrg-arm-"))
     mutated_on_disk = False
+    # Resolved once, before either run, so the pre-flight and the judged run cannot be
+    # about two different interpreters - and reported, because the evidence has to name
+    # the environment it came from when the resolver substitutes one.
+    python = _pytest_interpreter()
+    arm.interpreter = python
     try:
         if not args.no_preflight:
-            proc = _run_target(args.node, cwd, home)
+            proc = _run_target(args.node, cwd, home, python)
             passed = _passed_count(_combined(proc))
             if proc.returncode != PYTEST_OK or passed < 1:
                 # A refusal is a verdict like any other, so it goes through the same
@@ -548,7 +626,7 @@ def main(argv: list[str] | None = None) -> int:
                 arm.decide(
                     TARGET_BROKEN,
                     _why_target_broken(
-                        proc.returncode, passed, _combined(proc)
+                        proc.returncode, passed, _combined(proc), python
                     ),
                     EXIT_TARGET_BROKEN,
                 )
@@ -560,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
                 target.write_text(mutated, encoding="utf-8")
                 mutated_on_disk = True
                 _purge_bytecode(target)
-                proc = _run_target(args.node, cwd, home)
+                proc = _run_target(args.node, cwd, home, python)
                 out = _combined(proc)
                 arm.mutated_rc = proc.returncode
                 arm.mutated_passed = _passed_count(out)

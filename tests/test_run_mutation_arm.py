@@ -687,22 +687,147 @@ def test_the_parse_bullet_keeps_every_code_that_bullet_has_now_been_wrong_about(
     )
 
 
+
+
+class TestTheArmRunsUnderAnInterpreterThatCanImportPytest:
+    """The interpreter is resolved, not assumed - and the report names the one it used.
+
+    Measured 2026-10-05 (`cyc20261005-212445`), on this host, under a bare `python3`
+    (which resolves to the *installed* interpreter, no pytest):
+
+        check-merge-plan-suite._suite_interpreter()  ->  <checkout>/.venv/bin/python
+        python3 scripts/run-mutation-arm.py …        ->  TARGET-BROKEN, "check the node id"
+
+    One question - which interpreter runs pytest here - answered two ways, and the answer
+    the arm runner gave was a refusal that named a cause which was not the cause. The rule
+    now has one implementation: it is asked of the gate that owns it, by file path, the
+    same way that gate asks the sequence tool.
+    """
+
+    def test_the_resolved_interpreter_can_import_pytest(self, mod) -> None:
+        """The property the resolution exists for, measured rather than assumed."""
+        resolved = mod._pytest_interpreter()
+        assert resolved, "the resolver answered with nothing"
+        assert mod._load_gate()._can_import_pytest(resolved), (
+            f"the resolved interpreter cannot import pytest, so an arm judged under it "
+            f"would measure nothing: {resolved}"
+        )
+
+    def test_the_rule_is_asked_of_the_gate_not_reimplemented(self, mod, monkeypatch) -> None:
+        """A second implementation is the drift this delegates to avoid.
+
+        Driven through the gate's own function with a sentinel, because the *equality*
+        check (`_pytest_interpreter() == gate._suite_interpreter()`) cannot discriminate
+        on a machine where both answer with the caller's interpreter - which is every
+        machine whose suite can run at all. Measured, this is the arm that does the work:
+        hardcoding `sys.executable` survives the equality form and dies here.
+        """
+        gate = mod._load_gate()
+        monkeypatch.setattr(gate, "_suite_interpreter", lambda own=None, root=None: "/sentinel/py")
+        assert mod._pytest_interpreter() == "/sentinel/py", (
+            "the resolver did not read its answer from the gate, so the rule now has two "
+            "implementations - the state this delegation was added to end"
+        )
+
+    def test_the_resolution_answers_for_a_layout_it_is_given(self, mod, monkeypatch) -> None:
+        """The arguments are forwarded, so the rule is testable off this machine's layout."""
+        gate = mod._load_gate()
+        seen: list[tuple] = []
+
+        def fake(own=None, root=None):
+            seen.append((own, root))
+            return "/from/the/gate"
+
+        monkeypatch.setattr(gate, "_suite_interpreter", fake)
+        assert mod._pytest_interpreter("/x/python", Path("/y")) == "/from/the/gate"
+        assert seen == [("/x/python", Path("/y"))], (
+            f"the gate has to be asked the question it can answer: {seen}"
+        )
+
+    def test_the_report_names_the_interpreter_and_the_run_uses_it(
+        self, mod, tree, capsys, monkeypatch
+    ) -> None:
+        """Both halves: printed for the reader, and passed to the child that ran."""
+        import subprocess
+
+        sentinel = "/nonexistent/sentinel-python"
+        seen: list[str] = []
+
+        def fake_run(node, cwd, home, python):
+            seen.append(python)
+            return subprocess.CompletedProcess(
+                args=node, returncode=0, stdout="1 passed in 0.01s", stderr=""
+            )
+
+        monkeypatch.setattr(mod, "_pytest_interpreter", lambda *a, **k: sentinel)
+        monkeypatch.setattr(mod, "_run_target", fake_run)
+        _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+        assert f"interpreter: {sentinel}" in out, out
+        assert seen and set(seen) == {sentinel}, (
+            f"every run must use the resolved interpreter, and both did not: {seen}"
+        )
+
+    def test_the_child_command_carries_the_resolved_interpreter(
+        self, mod, tmp_path, monkeypatch
+    ) -> None:
+        """The command line itself, because every other test here stubs the run out.
+
+        Found by an arm, not by reading the code: with only the tests above,
+        `[python, "-m", "pytest", ...]` -> `[sys.executable, "-m", "pytest", ...]` in
+        `_run_target` **SURVIVED**, since the arms that judge the report monkeypatch
+        `_run_target` and never reach the argv it builds. This test spawns nothing - it
+        intercepts `subprocess.run` and reads the list - so the pin is on the command, not
+        on a stub's return value.
+        """
+        import subprocess
+
+        seen: dict[str, list[str]] = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="1 passed", stderr="")
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        mod._run_target(["tests/test_x.py::test_y"], tmp_path, tmp_path, "/resolved/python")
+        assert seen["cmd"][0] == "/resolved/python", (
+            f"the child must be started with the interpreter the arm was resolved under, "
+            f"not the one this process happens to run as: {seen['cmd']}"
+        )
+        assert seen["cmd"][1:3] == ["-m", "pytest"], seen["cmd"]
+
+    def test_the_json_carries_it_too(self, mod, tree, capsys, monkeypatch) -> None:
+        """The machine-readable report is read by callers who see no prose."""
+        import subprocess
+
+        monkeypatch.setattr(mod, "_pytest_interpreter", lambda *a, **k: "/sentinel/py")
+        monkeypatch.setattr(
+            mod, "_run_target",
+            lambda node, cwd, home, python: subprocess.CompletedProcess(
+                args=node, returncode=0, stdout="1 passed in 0.01s", stderr=""
+            ),
+        )
+        _arm(mod, tree, old=GREETING, new='return "goodbye " + name', json_out=True)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["interpreter"] == "/sentinel/py", payload
+
+
 class TestARefusedPreflightNamesTheCauseItFound:
     """A refusal has two causes with different remedies, so the report names which one.
 
     Measured 2026-10-05 (`cyc20261005-191637`), on this host: `python3
-    scripts/run-mutation-arm.py …` — a bare `python3` resolves to the *installed*
-    interpreter here, which has no pytest — gave `preflight: refused (rc=1, 0 passed)`
+    scripts/run-mutation-arm.py …` - a bare `python3` resolves to the *installed*
+    interpreter here, which has no pytest - gave `preflight: refused (rc=1, 0 passed)`
     and a verdict whose only remedy was "check the node id". The node id was fine; the
-    same node under `uv run --no-sync pytest` collected and passed. This tool hands
-    `sys.executable` to the child, so the interpreter it was *invoked* with decides
-    whether the refusal is about the target at all — and the run's output says so
-    ("<python>: No module named pytest"), which is the text these tests drive.
+    same node under `uv run --no-sync pytest` collected and passed. The run's output said
+    so ("<python>: No module named pytest"), which is the text these tests drive, and the
+    interpreter the message names is the one the run *used* - not `sys.executable`, which
+    is no longer what runs when the resolver substitutes the checkout's `.venv`.
     """
 
     def test_the_missing_pytest_cause_is_named_with_its_interpreter(self, mod) -> None:
         line = f"{mod.sys.executable}: No module named pytest"
-        reason = mod._why_target_broken(1, 0, f"collected 0 items\n\n{line}\n")
+        reason = mod._why_target_broken(1, 0, f"collected 0 items\n\n{line}\n", mod.sys.executable)
         assert "No module named pytest" in reason, reason
         assert line in reason, (
             f"the report has to quote the run's own line, not paraphrase it: {reason}"
@@ -720,18 +845,22 @@ class TestARefusedPreflightNamesTheCauseItFound:
         """`-m pytest` prints the unquoted form; a collection ImportError the quoted one.
 
         One matcher for one spelling would miss the other, and a missed spelling falls
-        back to the node-id reading — which is exactly the false remedy above.
+        back to the node-id reading - which is exactly the false remedy above.
         """
-        unquoted = mod._why_target_broken(1, 0, "/usr/bin/python3: No module named pytest")
+        unquoted = mod._why_target_broken(
+            1, 0, "/usr/bin/python3: No module named pytest", "/usr/bin/python3"
+        )
         quoted = mod._why_target_broken(
-            1, 0, "ModuleNotFoundError: No module named 'pytest'", 
+            1, 0, "ModuleNotFoundError: No module named 'pytest'", "/usr/bin/python3"
         )
         for reason in (unquoted, quoted):
             assert "cannot import pytest" in reason, reason
 
     def test_a_target_that_really_failed_keeps_the_node_id_reading(self, mod) -> None:
         """The other direction: with pytest running, the target's own failure stands."""
-        reason = mod._why_target_broken(1, 0, "FAILED tests/test_subject.py::test_hello - assert 1 == 2")
+        reason = mod._why_target_broken(
+            1, 0, "FAILED tests/test_subject.py::test_hello - assert 1 == 2", mod.sys.executable
+        )
         assert "test_x.py::TestC::test_y" in reason, reason
         assert "cannot import pytest" not in reason, reason
         assert mod.sys.executable in reason, (
@@ -739,22 +868,36 @@ class TestARefusedPreflightNamesTheCauseItFound:
             f"separable when the detector does not fire: {reason}"
         )
 
+    def test_the_message_names_the_interpreter_that_ran_not_the_invoked_one(self, mod) -> None:
+        """The resolver can substitute one, so `sys.executable` is the wrong thing to name."""
+        reason = mod._why_target_broken(
+            1, 0, "/somewhere/else/python: No module named pytest", "/checkout/.venv/bin/python"
+        )
+        assert "/checkout/.venv/bin/python" in reason, reason
+        assert mod.sys.executable not in reason, (
+            "the message must describe the run that happened, not the interpreter this "
+            f"process happens to be: {reason}"
+        )
+
     def test_the_report_carries_the_cause_end_to_end(self, mod, tree, capsys, monkeypatch) -> None:
         """Through `main()`, on the output a bare interpreter really produced.
 
-        The interpreter is stubbed rather than spawned: this test is about what the
-        report says, and the honest fixture for it is the bytes that interpreter wrote.
+        The run is stubbed rather than spawned: this test is about what the report says,
+        and the honest fixture for it is the bytes that interpreter wrote. The resolver is
+        stubbed to an interpreter that cannot run pytest, which is the state the message
+        describes (after resolution the real one usually can).
         """
         import subprocess
 
-        def fake_run(node, cwd, home):
+        def fake_run(node, cwd, home, python):
             return subprocess.CompletedProcess(
                 args=node,
                 returncode=1,
                 stdout="",
-                stderr=f"{mod.sys.executable}: No module named pytest\n",
+                stderr=f"{python}: No module named pytest\n",
             )
 
+        monkeypatch.setattr(mod, "_pytest_interpreter", lambda *a, **k: "/bare/python3")
         monkeypatch.setattr(mod, "_run_target", fake_run)
         before = (tree / "subject.py").read_text(encoding="utf-8")
         rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
@@ -762,6 +905,7 @@ class TestARefusedPreflightNamesTheCauseItFound:
         assert rc == mod.EXIT_TARGET_BROKEN, out
         assert "verdict: TARGET-BROKEN" in out, out
         assert "No module named pytest" in out, out
+        assert "/bare/python3" in out, out
         assert "test_x.py::TestC::test_y" not in out, (
             f"the false remedy must not survive in the printed report:\n{out}"
         )
