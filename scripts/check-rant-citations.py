@@ -13,14 +13,27 @@ The class this applies to
 -------------------------
 The **instruction class**: prose a reader is expected to *act on* - the built-in
 task-prompt templates, the evolution template, the upgrade/vibe-check prompts, the
-GUI redesign spec, and the CI README the host reads to set the release Secrets. Ten
-files, measured 2026-09-16: 49 citation sites over 35 distinct timestamps, counted
-as `len({t for s in sites for t in s.timestamps})` over `scan_tree` - the same tree
+GUI redesign spec, and the CI README the host reads to set the release Secrets.
+Twelve files: the ten of the 2026-09-16 measurement - 49 citation sites over 35
+distinct timestamps, counted
+as `len({t for s in sites for t in s.timestamps})` over `scan_tree` - plus two the
+class was missing until 2026-10-05, `competition_prompt.md` and
+`prompts/memory_compaction.j2` (neither carries a site, so every count here is
+unchanged; see `missing_templates` for the reading that catches the omission). The
+same tree
 reads 47 sites and 33 timestamps without the CI README (47/32 on `f07368ba`, the
 master commit it joined, before this template's own citations were rewritten into
 records), and each figure is a reading of the tree it names rather than an estimate.
 (The figure printed here said 29 until issue #1289 measured it: neither it nor the
-27 records-only timestamps.) Code
+27 records-only timestamps.)
+
+The class is enumerated by hand, and **the enumeration is itself read**: a name
+listed twice and a prompt template the list omits are the same defect pointing in
+opposite directions (`duplicated_files`, `missing_templates`). Both are defects in
+the class rather than in a citation - every citation rule still passes - which is
+why neither can be left to the printed count being "known": the count is a claim
+about the class, and a template outside it makes that claim a partial reading
+printed as the whole. Code
 comments are deliberately out of scope (the same
 spelling occurs in 1300+ lines there): a comment's citation is a historical note
 about why the line exists, and rewriting those burns the `git log -S` trail that
@@ -118,13 +131,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: #1290 x #1293 by keeping both sides of the hunk listed
 #: `emrg/server/evolution_prompt.md` twice and the guard still returned `rc=0`, now
 #: printing `58 site(s)` instead of 49. `duplicated_files` is where that is checked.
+#: A name listed twice is a failure (`duplicated_files`); a prompt template that the
+#: list omits is a failure too (`missing_templates`). The two are the same defect
+#: pointing in opposite directions, and both are defects in the **class**: every
+#: citation rule still passes, so nothing but a reading of the class itself can see
+#: either one.
 INSTRUCTION_FILES = (
     ".github/workflows/README.md",         # tells the host which Secrets to set
+    "emrg/server/competition_prompt.md",   # a task template added 2026-10-03 (#1822)
     "emrg/server/evolution_prompt.md",     # swept: the red line covers the running copy
     "emrg/server/journal_prompt.md",
     "emrg/server/open_source_prompt.md",
     "emrg/server/promote_prompt.md",
     "emrg/server/paper_prompt.md",
+    "emrg/server/prompts/memory_compaction.j2",  # rendered by daemon.COMPACTION_TEMPLATE
     "emrg/server/prompts/system.j2",
     "emrg/server/prompts/upgrade_prompt.j2",
     "emrg/server/prompts/vibe_check.j2",
@@ -311,6 +331,57 @@ def duplicated_files(files: tuple[str, ...] | None = None) -> list[str]:
     return repeated
 
 
+#: The prompt templates a reader acts on, as globs over the checkout. Used only to
+#: assert the hand-made enumeration above still **covers** them: membership stays the
+#: deliberate decision `INSTRUCTION_FILES` states, and this is the reading that a
+#: decision taken once does not silently stop covering a template added later. A glob
+#: is the right instrument for this half precisely because it is not a decision -
+#: measured 2026-10-05, `competition_prompt.md` was added on 2026-10-03 (#1822) and
+#: nothing noticed it was outside the class.
+PROMPT_TEMPLATE_GLOBS = ("emrg/server/*_prompt.md", "emrg/server/prompts/*.j2")
+
+
+def template_files(root: Path | None = None) -> list[str]:
+    """Every prompt template under `root`, as class-style relative names, in order.
+
+    :param root: the tree to look in; defaults to this file's repository root.
+    :returns: the template paths, POSIX-spelled so they compare to the class names.
+    """
+    base = REPO_ROOT if root is None else root
+    out: list[str] = []
+    for pattern in PROMPT_TEMPLATE_GLOBS:
+        out.extend(
+            sorted(
+                p.relative_to(base).as_posix()
+                for p in base.glob(pattern)
+                if p.is_file()
+            )
+        )
+    return out
+
+
+def missing_templates(
+    files: tuple[str, ...] | None = None, root: Path | None = None
+) -> list[str]:
+    """Prompt templates the class does not list, in `template_files` order.
+
+    The mirror of `duplicated_files`, and it exists for the same reason: a template
+    outside the class is invisible to every citation rule - nothing scans it - so the
+    count this guard prints, and the module docstring quotes, silently covers less than
+    it says. Measured 2026-10-05: `competition_prompt.md` (added 2026-10-03 by #1822)
+    and `prompts/memory_compaction.j2` were both outside the class, and neither
+    carries a citation site today - which is exactly why the omission could sit there:
+    it changes no verdict until the day it does.
+
+    :param files: the class to check; defaults to `INSTRUCTION_FILES`.
+    :param root: the tree to look in; defaults to this file's repository root.
+    :returns: one name per template the class does not list.
+    """
+    listed = INSTRUCTION_FILES if files is None else files
+    known = set(listed)
+    return [name for name in template_files(root) if name not in known]
+
+
 def scan_tree(root: Path, files: tuple[str, ...] | None = None) -> tuple[list[Site], list[str]]:
     """Sites in `root`, plus the names of files that could not be read.
 
@@ -398,6 +469,15 @@ def main(argv: list[str] | None = None) -> int:
                   f"one the module docstring quotes - inflates by that file's sites "
                   f"while every citation rule still passes")
         print(f"FAIL: {len(repeated)} duplicated instruction-class entr(y/ies)")
+        return 1
+
+    absent = missing_templates()
+    if absent:
+        for name in absent:
+            print(f"missing class entry {name}: it is a prompt template a reader acts "
+                  f"on, but INSTRUCTION_FILES does not list it, so no citation rule "
+                  f"scans it and the count this guard prints covers less than it says")
+        print(f"FAIL: {len(absent)} prompt template(s) outside the instruction class")
         return 1
 
     sites, missing = scan_tree(REPO_ROOT)

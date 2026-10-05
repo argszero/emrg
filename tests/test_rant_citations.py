@@ -314,6 +314,52 @@ def test_a_duplicated_class_entry_fails_the_guard(mod, monkeypatch, capsys):
     assert HOST_OWNED in out and "twice" in out, out
 
 
+def test_every_prompt_template_is_in_the_scanned_class(mod):
+    """The mirror of the duplicate rule: a template outside the class is unscanned.
+
+    Membership is a hand-made decision and nothing else in this file reads it, so a
+    template added later can sit outside the class while every citation rule still
+    passes and the count this guard prints covers less than it says. Measured
+    2026-10-05: `competition_prompt.md` (added 2026-10-03 by #1822) and
+    `prompts/memory_compaction.j2` were both outside the class, and neither carries a
+    citation site today - which is exactly why the omission could sit there.
+    """
+    assert mod.missing_templates() == []
+
+
+def test_the_two_templates_the_class_was_missing_are_listed(mod):
+    """The membership the reading above is about, named rather than implied."""
+    assert "emrg/server/competition_prompt.md" in mod.INSTRUCTION_FILES
+    assert "emrg/server/prompts/memory_compaction.j2" in mod.INSTRUCTION_FILES
+
+
+def test_a_template_outside_the_class_is_reported(mod, tmp_path):
+    """Both directions: a complete class names nothing, an incomplete one names it."""
+    (tmp_path / "emrg" / "server" / "prompts").mkdir(parents=True)
+    (tmp_path / "emrg" / "server" / "journal_prompt.md").write_text("", encoding="utf-8")
+    (tmp_path / "emrg" / "server" / "new_prompt.md").write_text("", encoding="utf-8")
+
+    assert mod.template_files(tmp_path) == [
+        "emrg/server/journal_prompt.md",
+        "emrg/server/new_prompt.md",
+    ]
+    listed = ("emrg/server/journal_prompt.md",)
+    assert mod.missing_templates(listed, tmp_path) == ["emrg/server/new_prompt.md"]
+    assert mod.missing_templates(
+        ("emrg/server/journal_prompt.md", "emrg/server/new_prompt.md"), tmp_path
+    ) == []
+
+
+def test_a_template_outside_the_class_fails_the_guard(mod, monkeypatch, capsys):
+    """`1`, not a pass with a smaller class: the count is a count of the class."""
+    monkeypatch.setattr(
+        mod, "missing_templates", lambda *a, **k: ["emrg/server/new_prompt.md"]
+    )
+    assert mod.main([]) == 1
+    out = capsys.readouterr().out
+    assert "new_prompt.md" in out and "outside the instruction class" in out, out
+
+
 # --- the tree, and the exit-code contract --------------------------------------
 
 
