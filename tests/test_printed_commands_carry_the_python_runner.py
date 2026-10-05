@@ -81,8 +81,8 @@ mentions, **all 8 bare** - that is the second carrier this clause exists for, af
 previous cycle's `review-queue.py` / `check-merge-freshness.py` pair (`60d77678`).
 
 **Docstrings are excluded**, and the reason is measured rather than assumed. The docstrings
-of `scripts/*.py` hold **65** command-shaped mentions against **31** in the strings the code
-actually prints, and the 9 bare ones among them are the family *naming* its readings rather
+of `scripts/*.py` hold **65** mentions of that shape, far more than the strings the code
+prints hold, and the 9 bare ones among them are the family *naming* its readings rather
 than offering commands: four comparisons to a sibling's rule ("in the same shape as
 `scripts/bump-version.py --check`"), three usage lines in `llm-cost-report.py` (a file that
 never hands its docstring to the parser), one transcript line in `cast-vote.py`
@@ -405,7 +405,22 @@ def test_a_source_that_prints_a_bare_command_is_caught():
 #: The anchor is the claim's **shape**, not its wording: any sentence that states this
 #: coverage has to carry the bolded total ({total} below is read from it), so a rewording
 #: of the prose around the numbers is not a finding while a rewrite that drops them is.
-_COVERAGE_TOTAL = re.compile(r"\*\*(\d+)\*\* command-shaped mentions")
+#:
+#: **Both spellings, and one home for the pair.** This quantity is written two ways in the
+#: prose - `<N> command-shaped mentions`, and the shorter `<N> in the strings the code
+#: [actually] prints` a comparison reaches for - and a guard that read either one alone
+#: would be green over a docstring stating the quantity twice with one of the two stale.
+#: That is not hypothetical: measured 2026-10-05, the first spelling was corrected to
+#: **32** while the second went on saying **31** one paragraph down, and the guard of the
+#: day - anchored on the first spelling only, and reading its first match - reported the
+#: file clean (the veto on PR #1859, cycle `cyc20261005-162709`). So every occurrence of
+#: either spelling is read, and the two of them together must be exactly one claim: one
+#: quantity with two homes is one number free to drift apart, and a writer who has to
+#: correct it in two places is a writer who will correct it in one.
+_COVERAGE_CLAIM_SHAPES = (
+    re.compile(r"\*\*(\d+)\*\* command-shaped mentions"),
+    re.compile(r"\*\*(\d+)\*\* in the strings the code"),
+)
 _COVERAGE_TOOL = re.compile(r"`([A-Za-z0-9_-]+\.py)` (\d+)")
 
 
@@ -429,15 +444,33 @@ def _documented_counts(docstring: str) -> tuple[int, dict[str, int]]:
     """The docstring's stated total and per-tool counts.
 
     Raises rather than returning empty: a claim that cannot be found is a failure of this
-    check, not a reason to skip it - the `never a pass` rule the clauses above cite.
+    check, not a reason to skip it - the `never a pass` rule the clauses above cite. And it
+    raises on a *second* claim rather than reading the first: the quantity this reads is
+    stated in two spellings, and any second occurrence of either is another sentence making
+    the same claim - the drift the shapes exist to catch, one site to the left of where
+    this guard was first looking.
     """
-    total_match = _COVERAGE_TOTAL.search(docstring)
-    assert total_match, (
+    claims = [
+        (match, match.group(1))
+        for shape in _COVERAGE_CLAIM_SHAPES
+        for match in shape.finditer(docstring)
+    ]
+    assert claims, (
         "the module docstring states no coverage in the `**N** command-shaped mentions` "
         "shape - that sentence is what a reader uses to see what this clause covers, and "
         "this check reads it, so a rewrite has to keep the numbers and their shape or the "
         "check would pass by finding nothing"
     )
+    assert len(claims) == 1, (
+        "the module docstring states this count "
+        f"{len(claims)} times ({', '.join('**' + n + '**' for _, n in claims)}) across the "
+        "`**N** command-shaped mentions` and `**N** in the strings the code` shapes - one "
+        "quantity with two homes is one number free to drift apart, and a guard that reads "
+        "a single site goes green over the other disagreeing with it. State the clause's "
+        "reading once; a second count of the same kind needs its own shape and its own "
+        "measurement, not a repeat of this one."
+    )
+    total_match, total_text = claims[0]
     # From the total to the first blank line: the paragraph that makes the claim, so a
     # count written elsewhere (a transcript line, an example) is not read as one.
     paragraph = docstring[total_match.start() :].split("\n\n", 1)[0]
@@ -447,7 +480,7 @@ def _documented_counts(docstring: str) -> tuple[int, dict[str, int]]:
         "the coverage claim states no per-tool counts, so a reader cannot tell which files "
         f"this clause reads: {paragraph!r}"
     )
-    return int(total_match.group(1)), tools
+    return int(total_text), tools
 
 
 def test_the_stated_coverage_is_the_measured_one():
@@ -478,3 +511,55 @@ def test_the_stated_coverage_is_the_measured_one():
         "the docstring's per-tool breakdown is not what the clause reads - a reader uses "
         f"it to find the files this rule covers: stated {stated_tools}, measured {measured}"
     )
+
+
+def test_a_second_sentence_stating_the_same_count_is_caught():
+    """Two homes for one number is the defect, so the reader refuses the second.
+
+    Both directions on synthetic docstrings, because the assert above is only evidence if
+    it can fail: one claim is read in either of its two spellings, and the same claim
+    stated twice is a failure even when the two sites agree - the failure this pins is not
+    an arithmetic one, it is that a number written twice can be corrected once. The third
+    case is the text that actually occurred, verbatim: **32** corrected at one site while
+    the other went on saying **31**, in the spelling the guard of the day did not read.
+    """
+    one = (
+        "What the clause reads on this tree, measured 2026-10-05: **32** command-shaped "
+        "mentions, in\nsix tools - `review-queue.py` 13. The same measurement applied to\n"
+        "`cast-vote.py` finds 8.\n\nA later paragraph, without a claim.\n"
+    )
+    total, tools = _documented_counts(one)
+    assert (total, tools) == (32, {"review-queue.py": 13}), (
+        "a single claim must be read, not refused: this is the shape the guard exists to read"
+    )
+
+    other_spelling = one.replace(
+        "**32** command-shaped mentions", "**32** in the strings the code prints"
+    )
+    total, tools = _documented_counts(other_spelling)
+    assert (total, tools) == (32, {"review-queue.py": 13}), (
+        "the shorter spelling states the same quantity, so it has to be read rather than "
+        "left unrecognised - a shape the guard does not know is a home it cannot check"
+    )
+
+    #: Verbatim the measured defect: the first spelling corrected, the second left stale.
+    as_it_happened = one + (
+        "\n**Docstrings are excluded** ... hold **65** command-shaped mentions against "
+        "**31** in the strings the code\nactually prints.\n"
+    )
+    for docstring, number in ((as_it_happened, "31"), (one + "\nand **31** in the strings "
+                                                         "the code prints.\n", "31")):
+        try:
+            _documented_counts(docstring)
+        except AssertionError as exc:
+            message = str(exc)
+            assert "states this count" in message and "**31**" in message, (
+                f"the refusal has to name the sites it found, not just count them: {message!r}"
+            )
+            assert number in message, f"the stale site has to be named: {message!r}"
+        else:
+            raise AssertionError(
+                "a docstring stating the same count twice was read as if it had one home - "
+                "this is exactly the drift the shapes exist to catch, and a guard reading "
+                "one site goes green over the other disagreeing with it"
+            )
