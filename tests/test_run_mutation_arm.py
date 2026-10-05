@@ -685,3 +685,86 @@ def test_the_parse_bullet_keeps_every_code_that_bullet_has_now_been_wrong_about(
         "the bullet has to name the target form that decides between 2 and 4, which is "
         f"the distinction it was rewritten for:\n{bullet}"
     )
+
+
+class TestARefusedPreflightNamesTheCauseItFound:
+    """A refusal has two causes with different remedies, so the report names which one.
+
+    Measured 2026-10-05 (`cyc20261005-191637`), on this host: `python3
+    scripts/run-mutation-arm.py …` — a bare `python3` resolves to the *installed*
+    interpreter here, which has no pytest — gave `preflight: refused (rc=1, 0 passed)`
+    and a verdict whose only remedy was "check the node id". The node id was fine; the
+    same node under `uv run --no-sync pytest` collected and passed. This tool hands
+    `sys.executable` to the child, so the interpreter it was *invoked* with decides
+    whether the refusal is about the target at all — and the run's output says so
+    ("<python>: No module named pytest"), which is the text these tests drive.
+    """
+
+    def test_the_missing_pytest_cause_is_named_with_its_interpreter(self, mod) -> None:
+        line = f"{mod.sys.executable}: No module named pytest"
+        reason = mod._why_target_broken(1, 0, f"collected 0 items\n\n{line}\n")
+        assert "No module named pytest" in reason, reason
+        assert line in reason, (
+            f"the report has to quote the run's own line, not paraphrase it: {reason}"
+        )
+        assert mod.sys.executable in reason, reason
+        assert "uv run --no-sync python3" in reason, (
+            f"a cause without its remedy is half a report: {reason}"
+        )
+        assert "test_x.py::TestC::test_y" not in reason, (
+            "the node id was never wrong here, and sending the reader to it is the "
+            f"defect this branch exists to remove: {reason}"
+        )
+
+    def test_both_spellings_of_the_error_are_read(self, mod) -> None:
+        """`-m pytest` prints the unquoted form; a collection ImportError the quoted one.
+
+        One matcher for one spelling would miss the other, and a missed spelling falls
+        back to the node-id reading — which is exactly the false remedy above.
+        """
+        unquoted = mod._why_target_broken(1, 0, "/usr/bin/python3: No module named pytest")
+        quoted = mod._why_target_broken(
+            1, 0, "ModuleNotFoundError: No module named 'pytest'", 
+        )
+        for reason in (unquoted, quoted):
+            assert "cannot import pytest" in reason, reason
+
+    def test_a_target_that_really_failed_keeps_the_node_id_reading(self, mod) -> None:
+        """The other direction: with pytest running, the target's own failure stands."""
+        reason = mod._why_target_broken(1, 0, "FAILED tests/test_subject.py::test_hello - assert 1 == 2")
+        assert "test_x.py::TestC::test_y" in reason, reason
+        assert "cannot import pytest" not in reason, reason
+        assert mod.sys.executable in reason, (
+            "the interpreter is printed in both branches, so the two causes stay "
+            f"separable when the detector does not fire: {reason}"
+        )
+
+    def test_the_report_carries_the_cause_end_to_end(self, mod, tree, capsys, monkeypatch) -> None:
+        """Through `main()`, on the output a bare interpreter really produced.
+
+        The interpreter is stubbed rather than spawned: this test is about what the
+        report says, and the honest fixture for it is the bytes that interpreter wrote.
+        """
+        import subprocess
+
+        def fake_run(node, cwd, home):
+            return subprocess.CompletedProcess(
+                args=node,
+                returncode=1,
+                stdout="",
+                stderr=f"{mod.sys.executable}: No module named pytest\n",
+            )
+
+        monkeypatch.setattr(mod, "_run_target", fake_run)
+        before = (tree / "subject.py").read_text(encoding="utf-8")
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_TARGET_BROKEN, out
+        assert "verdict: TARGET-BROKEN" in out, out
+        assert "No module named pytest" in out, out
+        assert "test_x.py::TestC::test_y" not in out, (
+            f"the false remedy must not survive in the printed report:\n{out}"
+        )
+        assert (tree / "subject.py").read_text(encoding="utf-8") == before, (
+            "a refused pre-flight must not have written anything"
+        )

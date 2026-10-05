@@ -162,6 +162,15 @@ EXIT_RESTORE_MISMATCH = 5
 #: `1 passed in 0.02s`, `3 passed, 1 warning in 0.10s` - the count pytest prints.
 _PASSED = re.compile(r"(\d+) passed")
 
+#: pytest's own words when the interpreter the target was run with cannot import it.
+#: Both spellings, because the two ways that happens print differently: `-m pytest` with
+#: the module absent prints `<python>: No module named pytest` (measured 2026-10-05 on
+#: this host's python3.13), and an ImportError raised while collecting prints the quoted
+#: `ModuleNotFoundError: No module named 'pytest'`. A matcher for one of the two would
+#: miss half the readings it exists for, which is what the `identity imported` /
+#: `3 identities imported` lesson in `emrg/server/evolution_prompt.md` §1.1 records.
+_NO_PYTEST = re.compile(r"No module named '?pytest'?")
+
 #: pytest's two echoed forms of the assertion that failed: the source line it writes
 #: with `>`, and its explanation, written with `E` - which carries the values
 #: substituted (`E   assert 0 == 1`). Both are text the run really printed, so either
@@ -335,6 +344,40 @@ def _apply(text: str, old: str, new: str) -> str | None:
     return text.replace(old, new, 1)
 
 
+def _why_target_broken(rc: int, passed: int, out: str) -> str:
+    """Why the pre-flight refused, read from the run's own output.
+
+    Two causes reach this refusal with different remedies, so the reason is read rather
+    than assumed. Measured 2026-10-05 (`cyc20261005-191637`), on this host: running this
+    tool with an interpreter that cannot import pytest - a bare `python3` here resolves
+    to the *installed* interpreter, not the checkout's, and this tool hands
+    `sys.executable` to the child - gave `rc=1, 0 passed`, and the message sent the
+    caller to re-check a node id that the same tool, under the checkout's runner, runs
+    green (`uv run --no-sync pytest <node>` -> `1 passed`). The output said which of the
+    two it was all along, and this function reads it: the interpreter is named in both
+    branches, so the two causes are separable from the report even when the detector
+    below does not fire.
+    """
+    if _NO_PYTEST.search(out):
+        line = next(text for text in out.splitlines() if _NO_PYTEST.search(text)).strip()
+        return (
+            f"before any mutation the target exited {rc} with {passed} passed, because "
+            f"the interpreter this tool ran it with cannot import pytest: {line}. This "
+            f"tool runs the target with sys.executable ({sys.executable}), so the node "
+            "id is not the cause - run the arm through the checkout's runner "
+            "(uv run --no-sync python3) instead of a bare python3, which resolves to the "
+            "installed interpreter"
+        )
+    return (
+        f"before any mutation the target exited {rc} with {passed} passed. An arm can "
+        "only attribute a failure to its mutation if the target collected and passed "
+        "first - check the node id (a class method needs its class: "
+        "tests/test_x.py::TestC::test_y). The run was made with sys.executable "
+        f"({sys.executable}); if that is not the checkout's interpreter, its pytest is "
+        "not the one this arm is about"
+    )
+
+
 class Arm:
     """One arm's state, so the verdict is computed before anything is printed."""
 
@@ -498,15 +541,15 @@ def main(argv: list[str] | None = None) -> int:
             if proc.returncode != PYTEST_OK or passed < 1:
                 # A refusal is a verdict like any other, so it goes through the same
                 # report path: an unattributed non-zero exit is the failure this tool
-                # exists to prevent, and that includes this tool's own.
+                # exists to prevent, and that includes this tool's own. Which of the
+                # causes it was is read from the output, not assumed - see
+                # `_why_target_broken`.
                 arm.preflight = f"refused (rc={proc.returncode}, {passed} passed)"
                 arm.decide(
                     TARGET_BROKEN,
-                    f"before any mutation the target exited {proc.returncode} with "
-                    f"{passed} passed. An arm can only attribute a failure to its "
-                    "mutation if the target collected and passed first - check the node "
-                    "id (a class method needs its class: "
-                    "tests/test_x.py::TestC::test_y)",
+                    _why_target_broken(
+                        proc.returncode, passed, _combined(proc)
+                    ),
                     EXIT_TARGET_BROKEN,
                 )
             else:
