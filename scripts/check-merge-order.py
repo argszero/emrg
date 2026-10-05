@@ -438,6 +438,13 @@ def forecast(base: str, numbers: list[int], repo: str) -> dict:
     heads = {number: _rev_parse(_fetch_head(repo, number)) for number in numbers}
     report: dict = {
         "base": base_sha,
+        # Every head this forecast was built from, by PR. The report names the base in
+        # two dimensions (its commit and the ref it denotes); a head is the third input
+        # and was the one left unnamed, so a reader could not hold a verdict against the
+        # head GitHub names - the same defect `check-merge-plan-suite.py` was fixed for
+        # (measured 2026-10-05, `cyc20261005-070014`: a gate judged a tree built from a
+        # head its own transport had left stale, and the output said nothing to check).
+        "heads": heads,
         "prs": {},
         "base_conflicts": [],
         "contains": {},
@@ -495,6 +502,16 @@ def _print_report(report: dict, *, selection: str) -> None:
     conflicting = sum(len(v["dirtied"]) for v in prs.values()) // 2
     where = "open" if selection == "open" else "named"
     print(f"base {report['base']}, {total} {where} PR(s), {conflicting} of {pairs} pairs conflict")
+    # The heads this forecast was built from, named beside the base. The base is named in
+    # two dimensions already (commit and ref); every other input of this forecast is a PR
+    # head, and without them a reader cannot tell which commits the verdicts are about -
+    # on a host whose `origin` can serve a stale `pull/<N>/head`, that is the difference
+    # between a traceable answer and a confident one about a commit nobody named (measured
+    # 2026-10-05, `cyc20261005-070014`, `cyc20261005-083006`). `review-queue.py` names the
+    # head GitHub answers with, so the two readings can now be held against each other.
+    heads_named = report.get("heads") or {}
+    if heads_named:
+        print("heads: " + " ".join(f"#{n} {heads_named[n]}" for n in sorted(heads_named)))
     if report["base_conflicts"]:
         print(
             "  conflicts with the base already: "

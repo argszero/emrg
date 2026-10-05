@@ -1797,3 +1797,65 @@ class TestTheHeaderNamesTheSelectionNotTheRepository:
         )
         assert mod.main(["--json"]) == 0
         assert json.loads(capsys.readouterr().out)["selection"] == "open"
+
+
+class TestTheReportNamesTheHeadsItFetched:
+    """Every input of the forecast is named: the base in two dimensions, and each head.
+
+    Measured 2026-10-05 (`cyc20261005-083006`): on this host `origin` is a checkout whose
+    `refs/pull/<N>/head` an earlier cycle can leave stale, so `_fetch_head` can return a
+    commit GitHub no longer names as that PR's head. This report printed the base and never
+    a head, so a verdict about `#1849` / `#1851` could not be held against the heads
+    `review-queue.py` asks the API for. Run live while this test was written, the gate
+    really did print `#1851 bc469292...` where GitHub answered `a3d27216...` - the defect
+    the line makes visible, not a hypothetical. (The sibling `check-merge-plan-suite.py`
+    was fixed first, on the same branch, `cyc20261005-070014`.)
+    """
+
+    def _report(self, heads: dict[int, str]) -> dict:
+        return {
+            "base": "abc",
+            "heads": heads,
+            "prs": {n: {"paths": [], "dirtied": []} for n in heads},
+            "base_conflicts": [],
+            "contains": {},
+            "identical": [],
+        }
+
+    def test_every_fetched_head_is_named(self, mod, capsys) -> None:
+        a, b = "a" * 40, "b" * 40
+        mod._print_report(self._report({7: a, 9: b}), selection="open")
+        out = capsys.readouterr().out
+        assert f"heads: #7 {a} #9 {b}" in out, out
+
+    def test_a_report_with_no_heads_prints_no_heads_line(self, mod, capsys) -> None:
+        """The control, and the refusal paths' shape: a caller that resolved no head (every
+        refusal returns before `forecast`) must not be handed a bare `heads:` header."""
+
+        report = self._report({})
+        del report["heads"]
+        mod._print_report(report, selection="open")
+        assert "heads:" not in capsys.readouterr().out
+
+    def test_the_forecast_carries_the_heads_so_the_json_does_too(
+        self, mod, monkeypatch
+    ) -> None:
+        """`--json` prints this dict, so the head rides in the document as well."""
+        sha_by_ref = {
+            "origin/master^{commit}": "aaaa1111",
+            "refs/emrg-forecast/pr1^{commit}": "bbbb2222",
+            "refs/emrg-forecast/pr2^{commit}": "cccc3333",
+        }
+
+        def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 0, sha_by_ref[argv[-1]], "")
+            return subprocess.CompletedProcess(argv, 0, _TREE + "\n", "")
+
+        monkeypatch.setattr(mod, "_run", fake_run)
+        monkeypatch.setattr(mod, "_fetch_head", lambda repo, n: f"refs/emrg-forecast/pr{n}")
+        report = mod.forecast("origin/master", [1, 2], "argszero/emrg")
+
+        assert report["heads"] == {1: "bbbb2222", 2: "cccc3333"}, (
+            "the resolved commits, not the mutable ref names the fetch parked"
+        )

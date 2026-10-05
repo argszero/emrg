@@ -765,3 +765,60 @@ def test_the_docstring_holds_this_file_to_the_singular_it_judges_by(mod):
     assert "scripts/check-doc-count.py" in doc, "the docstring must name the guard it runs"
     assert "seq.GUARD" in doc, "and the constant the name is taken from"
     assert "check-merge-plan-suite.py" in doc, "and where the suite question is asked instead"
+
+
+# --- the report names the heads it fetched ---------------------------------
+#
+# A pair is judged as a merge of the *fetched* heads, so every verdict is a verdict about
+# those two commits - and this report named neither. On this host `origin` is a checkout
+# whose `refs/pull/<N>/head` an earlier cycle can leave stale (the `check-merge-order.py`
+# run that produced this fix really did print `#1851 bc469292...` where GitHub answered
+# `a3d27216...`), so without the heads line a reader cannot hold the verdict against the
+# head `review-queue.py` asks the API for. The sibling `check-merge-plan-suite.py` was
+# fixed first, on the same branch (`cyc20261005-070014`).
+
+
+def test_the_report_names_every_head_it_fetched(mod, monkeypatch, capsys):
+    """The heads line names the resolved commits, in PR order, beside the base."""
+    chain = {(BASE, C1): C1, (BASE, C2): C2}
+    verdicts = {C1: (True, "documents 1564"), C2: (True, "documents 1564")}
+    rc, _ = _scan(mod, monkeypatch, chain, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert f"heads: #1 {C1} #2 {C2}" in out, out
+    # The line must name the commit `_fetch_head` returned, not the mutable ref the fetch
+    # parked: a reader holding `refs/pull/1/head` against the API still cannot tell which
+    # commit was judged, which is the whole defect.
+    assert "refs/pull" not in out, out
+
+
+def test_the_heads_line_rides_with_the_dangerous_pair_too(mod, monkeypatch, capsys):
+    """Both directions: the line is printed for a finding, not only for the quiet run."""
+    chain = {(BASE, C1): C1, (C1, C2): C2}
+    verdicts = {C2: (False, "documents 1564 but 1566 are collected")}
+    rc, _ = _scan(mod, monkeypatch, chain, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert f"heads: #1 {C1} #2 {C2}" in out, out
+
+
+def test_a_head_that_cannot_be_resolved_prints_no_heads_line(mod, monkeypatch, capsys):
+    """The control: the line reports resolved heads, so a refusal has none to report.
+
+    A mutant that printed `heads:` from the numbers alone - before any fetch, or from a
+    ref spelling - would satisfy the tests above only by naming commits it never resolved.
+    """
+    monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
+
+    def missing(n):
+        raise mod.seq.MeasurementError(f"could not fetch PR #{n}")
+
+    monkeypatch.setattr(mod.seq, "_fetch_head", missing)
+    rc = mod.main(["1", "2"])
+    captured = capsys.readouterr()
+
+    assert rc == 2, captured.out
+    assert "heads:" not in captured.out, captured.out

@@ -912,6 +912,21 @@ def main(argv: list[str] | None = None) -> int:
         # considered, and which it left out, is part of the answer.
         print(note)
     print(f"plan: {' -> '.join('#' + str(n) for n in numbers)}")
+    # Every head this plan is built from, fetched once and named beside the base. Each step
+    # is a merge of the *fetched* head (`_fetch_head`), so a step's verdict is a verdict
+    # about that commit - and this report named none of them, the defect the sibling
+    # `check-merge-plan-suite.py` was fixed for (measured 2026-10-05, `cyc20261005-070014`:
+    # a gate judged a tree built from a head its own transport had left stale, and printed
+    # a verdict with nothing a reader could hold against the head GitHub names). Resolving
+    # them up front also makes a number that is not an open PR fail loud before any step is
+    # reported, which is the reason `check-merge-pairs.py` already fetches this way.
+    try:
+        heads = {number: _fetch_head(number) for number in numbers}
+    except MeasurementError as exc:
+        print(f"could not measure: {exc}", file=sys.stderr)
+        return 2
+    if heads:
+        print("heads: " + " ".join(f"#{n} {heads[n]}" for n in numbers))
 
     dangers: list[int] = []
     conflicts: list[int] = []
@@ -921,7 +936,10 @@ def main(argv: list[str] | None = None) -> int:
         current = base
         for number in numbers:
             try:
-                head = _fetch_head(number)
+                # Resolved above, once per PR and named in the header: a fresh fetch here
+                # would be a second reading of the same mutable ref, free to disagree with
+                # the head this report says it measured.
+                head = heads[number]
                 merged = _merge_commit(current, head)
             except MeasurementError as exc:
                 print(f"  #{number}: could not measure: {exc}", file=sys.stderr)

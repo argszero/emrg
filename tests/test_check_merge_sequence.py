@@ -1864,3 +1864,64 @@ def test_a_dangerous_step_names_the_guard_the_tree_fails(mod, monkeypatch, capsy
     assert rc == 1, out
     assert f"they produce fails {mod.GUARD}" in out, out
     assert "the repo's own guards" not in out, out
+
+
+# --- the report names the heads it fetched ---------------------------------
+#
+# Each step is a merge of the *fetched* head, so a step's verdict is a verdict about that
+# commit - and this report named none of them. On this host `origin` is a checkout whose
+# `refs/pull/<N>/head` an earlier cycle can leave stale, so without the line a reader
+# cannot hold a step against the head `review-queue.py` asks the API for. Measured
+# 2026-10-05 (`cyc20261005-083006`): the sibling `check-merge-order.py` printed
+# `#1851 bc469292...` where GitHub answered `a3d27216...`, the defect this line makes
+# visible. `check-merge-plan-suite.py` was fixed first, on the same branch
+# (`cyc20261005-070014`).
+
+
+def test_the_report_names_every_head_it_fetched(mod, monkeypatch, capsys):
+    """The heads line names the resolved commits, in plan order - and no bare `refs/`."""
+    heads = {1: C1, 2: C2}
+    verdicts = {1: (C1, (True, "documents 1530")), 2: (C2, (True, "documents 1541"))}
+    rc, _ = _plan(mod, monkeypatch, heads, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert f"heads: #1 {C1} #2 {C2}" in out, out
+    assert "refs/pull" not in out, (
+        "the line must name the commit the fetch resolved, not the mutable ref it parked"
+    )
+
+
+def test_the_heads_line_rides_with_the_dangerous_step_too(mod, monkeypatch, capsys):
+    """Both directions: the line is printed for a finding, not only for the quiet run."""
+    heads = {1: C1, 2: C2}
+    verdicts = {
+        1: (C1, (True, "documents 1541")),
+        2: (C2, (False, "documents 1541 but 1560 are collected")),
+    }
+    rc, _ = _plan(mod, monkeypatch, heads, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert f"heads: #1 {C1} #2 {C2}" in out, out
+
+
+def test_a_head_that_cannot_be_resolved_prints_no_heads_line(mod, monkeypatch, capsys):
+    """The control: the line reports resolved heads, so a refusal has none to report.
+
+    A mutant that printed `heads:` from the numbers alone - before any fetch, or from a
+    ref spelling - would satisfy the tests above only by naming commits it never resolved.
+    Resolving up front also makes this a *clean* refusal: nothing is reported as measured.
+    """
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_refresh_base", lambda ref: None)
+
+    def missing(n):
+        raise mod.MeasurementError(f"could not fetch PR #{n}")
+
+    monkeypatch.setattr(mod, "_fetch_head", missing)
+    rc = mod.main(["1", "2"])
+    captured = capsys.readouterr()
+
+    assert rc == 2, captured.out
+    assert "heads:" not in captured.out, captured.out

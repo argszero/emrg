@@ -286,6 +286,15 @@ def main(argv: list[str] | None = None) -> int:
 
     pairs = [(a, b) for a in numbers for b in numbers if a != b]
     print(f"base {base[:8]} ({base_ref})")
+    # Every head this report was built from, named beside the base. Each pair is judged as
+    # a merge of the *fetched* heads (`seq._fetch_head`), so a verdict about a pair is a
+    # verdict about those two commits - and this file named neither. On a host whose
+    # `origin` can serve a stale `pull/<N>/head` the reader has to be able to hold the head
+    # against what GitHub answers with, which `review-queue.py` names (measured 2026-10-05:
+    # the sibling `check-merge-plan-suite.py` judged a stale head's tree and printed a
+    # verdict with nothing to check, `cyc20261005-070014`).
+    if heads:
+        print("heads: " + " ".join(f"#{n} {heads[n]}" for n in numbers))
     print(
         f"pairs: {len(numbers)} PR(s) -> {len(pairs)} ordered pair(s), "
         f"each measured as {base_ref} -> A -> B, judged by {seq.GUARD}"
