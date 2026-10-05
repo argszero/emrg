@@ -1552,6 +1552,36 @@ def test_two_unlabelled_issues_on_one_origin_are_a_duplicate(
         assert RANT_TS in detail and "Part:" in detail, detail
 
 
+def test_two_unlabelled_issues_on_an_absent_origin_are_unresolved_not_duplicate(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The precedence: the first joint of the chain is answered before the sharing claim.
+
+    Two issues cite the same instant, and the ledger holds **neither** it nor a near
+    spelling — so both are `origin-unresolved` and the duplicate reading must not replace
+    them. The remedy is the discriminator: the duplicate one (fold the two into a single
+    issue, or label each with its part) leaves the origin exactly as unresolved as it was,
+    so a reader following it fixes nothing. The ledger is asked first, and only an origin it
+    resolved can be a duplicate. The resolvable twin of this case is the test above, which
+    must keep reading `origin-duplicate` — a rule that dropped both directions would be no
+    reading at all.
+    """
+    _install(
+        mod,
+        monkeypatch,
+        _linked_issues([_issue_with_origin(10, RANT_TS), _issue_with_origin(11, RANT_TS)]),
+    )
+
+    rc, out = _run(
+        mod, capsys, ["--rants", str(_ledger(tmp_path, "2026-01-01T00:00:00+08:00"))]
+    )
+
+    assert rc == 1, out
+    for subject in ("#10 issue ORIGIN-UNRESOLVED", "#11 issue ORIGIN-UNRESOLVED"):
+        assert subject in out, out
+    assert "DUPLICATE" not in out, out
+
+
 def test_one_issue_writing_its_origin_twice_is_not_a_duplicate(
     mod, monkeypatch, capsys, tmp_path
 ) -> None:

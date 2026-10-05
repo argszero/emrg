@@ -703,6 +703,13 @@ def judge_origins(
       helper above exists to avoid. The list is therefore of distinct numbers, which is also
       what makes its `len` the issue count the threshold means.
 
+      Precedence, because two faults can hold at once: when the ledger holds **neither**
+      the cited instant nor a near spelling, every declaring issue already carries
+      `origin-unresolved`, and that fault stands — the duplicate question is asked only of
+      an origin the ledger resolved. The duplicate remedy (fold the issues together, or
+      label each with its part) leaves an absent origin exactly as unresolved as it was, so
+      reporting the sharing first would send a reader to fix something that cures nothing.
+
     The pruned-store limit, stated rather than implied: `submit_rant cleanup` keeps all
     pending and in-progress rants plus the ten most recent completed ones, so an issue
     whose rant completed and was then pruned reads `origin-unresolved` exactly like one
@@ -742,13 +749,22 @@ def judge_origins(
         if not unlabelled:
             continue
         for number in unlabelled:
-            faults[number] = (
-                "origin-duplicate",
-                f"{_numbers(numbers)} name the same rant origin `{ts}` and "
-                f"{_numbers(unlabelled)} carry no `Part: n/N` - one rant is one issue by "
-                "default, so either fold these into the one issue that finishes the rant, "
-                "or label each with the part it is (`Part: 1/2`) so a reader can tell a "
-                "deliberate split from a duplicate claim",
+            # `setdefault`, not assignment: the chain's first joint is answered before the
+            # claim about sharing it. An issue whose origin the ledger does not hold already
+            # carries `origin-unresolved`, and the duplicate remedy (fold the issues into
+            # one, or label each with its part) leaves that origin exactly as unresolved as
+            # it was — so overwriting would send the reader to fix something that cures
+            # nothing. The duplicate fault is recorded only where the origin resolved.
+            faults.setdefault(
+                number,
+                (
+                    "origin-duplicate",
+                    f"{_numbers(numbers)} name the same rant origin `{ts}` and "
+                    f"{_numbers(unlabelled)} carry no `Part: n/N` - one rant is one issue by "
+                    "default, so either fold these into the one issue that finishes the rant, "
+                    "or label each with the part it is (`Part: 1/2`) so a reader can tell a "
+                    "deliberate split from a duplicate claim",
+                ),
             )
     return faults
 
