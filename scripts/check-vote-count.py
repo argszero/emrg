@@ -352,7 +352,21 @@ INVOCATION = "uv run --no-sync python3 scripts/check-vote-count.py"
 DEFAULT_MIN_VOTES = 3
 
 # `cyc20260911-091230` - the cycle id the vote comments carry.
-_CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
+#
+# The trailing `(?!\d)` is a **token boundary on the right**, and it is here because
+# without it the reader returns an id the body did not write. Measured 2026-10-05
+# (`cyc20261005-234557`), driving the files' own functions: a body stating
+# `cyc20261005-2345571` read as `['cyc20261005-234557']` - the id is a *prefix* of a
+# longer run of digits, so the search takes the shorter one and every later reading
+# (the abstention window, the distinctness rule) is made about a cycle that did not
+# cast the vote. The same string is refused as a `--cycle` value by `cast-vote.py`
+# (`_CYCLE_RE.fullmatch`), so before this the family held two verdicts for one
+# string. Both copies of this pattern carry the boundary; they are described in both
+# files as one shared pattern, and a boundary on only one of them would be that
+# drift. The **left** side is deliberately unbounded: `xcyc20261005-234557` states an
+# id contained in a longer token, and the id returned is the one that was written -
+# a trailing digit is the case where the id read is not the id written.
+_CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}(?!\d)")
 
 
 def distinct_cycle_ids(body: str) -> list[str]:

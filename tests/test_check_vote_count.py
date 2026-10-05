@@ -1975,3 +1975,39 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_
         cycles_log=log,
     )
     assert not counted and why == ""
+
+
+def test_an_id_extended_by_a_digit_is_not_read_as_its_prefix(mod):
+    """An id truncated by what follows it is an id the body did not write.
+
+    Measured 2026-10-05 (`cyc20261005-234557`): a body stating `cyc20261005-2345571`
+    was read as `['cyc20261005-234557']` — the search took the shorter id out of a
+    longer run of digits — while `cast-vote.py` refused that same string as a
+    `--cycle` value, so the family held two verdicts for one string. Everything
+    downstream of the reading is then made about a cycle that did not cast the vote:
+    the abstention window (whose whole subject is *who* pushed a head) and the
+    distinctness rule ("3 consecutive ✅ from different cycles").
+
+    Both directions, because a boundary that fires on too much is the other way this
+    breaks: a period after the id is a real token boundary, not a truncation, and a
+    body naming two well-formed ids still names two candidates.
+    """
+    own = "cyc20261005-234557"
+
+    # The defect: a trailing digit means the *id written* is not the one read.
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle {own}1\n") == [], (
+        "an id extended by a digit must state no cycle at all, not the prefix"
+    )
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle {own}1-fix\n") == []
+
+    # The id itself is untouched, in both the shapes this repo writes.
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle {own}\n") == [own]
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle `{own}`\n") == [own], "backticks"
+
+    # A period is a boundary: `…-234557.1` states the id, then a version.
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle {own}.1\n") == [own]
+
+    # And two well-formed ids are still two candidates, which is what voids a vote.
+    assert mod.distinct_cycle_ids(
+        f"\u2705 LGTM\n\n— cycle {own}\n\nas measured by cyc20261005-234558\n"
+    ) == [own, "cyc20261005-234558"]
