@@ -73,8 +73,8 @@ number, the four spellings this family writes. The argument is the discriminator
 what keeps the clause off prose: "update `VERSION_SOURCES` in `scripts/bump-version.py`"
 ends at the file name and is not a thing to run, while `scripts/check-vote-count.py <PR>` is.
 
-What the clause reads on this tree, measured 2026-10-05: **31** command-shaped mentions, in
-six tools - `review-queue.py` 12, `cast-vote.py` 8, `check-merge-freshness.py` 7,
+What the clause reads on this tree, measured 2026-10-05: **32** command-shaped mentions, in
+six tools - `review-queue.py` 13, `cast-vote.py` 8, `check-merge-freshness.py` 7,
 `bump-version.py` 2, `check-merge-sequence.py` 1, `check-release-published.py` 1. The same
 measurement applied to `cast-vote.py` one commit earlier (`afaeae0f`) finds the same 8
 mentions, **all 8 bare** - that is the second carrier this clause exists for, after the
@@ -395,3 +395,86 @@ def test_a_source_that_prints_a_bare_command_is_caught():
     assert not [
         m for _, text in _printed_strings(cleared) for m, ok in _mentions(text) if not ok
     ], "the same line with the runner in front must clear"
+
+
+#: The sentence in the module docstring that states what the clause reads, and its two
+#: numbers. Parsed rather than restated: the docstring is the carrier a reader of this
+#: file meets first, and a number in it is a claim about the tree - which is what
+#: `Agent.md` means by *a derived number is never written where a guard can measure it*.
+#: This guard measures it on every run, so the claim is checked here instead of trusted.
+#: The anchor is the claim's **shape**, not its wording: any sentence that states this
+#: coverage has to carry the bolded total ({total} below is read from it), so a rewording
+#: of the prose around the numbers is not a finding while a rewrite that drops them is.
+_COVERAGE_TOTAL = re.compile(r"\*\*(\d+)\*\* command-shaped mentions")
+_COVERAGE_TOOL = re.compile(r"`([A-Za-z0-9_-]+\.py)` (\d+)")
+
+
+def _counts_by_tool() -> dict[str, int]:
+    """What the clause below reads on this tree, per file, as a name -> count mapping.
+
+    The same three readers the clauses use, in the same order, so the documentation and
+    the verdict cannot be about two different measurements.
+    """
+    counts: dict[str, int] = {}
+    for path, text in _sources():
+        found = sum(
+            len(_mentions(printed)) for _, printed in _printed_strings(text)
+        )
+        if found:
+            counts[path.name] = found
+    return counts
+
+
+def _documented_counts(docstring: str) -> tuple[int, dict[str, int]]:
+    """The docstring's stated total and per-tool counts.
+
+    Raises rather than returning empty: a claim that cannot be found is a failure of this
+    check, not a reason to skip it - the `never a pass` rule the clauses above cite.
+    """
+    total_match = _COVERAGE_TOTAL.search(docstring)
+    assert total_match, (
+        "the module docstring states no coverage in the `**N** command-shaped mentions` "
+        "shape - that sentence is what a reader uses to see what this clause covers, and "
+        "this check reads it, so a rewrite has to keep the numbers and their shape or the "
+        "check would pass by finding nothing"
+    )
+    # From the total to the first blank line: the paragraph that makes the claim, so a
+    # count written elsewhere (a transcript line, an example) is not read as one.
+    paragraph = docstring[total_match.start() :].split("\n\n", 1)[0]
+
+    tools = {name: int(count) for name, count in _COVERAGE_TOOL.findall(paragraph)}
+    assert tools, (
+        "the coverage claim states no per-tool counts, so a reader cannot tell which files "
+        f"this clause reads: {paragraph!r}"
+    )
+    return int(total_match.group(1)), tools
+
+
+def test_the_stated_coverage_is_the_measured_one():
+    """The docstring's count is a claim about the tree, so the tree checks it.
+
+    Measured 2026-10-05, on the commit that landed this file: the sentence said **31**
+    mentions in six tools with `review-queue.py` **12**, and the clause read **32** with
+    `review-queue.py` **13** - one more, because the last commit of the same PR added the
+    portable re-trigger spelling as a second line of one remedy. The number went stale
+    inside the change that wrote it, which is the whole reason it is read here instead of
+    asserted there.
+    """
+    docstring = ast.get_docstring(ast.parse(Path(__file__).read_text(encoding="utf-8")))
+    assert docstring, "this file has no module docstring, so its coverage claim is gone"
+
+    stated_total, stated_tools = _documented_counts(docstring)
+    measured = _counts_by_tool()
+
+    assert measured, (
+        "the clause read nothing on this tree, so there is no measurement to compare the "
+        "docstring against - 'nothing found' is not 'nothing wrong'"
+    )
+    assert sum(measured.values()) == stated_total, (
+        f"the docstring says {stated_total} command-shaped mentions, and this clause reads "
+        f"{sum(measured.values())} - update the sentence in the module docstring"
+    )
+    assert stated_tools == measured, (
+        "the docstring's per-tool breakdown is not what the clause reads - a reader uses "
+        f"it to find the files this rule covers: stated {stated_tools}, measured {measured}"
+    )
