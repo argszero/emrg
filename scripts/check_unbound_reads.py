@@ -248,10 +248,17 @@ def check_file(path: Path) -> list[tuple[str, int, int, str]]:
     return findings
 
 
-def scan(root: Path) -> tuple[list[str], list[str]]:
-    """(findings as lines, files that could not be measured)."""
-    findings: list[str] = []
-    unmeasured: list[str] = []
+def scanned_modules(root: Path) -> list[Path]:
+    """The first-party modules a verdict about this tree is a statement over.
+
+    One home for the question, because two readers ask it: `scan` walks exactly
+    these files, and `main` asks whether the walk had any subject at all. The
+    note below is why the second reader exists — a walk that read nothing is
+    "a clean verdict about nothing, which is the one failure mode this file
+    must not have", and *no module found* is that same failure with a different
+    cause from the whole-tree skip the note records.
+    """
+    out: list[Path] = []
     for directory in SCANNED_DIRS:
         base = root / directory
         if not base.is_dir():
@@ -264,16 +271,25 @@ def scan(root: Path) -> tuple[list[str], list[str]]:
             # the one failure mode this file must not have.
             if any(part in SKIPPED_DIRS for part in path.relative_to(root).parts):
                 continue
-            try:
-                file_findings = check_file(path)
-            except SyntaxError as exc:
-                unmeasured.append(f"{path}: {exc}")
-                continue
-            for name, read_line, bind_line, function in file_findings:
-                findings.append(
-                    f"{path.relative_to(root)}:{read_line}  in {function}()  reads "
-                    f"{name!r} before its first binding at {bind_line}"
-                )
+            out.append(path)
+    return out
+
+
+def scan(root: Path) -> tuple[list[str], list[str]]:
+    """(findings as lines, files that could not be measured)."""
+    findings: list[str] = []
+    unmeasured: list[str] = []
+    for path in scanned_modules(root):
+        try:
+            file_findings = check_file(path)
+        except SyntaxError as exc:
+            unmeasured.append(f"{path}: {exc}")
+            continue
+        for name, read_line, bind_line, function in file_findings:
+            findings.append(
+                f"{path.relative_to(root)}:{read_line}  in {function}()  reads "
+                f"{name!r} before its first binding at {bind_line}"
+            )
     return findings, unmeasured
 
 
@@ -317,6 +333,23 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"UNMEASURABLE: {len(unmeasured)} file(s) could not be parsed, so this is "
             "not a clean reading of the tree.",
+            file=sys.stderr,
+        )
+        return 2
+    # ...but only over a tree that had something to read. `scan` reports a file it could
+    # not *parse*; it cannot report the case where it found no first-party module at all,
+    # and "OK: no name is read before its first binding" over a tree with no module in it
+    # is the file's own named failure mode — "a clean verdict about nothing, which is the
+    # one failure mode this file must not have" (the note in `scanned_modules`). Measured
+    # 2026-10-05 (`cyc20261005-145352`) on the master this is based on: an empty directory,
+    # and one holding a single unrelated file, both answered `OK` with exit 0. Asked here,
+    # before `--quiet`, because a flag that suppresses the *clean* line must not suppress
+    # the refusal that replaces it.
+    if not scanned_modules(root):
+        print(
+            f"could not measure: no first-party module under {root} "
+            f"({'/, '.join(SCANNED_DIRS)}) - the clean verdict is a statement over "
+            "the modules read, and none was read here",
             file=sys.stderr,
         )
         return 2
