@@ -75,6 +75,21 @@ which is also why `--cycles-log` exists: the answer is read from the cycle recor
 disk, and a verdict about a vote must not silently depend on which records happen to
 sit on the reading host.
 
+Asked of *every* vote, though, it read a corpus the voting cycle never wrote. The
+clause is a self-review guard — "every cycle on a host is the same instance running
+again" — so it belongs to the instance whose records are being read, and this repo is
+reviewed by more than one: measured 2026-10-05 on #1851, the only open PR, two ✅
+LGTMs from **`pm25coder`** (whose cycle says its host is Windows; this counter's
+records are macOS) were voided as "cast inside the window this vote's cycle treats as
+its own", on the strength of a `previous cycle cyc20261005-080717` those cycles never
+saw. The PR read `0/3` with both approvals standing. So the clause is now asked of a
+vote cast by **this** instance's login, and a vote by any other author is counted
+subject to the conditions that need no window (posted after the head push, exactly one
+cycle id, no intervening ❌) — with the note saying so on the line that reports the
+count. An author the payload does not carry, or a login that cannot be read, keeps the
+clause applied: neither can credit a self-review (issue #1856, and the mirror half —
+our own vote on a head we did not push — is named there as out of scope).
+
 Measured before this clause landed, over the last 30 merged PRs: **0 of 90** counted
 votes fell inside their head's own window. The clause changed no history; what it
 removes is the possibility of one, on the path that never asked.
@@ -395,6 +410,70 @@ def distinct_cycle_ids(body: str) -> list[str]:
 # not silently depend on which cycle records happen to sit on the reading host.
 
 _review_queue: object | None = None
+
+
+# ── whose window is it? ─────────────────────────────────────────────────────
+#
+# The clause above is a **self**-review guard, and its own premise says so: "a cycle
+# does not vote on a head it pushed, and on the head pushed by the cycle immediately
+# before it, because every cycle on a host is the same instance running again". The
+# cycles of a host are the records on that host — so the question can be asked only
+# of a vote cast by the instance those records belong to.
+#
+# Asked of every vote it is not merely wider than the rule: it is a verdict read off
+# the wrong corpus. Measured 2026-10-05 on #1851, the repo's only open PR: two ✅
+# LGTMs cast after the head push, each naming exactly one cycle id, were reported
+# `VOID - cast inside the window this vote's cycle treats as its own ... (previous
+# cycle cyc20261005-080717)` — a window built from *this* host's records, justified
+# by *this* host's cycles, for votes `gh api repos/.../pulls/1851/reviews` attributes
+# to `pm25coder`, whose cycle 110820 measures its own host as Windows. The counter
+# therefore read `0/3` on a PR with two approvals standing, which is the direction
+# that strands work: an under-count looks like "not ready yet" and every cycle parks.
+#
+# Two inputs are not decided by guessing, and both keep the clause applied, because
+# refusing is the direction the clause itself prefers: a payload that does not carry
+# an author (a projection that did not apply — the failure this file already hit once
+# with `at`), and a login that cannot be read. Neither can *credit* a vote, so neither
+# can turn a self-review into a counted one.
+
+_UNSET: object = object()
+_own_login: object = _UNSET
+
+
+def instance_login() -> str | None:
+    """The login this instance votes under, or `None` when it cannot be read.
+
+    Asked only when the clause would otherwise void a vote (`own_login` below is
+    called from there and nowhere else), so a run with nothing inside a window makes
+    the same number of `gh` calls it always did. `None` is not a failure of the
+    reading: it keeps the clause applied, which is this file's safe direction.
+    """
+    global _own_login
+    if _own_login is _UNSET:
+        try:
+            payload = _gh_json(["api", "user", "--jq", "{login: .login}"])
+        except (RuntimeError, ValueError):
+            payload = None
+        login = payload.get("login") if isinstance(payload, dict) else None
+        _own_login = str(login) if isinstance(login, str) and login else None
+    return _own_login  # type: ignore[return-value]
+
+
+def own_login(author: str | None) -> bool:
+    """Was this vote cast by the instance whose cycle records the window came from?
+
+    `True` when it cannot be told apart — an author the payload does not carry, or a
+    login that cannot be read — so an undecided voter keeps the clause, which is the
+    direction that costs a delay rather than crediting a self-review (issue #1856).
+    The author is tested *first* so that a payload without one costs no `gh` call,
+    and so that a run which never compares two logins makes none at all.
+    """
+    if not author:
+        return True
+    mine = instance_login()
+    if not mine:
+        return True
+    return author == mine
 
 
 def review_queue():
@@ -919,6 +998,11 @@ class Vote:
     #: Distinct because the question is which cycle wrote the body: a body repeating one
     #: id has one candidate author, so it is not ambiguous (see the reader loop).
     ids: tuple[str, ...] = ()
+    #: Why a *valid* vote counted when the reading above would otherwise have voided
+    #: it — today, one case: the own-head clause was not asked because the vote was
+    #: cast by another instance (issue #1856). Empty is the ordinary case, and the
+    #: label column prints "counts" for it.
+    note: str = ""
 
 
 def _cycle_label(vote: Vote) -> str:
@@ -1289,7 +1373,7 @@ def check_pr(
             "api",
             f"repos/{REPO}/pulls/{number}/reviews",
             "--jq",
-            ".[] | {at: .submitted_at, body: .body}",
+            ".[] | {at: .submitted_at, body: .body, author: .user.login}",
         ]
     )
     reviews.sort(key=lambda r: str(r.get("at") or ""))
@@ -1314,6 +1398,11 @@ def check_pr(
             )
         body = str(r.get("body") or "")
         at = str(r.get("at"))
+        # Absent is not an error here, and is not read as "someone else": a payload
+        # that lost the field keeps the own-head clause applied (`own_login`), which
+        # is the direction that cannot credit a self-review. Unlike `at` above, the
+        # loss therefore cannot turn into a *higher* count.
+        author = str(r.get("author") or "")
         kind = classify(body)
         if kind == "comment":
             continue
@@ -1368,7 +1457,20 @@ def check_pr(
                     cycles_log=cycles_log,
                 )
             inside, why = windows[cycle]
-            if inside:
+            # …and only for a vote cast by the instance the window belongs to. The
+            # clause is a self-review guard read from this host's cycle records, so
+            # asking it of another instance's vote decides a question about records
+            # that instance never wrote (issue #1856: two ✅ from `pm25coder` were
+            # voided this way on #1851, and the PR read 0/3 with them standing).
+            # `own_login` is asked *here* rather than per vote so a run whose votes
+            # are all outside their windows makes no extra `gh` call.
+            if inside and not own_login(author):
+                votes.append(Vote(
+                    at, kind, cycle, True, "", tuple(ids),
+                    f"counts - cast by {author}, not this instance, so the own-head "
+                    "clause is not asked of it",
+                ))
+            elif inside:
                 votes.append(Vote(at, kind, cycle, False, why, tuple(ids)))
             else:
                 votes.append(Vote(at, kind, cycle, True, "", tuple(ids)))
@@ -1551,11 +1653,13 @@ def main(argv: list[str] | None = None) -> int:
                     note = "counts - resets the run" if vote.valid else vote.why
                 elif vote.valid:
                     mark = "OK  "
-                    note = (
-                        "counts"
-                        if contributes
-                        else f"valid, but cycle {vote.cycle} already counted"
-                    )
+                    if contributes:
+                        # A valid vote usually counts silently; the note is set only
+                        # where the count needs saying out loud (issue #1856: a vote
+                        # inside this host's window that was *not* voided).
+                        note = vote.note or "counts"
+                    else:
+                        note = f"valid, but cycle {vote.cycle} already counted"
                 else:
                     # An approval that predates the head push is a real ✅ and still
                     # does not count; rendering it "OK ... VOID" would contradict
