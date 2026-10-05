@@ -150,6 +150,22 @@ def text_files(root: Path) -> list[Path]:
     return sorted(out)
 
 
+def test_modules(root: Path, files: list[Path] | None = None) -> list[Path]:
+    """The `tests/*.py` under `root` - the set a verdict about citations is a statement over.
+
+    This is the one place that says which files are *test modules*: `scan` reads the
+    same list to decide what a citation can be resolved against, and `main` asks it
+    whether the question had any subjects at all - because a green verdict printed
+    over no modules is a claim about a tree nothing was read in.
+
+    :param root: the tree to walk.
+    :param files: an already-walked file list, so `scan` does not walk the tree twice.
+    :returns: the test modules, in a stable order.
+    """
+    walked = text_files(root) if files is None else files
+    return [p for p in walked if p.suffix == ".py" and p.is_relative_to(root / "tests")]
+
+
 def node_ids(path: Path) -> Optional[tuple[set[str], dict[str, list[str]]]]:
     """What pytest collects from one module, as the two sets the rule needs.
 
@@ -183,7 +199,7 @@ def scan(root: Path) -> tuple[list[Finding], list[str]]:
         list beside a non-empty one is reported instead of passed.
     """
     files = text_files(root)
-    modules = {p for p in files if p.suffix == ".py" and p.is_relative_to(root / "tests")}
+    modules = set(test_modules(root, files))
     parsed: dict[Path, Optional[tuple[set[str], dict[str, list[str]]]]] = {}
     unreadable: list[str] = []
     findings: list[Finding] = []
@@ -286,6 +302,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     if not findings:
+        # ...but only if there was something to read. `scan` reports a module it could
+        # not *parse*; it cannot report the case where it found no module at all, and
+        # an empty finding list beside an empty module list is not a clean tree - it is
+        # a reading over nothing, and `0` here would say "every citation resolves" in a
+        # tree no citation was read in. That is the second half of the `2` this file's
+        # docstring defines ("no test file could be read at all, which would make a
+        # green verdict a reading over an empty set"), and until 2026-10-05 only the
+        # first half was implemented: measured, an empty tree answered `0` with
+        # "every citation names a node id pytest collects".
+        if not test_modules(root):
+            print(
+                f"could not measure: no test module under {root / 'tests'} - the green "
+                "verdict is a statement over the modules read, and none was read here",
+                file=sys.stderr,
+            )
+            return 2
         print("every citation names a node id pytest collects")
         return 0
     for finding in findings:

@@ -171,6 +171,50 @@ def test_a_cited_module_that_cannot_be_parsed_is_unmeasurable(mod, tmp_path, cap
     assert "could not measure" in capsys.readouterr().err
 
 
+def test_a_tree_with_no_test_module_is_unmeasurable(mod, tmp_path, capsys):
+    """Nothing read is not the same answer as nothing wrong.
+
+    Measured 2026-10-05 (`cyc20261005-064033`): this tool printed "every citation
+    names a node id pytest collects" and exited `0` on a tree it had read no test
+    module from - an empty directory, and a directory holding one unrelated file.
+    Its own docstring defines that case as `2` ("no test file could be read at all,
+    which would make a green verdict a reading over an empty set"); only the
+    unparseable-module half was implemented, so the promise held for a module that
+    failed to parse and not for the tree where there was none. A reader handed that
+    `0` takes it as a statement about their tree.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert mod.main([str(empty)]) == 2
+    err = capsys.readouterr().err
+    assert "could not measure" in err
+    assert "no test module" in err
+
+    # A `tests/` directory holding no *module* is the same fact: the rule is about the
+    # files a citation can be resolved against, not about a directory existing.
+    bare = tmp_path / "bare"
+    (bare / "tests").mkdir(parents=True)
+    (bare / "tests" / "notes.md").write_text("nothing to resolve against\n", encoding="utf-8")
+    assert mod.main([str(bare)]) == 2
+    assert "no test module" in capsys.readouterr().err
+
+
+def test_a_module_that_cites_nothing_is_still_clean(mod, tmp_path, capsys):
+    """The other direction: a quiet tree must not be turned into unmeasurable.
+
+    The cheapest way to satisfy the test above is to answer `2` whenever there are
+    no findings, which would be a guard that never passes - a state that reads as
+    cautious and is the same as not having one. So the module is present and the
+    citation is absent, and the verdict has to stay `0`.
+    """
+    root = tmp_path / "quiet"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_thing.py").write_text(MODULE, encoding="utf-8")
+    (root / "notes.md").write_text("no citation here\n", encoding="utf-8")
+    assert mod.main([str(root)]) == 0
+    assert "collects" in capsys.readouterr().out
+
+
 def test_the_real_tree_cites_no_class_method_without_its_class(mod):
     """The rule, held against the tree it was derived from (measured: 0 sites).
 
