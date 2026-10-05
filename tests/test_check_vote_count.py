@@ -43,6 +43,13 @@ HEAD = "a" * 40
 T0 = "2026-09-11T00:00:00Z"  # the head push time
 BEFORE = "2026-09-10T00:00:00Z"  # any vote before it
 
+#: The login this instance votes under, as `gh api user` answers it. The abstention
+#: window is read from the cycle records of the host that holds the login, so a vote
+#: by this author is the one the own-head clause can be asked of (issue #1856) - and
+#: every fixture review is by this author unless a test says otherwise.
+SELF_LOGIN = "how2how2how2-arch"
+OTHER_LOGIN = "pm25coder"
+
 #: The host's own zone, needed wherever a test moves one end of the fixture timeline:
 #: a cycle id is **local** time and a push arrives as UTC, so a bare `...Z` literal sits
 #: at a different side of a window on every runner. (`tests/test_cast_vote.py` and
@@ -135,6 +142,11 @@ class FakeGh:
         self.merge_state = merge_state
         self.state = state
         self.merged_at = merged_at
+        #: The login `gh api user` answers with — the instance whose cycle records
+        #: the abstention window is read from (issue #1856). A run only asks when a
+        #: vote would otherwise be voided inside a window, which is why this is an
+        #: answer to a call rather than a constant the tool holds.
+        self.login: str = SELF_LOGIN
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> object:
@@ -156,6 +168,8 @@ class FakeGh:
                 return {"t": self.push_time if self.exact else ""}
             if "/commits/" in joined:
                 return {"t": self.push_time}
+            if joined.startswith("api user"):
+                return {"login": self.login}
         raise AssertionError(f"unexpected gh call: {args}")
 
     def paginated(self, args: list[str]) -> list:
@@ -165,16 +179,16 @@ class FakeGh:
         return self.reviews
 
 
-def _review(at: str, body: str) -> dict:
-    return {"at": at, "body": body}
+def _review(at: str, body: str, author: str = SELF_LOGIN) -> dict:
+    return {"at": at, "body": body, "author": author}
 
 
-def _approve(cycle: str, at: str) -> dict:
-    return _review(at, f"\u2705 LGTM - cycle `{cycle}`")
+def _approve(cycle: str, at: str, author: str = SELF_LOGIN) -> dict:
+    return _review(at, f"\u2705 LGTM - cycle `{cycle}`", author)
 
 
-def _veto(cycle: str, at: str) -> dict:
-    return _review(at, f"\u274c Needs fix - cycle `{cycle}`")
+def _veto(cycle: str, at: str, author: str = SELF_LOGIN) -> dict:
+    return _review(at, f"\u274c Needs fix - cycle `{cycle}`", author)
 
 
 def _run(mod, monkeypatch, fake: FakeGh, argv: list[str] | None = None) -> int:
@@ -1777,6 +1791,97 @@ def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_pa
     out = capsys.readouterr().out
     assert "1/3 valid votes" in out, out
     assert "inside the window" not in out, out
+
+
+def test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window(
+    mod, monkeypatch, capsys
+):
+    """The own-head clause is a self-review guard, so it is asked only of our own votes.
+
+    Measured 2026-10-05 on #1851, the repo's only open PR (issue #1856): two ✅ LGTMs
+    cast after the head push, each naming one cycle id, read
+
+        VOID … - cast inside the window this vote's cycle treats as its own - the head
+        was pushed …, at or after 2026-10-05T08:07:17+08:00 (previous cycle
+        cyc20261005-080717)
+
+    and `gh api repos/argszero/emrg/pulls/1851/reviews` attributes both to `pm25coder`,
+    whose cycle measures its host as Windows - the cycles of another instance, on a
+    host whose records are not the ones this counter reads. The window is drawn from
+    *this* host's cycle records, so a vote by another author cannot be inside it, and
+    the count is what a cycle reads before it merges: `0/3` with two approvals standing
+    is the error direction that strands work, since it reads as "not ready yet".
+
+    The pair below differs in the author and in nothing else - same vote, same instant,
+    same window - so a clause that stopped being asked at all fails the first half, and
+    one still asked of everyone fails the second.
+    """
+    pushed = _push(2026, 9, 11, 9, 0)
+    vote_at = _push(2026, 9, 11, 10, 0)
+    # The voting cycle started an hour before the push, so its own window covers it.
+    cycle = "cyc20260911-080000"
+
+    mine = FakeGh([_approve(cycle, vote_at)], push_time=pushed)
+    rc = _run(mod, monkeypatch, mine)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"VOID {cycle} - cast inside the window" in out, out
+
+    theirs = FakeGh(
+        [_approve(cycle, vote_at, author=OTHER_LOGIN)], push_time=pushed
+    )
+    rc = _run(mod, monkeypatch, theirs, ["1", "--min-votes", "1"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "READY 1/1" in out, out
+    assert "inside the window" not in out, (
+        "a vote by another instance is not this host's self-review, so the clause its "
+        "window carries is not asked of it"
+    )
+    assert f"cast by {OTHER_LOGIN}, not this instance" in out, (
+        "the count has to say why a vote inside the window was not voided - silence "
+        "would read as the clause never having been asked"
+    )
+    # The login is asked for the first public question that needed it, and then not
+    # again: one ask per process rather than per vote, so the run with nothing inside
+    # a window keeps the three calls it always made (pinned by the ready-count test).
+    asked = [
+        c for c in mine.calls + theirs.calls if "api user" in " ".join(c)
+    ]
+    assert len(asked) == 1, asked
+
+
+def test_an_undecided_voter_keeps_the_clause(mod, monkeypatch, capsys):
+    """Neither input can credit a self-review, so both keep today's verdict.
+
+    Two ways the question is unanswerable: the payload does not carry the author (a
+    projection that did not apply - the failure this file already hit once with `at`),
+    and the login cannot be read (no `gh`, no network, a token without `user`). The
+    direction that costs a delay is preferred to the one that counts a vote nobody can
+    attribute, which is the clause's own rule.
+    """
+    pushed = _push(2026, 9, 11, 9, 0)
+    vote_at = _push(2026, 9, 11, 10, 0)
+    cycle = "cyc20260911-080000"
+
+    # (a) the review payload has no author at all
+    anonymous = _approve(cycle, vote_at)
+    anonymous.pop("author")
+    fake = FakeGh([anonymous], push_time=pushed)
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"VOID {cycle}" in out, out
+
+    # (b) the author is there and our own login cannot be read
+    unreadable = FakeGh([_approve(cycle, vote_at, author=OTHER_LOGIN)], push_time=pushed)
+    unreadable.login = ""
+    rc = _run(mod, monkeypatch, unreadable)
+    out = capsys.readouterr().out
+    assert "VOID" in out, (
+        "an unreadable login is not a licence: with nothing to compare against, the "
+        "vote keeps the clause rather than being credited"
+    )
 
 
 def test_a_cycle_id_that_names_no_instant_is_not_passed(mod, monkeypatch, capsys):
