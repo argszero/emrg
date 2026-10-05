@@ -1443,6 +1443,9 @@ def test_a_rant_row_names_the_project_it_belongs_to(mod, monkeypatch, capsys):
     would have to open the ledger again — the cost the row was added to save. Measured
     2026-10-01 on this host, the queue rendered 39 open rants and every one belonged to
     another project, while this task's ledger rows were all `completed`.
+
+    Read through `--all-rants`, because this test is about the **row's shape** and the
+    default rendering withholds another project's row (that behaviour is pinned next door).
     """
     monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
     rants_of(
@@ -1451,13 +1454,214 @@ def test_a_rant_row_names_the_project_it_belongs_to(mod, monkeypatch, capsys):
         ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
         ("2026-09-30T09:30:16+08:00", "pending", [], ""),
     )
-    mod.main([])
+    mod.main(["--all-rants"])
     out = capsys.readouterr().out
 
     assert "project=silicon-science-cs" in out
     assert "project=(none)" in out, (
         "a row that names no project must say so: §2.2 makes it one to ignore entirely, "
         "and a row that prints nothing there is a row with no such state"
+    )
+
+
+def test_another_projects_rant_is_counted_and_not_printed(mod, monkeypatch, capsys):
+    """The bulk this report pays for, and the row it must not lose.
+
+    Measured 2026-10-04 on this host: 40 open rants, 39 of them `silicon-science-cs` — about
+    8.7KB of a 9.7KB report, rendered for a cycle the prompt itself tells that those rows are
+    not its work. They are now **counted and not printed**, which is the reading's cost and
+    not its content: the header keeps the ledger whole, so nothing is hidden.
+    """
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], "emrg"),
+    )
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "rant 2026-09-30T09:30:16+08:00" in out, "this task's own row is rendered"
+    assert "rant 2026-09-30T09:35:04+08:00" not in out, (
+        "another project's row body is what the default withholds"
+    )
+    header = next(line for line in out.splitlines() if "open rant(s)" in line)
+    assert "2 open rant(s) across 2 project(s)" in header, (
+        "the count stays the ledger's: withholding a row is not hiding it"
+    )
+    withheld = next(line for line in out.splitlines() if "not printed here" in line)
+    assert "1 of them names another project" in withheld, withheld
+    assert "--all-rants" in withheld, (
+        "a withheld row must come with the way to see it, or the reader has no remedy"
+    )
+    assert "`rendered_here` withholds another project's rows and only those" in withheld, (
+        "the reason must name the axis that withholds. It used to say `no issue in "
+        "argszero/emrg can declare them`, which is also true of the project-less row this "
+        "report prints - so it separated nothing (see "
+        "test_the_rant_header_and_the_withheld_line_name_what_withholds)"
+    )
+
+
+def test_a_project_less_rant_is_still_printed_though_it_can_declare_nothing_here(
+    mod, monkeypatch, capsys
+):
+    """`could_declare_here` is not the rendering rule, and the difference is deliberate.
+
+    That predicate answers "could an issue in this repo carry the rant's `Origin:` line",
+    and for a row naming no project it is false. A project-less row is not *another*
+    project's work, though — it is undeclared, and undeclared is something the cycle has to
+    look at. The rows this table prints exist because a cycle reading the queue alone
+    concluded "nothing to review" while three pending rants had no issue (2026-09-29), so
+    hiding an undeclared one would restore exactly that defect for the row most likely to be
+    this task's.
+    """
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:30:16+08:00", "pending", [], ""),
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+    )
+    mod.main([])
+    out = capsys.readouterr().out
+
+    assert "rant 2026-09-30T09:30:16+08:00" in out, "the undeclared row is rendered"
+    assert "project=(none)" in out
+    assert "rant 2026-09-30T09:35:04+08:00" not in out
+    assert mod.could_declare_here("", mod.REPO) is False, (
+        "the two rules must be seen to differ here, or this test would pass under either"
+    )
+    assert mod.rendered_here("", mod.REPO) is True
+
+
+def test_all_rants_prints_the_withheld_rows_and_the_line_disappears(
+    mod, monkeypatch, capsys
+):
+    """The other direction of the same flag: withheld means withheld *by default*."""
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], "emrg"),
+    )
+    mod.main(["--all-rants"])
+    out = capsys.readouterr().out
+
+    assert "rant 2026-09-30T09:35:04+08:00" in out
+    assert "rant 2026-09-30T09:30:16+08:00" in out
+    assert "not printed here" not in out, (
+        "nothing was withheld, so the sentence about withholding would be false"
+    )
+
+
+def test_the_all_rants_help_states_the_withheld_set_the_predicate_defines(mod, capsys):
+    """The `--help` sentence is the only statement of the flag's scope a reader meets.
+
+    It was wrong here: it said the default counts "a rant naming another project (or none)",
+    while `rendered_here` renders a project-less row by default - pinned above, and for the
+    reason that an undeclared row is not *another* project's work. A sentence restating a
+    rule that lives elsewhere is a second copy of it; this holds the copy against the
+    original, the predicate's three answers beside the sentence's two claims.
+    """
+    rendered = [
+        mod.rendered_here(project, mod.REPO)
+        for project in ("emrg", "silicon-science-cs", "")
+    ]
+    assert rendered == [True, False, True], (
+        "the rule the sentence states: this repo's rows, and the rows naming no project"
+    )
+
+    with pytest.raises(SystemExit):
+        mod.main(["--help"])
+    # argparse wraps the text at the terminal width, so a phrase can span a line break: the
+    # claims are read from the help text with its whitespace collapsed, not from its lines.
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert "rendered_here" in out, "the sentence names the rule that decides it"
+    assert "naming no project is still printed" in out, (
+        "the one case the sentence had wrong, now stated the way the predicate reads"
+    )
+
+
+def test_the_rant_header_and_the_withheld_line_name_what_withholds(
+    mod, monkeypatch, capsys
+):
+    """Both sentences a cycle reads on every run, held against the predicate that decides.
+
+    The `--help` copy was fixed for this on the same branch and the report's **header** was
+    not: it still told the reader that "a row naming another project - or none - is not this
+    cycle's work", one line above the project-less row it then printed. The withheld line
+    gave a reason that does not discriminate either - "no issue in argszero/emrg can declare
+    them" is equally true of that project-less row, because `could_declare_here("")` is False
+    too. The rule is `rendered_here`, spelled once, and these are its two copies.
+    """
+    rendered = [
+        mod.rendered_here(project, mod.REPO)
+        for project in ("emrg", "silicon-science-cs", "")
+    ]
+    assert rendered == [True, False, True], (
+        "the rule both sentences state: this repo's rows, and the rows naming no project"
+    )
+    assert mod.could_declare_here("silicon-science-cs", mod.REPO) is False
+    assert mod.could_declare_here("", mod.REPO) is False, (
+        "the reason the withheld line used to give is true of a row this report prints, so "
+        "it is not the reason anything is withheld - which is what this test keeps true"
+    )
+
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], ""),
+    )
+    mod.main([])
+    # The sentences are read with their whitespace collapsed, so the assertions are about
+    # the claim and not about where a line happens to break.
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert out.count("rendered_here") >= 2, (
+        "both sentences name the rule that decides them, the way the --help copy does"
+    )
+    assert "or none" not in out, (
+        "the header's own clause, the defect this pins: a row naming no project is not "
+        "withheld, and a report saying so is contradicted by the row it prints beside it"
+    )
+    assert "one naming no project is undeclared rather than another project's" in out, (
+        "the case the header had wrong, stated the way the predicate reads"
+    )
+    assert "rant 2026-09-30T09:30:16+08:00" in out, (
+        "and the row the header is about really is printed"
+    )
+
+
+def test_the_json_document_keeps_every_rant_row_and_labels_it(mod, monkeypatch, capsys):
+    """A consumer must not silently receive a shorter list than the ledger holds.
+
+    The prose withholds another project's row because its reader pays for the bytes; the
+    document keeps every row and carries the prose's own predicate as a field, spelled from
+    the same function. A JSON path that dropped rows with no marker would be this family's
+    "never a pass" defect in its machine-readable form: a short list read as a whole one.
+    """
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    monkeypatch.setattr(mod, "local_tree", lambda: ("/checkout", "some-branch", "b" * 40))
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], ""),
+        ("2026-09-30T09:17:54+08:00", "pending", [], "emrg"),
+    )
+    _run(mod, monkeypatch, votes, fresh, ["1", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    rants = [row for row in payload if row["subject"] == "rant"]
+    assert [row["project"] for row in rants] == ["silicon-science-cs", "", "emrg"]
+    assert [row["rendered"] for row in rants] == [False, True, True], (
+        "the field is the prose's predicate, so a consumer can apply the same rule"
     )
 
 

@@ -75,6 +75,23 @@ Usage
     uv run --no-sync python3 scripts/review-queue.py --cycle cyc20260917-221117
     uv run --no-sync python3 scripts/review-queue.py --json
 
+The rant half of the report prints this task's rows by default and **counts** the rest
+----------------------------------------------------------------------------------------
+`open_rant_rows` returns every open rant — the reading stays whole, and the JSON below keeps
+every row too, each labelled `rendered` — but the prose renders only the rows this repo can
+act on, and says how many it withheld. The rule is `rendered_here`: this task's own rants
+(by either spelling), plus the ones naming **no** project. Withheld are the rows naming
+another project, which is the whole of the bulk and none of the work: measured 2026-10-04 on
+this host, 40 open rants of which 39 were `silicon-science-cs`, ~8.7KB of the report's
+~9.7KB, printed every cycle for a reader the template has already told those rows are not
+its own. `--all-rants` prints every row.
+
+A row naming no project is deliberately still printed, though no issue here can declare it:
+undeclared is not another project's work, and the rows this section exists for were added
+after a cycle read "nothing to review" while pending rants without issues sat in the ledger
+(measured 2026-09-29) — so hiding an undeclared one would restore that defect for the row
+most likely to be this task's.
+
 `--cycle` is what turns "may this PR be voted on" into "may *this cycle* still vote
 here" — the counter counts per cycle, so a cycle that has already voted at a head
 must get its next vote from another cycle. Without it the tool reports the first
@@ -157,6 +174,26 @@ def could_declare_here(project: str, repo: str = REPO) -> bool:
     *reading*: see `open_rant_rows`, where the difference is 48.8s of `gh` against 5.8s.
     """
     return bool(project) and project in (repo, repo.rsplit("/", 1)[-1])
+
+
+def rendered_here(project: str, repo: str = REPO) -> bool:
+    """Whether this rant gets a row in the report **by default**.
+
+    This task's own rants, and the ones naming **no** project at all. The withheld case is
+    the one the prompt decides for us in as many words — a rant naming another project is
+    not this instance's to act on — and on this host that is also the whole of the bulk
+    (measured 2026-10-04: 40 open rants, 39 of them `silicon-science-cs`, ~8.7KB of the
+    report's ~9.7KB, paid by every cycle).
+
+    A row naming **no** project is deliberately *not* withheld, even though
+    `could_declare_here` is false for it: that predicate is about whether an issue **in this
+    repo** could carry the rant's `Origin:` line, and a project-less row is not another
+    project's work — it is undeclared, which is a thing the cycle has to look at. The rows
+    this table prints exist because a cycle reading the queue *alone* concluded "nothing to
+    review" while three pending rants had no issue (measured 2026-09-29), so hiding an
+    undeclared rant would restore that defect for the rows most likely to be this task's.
+    """
+    return could_declare_here(project, repo) or not project
 
 #: How the family's tools are invoked (`Agent.md`, "Test Commands"). Printed
 #: commands carry the runner the docstrings and the docs prescribe — a bare
@@ -1138,7 +1175,11 @@ def local_tree() -> tuple[str, str, str]:
     return str(SCRIPTS_DIR.parent), branch, head
 
 
-def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = None) -> str:
+def _as_json(
+    readings: list[tuple[Reading, Action]],
+    rants: list[Rant] | None = None,
+    repo: str = REPO,
+) -> str:
     # The clone and its branch ride as *fields* on each reading, the way
     # `check-merge-landed.py` states its tree in `--json`: the document's shape is a
     # list, and a prose line ahead of it would be a second kind of line in a stream a
@@ -1194,6 +1235,13 @@ def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = 
             "issues": rant.issues,
             "message": rant.message,
             "project": rant.project,
+            # The prose rendering withholds another project's rows (a cycle's report is
+            # the surface whose size is paid, and the prompt says those rows are not its
+            # work), but the **document keeps every row** and labels it here instead: a
+            # consumer that lost rows silently would be reading a short list as a whole
+            # one, which is this family's "never a pass" defect in its JSON form. The
+            # field is the prose's own predicate, spelled once - `rendered_here`.
+            "rendered": rendered_here(rant.project, repo),
         }
         for rant in (rants or [])
     )
@@ -1254,6 +1302,14 @@ def main(argv: list[str] | None = None) -> int:
         help="the rant ledger to read (default: $EMRG_RANTS, else ~/.emrg/rants.jsonl). "
              "Open rants are rendered as rows of their own - a queue that showed only "
              "PRs once read as 'nothing to move' while three pending rants had no issue",
+    )
+    parser.add_argument(
+        "--all-rants",
+        action="store_true",
+        help="print every open rant's row, including other projects' - the default "
+             "renders the rows `rendered_here` accepts (this repo's, and the rows "
+             "naming no project: naming no project is still printed, because "
+             "undeclared is not another project's work) and counts the rest",
     )
     parser.add_argument(
         "--json", action="store_true", help="emit the readings as JSON instead of prose"
@@ -1318,7 +1374,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     if args.json:
-        print(_as_json(readings, rants))
+        print(_as_json(readings, rants, args.repo))
     else:
         if not queue:
             # Only claim "nothing" when there is nothing to report on — and that includes
@@ -1368,11 +1424,37 @@ def main(argv: list[str] | None = None) -> int:
                 f"{len(rants)} open rant(s) across {len(counts)} project(s) - {across} - "
                 "each needs an issue and its PR (R5) once it is this task's; the prompt's "
                 "rant section matches a rant to a task by `project` (this task's project, "
-                "or its owner/repo), so a row naming another project - or none - is not "
-                "this cycle's work:"
+                "or its owner/repo), so a row naming another project is not this cycle's "
+                "work and is withheld by default - one naming no project is undeclared "
+                "rather than another project's, and is rendered (`rendered_here` decides "
+                "both):"
             )
+            # Rendered by default: the rows `rendered_here` accepts - this repo's, and the
+            # ones naming no project (a second predicate, `could_declare_here`, is **not**
+            # the rendering rule: it is false for a project-less row too, so it separates
+            # nothing here). Another project's rows are **counted above and not printed** —
+            # the header keeps the ledger whole, so nothing is hidden, and their bodies are
+            # what this section's cost was made of (measured 2026-10-04 on this host: 40 open
+            # rants, 39 of them `silicon-science-cs`, ~8.7KB of a ~9.7KB report, paid by a
+            # cycle for whom the prompt itself says they are not its work). `--all-rants`
+            # prints them all.
+            rendered = rants if args.all_rants else [
+                rant for rant in rants if rendered_here(rant.project, args.repo)
+            ]
+            withheld = len(rants) - len(rendered)
+            if withheld:
+                print(
+                    f"{withheld} of them "
+                    + ("names" if withheld == 1 else "name")
+                    + " another project, so "
+                    + ("its row is" if withheld == 1 else "their rows are")
+                    + " counted above and not printed here: `rendered_here` withholds "
+                    "another project's rows and only those - a row naming no project is "
+                    "undeclared, not another project's, so it is not withheld either. "
+                    f"`{RUNNER} scripts/review-queue.py --all-rants` prints every row."
+                )
             print()
-            for rant in rants:
+            for rant in rendered:
                 print(render_rant(rant))
                 print()
 
