@@ -235,7 +235,9 @@ child only, and restores **byte for byte** on every path, including its own fail
 leave a mutated tree behind. The interpreter the arm is judged under is resolved the same way
 `check-merge-plan-suite.py` resolves the suite's — the invoking interpreter, or the checkout's own
 `.venv` when that one cannot import pytest at all — and the report prints it, so the evidence names its
-environment instead of implying it. `--expect` is the failing assertion's own source line, not the test's
+environment instead of implying it. A gate that will not load is UNJUDGEABLE as well (exit `2`), naming
+the gate rather than raising a traceback: an arm whose interpreter could not be resolved has measured
+nothing, and a crash's exit code would be read as one of the verdicts it never reached. `--expect` is the failing assertion's own source line, not the test's
 message: pytest echoes that line, and a fragment copied from a message can be missed when an earlier
 assertion in the same test fires first.
 

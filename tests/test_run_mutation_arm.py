@@ -912,3 +912,69 @@ class TestARefusedPreflightNamesTheCauseItFound:
         assert (tree / "subject.py").read_text(encoding="utf-8") == before, (
             "a refused pre-flight must not have written anything"
         )
+
+
+class TestAGateThatWillNotLoadIsAVerdict:
+    """The resolution's own failure leaves through the report, not out of `main`.
+
+    Measured 2026-10-06 (`cyc20261006-020931`), on this host, in two shapes and with the
+    same outcome: a gate with one unparsable line appended, and a copy of this tool
+    standing alone without a gate beside it, each gave **no `verdict:` line at all** and
+    exit code **1** - which this file defines as `EXIT_SURVIVED`. A caller that reads the
+    exit code therefore read "the target still passed with the mutation in place" out of a
+    run that never started, which is the class of defect this file's own contract names:
+    "Every verdict leaves through `_report` … an exit code with no prose is the failure
+    this family keeps naming".
+    """
+
+    @pytest.fixture
+    def unloadable_gate(self, mod, tmp_path, monkeypatch):
+        """Point `_GATE` at a path that is not there, and forget the cached module.
+
+        The cache is the reason this is a fixture rather than one line in each test: a gate
+        already loaded by an earlier test would be returned without touching the disk, and
+        the test would then pass without ever exercising the failure.
+        """
+        monkeypatch.setattr(mod, "_GATE", tmp_path / "check-merge-plan-suite.py")
+        monkeypatch.setattr(mod, "_GATE_MODULE", None)
+        return mod._GATE
+
+    def test_the_failure_is_a_verdict_and_never_the_survived_code(
+        self, mod, tree, capsys, unloadable_gate
+    ) -> None:
+        before = (tree / "subject.py").read_text(encoding="utf-8")
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_UNJUDGEABLE, out
+        assert "verdict: UNJUDGEABLE" in out, out
+        assert rc != mod.EXIT_SURVIVED, (
+            "the crash used to exit 1, so a caller reading the code read a survivorship "
+            "finding it never measured"
+        )
+        assert (tree / "subject.py").read_text(encoding="utf-8") == before, (
+            "the arm stopped before it ran anything, so nothing may have been written"
+        )
+
+    def test_the_reason_names_the_gate_it_could_not_load(
+        self, mod, tree, capsys, unloadable_gate
+    ) -> None:
+        """A verdict the reader cannot act on is half a refusal."""
+        _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+        assert unloadable_gate.name in out, out
+        assert "No such file" in out, (
+            f"the cause the load really raised has to be quoted: {out}"
+        )
+        assert "check-merge-plan-suite.py --help" in out, (
+            f"a cause without a remedy sends the reader back to guessing: {out}"
+        )
+        assert "test_x.py::TestC::test_y" not in out, (
+            f"the node id was never the subject here: {out}"
+        )
+
+    def test_the_json_report_carries_it_too(self, mod, tree, capsys, unloadable_gate) -> None:
+        _arm(mod, tree, old=GREETING, new='return "goodbye " + name', json_out=True)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["verdict"] == "UNJUDGEABLE", payload
+        assert payload["exit"] == mod.EXIT_UNJUDGEABLE, payload
+        assert "No such file" in payload["why"], payload

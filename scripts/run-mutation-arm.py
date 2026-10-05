@@ -380,12 +380,22 @@ _GATE_MODULE: object | None = None
 
 
 def _load_gate():
+    """The gate module, loaded from its file once and kept.
+
+    No failure is handled *here*, on purpose: a gate that is missing, unreadable or will
+    not compile raises out of `exec_module`, and `main` turns that into the UNJUDGEABLE
+    verdict (`_why_no_interpreter`) rather than a traceback. The `if spec is None or
+    spec.loader is None` guard that used to sit here was **unreachable for exactly that
+    case**, which made it a refusal that could never fire: `spec_from_file_location`
+    returns a spec *and* a `SourceFileLoader` for a path that does not exist (measured
+    2026-10-06, `cyc20261006-020931`: `ModuleSpec(name='x', loader=<SourceFileLoader …>,
+    origin='/definitely/not/here.py')`), so the `RuntimeError` was dead code and the live
+    path was an uncaught `FileNotFoundError`.
+    """
     global _GATE_MODULE
     if _GATE_MODULE is not None:
         return _GATE_MODULE
     spec = importlib.util.spec_from_file_location("check_merge_plan_suite", _GATE)
-    if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-        raise RuntimeError(f"could not load {_GATE}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -404,6 +414,31 @@ def _pytest_interpreter(own: str | None = None, root: Path | None = None) -> str
     the environment it came from rather than leaving it implied.
     """
     return _load_gate()._suite_interpreter(own, root)
+
+
+def _why_no_interpreter(exc: BaseException) -> str:
+    """Why the arm could not be judged at all, because the rule could not be asked.
+
+    The interpreter is not resolved here: it is *asked of* `_GATE`, a file beside this
+    tool (`_pytest_interpreter`). A gate that is missing, unreadable or will not compile
+    therefore leaves the question unanswered - and an arm whose interpreter is unknown has
+    measured nothing, which is what this verdict means rather than a refusal about the
+    target. Nothing has been run and nothing has been written when this is printed.
+
+    This exists because the alternative was measured, not imagined (2026-10-06,
+    `cyc20261006-020931`): with the gate unloadable the tool exited **1** - which this file
+    defines as `EXIT_SURVIVED` - after a traceback and with no `verdict:` line, so a caller
+    reading the exit code read "the target still passed with the mutation in place" out of
+    a run that never started.
+    """
+    return (
+        f"the interpreter to judge the arm under could not be resolved: "
+        f"{type(exc).__name__}: {exc}. This tool asks {_GATE.name}, beside it, for the rule, "
+        "so that gate has to be present and loadable; nothing has been run and nothing has "
+        "been mutated. An arm whose interpreter could not be resolved has measured nothing, "
+        "which is what this verdict means - check the gate first "
+        "(uv run --no-sync python3 scripts/check-merge-plan-suite.py --help)"
+    )
 
 
 def _why_target_broken(rc: int, passed: int, out: str, interpreter: str) -> str:
@@ -610,7 +645,22 @@ def main(argv: list[str] | None = None) -> int:
     # Resolved once, before either run, so the pre-flight and the judged run cannot be
     # about two different interpreters - and reported, because the evidence has to name
     # the environment it came from when the resolver substitutes one.
-    python = _pytest_interpreter()
+    #
+    # A resolver that cannot answer is a **verdict**, not a traceback. The gate is a file
+    # loaded from disk, so it can be missing, unreadable or not compiling - a parallel
+    # cycle mid-edit on it is enough - and an uncaught exception here exits 1, which this
+    # file defines as `EXIT_SURVIVED` (measured 2026-10-06, `cyc20261006-020931`: a gate
+    # with one broken line appended, and a tool standing alone without one, each exited 1
+    # with no `verdict:` line). Every other outcome in this tool leaves through `_report`;
+    # so does this one, and the verdict is UNJUDGEABLE because an arm whose interpreter is
+    # unknown has measured nothing.
+    try:
+        python = _pytest_interpreter()
+    except Exception as exc:  # noqa: BLE001 - the cause is named, not swallowed
+        arm.decide(UNJUDGEABLE, _why_no_interpreter(exc), EXIT_UNJUDGEABLE)
+        shutil.rmtree(home, ignore_errors=True)
+        _report(arm, args.json)
+        return arm.code
     arm.interpreter = python
     try:
         if not args.no_preflight:
