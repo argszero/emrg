@@ -223,6 +223,57 @@ class TestItsExitCodes:
         first = (proc.stdout or "").splitlines()[0]
         assert first == f"tree: {tree.resolve()}", proc.stdout
 
+    def test_a_tree_with_no_module_is_unmeasurable_not_clean(self, tmp_path) -> None:
+        """A verdict over a tree the walk read nothing from is the file's own named failure.
+
+        Measured 2026-10-05 (`cyc20261005-145352`) on the master this pins: an empty
+        directory, and one holding a single unrelated file, both answered the clean
+        line with exit 0. `scanned_modules` already names that mode — "a clean verdict
+        about nothing, which is the one failure mode this file must not have" — and
+        the note was written for the whole-tree skip, so the same verdict from a
+        different cause was still reachable.
+        """
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        proc = _run(empty)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "could not measure" in proc.stderr, proc.stderr
+        assert "OK" not in proc.stdout, proc.stdout
+
+        # A tree that carries the scanned *directories* and no module in them is the
+        # same fact: what is inspected is the modules, not the directory names.
+        bare = tmp_path / "bare"
+        (bare / "emrg").mkdir(parents=True)
+        (bare / "notes.md").write_text("nothing to inspect\n", encoding="utf-8")
+        proc = _run(bare)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "could not measure" in proc.stderr, proc.stderr
+
+    def test_quiet_does_not_bypass_the_empty_tree_refusal(self, tmp_path) -> None:
+        """`--quiet` suppresses the clean *line*; it must not suppress the refusal.
+
+        The refusal exists to replace that line, so a flag whose help says it prints
+        "nothing but the verdict line on a clean tree" must not be the way past it.
+        """
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        proc = _run(empty, "--quiet")
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "could not measure" in proc.stderr, proc.stderr
+
+    def test_a_tree_with_a_module_and_no_defect_is_still_clean(self, tmp_path) -> None:
+        """The other direction, and the reason it is needed.
+
+        The cheapest way to satisfy the two tests above is to answer `2` whenever
+        there are no findings — a guard that never passes, which reads as cautious
+        and is the same as not having one. A module present and nothing wrong must
+        still be `0`.
+        """
+        tree = _tree(tmp_path, good="def g():\n    value = 1\n    return value\n")
+        proc = _run(tree)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "OK" in proc.stdout, proc.stdout
+
 
 class TestTheCheckout:
     def test_no_name_in_this_checkout_is_read_before_its_binding(self) -> None:
