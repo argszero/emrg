@@ -200,7 +200,12 @@ Exit codes
        tree that can no longer merge (a body naming no tree is not this, and a plan
        that cannot be computed is reported as unmeasurable rather than as a
        mismatch);
-       `gh-failed`: `gh` failed). Fail loud, and never report a posted
+       `gh-failed`: `gh` failed; `tool-failed`: this tool itself failed before it
+       could reach a verdict — an exception left `main` rather than a refusal, and
+       `_entry` reports it as unmeasurable (`2`) instead of letting Python exit `1`,
+       which here means "posted, and the counter never showed it". Nothing was
+       posted in that case, but the code alone cannot say so, which is why the
+       crash has the code that means "nothing was posted"). Fail loud, and never report a posted
        vote for a review that was never sent
 
 `gh` is required, and so is network access to GitHub: the question is about a
@@ -217,6 +222,7 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 REPO = "argszero/emrg"
@@ -289,6 +295,7 @@ RC2_CAUSES = (
     "own-head-window",   # the head is this cycle's own, or its window cannot be decided
     "landing-tree",      # the body names a tree that is not the one this merge would land
     "gh-failed",         # `gh pr review` itself failed
+    "tool-failed",       # `main` raised: `_entry` reports it unmeasurable (rc 1 would mean "posted")
 )
 
 _SIBLING = Path(__file__).resolve().parent / "check-vote-count.py"
@@ -308,8 +315,10 @@ def votes_counter():
     global _sibling
     if _sibling is None:
         spec = importlib.util.spec_from_file_location("check_vote_count", _SIBLING)
-        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-            raise RuntimeError(f"could not load {_SIBLING}")
+        # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+        # loader even for a path that does not exist (measured 2026-10-06), so that
+        # branch could never fire. A sibling that is missing or does not compile
+        # raises out of `exec_module`, and `_entry` reports that as `2`.
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -333,8 +342,10 @@ def review_queue():
     global _queue
     if _queue is None:
         spec = importlib.util.spec_from_file_location("review_queue", _QUEUE)
-        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-            raise RuntimeError(f"could not load {_QUEUE}")
+        # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+        # loader even for a path that does not exist (measured 2026-10-06), so that
+        # branch could never fire. A sibling that is missing or does not compile
+        # raises out of `exec_module`, and `_entry` reports that as `2`.
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -359,8 +370,10 @@ def merge_tree_tool():
     global _merge_tree
     if _merge_tree is None:
         spec = importlib.util.spec_from_file_location("merge_tree", _MERGE_TREE)
-        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-            raise RuntimeError(f"could not load {_MERGE_TREE}")
+        # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+        # loader even for a path that does not exist (measured 2026-10-06), so that
+        # branch could never fire. A sibling that is missing or does not compile
+        # raises out of `exec_module`, and `_entry` reports that as `2`.
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -1045,5 +1058,25 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_entry())

@@ -154,6 +154,7 @@ import os
 import re
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -415,8 +416,10 @@ def _sibling(name: str, module_name: str):
     package), so the file is loaded by path and registered under a plain name.
     """
     spec = importlib.util.spec_from_file_location(module_name, SCRIPTS_DIR / name)
-    if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-        raise RuntimeError(f"could not load {name}")
+    # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+    # loader even for a path that does not exist (measured 2026-10-06), so that
+    # branch could never fire. A sibling that is missing or does not compile
+    # raises out of `exec_module`, and `_entry` reports that as `2`.
     module = importlib.util.module_from_spec(spec)
     # Registered before exec: these modules declare dataclasses, and dataclasses
     # resolves annotations through sys.modules[cls.__module__] at class-creation
@@ -1501,5 +1504,25 @@ def main(argv: list[str] | None = None) -> int:
     return 2 if (unread or rants_unread) else 0
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_entry())

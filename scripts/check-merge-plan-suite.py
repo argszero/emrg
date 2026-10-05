@@ -283,6 +283,7 @@ import re
 import shutil
 import subprocess
 import sys
+import traceback
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -398,8 +399,10 @@ _SIBLING = Path(__file__).resolve().parent / "check-merge-sequence.py"
 
 def _load_sibling():
     spec = importlib.util.spec_from_file_location("check_merge_sequence", _SIBLING)
-    if spec is None or spec.loader is None:  # pragma: no cover - file is in this repo
-        raise RuntimeError(f"could not load {_SIBLING}")
+    # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+    # loader even for a path that does not exist (measured 2026-10-06), so that
+    # branch could never fire. A sibling that is missing or does not compile
+    # raises out of `exec_module`, and `_entry` reports that as `2`.
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -1520,5 +1523,25 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_entry())

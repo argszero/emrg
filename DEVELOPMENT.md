@@ -329,6 +329,19 @@ annotations from the job's check run — so a tokenless host still gets the fail
 step. The job **log** is the one part GitHub will not serve anonymously (`403`), and the report says
 so per job instead of reporting no cause.
 
+**A crash is a measurement error, not a verdict.** Every tool in the gate family ends its
+`__main__` block in `_entry()`, which runs `main()` and, if it raises, prints the traceback with a
+`<tool>: could not measure - <Type>: <message>` line and answers **`2`**. Without it a crash exits
+**`1`**, and `1` is a *verdict* in these tools' own tables — `check-merge-freshness.py` reads it as
+**STALE** (whose documented remedy is a re-merge and a push that voids every standing vote),
+`run-mutation-arm.py` as `EXIT_SURVIVED` ("the target still passed with the mutation in place"), and
+`review-queue.py` does not define `1` at all. Measured 2026-10-06 with a sibling left unparsable: those
+three exited `1` with no verdict-shaped line, so a caller reading the code read a verdict that was never
+reached. The load sites no longer carry a `if spec is None or spec.loader is None` guard either:
+`importlib.util.spec_from_file_location` returns a spec *and* a loader for a path that does not exist,
+so that branch could never fire — `tests/test_a_crash_is_a_measurement_error.py` pins both halves, and
+pins the entry point identical across the family (one rule, not nine copies free to drift apart).
+
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 > **Self-evolution from source**: the evolution workspace expects the repo at `~/.emrg/evolution/emrg`. Packaged installs self-heal (clone on demand + auto-bootstrap projects/tasks); source installs should clone there explicitly if you want the evolution daemon to work on this repo.
