@@ -253,6 +253,18 @@ _KIND_NO_RUN = "no_run"  # master is an ancestor but nothing ever judged the hea
 _KIND_RUNNING = "running"  # a run exists and has not concluded
 _KIND_FAILING = "failing"  # a run concluded non-success
 
+#: How this file's python tools are invoked (`Agent.md`, "Test Commands"). The
+#: runner is not decoration: without it a `scripts/*.py` command runs under
+#: whatever python is on PATH rather than the checkout's, so the pytest and the
+#: package imports the tool needs are not the ones it gets. `review-queue.py`
+#: carries the same constant and the same reasoning; it was missing here, which is
+#: how one remedy came to print the `uv run --no-sync python3` spelling for one
+#: command and a bare `scripts/x.py` for the command beside it (reviewed on #1851).
+#: A **shell** script takes `bash`, not this runner: `uv run --no-sync python3
+#: scripts/re-trigger-ci.sh` hands python a bash file and exits 1 with a
+#: SyntaxError, measured 2026-10-04.
+RUNNER = "uv run --no-sync python3"
+
 # How many times the run lookup is asked before an empty answer is taken as *the*
 # answer, and the gap between the asks. The reason is in the module docstring and
 # in `_latest_run_for_head`: an empty answer here is not a missing measurement, it
@@ -303,6 +315,12 @@ class Verdict:
     reason: str
     # Which of the four ways (one of the `_KIND_*` names); "" when fresh.
     stale_kind: str = ""
+    #: The run's own id, so a remedy can hand over a command that is runnable as
+    #: printed. Empty when there is no run. Why it is carried rather than looked up
+    #: again by the reader: the only other place this id is visible is the link
+    #: `gh pr checks` prints, and a remedy whose command has to be assembled by hand
+    #: is one the reader can get wrong at the moment they are least able to tell.
+    run_id: str = ""
     #: GitHub's lifecycle state (`OPEN`, `MERGED`, `CLOSED`). A terminal PR is not a
     #: stale verdict and not a fresh one - it has no merge left for a verdict to be
     #: about (issue #1837, and `_terminal` below).
@@ -369,7 +387,7 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
             f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
             "--jq",
             "{runs: [.workflow_runs[] | {headSha: .head_sha, name, "
-            "createdAt: .created_at, conclusion}]}",
+            "createdAt: .created_at, conclusion, databaseId: .id}]}",
         ]
     )
     assert isinstance(payload, dict)
@@ -478,6 +496,7 @@ def check_pr(number: int) -> Verdict:
         behind_by=behind_by,
         run_created_at=created,
         run_conclusion=conclusion,
+        run_id=str(run.get("databaseId") or "") if run else "",
     )
 
     if status not in _FRESH_STATUSES and status not in _STALE_STATUSES:
@@ -654,8 +673,22 @@ def _valid_votes(pr: int) -> Price:
         return Price(None, unread=f"{type(exc).__name__}: {exc}".replace("\n", " ")[:200])
 
 
-def _remedy(pr: int, kind: str, price: Price) -> str:
+def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
     """One line: what to do about this verdict, and what it charges.
+
+    The failing kind's line names a **reading** as well as an action, and the reading
+    is handed over runnable as printed (`run_id` is the verdict's own). Measured
+    2026-10-04: "fix the failure" without a way to read *why* left the reader to
+    reach for `gh run view --log`, which answered **0 bytes with rc 0** for every run
+    measured here, a red one included - a failure to measure wearing the shape of a
+    pass, handed over at the moment the reader is least able to tell. It is not a
+    universal and the remedy does not claim one: a reviewer on the same host and the
+    same `gh` measured one run as answering its whole log, so the axis is not
+    established - what both measurements agree on is the case this remedy exists for,
+    where a red run's `--log` *and* `--log-failed` are both empty and exit 0. The old
+    command is not repeated as a thing to try, for the reason
+    `scripts/check-release-published.py` records: a remedy that lists both hands the
+    reader the broken one.
 
     The price is attached only where it is actually paid - an ancestry-stale
     verdict is the one a refresh cures. The other three kinds get the action that
@@ -685,8 +718,8 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
         if price.valid_votes is None:
             return (
                 f"#{pr}: vote count unavailable ({price.unread or 'not read'}) - read it "
-                f"before refreshing (`scripts/check-vote-count.py {pr}`): a refresh moves "
-                "the head and voids every vote the branch has"
+                f"before refreshing (`{RUNNER} scripts/check-vote-count.py {pr}`): a refresh "
+                "moves the head and voids every vote the branch has"
             )
         if price.valid_votes == 0 and not price.vetoes:
             return (
@@ -701,7 +734,7 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
                 "immediately before it counts as its own - so the earliest vote this head "
                 "can collect is from the cycle after next. If this cycle would have cast "
                 "that first vote, do not push: measure the tree this merge would land "
-                "(`scripts/check-merge-plan-suite.py <PR>`) and the head does not move, "
+                f"(`{RUNNER} scripts/check-merge-plan-suite.py <PR>`) and the head does not move, "
                 "leaving the next cycle free to vote on it"
             )
         if price.valid_votes == 0:
@@ -721,22 +754,23 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
             f"#{pr}: {price.valid_votes} valid vote(s) at risk - a refresh moves the head, "
             f"and the vote counter voids all {price.valid_votes}{beside}. Measure the tree "
             "this merge would land "
-            "instead (`git fetch origin master`, then `scripts/check-merge-plan-suite.py "
-            f"{pr}`) and cast the vote on it (`scripts/cast-vote.py {pr} --body-file <path>`), "
+            "instead (`git fetch origin master`, then "
+            f"`{RUNNER} scripts/check-merge-plan-suite.py {pr}`) and cast the vote on it "
+            f"(`{RUNNER} scripts/cast-vote.py {pr} --body-file <path>`), "
             "stating the landing tree the review is about: the head does not move, so the "
             "votes already cast stay valid and this one is counted - reviews are the channel "
             "the counter reads, a plain comment carries the reading but no vote. The body "
             "must carry this cycle's id (`cycYYYYMMDD-HHMMSS`): the counter reads the voting "
             "cycle out of the body and excludes a review without one, and `gh pr review` "
             "prints nothing on success, so such a vote is spent in silence - which is why the "
-            "casting is done by `scripts/cast-vote.py`, that refuses a body the counter cannot "
+            f"casting is done by `{RUNNER} scripts/cast-vote.py`, that refuses a body the counter cannot "
             "attribute and then reads the count back. Refresh only if that tree fails - those "
             "votes were about a tree that can no longer be merged"
         )
     if kind == _KIND_NO_RUN:
         return (
             f"#{pr}: no run for this head - re-trigger CI on the same head (`gh workflow run "
-            "test.yml --ref <branch>`, or `scripts/re-trigger-ci.sh <branch>`), which keeps "
+            "test.yml --ref <branch>`, or `bash scripts/re-trigger-ci.sh <branch>`), which keeps "
             "the votes. A refresh would fire a run too, and cost every vote the branch has"
         )
     if kind == _KIND_RUNNING:
@@ -747,7 +781,12 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
         )
     return (
         f"#{pr}: fix the failure - a refresh costs every vote the branch has, and does not "
-        "make a failing run pass"
+        "make a failing run pass. Whose failure it is comes first: read the cause with the "
+        f"reading that answers (`{RUNNER} scripts/read-run-failure.py "
+        f"{run_id}` - the run's step and the block up to its `##[error]`), and ask whether "
+        f"the row is the head's own (`{RUNNER} scripts/check-merge-plan-suite.py {pr}` names the "
+        "failing rows and reports the ones the base tree fails as well, and those belong to "
+        "the base)"
     )
 
 
@@ -798,6 +837,11 @@ def main(argv: list[str] | None = None) -> int:
                         "stale": v.stale,
                         "reason": v.reason,
                         "stale_kind": v.stale_kind,
+                        # The remedy's own input: a consumer that renders "read why it
+                        # failed" from this reading needs the run the failing verdict is
+                        # about, and re-deriving it means another `gh` query for a value
+                        # the tool already had.
+                        "run_id": v.run_id or None,
                         # Beside `stale`, because the three-valued outcome
                         # (fresh / stale / over) does not fit in a boolean: a consumer
                         # reading `"stale": false` off a merged PR would conclude the
@@ -842,7 +886,7 @@ def main(argv: list[str] | None = None) -> int:
             if not v.stale:
                 continue
             price = prices.get(v.pr, Price(None))
-            print("  " + _remedy(v.pr, v.stale_kind, price), file=sys.stderr)
+            print("  " + _remedy(v.pr, v.stale_kind, price, v.run_id), file=sys.stderr)
         return 1
     return 0
 

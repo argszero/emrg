@@ -199,6 +199,23 @@ def rendered_here(project: str, repo: str = REPO) -> bool:
 #: commands carry the runner the docstrings and the docs prescribe — a bare
 #: `scripts/x.py` is not executable on this host, so printing one would hand the
 #: reader a command that fails.
+#:
+#: The rule is **by file type**, and the shell half was got wrong here: a `.py`
+#: tool takes this runner, while a `.sh` tool takes `bash` and must never be given
+#: to python. Measured 2026-10-04: `uv run --no-sync python3 scripts/re-trigger-ci.sh`
+#: exits 1 with `SyntaxError: invalid syntax` on line 11 (`set -euo pipefail`) — the
+#: re-trigger row used to print exactly that, so the one row whose remedy is
+#: "re-trigger CI on the same head" handed over a command that could not run.
+#:
+#: Carrying the right runner is not the whole rule either: `bash` is a **host**
+#: dependency, and the row is printed to whichever host is running the cycle. Measured
+#: 2026-10-05 by a reviewer on a Windows host (cycle `cyc20261005-054639`):
+#: `Get-Command bash` -> CommandNotFoundException, a git-bundled `bash.exe` present but
+#: not on PATH, so `bash scripts/re-trigger-ci.sh` could not run there at all - the same
+#: defect one rung on. `gh` is not optional in this family (every tool here reads GitHub
+#: through it) and `test.yml` declares `workflow_dispatch`, so the re-trigger row now
+#: **leads** with `gh workflow run test.yml --ref <branch>`, which is the single command
+#: `re-trigger-ci.sh` itself runs, and keeps the script as the alternative beneath it.
 RUNNER = "uv run --no-sync python3"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -658,6 +675,11 @@ class Reading:
     stale: bool = False
     stale_kind: str = ""
     stale_reason: str = ""
+    #: The CI run the stale verdict is about, empty when there is none. The `ci-red`
+    #: row's remedy is built from it: "read why it failed" is runnable as printed only
+    #: if the row has the run, and the alternative - the id in the link `gh pr checks`
+    #: prints - is a command the reader has to assemble by hand.
+    ci_run_id: str = ""
     behind_by: int | None = None
     unread: str = ""
     #: GitHub's lifecycle state for the PR (`OPEN`, `MERGED`, `CLOSED`). Everything
@@ -796,6 +818,7 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
     out.stale = bool(fresh.stale)
     out.stale_kind = str(fresh.stale_kind)
     out.stale_reason = str(fresh.reason)
+    out.ci_run_id = str(getattr(fresh, "run_id", "") or "")
     out.behind_by = int(fresh.behind_by)
     return out
 
@@ -892,8 +915,18 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             kind="ci-red",
             why=reading.stale_reason
             + " - not votable: a vote at this head would be a vote about a tree whose "
-              "CI ran red, and a re-run only helps if the failure was a flake",
+              "CI ran red, and a re-run only helps if the failure was a flake. "
+              "`gh pr checks` names the failing check, not its cause, so read the cause "
+              "with the reading that answers - and before fixing anything, ask whether "
+              "the row is the head's own, because a base-level failure turns every open "
+              "PR red and `check-merge-plan-suite.py` reports the rows the base tree "
+              "fails too",
             command=f"gh pr checks {pr} -R {repo}",
+            extra=[
+                f"{RUNNER} scripts/read-run-failure.py "
+                f"{reading.ci_run_id or '<run-id from the link above>'}",
+                f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
+            ],
         )
     if reading.stale_read and reading.stale_kind == "no_run":
         return Action(
@@ -901,7 +934,8 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             why=reading.stale_reason
             + " - re-triggering fires a run on the same head, which keeps the votes a "
               "refresh would spend",
-            command=f"{RUNNER} scripts/re-trigger-ci.sh <branch-of-{pr}>",
+            command=f"gh workflow run test.yml --ref <branch-of-{pr}>",
+            extra=[f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>"],
         )
     if reading.stale_read and reading.stale_kind == "running":
         # The verb is the instruction: "wait" told the reader to block until the run

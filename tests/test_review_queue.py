@@ -250,11 +250,12 @@ class FakeFresh:
     """`check-merge-freshness.py`, for both the fresh case and the four stale kinds."""
 
     def __init__(self, stale: bool = False, kind: str = "", behind: int = 0,
-                 reason: str = ""):
+                 reason: str = "", run_id: str = ""):
         self.stale = stale
         self.kind = kind
         self.behind = behind
         self.reason = reason or f"some reason for {kind or 'fresh'}"
+        self.run_id = run_id
         self.calls: list[int] = []
         self.real = None
 
@@ -270,6 +271,7 @@ class FakeFresh:
             behind_by=self.behind,
             run_created_at=None,
             run_conclusion=None,
+            run_id=self.run_id,
             stale=self.stale,
             reason=self.reason,
             stale_kind=self.kind,
@@ -461,7 +463,7 @@ def test_enough_votes_on_a_stale_head_measures_before_merging(mod, monkeypatch, 
 
 def test_a_red_run_is_not_votable_and_names_the_run(mod, monkeypatch, capsys):
     votes = FakeVotes(reviews=[])
-    fresh = FakeFresh(stale=True, kind="failing",
+    fresh = FakeFresh(stale=True, kind="failing", run_id="37194550758",
                       reason="CI concluded 'failure' on head aaaa")
     rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
     out = capsys.readouterr().out
@@ -469,6 +471,28 @@ def test_a_red_run_is_not_votable_and_names_the_run(mod, monkeypatch, capsys):
     assert "ci-red" in out
     assert "gh pr checks 1" in out
     assert "cast-vote.py" not in out
+    # `gh pr checks` names the failing check, not why it failed, and the second half of
+    # step 0.4's duty is "read its failing job's log to a cause". The row has to name the
+    # reading that does, **with this run's id**, so the printed command runs as printed:
+    # an id the reader has to fish out of the link above is one they can get wrong at the
+    # moment they are least able to tell. And the broken path is not repeated as a thing
+    # to try - `gh run view --log-failed` answers 0 bytes with rc 0 on this host (measured
+    # 2026-10-04, a green run included), which is a failure to measure wearing a pass's
+    # shape.
+    assert "read-run-failure.py 37194550758" in out, (
+        "the ci-red row names the failing check but no reading that can produce its "
+        "cause with the run it is about"
+    )
+    assert "--log-failed" not in out, (
+        "the row offers `gh run view --log-failed`, which answers 0 bytes with exit 0 "
+        "here - a failure to measure wearing the shape of a pass"
+    )
+    # A red row is not always the head's: a base-level failure turns every open PR red,
+    # and the reading that separates the two is the plan suite's base comparison.
+    assert "check-merge-plan-suite.py 1" in out, (
+        "without the base comparison the reader cannot tell this head's failure from one "
+        "the base fails too, and fixing the wrong tree is what that costs"
+    )
 
 
 def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsys):
@@ -483,6 +507,37 @@ def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsy
     assert "retrigger-ci" in out
     assert "cast-vote.py" not in out
     assert "git merge FETCH_HEAD" not in out
+    # The command has to run as printed, and this row's did not: `re-trigger-ci.sh` is
+    # a **bash** script, and it was printed behind the python runner, which hands python
+    # a bash file. Measured 2026-10-04: `uv run --no-sync python3 scripts/re-trigger-ci.sh`
+    # exits 1 with `SyntaxError: invalid syntax`. The one row whose whole remedy is
+    # "re-trigger CI" was the one handing over a command that could not re-trigger
+    # anything.
+    #
+    # Carrying `bash` was not the end of it either (#1852, re-opened by cycle
+    # `cyc20261005-054639`): `bash` is on PATH on this host and is not on a Windows one,
+    # so the row now **leads** with the command that needs only `gh` - the tool every
+    # reader of this queue has already run - and keeps the script beneath it. Both halves
+    # are asserted, and by position: a row that puts `bash` first is back to a command
+    # that runs on one host family only.
+    assert "$ gh workflow run test.yml --ref <branch-of-" in out, (
+        "the re-trigger row leads with the host-portable form: `gh workflow run "
+        "test.yml --ref <branch>`, which is what `re-trigger-ci.sh` itself runs"
+    )
+    assert "$ bash scripts/re-trigger-ci.sh" in out, (
+        "the script stays as the alternative under it - it is the shorter spelling "
+        "where `bash` exists"
+    )
+    lead = out.index("$ gh workflow run test.yml")
+    alternative = out.index("$ bash scripts/re-trigger-ci.sh")
+    assert lead < alternative, (
+        "the portable form must come first: the reader who stops at the first line is "
+        "the one this fix is for"
+    )
+    assert "uv run --no-sync python3 scripts/re-trigger-ci.sh" not in out, (
+        "the re-trigger row hands a bash script to python, which exits 1 with a "
+        "SyntaxError - the command cannot run as printed"
+    )
 
 
 def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):

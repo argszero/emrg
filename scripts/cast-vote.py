@@ -117,7 +117,8 @@ The merge rules say what a vote *is*; until 2026-09-18 nothing said **who may ca
 one** (issue #1408). The clause is *a cycle does not vote on a head it pushed*, and
 the cycle immediately before this one counts as one's own — because every cycle on a
 host is the same instance running again. `review-queue.py` owns that reading, and
-`scripts/review-queue.py --cycle <id>` reports such a head as an `abstain` row.
+`uv run --no-sync python3 scripts/review-queue.py --cycle <id>` reports such a head as an
+`abstain` row.
 
 That instrument answers the question when a cycle asks it. A cycle that does not ask
 spends the vote anyway, and un-spending it is a hand edit of the review body, because
@@ -219,6 +220,27 @@ import time
 from pathlib import Path
 
 REPO = "argszero/emrg"
+
+#: How this file hands a reader the family's tools (`Agent.md`, "Test Commands").
+#: Measured 2026-10-05, every command this tool printed bare in its refusal and
+#: result messages: `scripts/check-vote-count.py 1849` -> **rc 126**, the same for
+#: `scripts/review-queue.py --cycle <id>` and `scripts/check-merge-plan-suite.py <PR>`
+#: (the tools are mode 644, so a bare path is not executable). So a reader who did
+#: what the message said — "re-read it with scripts/check-vote-count.py" — got a
+#: shell error instead of the reading that would have answered the question, at the
+#: moment the tool had just refused to act. The runner goes in front, and a `.sh`
+#: takes `bash` rather than this constant: `uv run --no-sync python3
+#: scripts/re-trigger-ci.sh` hands python a bash file and exits 1 with a
+#: `SyntaxError` (measured 2026-10-04, the defect #1852 records in the sibling).
+#:
+#: `bash` is itself a host dependency, though, and the one command here that used it
+#: as its lead form was not runnable on a host without it — measured 2026-10-05 by a
+#: reviewer on a Windows host (cycle `cyc20261005-054639`): `Get-Command bash` ->
+#: CommandNotFoundException. So the re-trigger remedy leads with
+#: `gh workflow run test.yml --ref <branch>`, which every tool in this family can
+#: already run (they all read GitHub through `gh`) and which is the one command
+#: `scripts/re-trigger-ci.sh` itself runs.
+RUNNER = "uv run --no-sync python3"
 
 # `--body-file -` means stdin, the convention `gh` itself uses for the same flag.
 # Named rather than written as a literal in two places, because the read path and
@@ -468,7 +490,7 @@ def tree_claim_refusal(body: str, pr: int, repo: str) -> tuple[str | None, str]:
         "master moves: a reading taken before another PR merged is about a tree "
         "that can no longer land, and the vote counts either way, so nothing else "
         "would ever say so.\n"
-        f"Re-measure (scripts/check-merge-plan-suite.py {pr}) and put the tree it "
+        f"Re-measure ({RUNNER} scripts/check-merge-plan-suite.py {pr}) and put the tree it "
         "reports in the body, or name no tree at all if the vote is not about a "
         "landing tree.",
         "",
@@ -543,8 +565,9 @@ def own_head_window(
             "cycle treats as its own. Nothing was posted. The counter already calls "
             "such a head blocking for the same missing run, and the queue gives it the "
             "same remedy (`unblock`, not `abstain`): re-trigger a run for the head "
-            "(`scripts/re-trigger-ci.sh <branch>`), then ask again - "
-            "`scripts/review-queue.py --cycle <id>` reads the same head the same way"
+            "(`gh workflow run test.yml --ref <branch>`, or "
+            "`bash scripts/re-trigger-ci.sh <branch>`), then ask again - "
+            f"`{RUNNER} scripts/review-queue.py --cycle <id>` reads the same head the same way"
         ), note
 
     pushed = queue.instant(push_time)
@@ -562,10 +585,10 @@ def own_head_window(
             "well, because every cycle on a host is the same instance running again. "
             "Nothing was posted. The next vote here has to come from a later cycle "
             "(the same head is an `abstain` row in "
-            "`scripts/review-queue.py --cycle <id>`); if the head is stale and its "
+            f"`{RUNNER} scripts/review-queue.py --cycle <id>`); if the head is stale and its "
             "votes are at risk, measure the tree the merge would land instead of "
             "refreshing it - a push voids the votes it was meant to preserve "
-            "(`scripts/check-merge-plan-suite.py <PR>`)"
+            f"(`{RUNNER} scripts/check-merge-plan-suite.py <PR>`)"
         ), note
 
     return "", note
@@ -918,7 +941,7 @@ def main(argv: list[str] | None = None) -> int:
             f"refusing to post: #{args.pr} is {state}{when} - a finished PR has nothing "
             "to vote on, so this review would count for nothing. The counter reads it "
             f"with no votes at all: re-read it with "
-            f"scripts/check-vote-count.py {args.pr}",
+            f"{RUNNER} scripts/check-vote-count.py {args.pr}",
             file=sys.stderr,
         )
         return 2  # cause: pr-terminal
@@ -991,7 +1014,7 @@ def main(argv: list[str] | None = None) -> int:
             "A veto is not a lost vote: it is on the record and it resets the run, so "
             f"#{args.pr} now needs three consecutive LGTMs from other cycles. "
             "Re-posting contributes nothing - re-read it with "
-            f"scripts/check-vote-count.py {args.pr}."
+            f"{RUNNER} scripts/check-vote-count.py {args.pr}."
         )
         return 0
     if state == "void":
@@ -1008,7 +1031,7 @@ def main(argv: list[str] | None = None) -> int:
         "That is unmeasurable, not a verdict: the review is on GitHub and cannot be "
         "un-posted, and it can register after this tool's bounded retries. Do not "
         "spend it and do not re-post - re-read the counter first "
-        f"(scripts/check-vote-count.py {args.pr}) and act on what it says.",
+        f"({RUNNER} scripts/check-vote-count.py {args.pr}) and act on what it says.",
         file=sys.stderr,
     )
     return 1
