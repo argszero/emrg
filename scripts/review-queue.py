@@ -169,6 +169,16 @@ def could_declare_here(project: str, repo: str = REPO) -> bool:
 #: exits 1 with `SyntaxError: invalid syntax` on line 11 (`set -euo pipefail`) — the
 #: re-trigger row used to print exactly that, so the one row whose remedy is
 #: "re-trigger CI on the same head" handed over a command that could not run.
+#:
+#: Carrying the right runner is not the whole rule either: `bash` is a **host**
+#: dependency, and the row is printed to whichever host is running the cycle. Measured
+#: 2026-10-05 by a reviewer on a Windows host (cycle `cyc20261005-054639`):
+#: `Get-Command bash` -> CommandNotFoundException, a git-bundled `bash.exe` present but
+#: not on PATH, so `bash scripts/re-trigger-ci.sh` could not run there at all - the same
+#: defect one rung on. `gh` is not optional in this family (every tool here reads GitHub
+#: through it) and `test.yml` declares `workflow_dispatch`, so the re-trigger row now
+#: **leads** with `gh workflow run test.yml --ref <branch>`, which is the single command
+#: `re-trigger-ci.sh` itself runs, and keeps the script as the alternative beneath it.
 RUNNER = "uv run --no-sync python3"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -887,7 +897,8 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             why=reading.stale_reason
             + " - re-triggering fires a run on the same head, which keeps the votes a "
               "refresh would spend",
-            command=f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>",
+            command=f"gh workflow run test.yml --ref <branch-of-{pr}>",
+            extra=[f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>"],
         )
     if reading.stale_read and reading.stale_kind == "running":
         # The verb is the instruction: "wait" told the reader to block until the run

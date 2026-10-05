@@ -44,6 +44,15 @@ the runner has to match the file type, and behind the python runner a shell scri
 without re-triggering anything. Each row is the command typed as printed (measured
 2026-10-05).
 
+**On the host the row was typed on**, which the table has to say: those four rows were
+taken on a POSIX host, and the fourth is true of one only. Measured 2026-10-05 by a
+reviewer on a Windows host (cycle `cyc20261005-054639`): `Get-Command bash` ->
+CommandNotFoundException and a git-bundled `bash.exe` present but not on PATH, so the bare
+path does not run there either - *mode 755* is not a fact Windows carries. A `.sh` tool's
+runnable spelling is therefore host-dependent too, and the printed remedies lead with the
+one that is not: `gh workflow run test.yml --ref <branch>` (`scripts/review-queue.py`,
+`scripts/cast-vote.py`), with `bash scripts/re-trigger-ci.sh <branch>` beside it.
+
 A cycle that did what the message said - "re-read it with `scripts/check-vote-count.py`" -
 got `command not found`/`rc 126` at the exact moment the tool had just refused to act. So
 the third clause below reads the **mentions** rather than the interpolations, and therefore

@@ -510,11 +510,29 @@ def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsy
     # The command has to run as printed, and this row's did not: `re-trigger-ci.sh` is
     # a **bash** script, and it was printed behind the python runner, which hands python
     # a bash file. Measured 2026-10-04: `uv run --no-sync python3 scripts/re-trigger-ci.sh`
-    # exits 1 with `SyntaxError: invalid syntax`; `bash scripts/re-trigger-ci.sh` runs.
-    # The one row whose whole remedy is "re-trigger CI" was the one handing over a
-    # command that could not re-trigger anything.
+    # exits 1 with `SyntaxError: invalid syntax`. The one row whose whole remedy is
+    # "re-trigger CI" was the one handing over a command that could not re-trigger
+    # anything.
+    #
+    # Carrying `bash` was not the end of it either (#1852, re-opened by cycle
+    # `cyc20261005-054639`): `bash` is on PATH on this host and is not on a Windows one,
+    # so the row now **leads** with the command that needs only `gh` - the tool every
+    # reader of this queue has already run - and keeps the script beneath it. Both halves
+    # are asserted, and by position: a row that puts `bash` first is back to a command
+    # that runs on one host family only.
+    assert "$ gh workflow run test.yml --ref <branch-of-" in out, (
+        "the re-trigger row leads with the host-portable form: `gh workflow run "
+        "test.yml --ref <branch>`, which is what `re-trigger-ci.sh` itself runs"
+    )
     assert "$ bash scripts/re-trigger-ci.sh" in out, (
-        "the re-trigger row must print a command that runs: `bash scripts/re-trigger-ci.sh`"
+        "the script stays as the alternative under it - it is the shorter spelling "
+        "where `bash` exists"
+    )
+    lead = out.index("$ gh workflow run test.yml")
+    alternative = out.index("$ bash scripts/re-trigger-ci.sh")
+    assert lead < alternative, (
+        "the portable form must come first: the reader who stops at the first line is "
+        "the one this fix is for"
     )
     assert "uv run --no-sync python3 scripts/re-trigger-ci.sh" not in out, (
         "the re-trigger row hands a bash script to python, which exits 1 with a "

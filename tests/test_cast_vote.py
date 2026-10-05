@@ -1487,6 +1487,17 @@ def test_a_head_with_no_ci_run_cannot_be_judged_so_nothing_is_posted(
     assert "no CI run" in err and "lower bound" in err
     assert "unblock" in err, "the queue's own remedy for this head, not a new one"
     assert "re-trigger" in err, "the refusal names the command, not just the state"
+    # And it names the spelling that runs wherever the reader is. The remedy used to
+    # offer only `bash scripts/re-trigger-ci.sh`; measured 2026-10-05 by a reviewer on a
+    # Windows host (cycle `cyc20261005-054639`) `Get-Command bash` is not found there, so
+    # a refusal that named only that handed a reader a command they could not run. The
+    # portable form is what the script itself runs, and needs only `gh`, which every tool
+    # in this family already uses.
+    assert "gh workflow run test.yml --ref" in err, (
+        "the refusal must name a command that runs on the host reading it")
+    assert err.index("gh workflow run test.yml") < err.index("bash scripts/re-trigger-ci.sh"), (
+        "portable form first: the reader who acts on the first command they see is the "
+        "one this remedy exists for")
 
     # The module docstring is the first carrier a reader meets, and it said the opposite
     # about this very head until now — "left alone rather than judged", a pass — while

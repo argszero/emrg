@@ -232,6 +232,14 @@ REPO = "argszero/emrg"
 #: takes `bash` rather than this constant: `uv run --no-sync python3
 #: scripts/re-trigger-ci.sh` hands python a bash file and exits 1 with a
 #: `SyntaxError` (measured 2026-10-04, the defect #1852 records in the sibling).
+#:
+#: `bash` is itself a host dependency, though, and the one command here that used it
+#: as its lead form was not runnable on a host without it — measured 2026-10-05 by a
+#: reviewer on a Windows host (cycle `cyc20261005-054639`): `Get-Command bash` ->
+#: CommandNotFoundException. So the re-trigger remedy leads with
+#: `gh workflow run test.yml --ref <branch>`, which every tool in this family can
+#: already run (they all read GitHub through `gh`) and which is the one command
+#: `scripts/re-trigger-ci.sh` itself runs.
 RUNNER = "uv run --no-sync python3"
 
 # `--body-file -` means stdin, the convention `gh` itself uses for the same flag.
@@ -557,7 +565,8 @@ def own_head_window(
             "cycle treats as its own. Nothing was posted. The counter already calls "
             "such a head blocking for the same missing run, and the queue gives it the "
             "same remedy (`unblock`, not `abstain`): re-trigger a run for the head "
-            f"(`bash scripts/re-trigger-ci.sh <branch>`), then ask again - "
+            "(`gh workflow run test.yml --ref <branch>`, or "
+            "`bash scripts/re-trigger-ci.sh <branch>`), then ask again - "
             f"`{RUNNER} scripts/review-queue.py --cycle <id>` reads the same head the same way"
         ), note
 
