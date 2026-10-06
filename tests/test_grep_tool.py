@@ -147,6 +147,52 @@ def test_skips_hidden_dirs(temp_cwd):
     result = _run(tool.execute({"pattern": "binary", "path": str(temp_cwd)}))
     assert "No matches" in result.content
 
+class TestTheHiddenDirectoryItKeepsIsDeclared:
+    """`grep` drops every hidden dot-part except `.emrg`, and said only "hidden dirs".
+
+    Measured 2026-10-07 (`cyc20261007-000240`) with the tool itself: a search from a root
+    holding `.emrg/memory/MEMORY.md` and `.git/config` returns the `.emrg` file and never
+    the `.git` one, while the description promised "automatic binary/hidden file skipping"
+    and the class docstring "Skips binary files, hidden dirs, and files over 512KB". The
+    exception is deliberate — `.emrg` is the agent's own state — so the claim is what is
+    wrong, exactly as in the sibling `glob` tool (issue #1880).
+    """
+
+    def _tree(self, root: Path) -> None:
+        (root / ".emrg" / "memory").mkdir(parents=True)
+        (root / ".emrg" / "memory" / "MEMORY.md").write_text("# index\nNEEDLE here\n")
+        (root / ".git").mkdir()
+        (root / ".git" / "config").write_text("NEEDLE in git config\n")
+        (root / "src.py").write_text("NEEDLE in source\n")
+
+    def _search(self, path: Path):
+        return _run(GrepTool().execute({
+            "pattern": "NEEDLE", "path": str(path), "intent": "hidden-dir probe",
+        }))
+
+    def test_the_definition_names_the_one_hidden_directory_that_is_read(self):
+        tool = GrepTool()
+        assert ".emrg" in tool.definition().description, (
+            "the description claims hidden-file skipping without its exception"
+        )
+        assert ".emrg" in (type(tool).__doc__ or ""), (
+            "the class docstring claims it skips hidden dirs without its exception"
+        )
+
+    def test_the_emrg_directory_it_declares_as_read_really_is_read(self, tmp_path):
+        self._tree(tmp_path)
+
+        content = self._search(tmp_path).content
+
+        assert ".emrg/memory/MEMORY.md" in content, (
+            f"the .emrg file the description says is read was not searched:\n{content}"
+        )
+        assert ".git/config" not in content, (
+            "the .git directory the description says is skipped was searched"
+        )
+        assert "src.py" in content
+
+
 
 def test_grep_nonexistent_path():
     """Searching a non-existent path should return an error."""
@@ -380,3 +426,4 @@ class TestTheCountSaysWhenItIsAFloor:
         assert result.content.index("floor") < result.content.index("output truncated"), (
             "the summary has to carry its own caveat, not depend on the note at the end"
         )
+
