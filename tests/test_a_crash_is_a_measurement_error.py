@@ -29,6 +29,7 @@ clauses do — by file, from `scripts/` — because the rule is about all of the
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import inspect
 import sys
@@ -172,6 +173,67 @@ def test_the_dead_guard_is_gone_from_the_family():
     assert not offenders, (
         "these files still guard a load with `spec is None or spec.loader is None`, which "
         f"`spec_from_file_location` cannot produce: {offenders}"
+    )
+
+
+def test_the_family_is_derived_from_the_source_not_listed():
+    """A tool that loads a sibling by file is in the family whether or not anyone listed it.
+
+    Read out of the source with `ast`, because the shape that matters is the *call*: two
+    scripts name `spec_from_file_location` only in prose (`check-citation-resolves.py`,
+    `check-memory-index.py`) and are not members, while a gate added later that really loads
+    a sibling would be one. Before this clause the family was a hand-written list, so the
+    `DEVELOPMENT.md` sentence claiming the rule for "the gate family" was pinned by a module
+    that could not measure the claim (measured 2026-10-06, `cyc20261006-091811`).
+
+    The set is required to be a **subset** of `TOOLS`, not equal to it: `run-mutation-arm.py`
+    is pinned here and loads nothing — it asks a gate as a subprocess — so equality would be
+    false. What is asserted is the direction that can rot: no sibling-loading gate escapes
+    the list.
+    """
+    loaders = set()
+    for path in sorted(SCRIPTS.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "spec_from_file_location"
+            ):
+                loaders.add(path.name)
+                break
+
+    assert loaders, (
+        "no tool under scripts/ loads a sibling by file any more, so this clause measured "
+        "nothing - a rule that silently stopped applying is not a rule that passed"
+    )
+    missing = sorted(loaders - set(TOOLS))
+    assert not missing, (
+        "these tools load a sibling by file and are not in TOOLS, so nothing pins what their "
+        f"entry point answers to a crash: {missing} - add them to TOOLS and give them "
+        "`_entry()`"
+    )
+
+
+def test_the_documented_rule_names_the_class_it_was_fixed_for():
+    """The sentence a reader checks has to be one the guard can falsify.
+
+    It read "Every tool in the gate family ends its `__main__` block in `_entry()`", and "the
+    gate family" has no definition in this repo — the only other naming of the gates is
+    `Agent.md`'s "Merge gates, run before merging" list, four of whose entries end in
+    `sys.exit(main())` and have no `_entry()` at all. So the sentence was false for a reader
+    who took the documented gate list for the family, and true only under an unstated narrower
+    one (measured 2026-10-06, `cyc20261006-091811`). Both directions are pinned: the unscoped
+    wording must not come back, and the class the guard measures must be named.
+    """
+    text = (REPO_ROOT / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    assert "Every tool in the gate family ends its" not in text, (
+        "this sentence claims a family the repo does not define - name the class the guard "
+        "measures instead of a name a reader has to guess at"
+    )
+    assert "the gates that load a sibling by file path" in text, (
+        "the rule has to name the class `TOOLS` is derived from, or a reader cannot check "
+        "which tools it is about"
     )
 
 

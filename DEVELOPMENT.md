@@ -329,18 +329,26 @@ annotations from the job's check run — so a tokenless host still gets the fail
 step. The job **log** is the one part GitHub will not serve anonymously (`403`), and the report says
 so per job instead of reporting no cause.
 
-**A crash is a measurement error, not a verdict.** Every tool in the gate family ends its
-`__main__` block in `_entry()`, which runs `main()` and, if it raises, prints the traceback with a
-`<tool>: could not measure - <Type>: <message>` line and answers **`2`**. Without it a crash exits
+**A crash is a measurement error, not a verdict.** A tool that dies on an unhandled exception exits
 **`1`**, and `1` is a *verdict* in these tools' own tables — `check-merge-freshness.py` reads it as
 **STALE** (whose documented remedy is a re-merge and a push that voids every standing vote),
 `run-mutation-arm.py` as `EXIT_SURVIVED` ("the target still passed with the mutation in place"), and
 `review-queue.py` does not define `1` at all. Measured 2026-10-06 with a sibling left unparsable: those
 three exited `1` with no verdict-shaped line, so a caller reading the code read a verdict that was never
-reached. The load sites no longer carry a `if spec is None or spec.loader is None` guard either:
+reached. So a crash has to leave as the tool's own "could not measure" answer, and the family pinned by
+`tests/test_a_crash_is_a_measurement_error.py` — **the gates that load a sibling by file path**, plus
+`run-mutation-arm.py`, which asks a gate as a subprocess and whose crash class is the same one — does it
+in one place: each ends its `__main__` block in `_entry()`, which runs `main()` and, if it raises, prints
+the traceback with a `<tool>: could not measure - <Type>: <message>` line and answers **`2`**. A gate
+that loads no sibling reaches the same rule by its own route and says so where it does —
+`check-merge-tree-health.py:_merged_tree_sha` raises `MeasurementError` "because an unhandled exception
+leaves this tool as exit 1 - the code that means 'a clean merge landed an unhealthy tree'". The load
+sites no longer carry a `if spec is None or spec.loader is None` guard either:
 `importlib.util.spec_from_file_location` returns a spec *and* a loader for a path that does not exist,
-so that branch could never fire — `tests/test_a_crash_is_a_measurement_error.py` pins both halves, and
-pins the entry point identical across the family (one rule, not nine copies free to drift apart).
+so that branch could never fire — `tests/test_a_crash_is_a_measurement_error.py` pins both halves,
+pins the entry point identical across the family (one rule, not nine copies free to drift apart), and
+derives the family from the source (a `spec_from_file_location` call in code), so a gate that loads a
+sibling and is not in that list fails the module instead of sitting silently outside it.
 
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
