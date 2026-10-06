@@ -241,22 +241,60 @@ def test_parse_commit_preserves_original_offset(tmp_path):
     assert parsed["committer"]["date"] == "2023-11-15T06:13:20+08:00"
 
 
-def test_collect_objects_finds_nested_blobs_and_all_trees(tmp_path):
+def test_upload_skips_a_subtree_the_remote_already_has(tmp_path):
+    """A push uploads the *difference*, not the repository.
+
+    Without a probe the script enumerated every object of every commit tree and
+    re-sent all of them (measured 2026-10-06: argszero/emrg is 630 blobs + 38
+    trees = ~669 requests per push, which outlives the caller's 600 s tool
+    timeout and reports a false failure for a push that landed). The second push
+    here adds one top-level file; the whole `sub/` subtree is already remote, so
+    none of its 20 blobs may be re-sent."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    for i in range(20):
+        _write_file(repo, f"sub/f{i:02d}.txt", f"x{i}\n".encode())
+    _write_file(repo, "top.txt", b"top\n")
+    root = _commit_all(repo, "root commit")
+    _commit_all(repo, "one file added", new_file="c.txt")
+    fake = FakeGitHub(repo)
+
+    def posts(frac):
+        return [p for m, p in fake.log if m == "POST" and frac in p]
+
+    orig_api = mod.api
+    mod.api = fake
+    try:
+        # first push: the remote is empty, so the whole tree goes up
+        mod.push_branch("x", "feature/x", root, False, cwd=repo)
+        first_blobs = posts("/git/blob")
+        fake.log.clear()
+        # second push: only the root tree's own blobs are new — recursing into
+        # `sub/` probes its tree, gets 200, and stops without touching its blobs
+        result = mod.push_branch("x", "feature/x", "HEAD", False, cwd=repo)
+        second_blobs = posts("/git/blob")
+        second_trees = posts("/git/tree")
+    finally:
+        mod.api = orig_api
+
+    assert result["result"] == "pushed"
+    assert len(first_blobs) == 21      # 20 under sub/ + top.txt
+    assert len(second_blobs) == 2      # top.txt + c.txt, NOT the 20 under sub/
+    assert len(second_trees) == 1      # only the re-built root tree
+
+
+def test_tree_entries_lists_immediate_children(tmp_path):
     mod = _load_module()
     repo = _init_repo(tmp_path)
     _write_file(repo, "a/b.txt", b"nested\n")
     _write_file(repo, "top.txt", b"top\n")
     sha = _commit_all(repo, "files")
     tree = _git("rev-parse", f"{sha}^{{tree}}", cwd=repo).stdout.decode().strip()
-    objs = mod.collect_objects(tree, cwd=repo)
-    assert "a/b.txt" in objs["blobs"].values()
-    assert "top.txt" in objs["blobs"].values()
-    assert tree in objs["trees"]     # root tree included (key = sha, path "")
-    assert objs["trees"][tree] == ""
-    assert "a" in objs["trees"].values()  # nested subtree included
     entries = mod.tree_entries(tree, cwd=repo)
     types = {e["path"]: e["type"] for e in entries}
     assert types == {"a": "tree", "top.txt": "blob"}
+    nested = _git("rev-parse", f"{sha}:a", cwd=repo).stdout.decode().strip()
+    assert {e["path"] for e in mod.tree_entries(nested, cwd=repo)} == {"b.txt"}
 
 
 def test_push_end_to_end_byte_exact_with_fake_github(tmp_path):
@@ -314,7 +352,10 @@ def test_push_end_to_end_byte_exact_with_fake_github(tmp_path):
     assert kinds[-1] == "refs"
     commit_idx = [i for i, k in enumerate(kinds) if k == "commits"]
     assert commit_idx, "no commit creation calls"
-    assert kinds.index("blobs") < kinds.index("trees") < commit_idx[0]
+    # probe-then-recurse: the first object call is a tree existence probe, and
+    # every object call still precedes the first commit creation
+    first_obj = next(k for k in kinds if k in ("blobs", "trees"))
+    assert first_obj == "trees"
     assert all(k not in ("blobs", "trees") for k in kinds[commit_idx[0]:-1])
     # two commits -> two create calls, oldest first
     commits = [p for k, p in zip(kinds, fake.log) if k == "commits"]
