@@ -23,6 +23,9 @@ def temp_cwd():
         (root / "__pycache__").mkdir()
         (root / "__pycache__" / "compiled.pyc").write_text("")
         (root / ".hidden.py").write_text("")
+        (root / "node_modules" / "pkg").mkdir(parents=True)
+        (root / "node_modules" / "pkg" / "package.json").write_text("")
+        (root / "node_modules" / "pkg" / "index.js").write_text("")
         yield root
 
 
@@ -59,6 +62,78 @@ def test_glob_no_match(temp_cwd):
     tool = GlobTool()
     result = _run(tool.execute({"pattern": "*.rs", "workdir": str(temp_cwd)}))
     assert "No files matched" in result.content
+
+
+def test_glob_no_match_says_nothing_about_skipping_when_nothing_was_skipped(temp_cwd):
+    """The control for the two legs below: the skip clause is a measurement, not boilerplate.
+
+    `*.rs` matches no path at all, so `skipped` is 0 and there is nothing to declare. A
+    clause printed unconditionally would pass both legs below while telling a reader
+    about a skip that did not happen.
+    """
+    tool = GlobTool()
+    result = _run(tool.execute({"pattern": "*.rs", "workdir": str(temp_cwd)}))
+    assert "skipped" not in result.content
+
+
+def test_a_pattern_whose_every_match_was_skipped_does_not_deny_them(temp_cwd):
+    """The defect: `No files matched` for a pattern that matched 352 paths in this checkout.
+
+    Measured 2026-10-06 (`cyc20261006-192020`) in `emrg/gui`:
+    `node_modules/**/package.json` matched **352** paths, the skip policy dropped every
+    one, and the tool answered `No files matched pattern ...` — a false statement about
+    the tree, and the reading an agent answers "is this dependency installed?" with.
+    """
+    tool = GlobTool()
+    result = _run(
+        tool.execute({"pattern": "node_modules/**/package.json", "workdir": str(temp_cwd)})
+    )
+    assert not result.error
+    assert "No files matched" in result.content
+    assert "1 path(s) matched it but were skipped" in result.content
+
+
+def test_the_count_in_a_hit_line_names_what_the_skip_dropped(temp_cwd):
+    """"Found N matches" is the number left after the skip, and has to say so.
+
+    The sibling `grep` names its subject in the same line ("searched N files"); without
+    the same qualifier a reader cannot tell this count from the number the tree holds.
+    """
+    tool = GlobTool()
+    result = _run(tool.execute({"pattern": "**/*.py", "workdir": str(temp_cwd)}))
+    assert "Found 4 matches for '**/*.py'" in result.content
+    assert "1 path(s) also matched but were skipped" in result.content
+
+
+def test_pointing_workdir_at_a_skipped_directory_reads_it(temp_cwd):
+    """The remedy the refusal names is the measured one, not a plausible sentence.
+
+    The skip compares each path relative to the root the caller passed, so a `workdir`
+    inside the skipped directory finds the files — verified here because a remedy that
+    does not work is worse than none.
+    """
+    tool = GlobTool()
+    result = _run(
+        tool.execute(
+            {"pattern": "**/package.json", "workdir": str(temp_cwd / "node_modules")}
+        )
+    )
+    assert "Found 1 matches" in result.content
+    assert "package.json" in result.content
+
+
+def test_the_definition_declares_the_skip_the_way_grep_does(temp_cwd):
+    """The tool description is the contract the agent reads, and it did not mention the skip.
+
+    `grep` states its skipping in its description ("automatic binary/hidden file
+    skipping"); `glob` skipped the same way and said nothing, so "Found 5 matches" read
+    as a fact about the tree.
+    """
+    tool = GlobTool()
+    description = tool.definition().description
+    assert "Skips hidden entries" in description
+    assert "node_modules" in description
+    assert "relative to it" in tool.definition().parameters["properties"]["workdir"]["description"]
 
 
 def test_glob_no_pattern():
