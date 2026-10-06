@@ -546,8 +546,18 @@ def own_head_window(
     CI run has a push time that is the *commit date*, a lower bound that cannot decide
     the window; the counter already calls such a head blocking for the same missing
     run, and the remedy is the same here — get the run, then ask again.
+
+    **Whose push it is comes before the window.** The clause is about a head *this*
+    instance pushed, and the window is only a proxy for that: a head the peer pushed
+    inside a gap between this host's cycles fell inside the window and was refused
+    (measured 2026-10-06, `cyc20261006-122605`). A `pusher` reading a *different* login
+    therefore posts; an unknown one keeps the refusal, so this can only ever un-refuse
+    a push that is provably someone else's.
     """
     queue = review_queue()
+    pusher = str(getattr(verdict, "pusher", ""))
+    if pusher and not votes_counter().own_login(pusher):
+        return "", ""
     if prev_cycle:
         previous, where = prev_cycle, "named by --prev-cycle"
     else:

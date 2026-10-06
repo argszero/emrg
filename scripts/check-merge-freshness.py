@@ -65,7 +65,7 @@ answer is used**: it sets `_KIND_NO_RUN` and refuses FRESH with "there is NO Tes
 run for head ...", a verdict-shaped sentence about a head that has one. A head
 that really ran nothing stays empty through both asks and is still reported
 `no_run`, so the retry cannot invent a verdict. Filed as issue #1585, whose
-sibling half is `check-vote-count.py`'s `_earliest_run_created_at`; the two are
+sibling half is `check-vote-count.py`'s `_earliest_run`; the two are
 deliberately separate implementations because each suite stubs its **own**
 `_gh_json`, so a shared lookup would put a live `gh` request behind the other
 suite's tests.

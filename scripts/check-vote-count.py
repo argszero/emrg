@@ -566,6 +566,7 @@ def own_head_window(
     *,
     push_time: str,
     push_time_exact: bool,
+    pusher: str = "",
     cycles_log: str | None = None,
 ) -> tuple[bool, str]:
     """Is the head inside the window this vote's own cycle treats as its own?
@@ -573,8 +574,15 @@ def own_head_window(
     Answers `(inside, why)`. `inside` means the vote must not count, and `why` is
     what the reader is told about it; `(False, "")` is the ordinary case.
 
-    Three inputs, and the same rule as the posting side for each of them:
+    Four inputs, and the same rule as the posting side for each of them:
 
+    * **Whose push it is.** The clause is about a head *this* instance pushed, and the
+      window is only a proxy for that: a head the peer pushed inside a gap between this
+      host's cycles fell inside the window and was voided as this instance's own work
+      (measured 2026-10-06, `cyc20261006-122605`; #1856's mirror half). So a `pusher`
+      that reads as a *different* login exempts the head outright. An unknown one - an
+      empty string, or a login that cannot be read - keeps the clause, so this can only
+      ever un-void a push that is provably someone else's, never credit a self-review.
     * **The window.** The previous cycle's start when its record can be found, this
       cycle's own start when it cannot — `abstain_window`'s narrowed form, and the
       reason says which of the two was applied, because a window that could not be
@@ -612,6 +620,17 @@ def own_head_window(
             "which is not an instant (issue #1408)"
         )
     if pushed < window.start:
+        return False, ""
+    # The clause is about a head *this* instance pushed, and the window is only a proxy
+    # for that: a head the peer pushed inside a gap between this host's cycles fell inside
+    # the window and was reported as this one's own work (measured 2026-10-06,
+    # `cyc20261006-122605`; #1856's mirror half). A positive reading of a *different*
+    # login exempts the head; an unknown one keeps the clause, so this can only ever
+    # un-void a push that is provably someone else's. Asked *here* - after the window has
+    # said the head is inside it - so a run whose heads are all outside their windows
+    # still makes no `gh api user` call, the laziness
+    # `test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window` pins.
+    if pusher and not own_login(pusher):
         return False, ""
     narrowed = (
         f"; the window could not be widened to the cycle before this one ({window.unresolved})"
@@ -1133,6 +1152,12 @@ class Verdict:
     head_sha: str
     push_time: str
     push_time_exact: bool
+    #: The login whose CI run fixed `push_time`, or `""` when there was no run to ask
+    #: (the commit-date fallback) or the payload did not carry one. The abstention
+    #: clause reads it to tell a head this instance pushed from one another instance
+    #: did inside a gap between this host's cycles (#1856's mirror half, measured
+    #: 2026-10-06 on `cyc20261006-122605`). Empty keeps the clause applied.
+    pusher: str = ""
     mergeable: str = ""
     merge_state: str = ""
     #: GitHub's lifecycle state: `OPEN`, `MERGED` or `CLOSED`. A terminal one is a
@@ -1398,31 +1423,48 @@ class Verdict:
         return "READY"
 
 
-def _earliest_run_created_at(head: str) -> str:
-    """The earliest CI run creation time GitHub lists for this SHA, or `""`.
+def _earliest_run(head: str) -> tuple[str, str]:
+    """The earliest CI run GitHub lists for this SHA, as `(created_at, actor_login)`.
 
     Re-asked when the answer is empty, because an empty answer is used as a fact
     (`block_reason` reads it as "no CI run exists", and `blocked` turns on it) - see
     `_RUN_LOOKUP_ATTEMPTS` for the measurement that made a single ask untenable. A
-    head that really ran nothing stays empty and returns `""`; the caller then falls
-    back, still flagged inexact, so the retry cannot manufacture a run.
+    head that really ran nothing stays empty and returns `("", "")`; the caller then
+    falls back, still flagged inexact, so the retry cannot manufacture a run.
 
     The re-ask that *finds* the run is reported on stderr: a tool that silently
     repairs a stale answer hides the thing it repairs, and how often this happens is
     the only way a later reader can tell flakiness from a one-off.
+
+    The run's **actor** comes back with its time because the abstention clause is about
+    *whose* push a head is, and the window's start instant is only a proxy for it: from
+    the time alone, a head another instance pushed inside a gap between this host's
+    cycles was attributed to this host (measured 2026-10-06, `cyc20261006-122605`). An
+    actor the payload does not carry reads as `""`, and `""` leaves the clause applied -
+    the exemption is only ever bought by a positive reading of a non-own login. The
+    login is taken from the run whose time is the answer, so the two cannot come from
+    different runs.
     """
     for attempt in range(_RUN_LOOKUP_ATTEMPTS):
-        runs = _gh_json(
+        payload = _gh_json(
             [
                 "api",
                 f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
                 "--jq",
-                '{t: ([.workflow_runs[].created_at] | sort | .[0] // "")}',
+                '{runs: [.workflow_runs[] | {t: (.created_at // ""), '
+                'a: (.actor.login // "")}]}',
             ]
         )
-        assert isinstance(runs, dict)
-        created = runs.get("t")
-        if isinstance(created, str) and created:
+        assert isinstance(payload, dict)
+        raw = payload.get("runs")
+        assert isinstance(raw, list), payload
+        dated = [
+            (str(run.get("t") or ""), str(run.get("a") or ""))
+            for run in raw
+            if isinstance(run, dict) and str(run.get("t") or "")
+        ]
+        if dated:
+            created, actor = min(dated, key=lambda pair: pair[0])
             if attempt:
                 print(
                     f"note: the runs API listed no run for head {head[:8]} and then "
@@ -1430,10 +1472,10 @@ def _earliest_run_created_at(head: str) -> str:
                     "push time is exact after all",
                     file=sys.stderr,
                 )
-            return created
+            return created, actor
         if attempt + 1 < _RUN_LOOKUP_ATTEMPTS:
             time.sleep(_RUN_LOOKUP_DELAY_SECONDS)
-    return ""
+    return "", ""
 
 
 def _head_check_runs(head: str) -> tuple[tuple[HeadCheck, ...], bool]:
@@ -1495,23 +1537,25 @@ def _head_check_runs(head: str) -> tuple[tuple[HeadCheck, ...], bool]:
     return tuple(checks), truncated
 
 
-def _head_push_time(head: str) -> tuple[str, bool]:
+def _head_push_time(head: str) -> tuple[str, bool, str]:
     """Earliest CI run creation time for this SHA, else the commit date.
 
-    Returns `(timestamp, is_exact)`. The run's `createdAt` is the push event time;
-    a commit date can precede the push, so the fallback is flagged rather than
-    silently used.
+    Returns `(timestamp, is_exact, pusher_login)`. The run's `createdAt` is the push
+    event time; a commit date can precede the push, so the fallback is flagged rather
+    than silently used. `pusher_login` is the actor of the run the timestamp came from,
+    and is `""` on the commit-date fallback - there is no run there to ask whose push
+    the head was, which keeps the abstention clause applied rather than guessing.
     """
-    created = _earliest_run_created_at(head)
+    created, actor = _earliest_run(head)
     if created:
-        return created, True
+        return created, True, actor
 
     commit = _gh_json(["api", f"repos/{REPO}/commits/{head}", "--jq", "{t: .commit.committer.date}"])
     assert isinstance(commit, dict)
     committer_date = commit.get("t")
     if not isinstance(committer_date, str) or not committer_date:
         raise RuntimeError(f"cannot determine a push time for head {head[:8]}")
-    return committer_date, False
+    return committer_date, False, ""
 
 
 def _merge_state(view: dict) -> tuple[str, str]:
@@ -1653,7 +1697,7 @@ def check_pr(
             "reporting READY from it would be a verdict this tool has not verified"
         )
 
-    push_time, exact = _head_push_time(head)
+    push_time, exact, pusher = _head_push_time(head)
 
     # The head's check-runs, asked **only** for `UNSTABLE`: it is the one state whose
     # cause the state cannot express, and on every other head the extra `gh` call would
@@ -1757,6 +1801,7 @@ def check_pr(
                     cycle,
                     push_time=push_time,
                     push_time_exact=exact,
+                    pusher=pusher,
                     cycles_log=cycles_log,
                 )
             inside, why = windows[cycle]
@@ -1806,6 +1851,7 @@ def check_pr(
         head_sha=head,
         push_time=push_time,
         push_time_exact=exact,
+        pusher=pusher,
         mergeable=mergeable,
         merge_state=merge_state,
         state=state,
@@ -1875,6 +1921,7 @@ def main(argv: list[str] | None = None) -> int:
                         "head": v.head_sha,
                         "push_time": v.push_time,
                         "push_time_exact": v.push_time_exact,
+                        "head_pusher": v.pusher,
                         "valid_votes": v.valid_count,
                         "needed": v.needed,
                         "mergeable": v.mergeable,

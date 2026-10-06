@@ -670,6 +670,10 @@ class Reading:
     #: Carried because the abstention clause is a comparison against this instant.
     head_pushed_at: str = ""
     head_pushed_exact: bool = True
+    #: The login whose CI run fixed `head_pushed_at`, or `""` when there was none to
+    #: ask. The abstention clause is about a head *this* instance pushed, and the
+    #: window is only a proxy for that; empty keeps the clause applied.
+    head_pusher: str = ""
     #: The window the clause was applied over, and what it rests on. `window_start`
     #: empty means the clause could not be applied at all — never "no window needed".
     window_start: str = ""
@@ -797,6 +801,7 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
         return out
     out.head_pushed_at = str(verdict.push_time)
     out.head_pushed_exact = bool(verdict.push_time_exact)
+    out.head_pusher = str(getattr(verdict, "pusher", "") or "")
     if window is not None:
         out.window_start = window.window_start_text()
         out.window_source = window.source
@@ -1000,7 +1005,17 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
         )
     if window is not None and window.applied:
         pushed = instant(reading.head_pushed_at)
-        if pushed is not None and pushed >= window.start:
+        # Whose push is it? The window is only a proxy for "this instance pushed it",
+        # and the proxy misreads the ordinary case: a head the peer pushed inside a gap
+        # between this host's cycles lands inside the window and is not this cycle's
+        # work at all (measured 2026-10-06, `cyc20261006-122605`: #1869's head, pushed
+        # by the peer at 04:07:01Z, read `abstain`). A positive reading of a *different*
+        # login exempts the head; an unknown one keeps the clause, so the row can only
+        # un-abstain on a push that is provably someone else's.
+        other_pusher = bool(reading.head_pusher) and not vote_counter().own_login(
+            reading.head_pusher
+        )
+        if pushed is not None and pushed >= window.start and not other_pusher:
             return Action(
                 kind="abstain",
                 why=f"head pushed {reading.head_pushed_at}, inside the window this cycle "

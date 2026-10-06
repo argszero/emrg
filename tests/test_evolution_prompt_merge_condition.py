@@ -252,6 +252,14 @@ class _FakeGh:
                 "mergeStateStatus": "CLEAN",
             }
         assert args and args[0] == "api", args
+        if "actions/runs" in " ".join(args):
+            # The projection the counter asks for now carries the run's actor beside its
+            # time. This fixture's cycles all start an hour *after* the push, so the
+            # abstention clause never reads it here - the vote is an ordinary one. The
+            # actor is left unread, which is the shape that keeps the clause applied if a
+            # future fixture moves the window; the ownership arms live with the
+            # instrument, in `tests/test_check_vote_count.py`.
+            return {"runs": [{"t": PUSH, "a": ""}]}
         return {"t": PUSH}
 
     def paginated(self, args: list[str]) -> list:

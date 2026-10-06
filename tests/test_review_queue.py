@@ -58,6 +58,12 @@ CYCLE = "cyc20260917-221117"
 #: what the abstention window's two ends are pinned against.
 PREV_CYCLE = "cyc20260917-215929"
 
+#: The login this instance votes under, and one it does not. The abstention clause asks
+#: whose push a head was before it asks about the window, so both ends of that
+#: comparison need a name (the same pair `tests/test_check_vote_count.py` uses).
+SELF_LOGIN = "how2how2how2-arch"
+OTHER_LOGIN = "pm25coder"
+
 LOCAL = datetime.now().astimezone().tzinfo
 
 
@@ -182,7 +188,8 @@ class FakeVotes:
                  state: str = "CLEAN", head: str = HEAD, valid: int | None = None,
                  push: str | None = None, exact: bool = True,
                  pr_state: str = "OPEN", merged_at: str = "",
-                 checks: tuple | None = None):
+                 checks: tuple | None = None,
+                 pusher: str = SELF_LOGIN, login: str = SELF_LOGIN):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
@@ -197,6 +204,12 @@ class FakeVotes:
         #: against. `None` keeps the historical default, far from every window.
         self.push = PUSH_TIME if push is None else push
         self.exact = exact
+        #: Whose CI run fixed `push`, and the login this instance votes under. The
+        #: clause asks *whose push* before it asks about the window, and the real
+        #: counter answers the identity half with `gh api user`; here it is a field, so
+        #: a test can name the pusher without an API.
+        self.pusher = pusher
+        self.login = login
         #: The head's check-runs, as the counter carries them, and whether the reading
         #: was taken. `None` means not taken, which is what the counter does for every
         #: non-`UNSTABLE` head (and what leaves `checks_green` False, the strict side).
@@ -240,6 +253,7 @@ class FakeVotes:
             head_sha=self.head,
             push_time=self.push,
             push_time_exact=self.exact,
+            pusher=self.pusher,
             mergeable=self.mergeable,
             merge_state=self.state,
             state=self.pr_state,
@@ -251,6 +265,18 @@ class FakeVotes:
             checks=self.checks or (),
             checks_read=self.checks is not None,
         )
+
+    def own_login(self, author):
+        """The counter's `own_login`: an author it cannot tell apart keeps the clause.
+
+        The real one asks `gh api user` and compares; a payload with no author, or a
+        login that cannot be read, answers `True` - the direction that costs a delay
+        rather than crediting a self-review. Reproduced here rather than imported
+        because this file's fakes are the *second* answer the tool is measured against.
+        """
+        if not author:
+            return True
+        return author == self.login
 
 
 class FakeFresh:
@@ -1048,6 +1074,57 @@ def test_a_head_pushed_by_the_previous_cycle_is_an_abstain(mod, monkeypatch, cap
     out = capsys.readouterr().out
     assert "abstain" in out
     assert PREV_CYCLE in out
+
+
+def test_a_head_another_instance_pushed_is_not_this_cycles_own(mod, monkeypatch, capsys):
+    """The clause is about a head *this* instance pushed; the window only proxies that.
+
+    The proxy misreads the ordinary case: the peer pushes and this host's next cycle
+    starts minutes later, so the head lands inside the window while belonging to work
+    this instance never did (measured 2026-10-06, `cyc20261006-122605`, on #1869's head
+    at 04:07:01Z). The push instant here is the same one
+    `test_a_head_pushed_inside_this_cycle_is_an_abstain` uses, so the two differ in the
+    actor alone - which is the whole claim.
+    """
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30), pusher=OTHER_LOGIN)
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" not in out
+    assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
+
+
+def test_a_full_count_at_another_instances_head_is_mergeable(mod, monkeypatch, capsys):
+    """The other half the clause withholds, and the mirror of
+    `test_a_head_this_cycle_pushed_is_not_merged_either`: the same push instant and the
+    same `3/3`, with the peer as the pusher, has to reach the merge command. If only the
+    `abstain` row were fixed the cycle could vote here and then not land it."""
+    votes = FakeVotes(
+        reviews=[_review(cycle=f"cyc20260917-1{n}") for n in range(3)],
+        push=_push(2026, 9, 17, 22, 30),
+        pusher=OTHER_LOGIN,
+    )
+    out = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
+    printed = capsys.readouterr().out
+    assert out == 0
+    assert "abstain" not in printed
+    assert "3/3 valid votes" in printed
+    assert "gh pr merge 1" in printed
+
+
+def test_a_head_with_no_actor_reading_keeps_the_abstain(mod, monkeypatch, capsys):
+    """The fail-safe direction: the exemption is bought only by a positive reading.
+
+    A payload that carried no `actor`, or a login that could not be read, reads as `""`
+    - and `""` must keep the clause, or a self-review could count on a head whose
+    ownership nobody measured. Same push instant as the test above; only the reading
+    differs, and it has to land on the other side.
+    """
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30), pusher="")
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" in out
 
 
 def test_a_push_at_the_previous_cycles_start_is_inside_the_window(mod, monkeypatch, capsys):

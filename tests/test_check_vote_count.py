@@ -136,10 +136,16 @@ class FakeGh:
         merged_at: str = "",
         checks: list[dict] | None = None,
         checks_total: int | None = None,
+        pusher: str = SELF_LOGIN,
     ):
         self.reviews = reviews
         self.push_time = push_time
         self.exact = exact
+        #: The `actor.login` of the run that answers `actions/runs` — whose push the
+        #: head was, as the abstention clause reads it. Defaults to this instance, so
+        #: every fixture written before the clause asked the question still describes
+        #: a head this instance pushed (the case the clause is applied to).
+        self.pusher = pusher
         self.mergeable = mergeable
         self.merge_state = merge_state
         self.state = state
@@ -195,7 +201,11 @@ class FakeGh:
                     "checks": self.checks,
                 }
             if "actions/runs" in joined:
-                return {"t": self.push_time if self.exact else ""}
+                return {
+                    "runs": (
+                        [{"t": self.push_time, "a": self.pusher}] if self.exact else []
+                    )
+                }
             if "/commits/" in joined:
                 return {"t": self.push_time}
             if joined.startswith("api user"):
@@ -1494,7 +1504,7 @@ def test_an_empty_run_answer_is_re_asked_before_it_is_reported_as_no_run(mod, mo
             asked.append("runs")
             if len(asked) == 1:
                 base.calls.append(list(args))
-                return {"t": ""}  # the stale answer, verbatim shape
+                return {"runs": []}  # the stale answer, verbatim shape
         return base(args)
 
     monkeypatch.setattr(mod, "_gh_json", flaky)
@@ -1940,12 +1950,13 @@ def _cast_vote():
 
 
 class _Head:
-    """The three fields the posting side reads off a verdict, and nothing else."""
+    """The four fields the posting side reads off a verdict, and nothing else."""
 
-    def __init__(self, pushed: str, exact: bool = True, sha: str = HEAD):
+    def __init__(self, pushed: str, exact: bool = True, sha: str = HEAD, pusher: str = ""):
         self.head_sha = sha
         self.push_time = pushed
         self.push_time_exact = exact
+        self.pusher = pusher
 
 
 def test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count(
@@ -1976,6 +1987,50 @@ def test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count(
     assert rc == 0, out
     assert "READY 1/1" in out, out
     assert "inside the window" not in out, out
+
+
+def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
+    mod, monkeypatch, capsys
+):
+    """The mirror half of #1856: another instance's *push* is not this host's own work.
+
+    The clause says a cycle does not vote on a head **it** pushed, and the window is
+    only a proxy for "it". The proxy misreads the ordinary case - the peer pushes, this
+    host's next cycle starts minutes later, and the head lands inside the window while
+    belonging to work this instance never did (measured 2026-10-06,
+    `cyc20261006-122605`: #1869's head, pushed by the peer at 04:07:01Z).
+
+    The fixture is the one from
+    `test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count`, and the voter
+    is this instance in all three arms - so #1857's exemption, which asks about the
+    *author*, cannot reach any of them. The arms differ in the pusher alone.
+    """
+    pushed = _push(2026, 9, 11, 9, 0)
+    vote_at = _push(2026, 9, 11, 10, 0)
+    cycle = "cyc20260911-080000"
+
+    # (a) the control: this instance pushed the head, so the window applies
+    mine = FakeGh([_approve(cycle, vote_at)], push_time=pushed)
+    rc = _run(mod, monkeypatch, mine)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"VOID {cycle} - cast inside the window" in out, out
+
+    # (b) the peer pushed it: the same instant is not this instance's own work
+    theirs = FakeGh([_approve(cycle, vote_at)], push_time=pushed, pusher=OTHER_LOGIN)
+    rc = _run(mod, monkeypatch, theirs, ["1", "--min-votes", "1"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "READY 1/1" in out, out
+    assert "inside the window" not in out, out
+
+    # (c) the fail-safe arm: with no actor reading the clause stays applied, so the
+    # exemption can only be bought by a positive identification of someone else
+    unknown = FakeGh([_approve(cycle, vote_at)], push_time=pushed, pusher="")
+    rc = _run(mod, monkeypatch, unknown)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"VOID {cycle} - cast inside the window" in out, out
 
 
 def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_path):
@@ -2094,6 +2149,14 @@ def test_an_undecided_voter_keeps_the_clause(mod, monkeypatch, capsys):
     assert f"VOID {cycle}" in out, out
 
     # (b) the author is there and our own login cannot be read
+    #
+    # The cache is cleared first, and that is part of the fixture rather than tidying:
+    # (a) above already asked the identity, because the pusher clause reads it for every
+    # head inside a window. Left warm, the answer here would come from that earlier ask
+    # and the arm would stop describing "the login cannot be read" - it would describe
+    # "the login could not be read earlier in the same run", which the tool deliberately
+    # never re-asks. Reset, `unreadable.login = ""` is the first ask of the run.
+    mod._own_login = mod._UNSET
     unreadable = FakeGh([_approve(cycle, vote_at, author=OTHER_LOGIN)], push_time=pushed)
     unreadable.login = ""
     rc = _run(mod, monkeypatch, unreadable)
@@ -2143,7 +2206,29 @@ def test_a_head_with_no_ci_run_leaves_the_clause_unapplied(mod, monkeypatch, cap
     assert "inside the window" not in out, out
 
 
-def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_path):
+def test_the_pusher_is_the_actor_of_the_run_whose_time_was_read(mod, monkeypatch):
+    """The login must come from the run the timestamp did, not from any run of the head.
+
+    A head carries at least a `push` run and a `pull_request` run, and they need not
+    have the same actor. The clause asks one thing - *whose push* the instant describes -
+    so pairing the earliest time with another run's actor would name a pusher for an
+    instant they did not create. The earliest entry is deliberately neither the first
+    nor the last, and the last carries the empty actor a projection that did not apply
+    would produce, so a reading of `[0]`, of the tail, or of the first *non-empty* actor
+    fails here.
+    """
+    payload = {
+        "runs": [
+            {"t": "2026-09-11T05:00:00Z", "a": OTHER_LOGIN},
+            {"t": "2026-09-11T01:00:00Z", "a": SELF_LOGIN},
+            {"t": "2026-09-11T09:00:00Z", "a": ""},
+        ]
+    }
+    monkeypatch.setattr(mod, "_gh_json", lambda args: payload)
+    assert mod._earliest_run(HEAD) == ("2026-09-11T01:00:00Z", SELF_LOGIN)
+
+
+def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monkeypatch, tmp_path):
     """The two halves of one clause, asserted against each other rather than assumed.
 
     Sharing the machinery is not the claim; sharing the *verdict* is. If a later change
@@ -2158,6 +2243,14 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_
     (corpus / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
     log = str(corpus)
     counter, cast_vote = mod, _cast_vote()
+    # The identity half is asked through `gh api user`, and neither end is driven through
+    # a fake here - both are called directly - so it is pinned instead of stubbed. Two
+    # module objects hold the cache, because `cast-vote.py` loads the counter as its own
+    # sibling, and a pin on one of them would leave the other reading the real login.
+    # With both pinned, the arms below turn on the pusher alone: this instance is
+    # `SELF_LOGIN`, and `OTHER_LOGIN` is a login it is not.
+    for owner in (counter, cast_vote.votes_counter()):
+        monkeypatch.setattr(owner, "_own_login", SELF_LOGIN)
 
     cases = (
         # (push instant, inside the window?)
@@ -2175,6 +2268,43 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_
             "cyc20260911-100000",
             push_time=pushed,
             push_time_exact=True,
+            cycles_log=log,
+        )
+        assert bool(refused) is inside, (pushed, refused)
+        assert counted is inside, (pushed, why)
+
+    # The input that was missing: *whose* push it is. Inside the window, a pusher that
+    # reads as another login has to reach the same verdict at both ends - nothing
+    # refused, nothing voided - or the row and the gate disagree about the head
+    # (measured 2026-10-06, `cyc20261006-122605`: #1869's head, pushed by the peer at
+    # 04:07:01Z, read `abstain` in the queue and `own-head-window` at the gate).
+    for pushed, inside in cases:
+        if not inside:
+            continue
+        refused, _ = cast_vote.own_head_window(
+            "cyc20260911-100000", _Head(pushed, pusher=OTHER_LOGIN), cycles_log=log
+        )
+        counted, why = counter.own_head_window(
+            "cyc20260911-100000",
+            push_time=pushed,
+            push_time_exact=True,
+            pusher=OTHER_LOGIN,
+            cycles_log=log,
+        )
+        assert not refused, (pushed, refused)
+        assert not counted, (pushed, why)
+
+    # …and the fail-safe arm: an unreadable pusher keeps the clause at both ends, since
+    # an exemption nobody measured is the direction that credits a self-review.
+    for pushed, inside in cases:
+        refused, _ = cast_vote.own_head_window(
+            "cyc20260911-100000", _Head(pushed, pusher=""), cycles_log=log
+        )
+        counted, why = counter.own_head_window(
+            "cyc20260911-100000",
+            push_time=pushed,
+            push_time_exact=True,
+            pusher="",
             cycles_log=log,
         )
         assert bool(refused) is inside, (pushed, refused)
