@@ -245,6 +245,12 @@ NOT_TREE_READERS = {
         "subject is the remote queue, so there is no local tree whose name would "
         "answer anything (the repo it read is printed first instead)"
     ),
+    "check-stacked-prs.py": (
+        "reads every open PR's head and commit list from the GitHub API and reports which "
+        "open PR's head commit another one would land - the subject is the remote queue, so "
+        "no local tree's name would answer anything (the repo it read is printed first "
+        "instead, as check-issue-links.py does)"
+    ),
     "check-patch-files.py": "reads the patch files it is given as arguments",
     "check-merge-freshness.py": "requires PR numbers; answers per head and its base",
     "check-merge-order.py": "requires PR numbers; names the base it plans against",
