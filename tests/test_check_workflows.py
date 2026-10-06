@@ -208,7 +208,7 @@ def test_a_different_build_that_found_nothing_is_not_a_pass(
     _install(mod, monkeypatch, FakeActionlint(version="1.7.10"))
     code, out, err = _run_main(mod, capsys, _tree(tmp_path))
     assert code == 2, "a different build's clean answer is not the pinned gate's verdict"
-    assert "not measurable" in err
+    assert "could not measure" in err
     assert "1.7.10" in err and "1.7.12" in err, (
         "the reader has to see both builds to know which one answered"
     )
@@ -221,7 +221,7 @@ def test_a_finding_from_a_different_build_is_still_a_finding(
     """The control on the leg above: the agreement rule must not swallow real findings.
 
     Without this the version check would be a way to make failures vanish - a mutated
-    tool that turned every run into `not measurable` would live happily beside a suite
+    tool that turned every run into `could not measure` would live happily beside a suite
     that only pinned the green path.
     """
     _install(mod, monkeypatch, FakeActionlint(version="1.7.10", rc=1, output="boom"))
@@ -247,7 +247,7 @@ def test_no_actionlint_on_path_is_not_measurable(mod, monkeypatch, capsys, tmp_p
     _install(mod, monkeypatch, FakeActionlint(on_path=False))
     code, out, err = _run_main(mod, capsys, _tree(tmp_path))
     assert code == 2
-    assert "not measurable" in err and "not on PATH" in err
+    assert "could not measure" in err and "not on PATH" in err
     assert "brew install actionlint" in err, "an unmeasurable answer owes the remedy"
     assert "v1.7.12" in err, "the version the host has to match belongs in the remedy"
     assert [line for line in out.splitlines() if line.strip()] == [
@@ -261,6 +261,43 @@ def test_a_tree_with_no_workflow_file_is_not_measurable(mod, monkeypatch, capsys
     code, _, err = _run_main(mod, capsys, tmp_path)
     assert code == 2
     assert "no workflow file" in err
+
+
+def test_a_root_that_is_not_a_directory_says_so_not_that_it_is_empty(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The two shapes that answer "nothing to lint" are named apart, and the pair is the test.
+
+    Measured 2026-10-06 (`cyc20261006-182152`): a `--root` that does not exist and a
+    directory with no workflows in it both printed `no workflow file under
+    <root>/.github/workflows` - so an absent path was reported as a directory that is
+    there and happens to be empty, pointing the reader at a `.github/workflows` inside
+    something that is not there. The remedies differ (fix the path, versus run it where
+    the workflows are), which is why the family's rule for a guard a caller can point at
+    a tree of their choosing is that the refusal names which of the two it read.
+
+    The second half is the control: the empty tree must keep the `no workflow file`
+    wording, so this cannot be satisfied by a guard that prints the new sentence always.
+    """
+    _install(mod, monkeypatch, FakeActionlint())
+
+    absent = tmp_path / "not-there"
+    code, out, err = _run_main(mod, capsys, absent)
+    assert code == 2
+    assert "could not measure" in err
+    assert "is not a directory" in err, err
+    assert "no workflow file" not in err, (
+        "an absent path is not a tree that holds no workflow file - the two have "
+        "different remedies and the refusal has to name which it read:\n" + err
+    )
+    assert "OK:" not in out
+
+    code, _, err = _run_main(mod, capsys, tmp_path)
+    assert code == 2
+    assert "no workflow file" in err and "is not a directory" not in err, (
+        "a directory that exists and holds no workflow file is the other shape - its "
+        "wording must not have been replaced by the new one:\n" + err
+    )
 
 
 def test_a_tree_whose_workflows_run_no_actionlint_is_not_measurable(

@@ -44,8 +44,9 @@ Exit codes (the family's contract - "clean" and "could not measure" are never th
        nothing
     1  actionlint reported at least one problem; its own output is quoted verbatim
     2  could not measure, with the reason and never as a pass: actionlint is not on PATH,
-       no workflow file was found, the binary could not be run, or the build found is not
-       the one CI pins
+       no workflow file was found (or the `--root` is not a directory at all, which is a
+       different reading with a different remedy), the binary could not be run, or the
+       build found is not the one CI pins
 
 Usage
 -----
@@ -168,9 +169,10 @@ def _local_version(exe: str, root: Path) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     # The family's buffering remedy (#1633 asserts it over `scripts/check-*.py`): stdout is
-    # block-buffered under a pipe while stderr is not, so without this the "not measurable"
-    # verdict on stderr overtakes the identity line the family promises comes first -
-    # measured here as well, since the missing-binary case is this tool's likeliest run.
+    # block-buffered under a pipe while stderr is not, so without this the "could not
+    # measure" verdict on stderr overtakes the identity line the family promises comes
+    # first - measured here as well, since the missing-binary case is this tool's likeliest
+    # run.
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except (AttributeError, ValueError):
@@ -193,8 +195,26 @@ def main(argv: list[str] | None = None) -> int:
         # own `tree` field, so the JSON stays one document.
         print(f"tree: {root}")
 
-    files = workflow_files(root)
     pin = pinned_version(root)
+
+    if not root.is_dir():
+        # Two shapes answer "nothing to lint" and they are not the same fact: a `--root`
+        # that is not a directory at all (the path is wrong - measured 2026-10-06,
+        # `cyc20261006-182152`: an absent path and an empty directory both printed the
+        # one sentence below, which names a `.github/workflows` under a directory that
+        # is not there) and a tree that really holds no workflow file. The remedies
+        # differ - fix the path, versus run it where the workflows are - so the refusal
+        # names which of the two it read, as the family's rule for a guard pointed at a
+        # tree of the caller's choosing requires.
+        reason = (
+            f"{root} is not a directory, so nothing was read and there is no gate input "
+            f"to lint. Check that `--root` names a directory that exists (the workflows "
+            f"this tool lints live in a {WORKFLOW_DIR} below it), or run it from the "
+            "checkout you mean - this is not a pass"
+        )
+        return _unmeasured(args, root, reason, pin, 0)
+
+    files = workflow_files(root)
 
     if not files:
         reason = (
@@ -295,7 +315,7 @@ def _unmeasured(
             )
         )
     else:
-        print(f"not measurable: {reason}", file=sys.stderr)
+        print(f"could not measure: {reason}", file=sys.stderr)
     return 2
 
 
