@@ -73,16 +73,27 @@ number, the four spellings this family writes. The argument is the discriminator
 what keeps the clause off prose: "update `VERSION_SOURCES` in `scripts/bump-version.py`"
 ends at the file name and is not a thing to run, while `scripts/check-vote-count.py <PR>` is.
 
-What the clause reads on this tree, measured 2026-10-06: **34** command-shaped mentions, in
-six tools - `review-queue.py` 15, `cast-vote.py` 8, `check-merge-freshness.py` 7,
-`bump-version.py` 2, `check-merge-sequence.py` 1, `check-release-published.py` 1. The same
+What the clause reads on this tree, measured 2026-10-06: **36** command-shaped mentions, in
+six tools - `review-queue.py` 16, `cast-vote.py` 8, `check-merge-freshness.py` 8,
+`bump-version.py` 2, `check-merge-sequence.py` 1, `check-release-published.py` 1. Two of
+those are new in one afternoon and both came from a *remedy*: a printed remedy is a printed
+command, so adding one to a tool's repair path moves this number whether or not the author
+was thinking about citations (`review-queue.py`'s no-verdict row, and the reason
+`check-merge-freshness.py` now gives for it). The lesson is not to stop printing remedies -
+a remedy a reader cannot run is worth less than the count - but that this sentence is read
+from the **tree**, so a branch that adds a mention has to re-measure it, and two such
+branches merging together leave the second one to re-measure again. The same
 measurement applied to `cast-vote.py` one commit earlier (`afaeae0f`) finds the same 8
 mentions, **all 8 bare** - that is the second carrier this clause exists for, after the
 previous cycle's `review-queue.py` / `check-merge-freshness.py` pair (`60d77678`).
-`review-queue.py` moved 13 -> 15 when the `unblock` row stopped handing over
-`gh pr view --json mergeable,mergeStateStatus` (a command that reprints the fact the row
-has just stated) and named the two readings that answer instead (cycle
-`cyc20261006-091811`).
+`review-queue.py` moved 13 -> 16 across the two branches this file was merged from: 13 -> 15
+when the `unblock` row stopped handing over `gh pr view --json mergeable,mergeStateStatus` (a
+command that reprints the fact the row has just stated) and named the two readings that answer
+instead (cycle `cyc20261006-091811`), and one more from the no-verdict row that arrived with
+`check-merge-freshness.py`'s new kind (#1867). That merge is the shape this paragraph warns
+about, one step further on: both branches measured 34 against their own base, and the tree they
+land on together holds 36 - a count two branches can each be right about and still leave the
+other one stale.
 
 **Docstrings are excluded**, and the reason is measured rather than assumed. The docstrings
 of `scripts/*.py` hold **65** mentions of that shape, far more than the strings the code
