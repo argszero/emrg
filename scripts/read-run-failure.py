@@ -47,7 +47,11 @@ Usage
 Exit codes
 ----------
     0  a failed job was found and its cause was printed
-    1  the run has no failed job - a determinate reading, not a failure to measure
+    1  the run has no failed job - a determinate reading, not a failure to measure. Which
+       determinate reading it is, the report says: every job succeeded (nothing to
+       explain), or no job failed but the run judged nothing because its jobs concluded
+       without a verdict or never concluded (no cause to read, and re-running is the
+       remedy). `--json` carries the same distinction as `no_verdict`
     2  the question could not be answered (bad run id, gh failed, no jobs listed, a job's
        log could not be fetched or came back empty) - fail loud; never report "no cause"
        for a log nobody read
@@ -118,6 +122,23 @@ _FAILED = frozenset({"failure", "timed_out", "startup_failure"})
 # Concluded without doing the work and without a verdict: reported, never counted as a
 # cause and never dropped, because "the job did not run" is a fact the reader needs.
 _NEITHER = frozenset({"skipped", "cancelled", "neutral", "stale", "action_required"})
+
+
+def _conclusion(job: dict) -> str:
+    """One job's conclusion, as the string GitHub sends - empty when it has none.
+
+    One home for the reading, because three places ask it and they must not disagree
+    about what a conclusion is. `""` is **not** a conclusion: a job still running, or one
+    whose runner was never acquired, carries no conclusion at all, and a job handed in
+    without the key reads the same way. Reading that as a conclusion is how a run that
+    judged nothing comes to be described as having concluded.
+
+    Measured 2026-10-06 (`cyc20261006-155448`), driving `main` with stubbed job payloads:
+    a single job with `conclusion: None` (and one with no `conclusion` key at all) printed
+    `1 concluded otherwise: test` - a conclusion reported for a job that had not reached
+    one.
+    """
+    return str(job.get("conclusion") or "")
 
 # The runner's own rendering of a workflow command that ran. See the module docstring:
 # `::error::` in this text is usually the step's *source*, not an annotation.
@@ -455,22 +476,32 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    failed_jobs = [job for job in jobs if str(job.get("conclusion") or "") in _FAILED]
-    other_jobs = [
+    failed_jobs = [job for job in jobs if _conclusion(job) in _FAILED]
+    # Not a failure and not a success either, split by whether a conclusion exists at all.
+    # Both halves are jobs whose outcome the reader needs, and they are not the same fact:
+    # `concluded_otherwise` did reach a conclusion without a verdict (cancelled, skipped,
+    # ...), while `unrecorded` has not concluded. Reported as one list they told the reader
+    # that a job still in flight - or one whose runner was never acquired, which on this
+    # host is routine - had concluded.
+    concluded_otherwise = [
         job
         for job in jobs
-        if str(job.get("conclusion") or "") not in _FAILED
-        and str(job.get("conclusion") or "") not in {"success"}
+        if _conclusion(job) and _conclusion(job) not in _FAILED
+        and _conclusion(job) != "success"
     ]
+    unrecorded = [job for job in jobs if not _conclusion(job)]
 
     if not args.json:
         # The subject first, before any verdict: the family's convention, and here it is
         # also the only place the reader learns which run answered.
         print(f"repo: {args.repo}, run {args.run_id}")
         summary = f"jobs: {len(jobs)} ({len(failed_jobs)} failed"
-        if other_jobs:
-            names = ", ".join(str(job.get("name")) for job in other_jobs)
-            summary += f", {len(other_jobs)} concluded otherwise: {names}"
+        if concluded_otherwise:
+            names = ", ".join(str(job.get("name")) for job in concluded_otherwise)
+            summary += f", {len(concluded_otherwise)} concluded otherwise: {names}"
+        if unrecorded:
+            names = ", ".join(str(job.get("name")) for job in unrecorded)
+            summary += f", {len(unrecorded)} with no conclusion recorded: {names}"
         print(summary + ")")
         # The basis, beside the subject: `gh` and the anonymous public API do not carry
         # the same fields, so a reader deciding whether to quote a field needs to know
@@ -479,18 +510,46 @@ def main(argv: list[str] | None = None) -> int:
         if any(channel != "gh" for channel in transports_used()):
             print(f"transport: {', '.join(transports_used())}")
 
+    #: Whether this run reached a verdict at all. A run with no failed job is a
+    #: *determinate* reading either way, but which determinate reading it is decides the
+    #: remedy: a run every job of which succeeded has nothing to explain, while one whose
+    #: jobs concluded without a verdict - or never concluded - judged nothing, so there is
+    #: no cause to read and re-running is what it takes.
+    judged = not (concluded_otherwise or unrecorded)
+
     if not failed_jobs:
         # A determinate reading: nothing failed. Exit 1, not 0 - "no failure" is not the
         # answer this tool was asked for, and a caller scripting it should see the
         # difference rather than a silent success.
+        #
+        # Measured 2026-10-06 (`cyc20261006-155448`): both cases used to print the one
+        # sentence "nothing to explain", which is true of the first and false of the
+        # second - there *is* something to explain about a run that never judged the tree,
+        # and it is not a cause in the log. This is the same distinction `#1867` drew one
+        # layer up in `check-merge-freshness.py`, which stopped handing this tool over as
+        # the remedy for a cancelled run.
         if args.json:
             print(json.dumps({"run": args.run_id, "repo": args.repo, "failed": False,
+                              "no_verdict": not judged,
                               "transport": transports_used(),
                               "jobs": [
                 {"name": j.get("name"), "conclusion": j.get("conclusion")} for j in jobs
             ]}, indent=2))
+        elif judged:
+            print(
+                f"no failed job in run {args.run_id} - every job succeeded, so there is "
+                "no failure to explain"
+            )
         else:
-            print(f"no failed job in run {args.run_id} - nothing to explain")
+            stopped = ", ".join(
+                f"{job.get('name')} [{_conclusion(job) or 'no conclusion recorded'}]"
+                for job in concluded_otherwise + unrecorded
+            )
+            print(
+                f"no failed job in run {args.run_id}, but the run judged nothing "
+                f"({stopped}) - there is no cause to read, and re-running is the remedy "
+                "a run that stopped without a verdict takes"
+            )
         return 1
 
     reports: list[dict] = []

@@ -197,13 +197,105 @@ def test_a_silent_step_is_still_named_by_the_job_payload(mod, monkeypatch, capsy
 def test_a_run_with_no_failed_job_is_a_determinate_answer_not_a_failure(
     mod, monkeypatch, capsys
 ):
-    """`no failed job` is a reading with its own exit code, never a silent success."""
+    """`no failed job` is a reading with its own exit code, never a silent success.
+
+    Every job succeeded here, which is the one case the pass-shaped sentence belongs to -
+    and the *only* one, which the tests below pin from the other side: a run whose
+    jobs concluded without a verdict, or never concluded, judged nothing, and the report
+    says that instead.
+    """
     fake = FakeGh([_job(conclusion="success"), _job(name="release", conclusion="success", job_id=2)])
     rc = _run(mod, monkeypatch, fake, ["42"])
     out = capsys.readouterr().out
     assert rc == 1, "not 0: the answer this tool was asked for was not produced"
     assert "no failed job" in out
-    assert "nothing to explain" in out
+    assert "every job succeeded" in out, out
+    assert "judged nothing" not in out, (
+        "a run every job of which succeeded is not a run that judged nothing"
+    )
+
+
+def test_a_run_that_judged_nothing_does_not_say_nothing_to_explain(
+    mod, monkeypatch, capsys
+):
+    """A cancelled job is not a verdict, so there is no cause to read - and the report says it.
+
+    Measured 2026-10-06 (`cyc20261006-155448`): with the run's only job `cancelled`, the
+    report read `no failed job in run 42 - nothing to explain` - the same sentence an
+    all-green run gets. On this host that is not a corner: a job that never got a runner
+    appears as `cancelled` (0 steps, waiting for one), which is exactly the state #1867
+    taught `check-merge-freshness.py` to stop calling a failing verdict.
+
+    The remedy is what makes the two readings worth telling apart: "no job failed, the tree
+    passed" needs nothing, while a run that judged nothing takes a re-run.
+    """
+    fake = FakeGh(
+        [_job(conclusion="cancelled"), _job(name="test-windows", conclusion="success", job_id=2)]
+    )
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    out = capsys.readouterr().out
+    assert rc == 1, "a determinate reading either way: no job failed"
+    assert "no failed job" in out
+    assert "the run judged nothing" in out, out
+    assert "cancelled" in out, "the job that concluded without a verdict has to be named"
+    assert "re-running" in out, "a run that reached no verdict takes a re-run, not a reading"
+    assert "every job succeeded" not in out, (
+        "one job was cancelled and another green - this run did not pass"
+    )
+
+
+def test_a_job_with_no_conclusion_is_not_reported_as_having_concluded(
+    mod, monkeypatch, capsys
+):
+    """`""` is not a conclusion: a job still in flight has not concluded anything.
+
+    The summary read `1 concluded otherwise: test` for it - a conclusion asserted for a job
+    that had not reached one. Measured 2026-10-06 (`cyc20261006-155448`), driving `main`
+    with `{"name": "test"}` and with `{"name": "test", "conclusion": None}`: both printed
+    the line a genuinely cancelled job gets.
+    """
+    fake = FakeGh([_job(name="test", conclusion=None)])
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "with no conclusion recorded" in out, out
+    assert "concluded otherwise" not in out, (
+        "a job with no conclusion has not concluded - saying it 'concluded otherwise' "
+        "reports a reading nobody took"
+    )
+    assert "no conclusion recorded" in out, out
+
+
+def test_a_skipped_job_is_still_one_that_concluded_without_a_verdict(
+    mod, monkeypatch, capsys
+):
+    """The other half of the split, so the distinction cannot collapse into one bucket."""
+    fake = FakeGh([_job(name="test", conclusion="skipped")])
+    rc = _run(mod, monkeypatch, fake, ["42"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "concluded otherwise" in out, out
+    assert "with no conclusion recorded" not in out, (
+        "`skipped` IS a conclusion - the two cases are not the same fact, and a report "
+        "that merges them is the defect this pair of tests exists for"
+    )
+    assert "judged nothing" in out, out
+
+
+def test_the_json_carries_whether_the_run_reached_a_verdict(mod, monkeypatch, capsys):
+    """The machine-readable half: a caller cannot branch on prose."""
+    fake = FakeGh([_job(conclusion="cancelled")])
+    rc = _run(mod, monkeypatch, fake, ["42", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1 and payload["failed"] is False, payload
+    assert payload["no_verdict"] is True, payload
+
+    fake = FakeGh([_job(conclusion="success")])
+    _run(mod, monkeypatch, fake, ["42", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["no_verdict"] is False, (
+        "a run every job of which succeeded did reach a verdict"
+    )
 
 
 def test_an_unreadable_log_makes_the_run_unmeasurable(mod, monkeypatch, capsys):
