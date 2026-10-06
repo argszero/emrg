@@ -114,6 +114,20 @@ def _hash_object(repo: Path, obj_type: str, raw: bytes, write: bool = False) -> 
     return r.stdout.decode().strip()
 
 
+def _ls_tree(repo: Path, sha: str) -> list[tuple[str, str, str, str]]:
+    """(mode, type, sha, path) for a tree's immediate children, NUL-delimited so
+    a path with a space cannot be split in the middle."""
+    out = _git("ls-tree", "-z", sha, cwd=repo).stdout.decode("utf-8")
+    rows = []
+    for record in out.split("\0"):
+        if not record:
+            continue
+        meta, path = record.split("\t", 1)
+        mode, typ, child = meta.split()
+        rows.append((mode, typ, child, path))
+    return rows
+
+
 class FakeGitHub:
     """Faithful GitHub Git Data API fake: recomputes every sha with real git so
     byte-exactness of the script's payloads is verifiable end-to-end."""
@@ -163,22 +177,45 @@ class FakeGitHub:
                 if sha in self.objects:
                     return {"sha": sha}
                 raise _http_error(404)
-            # content-addressed store: rebuild the tree from the entries with
-            # real `git mktree` (git's own serialization + sorting), so the
-            # stored sha equals the local sha iff the entries are byte-exact
-            lines = []
+            # content-addressed store: rebuild the tree with real `git mktree`
+            # (git's own serialization + sorting), so the stored sha equals the
+            # local sha iff the entries are byte-exact. `base_tree` is honoured
+            # the way GitHub documents it (measured against the real API
+            # 2026-10-06): the listed entries are merged *into* the base tree -
+            # unlisted paths the base has are kept, and a listed path with a
+            # null sha is removed.
+            merged: dict[str, tuple[str, str, str]] = {}
+            if body.get("base_tree"):
+                assert body["base_tree"] in self.objects, \
+                    f"base_tree {body['base_tree']} is not on the remote"
+                assert self.objects[body["base_tree"]][0] == "tree", "base_tree is not a tree"
+                for mode, typ, sha, p in _ls_tree(self.repo, body["base_tree"]):
+                    merged[p] = (mode, typ, sha)
             for e in body["tree"]:
                 assert "/" not in e["path"], "create-tree entries must be immediate children"
+                if e.get("sha", "") is None:      # explicit deletion from base_tree
+                    merged.pop(e["path"], None)
+                    continue
                 typ = _git("cat-file", "-t", e["sha"], cwd=self.repo).stdout.decode().strip()
                 assert typ == e["type"], f"entry {e['path']}: local type {typ} != {e['type']}"
                 assert e["mode"] in ("100644", "100755", "120000", "040000", "160000")
-                lines.append(f"{e['mode']} {e['type']} {e['sha']}\t{e['path']}")
+                merged[e["path"]] = (e["mode"], e["type"], e["sha"])
+            lines = [f"{m} {t} {s}\t{p}" for p, (m, t, s) in merged.items()]
             r = _git("mktree", cwd=self.repo, input_bytes=("\n".join(lines) + "\n").encode())
             assert r.returncode == 0, r.stderr
             sha = r.stdout.decode().strip()
             self.objects[sha] = ("tree", b"<local>")
             return {"sha": sha}
         if path.startswith("/repos/x/git/commits"):
+            if method == "GET":
+                # GET /git/commits/{sha} — the script reads the base commit's
+                # tree sha from here, to name it as base_tree
+                sha = path.rsplit("/", 1)[1]
+                if sha in self.objects:
+                    tree = _git("rev-parse", f"{sha}^{{tree}}",
+                                cwd=self.repo).stdout.decode().strip()
+                    return {"sha": sha, "tree": {"sha": tree}}
+                raise _http_error(404)
             if self.fail_commits:
                 raise _http_error(422, b'{"message":"Validation Failed"}')
             # like real GitHub: parents must already exist remotely
@@ -249,7 +286,9 @@ def test_upload_skips_a_subtree_the_remote_already_has(tmp_path):
     trees = ~669 requests per push, which outlives the caller's 600 s tool
     timeout and reports a false failure for a push that landed). The second push
     here adds one top-level file; the whole `sub/` subtree is already remote, so
-    none of its 20 blobs may be re-sent."""
+    none of its 20 blobs may be re-sent — and because the new tree is created
+    against the base tree, the unchanged `top.txt` is not re-sent either (it
+    was, until the base tree was named: 2 blob POSTs, now 1)."""
     mod = _load_module()
     repo = _init_repo(tmp_path)
     for i in range(20):
@@ -269,8 +308,9 @@ def test_upload_skips_a_subtree_the_remote_already_has(tmp_path):
         mod.push_branch("x", "feature/x", root, False, cwd=repo)
         first_blobs = posts("/git/blob")
         fake.log.clear()
-        # second push: only the root tree's own blobs are new — recursing into
-        # `sub/` probes its tree, gets 200, and stops without touching its blobs
+        # second push: only the root tree's own new blob is new — recursing into
+        # `sub/` probes its tree, gets 200, and stops without touching its blobs,
+        # and `top.txt` comes from the base tree
         result = mod.push_branch("x", "feature/x", "HEAD", False, cwd=repo)
         second_blobs = posts("/git/blob")
         second_trees = posts("/git/tree")
@@ -279,8 +319,74 @@ def test_upload_skips_a_subtree_the_remote_already_has(tmp_path):
 
     assert result["result"] == "pushed"
     assert len(first_blobs) == 21      # 20 under sub/ + top.txt
-    assert len(second_blobs) == 2      # top.txt + c.txt, NOT the 20 under sub/
+    assert len(second_blobs) == 1      # c.txt only — not `sub/`'s 20, nor top.txt
     assert len(second_trees) == 1      # only the re-built root tree
+
+
+def test_a_changed_file_deep_in_a_tree_uploads_only_that_file(tmp_path):
+    """The probe stops at an unchanged subtree, but a *changed* subtree used to
+    go up whole — 231 blobs on argszero/emrg for a two-file change, because
+    scripts/ and tests/ had changed. Naming the base tree cuts the payload to
+    the entries that differ: one file edited under `sub/` sends one blob, not
+    twenty."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    for i in range(20):
+        _write_file(repo, f"sub/f{i:02d}.txt", f"x{i}\n".encode())
+    root = _commit_all(repo, "root commit")
+    _write_file(repo, "sub/f00.txt", b"edited\n")
+    _commit_all(repo, "edit one file under sub/")
+    fake = FakeGitHub(repo)
+
+    orig_api = mod.api
+    mod.api = fake
+    try:
+        mod.push_branch("x", "feature/x", root, False, cwd=repo)
+        fake.log.clear()
+        result = mod.push_branch("x", "feature/x", "HEAD", False, cwd=repo)
+    finally:
+        mod.api = orig_api
+
+    blobs = [p for m, p in fake.log if m == "POST" and "/git/blob" in p]
+    trees = [p for m, p in fake.log if m == "POST" and "/git/tree" in p]
+    assert result["result"] == "pushed"
+    assert result["content_identical"] is True
+    # the edited blob, then `sub/` and the root tree — the other 19 blobs of
+    # `sub/` are the base tree's and must not be re-sent
+    assert len(blobs) == 1
+    assert len(trees) == 2
+
+
+def test_a_deleted_file_is_removed_from_the_base_tree(tmp_path):
+    """base_tree is merged *in*, so dropping a path from the payload would keep
+    it. A deletion has to be stated, with a null sha — this is the arm that
+    fails if the script simply omits paths it does not have."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "sub/keep.txt", b"keep\n")
+    _write_file(repo, "sub/gone.txt", b"gone\n")
+    root = _commit_all(repo, "root commit")
+    (repo / "sub" / "gone.txt").unlink()
+    _commit_all(repo, "delete one file under sub/")
+    fake = FakeGitHub(repo)
+
+    orig_api = mod.api
+    mod.api = fake
+    try:
+        mod.push_branch("x", "feature/x", root, False, cwd=repo)
+        fake.log.clear()
+        result = mod.push_branch("x", "feature/x", "HEAD", False, cwd=repo)
+    finally:
+        mod.api = orig_api
+
+    assert result["result"] == "pushed"
+    assert result["content_identical"] is True
+    # both directions on the pushed tree: the deleted path is gone, the kept one
+    # is still there (read from the remote commit's own tree)
+    gone = _git("cat-file", "-e", f"{result['sha']}:sub/gone.txt", cwd=repo)
+    keep = _git("cat-file", "-e", f"{result['sha']}:sub/keep.txt", cwd=repo)
+    assert gone.returncode != 0
+    assert keep.returncode == 0
 
 
 def test_tree_entries_lists_immediate_children(tmp_path):

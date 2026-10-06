@@ -21,11 +21,18 @@ This script automates that recipe:
     the existing branch head, or the first ancestor the remote already has
     (GET /repos/{repo}/commits/{sha})
   * uploads blobs (raw bytes, byte-exact) and trees (structured entries,
-    children referenced by their *remote* sha) bottom-up - and asks whether a
-    tree is already on the remote *before* walking into it, so a small change
-    uploads the difference rather than the whole repository (a tree is
-    content-addressed, so the same sha is the same object, and a tree that is
-    present guarantees everything beneath it is present)
+    children referenced by their *remote* sha) bottom-up - and, so that a small
+    change uploads the difference rather than the whole repository, does it in
+    two ways. A tree is content-addressed, so the same sha names the same
+    object and a tree that is already remote guarantees everything beneath it
+    is too: each tree is probed once and, when present, its whole subtree is
+    skipped without being walked. A tree that is *not* present is created with
+    a `base_tree` naming the same path in the base commit's tree, listing only
+    the entries that differ (unlisted entries are re-used from the base, and a
+    path the new tree drops is listed with `sha: null`), so only genuinely new
+    blobs are uploaded (measured 2026-10-06 on argszero/emrg: a two-file change
+    against master costs 243 requests without `base_tree` - it re-sends all 231
+    blobs under the two changed directories - and 9 with it)
   * recreates commits via the structured endpoint, deriving author/committer
     name, email and epoch+offset from the local raw object (gotcha 3), with the
     message passed without a trailing newline
@@ -266,7 +273,13 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
     if base:
         obj_map[base] = base
 
-    def remote_sha(sha: str, kind: str) -> str:
+    def remote_sha(sha: str, kind: str, base: str | None = None) -> str:
+        """Create this object remotely unless it is already there; return its sha.
+
+        `base` is only meaningful for a tree: the sha of the tree at the same
+        path in the base commit (which the remote already has). Naming it as
+        `base_tree` lets the create-tree call carry the entries that differ,
+        with the rest re-used from the base."""
         if sha in obj_map:
             return obj_map[sha]
         if kind == "blob":
@@ -296,13 +309,44 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
                 if e.code != 404:
                     raise
             entries = tree_entries(sha, cwd=cwd)
+            # The probe above stops at a subtree the remote already has, but a
+            # subtree that *did* change is otherwise re-sent whole: on
+            # argszero/emrg a two-file change still uploaded 231 blobs (all of
+            # scripts/ and tests/, the two directories that changed) - measured
+            # 2026-10-06, 243 requests. Naming the base tree turns the payload
+            # into the difference: entries the base already supplies are left
+            # out, GitHub re-creates them, and the same change costs 9 requests.
+            base_entries: dict[str, dict] = {}
+            if base:
+                base_entries = {e["path"]: e for e in tree_entries(base, cwd=cwd)}
+            sent: list[dict] = []
             for e in entries:
-                if e["type"] != "blob":
-                    e["sha"] = remote_sha(e["sha"], "tree")
-                else:
+                b = base_entries.get(e["path"])
+                if b and b["mode"] == e["mode"] and b["type"] == e["type"] \
+                        and b["sha"] == e["sha"]:
+                    continue  # identical to the base -> the base supplies it
+                if e["type"] == "blob":
                     e["sha"] = remote_sha(e["sha"], "blob")
+                else:
+                    # only a tree entry can be a tree's base counterpart; a path
+                    # that changed kind gets no base and is listed in full
+                    child_base = b["sha"] if (b and b["type"] == "tree") else None
+                    e["sha"] = remote_sha(e["sha"], "tree", child_base)
+                sent.append(e)
+            body: dict = {"tree": sent}
+            if base:
+                body["base_tree"] = base
+                for path, b in base_entries.items():
+                    if path not in {e["path"] for e in entries}:
+                        # a path the base has and this tree does not: base_tree
+                        # is merged *in*, so omitting it would keep it - only a
+                        # null sha removes it (measured 2026-10-06: listing
+                        # {"path": p, "sha": None} yields exactly the tree
+                        # without p, verified against a locally-built one)
+                        sent.append({"path": path, "mode": b["mode"],
+                                     "type": b["type"], "sha": None})
             try:
-                resp = api("POST", f"/repos/{repo}/git/trees", {"tree": entries})
+                resp = api("POST", f"/repos/{repo}/git/trees", body)
             except urllib.error.HTTPError as e:
                 if e.code == 422:
                     resp = api("GET", f"/repos/{repo}/git/trees/{sha}")
@@ -312,13 +356,21 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
         obj_map[sha] = rsha
         return rsha
 
+    # The base commit's tree - the tree every new tree is a modification of, so
+    # its entries can be re-used instead of re-sent. Asked of the API rather
+    # than `git rev-parse`: `base` may be a commit GitHub normalized on an
+    # earlier push, which this checkout never materialized.
+    base_tree: str | None = None
+    if base:
+        base_tree = api("GET", f"/repos/{repo}/git/commits/{base}")["tree"]["sha"]
+
     for commit in chain:
         # Post-order recursion (see remote_sha) creates every child object before
         # the tree that names it, so one call per commit tree suffices. The old
         # "all blobs, then all trees deepest-first" pre-pass had to enumerate
         # every object of the tree just to order them, and so re-uploaded the
         # whole repository even when almost all of it was already remote.
-        remote_sha(commit[1]["tree"], "tree")
+        remote_sha(commit[1]["tree"], "tree", base_tree)
 
     # ---- create commits oldest -> newest; a commit's parents must reference
     # the *remote* shas of already-created commits (they differ from the local
