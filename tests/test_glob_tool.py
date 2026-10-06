@@ -171,7 +171,13 @@ def test_the_emrg_directory_it_declares_as_read_really_is_read(temp_cwd):
 
     assert not result.error
     assert "Found 1 matches" in result.content, result.content
-    assert ".emrg/memory/MEMORY.md" in result.content
+    # Spelled the way the tool prints it — `str(path.relative_to(root))`, the platform's
+    # own separator — and written as that same expression, so the assertion is not a
+    # POSIX literal. It was one until measured: run 37495221347, leg `test-windows`
+    # (2026-10-06), where this line and its sibling in `tests/test_grep_tool.py` were the
+    # only two failures in 3,909 passes. `skipif(win32)` would have left the other
+    # platform unmeasured, which is the state that let it through.
+    assert str(Path(".emrg") / "memory" / "MEMORY.md") in result.content
     assert "skipped" not in result.content, (
         "the .emrg path was dropped by the skip policy the description says reads it"
     )
