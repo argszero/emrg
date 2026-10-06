@@ -143,12 +143,18 @@ class GrepTool(ToolExecutor):
         #: it counted among the four "searched". "Searched" is a claim about work done;
         #: the skips are reported beside it for the same reason `glob` names its skips.
         files_read = 0
-        #: The two ways a collected file is not read, kept apart because their remedies
-        #: differ (raise `MAX_FILE_SIZE` / a search that can read bytes vs. a text
-        #: search that will not read this file at all). A stat that fails is the second
-        #: kind: nothing about the file could be measured, so it was not searched either.
+        #: The three ways a collected file is not read, kept apart because their remedies
+        #: differ (raise `MAX_FILE_SIZE` / search with a byte reader / fix the path or its
+        #: permissions). They were two until 2026-10-07 (`cyc20261007-024140`), and the
+        #: second held both "the bytes are not UTF-8" and "the file could not be opened at
+        #: all" — so a file that is perfectly good UTF-8 but unreadable (mode `000`, or
+        #: gone since the listing) was reported as `not readable as UTF-8 text`, a false
+        #: statement about it and a wrong remedy for its reader. Measured on master
+        #: `65df80ac`: a tree with one `NEEDLE` file at mode `000` and one binary copy
+        #: answered `(searched 1 files; 2 skipped: 2 not readable as UTF-8 text)`.
         oversize = 0
         undecodable = 0
+        unreadable = 0
         stop = False
         #: Set when the loop stopped at the result budget rather than at the end of the
         #: tree. The count is then a **floor**, and the summary has to say so: a number
@@ -166,14 +172,17 @@ class GrepTool(ToolExecutor):
                     oversize += 1
                     continue
             except OSError:
-                undecodable += 1
+                unreadable += 1
                 continue
 
             # Read and search
             try:
                 text = filepath.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
+            except UnicodeDecodeError:
                 undecodable += 1
+                continue
+            except OSError:
+                unreadable += 1
                 continue
 
             files_read += 1
@@ -218,13 +227,19 @@ class GrepTool(ToolExecutor):
         #: Empty when nothing was skipped, so the sentence stays a measurement rather
         #: than boilerplate (pinned in both directions in `tests/test_grep_tool.py`).
         skipped = ""
-        if oversize or undecodable:
+        if oversize or undecodable or unreadable:
             parts = []
             if oversize:
                 parts.append(f"{oversize} over {MAX_FILE_SIZE} bytes")
             if undecodable:
                 parts.append(f"{undecodable} not readable as UTF-8 text")
-            skipped = f"; {oversize + undecodable} skipped: " + ", ".join(parts)
+            if unreadable:
+                # Not "not readable as UTF-8": the file could not be opened at all, which
+                # says nothing about its encoding and takes a different remedy (the path
+                # or its permissions). Kept apart from the clause above so neither number
+                # asserts a cause the other one measured.
+                parts.append(f"{unreadable} could not be read")
+            skipped = f"; {oversize + undecodable + unreadable} skipped: " + ", ".join(parts)
 
         if not results:
             return ToolResult(

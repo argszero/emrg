@@ -460,3 +460,134 @@ class TestTheCountNamesTheFilesItReallySearched:
 
         assert "Found 1 matches" in content
         assert "(searched 2 files; 1 skipped: 1 over 524288 bytes)" in content
+
+
+class TestASkipNamesItsOwnReason:
+    """A skip's reason is a reading, and one word held two of them (measured 2026-10-07).
+
+    `undecodable` counted both "the bytes are not UTF-8" and "the file could not be opened
+    at all" — a `stat()` failure and a `read_text()` `OSError` were routed to the same
+    counter as a `UnicodeDecodeError`, and the clause named only the first:
+
+        $ ls -l  binary.bin  locked.txt
+        -rw-r--r--  17 binary.bin        # not UTF-8
+        ----------  16 locked.txt        # valid UTF-8, mode 000
+
+        Found 1 matches for 'NEEDLE' in <root> (searched 1 files; 2 skipped: 2 not
+        readable as UTF-8 text)                                    # on master 65df80ac
+
+    `locked.txt` holds `NEEDLE here too` — perfectly good UTF-8. The sentence was false
+    about it, and the remedy it implies (a byte-reading search) is not the one that works
+    (the path or its permissions). The two are named apart now, and the pair below is the
+    test: the binary file keeps the encoding clause, the locked one gets its own.
+    """
+
+    HITS = "NEEDLE"
+
+    def _tree(self, root: Path) -> None:
+        (root / "good.txt").write_text(f"{self.HITS} in a readable file\n", encoding="utf-8")
+
+    def _search(self, path: Path):
+        return _run(GrepTool().execute({
+            "pattern": self.HITS, "path": str(path), "intent": "skip reason probe",
+        }))
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="mode 000 does not stop a read on Windows, so the file is searched there",
+    )
+    def test_an_unopenable_file_is_not_called_non_utf8(self, tmp_path):
+        """The measured case, driven through the real file system."""
+        self._tree(tmp_path)
+        locked = tmp_path / "locked.txt"
+        locked.write_text(f"{self.HITS} is right here\n", encoding="utf-8")
+        (tmp_path / "binary.bin").write_bytes(b"\xff\xfe" + self.HITS.encode() + b"\x00")
+        locked.chmod(0o000)
+        try:
+            content = self._search(tmp_path).content
+
+            assert "2 skipped" in content, content
+            assert "1 not readable as UTF-8 text" in content, (
+                "the binary file is the one this clause belongs to: " + content
+            )
+            assert "1 could not be read" in content, (
+                "a mode-000 file is valid UTF-8 that could not be opened - neither the "
+                "encoding clause nor silence is the truth about it: " + content
+            )
+            assert "2 not readable as UTF-8 text" not in content, (
+                "the locked file is being reported as non-UTF-8, which is the defect: "
+                + content
+            )
+        finally:
+            locked.chmod(0o600)  # so tmp_path can be cleaned up on every platform
+
+    def test_a_read_that_fails_for_its_own_reason_is_classified_the_same(self, tmp_path, monkeypatch):
+        """The same reading on a platform where mode bits mean nothing, so the leg is not skipped.
+
+        Windows has no `chmod 000`, so the test above does not run there — but the branch it
+        covers does exist on Windows (a file removed between the listing and the read, a
+        path that cannot be opened). Driving `read_text` to raise is what keeps the
+        classification measured on every platform rather than only where chmod bites.
+        """
+        self._tree(tmp_path)
+        (tmp_path / "unopenable.txt").write_text(f"{self.HITS}\n", encoding="utf-8")
+
+        real_read_text = Path.read_text
+
+        def read_text(self: Path, *args, **kwargs):
+            if self.name == "unopenable.txt":
+                raise PermissionError(13, "Permission denied")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+
+        content = self._search(tmp_path).content
+
+        assert "1 skipped: 1 could not be read" in content, content
+        assert "not readable as UTF-8 text" not in content, (
+            "an OSError is not a statement about the file's encoding: " + content
+        )
+        assert "(searched 1 files" in content, (
+            "a file that could not be read was not searched, so it is not in this count: "
+            + content
+        )
+
+    def test_a_file_whose_size_cannot_be_measured_is_named_the_same_way(self, tmp_path, monkeypatch):
+        """The `stat()` guard's skip is not an encoding claim either — and it has its own test.
+
+        A mutation arm is what put this leg here: routing the `stat()` failure back into
+        `undecodable` survived the other two tests, because a `chmod 000` file still
+        `stat`s — the two guards are different code paths and only one of them was covered.
+        The path is real: `_collect_files` calls `is_file()` and the loop calls `stat()`
+        after it, so the two disagree exactly when a file is removed between them. Driven
+        here rather than raced, and driven on every platform, because the branch exists
+        wherever the tool runs.
+        """
+        self._tree(tmp_path)
+        (tmp_path / "vanishing.txt").write_text(f"{self.HITS}\n", encoding="utf-8")
+
+        real_stat = Path.stat
+        real_is_file = Path.is_file
+
+        def stat(self, *args, **kwargs):
+            if self.name == "vanishing.txt":
+                raise FileNotFoundError(2, "No such file or directory")
+            return real_stat(self, *args, **kwargs)
+
+        def is_file(self):
+            # Collected first, gone by the time the loop measures it: the shape the two
+            # calls disagree on, without the race that produces it in the wild.
+            if self.name == "vanishing.txt":
+                return True
+            return real_is_file(self)
+
+        monkeypatch.setattr(Path, "stat", stat)
+        monkeypatch.setattr(Path, "is_file", is_file)
+
+        content = self._search(tmp_path).content
+
+        assert "1 skipped: 1 could not be read" in content, content
+        assert "not readable as UTF-8 text" not in content, (
+            "a size that could not be measured says nothing about the file's encoding: "
+            + content
+        )
