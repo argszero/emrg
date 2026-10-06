@@ -70,9 +70,14 @@ deliberately separate implementations because each suite stubs its **own**
 `_gh_json`, so a shared lookup would put a live `gh` request behind the other
 suite's tests.
 
-The run is also required to have *passed* - a failing or cancelled run is not a
-stale verdict, it is a verdict the committer has to deal with on its own terms,
-and this tool says so rather than calling it fresh.
+The run is also required to have *passed* - a failing run is not a stale verdict, it is
+a verdict the committer has to deal with on its own terms, and this tool says so rather
+than calling it fresh. **"Failing" means a job of the run concluded `failure`**, which is
+not the same as the run's own conclusion: that one is an aggregate, and GitHub counts a
+*cancelled* job as a failed run. A run whose non-success jobs are all cancellations
+judged nothing, so it is reported as `_KIND_NO_VERDICT` with the remedy a missing verdict
+takes (a re-trigger) rather than as a red verdict whose remedy is to read a cause that
+does not exist - measured 2026-10-06, `cyc20261006-065715`.
 
 Which state is reported when more than one holds
 ------------------------------------------------
@@ -244,14 +249,15 @@ _UNFINISHED = frozenset({"", "pending", "queued", "in_progress", "requested", "w
 # here reads as "the verdict workflow did not run", not as "the branch has no CI".
 _VERDICT_WORKFLOW = "Test"
 
-# The four ways a verdict can fail to be current. They were prose in `reason`
+# The five ways a verdict can fail to be current. They were prose in `reason`
 # before, which is enough to *report* the state and not enough to choose a
 # remedy: the state decides which action the tool may recommend, and only one of
-# the four is fixed by a refresh (and that one charges the whole vote count).
+# the five is fixed by a refresh (and that one charges the whole vote count).
 _KIND_ANCESTRY = "ancestry"  # the #1137 case: green, but about an older master
 _KIND_NO_RUN = "no_run"  # master is an ancestor but nothing ever judged the head
 _KIND_RUNNING = "running"  # a run exists and has not concluded
-_KIND_FAILING = "failing"  # a run concluded non-success
+_KIND_FAILING = "failing"  # a job concluded `failure`: the tree was judged and rejected
+_KIND_NO_VERDICT = "no_verdict"  # the run stopped without a job judging the tree
 
 #: How this file's python tools are invoked (`Agent.md`, "Test Commands"). The
 #: runner is not decoration: without it a `scripts/*.py` command runs under
@@ -313,7 +319,7 @@ class Verdict:
     run_conclusion: str | None
     stale: bool
     reason: str
-    # Which of the four ways (one of the `_KIND_*` names); "" when fresh.
+    # Which of the five ways (one of the `_KIND_*` names); "" when fresh.
     stale_kind: str = ""
     #: The run's own id, so a remedy can hand over a command that is runnable as
     #: printed. Empty when there is no run. Why it is carried rather than looked up
@@ -403,6 +409,42 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
     if not matching:
         return None
     return max(matching, key=lambda r: str(r.get("createdAt") or ""))
+
+
+def _run_jobs(run_id: str) -> list[dict] | None:
+    """One run's jobs, or `None` when that list could not be read.
+
+    `None` is "not measured", never "no jobs": this reading exists to tell a run that
+    **judged the tree and rejected it** from one that stopped without judging at all, and an
+    unread list answers neither question. The caller keeps the coarser verdict and says so.
+
+    Why the run's own `conclusion` is not enough (measured 2026-10-06,
+    `cyc20261006-065715`): the workflow run's conclusion is an **aggregate**, and GitHub
+    counts a *cancelled* job as a failed run. Head `50dea4e8`'s run `37372464666` reads
+    `conclusion=failure`, and its jobs are `test: cancelled` (0 steps, 15m of waiting for a
+    runner) and `test-windows: success`. This tool called that "a failing verdict, not a
+    stale one; re-running will not make it fresh", and the reading its own remedy hands over
+    (`scripts/read-run-failure.py 37372464666`) answered **"no failed job … nothing to
+    explain"** - a verdict-shaped sentence about a run that reached no verdict, with a
+    remedy that could not produce a cause.
+    """
+    try:
+        payload = _gh_json(
+            [
+                "api",
+                f"repos/{REPO}/actions/runs/{run_id}/jobs?per_page=100",
+                "--jq",
+                "{jobs: [.jobs[] | {name, conclusion}]}",
+            ]
+        )
+    except RuntimeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list):
+        return None
+    return [j for j in jobs if isinstance(j, dict)]
 
 
 def _tree_note(stale_tree: bool, status: str, behind_by: int, merge_base: str) -> str:
@@ -536,13 +578,52 @@ def check_pr(number: int) -> Verdict:
             ),
         )
     if conclusion != "success":
+        # A non-success run is not automatically a *judgment*. The run's conclusion is an
+        # aggregate over its jobs, and a job that was cancelled never judged anything - so
+        # the jobs are asked, and only a job that concluded `failure` makes this the failing
+        # kind. Everything else (a cancelled job, a job that never got a runner) is a run
+        # that stopped without a verdict, whose remedy is a re-trigger rather than "fix the
+        # failure" - the measured cost of not asking is in `_run_jobs`.
+        jobs = _run_jobs(str(run.get("databaseId") or ""))
+        if jobs is not None:
+            judged = [str(j.get("name") or "?") for j in jobs if j.get("conclusion") == "failure"]
+            stopped = [
+                f"{j.get('name') or '?'}: {j.get('conclusion')}"
+                for j in jobs
+                if j.get("conclusion") and j.get("conclusion") != "success"
+            ]
+            if not judged:
+                return Verdict(
+                    **common,
+                    stale=True,
+                    stale_kind=_KIND_NO_VERDICT,
+                    reason=(
+                        f"the {_VERDICT_WORKFLOW} run for head {head_sha[:8]} concluded "
+                        f"{conclusion!r} without judging the tree - no job of it concluded "
+                        f"`failure` ({', '.join(stopped) if stopped else 'no job concluded'})"
+                        f"{_tree_note(stale_tree, status, behind_by, merge_base)} - so there is "
+                        "no cause to read, and re-running is the remedy a missing verdict takes"
+                    ),
+                )
+            return Verdict(
+                **common,
+                stale=True,
+                stale_kind=_KIND_FAILING,
+                reason=(
+                    f"CI judged head {head_sha[:8]} and rejected it: "
+                    f"{', '.join(judged)} concluded `failure` (run {conclusion!r}) - a failing "
+                    "verdict, not a stale one; re-running will not make it fresh"
+                    f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
+                ),
+            )
         return Verdict(
             **common,
             stale=True,
             stale_kind=_KIND_FAILING,
             reason=(
                 f"CI concluded {conclusion!r} on head {head_sha[:8]} - a failing verdict, "
-                "not a stale one; re-running will not make it fresh"
+                "not a stale one; re-running will not make it fresh. The run's jobs could not "
+                "be read, so which job failed - and whether any did - is not measured here"
                 f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
             ),
         )
@@ -778,6 +859,17 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
             f"#{pr}: park it, the run has not concluded - a vote here is not votable by "
             "anyone and neither a refresh nor a re-trigger answers it, so do not block on "
             "this PR: read it again next cycle (host rant 2026-09-24T14:46:10)"
+        )
+    if kind == _KIND_NO_VERDICT:
+        return (
+            f"#{pr}: the run stopped without judging the tree, so there is no cause to fix - "
+            "re-trigger CI on the same head (`gh workflow run test.yml --ref <branch>`, or "
+            "`bash scripts/re-trigger-ci.sh <branch>`), which keeps the votes, and park the PR "
+            "until the new run concludes. Re-running is what this kind *does* take: measured "
+            "2026-10-06, a cancelled job is a job that never got a runner (0 steps, 15 minutes "
+            "of waiting), and the alternative remedy - read the failure - answers `no failed "
+            "job in run ... nothing to explain`, because there is none. A refresh would fire a "
+            "run too and cost every vote the branch has"
         )
     return (
         f"#{pr}: fix the failure - a refresh costs every vote the branch has, and does not "

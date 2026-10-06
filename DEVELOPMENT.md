@@ -328,6 +328,21 @@ above, which bury the cause). Exit `0` = a cause was printed; `1` = the run has 
 the question could not be answered (bad id, `gh` failed, no jobs listed, or a failed job's log came
 back empty) — **never a pass**.
 
+**"Failing" means a *job* concluded `failure`, not the run.** A workflow run's own `conclusion` is an
+aggregate over its jobs, and GitHub counts a **cancelled** job as a failed run — so a run that never
+got a runner (a job that sits 15 minutes with 0 steps and is cancelled) reports `failure` while no job
+of it ever judged the tree. `check-merge-freshness.py` therefore asks the run's jobs when a run is
+non-success, and reports the state it finds: a job concluding `failure` is the red verdict (and the
+cause-reading documented above can name its cause), while a run whose non-success jobs are all
+cancellations is
+reported as a **missing verdict** whose remedy is a re-trigger — the same action a head with no run
+gets. Measured 2026-10-06: without that split, the row said "a failing verdict, not a stale one;
+re-running will not make it fresh" about a cancelled run, and the reading its own remedy handed over
+answered "no failed job … nothing to explain" (exit 1) — a verdict-shaped sentence about a run that
+reached no verdict, with a remedy that could not produce a cause. When the jobs list itself cannot be
+read, the coarse reading stands and the report says that half is unmeasured, never which of the two it
+would have been.
+
 **It works without a GitHub token too**, which matters because `gh` refuses *every* call when it is
 unauthenticated ("please run: gh auth login") while the same paths answer anonymously: the tool falls
 back to `api.github.com` with no credentials, prints which channel answered, and reads the runner's
