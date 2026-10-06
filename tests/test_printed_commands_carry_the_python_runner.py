@@ -73,10 +73,14 @@ number, the four spellings this family writes. The argument is the discriminator
 what keeps the clause off prose: "update `VERSION_SOURCES` in `scripts/bump-version.py`"
 ends at the file name and is not a thing to run, while `scripts/check-vote-count.py <PR>` is.
 
-What the clause reads on this tree, measured 2026-10-06: **36** command-shaped mentions, in
-six tools - `review-queue.py` 16, `cast-vote.py` 8, `check-merge-freshness.py` 8,
-`bump-version.py` 2, `check-merge-sequence.py` 1, `check-release-published.py` 1. Two of
-those are new in one afternoon and both came from a *remedy*: a printed remedy is a printed
+What the clause reads on this tree, measured 2026-10-06: **37** command-shaped mentions, in
+seven tools - `review-queue.py` 16, `cast-vote.py` 8, `check-merge-freshness.py` 8,
+`bump-version.py` 2, `check-merge-sequence.py` 1, `check-release-published.py` 1,
+`run-mutation-arm.py` 1. The seventh is the newest and the reason this sentence moved: that
+tool's refusal for a gate it cannot load ends with a runnable remedy
+(`uv run --no-sync python3 scripts/check-merge-plan-suite.py --help`), which is a printed
+command like any other and carries the runner like any other. Two of the others are new in one
+afternoon and both came from a *remedy*: a printed remedy is a printed
 command, so adding one to a tool's repair path moves this number whether or not the author
 was thinking about citations (`review-queue.py`'s no-verdict row, and the reason
 `check-merge-freshness.py` now gives for it). The lesson is not to stop printing remedies -
