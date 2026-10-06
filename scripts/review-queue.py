@@ -952,12 +952,30 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.blocked:
+        # The row used to end "the branch has to remove it" and to hand the reader
+        # `gh pr view --json mergeable,mergeStateStatus` - a command that reprints the
+        # fact the row has just stated. Both were wrong in the same direction: the
+        # non-clean states do *not* share one cure (a `DRAFT` clears when the PR is
+        # marked ready, a `BLOCKED` with a review, a `BEHIND` by the refresh that moves
+        # the head, and an `UNSTABLE` held by a superseded run's check-run not at all),
+        # and the reading that answers "why is this not clean" is the counter's own
+        # report, which now carries the head's check-runs. Measured 2026-10-06
+        # (`cyc20261006-091811`) on #1865, whose row read `unblock` while its newest
+        # check-runs were green and its head already contained master: there was
+        # nothing for the prescribed remedy to publish.
+        conflict = reading.mergeable == "CONFLICTING" or reading.merge_state == "DIRTY"
+        command = (
+            f"{RUNNER} scripts/classify-conflict.py --all"
+            if conflict
+            else f"{RUNNER} scripts/check-vote-count.py {pr}"
+        )
         return Action(
             kind="unblock",
             why=reading.block_reason
             + " - a state of the branch, not of the review: no vote cast here changes "
-              "it, and the branch has to remove it",
-            command=f"gh pr view {pr} -R {repo} --json mergeable,mergeStateStatus",
+              "it, and which move clears it is the state's own (the reason above names "
+              "it; a refresh is only that move for a state that is about the tree)",
+            command=command,
         )
     if window is not None and window.applied:
         pushed = instant(reading.head_pushed_at)

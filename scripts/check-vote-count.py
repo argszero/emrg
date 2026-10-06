@@ -126,9 +126,21 @@ mergeable,mergeStateStatus`, and it can only ever **downgrade** a verdict:
   means "come back after more review", blocked means "review is done and this still
   cannot land" - the state that sat invisible behind six `READY` lines.
 * `MERGEABLE`, but any `mergeStateStatus` other than `CLEAN` - the gate is the
-  *pair*, so a `MERGEABLE` PR that is `UNSTABLE` (checks failing or unfinished),
-  `BEHIND`, `BLOCKED` or `DRAFT` is also blocked. Reading only `mergeable` is what
-  let a **draft** pull request - which no vote can merge - print `READY`.
+  *pair*, so a `MERGEABLE` PR that is `UNSTABLE`, `BEHIND`, `BLOCKED` or `DRAFT` is
+  also blocked. Reading only `mergeable` is what let a **draft** pull request -
+  which no vote can merge - print `READY`. `UNSTABLE` is the one of the four that is
+  not decided by the state alone: it says the head's check rollup is not all green
+  without saying which check-run is not, and GitHub's rollup keeps a check-run from a
+  run that a newer run on the same head has already superseded (measured 2026-10-06
+  on #1865, `50dea4e8`: the rollup carries the 20:52 run's `cancelled` `test` while
+  the 23:47 run's `test` on the same commit concluded `success`, and no newest
+  check-run of any name is non-green). So an `UNSTABLE` head's check-runs are read,
+  and the state blocks exactly when they are not all green - a check still running, a
+  check that concluded red, a check that never concluded at all (measured on #1861,
+  head `7409741c`: the newest `test-windows` check-run is `cancelled` with 0 steps,
+  superseding the older one whose runner was lost), or a list that could not be read.
+  The gloss this bullet used to carry ("checks failing or unfinished") was the
+  sentence that sent a reader to fix a tree nothing was wrong with.
 * `UNKNOWN` - GitHub has not computed mergeability yet (usual right after a push).
   Not a yes and not a no, so this fails loud (exit 2) rather than printing either.
   A `mergeStateStatus` this version does not recognise fails loud for the same
@@ -145,8 +157,10 @@ mergeable,mergeStateStatus`, and it can only ever **downgrade** a verdict:
 
 One sibling question stays with its own tool, named here so this one does not
 quietly pretend to answer it: `check-merge-freshness.py` asks whether the CI verdict
-is still about the tree that would merge (a question about *which* tree ran CI, not
-about whether checks pass - `UNSTABLE` answers that one, and is read above). Likewise
+is still about the tree that would merge (a question about *which* tree ran CI). This
+tool answers the narrower "did this head's checks pass", and the two are read from the
+same object - the runs and check-runs of one commit - which is why an `UNSTABLE` head
+consults its check-runs rather than trusting the state's summary of them. Likewise
 `check-merge-tree-health.py` (PR #1155) asks whether the merged tree passes the
 repository's own guard, `scripts/check-doc-count.py` - that guard alone, the same
 bound every gate in this family states about itself.
@@ -206,7 +220,8 @@ Exit codes
        (`--min-votes` defaults to `DEFAULT_MIN_VOTES`; `--help` prints it, so this
        spec states the name rather than a second copy of the number)
     1  at least one PR is SHORT (too few votes) or BLOCKED (cannot be merged:
-       conflicting, a non-clean merge state, or no CI run for the head)
+       conflicting, a non-clean merge state, an `UNSTABLE` head whose check-runs are
+       not all green, or no CI run for the head)
     2  the check could not be made (gh failed, unparseable response, mergeability
        not computed yet, merge state not recognised) - fail loud; never report a
        count for a question that was not answered
@@ -317,21 +332,52 @@ _RUN_LOOKUP_DELAY_SECONDS = 2.0
 # actually trying to buy, at the cost of the false READY above.
 _CLEAN = "CLEAN"
 
+# `UNSTABLE` is read separately from the states below, because it is the one non-clean
+# state whose *cause* is a second reading rather than the state itself: GitHub reports
+# it whenever the head's check rollup is not all green, and the rollup can be held down
+# by a check-run from a run that a newer run on the same head has already superseded.
+# Measured 2026-10-06 on #1865 (`50dea4e8`): the state reads `UNSTABLE` while every
+# newest check-run on that head concluded `success` - the rollup still carries the
+# `cancelled` `test` check-run of the 20:52 run after the 23:47 run on the same commit
+# passed both jobs. The gloss this map used to carry ("checks are failing or have not
+# finished") was therefore false about that head, and it is the sentence that sends a
+# reader to fix a tree nothing is wrong with. So the state is kept, the gloss is not:
+# the head's check-runs decide it (`Verdict.checks_green`), which is the object the
+# question - "did this head's checks pass?" - is actually about.
+_UNSTABLE = "UNSTABLE"
+
 # The states in which the merge cannot proceed right now, each with the reason the
 # reader needs. GitHub's `MergeStateStatus` vocabulary:
 #
 #   DIRTY       the merge conflicts
-#   UNSTABLE    mergeable, but commit status is not passing  <- the CI conjunct
 #   BEHIND      the head is out of date with the base branch
 #   BLOCKED     GitHub blocks the merge (protection rules / required reviews)
 #   DRAFT       the pull request is a draft
 _NON_CLEAN_STATES = {
     "DIRTY": "the merge conflicts",
-    "UNSTABLE": "checks are failing or have not finished",
     "BEHIND": "the head is behind the base branch",
     "BLOCKED": "GitHub reports the merge blocked (protection rules or required reviews)",
     "DRAFT": "the pull request is a draft",
 }
+
+# Every `MergeStateStatus` this version knows how to read, so the fail-loud branch
+# below still refuses a state GitHub adds later. `UNSTABLE` is here and not in the map
+# above: dropping it from the vocabulary would make the one state whose reading changed
+# the one state that reads as unknown.
+_KNOWN_STATES = frozenset({_CLEAN, _UNSTABLE, *_NON_CLEAN_STATES})
+
+# What a check-run's conclusion has to be for the check to have held the head back.
+# `neutral` and `skipped` count as green for the same reason `gh pr checks` renders
+# them as passes: neither is a statement that the check failed. A check-run that has
+# not completed has no conclusion at all and is never green - the "checks still
+# running" case this clause was added for (cyc20260912-190602) stays blocked.
+_GREEN_CHECK_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+
+# How many check-runs GitHub can list for one commit in a single page. Every check-run
+# of a head is needed to tell a superseded `cancelled` from a live one, so a head that
+# overflows this would be read from a truncated list - named rather than silent, and
+# reported by `Verdict.checks_truncated`.
+_CHECK_RUNS_PAGE = 100
 
 # `HAS_HOOKS` ("merge commits are conditioned on hooks") is deliberately NOT in the
 # map: whether it permits a merge is not something this tool can establish, and
@@ -1034,6 +1080,49 @@ def _cycle_label(vote: Vote) -> str:
     return "(no cycle id)"
 
 
+@dataclass(frozen=True)
+class HeadCheck:
+    """One check-run GitHub lists for the head commit.
+
+    Every field is GitHub's own word for the check: `name` is what a reader sees on
+    the PR page, `conclusion` is empty until the check completes, `status` is the
+    lifecycle word (`completed`, `in_progress`, `queued`), and `run_id` is the
+    Actions run the check belongs to, parsed out of the check-run's details URL so a
+    reason can hand the reader a run to read rather than a name to search for.
+
+    Frozen: `superseded_checks` asks which of these are *not* the newest of their
+    name, and that question is a set membership rather than a field comparison.
+    """
+
+    name: str
+    conclusion: str
+    status: str
+    run_id: str
+    started_at: str
+    #: The check-run's own id. The tie-break for "newest", because two check-runs of
+    #: one name can share a start second - and GitHub orders by id, monotonically.
+    id: int = 0
+
+    @property
+    def green(self) -> bool:
+        """This check did not hold the head back.
+
+        A check that has not completed is never green: it has no conclusion, and
+        "still running" is precisely one of the two cases `UNSTABLE` used to cover.
+        """
+        return self.status == "completed" and self.conclusion in _GREEN_CHECK_CONCLUSIONS
+
+    @property
+    def word(self) -> str:
+        """What this check says about itself, in one word, for a reason sentence."""
+        return (self.conclusion or self.status or "unknown").lower()
+
+    @property
+    def order_key(self) -> tuple[str, int]:
+        """Newest-first ordering: start time, then the check-run id as tie-break."""
+        return (self.started_at, self.id)
+
+
 @dataclass
 class Verdict:
     pr: int
@@ -1055,6 +1144,19 @@ class Verdict:
     counted: list[bool] = field(default_factory=list)
     valid_count: int = 0
     needed: int = DEFAULT_MIN_VOTES
+    #: Every check-run GitHub lists for this head, read **only when the merge state is
+    #: `UNSTABLE`** - the one state whose cause is a second reading rather than the
+    #: state itself (see `_UNSTABLE`). Empty on every other head, where the state
+    #: already says what there is to say and the cost of a further read would be paid
+    #: for nothing. `checks_read` is what tells "the reading was taken and found
+    #: nothing" from "the reading was not taken", because `checks_green` is False in
+    #: both and must never be read as a pass.
+    checks: tuple[HeadCheck, ...] = ()
+    checks_read: bool = False
+    #: Whether GitHub's list was truncated at `_CHECK_RUNS_PAGE`. Reported rather than
+    #: hidden: a cut list can lose the newest check-run of a name, which is exactly the
+    #: one that decides the reading.
+    checks_truncated: bool = False
 
     @property
     def terminal(self) -> bool:
@@ -1100,6 +1202,24 @@ class Verdict:
         (CI not green), `/BEHIND`, `/BLOCKED` and `/DRAFT` - a draft PR, which nobody
         can merge at all. The gate's spelling is the pair, so the pair is tested.
 
+        **`UNSTABLE` is the exception, and it is read from the head's checks.** The
+        state says the rollup is not all green; it does not say *which* check-run, and
+        the rollup keeps a check-run from a run that a newer run on the same head has
+        already superseded. Measured 2026-10-06 (`cyc20261006-091811`) on #1865: head
+        `50dea4e8` reads `MERGEABLE`/`UNSTABLE` while the newest `test` and
+        `test-windows` check-runs on that very commit both concluded `success` - what
+        holds the state down is the `cancelled` `test` check-run of the 20:52 run, left
+        behind after the 23:47 run on the same commit passed. A re-run does not clear
+        it and master is already an ancestor of that head (`check-merge-freshness.py`:
+        `ahead, behind_by=0`), so the remedy the old gloss implied - "fix the failure",
+        or "refresh the branch" - is either about a failure that is not there or a
+        no-op that publishes no new head. The honest reading of that head is that its
+        checks passed; so when the check-runs are read and every newest one is green,
+        `UNSTABLE` is reported and not treated as a block, and `checks_note` says what
+        holds the state. Every other shape of `UNSTABLE` still blocks: a check still
+        running or one that concluded red has a non-green newest check-run, and an
+        unread list is not a pass (`checks_green` is False without a reading).
+
         A head with **no CI run** is blocking too, and it is the case the merge state
         cannot express: `MergeStateStatus` counts *required* checks, and with no
         branch protection a head that ran nothing is not `PENDING` or `UNSTABLE` but
@@ -1114,9 +1234,90 @@ class Verdict:
             else (
                 self.mergeable == _CONFLICTING
                 or self.merge_state in _NON_CLEAN_STATES
+                or (self.merge_state == _UNSTABLE and not self.checks_green)
                 or not self.push_time_exact
             )
         )
+
+    @property
+    def newest_checks(self) -> tuple[HeadCheck, ...]:
+        """The newest check-run of each name on the head, in first-seen order.
+
+        Per *name*, because that is the question a check answers: two `test`
+        check-runs on one commit are two runs of one check, and the head's verdict is
+        the newer one's. GitHub keeps both in the rollup, which is the whole defect
+        this reading exists for.
+        """
+        newest: dict[str, HeadCheck] = {}
+        for check in self.checks:
+            current = newest.get(check.name)
+            if current is None or check.order_key > current.order_key:
+                newest[check.name] = check
+        return tuple(newest.values())
+
+    @property
+    def checks_green(self) -> bool:
+        """Whether this head's checks have all passed.
+
+        False without a reading, which is the fail-safe direction: an unread list is
+        not evidence that anything passed, and every caller treats False as the
+        strict answer.
+        """
+        newest = self.newest_checks
+        return bool(newest) and all(check.green for check in newest)
+
+    @property
+    def checks_reason(self) -> str:
+        """Why the checks are not green, naming each check that is not (or "")."""
+        bad = [c for c in self.newest_checks if not c.green]
+        if not bad:
+            return ""
+        named = ", ".join(f"{c.name}: {c.word}" for c in bad)
+        return f"the head's checks are not all green ({named})"
+
+    @property
+    def superseded_checks(self) -> tuple[HeadCheck, ...]:
+        """Green-readers' leftovers: check-runs a newer run of the same name replaced.
+
+        Non-green *and* not the newest of its name. These are the ones the rollup can
+        hold against a head that has since passed, so they are what `checks_note`
+        names - and they are never what `blocked` is decided on, because the newer
+        check-run of that name is.
+        """
+        newest = set(self.newest_checks)
+        return tuple(c for c in self.checks if c not in newest and not c.green)
+
+    @property
+    def checks_note(self) -> str:
+        """What a check-run reading adds to the merge state, or "" when it adds nothing.
+
+        Two facts the state cannot show, both of them reasons the row a reader takes
+        first was misleading: a head whose checks are green while the state is
+        `UNSTABLE` (so what holds the state is a superseded run, not this tree), and a
+        truncated list (so the reading may be missing the check that decides it). The
+        non-green case needs no note here - a head in that shape is `blocked`, and
+        `block_reason` is what the report prints for a blocked PR.
+        """
+        parts: list[str] = []
+        if self.checks_truncated:
+            parts.append(
+                f"GitHub listed more than {_CHECK_RUNS_PAGE} check-runs for this head, "
+                "so the newest of a name may not be in the list that was read"
+            )
+        if self.merge_state == _UNSTABLE and self.checks_green:
+            stale = self.superseded_checks
+            if stale:
+                named = ", ".join(
+                    f"{c.name}: {c.word} (run {c.run_id or 'unknown'})" for c in stale
+                )
+                parts.append(
+                    "every newest check-run on this head is green, and what holds the "
+                    f"state down is a superseded run's check-run - {named}; the rollup "
+                    "keeps it until the head changes, and re-running this head does "
+                    "not clear it, so the state is not a reading about the tree "
+                    "(`scripts/check-merge-freshness.py` is the reading that is)"
+                )
+        return "; ".join(parts)
 
     @property
     def block_reason(self) -> str:
@@ -1126,6 +1327,19 @@ class Verdict:
         reason = _NON_CLEAN_STATES.get(self.merge_state)
         if reason:
             return f"merge state is {self.merge_state} - {reason}"
+        if self.merge_state == _UNSTABLE and not self.checks_green:
+            # The head's checks, not a gloss about them. `checks_reason` is empty only
+            # when the list was not read at all, which is its own sentence - the one
+            # thing this must never do is answer "checks are failing" for a head whose
+            # checks were never looked at.
+            return (
+                f"merge state is {_UNSTABLE} - "
+                + (
+                    self.checks_reason
+                    or "the head's check-runs could not be read, so which check holds "
+                       "the state is not measured"
+                )
+            )
         if not self.push_time_exact:
             return (
                 "no CI run exists for the head commit, so the CI conjunct is not "
@@ -1217,6 +1431,65 @@ def _earliest_run_created_at(head: str) -> str:
         if attempt + 1 < _RUN_LOOKUP_ATTEMPTS:
             time.sleep(_RUN_LOOKUP_DELAY_SECONDS)
     return ""
+
+
+def _head_check_runs(head: str) -> tuple[tuple[HeadCheck, ...], bool]:
+    """Every check-run GitHub lists for this commit, and whether list was truncated.
+
+    Asked of the commit, not of the PR: the check-runs endpoint answers per commit,
+    which is the object the question is about ("did this head's checks pass?"), and
+    asking the PR for its rollup is what made the state unreadable - GitHub's
+    `statusCheckRollup` keeps **one** check-run per name and, measured 2026-10-06 on
+    `50dea4e8`, kept the *older*: it carried the 20:52 run's `cancelled` `test` while
+    the 23:47 run's `success` for the same name and commit was not in it at all. The
+    raw endpoint returns all four, which is the whole difference.
+
+    `run_id` is parsed out of the check-run's `details_url`
+    (`…/actions/runs/<id>/job/<id>`), so a reason can name the run it is talking about
+    and a reader can hand that id to `read-run-failure.py` without a search. A
+    check-run from another app has no such URL and carries an empty id, which is
+    reported as `unknown` rather than guessed.
+
+    **Not caught.** A read that fails raises, and the caller reports "could not
+    measure" rather than a verdict: the failure this reading guards against is a head
+    that looks blocked for a cause that is not there, and swallowing the error would
+    reinstate the same misreading one level down. Being asked only for `UNSTABLE`
+    heads, this costs a `gh` call exactly where the state alone cannot answer.
+    """
+    payload = _gh_json(
+        [
+            "api",
+            f"repos/{REPO}/commits/{head}/check-runs?per_page={_CHECK_RUNS_PAGE}",
+            "--jq",
+            "{total: .total_count, checks: [.check_runs[] | "
+            "{name, conclusion, status, startedAt: .started_at, id, "
+            "url: (.details_url // \"\")}]}",
+        ]
+    )
+    assert isinstance(payload, dict)
+    raw = payload.get("checks")
+    assert isinstance(raw, list), payload
+    checks: list[HeadCheck] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url") or "")
+        run_id = ""
+        if "/actions/runs/" in url:
+            run_id = url.split("/actions/runs/", 1)[1].split("/", 1)[0]
+        checks.append(
+            HeadCheck(
+                name=str(entry.get("name") or ""),
+                conclusion=str(entry.get("conclusion") or ""),
+                status=str(entry.get("status") or ""),
+                run_id=run_id,
+                started_at=str(entry.get("startedAt") or ""),
+                id=int(entry.get("id") or 0),
+            )
+        )
+    total = payload.get("total")
+    truncated = isinstance(total, int) and total > len(checks)
+    return tuple(checks), truncated
 
 
 def _head_push_time(head: str) -> tuple[str, bool]:
@@ -1369,15 +1642,28 @@ def check_pr(
     # The second half of the gate's spelling. `MERGEABLE` alone is not `MERGEABLE`/
     # `CLEAN`: every other state either blocks the merge or says the CI conjunct is
     # unmet, and a state this version does not know is not evidence of cleanliness.
-    if mergeable == _MERGEABLE and merge_state not in {_CLEAN, *_NON_CLEAN_STATES}:
+    if mergeable == _MERGEABLE and merge_state not in _KNOWN_STATES:
         raise RuntimeError(
             f"#{number}: mergeStateStatus={merge_state!r} is not a state this check "
-            f"knows (known: CLEAN, {', '.join(sorted(_NON_CLEAN_STATES))}). It is not "
+            f"knows (known: {', '.join(sorted(_KNOWN_STATES))}). It is not "
             "read as permission - an unrecognised state may well block the merge, and "
             "reporting READY from it would be a verdict this tool has not verified"
         )
 
     push_time, exact = _head_push_time(head)
+
+    # The head's check-runs, asked **only** for `UNSTABLE`: it is the one state whose
+    # cause the state cannot express, and on every other head the extra `gh` call would
+    # buy nothing (a `CLEAN` head's checks passed by GitHub's own reading, a `DIRTY`
+    # one's cannot matter until the text merges). An `UNSTABLE` head whose checks are
+    # read and all green is not blocked - see `blocked` - so this is the read that
+    # decides the verdict rather than a note beside it.
+    checks: tuple[HeadCheck, ...] = ()
+    checks_read = False
+    checks_truncated = False
+    if merge_state == _UNSTABLE:
+        checks, checks_truncated = _head_check_runs(head)
+        checks_read = True
 
     # Every page, not the first 30: a truncated list drops the newest reviews,
     # which are exactly the votes that count (and the endpoint orders oldest
@@ -1525,6 +1811,9 @@ def check_pr(
         counted=counted,
         valid_count=run,
         needed=needed,
+        checks=checks,
+        checks_read=checks_read,
+        checks_truncated=checks_truncated,
     )
 
 
@@ -1591,6 +1880,19 @@ def main(argv: list[str] | None = None) -> int:
                         "merged_at": v.merged_at,
                         "terminal": v.terminal,
                         "ci_ran": v.push_time_exact,
+                        "checks_read": v.checks_read,
+                        "checks_green": v.checks_green,
+                        "checks_note": v.checks_note,
+                        "checks": [
+                            {
+                                "name": c.name,
+                                "conclusion": c.conclusion,
+                                "status": c.status,
+                                "run_id": c.run_id,
+                                "newest_of_name": c in set(v.newest_checks),
+                            }
+                            for c in v.checks
+                        ],
                         "blocked": v.blocked,
                         "verdict": v.mark,
                         "enough_votes": not v.short,
@@ -1647,6 +1949,14 @@ def main(argv: list[str] | None = None) -> int:
             # contradiction this was fixed for, and it is worth being unable to
             # produce: `mark` already refuses to say READY in that case.
             print(f"    merge state: {v.mergeable}/{v.merge_state}")
+            # Printed with the state rather than only in the blocked summary, because
+            # the case it exists for is a head that is *not* blocked: `UNSTABLE` with
+            # every newest check-run green. A reader seeing `UNSTABLE` and nothing else
+            # has to guess, and `gh pr checks` guesses the other way - it renders the
+            # superseded run's `cancelled` check-run as `fail`.
+            note = v.checks_note
+            if note:
+                print(f"    check-runs: {note}")
             for index, vote in enumerate(v.votes):
                 # Whether *this* vote is part of the count `run` -- not whether it
                 # could be: `valid` only says it is about this head. The two come
@@ -1691,8 +2001,18 @@ def main(argv: list[str] | None = None) -> int:
     short = [v for v in verdicts if v.short and not v.blocked]
 
     if blocked:
-        also_short = " (their votes are short too, but resolving the block " \
-            "replaces the head and voids them - review after the rebase, not before)"
+        # One sentence per state, because the states have different cures and the
+        # single sentence this replaces ("resolving the block replaces the head and
+        # voids them - review after the rebase, not before") was false for most of
+        # them: a `DRAFT` clears when the PR is marked ready and a `BLOCKED` clears
+        # with a review, neither of which publishes a commit; an `UNSTABLE` whose
+        # binding check-run belongs to a superseded run does not clear at all, and a
+        # `BEHIND` one clears by a refresh that *does* move the head. What the reader
+        # needs is which of those they are in, and `block_reason` already says.
+        also_short = (
+            " (their votes are short too - where clearing this state means publishing "
+            "a new head, that voids every vote standing here)"
+        )
         reasons = "; ".join(
             f"#{v.pr}: {v.block_reason}" for v in blocked
         )
