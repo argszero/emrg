@@ -32,7 +32,7 @@ re-implemented here:
 * `check-vote-count.py` owns "how many votes are still about this head?" — the
   count, the per-cycle rule, and the mergeability clause;
 * `check-merge-freshness.py` owns "is the green CI about the tree that would land?"
-  — the ancestry, and the five ways a verdict can fail to be current.
+  — the ancestry, and the six ways a verdict can fail to be current.
 
 So the number printed here is the counter's number and the staleness here is the
 freshness tool's *kind*, not a local re-derivation of either. That matters more than
@@ -930,6 +930,26 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                 f"{reading.ci_run_id or '<run-id from the link above>'}",
                 f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
             ],
+        )
+    if reading.stale_read and reading.stale_kind == "no_run_yet":
+        # The head is younger than a push-event run takes to appear, so the empty
+        # run lookup is not yet evidence of anything and the row takes `running`'s
+        # verb for the same reason that one does: the head is not votable until a
+        # run concludes, and the re-trigger `no_run` prescribes would fire a
+        # *second* run on a head whose first one is arriving (measured 2026-10-07:
+        # a re-trigger does not cancel it - `test.yml` declares no concurrency
+        # group - so the duplicate runs in parallel). Measured by the row that is
+        # not here: cycle `cyc20261007-022540` read "no checks reported" from
+        # `gh pr checks` seconds after pushing head `338a9a53`, while that head's
+        # run existed and was registering.
+        return Action(
+            kind="park",
+            why=reading.stale_reason
+            + " - parked for this cycle: the head is too young for the empty lookup "
+              "to mean the push was dropped, and a re-trigger here starts a second "
+              "run beside the one arriving. Read this PR again next cycle; a head "
+              "still run-less then is `no_run`, whose row does name the re-trigger",
+            command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.stale_read and reading.stale_kind == "no_run":
         return Action(

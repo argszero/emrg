@@ -567,6 +567,35 @@ def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
     assert "cast-vote.py" not in out
 
 
+def test_a_head_whose_run_is_still_arriving_is_parked_not_retriggered(
+    mod, monkeypatch, capsys
+):
+    """The empty lookup has a second shape, and this row is what tells them apart.
+
+    Measured 2026-10-07 (`cyc20261007-022540`): `gh pr checks` printed "no checks
+    reported" for a head pushed seconds earlier, whose run existed and was
+    registering. The `no_run` row reads that state as a dropped push and hands over
+    a re-trigger - which fires a **second** run beside the one arriving, since
+    `test.yml` declares no concurrency group. The freshness tool now separates the
+    two by the head's age, and this row is where the separation has to *land*: a
+    kind the queue has no row for falls through to the merge-state branch below it.
+    """
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh(stale=True, kind="no_run_yet",
+                      reason="no Test run for head aaaa yet, and the head was "
+                             "committed 4 s ago")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "park" in out
+    assert "next cycle" in out, "the deferral has to name when the row comes back"
+    assert "gh workflow run" not in out, (
+        "a re-trigger here starts a second run on a head whose first one is arriving"
+    )
+    assert "re-trigger-ci.sh" not in out
+    assert "cast-vote.py" not in out
+
+
 # --- branch states, and the one a committer resolves directly --------------
 
 

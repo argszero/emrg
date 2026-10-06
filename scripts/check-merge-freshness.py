@@ -70,6 +70,20 @@ deliberately separate implementations because each suite stubs its **own**
 `_gh_json`, so a shared lookup would put a live `gh` request behind the other
 suite's tests.
 
+**Two asks two seconds apart cannot cover that window**, which is why the empty
+answer is no longer reported as `no_run` on its own: the head's commit age decides
+between the two states the empty answer is the shape of. The case above is the
+measurement - `fb672634` was pushed 12:45:21Z and its run was created 12:45:38Z, so
+at the moment the query was made the run did not exist yet, and *no* number of asks
+spanning less than those 17 s could have found it. Inside
+`_REGISTRATION_WINDOW_SECONDS` the empty answer is `_KIND_NO_RUN_YET` ("not evidence
+of a dropped push yet"; the remedy is a park), past it the reading is `_KIND_NO_RUN`
+and the re-trigger remedy stands. Measured 2026-10-07 on this repository: 11 pushes
+and the `Test` run created for each, delay 1-6 s. The same false reading reaches
+the reader by the other hand too - `gh pr checks` prints "no checks reported" for a
+head whose run is registering, which is the sentence §1.1 of the prompt reads as
+"the push event was dropped".
+
 The run is also required to have *passed* - a failing run is not a stale verdict, it is
 a verdict the committer has to deal with on its own terms, and this tool says so rather
 than calling it fresh. **"Failing" means a job of the run concluded `failure`**, which is
@@ -208,6 +222,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = "argszero/emrg"
@@ -250,15 +265,33 @@ _UNFINISHED = frozenset({"", "pending", "queued", "in_progress", "requested", "w
 # here reads as "the verdict workflow did not run", not as "the branch has no CI".
 _VERDICT_WORKFLOW = "Test"
 
-# The five ways a verdict can fail to be current. They were prose in `reason`
+# The six ways a verdict can fail to be current. They were prose in `reason`
 # before, which is enough to *report* the state and not enough to choose a
 # remedy: the state decides which action the tool may recommend, and only one of
-# the five is fixed by a refresh (and that one charges the whole vote count).
+# the six is fixed by a refresh (and that one charges the whole vote count).
 _KIND_ANCESTRY = "ancestry"  # the #1137 case: green, but about an older master
 _KIND_NO_RUN = "no_run"  # master is an ancestor but nothing ever judged the head
+_KIND_NO_RUN_YET = "no_run_yet"  # the head is younger than a run takes to appear
 _KIND_RUNNING = "running"  # a run exists and has not concluded
 _KIND_FAILING = "failing"  # a job concluded `failure`: the tree was judged and rejected
 _KIND_NO_VERDICT = "no_verdict"  # the run stopped without a job judging the tree
+
+#: How long after a head is committed a push-event run can still be *arriving*.
+#: Inside this window an empty run lookup is not evidence of anything: it is the
+#: shape of a dropped push event **and** the shape of a run that has not been
+#: created yet, and the two are told apart only by waiting past the window. The
+#: number is measured, not chosen. Measured 2026-10-07 on this repository: the
+#: delay between a `PushEvent` and the `Test` run for that same head across the 11
+#: pairs the events feed and the runs API both still carried was 1, 1, 1, 2, 2, 4,
+#: 5, 5, 5, 6 seconds - and 17 s in the case this file's docstring records for
+#: #1585 (head `fb672634` pushed 12:45:21Z, its run created 12:45:38Z), which is
+#: what set this file's re-ask in the first place. 30 is that maximum with room to
+#: spare, and it is the window the re-ask is *supposed* to cover: with
+#: `_RUN_LOOKUP_ATTEMPTS` asks 2 s apart the wait was 2 s, i.e. narrower than the
+#: phenomenon it exists for. Nothing about the run lookup can be made exact - an
+#: empty answer is the same bytes in both states - so past the window the reading
+#: is still `_KIND_NO_RUN`, and inside it the tool refuses to claim one.
+_REGISTRATION_WINDOW_SECONDS = 30.0
 
 #: How this file's python tools are invoked (`Agent.md`, "Test Commands"). The
 #: runner is not decoration: without it a `scripts/*.py` command runs under
@@ -275,11 +308,17 @@ RUNNER = "uv run --no-sync python3"
 # How many times the run lookup is asked before an empty answer is taken as *the*
 # answer, and the gap between the asks. The reason is in the module docstring and
 # in `_latest_run_for_head`: an empty answer here is not a missing measurement, it
-# is a *verdict* (`_KIND_NO_RUN`, FRESH refused), and the query was measured
-# serving one stale for a head that has a run. Bounded at two because the state it
-# guards still exists - a dropped push event or a fork PR really has no run - and
-# such a head stays empty through both asks. `review-queue.py` reads this for every
-# open PR, so the run-less head pays the gap once per reader and no more.
+# is a *verdict* (FRESH refused), and the query was measured serving one stale for a
+# head that has a run. Bounded at two because the state it guards still exists - a
+# dropped push event or a fork PR really has no run - and such a head stays empty
+# through both asks. `review-queue.py` reads this for every open PR, so the run-less
+# head pays the gap once per reader and no more.
+#
+# The re-ask answers the *stale payload* half of the empty answer and nothing else:
+# it is not, and cannot be, the guard against a run that has not been created yet,
+# since the two asks span 2 s while that delay was measured at 1-17 s - which is
+# why the age of the head, not a longer wait, decides that half
+# (`_REGISTRATION_WINDOW_SECONDS`, and `_KIND_NO_RUN_YET` below it).
 _RUN_LOOKUP_ATTEMPTS = 2
 _RUN_LOOKUP_DELAY_SECONDS = 2.0
 
@@ -320,7 +359,7 @@ class Verdict:
     run_conclusion: str | None
     stale: bool
     reason: str
-    # Which of the five ways (one of the `_KIND_*` names); "" when fresh.
+    # Which of the six ways (one of the `_KIND_*` names); "" when fresh.
     stale_kind: str = ""
     #: The run's own id, so a remedy can hand over a command that is runnable as
     #: printed. Empty when there is no run. Why it is carried rather than looked up
@@ -340,6 +379,47 @@ class Verdict:
         return self.state in votes_counter().TERMINAL_STATES
 
 
+def _head_age_seconds(head: str) -> float | None:
+    """How long ago the head commit was made, or `None` when that is not a reading.
+
+    Asked only where it decides something: the empty-run branch of `check_pr`, i.e.
+    the state this tool spends an extra `gh` call on at most once per run-less head.
+    The commit date is the *committer's* date, so it is a **lower** bound on the
+    head's age (a commit can sit unpushed for any length of time, and a clock is a
+    clock) - which is the direction this reading needs: a head whose commit is
+    younger than the registration window cannot have been pushed long enough ago
+    for its run to have been created and still be missing, so `no_run_yet` is
+    earned by a measurement. The other direction is not claimed anywhere: an *old*
+    commit says nothing, and that case falls through to `_KIND_NO_RUN`.
+
+    `None` is "not measured", and it is returned rather than a zero age: an age that
+    could not be read must not be read as a *young* head, so the unmeasured case
+    keeps the reading this tool gave before this kind existed (`_KIND_NO_RUN`,
+    with the re-trigger remedy) instead of being turned into a refusal by a
+    measurement that never happened. The fail-loud direction here is the opposite
+    of the usual one on purpose: `_KIND_NO_RUN` is the *stronger* claim, and this
+    helper is allowed to weaken it only on evidence.
+
+    The parse is the queue's `instant` rather than a second timestamp reader in
+    this file, for the reason the sibling loaders give. The `--jq` asks for an
+    **object**: `gh api --jq '.field'` prints a bare string, which is not JSON, so
+    the unquoted form would raise out of `_gh_json`'s `json.loads`.
+    """
+    try:
+        raw = _gh_json(
+            ["api", f"repos/{REPO}/commits/{head}", "--jq",
+             "{committed: .commit.committer.date}"]
+        )
+    except (RuntimeError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    stamp = votes_counter().review_queue().instant(str(raw.get("committed") or ""))
+    if stamp is None:
+        return None
+    return (datetime.now(timezone.utc) - stamp).total_seconds()
+
+
 def _latest_run_for_head(head: str) -> dict | None:
     """The newest `_VERDICT_WORKFLOW` run for this exact commit, or None.
 
@@ -356,13 +436,14 @@ def _latest_run_for_head(head: str) -> dict | None:
 
     An empty answer is re-asked (bounded, `_RUN_LOOKUP_ATTEMPTS`) before it is
     returned as `None`, because `None` is not how this tool says "unknown" - it is
-    `_KIND_NO_RUN` and a refused FRESH, i.e. a sentence claiming the head has no
-    run at all. That sentence was measured being said about head `fb672634`
-    (#1582) by the identical query while GitHub held its run; see the module
-    docstring. The re-ask that *finds* the run is reported on stderr, so a repair
-    of a stale answer is never silent and a later reader can tell flakiness from a
-    one-off. A head that really ran nothing returns `None` from both asks, so the
-    retry cannot manufacture a run.
+    a stale verdict and a refused FRESH. Which one is the caller's to decide, and
+    the age of the head is the input: `_KIND_NO_RUN` is "the head has no run at
+    all", `_KIND_NO_RUN_YET` is "a run may still be arriving". The first was
+    measured being said about head `fb672634` (#1582) by the identical query while
+    GitHub held its run; see the module docstring. The re-ask that *finds* the run
+    is reported on stderr, so a repair of a stale answer is never silent and a
+    later reader can tell flakiness from a one-off. A head that really ran nothing
+    returns `None` from both asks, so the retry cannot manufacture a run.
     """
     for attempt in range(_RUN_LOOKUP_ATTEMPTS):
         run = _ask_latest_run_for_head(head)
@@ -558,13 +639,39 @@ def check_pr(number: int) -> Verdict:
     # unfinished, a run failed), and only a *passing* run raises the ancestry question.
     stale_tree = status in _STALE_STATUSES
     if run is None:
+        age = _head_age_seconds(head_sha)
+        if age is not None and age < _REGISTRATION_WINDOW_SECONDS:
+            # The head is younger than a run takes to appear, so the empty lookup
+            # is not yet a fact about GitHub - it is the shape of both a dropped
+            # push and a run that is still being created. Refusing to assert one:
+            # the sentence `_KIND_NO_RUN` carries ("there is NO Test run for head
+            # ...") was measured being said about a head that has one, and the
+            # remedy it carries (re-trigger) fires a *second* run on such a head.
+            # `_head_age_seconds` returning `None` (the age could not be read)
+            # keeps the reading below rather than turning an unmeasured age into
+            # this one: the refusal direction has to be earned by a measurement.
+            return Verdict(
+                **common,
+                stale=True,
+                stale_kind=_KIND_NO_RUN_YET,
+                reason=(
+                    f"no {_VERDICT_WORKFLOW} run for head {head_sha[:8]} yet, and the head "
+                    f"was committed {int(age)} s ago - inside the "
+                    f"{int(_REGISTRATION_WINDOW_SECONDS)} s a push-event run takes to "
+                    "appear, so this is not evidence of a dropped push"
+                    f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
+                ),
+            )
         return Verdict(
             **common,
             stale=True,
             stale_kind=_KIND_NO_RUN,
             reason=(
                 f"there is NO {_VERDICT_WORKFLOW} run for head {head_sha[:8]}"
-                f"{_tree_note(stale_tree, status, behind_by, merge_base)} - an unjudged head, "
+                + (f" (committed {int(age)} s ago, past the "
+                   f"{int(_REGISTRATION_WINDOW_SECONDS)} s a run takes to appear)"
+                   if age is not None else "")
+                + f"{_tree_note(stale_tree, status, behind_by, merge_base)} - an unjudged head, "
                 "which `gh pr checks` reports as 'no checks reported'"
             ),
         )
@@ -850,6 +957,17 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
             f"casting is done by `{RUNNER} scripts/cast-vote.py`, that refuses a body the counter cannot "
             "attribute and then reads the count back. Refresh only if that tree fails - those "
             "votes were about a tree that can no longer be merged"
+        )
+    if kind == _KIND_NO_RUN_YET:
+        return (
+            f"#{pr}: park it, the head is younger than a push-event run takes to "
+            f"appear ({int(_REGISTRATION_WINDOW_SECONDS)} s, measured) - an empty run "
+            "lookup here is the shape of a dropped push and of a run still being "
+            "created, and a re-trigger would fire a **second** run on a head whose "
+            "first one is arriving (nothing cancels it: `test.yml` declares no "
+            "concurrency group, so the duplicate runs in parallel and one of them "
+            "judges nothing). Read this PR again next cycle: a head that is still "
+            "run-less then is `no_run`, and the re-trigger below is its remedy"
         )
     if kind == _KIND_NO_RUN:
         return (
