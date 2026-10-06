@@ -141,12 +141,30 @@ TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
 #: because "accepts a root" is not visible in the source the way a `tree: ` line is.
 #: `TAKES_A_TREE_ARGUMENT` is here as the member whose tree *is* its argument;
 #: `check_unbound_reads.py` takes the same kind of input behind an optional flag, which
-#: is why it is also in `RUN_HERE` (with no flag it names its own checkout). A guard that
-#: gains a root argument has to be added here and to one of the buckets above.
+#: is why it is also in `RUN_HERE` (with no flag it names its own checkout);
+#: `check-workflows.py` takes one behind `--root` and is classified in the
+#: *cannot-be-run-here* bucket, which is why membership here is checked against the whole
+#: classification rather than against `RUN_HERE` alone (it was added 2026-10-06,
+#: `cyc20261006-214703`: the table was one merge old and already one member short, while
+#: `check-workflows.py` refused both shapes correctly — rc 2 with
+#: `not measurable: no workflow file under …`). A guard that gains a root argument has to
+#: be added here, and this table is a claim like any other: nothing measures it against
+#: the argv each guard really accepts.
 POINTABLE_AT_A_TREE = {
     "check-citation-resolves.py": (),
     "check_unbound_reads.py": ("--root",),
+    "check-workflows.py": ("--root",),
 }
+
+#: The spellings the family's refusals really use, measured 2026-10-06
+#: (`cyc20261006-214703`) by pointing each member at an empty directory **and** at a path
+#: that is not there: `check-citation-resolves.py` and `check_unbound_reads.py` print
+#: `could not measure`, `check-workflows.py` prints `not measurable`. The leg below asked
+#: for the first of those only, so it could not have covered the third member at all — a
+#: matcher written for one output form is the defect this repository has already paid for
+#: (issue #461, the singular `identity imported` that missed `3 identities imported`). The
+#: leg asks whether the guard *said* it could not measure, in whichever words it uses.
+REFUSAL_WORDS = ("could not measure", "not measurable", "unmeasurable")
 
 #: Reads a working tree and names it, but cannot be run in this suite. Classified rather
 #: than dropped, because "not run" is the kind of exemption that widens silently.
@@ -447,7 +465,13 @@ def test_a_guard_pointed_at_a_tree_it_read_nothing_from_refuses_to_pass(tmp_path
     Both shapes are asked of every member, because they are both "I read no file": a
     directory that exists and holds nothing, and a path that is not a directory at all.
     """
-    unclassified = set(POINTABLE_AT_A_TREE) - (set(RUN_HERE) | {TAKES_A_TREE_ARGUMENT})
+    classified = (
+        set(RUN_HERE)
+        | {TAKES_A_TREE_ARGUMENT}
+        | set(NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE)
+        | set(NOT_TREE_READERS)
+    )
+    unclassified = set(POINTABLE_AT_A_TREE) - classified
     assert not unclassified, (
         f"{sorted(unclassified)} is listed as pointable at a tree and is in no bucket "
         "above, so nothing else in this file holds it to the family's rules"
@@ -463,9 +487,9 @@ def test_a_guard_pointed_at_a_tree_it_read_nothing_from_refuses_to_pass(tmp_path
                 f"{name} answered rc={proc.returncode} for {label} ({target}) — `0` is "
                 f"\"measured and clean\", and a tree it read no file from is neither:\n{out}"
             )
-            assert "could not measure" in out, (
+            assert any(word in out.lower() for word in REFUSAL_WORDS), (
                 f"{name}: the unmeasurable code has to carry the reason, or it is not an "
-                f"answer a reader can act on:\n{out}"
+                f"answer a reader can act on — none of {REFUSAL_WORDS} is in it:\n{out}"
             )
             assert "OK:" not in out and "collects" not in out, (
                 f"{name} printed a clean verdict as well as refusing — the two halves "
