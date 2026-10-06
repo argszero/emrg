@@ -879,6 +879,70 @@ class TestARefusedPreflightNamesTheCauseItFound:
             f"process happens to be: {reason}"
         )
 
+    def test_a_missing_plugin_is_not_read_as_a_missing_pytest(self, mod) -> None:
+        """The veto's shape: the same sentence names a module that is not pytest.
+
+        Measured 2026-10-06 (`cyc20261006-131455`, the veto on PR #1861): the matcher had
+        no right boundary, so `No module named 'pytest_asyncio'` - pytest imports, a plugin
+        does not - was reported as "the interpreter this tool ran it with cannot import
+        pytest". A cause the report did not measure is the family's own defect class, so
+        every name the run can print is enumerated here rather than the two that happen to
+        start with the same letters.
+        """
+        for module in ("pytest_asyncio", "pytest_timeout", "pytest_cov", "pytest.core"):
+            reason = mod._why_target_broken(
+                1, 0, f"ModuleNotFoundError: No module named '{module}'", "/usr/bin/python3"
+            )
+            assert "cannot import pytest" not in reason, (
+                f"{module} is not pytest, and reporting it as an interpreter that cannot "
+                f"import pytest is a cause nobody measured: {reason}"
+            )
+            assert module in reason, (
+                f"the module the run named has to be in the report - it is the cause, and "
+                f"the remedy is an install that only the name can point at: {reason}"
+            )
+            assert "test_x.py::TestC::test_y" not in reason, (
+                "the target never collected, so the node id is not the cause either: "
+                f"{reason}"
+            )
+            assert "uv run --no-sync python3" in reason, (
+                f"a cause without its remedy is half a report: {reason}"
+            )
+
+    def test_the_missing_module_reader_names_the_module_and_stops_at_it(self, mod) -> None:
+        """The reader itself, both spellings and the boundary, on names it must not swallow.
+
+        A greedy pattern would take `pytest.core` for pytest and a boundary-less one takes
+        `pytest_asyncio`; the reader is where that is decided, so it is asked directly
+        rather than through the message it produces.
+        """
+        cases = {
+            "/usr/bin/python3: No module named pytest": "pytest",
+            "ModuleNotFoundError: No module named 'pytest'": "pytest",
+            "No module named pytest.": "pytest",
+            "ModuleNotFoundError: No module named 'pytest_asyncio'": "pytest_asyncio",
+            "ModuleNotFoundError: No module named 'pytest.core'": "pytest.core",
+            "ModuleNotFoundError: No module named 'numpy.linalg'": "numpy.linalg",
+        }
+        for out, expected in cases.items():
+            assert mod._missing_module(out) == expected, (
+                f"{out!r} names {expected!r}, and reading it as anything else sends the "
+                "reader to a remedy for a different failure"
+            )
+        for out in (
+            "ERROR: not found: tests/test_x.py::test_y",
+            "collected 0 items / 1 error",
+            "FAILED tests/test_x.py::test_y - assert 1 == 2",
+        ):
+            assert mod._missing_module(out) == "", (
+                f"this output names no missing module, and a reader that returns one "
+                f"invents a cause: {out!r} -> {mod._missing_module(out)!r}"
+            )
+        assert "pytest" in mod._missing_module("ModuleNotFoundError: No module named 'pytest'"), (
+            "the reader is the one place the module name is read; a rewrite that stops "
+            "reading it has to fail here rather than silently widen a message"
+        )
+
     def test_the_report_carries_the_cause_end_to_end(self, mod, tree, capsys, monkeypatch) -> None:
         """Through `main()`, on the output a bare interpreter really produced.
 

@@ -173,7 +173,28 @@ _PASSED = re.compile(r"(\d+) passed")
 #: `ModuleNotFoundError: No module named 'pytest'`. A matcher for one of the two would
 #: miss half the readings it exists for, which is what the `identity imported` /
 #: `3 identities imported` lesson in `emrg/server/evolution_prompt.md` §1.1 records.
-_NO_PYTEST = re.compile(r"No module named '?pytest'?")
+#:
+#: The module is **captured and compared**, not spelled into the pattern, because this
+#: sentence names every module a run could not import: `No module named 'pytest_asyncio'`
+#: is a missing *plugin* - pytest imports and a plugin does not - and a literal `pytest`
+#: with no right boundary read it as "the interpreter cannot import pytest", which is a
+#: cause nobody measured (veto, measured 2026-10-06 by `cyc20261006-131455`; the three
+#: plugin names it listed all fired). Reading the name out is what makes the third cause
+#: separable at all - `_missing_module` is the reader, and its callers decide what the
+#: name means.
+_NO_MODULE = re.compile(r"No module named '?([A-Za-z_][\w.]*)'?")
+
+
+def _missing_module(out: str) -> str:
+    """The module this run's output says it could not import, or `""` if it named none.
+
+    A trailing `.` is stripped: `No module named pytest.` is the same reading as
+    `No module named pytest` (the period belongs to the sentence around it, not to the
+    name), while `pytest.core` keeps its dot and is therefore *not* pytest itself - the
+    distinction the veto turned on, where an unanchored matcher could not tell them apart.
+    """
+    match = _NO_MODULE.search(out)
+    return match.group(1).rstrip(".") if match else ""
 
 #: pytest's two echoed forms of the assertion that failed: the source line it writes
 #: with `>`, and its explanation, written with `E` - which carries the values
@@ -444,7 +465,7 @@ def _why_no_interpreter(exc: BaseException) -> str:
 def _why_target_broken(rc: int, passed: int, out: str, interpreter: str) -> str:
     """Why the pre-flight refused, read from the run's own output.
 
-    Two causes reach this refusal with different remedies, so the reason is read rather
+    Three causes reach this refusal with different remedies, so the reason is read rather
     than assumed. Measured 2026-10-05 (`cyc20261005-191637`), on this host: running this
     tool with an interpreter that cannot import pytest - a bare `python3` here resolves
     to the *installed* interpreter, not the checkout's - gave `rc=1, 0 passed`, and the
@@ -452,13 +473,21 @@ def _why_target_broken(rc: int, passed: int, out: str, interpreter: str) -> str:
     checkout's runner, runs green (`uv run --no-sync pytest <node>` -> `1 passed`). The
     output said which of the two it was all along, and this function reads it.
 
+    The third is the same sentence naming a different module, and it was the veto's
+    subject (2026-10-06, `cyc20261006-131455`): a run whose output says
+    `No module named 'pytest_asyncio'` had measurable pytest and one missing plugin, and
+    the two-cause reader called it "the interpreter cannot import pytest". A report that
+    names a cause has to have read it, so the module is named and only `pytest` itself
+    takes the interpreter branch.
+
     `interpreter` is the one the run *actually used*, so the message is about the thing
     that ran: it must not name `sys.executable` when the resolver substituted a different
-    one. Both branches name it, so the two causes stay separable from the report even
-    when the detector below does not fire.
+    one. Every branch names it, so the causes stay separable from the report even when the
+    detector does not fire.
     """
-    if _NO_PYTEST.search(out):
-        line = next(text for text in out.splitlines() if _NO_PYTEST.search(text)).strip()
+    missing = _missing_module(out)
+    if missing == "pytest":
+        line = next(text for text in out.splitlines() if _NO_MODULE.search(text)).strip()
         return (
             f"before any mutation the target exited {rc} with {passed} passed, because "
             f"the interpreter this tool ran it with cannot import pytest: {line}. This "
@@ -466,6 +495,17 @@ def _why_target_broken(rc: int, passed: int, out: str, interpreter: str) -> str:
             "the node id is not the cause - and because the resolver already fell back to "
             "the checkout's own `.venv`, more than one interpreter has been tried: "
             "install pytest (`uv sync`) or run the arm through the checkout's runner "
+            "(uv run --no-sync python3)"
+        )
+    if missing:
+        line = next(text for text in out.splitlines() if _NO_MODULE.search(text)).strip()
+        return (
+            f"before any mutation the target exited {rc} with {passed} passed, because "
+            f"the run could not import a module: {line}. The target never collected, so "
+            f"the node id is not the cause; the module named above is, and it is not "
+            f"pytest itself - the run named {missing!r} while pytest resolved far enough "
+            f"to look for it. Install it in the environment this tool runs with "
+            f"({interpreter}), or run the arm through the checkout's runner "
             "(uv run --no-sync python3)"
         )
     return (
