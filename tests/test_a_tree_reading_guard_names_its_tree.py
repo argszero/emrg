@@ -136,6 +136,18 @@ def _carries(subjects: tuple[str, ...]) -> bool:
 #: is asked a different question below: its line must follow its argument.
 TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
 
+#: The guards that can be pointed at a tree of the caller's choosing, and the argument
+#: that points each at one — the shape the empty-tree leg below needs and cannot derive,
+#: because "accepts a root" is not visible in the source the way a `tree: ` line is.
+#: `TAKES_A_TREE_ARGUMENT` is here as the member whose tree *is* its argument;
+#: `check_unbound_reads.py` takes the same kind of input behind an optional flag, which
+#: is why it is also in `RUN_HERE` (with no flag it names its own checkout). A guard that
+#: gains a root argument has to be added here and to one of the buckets above.
+POINTABLE_AT_A_TREE = {
+    "check-citation-resolves.py": (),
+    "check_unbound_reads.py": ("--root",),
+}
+
 #: Reads a working tree and names it, but cannot be run in this suite. Classified rather
 #: than dropped, because "not run" is the kind of exemption that widens silently.
 NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
@@ -413,6 +425,52 @@ def test_the_guard_that_takes_a_tree_names_the_tree_it_was_given(tmp_path) -> No
         "the control is only discriminating while the tree it was given is not this "
         "repository — otherwise both halves of this file's control name the same path"
     )
+
+
+def _refusal(proc: subprocess.CompletedProcess) -> str:
+    """The combined output of a refusal, for the two legs below to assert on together."""
+    return (proc.stdout or "") + (proc.stderr or "")
+
+
+def test_a_guard_pointed_at_a_tree_it_read_nothing_from_refuses_to_pass(tmp_path) -> None:
+    """An empty tree is not a clean one, for whichever guard is asked about it.
+
+    The family's rule — a question a guard cannot answer is `could not measure`, never a
+    pass — was prose in `check-citation-resolves.py`'s exit-code paragraph and had no
+    executor in either guard that can be pointed at a tree of the caller's choosing
+    (measured 2026-10-06, `cyc20261006-165503`): the citation guard printed its green
+    line `every citation names a node id pytest collects` with rc 0 for an empty
+    directory, and `check_unbound_reads.py` printed its `OK:` line for an empty one and
+    for a path that does not exist at all. The fix is a branch in each; this leg is what
+    makes a third guard take the branch rather than being trusted to have copied it.
+
+    Both shapes are asked of every member, because they are both "I read no file": a
+    directory that exists and holds nothing, and a path that is not a directory at all.
+    """
+    unclassified = set(POINTABLE_AT_A_TREE) - (set(RUN_HERE) | {TAKES_A_TREE_ARGUMENT})
+    assert not unclassified, (
+        f"{sorted(unclassified)} is listed as pointable at a tree and is in no bucket "
+        "above, so nothing else in this file holds it to the family's rules"
+    )
+    for name, flag in POINTABLE_AT_A_TREE.items():
+        empty = tmp_path / f"empty-{name}"
+        empty.mkdir()
+        absent = tmp_path / f"absent-{name}"
+        for label, target in (("an empty directory", empty), ("a path that is not there", absent)):
+            proc = _run([str(SCRIPTS_DIR / name), *flag, str(target)], cwd=REPO_ROOT)
+            out = _refusal(proc)
+            assert proc.returncode == 2, (
+                f"{name} answered rc={proc.returncode} for {label} ({target}) — `0` is "
+                f"\"measured and clean\", and a tree it read no file from is neither:\n{out}"
+            )
+            assert "could not measure" in out, (
+                f"{name}: the unmeasurable code has to carry the reason, or it is not an "
+                f"answer a reader can act on:\n{out}"
+            )
+            assert "OK:" not in out and "collects" not in out, (
+                f"{name} printed a clean verdict as well as refusing — the two halves "
+                f"disagree:\n{out}"
+            )
 
 
 def test_the_citation_guards_line_is_not_merely_the_default(tmp_path) -> None:

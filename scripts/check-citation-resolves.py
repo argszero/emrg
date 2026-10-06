@@ -71,6 +71,15 @@ method without its class (each is printed with the qualifier it needs). ``2``
 the question could not be answered - the root is not a directory, or no test
 file could be read at all, which would make a green verdict a reading over an
 empty set.
+
+That second half was prose with no executor until 2026-10-06 (cycle
+`cyc20261006-165503`): the paragraph promised the refusal and `main` had no branch
+for it, so a root holding no test module printed the green line with rc 0 - measured
+on an empty directory, and on `check_unbound_reads.py` too, which is the same class in
+the other guard that can be pointed at a tree of the caller's choosing. Both now count
+how many files they read and refuse when the answer is none; each count is pinned in
+its own test file, and a third guard joining them is caught by
+`tests/test_a_tree_reading_guard_names_its_tree.py`.
 """
 
 from __future__ import annotations
@@ -174,13 +183,16 @@ def node_ids(path: Path) -> Optional[tuple[set[str], dict[str, list[str]]]]:
     return module_level, methods
 
 
-def scan(root: Path) -> tuple[list[Finding], list[str]]:
+def scan(root: Path) -> tuple[list[Finding], list[str], int]:
     """Check every citation under `root`.
 
     :param root: the tree to scan.
-    :returns: `(findings, unreadable_sites)` - the second is every file a
-        citation was found in but that could not be parsed, so an empty finding
-        list beside a non-empty one is reported instead of passed.
+    :returns: `(findings, unreadable_sites, test_modules)` - the second is every
+        file a citation was found in but that could not be parsed, so an empty
+        finding list beside a non-empty one is reported instead of passed. The
+        third is the set every citation is resolved *against*: with none of them
+        the green verdict is a reading over an empty set, so the caller refuses
+        rather than printing it, and prints the count when it does not.
     """
     files = text_files(root)
     modules = {p for p in files if p.suffix == ".py" and p.is_relative_to(root / "tests")}
@@ -222,7 +234,7 @@ def scan(root: Path) -> tuple[list[Finding], list[str]]:
                         needed=_needed(cited_path, name, methods),
                     )
                 )
-    return findings, unreadable
+    return findings, unreadable, len(modules)
 
 
 def _needed(cited_path: str, name: str, methods: dict[str, list[str]]) -> str:
@@ -277,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     # outright unless it names the tree it read, and requires that name to be the
     # tree it asked about (`TREE_IN_REPORT`).
     print(f"tree: {root}")
-    findings, unreadable = scan(root)
+    findings, unreadable, modules = scan(root)
     if unreadable:
         print(
             f"could not measure: {len(unreadable)} cited test module(s) could not be "
@@ -285,8 +297,26 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if modules == 0:
+        # The docstring has promised this refusal since the tool was written and
+        # `main` had no branch for it: a citation is resolved *against* a test
+        # module, so with none under `<root>/tests` there is nothing to resolve
+        # anything against and "every citation names what it says" is a reading
+        # over an empty set. Measured 2026-10-06 (`cyc20261006-165503`) on an
+        # empty directory: the green line, rc 0.
+        print(
+            f"could not measure: no test module was read under {root} "
+            f"({root / 'tests'} holds no .py file), so there was nothing for a "
+            "citation to resolve against - `0` says the citations were checked, "
+            "and none was.",
+            file=sys.stderr,
+        )
+        return 2
     if not findings:
-        print("every citation names a node id pytest collects")
+        print(
+            "every citation names a node id pytest collects "
+            f"({modules} test module(s) read)"
+        )
         return 0
     for finding in findings:
         print(f"{finding.site}:{finding.line}: {finding.cited}")

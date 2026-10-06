@@ -83,7 +83,7 @@ def _tree(tmp_path: Path, citation: str) -> Path:
 def test_a_class_method_cited_without_its_class_is_reported(mod, tmp_path):
     """The defect itself: the file resolves, the name resolves, the node id does not."""
     root = _tree(tmp_path, "`tests/test_thing.py::test_inside_a_class`")
-    findings, unreadable = mod.scan(root)
+    findings, unreadable, _modules = mod.scan(root)
     assert unreadable == []
     assert len(findings) == 1
     found = findings[0]
@@ -95,14 +95,14 @@ def test_a_class_method_cited_without_its_class_is_reported(mod, tmp_path):
 def test_the_qualified_form_is_accepted(mod, tmp_path):
     """The remedy the tool prints is the form the tool accepts: it must be."""
     root = _tree(tmp_path, "`tests/test_thing.py::TestHolder::test_inside_a_class`")
-    findings, unreadable = mod.scan(root)
+    findings, unreadable, _modules = mod.scan(root)
     assert (findings, unreadable) == ([], [])
 
 
 def test_a_module_level_test_needs_no_qualifier(mod, tmp_path):
     """The common case: 32 citations in this tree take this shape and collect."""
     root = _tree(tmp_path, "`tests/test_thing.py::test_at_module_level`")
-    assert mod.scan(root) == ([], [])
+    assert mod.scan(root) == ([], [], 1)
 
 
 # --- the lookalikes, each of which must stay silent -----------------------------
@@ -114,31 +114,31 @@ def test_a_path_that_does_not_exist_is_not_a_citation(mod, tmp_path):
     A guard that flagged them would be red at master for prose that is correct.
     """
     root = _tree(tmp_path, "`tests/test_a.py::test_b`")
-    assert mod.scan(root) == ([], [])
+    assert mod.scan(root) == ([], [], 1)
 
 
 def test_a_bare_name_in_prose_is_not_a_citation(mod, tmp_path):
     """A name is required to exist; a node id is required to collect. Different claims."""
     root = _tree(tmp_path, "mirrors `test_inside_a_class`'s slow-chat pattern")
-    assert mod.scan(root) == ([], [])
+    assert mod.scan(root) == ([], [], 1)
 
 
 def test_a_prefix_citation_is_not_a_citation(mod, tmp_path):
     """`tests/test_daemon.py::test_shutdown_all_*` names a family, not a node id."""
     root = _tree(tmp_path, "`tests/test_thing.py::test_inside_*`")
-    assert mod.scan(root) == ([], [])
+    assert mod.scan(root) == ([], [], 1)
 
 
 def test_a_class_citation_is_not_flagged(mod, tmp_path):
     """pytest collects a class as written, so there is nothing to qualify."""
     root = _tree(tmp_path, "`tests/test_thing.py::TestHolder`")
-    assert mod.scan(root) == ([], [])
+    assert mod.scan(root) == ([], [], 1)
 
 
 def test_a_citation_whose_name_is_absent_is_left_to_another_rule(mod, tmp_path):
     """A renamed test is a different defect, and guessing at it would be worse."""
     root = _tree(tmp_path, "`tests/test_thing.py::test_that_never_existed`")
-    assert mod.scan(root) == ([], [])
+    assert mod.scan(root) == ([], [], 1)
 
 
 # --- the exit-code contract, and the tree --------------------------------------
@@ -155,7 +155,14 @@ def test_the_exit_code_says_which_of_the_three_answers_it_is(mod, tmp_path, caps
     assert "TestHolder" in out, "the remedy has to be printed, not only the fault"
 
     assert mod.main([str(tmp_path / "not-a-directory")]) == 2
-    assert "could not measure" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "could not measure" in err
+    assert "is not a directory" in err, (
+        "a path that is not a directory and a directory holding no test module are two "
+        "branches with two remedies (fix the path, versus run it where the tests are), so "
+        "the refusal has to name the one it read rather than answering both with the "
+        f"empty-set message:\n{err}"
+    )
 
 
 def test_a_cited_module_that_cannot_be_parsed_is_unmeasurable(mod, tmp_path, capsys):
@@ -171,6 +178,34 @@ def test_a_cited_module_that_cannot_be_parsed_is_unmeasurable(mod, tmp_path, cap
     assert "could not measure" in capsys.readouterr().err
 
 
+def test_a_root_with_no_test_module_is_unmeasurable_not_clean(mod, tmp_path, capsys):
+    """The half the exit-code paragraph promised and `main` had no branch for.
+
+    Measured 2026-10-06 (`cyc20261006-165503`): an empty directory printed
+    `every citation names a node id pytest collects` with rc 0. A citation is resolved
+    *against* a test module, so with none under `<root>/tests` the green line is a
+    statement over an empty set - the same false OK the unreadable branch above
+    refuses, one reading further out.
+    """
+    root = tmp_path / "empty"
+    root.mkdir()
+    assert mod.main([str(root)]) == 2
+    captured = capsys.readouterr()
+    assert "could not measure" in captured.err
+    assert "collects" not in captured.out
+
+
+def test_the_clean_verdict_names_how_many_modules_it_resolved_against(mod, tmp_path, capsys):
+    """`0` has to say what it is a statement about - the count is the subject it read.
+
+    Without it, "every citation resolves" over 137 test modules and over none are the
+    same sentence, which is how the empty root above stayed invisible.
+    """
+    root = _tree(tmp_path, "`tests/test_thing.py::test_at_module_level`")
+    assert mod.main([str(root)]) == 0
+    assert "1 test module(s) read" in capsys.readouterr().out
+
+
 def test_the_real_tree_cites_no_class_method_without_its_class(mod):
     """The rule, held against the tree it was derived from (measured: 0 sites).
 
@@ -179,6 +214,10 @@ def test_the_real_tree_cites_no_class_method_without_its_class(mod):
     rule that also fires on a fixture's synthetic id would have to be deleted
     rather than obeyed.
     """
-    findings, unreadable = mod.scan(REPO_ROOT)
+    findings, unreadable, modules = mod.scan(REPO_ROOT)
     assert unreadable == [], f"unmeasurable: {unreadable}"
+    assert modules, (
+        "this checkout carries no test module, so the green verdict below would be a "
+        "reading over an empty set rather than a rule held against a tree"
+    )
     assert findings == [], "\n".join(f"{f.site}:{f.line}: {f.cited} -> {f.needed}" for f in findings)
