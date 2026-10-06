@@ -134,7 +134,21 @@ class GrepTool(ToolExecutor):
         #: is this list's length, and nothing downstream re-derives it from the
         #: rendered text — see the summary below for what that cost.
         block_starts: list[int] = []
-        files_searched = 0
+        #: Files the loop really read and searched — **not** files it looked at. The two
+        #: were the same variable until 2026-10-06 (`cyc20261006-214703`), which made the
+        #: summary's `(searched N files)` a false statement: the counter was incremented
+        #: before the size and decode guards, so a tree whose only copies of the pattern
+        #: were a >512KB file and a binary one came back as
+        #: `No matches for 'NEEDLE' in <root> (searched 4 files)` — the two files holding
+        #: it counted among the four "searched". "Searched" is a claim about work done;
+        #: the skips are reported beside it for the same reason `glob` names its skips.
+        files_read = 0
+        #: The two ways a collected file is not read, kept apart because their remedies
+        #: differ (raise `MAX_FILE_SIZE` / a search that can read bytes vs. a text
+        #: search that will not read this file at all). A stat that fails is the second
+        #: kind: nothing about the file could be measured, so it was not searched either.
+        oversize = 0
+        undecodable = 0
         stop = False
         #: Set when the loop stopped at the result budget rather than at the end of the
         #: tree. The count is then a **floor**, and the summary has to say so: a number
@@ -145,21 +159,24 @@ class GrepTool(ToolExecutor):
         for filepath in files:
             if stop:
                 break
-            files_searched += 1
 
             # Skip large files
             try:
                 if filepath.stat().st_size > MAX_FILE_SIZE:
+                    oversize += 1
                     continue
             except OSError:
+                undecodable += 1
                 continue
 
             # Read and search
             try:
                 text = filepath.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
+                undecodable += 1
                 continue
 
+            files_read += 1
             # A file that ends with a newline splits into one element more than it has
             # lines: the trailing '' is the position *after* the last terminator, not a
             # line of the file. Left in, it is searchable — so a pattern that can match
@@ -194,12 +211,27 @@ class GrepTool(ToolExecutor):
                         search_cut = True
                         break
 
+        #: What was *not* searched, named in the same line as what was. The subject of
+        #: `searched N files` is the files the loop really read, and these two numbers
+        #: are what a reader subtracts from the tree to know what the answer covers — a
+        #: skip that is not stated is indistinguishable from a tree that holds no match.
+        #: Empty when nothing was skipped, so the sentence stays a measurement rather
+        #: than boilerplate (pinned in both directions in `tests/test_grep_tool.py`).
+        skipped = ""
+        if oversize or undecodable:
+            parts = []
+            if oversize:
+                parts.append(f"{oversize} over {MAX_FILE_SIZE} bytes")
+            if undecodable:
+                parts.append(f"{undecodable} not readable as UTF-8 text")
+            skipped = f"; {oversize + undecodable} skipped: " + ", ".join(parts)
+
         if not results:
             return ToolResult(
                 name="grep",
                 content=(
                     f"No matches for '{pattern}' in {root} "
-                    f"(searched {files_searched} files)"
+                    f"(searched {files_read} files{skipped})"
                     + (f" matching '{file_glob}'" if file_glob else "")
                 ),
             )
@@ -228,14 +260,14 @@ class GrepTool(ToolExecutor):
             summary = (
                 f"Found {matches_found} matches for '{pattern}' in {root}, where the "
                 f"search stopped at its result budget (max_results={max_results}) after "
-                f"{files_searched} file(s) - so this count is a floor and the tree may "
-                f"hold more. Narrow the pattern or the path, or raise max_results, to "
+                f"{files_read} file(s){skipped} - so this count is a floor and the tree "
+                f"may hold more. Narrow the pattern or the path, or raise max_results, to "
                 f"count them all:\n\n"
             )
         else:
             summary = (
                 f"Found {matches_found} matches for '{pattern}' "
-                f"in {root} (searched {files_searched} files):\n\n"
+                f"in {root} (searched {files_read} files{skipped}):\n\n"
             )
 
         # Truncate if too many lines — at a **block boundary**, and the note names the
