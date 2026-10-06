@@ -282,7 +282,7 @@ APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \
 #   uv run --no-sync python3 scripts/check-notary-credentials.py --env-file ~/.emrg/notary.env
 ```
 
-Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's own reply is printed (usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); `2` = the exchange did not complete, so **no verdict was reached — never a pass**, and CI must fail on it too. After fixing, resume the run that failed with `gh run rerun <run-id> --failed`: a tag already pushed is not re-pushed.
+Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's own reply is printed (usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); `2` = the exchange did not complete — **or the `--env-file` named could not be read**, a typo or a file not created yet; the message says which, and in both cases **no verdict was reached — never a pass**, and CI must fail on it too. After fixing, resume the run that failed with `gh run rerun <run-id> --failed`: a tag already pushed is not re-pushed.
 
 The step's two failure modes are told apart by **duration**, not by the exit code: a refused *submission* dies in seconds, while a notarization *verdict* takes minutes, exits 0 and reports `status=Invalid` (the step parses that status and fetches Apple's rejection log for it). `Notarize pkg` names the preflight in its own `::error::` when the submission is refused, so the remedy arrives with the failure.
 
@@ -370,7 +370,7 @@ leaves this tool as exit 1 - the code that means 'a clean merge landed an unheal
 sites no longer carry a `if spec is None or spec.loader is None` guard either:
 `importlib.util.spec_from_file_location` returns a spec *and* a loader for a path that does not exist,
 so that branch could never fire — `tests/test_a_crash_is_a_measurement_error.py` pins both halves,
-pins the entry point identical across the family (one rule, not nine copies free to drift apart), and
+pins the entry point identical across the family (one rule, not a copy per tool free to drift apart), and
 derives the family from the source (a `spec_from_file_location` call in code), so a gate that loads a
 sibling and is not in that list fails the module instead of sitting silently outside it.
 

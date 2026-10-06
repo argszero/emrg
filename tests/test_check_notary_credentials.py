@@ -116,6 +116,7 @@ def _run(
     credentials: bool = True,
     xcrun: str | None = None,
     empty_path: bool = False,
+    env_file: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -133,6 +134,10 @@ def _run(
         env[TEAM_ID_VAR] = "TEAMID1234"
 
     argv = [sys.executable, str(SCRIPT)]
+    if env_file is not None:
+        # A path, not a file: whether it is readable is the scenario's own business, and
+        # the arms that pass one deliberately pass paths that are not there.
+        argv += ["--env-file", env_file]
     if xcrun is not None:
         argv += ["--xcrun", xcrun]
     elif empty_path:
@@ -261,6 +266,110 @@ def test_a_path_without_xcrun_is_unmeasured_rather_than_passed(tmp_path: Path) -
         f"stdout={result.stdout!r}"
     )
     assert "no `xcrun` on PATH" in result.stdout
+
+
+# ── The `--env-file` half: an input that could not be read is never a verdict ──
+#
+# Measured 2026-10-07 (`cyc20261007-072231`) on the invocation `DEVELOPMENT.md` recommends
+# - `--env-file ~/.emrg/notary.env`, the way to keep the secrets out of the shell history,
+# with that file absent on this host:
+#
+#     Traceback (most recent call last): ... FileNotFoundError: '/Users/…/notary.env'
+#     rc=1
+#
+# `1` is the code this tool's table gives **Apple's refusal**, whose documented remedy is
+# an expired or revoked app-specific password. So the host troubleshooting the blocked
+# release was sent credential-hunting over a mistyped path - the false diagnosis this
+# preflight exists to remove, one code over. The arms below hold both halves: an input
+# that cannot be read is `2` and says which file, while the refusal (above) stays `1`.
+#
+# They are not `_posix_only`: the branch returns before `xcrun` is resolved, so nothing
+# here executes the stand-in, and both platforms measure the same reading.
+
+
+def test_an_env_file_that_is_not_there_is_unmeasured_never_a_refusal(tmp_path: Path) -> None:
+    """The measured defect, in the shape a host hits: a path with no file behind it.
+
+    Run **both ways round**, because the environment is the other place the three variables
+    can come from and only one of the two shapes makes the fallback visible: with them unset
+    a branch that printed the reason and then carried on would still land on exit 2 ("nothing
+    to send"), so the arm that means something is the one where the environment is *set* and
+    a verdict must still not be reached. That arm is not decoration - it was measured: this
+    test passed a mutation that deleted the `return 2` while the credentials were unset, and
+    a host with them exported (the documented first invocation) would have been handed a
+    credential verdict about a set they had just said to read from a file.
+    """
+    missing = tmp_path / "notary.env"
+
+    for credentials in (False, True):
+        result = _run(tmp_path, "accepted", credentials=credentials, env_file=str(missing))
+        where = f"credentials in the environment: {credentials}"
+
+        assert result.returncode == 2, (
+            f"an unreadable env file answered {result.returncode} ({where}) - `1` is this "
+            f"table's code for Apple refusing the credentials, and nothing was ever sent to "
+            f"Apple.\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
+        assert "Traceback" not in result.stderr, (
+            "the input error reached the host as a traceback instead of a reading — the "
+            f"failure that sent the diagnosis to the wrong cause ({where}).\n"
+            f"stderr={result.stderr!r}"
+        )
+        assert "REFUSED" not in result.stdout and "OK:" not in result.stdout, (
+            f"a verdict was printed for a file that was never read ({where}) - the reading "
+            f"fell back to the environment.\nstdout={result.stdout!r}"
+        )
+        assert "not measurable" in result.stderr and str(missing) in result.stderr, (
+            "the unmeasurable answer has to carry the reason and name the file, or the host "
+            f"cannot act on it ({where}).\nstderr={result.stderr!r}"
+        )
+        assert "environment instead" in result.stderr, (
+            "the fallback has to be refused out loud: a preflight that quietly read the "
+            "environment instead would measure a credential set the caller did not name, "
+            f"which reads as a verdict ({where}).\nstderr={result.stderr!r}"
+        )
+
+
+def test_an_env_file_that_is_a_directory_is_unmeasured_too(tmp_path: Path) -> None:
+    """The second shape of "cannot be read": a path that exists and is not a file."""
+    target = tmp_path / "notary.env"
+    target.mkdir()
+    result = _run(tmp_path, "accepted", credentials=False, env_file=str(target))
+
+    assert result.returncode == 2, (
+        f"a directory handed to `--env-file` answered {result.returncode}.\n"
+        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    assert str(target) in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_the_env_file_is_read_when_it_is_really_there(tmp_path: Path) -> None:
+    """The control: the arms above must not be satisfiable by never reading the file.
+
+    Same stub, same scenario, and the three variables are **absent from the environment**
+    — so `0` here is only reachable if the file's values are the ones the call was made
+    with. Without this arm, a branch that refused every `--env-file` would pass the pair
+    above while breaking the documented invocation it was added for.
+    """
+    env_file = tmp_path / "notary.env"
+    env_file.write_text(
+        f"# the host's own file, not a shell script\n"
+        f"{APPLE_ID_VAR}=dev@example.invalid\n"
+        f"{PASSWORD_VAR}={PASSWORD}\n"
+        f"{TEAM_ID_VAR}=TEAMID1234\n",
+        encoding="utf-8",
+    )
+    result = _run(tmp_path, "accepted", credentials=False, env_file=str(env_file))
+
+    assert result.returncode == 0, (
+        "a readable env file did not carry the credentials into the call.\n"
+        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    assert f"apple-id: dev@example.invalid" in result.stdout, (
+        f"the file's values did not reach the reading.\nstdout={result.stdout!r}"
+    )
+    assert PASSWORD not in result.stdout + result.stderr
 
 
 # ── The reading must not carry the secret ─────────────────────────────────────
