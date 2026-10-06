@@ -503,9 +503,10 @@ def _why_target_broken(rc: int, passed: int, out: str, interpreter: str) -> str:
         return (
             f"before any mutation the target exited {rc} with {passed} passed, because "
             f"the run could not import a module: {line}. The target never collected, so "
-            f"the node id is not the cause; the module named above is, and it is not "
-            f"pytest itself - the run named {missing!r} while pytest resolved far enough "
-            f"to look for it. Install it in the environment this tool runs with "
+            f"the node id is not the cause; the module named there is, and it is not "
+            f"pytest itself - the run named {missing!r}, which is read apart from "
+            f"pytest because a module that will not import is not an interpreter that "
+            f"lacks pytest. Install it in the environment this tool runs with "
             f"({interpreter}), or run the arm through the checkout's runner "
             "(uv run --no-sync python3)"
         )
