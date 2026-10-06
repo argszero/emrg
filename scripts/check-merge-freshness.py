@@ -775,11 +775,17 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
     reader the broken one.
 
     The price is attached only where it is actually paid - an ancestry-stale
-    verdict is the one a refresh cures. The other three kinds get the action that
-    fits them, so the output cannot be read as "rebase and move on" for a head
-    whose CI run is merely missing (a refresh is a remedy there too, but the
-    expensive one: re-triggering fires a run on the same head and keeps the
-    votes).
+    verdict is the one a refresh cures. Every other kind is named by a branch of
+    its own here and gets the action that fits it, so the output cannot be read as
+    "rebase and move on" for a head whose CI run is merely missing (a refresh is a
+    remedy there too, but the expensive one: re-triggering fires a run on the same
+    head and keeps the votes). **No kind is served by the fall-through**: the last
+    branch used to *be* the failing remedy, so a kind added without a branch of its
+    own would have been answered as a failure - a remedy for something that did not
+    happen, handed to the reader at the moment they trust the tool most. The
+    count of kinds is deliberately not written here: it is measured instead
+    (`tests/test_a_stale_kind_is_answered_by_name.py`, which also pins that every
+    kind is routed by `review-queue.py` rather than falling through its rows).
 
     The ancestry-stale branch has **three** states, not two: nothing to void, a
     price in approvals, and - the one that went missing - no approvals but a
@@ -874,14 +880,26 @@ def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
             "job in run ... nothing to explain`, because there is none. A refresh would fire a "
             "run too and cost every vote the branch has"
         )
-    return (
-        f"#{pr}: fix the failure - a refresh costs every vote the branch has, and does not "
-        "make a failing run pass. Whose failure it is comes first: read the cause with the "
-        f"reading that answers (`{RUNNER} scripts/read-run-failure.py "
-        f"{run_id}` - the run's step and the block up to its `##[error]`), and ask whether "
-        f"the row is the head's own (`{RUNNER} scripts/check-merge-plan-suite.py {pr}` names the "
-        "failing rows and reports the ones the base tree fails as well, and those belong to "
-        "the base)"
+    if kind == _KIND_FAILING:
+        return (
+            f"#{pr}: fix the failure - a refresh costs every vote the branch has, and does not "
+            "make a failing run pass. Whose failure it is comes first: read the cause with the "
+            f"reading that answers (`{RUNNER} scripts/read-run-failure.py "
+            f"{run_id}` - the run's step and the block up to its `##[error]`), and ask whether "
+            f"the row is the head's own (`{RUNNER} scripts/check-merge-plan-suite.py {pr}` names the "
+            "failing rows and reports the ones the base tree fails as well, and those belong to "
+            "the base)"
+        )
+    # Not a fall-through. This branch was the failing remedy until a kind was added
+    # beside it that had no branch of its own: an unnamed kind inherited a remedy
+    # written for a failure it never had, silently, at the one moment the reader has
+    # no other reading to check it against. A kind with no remedy is a *code* fault,
+    # not a state of the PR, so it is refused where the fault is (`_entry` reports it
+    # as `2`, "could not measure", never as a verdict about the PR).
+    raise ValueError(
+        f"no remedy is written for stale kind {kind!r}: every `_KIND_*` this tool can "
+        "return has a branch above, and one served by another kind's remedy would be a "
+        "remedy for something that did not happen"
     )
 
 
