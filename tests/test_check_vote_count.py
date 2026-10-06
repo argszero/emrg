@@ -134,6 +134,8 @@ class FakeGh:
         merge_state: str = "CLEAN",
         state: str = "OPEN",
         merged_at: str = "",
+        checks: list[dict] | None = None,
+        checks_total: int | None = None,
     ):
         self.reviews = reviews
         self.push_time = push_time
@@ -142,6 +144,16 @@ class FakeGh:
         self.merge_state = merge_state
         self.state = state
         self.merged_at = merged_at
+        #: The head's check-runs, asked by the tool **only** when the merge state is
+        #: `UNSTABLE` (that state's cause is not in the state). Required for an
+        #: `UNSTABLE` fixture: a default here would be a silent answer to the question
+        #: the test exists to ask - the same trap as a fixture that answers "no jobs"
+        #: for every failing run, which leaves the branch it is about unreachable from
+        #: every test in the file (measured in `test_check_merge_freshness.py`).
+        self.checks = checks
+        #: GitHub's `total_count`, when a test needs it to exceed the list returned
+        #: (the truncated-page case). `None` means "the whole list came back".
+        self.checks_total = checks_total
         #: The login `gh api user` answers with — the instance whose cycle records
         #: the abstention window is read from (issue #1856). A run only asks when a
         #: vote would otherwise be voided inside a window, which is why this is an
@@ -164,6 +176,24 @@ class FakeGh:
             }
         if args[0] == "api":
             joined = " ".join(args)
+            # Before the `/commits/` route below, not after: the check-runs endpoint is
+            # `repos/…/commits/<sha>/check-runs`, so the broader match would answer it
+            # with the push-time payload and the reading would die on its own assertion.
+            if "check-runs" in joined:
+                assert self.checks is not None, (
+                    "an UNSTABLE fixture must say what the head's check-runs are: the "
+                    "state no longer decides the verdict on its own, so a test that "
+                    "sets merge_state='UNSTABLE' without `checks=` would be asserting "
+                    "against a default rather than against the shape it means"
+                )
+                return {
+                    "total": (
+                        self.checks_total
+                        if self.checks_total is not None
+                        else len(self.checks)
+                    ),
+                    "checks": self.checks,
+                }
             if "actions/runs" in joined:
                 return {"t": self.push_time if self.exact else ""}
             if "/commits/" in joined:
@@ -189,6 +219,34 @@ def _approve(cycle: str, at: str, author: str = SELF_LOGIN) -> dict:
 
 def _veto(cycle: str, at: str, author: str = SELF_LOGIN) -> dict:
     return _review(at, f"\u274c Needs fix - cycle `{cycle}`", author)
+
+
+def _check(
+    name: str,
+    conclusion: str,
+    *,
+    status: str = "completed",
+    run: str = "1",
+    started: str = "2026-09-11T00:00:00Z",
+    id: int = 1,
+) -> dict:
+    """One check-run as GitHub's `commits/<sha>/check-runs` endpoint reports it."""
+    return {
+        "name": name,
+        "conclusion": conclusion,
+        "status": status,
+        "startedAt": started,
+        "id": id,
+        "url": (
+            f"https://github.com/argszero/emrg/actions/runs/{run}/job/{id}"
+            if run
+            else ""
+        ),
+    }
+
+
+def _green_checks(name: str = "test") -> list[dict]:
+    return [_check(name, "success")]
 
 
 def _run(mod, monkeypatch, fake: FakeGh, argv: list[str] | None = None) -> int:
@@ -438,7 +496,12 @@ def test_a_pr_that_is_both_short_and_conflicting_is_reported_as_blocked(mod, mon
     captured = capsys.readouterr()
     assert rc == 1
     assert "BLOCKED 1/3" in captured.out, "the conflict is the blocking fact, not the vote deficit"
-    assert "voids them" in captured.err
+    # The short-votes addendum is now *conditional*, because the states do not share
+    # one cure: a `DRAFT` clears when the PR is marked ready and a `BLOCKED` clears
+    # with a review, neither of which publishes a commit, so an unconditional "resolving
+    # the block voids them" was false for most of the states it was printed for.
+    assert "where clearing this state means publishing a new head" in captured.err
+    assert "voids every vote standing here" in captured.err
 
 
 def test_a_mergeable_pr_with_three_votes_is_ready(mod, monkeypatch, capsys):
@@ -611,21 +674,31 @@ def test_every_non_clean_merge_state_blocks_with_enough_votes(mod, monkeypatch, 
     A single test asserting that one non-clean state blocks would have passed on the
     old code (it handled `DIRTY`) while the other four stayed broken - which is
     exactly how this shipped.
+
+    `UNSTABLE` carries a check-runs answer because it is the one state whose verdict
+    is not decided by the state: the shape pinned here is the one that must still
+    block (a check-run that concluded red), and the green shape is pinned separately.
     """
-    for state, why in [
-        ("DIRTY", "conflicts"),
-        ("UNSTABLE", "checks are failing"),
-        ("BEHIND", "behind the base"),
-        ("BLOCKED", "protected"),
-        ("DRAFT", "a draft"),
+    for state, why, checks in [
+        ("DIRTY", "conflicts", None),
+        ("UNSTABLE", "checks", [_check("test", "failure")]),
+        ("BEHIND", "behind the base", None),
+        ("BLOCKED", "protection rules", None),
+        ("DRAFT", "a draft", None),
     ]:
-        fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state=state)
+        fake = FakeGh(
+            _three_votes(),
+            mergeable="MERGEABLE",
+            merge_state=state,
+            checks=checks,
+        )
         rc = _run(mod, monkeypatch, fake)
         captured = capsys.readouterr()
         assert rc == 1, f"MERGEABLE/{state} must block, not exit 0"
         assert "READY" not in captured.out, f"MERGEABLE/{state} rendered READY"
         assert "BLOCKED" in captured.out, f"MERGEABLE/{state} should read BLOCKED"
         assert state in captured.err, f"the reason must name {state}"
+        assert why in captured.err, f"the reason for {state} should say {why}"
 
 
 def test_a_draft_pull_request_is_never_reported_as_ready(mod, monkeypatch, capsys):
@@ -643,23 +716,170 @@ def test_a_draft_pull_request_is_never_reported_as_ready(mod, monkeypatch, capsy
     assert "DRAFT" in out
 
 
-def test_unstable_is_named_as_the_ci_conjunct(mod, monkeypatch, capsys):
-    """`UNSTABLE` is "checks failing or unfinished" - i.e. CI is not green.
+def test_unstable_with_a_red_check_names_the_check_not_a_conflict(mod, monkeypatch, capsys):
+    """`UNSTABLE` with a check-run that concluded red is the CI conjunct, named.
 
-    The tool's own docstring says the CI conjunct is a sibling's question; that is
-    true of *whether the verdict is stale*, but not of *whether checks pass*, and
-    GitHub already answers the latter here. So this is pinned as a blocked state,
-    with the reason saying checks, not "conflict" - the old single-reason message
-    would have told the reader to resolve a conflict that does not exist.
+    The old reason for this state read "checks are failing or have not finished" - a
+    gloss about checks the state does not carry. Now the read is the head's own
+    check-runs, so the sentence names the check and its own word, and the reader is
+    not sent after a conflict that does not exist.
     """
-    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="UNSTABLE")
-    _run(mod, monkeypatch, fake)
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[_check("test", "failure"), _check("test-windows", "success")],
+    )
+    rc = _run(mod, monkeypatch, fake)
     err = capsys.readouterr().err
-    assert "checks" in err
+    assert rc == 1
+    assert "test: failure" in err, "the check that holds the state must be named"
     assert "conflict" not in err.lower(), (
         "UNSTABLE is a CI problem; telling the reader to resolve a conflict sends "
         "them after something that is not there"
     )
+
+
+def test_a_cancelled_check_is_not_a_green_one(mod, monkeypatch, capsys):
+    """A check that never concluded is not a pass - measured on #1861's head.
+
+    `7409741c`: the newest `test-windows` check-run is `cancelled` with 0 steps, after
+    the runner carrying the older one was lost. Nothing failed, and nothing passed
+    either, so the head has no verdict and blocking is the right answer - the reason
+    says which check and which word.
+    """
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[
+            _check("test", "success", started="2026-09-11T01:00:00Z", id=3),
+            _check("test-windows", "cancelled", started="2026-09-11T00:30:00Z", id=2),
+        ],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "BLOCKED" in captured.out
+    assert "test-windows: cancelled" in captured.err
+
+
+def test_a_superseded_cancelled_check_does_not_block_a_head_whose_checks_passed(
+    mod, monkeypatch, capsys
+):
+    """The measured defect: #1865 (`50dea4e8`), live on 2026-10-06.
+
+    That head reads `MERGEABLE`/`UNSTABLE` while the newest `test` and `test-windows`
+    check-runs on it both concluded `success`. What holds the state down is the
+    `cancelled` `test` check-run of the 20:52 run: the 23:47 run on the same commit
+    passed both jobs, and GitHub's rollup kept the older check-run anyway. Master was
+    already an ancestor of that head, so the remedy the old reading implied ("fix the
+    failure", or a refresh) was either about a failure that was not there or a no-op
+    that publishes no new head - the PR could not have been merged by this process at
+    all, and nothing in the output said why.
+
+    So the state is reported and is not a block, and the note names the superseded
+    check-run and the run it came from, which is the fact the state cannot carry.
+    """
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[
+            _check("test", "success", run="37390520380", started="2026-10-05T23:47:56Z", id=4),
+            _check("test-windows", "success", run="37390520380", started="2026-10-05T23:47:57Z", id=5),
+            _check("test", "cancelled", run="37372464666", started="2026-10-05T20:52:57Z", id=2),
+            _check("test-windows", "success", run="37372464666", started="2026-10-05T20:53:10Z", id=3),
+        ],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    captured = capsys.readouterr()
+    assert rc == 0, "a head whose newest check-runs all passed is not blocked"
+    assert "READY 3/3" in captured.out
+    assert "UNSTABLE" in captured.out, "the state is still reported, just not as a block"
+    note = captured.out
+    assert "superseded run's check-run" in note
+    assert "test: cancelled (run 37372464666)" in note, (
+        "the note must name the superseded check-run and its run, so the reader can "
+        "go and look at it"
+    )
+    assert "BLOCKED" not in captured.out
+
+
+def test_a_check_that_has_not_concluded_is_not_read_as_green(mod, monkeypatch, capsys):
+    """`UNSTABLE` because a check is still running - the case the clause was added for.
+
+    `cyc20260912-190602` fixed a `READY` printed for `UNSTABLE`; that must not come
+    back, and the run has not concluded, so it is not green either.
+    """
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[
+            _check("test", "success"),
+            _check("test-windows", "", status="in_progress"),
+        ],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "READY" not in captured.out
+    assert "test-windows: in_progress" in captured.err
+
+
+def test_the_check_runs_are_asked_only_where_the_state_cannot_answer(mod, monkeypatch,
+                                                                    capsys):
+    """A `CLEAN` head pays nothing for a reading only `UNSTABLE` needs.
+
+    The queue reads this tool for every open PR, so an unconditional extra `gh` call
+    would be a per-PR cost on the commonest case - and the case it buys nothing for,
+    because a `CLEAN` head's checks passed by GitHub's own reading.
+    """
+    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="CLEAN")
+    _run(mod, monkeypatch, fake)
+    assert not [c for c in fake.calls if "check-runs" in " ".join(c)], (
+        "the check-runs reading is asked of an UNSTABLE head only"
+    )
+
+
+def test_a_check_runs_read_that_fails_is_a_could_not_check(mod, monkeypatch, capsys):
+    """An unreadable list is not a pass and not a verdict: exit 2, naming the failure.
+
+    Measured shape: a `gh` call that fails raises out of the reader. Catching it here
+    would report a block whose reason the tool invented, which is the same misreading
+    this reading was added to remove - one level down.
+    """
+    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="UNSTABLE",
+                  checks=None)
+    monkeypatch.setattr(mod, "_gh_json", fake)
+
+    def boom(args):
+        raise RuntimeError("gh failed (rc=1): gh api repos/... /check-runs")
+
+    monkeypatch.setattr(mod, "_head_check_runs", boom)
+    rc = mod.main(["1"])
+    captured = capsys.readouterr()
+    assert rc == 2, "a reading that could not be taken is not a verdict"
+    assert "could not be read" not in captured.out
+    assert "READY" not in captured.out
+    assert "gh failed" in captured.err
+
+
+def test_a_truncated_check_run_list_is_reported_not_silently_used(mod, monkeypatch,
+                                                                  capsys):
+    """A cut list can lose the newest check-run of a name - the one that decides it."""
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[_check("test", "success")],
+        checks_total=250,
+    )
+    _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert "more than 100 check-runs" in out
+    assert "may not be in the list that was read" in out
 
 
 def test_an_unknown_merge_state_fails_loud_rather_than_passing(mod, monkeypatch, capsys):
