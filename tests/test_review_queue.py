@@ -181,7 +181,8 @@ class FakeVotes:
     def __init__(self, reviews: list[dict] | None = None, mergeable: str = "MERGEABLE",
                  state: str = "CLEAN", head: str = HEAD, valid: int | None = None,
                  push: str | None = None, exact: bool = True,
-                 pr_state: str = "OPEN", merged_at: str = ""):
+                 pr_state: str = "OPEN", merged_at: str = "",
+                 checks: tuple | None = None):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
@@ -196,6 +197,10 @@ class FakeVotes:
         #: against. `None` keeps the historical default, far from every window.
         self.push = PUSH_TIME if push is None else push
         self.exact = exact
+        #: The head's check-runs, as the counter carries them, and whether the reading
+        #: was taken. `None` means not taken, which is what the counter does for every
+        #: non-`UNSTABLE` head (and what leaves `checks_green` False, the strict side).
+        self.checks = checks
         self.calls: list[tuple[int, int, float]] = []
         #: The real sibling module, attached by `_install` so the fakes can build
         #: its dataclasses instead of a lookalike that would agree with a misreading.
@@ -243,6 +248,8 @@ class FakeVotes:
             counted=[],
             valid_count=run if self.forced_valid is None else self.forced_valid,
             needed=needed,
+            checks=self.checks or (),
+            checks_read=self.checks is not None,
         )
 
 
@@ -606,7 +613,14 @@ def test_a_conflict_names_the_merge_and_the_classifier(mod, monkeypatch, capsys)
 
 def test_a_conflict_is_not_reported_as_an_ordinary_blocker(mod, monkeypatch, capsys):
     """A non-conflicting state is the branch's to remove, so the row must not hand
-    the reader a merge cascade for a draft."""
+    the reader a merge cascade for a draft.
+
+    The command is pinned too, because it was the one remedy this family printed that
+    answered nothing: `gh pr view --json mergeable,mergeStateStatus` reprints the fact
+    the row has already stated. What answers is the reading that explains the state,
+    which is the counter's own report (it now carries the head's check-runs) — or, for
+    a text conflict, the classifier.
+    """
     votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="DRAFT")
     fresh = FakeFresh()
     rc = _read(mod, monkeypatch, votes, fresh)
@@ -614,6 +628,87 @@ def test_a_conflict_is_not_reported_as_an_ordinary_blocker(mod, monkeypatch, cap
     assert rc == 0
     assert "unblock" in out
     assert "resolve-conflict" not in out
+    assert "gh pr view 1 -R argszero/emrg --json mergeable,mergeStateStatus" not in out, (
+        "the remedy reprints the row's own fact; the reading that answers is the "
+        "counter's report"
+    )
+    assert "check-vote-count.py 1" in out
+
+
+def test_an_unstable_head_whose_checks_passed_is_votable_not_blocked(mod, monkeypatch,
+                                                                    capsys):
+    """The row for the head this reading was rewritten for - measured, #1865.
+
+    `50dea4e8` reads `UNSTABLE` while every newest check-run on it is green (the
+    rollup keeps a superseded run's `cancelled` check-run), and master is already an
+    ancestor of it, so no remedy the branch could perform would publish a new head.
+    The old row said `unblock` — "the branch has to remove it" — for a branch with
+    nothing to remove and no way to move; the fixed reading finds green checks and
+    reaches the row that spends the cycle on the review instead.
+    """
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    # Built after `_install` attaches the real counter, whose `HeadCheck` these are.
+    _install(mod, monkeypatch, votes, FakeFresh())
+    votes.checks = (
+        votes.real.HeadCheck(
+            name="test", conclusion="success", status="completed", run_id="37390520380",
+            started_at="2026-10-05T23:47:56Z", id=4,
+        ),
+        votes.real.HeadCheck(
+            name="test", conclusion="cancelled", status="completed",
+            run_id="37372464666", started_at="2026-10-05T20:52:57Z", id=2,
+        ),
+    )
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" not in out, "a head whose checks passed is not a branch defect"
+    assert " vote " in out or "vote" in out.splitlines()[0]
+
+
+def test_an_unstable_head_whose_newest_check_never_concluded_is_an_unblock(
+    mod, monkeypatch, capsys
+):
+    """The other direction, so the green row cannot be bought by removing the branch.
+
+    A `cancelled` check-run that is the *newest* of its name means the head has no
+    verdict (measured on #1861's `7409741c`, where the newest `test-windows` check-run
+    is cancelled with 0 steps and the older one - whose runner was lost - is not what
+    decides). That head must still be `unblock`, and the reason must name the check.
+    """
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    _install(mod, monkeypatch, votes, FakeFresh())
+    votes.checks = (
+        votes.real.HeadCheck(
+            name="test", conclusion="success", status="completed", run_id="37390520380",
+            started_at="2026-10-05T23:47:56Z", id=4,
+        ),
+        votes.real.HeadCheck(
+            name="test-windows", conclusion="cancelled", status="completed",
+            run_id="37390520380", started_at="2026-10-05T23:56:31Z", id=2,
+        ),
+    )
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" in out
+    assert "test-windows: cancelled" in out, "the check that holds the state must be named"
+
+
+def test_an_unread_check_run_list_keeps_the_state_blocking(mod, monkeypatch, capsys):
+    """No reading is not a pass: an `UNSTABLE` head whose checks were not read blocks.
+
+    The counter asks for the check-runs only on an `UNSTABLE` head, and the fake here
+    answers the list as empty-or-unread - the state that must never be read as "the
+    checks are fine".
+    """
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    _install(mod, monkeypatch, votes, FakeFresh())
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" in out
+    assert "could not be read" in out
 
 
 # --- the per-cycle rule ----------------------------------------------------
