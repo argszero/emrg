@@ -32,7 +32,7 @@ re-implemented here:
 * `check-vote-count.py` owns "how many votes are still about this head?" — the
   count, the per-cycle rule, and the mergeability clause;
 * `check-merge-freshness.py` owns "is the green CI about the tree that would land?"
-  — the ancestry, and the four ways a verdict can fail to be current.
+  — the ancestry, and the five ways a verdict can fail to be current.
 
 So the number printed here is the counter's number and the staleness here is the
 freshness tool's *kind*, not a local re-derivation of either. That matters more than
@@ -936,6 +936,24 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
               "refresh would spend",
             command=f"gh workflow run test.yml --ref <branch-of-{pr}>",
             extra=[f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>"],
+        )
+    if reading.stale_read and reading.stale_kind == "no_verdict":
+        # A run that stopped without judging the tree is the `ci-red` row's *other* half:
+        # its remedy is `no_run`'s, not "read the failure". Measured 2026-10-06: this row
+        # used to be `ci-red`, and handed over `read-run-failure.py <run>` - whose answer
+        # for a cancelled job is "no failed job … nothing to explain", because there is no
+        # cause to read. The verb stays `park` for the same reason `running` does: the
+        # head is not votable until a run concludes, and the re-trigger starts one.
+        return Action(
+            kind="retrigger-ci",
+            why=reading.stale_reason
+            + " - re-triggering fires a run on the same head, which keeps the votes a "
+              "refresh would spend, and park the PR until that run concludes",
+            command=f"gh workflow run test.yml --ref <branch-of-{pr}>",
+            extra=[
+                f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>",
+                f"gh pr checks {pr} -R {repo}",
+            ],
         )
     if reading.stale_read and reading.stale_kind == "running":
         # The verb is the instruction: "wait" told the reader to block until the run

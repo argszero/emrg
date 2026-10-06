@@ -2181,3 +2181,39 @@ def test_a_closed_pull_request_is_not_read_as_a_declaring_issue(monkeypatch):
 
     assert rant.closed_issues == []
     assert "no issue yet" in tool.render_rant(rant)
+
+
+def test_a_run_that_judged_nothing_is_retriggered_not_read_for_a_cause(mod, monkeypatch, capsys):
+    """The row beside `ci-red`, and the difference is the whole point.
+
+    Measured 2026-10-06 (`cyc20261006-065715`): a head whose run concluded `failure` only
+    because a *cancelled* job counts as a failed run was given the `ci-red` row, whose
+    remedies are `read-run-failure.py <run>` and the plan suite. The first answered
+    **"no failed job in run … nothing to explain"** - there is no cause, because no job
+    judged the tree - and neither remedy re-runs anything. So the row said "a failing
+    verdict" about a run that reached no verdict, and offered no way out of it.
+
+    This is the same state `no_run` is in - a head with no verdict - so it takes the same
+    action, and the test asserts the *opposite* of the `ci-red` row's assertions: the
+    cause-reading must be absent, because it cannot produce one.
+    """
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh(
+        stale=True,
+        kind="no_verdict",
+        reason="the Test run for head aaaa concluded 'failure' without judging the tree",
+        run_id="37194550758",
+    )
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "retrigger-ci" in out
+    assert "gh workflow run test.yml --ref <branch-of-" in out, (
+        "the remedy is a re-trigger, which starts a run that can actually judge the tree"
+    )
+    assert "read-run-failure.py 37194550758" not in out, (
+        "the cause-reading answers `no failed job … nothing to explain` for exactly this "
+        "state, so handing it over is the defect this row exists to remove"
+    )
+    assert "ci-red" not in out
+    assert "cast-vote.py" not in out, "a head whose run judged nothing is not votable"

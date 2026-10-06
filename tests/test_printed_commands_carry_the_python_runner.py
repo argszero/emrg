@@ -73,9 +73,16 @@ number, the four spellings this family writes. The argument is the discriminator
 what keeps the clause off prose: "update `VERSION_SOURCES` in `scripts/bump-version.py`"
 ends at the file name and is not a thing to run, while `scripts/check-vote-count.py <PR>` is.
 
-What the clause reads on this tree, measured 2026-10-05: **32** command-shaped mentions, in
-six tools - `review-queue.py` 13, `cast-vote.py` 8, `check-merge-freshness.py` 7,
-`bump-version.py` 2, `check-merge-sequence.py` 1, `check-release-published.py` 1. The same
+What the clause reads on this tree, measured 2026-10-06: **34** command-shaped mentions, in
+six tools - `review-queue.py` 14, `cast-vote.py` 8, `check-merge-freshness.py` 8,
+`bump-version.py` 2, `check-merge-sequence.py` 1, `check-release-published.py` 1. Two of
+those are new in one afternoon and both came from a *remedy*: a printed remedy is a printed
+command, so adding one to a tool's repair path moves this number whether or not the author
+was thinking about citations (`review-queue.py`'s no-verdict row, and the reason
+`check-merge-freshness.py` now gives for it). The lesson is not to stop printing remedies -
+a remedy a reader cannot run is worth less than the count - but that this sentence is read
+from the **tree**, so a branch that adds a mention has to re-measure it, and two such
+branches merging together leave the second one to re-measure again. The same
 measurement applied to `cast-vote.py` one commit earlier (`afaeae0f`) finds the same 8
 mentions, **all 8 bare** - that is the second carrier this clause exists for, after the
 previous cycle's `review-queue.py` / `check-merge-freshness.py` pair (`60d77678`).
