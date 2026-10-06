@@ -447,6 +447,45 @@ def _counts_by_tool() -> dict[str, int]:
     return counts
 
 
+#: How the number of tools reads in the claim. Prose, not a parsed field - but the remedy
+#: below writes the whole sentence, so it has to write this part the way the docstring does.
+_TOOL_WORDS = {
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+}
+
+
+def _coverage_remedy(counts: dict[str, int]) -> str:
+    """The sentence this tree's numbers call for, in the shape the claim is written in.
+
+    A guard that names a mismatch and not its replacement leaves the arithmetic to the
+    reader, and the arithmetic is the part that has to be redone at every merge: measured
+    2026-10-06 (`cyc20261006-115348`), two branches each measured **34** command-shaped
+    mentions against their own base - both numbers right about the tree each one stood on -
+    while the tree one of them landed on after merging the other held **36**. The number a
+    branch has to write is the one its *merge result* has, which no branch can measure from
+    where it stands, and that reconciliation was done by hand twice in one cycle. The
+    numbers here come from the reader the verdict comes from - `_counts_by_tool` - so the
+    sentence a failure prints cannot be about a different measurement than the failure
+    itself.
+    """
+    tools = ", ".join(f"`{name}` {count}" for name, count in counts.items())
+    word = _TOOL_WORDS.get(len(counts), str(len(counts)))
+    noun = "tool" if len(counts) == 1 else "tools"
+    return (
+        f"What the clause reads on this tree, measured <date>: "
+        f"**{sum(counts.values())}** command-shaped mentions, in {word} {noun} - {tools}"
+    )
+
+
 def _documented_counts(docstring: str) -> tuple[int, dict[str, int]]:
     """The docstring's stated total and per-tool counts.
 
@@ -512,11 +551,58 @@ def test_the_stated_coverage_is_the_measured_one():
     )
     assert sum(measured.values()) == stated_total, (
         f"the docstring says {stated_total} command-shaped mentions, and this clause reads "
-        f"{sum(measured.values())} - update the sentence in the module docstring"
+        f"{sum(measured.values())} - write this tree's numbers in its place:\n\n"
+        f"    {_coverage_remedy(measured)}\n"
     )
     assert stated_tools == measured, (
         "the docstring's per-tool breakdown is not what the clause reads - a reader uses "
         f"it to find the files this rule covers: stated {stated_tools}, measured {measured}"
+        f"\n\n    {_coverage_remedy(measured)}\n"
+    )
+
+
+def test_the_remedy_is_written_in_the_shape_this_guard_reads():
+    """The sentence a failure prints is read back through the same clause that reads the claim.
+
+    The remedy is not a second implementation of the coverage sentence if the guard's own
+    reader accepts it: parsed by `_documented_counts`, it must yield exactly the counts
+    `_counts_by_tool` measured. That is what keeps a printed fix from drifting away from the
+    claim it is a fix for - a paste of it has to be a claim this file can read, and reading
+    it back has to agree with the tree.
+    """
+    measured = _counts_by_tool()
+    assert measured, "the clause read nothing, so there is no remedy to check"
+
+    remedy = _coverage_remedy(measured)
+    stated_total, stated_tools = _documented_counts(remedy + "\n")
+
+    assert (stated_total, stated_tools) == (sum(measured.values()), measured), (
+        "the printed remedy is not the sentence this guard reads: a reader who pastes it "
+        f"would still be off. printed {remedy!r}, parsed {(stated_total, stated_tools)!r}, "
+        f"measured {(sum(measured.values()), measured)!r}"
+    )
+
+
+def test_the_remedy_counts_every_tool_and_labels_the_number_of_them():
+    """Both halves of the sentence on a synthetic tree, so each can fail on its own.
+
+    The real tree's counts cannot separate "the total is the sum" from "the total happens
+    to equal the first tool's count", and nothing there exercises the word for a tool count
+    other than the one this file has. Synthetic inputs are the only place the arithmetic can
+    be asked directly.
+    """
+    two = _coverage_remedy({"a.py": 2, "b.py": 1})
+    assert "**3** command-shaped mentions" in two, (
+        f"the total is the sum of the per-tool counts, not one of them: {two!r}"
+    )
+    assert "in two tools" in two, f"the number of tools has to be stated: {two!r}"
+    assert "`a.py` 2" in two and "`b.py` 1" in two, (
+        f"every tool of the measurement has to be named with its own count: {two!r}"
+    )
+
+    one = _coverage_remedy({"only.py": 4})
+    assert "**4** command-shaped mentions" in one and "in one tool -" in one, (
+        f"a single tool is not 'one tools', and its count is still the total: {one!r}"
     )
 
 
