@@ -1912,3 +1912,62 @@ def test_a_dry_run_refuses_a_wrong_tree_claim_too(mod, monkeypatch, capsys, body
     assert "dry run" not in capsys.readouterr().out, (
         "the refusal comes before the dry-run line, so the run never reads as a pass"
     )
+
+
+def test_a_malformed_id_in_the_body_is_refused_as_it_is_in_the_flag(
+    mod, monkeypatch, capsys, body_file
+):
+    """One string, one verdict - the flag and the body must agree about it.
+
+    Measured 2026-10-05 (`cyc20261005-234557`): `--cycle cyc20261005-2345571` was
+    always refused as "not a cycle id", while a *body* stating that same string was
+    accepted, because the counter's reader took `cyc20261005-234557` out of the longer
+    run of digits. The vote would then have been attributed to a cycle that did not
+    cast it, and the abstention window - whose whole subject is who pushed a head -
+    would have been that cycle's. This is the body half of the pair; the flag half is
+    `test_a_malformed_cycle_flag_is_refused` above, which reads the same shape through
+    `--cycle`.
+    """
+    counter = FakeCounter(verdict_with())
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file("✅ LGTM\n\n— cycle cyc20261005-2345571")],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert "no cycle id" in err, err
+    assert gh.calls == [], "nothing may be posted for a body that states no cycle id"
+    assert counter.calls == [], "and the count is not worth reading for it"
+
+
+def test_the_boundary_leaves_a_well_formed_body_alone(mod, monkeypatch, capsys, body_file):
+    """The other direction: the id this file is given is still read from the body.
+
+    Said with the id at the *end of a sentence* - `… -- cycle cyc<id>` followed by a
+    newline - because that is the shape every vote body in this repo has, and a
+    boundary that fired there would refuse every real vote.
+    """
+    mine = "cyc20261005-234557"
+    counter = FakeCounter(
+        verdict_with(),
+        verdict_with([vote(cycle=mine)], counted=[True], valid_count=2),
+    )
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        [
+            "1255",
+            "--cycle", mine,
+            "--body-file", body_file(f"✅ LGTM\n\n— cycle {mine}\n"),
+        ],
+    )
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert gh.calls, "a well-formed body is still posted"

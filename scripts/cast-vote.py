@@ -262,7 +262,15 @@ _VOTES_NEEDED = 3
 # how the two tools came to disagree (2026-09-17, and again on 2026-09-27 for quoted
 # ids). A helper that accepted a different shape than the counter reads would post
 # bodies that are void by construction, which is the defect it exists to prevent.
-_CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
+#
+# The trailing `(?!\d)` is the token boundary on the right, taken with the pattern
+# rather than decided here: the counter's own comment carries the measurement
+# (2026-10-05, `cyc20261005-234557`) — a body stating `cyc20261005-2345571` used to
+# be attributed to `cyc20261005-234557`, an id it never states, while this file
+# refused that same string as a `--cycle` value. `fullmatch` needs no boundary of its
+# own; it is kept identical so the two copies stay one pattern, which the test below
+# asserts.
+_CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}(?!\d)")
 
 # Every `return 2` declares which of these it is, as `# cause: <slug>` on the
 # return itself, and each slug is named in the exit-code table above. The three
