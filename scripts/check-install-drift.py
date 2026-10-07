@@ -84,7 +84,14 @@ history, and every membership question here is about history. Left intolerant th
 `2` on the very host this tool exists for. Tolerating it can only *remove* a candidate, so a
 file whose content sits under a missing tree reads as drift: the same false-positive
 direction, and the same safe one, as content that was committed and then orphaned. The count
-of absent objects is printed so that a narrowed set is never read as the whole one.
+of absent objects is printed so that a narrowed set is never read as the whole one - and when
+it is not zero the verdict is hedged to match, because the drift claim is then a candidate
+and not a proof: the summary says the content is absent from what was **walked**, and the
+"move the change into the source checkout" remedy is withheld, since content under an absent
+object can be an *older* release's bytes rather than an edit and following the remedy would
+revert shipped work (measured 2026-10-08, `cyc20261008-042840`: the install tree's
+`Shell.tsx` is the bytes from before `renderer={mdRenderer}`, which the checkout's master
+holds).
 
 Exit codes
 ----------
@@ -309,6 +316,11 @@ def scan(
             )
         else:
             note = "no commit of this checkout holds this content"
+            if missing:
+                # The walk was narrowed (see `_tolerant_objects`), so this is the strongest
+                # the reading supports: a commit holding these bytes can sit under an absent
+                # object. Stated without the qualifier it is a claim the walk cannot make.
+                note += " among the objects that could be walked"
         reported.append((relative, size, note))
     return reported, skipped, len(shared), missing
 
@@ -431,6 +443,27 @@ def main(argv: list[str] | None = None) -> int:
 
     for relative, size, note in drifted:
         print(f"{relative} ({size} bytes) - {note}")
+
+    if missing:
+        # The verdict was reached over a *narrowed* history, so it may not be stated as
+        # proof and the remedy below may not be offered. An absent object can hide the very
+        # commit whose content matches, so the file's bytes can be an **older** release's
+        # rather than an edit - and "move the change into the source checkout" would then
+        # revert shipped work. Measured 2026-10-08 (`cyc20261008-042840`) on this host: the
+        # install tree's `Shell.tsx` (blob `3aeeba0f`, which this checkout does not have) is
+        # the bytes from before `renderer={mdRenderer}`, and master holds that line.
+        print(
+            f"{len(drifted)} file(s) hold content no shipped commit in this walk has; "
+            f"{checked} checked, {missing} object(s) not walked"
+        )
+        print(
+            "    read this as a drift candidate over a narrowed history, not a proof: an "
+            "absent object can hold a matching commit, and content the upgrade replaces can "
+            "be an older release's bytes. Do not edit the source to match it - recover the "
+            "absent objects and re-run, or compare the file's history by hand."
+        )
+        return 1
+
     print(f"{len(drifted)} file(s) hold content no shipped commit has; {checked} checked")
     print(
         "    this was edited in place. The install tree is not a git clone and an "

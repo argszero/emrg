@@ -502,6 +502,74 @@ def test_an_absent_object_is_tolerated_rather_than_making_the_reading_unmeasurab
     )
 
 
+def test_a_narrowed_walk_hedges_the_verdict_and_withholds_the_remedy(tmp_path: Path) -> None:
+    """A drift verdict over a narrowed history may not read as proof, nor offer the remedy.
+
+    `--missing=print` lets the walk finish on a clone with a hole, and tolerating a hole can
+    only *remove* a candidate, so a file under an absent object reads as drift - the safe
+    direction `test_an_absent_object_is_tolerated_...` pins. But that verdict is then a
+    candidate and not a proof, and the tool stated it as one: the summary said "no shipped
+    commit has this content" and the remedy said to "move the change into the source
+    checkout". The remedy is actively wrong when the install copy is *older* than the
+    checkout - measured 2026-10-08 (`cyc20261008-042840`) on this host, the install tree's
+    `Shell.tsx` is the bytes from before `renderer={mdRenderer}`, which master holds, so
+    following it would revert a shipped line.
+
+    Both directions are asserted: the narrowed run withholds the remedy and says the walk was
+    narrowed, and the intact run - the same pair before the object is removed - still offers
+    it, so the hedge is a property of the reading rather than a line the tool stopped printing.
+    """
+    root = tmp_path / "checkout"
+    (root / "emrg").mkdir(parents=True)
+    (root / "emrg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.invalid")
+    _git(root, "config", "user.name", "t")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "released")
+
+    install = tmp_path / "install" / "source"
+    (install / "emrg").mkdir(parents=True)
+    # An edit, so the file is drift whether or not the walk is narrowed.
+    (install / "emrg" / "mod.py").write_text("x = 2\n", encoding="utf-8")
+
+    intact = _run(install, root)
+    assert intact.returncode == 1, intact.stdout
+    assert "move the change into the source checkout" in intact.stdout, (
+        f"the intact run did not offer the remedy, so this is not a control: {intact.stdout!r}"
+    )
+    assert "not walked" not in intact.stdout, (
+        f"a full walk reported itself as narrowed: {intact.stdout!r}"
+    )
+
+    tree = _git(root, "rev-parse", "HEAD^{tree}").stdout.strip()
+    loose = root / ".git" / "objects" / tree[:2] / tree[2:]
+    assert loose.exists(), (
+        "this fixture needs a freshly written, still-loose object to forge the hole; "
+        f"{tree} is not loose, so the case would not exercise anything"
+    )
+    os.chmod(loose, stat.S_IWRITE)
+    loose.unlink()
+
+    narrowed = _run(install, root)
+    assert narrowed.returncode == 1, (
+        f"a narrowed walk answered {narrowed.returncode}, not the drift verdict: "
+        f"{narrowed.stdout!r} {narrowed.stderr!r}"
+    )
+    assert "membership: 1 object(s)" in narrowed.stdout, narrowed.stdout
+    assert "move the change into the source checkout" not in narrowed.stdout, (
+        "the remedy was offered over a narrowed history, where the file's bytes can be an "
+        f"older release's rather than an edit: {narrowed.stdout!r}"
+    )
+    assert "not walked" in narrowed.stdout, (
+        "the verdict does not say how much of history it walked, so a candidate reads as a "
+        f"proof: {narrowed.stdout!r}"
+    )
+    assert "among the objects that could be walked" in narrowed.stdout, (
+        f"the per-file note still claims the whole history: {narrowed.stdout!r}"
+    )
+
+
 def test_the_report_names_both_trees_before_the_verdict(
     install_dir: Path, checkout: Path
 ) -> None:
