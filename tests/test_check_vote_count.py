@@ -88,6 +88,26 @@ def mod():
 
 
 @pytest.fixture(autouse=True)
+def _identity_reads_no_remote(mod, monkeypatch):
+    """Pin the remote half of the identity, for every test in this file.
+
+    `instance_logins` reads the token's login (`gh api user`) **and** the accounts this
+    checkout's `git remote -v` names, because a host may push under more than one and
+    GitHub attributes a push to the account that authenticated — `remote_owners` carries
+    the measurement, and the review on #1900 the two-arm test that pins it. Left live,
+    the second half would answer `pm25coder` on this checkout, so the file's
+    `SELF_LOGIN` / `OTHER_LOGIN` pair would mean different things on different machines
+    and a count would be a verdict about the fixture rather than about the tool.
+
+    Empty here, which is the reading the tool had before it could see a remote at all.
+    A test that wants the second login sets this itself; a second copy of the counter
+    (the one `cast-vote.py` loads) is patched where it is used, because it is a different
+    module object and this fixture reaches only `mod`.
+    """
+    monkeypatch.setattr(mod, "_git_remote_listing", lambda: "")
+
+
+@pytest.fixture(autouse=True)
 def _pinned_cycle_records(mod, tmp_path, monkeypatch):
     """Point the abstention window at an empty directory, for every test in this file.
 
@@ -263,6 +283,18 @@ def _run(mod, monkeypatch, fake: FakeGh, argv: list[str] | None = None) -> int:
     monkeypatch.setattr(mod, "_gh_json", fake)
     monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
     return mod.main(argv if argv is not None else ["1"])
+
+
+def _identity(mod, monkeypatch, listing: str = "") -> None:
+    """Point the remote half of the identity at `listing`, and drop the cache.
+
+    The login set is computed once per run (`instance_logins`) and cached, so an arm
+    that changes *whose* logins this host has must clear it, or it is answered by the
+    arm before it — the same trap `test_an_undecided_voter_keeps_the_clause` names for
+    the unreadable-login reading, and the reason that test resets the cache too.
+    """
+    monkeypatch.setattr(mod, "_git_remote_listing", lambda: listing)
+    mod._own_logins = mod._UNSET
 
 
 # --- classification: the mark, however it is decorated ---------------------
@@ -2002,8 +2034,9 @@ def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
 
     The fixture is the one from
     `test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count`, and the voter
-    is this instance in all three arms - so #1857's exemption, which asks about the
-    *author*, cannot reach any of them. The arms differ in the pusher alone.
+    is this instance in every arm - so #1857's exemption, which asks about the *author*,
+    cannot reach any of them. The arms differ in the pusher, and in (d)/(e) in which
+    logins the host is read as having.
     """
     pushed = _push(2026, 9, 11, 9, 0)
     vote_at = _push(2026, 9, 11, 10, 0)
@@ -2023,6 +2056,11 @@ def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
     assert rc == 0, out
     assert "READY 1/1" in out, out
     assert "inside the window" not in out, out
+    # …and the line says *which* datum decided, because a reader who cannot see it
+    # cannot tell an exemption the identity produced from the clock's ordinary answer,
+    # and those two are corrected in opposite directions (the review on #1900 asked for
+    # the reading on the row either way).
+    assert f"pushed by {OTHER_LOGIN}" in out, out
 
     # (c) the fail-safe arm: with no actor reading the clause stays applied, so the
     # exemption can only be bought by a positive identification of someone else
@@ -2031,6 +2069,91 @@ def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
     out = capsys.readouterr().out
     assert rc == 1, out
     assert f"VOID {cycle} - cast inside the window" in out, out
+
+    # (d) **this host's other login** - the hole the review on #1900 measured, on
+    # 2026-10-08. A host can push under more than one account: GitHub attributes a push
+    # to the account that authenticated, so a checkout whose remote is
+    # `git@github.com:argszero/emrg.git` has its pushes recorded as `argszero` while
+    # `gh api user` answers something else (that host's, `how2how2how2-arch`; the numbers
+    # are in `remote_owners`). Comparing against the one login un-refused this instance's
+    # *own* pushes made under the other one, which is a self-review - and the arm is
+    # indistinguishable from (a) except through the identity reading, so nothing else in
+    # the fixture can be what makes it pass.
+    second_login = "argszero"
+    assert second_login != SELF_LOGIN
+    other_mine = FakeGh([_approve(cycle, vote_at)], push_time=pushed, pusher=second_login)
+    _identity(mod, monkeypatch, "origin\tgit@github.com:argszero/emrg.git (push)")
+    rc = _run(mod, monkeypatch, other_mine)
+    out = capsys.readouterr().out
+    assert rc == 1, f"arm (d), this host's second login: {out}"
+    assert f"VOID {cycle} - cast inside the window" in out, out
+
+    # (e) …and the same login stops being this host's once the remote names someone
+    # else, which is the direction the exemption exists for. One input changes between
+    # (d) and (e) - the remote listing - so (d) cannot pass for a tool that kept the
+    # clause on every head, nor (e) for one that exempted every pusher.
+    _identity(mod, monkeypatch, "origin\tgit@github.com:someone-else/emrg.git (push)")
+    rc = _run(mod, monkeypatch, other_mine, ["1", "--min-votes", "1"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"arm (e), a stranger's remote: {out}"
+    assert "READY 1/1" in out, out
+    assert "inside the window" not in out, out
+
+
+def test_a_remote_url_names_its_account_in_every_form_it_is_written(mod):
+    """`remote_owners` reads the account out of both shapes a GitHub remote takes.
+
+    The second half of the identity is a parsing step with no network in it, so it is
+    pinned directly rather than through a run: the scp-like `git@host:owner/repo.git`
+    (what an SSH checkout writes) and the URL forms. A local-path remote — this
+    checkout's own `origin` is a directory — must name nobody: read as an account it
+    would invent a login, and an invented login is one the clause treats as this
+    instance's own, wrongly abstaining on another instance's head. Duplicated rows (a
+    remote lists itself once for fetch and once for push) are one account.
+    """
+    listing = "\n".join(
+        [
+            "origin\tgit@github.com:argszero/emrg.git (fetch)",
+            "origin\tgit@github.com:argszero/emrg.git (push)",
+            "fork\thttps://github.com/pm25coder/emrg.git (fetch)",
+            "tunnel\tssh://git@github.com:22/Someone-Else/emrg.git (push)",
+            "local\tC:/Users/Administrator/.emrg/evolution/emrg/ (push)",
+            "empty\t (fetch)",
+        ]
+    )
+    assert mod.remote_owners(listing) == frozenset(
+        {"argszero", "pm25coder", "Someone-Else"}
+    )
+
+
+def test_the_login_set_is_the_token_and_the_remotes(mod, monkeypatch):
+    """`instance_logins` is a **set**: the token's login plus the remotes' accounts.
+
+    Both halves are this host's, so the reading has to be the union — reading only the
+    first is the defect the review on #1900 measured, and reading only the second would
+    lose a host whose remotes are all local (this one's `origin` is a directory) while
+    its token answers a login. Each arm re-reads through `_identity`, which clears the
+    cache the arm before it left.
+    """
+    monkeypatch.setattr(mod, "_gh_json", lambda args: {"login": "pm25coder"})
+    _identity(mod, monkeypatch, "origin\tgit@github.com:argszero/emrg.git (push)")
+    assert mod.instance_logins() == frozenset({"pm25coder", "argszero"})
+    assert mod.own_login("argszero") is True
+    assert mod.own_login("a-stranger") is False
+
+    # (b) the token alone, when no remote names anybody
+    _identity(mod, monkeypatch, "local\tC:/Users/Administrator/emrg/ (push)")
+    assert mod.instance_logins() == frozenset({"pm25coder"})
+
+    # (c) nothing readable at all: the empty set keeps the clause applied, which is the
+    # direction that cannot credit a self-review
+    def _down(args):
+        raise RuntimeError("gh failed (rc=1): gh api user")
+
+    monkeypatch.setattr(mod, "_gh_json", _down)
+    _identity(mod, monkeypatch, "")
+    assert mod.instance_logins() == frozenset()
+    assert mod.own_login("pm25coder") is True
 
 
 def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_path):
@@ -2156,7 +2279,7 @@ def test_an_undecided_voter_keeps_the_clause(mod, monkeypatch, capsys):
     # and the arm would stop describing "the login cannot be read" - it would describe
     # "the login could not be read earlier in the same run", which the tool deliberately
     # never re-asks. Reset, `unreadable.login = ""` is the first ask of the run.
-    mod._own_login = mod._UNSET
+    mod._own_logins = mod._UNSET
     unreadable = FakeGh([_approve(cycle, vote_at, author=OTHER_LOGIN)], push_time=pushed)
     unreadable.login = ""
     rc = _run(mod, monkeypatch, unreadable)
@@ -2250,7 +2373,7 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monk
     # With both pinned, the arms below turn on the pusher alone: this instance is
     # `SELF_LOGIN`, and `OTHER_LOGIN` is a login it is not.
     for owner in (counter, cast_vote.votes_counter()):
-        monkeypatch.setattr(owner, "_own_login", SELF_LOGIN)
+        monkeypatch.setattr(owner, "_own_logins", frozenset({SELF_LOGIN}))
 
     cases = (
         # (push instant, inside the window?)

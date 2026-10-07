@@ -550,14 +550,23 @@ def own_head_window(
     **Whose push it is comes before the window.** The clause is about a head *this*
     instance pushed, and the window is only a proxy for that: a head the peer pushed
     inside a gap between this host's cycles fell inside the window and was refused
-    (measured 2026-10-06, `cyc20261006-122605`). A `pusher` reading a *different* login
-    therefore posts; an unknown one keeps the refusal, so this can only ever un-refuse
-    a push that is provably someone else's.
+    (measured 2026-10-06, `cyc20261006-122605`). A `pusher` reading a login **outside
+    the set this instance pushes under** therefore posts, and the note says so; an
+    unknown one keeps the refusal, so this can only ever un-refuse a push that is
+    provably someone else's. The set, rather than one login, because a host holds more
+    than one (the SSH remote's account and the token's) and reading a single one
+    un-refused this instance's own pushes made under its other one — the review on
+    #1900 measured a run whose actor is `argszero` against a token answering
+    `how2how2how2-arch`.
     """
     queue = review_queue()
     pusher = str(getattr(verdict, "pusher", ""))
     if pusher and not votes_counter().own_login(pusher):
-        return "", ""
+        return "", (
+            f"the head was pushed by {pusher}, which is not a login this instance "
+            "pushes under (`gh api user` and `git remote -v`), so the head is another "
+            "instance's work and the abstention clause is not asked of it"
+        )
     if prev_cycle:
         previous, where = prev_cycle, "named by --prev-cycle"
     else:

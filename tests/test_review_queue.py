@@ -63,6 +63,12 @@ PREV_CYCLE = "cyc20260917-215929"
 #: comparison need a name (the same pair `tests/test_check_vote_count.py` uses).
 SELF_LOGIN = "how2how2how2-arch"
 OTHER_LOGIN = "pm25coder"
+#: The **second** login this host pushes under. A host may hold two accounts — a push is
+#: attributed to the one that authenticated, not to the one the reading happened to ask
+#: — and a head pushed under this one is still this instance's own work (the hole the
+#: review on #1900 measured, 2026-10-08: actor `argszero` against a token answering
+#: `how2how2how2-arch`). Distinct from `OTHER_LOGIN`, which is nobody here.
+SECOND_LOGIN = "argszero"
 
 LOCAL = datetime.now().astimezone().tzinfo
 
@@ -189,7 +195,7 @@ class FakeVotes:
                  push: str | None = None, exact: bool = True,
                  pr_state: str = "OPEN", merged_at: str = "",
                  checks: tuple | None = None,
-                 pusher: str = SELF_LOGIN, login: str = SELF_LOGIN):
+                 pusher: str = SELF_LOGIN, logins: frozenset[str] | None = None):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
@@ -204,12 +210,14 @@ class FakeVotes:
         #: against. `None` keeps the historical default, far from every window.
         self.push = PUSH_TIME if push is None else push
         self.exact = exact
-        #: Whose CI run fixed `push`, and the login this instance votes under. The
-        #: clause asks *whose push* before it asks about the window, and the real
-        #: counter answers the identity half with `gh api user`; here it is a field, so
-        #: a test can name the pusher without an API.
+        #: Whose CI run fixed `push`, and the logins this instance pushes under. The
+        #: clause asks *whose push* before it asks about the window, and the real counter
+        #: answers the identity half from `gh api user` **and** `git remote -v`; here it
+        #: is a field, so a test can name the pusher and the host's own logins without an
+        #: API. A set, because a host may hold two accounts and comparing one un-abstained
+        #: this instance's own pushes made under the other (the review on #1900).
         self.pusher = pusher
-        self.login = login
+        self.logins = logins if logins is not None else frozenset({SELF_LOGIN})
         #: The head's check-runs, as the counter carries them, and whether the reading
         #: was taken. `None` means not taken, which is what the counter does for every
         #: non-`UNSTABLE` head (and what leaves `checks_green` False, the strict side).
@@ -269,14 +277,17 @@ class FakeVotes:
     def own_login(self, author):
         """The counter's `own_login`: an author it cannot tell apart keeps the clause.
 
-        The real one asks `gh api user` and compares; a payload with no author, or a
-        login that cannot be read, answers `True` - the direction that costs a delay
-        rather than crediting a self-review. Reproduced here rather than imported
-        because this file's fakes are the *second* answer the tool is measured against.
+        The real one reads the logins this host pushes under — the token's and the
+        remotes' — and compares by **membership**; a payload with no author, or no login
+        that can be read, answers `True` - the direction that costs a delay rather than
+        crediting a self-review. Reproduced here rather than imported because this file's
+        fakes are the *second* answer the tool is measured against.
         """
         if not author:
             return True
-        return author == self.login
+        if not self.logins:
+            return True
+        return author in self.logins
 
 
 class FakeFresh:
@@ -1164,6 +1175,38 @@ def test_a_head_another_instance_pushed_is_not_this_cycles_own(mod, monkeypatch,
     assert rc == 0
     assert "abstain" not in out
     assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
+
+
+def test_a_head_pushed_under_this_hosts_other_login_is_still_an_abstain(
+    mod, monkeypatch, capsys
+):
+    """The hole the review on #1900 measured: one login is not the whole identity.
+
+    A host can push under more than one account — GitHub attributes a push to the one
+    that authenticated, so a checkout whose remote is `git@github.com:argszero/emrg.git`
+    has its pushes recorded as `argszero` while `gh api user` answers something else
+    (measured 2026-10-08; the numbers are in `check-vote-count.py`'s `remote_owners`).
+    The head below carries the same instant as
+    `test_a_head_another_instance_pushed_is_not_this_cycles_own`, and that test's
+    exemption must not reach it: a push under `SECOND_LOGIN` is this host's own work just
+    as much as one under `SELF_LOGIN`, so voting here is the self-review the clause
+    exists to stop. Without this arm the fake would pass for any predicate that asked
+    about a single login.
+    """
+    votes = FakeVotes(
+        reviews=[],
+        push=_push(2026, 9, 17, 22, 30),
+        pusher=SECOND_LOGIN,
+        logins=frozenset({SELF_LOGIN, SECOND_LOGIN}),
+    )
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" in out
+    # …and the row names the datum that decided, so a reader can tell an abstention an
+    # identity produced from the clock's ordinary one — the two are corrected in
+    # opposite directions.
+    assert SECOND_LOGIN in out
 
 
 def test_a_full_count_at_another_instances_head_is_mergeable(mod, monkeypatch, capsys):
