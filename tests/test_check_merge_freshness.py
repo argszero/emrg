@@ -56,6 +56,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,18 @@ BASE = "c" * 40
 # The actions run's own id, as the API reports it - the value a failing remedy hands over
 # so its command is runnable as printed.
 RUN_ID = "37194550758"
+#: The head commit's date, as the fixture's default. Old on purpose: a head whose run
+#: really never existed is a head pushed long ago, and the age is what tells the two
+#: states an empty run lookup is the shape of apart. A test that wants the *young* head
+#: passes its own timestamp (`_just_now`), and one that wants the age to be unreadable
+#: passes `None`.
+HEAD_COMMITTED_AT = "2026-01-01T00:00:00Z"
+
+
+def _just_now(seconds_ago: float = 0.0) -> str:
+    """A commit date `seconds_ago` in the past, so the tool's real clock reads it young."""
+    stamp = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    return stamp.isoformat().replace("+00:00", "Z")
 
 
 def _load_module():
@@ -105,10 +118,16 @@ class FakeGh:
     """
 
     def __init__(self, pr_view: dict, compare: dict, runs: list[dict] | None,
-                 jobs: list[dict] | None = None, jobs_unreadable: bool = False):
+                 jobs: list[dict] | None = None, jobs_unreadable: bool = False,
+                 head_committed_at: str | None = HEAD_COMMITTED_AT):
         self.pr_view = pr_view
         self.compare = compare
         self.runs = runs
+        #: The head commit's date, or `None` for a lookup that could not be read.
+        #: The default is the old head the run-less state describes, so the tests
+        #: that are about a dropped push keep reading `no_run`; a test that wants
+        #: the young head (or the unreadable one) says so.
+        self.head_committed_at = head_committed_at
         #: The jobs of the newest run, or `None` to mirror that run's own conclusion.
         #: The default is what a real run looks like: a run concludes `failure` because a
         #: job did, and that job is the one whose cause a reader can act on. A fixture that
@@ -135,6 +154,15 @@ class FakeGh:
                 return {"jobs": _jobs_mirroring(self.runs)}
             if any("actions/runs" in a for a in args):
                 return {"runs": self.runs if self.runs is not None else []}
+            if any("/commits/" in a for a in args):
+                # The head's age, asked only where an empty run lookup makes it
+                # decide something. `None` is the unreadable case, and the tool has
+                # to keep its pre-existing reading for it rather than call the head
+                # young - so this route is what test_the_age_that_could_not_be_read
+                # is about.
+                if self.head_committed_at is None:
+                    raise RuntimeError("gh failed (rc=1): the commit is not served")
+                return {"committed": self.head_committed_at}
             assert any(a.startswith("repos/") and "/compare/" in a for a in args), args
             return self.compare
         raise AssertionError(f"unexpected gh call: {args}")
@@ -684,6 +712,101 @@ def test_a_missing_run_is_told_to_re_trigger_rather_than_refresh(mod, monkeypatc
     assert "bash scripts/re-trigger-ci.sh" in err, (
         "the re-trigger remedy must spell the shell script `bash scripts/re-trigger-ci.sh`"
     )
+
+
+# --- the empty lookup: two states, one shape -------------------------------
+
+
+def test_the_registration_window_is_not_narrower_than_the_measurement(mod):
+    """The window is derived from a measurement, so it may not be quietly shrunk.
+
+    Two measurements set it, and a later cycle that trims the number has to face
+    them here: the case this file's docstring records for #1585 - head `fb672634`
+    pushed `2026-09-24T12:45:21Z`, its `Test` run created `12:45:38Z`, i.e. 17 s
+    during which an empty lookup was the *same bytes* as a dropped push - and 11
+    push/run pairs measured on this repository on 2026-10-07 at 1, 1, 1, 2, 2, 4,
+    5, 5, 5, 6 s. The window has to cover the largest of them, or the tool asserts
+    the dropped-push reading inside the very window it exists to exclude.
+    """
+    assert mod._REGISTRATION_WINDOW_SECONDS >= 17.0, (
+        "the window is narrower than the measured push-to-run delay (17 s), so an "
+        "empty lookup inside it would be reported as a dropped push"
+    )
+
+
+def test_a_head_pushed_moments_ago_is_parked_not_retriggered(mod, monkeypatch, capsys):
+    """The empty lookup is not evidence while the run may still be arriving.
+
+    Measured 2026-10-07 (`cyc20261007-022540`): seconds after head `338a9a53` was
+    pushed, `gh pr checks` printed "no checks reported" for it while its run
+    existed and was registering - and the same reading reaches a cycle through
+    this tool. A re-trigger here fires a **second** run beside the one arriving
+    (`test.yml` declares no concurrency group, so nothing cancels it), and the
+    reader is told the head has no run when it has one.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [], head_committed_at=_just_now())
+    asked = _votes(mod, monkeypatch, 0)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1, "a head with no verdict is still not fresh"
+    assert asked == [], "no count is read for a state whose remedy ignores it"
+    assert "not evidence of a dropped push" in cap.out
+    assert "there is NO Test run" not in cap.out, (
+        "the sentence claims a fact about GitHub that the head's age says this reading "
+        "cannot know yet"
+    )
+    assert "park it" in cap.err
+    assert "next cycle" in cap.err, "the deferral has to name when the row comes back"
+    # The word appears in the explanation (why the duplicate is not fired), so the
+    # assertion is about the *command*: no re-trigger may be handed over here.
+    assert "gh workflow run" not in cap.err
+    assert "re-trigger-ci.sh" not in cap.err, (
+        "the re-trigger is the duplicate-run remedy, and this is exactly the state it "
+        "must not be handed to"
+    )
+    assert any(any("/commits/" in a for a in c) for c in fake.calls), (
+        "the age is what decides this, so the lookup that reads it has to be made"
+    )
+
+
+def test_the_same_empty_lookup_past_the_window_still_reads_as_no_run(
+    mod, monkeypatch, capsys
+):
+    """The discriminating arm: only the head's age differs, and the verdict must too.
+
+    Same fixture as the test above - a head with no run for it - and the old commit
+    date the fixture defaults to is the *other* state the empty answer is the shape
+    of. If this arm read `no_run_yet` as well, the age would be decoration and the
+    re-trigger (the remedy a dropped push needs) would be unreachable.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [])
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "there is NO Test run" in cap.out
+    assert "past the" in cap.out, (
+        "the reason names the age it was decided on, so a reader can tell the two "
+        "readings apart"
+    )
+    assert "re-trigger CI on the same head" in cap.err
+
+
+def test_an_age_that_could_not_be_read_keeps_the_no_run_reading(mod, monkeypatch, capsys):
+    """`None` is "not measured", and it may not be spent as a refusal.
+
+    The window can only *withhold* the dropped-push sentence, and it withholds it on
+    a measurement. A commit lookup that fails must therefore leave the reading this
+    tool gave before the window existed - the stronger one - rather than turning an
+    unmeasured age into `no_run_yet` and parking a head that may really have lost
+    its run.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [], head_committed_at=None)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "there is NO Test run" in cap.out
+    assert "past the" not in cap.out, "no age was read, so none may be stated"
+    assert "re-trigger CI on the same head" in cap.err
 
 
 def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
