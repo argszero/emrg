@@ -23,7 +23,8 @@ class GrepTool(ToolExecutor):
     """Search file contents using regex patterns with optional context lines.
 
     Returns matches as filename:line_number: content. Skips binary files,
-    hidden dirs, and files over 512KB.
+    hidden dirs (except `.emrg`, where the agent's own state lives), and files
+    over 512KB.
     """
 
     def definition(self) -> ToolDefinition:
@@ -35,7 +36,9 @@ class GrepTool(ToolExecutor):
                 "Supports -i (case-insensitive), context lines before/after matches, "
                 "file glob filtering, and output truncation caps. "
                 "Use this instead of 'bash grep' for cross-platform pattern search "
-                "with automatic binary/hidden file skipping."
+                "with automatic binary/hidden file skipping. Hidden entries are skipped "
+                "with one exception: .emrg is read, because the agent's own state lives "
+                "there."
             ),
             parameters={
                 "type": "object",

@@ -31,7 +31,8 @@ class GlobTool(ToolExecutor):
                 "'**/*test*' for test files. "
                 "Results are capped at 500 matches, sorted by path. "
                 "Skips hidden entries and the noise directories .git, node_modules, "
-                ".venv and __pycache__, and says in the result how many paths it "
+                ".venv and __pycache__, with one exception: .emrg is read, because the "
+                "agent's own state lives there. Says in the result how many paths it "
                 "skipped — the count is what was left after that skip, not what the "
                 "tree holds."
             ),

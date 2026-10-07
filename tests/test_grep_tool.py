@@ -148,6 +148,61 @@ def test_skips_hidden_dirs(temp_cwd):
     assert "No matches" in result.content
 
 
+class TestTheHiddenDirectoryItKeepsIsDeclared:
+    """`grep` drops every hidden dot-part except `.emrg`, and said only "hidden dirs".
+
+    Measured 2026-10-07 (`cyc20261007-000240`) with the tool itself: a search from a root
+    holding `.emrg/memory/MEMORY.md` and `.git/config` returns the `.emrg` file and never
+    the `.git` one, while the description promised "automatic binary/hidden file skipping"
+    and the class docstring "Skips binary files, hidden dirs, and files over 512KB". The
+    exception is deliberate — `.emrg` is the agent's own state — so the claim is what is
+    wrong, exactly as in the sibling `glob` tool (issue #1880).
+    """
+
+    def _tree(self, root: Path) -> None:
+        (root / ".emrg" / "memory").mkdir(parents=True)
+        (root / ".emrg" / "memory" / "MEMORY.md").write_text("# index\nNEEDLE here\n")
+        (root / ".git").mkdir()
+        (root / ".git" / "config").write_text("NEEDLE in git config\n")
+        (root / "src.py").write_text("NEEDLE in source\n")
+
+    def _search(self, path: Path):
+        return _run(GrepTool().execute({
+            "pattern": "NEEDLE", "path": str(path), "intent": "hidden-dir probe",
+        }))
+
+    def test_the_definition_names_the_one_hidden_directory_that_is_read(self):
+        tool = GrepTool()
+        assert ".emrg" in tool.definition().description, (
+            "the description claims hidden-file skipping without its exception"
+        )
+        assert ".emrg" in (type(tool).__doc__ or ""), (
+            "the class docstring claims it skips hidden dirs without its exception"
+        )
+
+    def test_the_emrg_directory_it_declares_as_read_really_is_read(self, tmp_path):
+        self._tree(tmp_path)
+
+        content = self._search(tmp_path).content
+
+        # Both paths are spelled the way the tool prints them — `str(path.relative_to(root))`,
+        # the platform's own separator — and written as that same expression, so neither
+        # assertion is a POSIX literal. They were, until measured: run 37495221347, leg
+        # `test-windows` (2026-10-06), where these two and their sibling in
+        # `tests/test_glob_tool.py` were the only failures in 3,909 passes. The negative
+        # one is the sharper half: `".git/config" not in content` cannot fail on Windows,
+        # where a searched `.git` prints `.git\\config` — a false green about the very
+        # directory this test exists to check is skipped.
+        assert str(Path(".emrg") / "memory" / "MEMORY.md") in content, (
+            f"the .emrg file the description says is read was not searched:\n{content}"
+        )
+        assert str(Path(".git") / "config") not in content, (
+            "the .git directory the description says is skipped was searched"
+        )
+        assert "src.py" in content
+
+
+
 def test_grep_nonexistent_path():
     """Searching a non-existent path should return an error."""
     tool = GrepTool()
