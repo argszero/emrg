@@ -1246,12 +1246,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     args = card.arguments if (card is not None and card.name == te.tool_name) else {}
                     # Show diff for successful edit operations
                     if te.tool_name == "edit" and not te.error and args:
-                        old_str = args.get("old_string", "")
-                        new_str = args.get("new_string", "")
-                        if old_str or new_str:
+                        pair = _edit_shows_a_diff(args)
+                        if pair is not None:
                             diff_widget = Diff(
-                                old=old_str,
-                                new=new_str,
+                                old=pair[0],
+                                new=pair[1],
                                 old_label="old",
                                 new_label="new",
                                 mode="unified",
@@ -1259,10 +1258,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             chat.add(diff_widget)
                     # Show summary for successful write operations
                     elif te.tool_name == "write" and not te.error and args:
-                        fp = args.get("file_path", "?")
-                        short_fp = f"…/{PurePath(fp).name}" if len(fp) > 50 else fp
-                        content_len = len(args.get("content", ""))
-                        chat.add("system", f"✓ Wrote {content_len} bytes to {short_fp}")
+                        chat.add("system", _write_call_summary(args))
                     if card and card.name == te.tool_name:
                         card.update(
                             "failed" if te.error else "done",
@@ -3442,6 +3438,36 @@ def _format_args(args: dict, tool_name: str = "") -> str:
     if len(arg_str) > 60:
         arg_str = arg_str[:57] + "..."
     return arg_str
+
+
+def _edit_shows_a_diff(args: dict) -> tuple[str, str] | None:
+    """The `(old, new)` pair a successful `edit` may be diffed on, or `None` for neither.
+
+    The second place a tool call's fields are read for display, and the same rule as
+    `_format_args`: `_display_text` first, because the schema's types are a promise
+    nothing enforces. Measured 2026-10-07 (`cyc20261007-215754`) — `old_string: 123`
+    reached `Diff(old=123, ...)`, which does not raise here but at **render** time
+    (`Diff.render` calls `splitlines` on both halves), one widget later with the frame
+    already consumed. A field of the wrong shape is rendered as absent, never handed on.
+    """
+    old = _display_text(args.get("old_string"))
+    new = _display_text(args.get("new_string"))
+    return (old, new) if (old or new) else None
+
+
+def _write_call_summary(args: dict) -> str:
+    """The `✓ Wrote N bytes to <file>` line for a successful `write`.
+
+    Both fields go through `_display_text` for `_format_args`' reason, and this site was
+    the one left reading them raw: `len(args.get("content", ""))` was measured raising on
+    `content: 123` (`TypeError`) and answering a *wrong number* on `content: ["a","b"]`
+    ("2 bytes") — the fabricated-count shape the notary preflight was fixed for in the
+    same family. `file_path` reached `PurePath` unguarded too, which raises on anything
+    that is not str or path-like. Behaviour for a well-formed call is unchanged.
+    """
+    fp = _display_text(args.get("file_path")) or "?"
+    short = f"…/{PurePath(fp).name}" if len(fp) > 50 else fp
+    return f"✓ Wrote {len(_display_text(args.get('content')))} bytes to {short}"
 
 
 def run_client(init_auto_evolve: bool = False):

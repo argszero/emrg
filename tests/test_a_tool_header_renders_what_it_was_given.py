@@ -40,7 +40,19 @@ APP = REPO / "emrg" / "client" / "app.py"
 
 sys.path.insert(0, str(REPO))
 
-from emrg.client.app import _cards_from_tool_calls, _format_args  # noqa: E402
+from emrg.client.app import (  # noqa: E402
+    _cards_from_tool_calls,
+    _edit_shows_a_diff,
+    _format_args,
+    _write_call_summary,
+)
+
+#: Every function that reads a tool call's fields to render them. The AST arm below checks
+#: all of them, so a reader added without the guard fails here rather than in a session.
+#: `_edit_shows_a_diff` and `_write_call_summary` are the `tool_end` half — before
+#: 2026-10-07 they were inline in the event loop and read raw, which is exactly the shape
+#: a rule that names one function cannot see.
+_SHAPE_GUARDED_READERS = ("_format_args", "_edit_shows_a_diff", "_write_call_summary")
 
 
 #: `(what the model sent, is the shape one the old read died on)` — the first element is
@@ -167,56 +179,67 @@ def _unguarded_reads() -> dict[str, str]:
 def test_no_field_of_the_header_is_read_without_a_shape_guard() -> None:
     """The rule, mechanised: a future field read cannot skip the guard silently.
 
-    Every `args.get(...)` / `args[...]` inside `_format_args` must be the argument of
+    Every `args.get(...)` / `args[...]` inside each function below must be the argument of
     `_display_text` or `_display_int` (reached through the `or` chain the range uses),
     except the whole-dict `json.dumps(args)` fallback. This is the arm that would have
     caught the original six: they were `len(args.get('content', ''))` and friends, whose
     parent is not one of the two helpers.
+
+    Three readers, not one. `_format_args` was the first, and it was fixed alone —
+    measured 2026-10-07 (`cyc20261007-215754`), the `tool_end` summary still read
+    `len(args.get("content", ""))` and `PurePath(args.get("file_path", "?"))` raw, so the
+    *finished* call of a session rendered through an unguarded path while its *header* was
+    guarded. One home, every reader — which is what this list is for.
     """
     tree = ast.parse(APP.read_text(encoding="utf-8"))
-    target = next(
-        (
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name == "_format_args"
-        ),
-        None,
-    )
-    assert target is not None, "_format_args is not in app.py — this guard names what it reads"
-
-    parents: dict[int, ast.AST] = {}
-    for parent in ast.walk(target):
-        for child in ast.iter_child_nodes(parent):
-            parents[id(child)] = parent
-
-    reads: list[ast.AST] = []
-    for node in ast.walk(target):
-        if isinstance(node, ast.Subscript) and _is_args(node.value):
-            reads.append(node)
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "get"
-            and _is_args(node.func.value)
-        ):
-            reads.append(node)
-    assert reads, "no field read found in _format_args — the guard would pass vacuously"
-
-    unguarded: list[str] = []
-    for read in reads:
-        if _guarded_by_helper(read, parents):
+    unchecked: list[str] = []
+    for name in _SHAPE_GUARDED_READERS:
+        target = next(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == name
+            ),
+            None,
+        )
+        if target is None:
+            unchecked.append(f"{name} (not in app.py — this guard names what it reads)")
             continue
-        # The whole-dict fallback renders every field, which is what a field the header
-        # cannot read is supposed to do.
-        parent = parents.get(id(read))
-        if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Attribute):
-            if parent.func.attr == "dumps":
+
+        parents: dict[int, ast.AST] = {}
+        for parent in ast.walk(target):
+            for child in ast.iter_child_nodes(parent):
+                parents[id(child)] = parent
+
+        reads: list[ast.AST] = []
+        for node in ast.walk(target):
+            if isinstance(node, ast.Subscript) and _is_args(node.value):
+                reads.append(node)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and _is_args(node.func.value)
+            ):
+                reads.append(node)
+        if not reads:
+            unchecked.append(f"{name} (no field read found — the guard would pass vacuously)")
+            continue
+
+        for read in reads:
+            if _guarded_by_helper(read, parents):
                 continue
-        unguarded.append(f"line {read.lineno}")
-    assert not unguarded, (
-        "_format_args reads a field without a shape guard, which is the defect this "
+            # The whole-dict fallback renders every field, which is what a field the header
+            # cannot read is supposed to do.
+            parent = parents.get(id(read))
+            if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Attribute):
+                if parent.func.attr == "dumps":
+                    continue
+            unchecked.append(f"{name} line {read.lineno}")
+    assert not unchecked, (
+        "a display reader reads a field without a shape guard, which is the defect this "
         "module exists for: a field of the wrong shape raises out of the renderer and "
-        f"takes the session with it. Unguarded read(s) at {', '.join(unguarded)}"
+        f"takes the session with it. Unguarded read(s): {', '.join(unchecked)}"
     )
 
 
@@ -286,3 +309,63 @@ def test_a_field_the_header_cannot_read_falls_back_to_the_raw_arguments() -> Non
     """
     rendered = _format_args({"file_path": {"a": 1}, "content": "hi"}, "write")
     assert json.loads(rendered) == {"file_path": {"a": 1}, "content": "hi"}
+
+
+# ── the `tool_end` half: a finished call renders through the same rule ────────────────
+
+
+def test_a_finished_write_renders_whatever_shape_its_fields_arrived_in() -> None:
+    """The `✓ Wrote N bytes to …` line, for every shape the raw read died on.
+
+    Measured 2026-10-07 (`cyc20261007-215754`) on master `7b3ed020`, replaying the
+    pre-fix expressions verbatim: `len(args.get("content", ""))` raised `TypeError` on
+    `content: 123` and on `content: null`, and answered **2** — printed as a byte count —
+    on `content: ["a","b"]`; `PurePath(args.get("file_path", "?")).name` raised on a
+    numeric or mapping `file_path`. This is the path that renders every *finished* write
+    call, so it is not only the resumed session at stake: the live frame reached it too.
+    """
+    assert _write_call_summary({"file_path": "/a/b.txt", "content": 123}) == "✓ Wrote 0 bytes to /a/b.txt"
+    assert _write_call_summary({"file_path": "/a/b.txt", "content": None}) == "✓ Wrote 0 bytes to /a/b.txt"
+    assert _write_call_summary({"file_path": "/a/b.txt", "content": ["a", "b"]}) == "✓ Wrote 0 bytes to /a/b.txt"
+    assert _write_call_summary({"file_path": 42, "content": "hi"}) == "✓ Wrote 2 bytes to ?"
+    assert _write_call_summary({"file_path": {"a": 1}, "content": "hi"}) == "✓ Wrote 2 bytes to ?"
+    assert _write_call_summary({"content": "hi"}) == "✓ Wrote 2 bytes to ?"
+
+
+def test_a_readable_write_still_reports_its_own_path_and_size() -> None:
+    """The control: the guard must not have replaced the reading with a placeholder."""
+    assert _write_call_summary({"file_path": "/a/b.txt", "content": "hello"}) == "✓ Wrote 5 bytes to /a/b.txt"
+    deep = "/" + "/".join(["averylongdirectoryname"] * 4) + "/b.txt"
+    assert _write_call_summary({"file_path": deep, "content": "hi"}) == "✓ Wrote 2 bytes to …/b.txt"
+
+
+def test_an_edit_hands_the_diff_only_shapes_it_can_render() -> None:
+    """`None` for a pair that is not renderable, so the deferred crash cannot happen.
+
+    `Diff(old=123)` does **not** raise where the call is built — `Diff.render` raises
+    `AttributeError: 'int' object has no attribute 'splitlines'` one widget later, with
+    the frame already consumed. So the guard has to be here, at the read, and this arm
+    drives the render path the TUI drives, not merely the constructor.
+    """
+    from emrg.client.python_tui.widgets.base import RenderContext
+    from emrg.client.python_tui.widgets.diff import Diff
+
+    ctx = RenderContext(width=80)
+    for args in (
+        {"old_string": 123, "new_string": "b"},
+        {"old_string": None, "new_string": None},
+        {"old_string": {"a": 1}, "new_string": "b"},
+        {"old_string": 123, "new_string": 456},
+        {},
+    ):
+        pair = _edit_shows_a_diff(args)
+        if pair is None:
+            continue
+        list(Diff(old=pair[0], new=pair[1]).render(ctx))  # must not raise
+
+    # The control: a renderable pair is still handed on, and still renders.
+    pair = _edit_shows_a_diff({"old_string": "a", "new_string": "b"})
+    assert pair == ("a", "b")
+    list(Diff(old=pair[0], new=pair[1]).render(ctx))
+    assert _edit_shows_a_diff({"old_string": "a"}) == ("a", "")
+    assert _edit_shows_a_diff({}) is None
