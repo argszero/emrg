@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from emrg.tools.grep_tool import GrepTool
+from emrg.tools.grep_tool import MAX_FILE_SIZE, GrepTool
 
 
 @pytest.fixture
@@ -146,6 +146,61 @@ def test_skips_hidden_dirs(temp_cwd):
     tool = GrepTool()
     result = _run(tool.execute({"pattern": "binary", "path": str(temp_cwd)}))
     assert "No matches" in result.content
+
+
+class TestTheHiddenDirectoryItKeepsIsDeclared:
+    """`grep` drops every hidden dot-part except `.emrg`, and said only "hidden dirs".
+
+    Measured 2026-10-07 (`cyc20261007-000240`) with the tool itself: a search from a root
+    holding `.emrg/memory/MEMORY.md` and `.git/config` returns the `.emrg` file and never
+    the `.git` one, while the description promised "automatic binary/hidden file skipping"
+    and the class docstring "Skips binary files, hidden dirs, and files over 512KB". The
+    exception is deliberate — `.emrg` is the agent's own state — so the claim is what is
+    wrong, exactly as in the sibling `glob` tool (issue #1880).
+    """
+
+    def _tree(self, root: Path) -> None:
+        (root / ".emrg" / "memory").mkdir(parents=True)
+        (root / ".emrg" / "memory" / "MEMORY.md").write_text("# index\nNEEDLE here\n")
+        (root / ".git").mkdir()
+        (root / ".git" / "config").write_text("NEEDLE in git config\n")
+        (root / "src.py").write_text("NEEDLE in source\n")
+
+    def _search(self, path: Path):
+        return _run(GrepTool().execute({
+            "pattern": "NEEDLE", "path": str(path), "intent": "hidden-dir probe",
+        }))
+
+    def test_the_definition_names_the_one_hidden_directory_that_is_read(self):
+        tool = GrepTool()
+        assert ".emrg" in tool.definition().description, (
+            "the description claims hidden-file skipping without its exception"
+        )
+        assert ".emrg" in (type(tool).__doc__ or ""), (
+            "the class docstring claims it skips hidden dirs without its exception"
+        )
+
+    def test_the_emrg_directory_it_declares_as_read_really_is_read(self, tmp_path):
+        self._tree(tmp_path)
+
+        content = self._search(tmp_path).content
+
+        # Both paths are spelled the way the tool prints them — `str(path.relative_to(root))`,
+        # the platform's own separator — and written as that same expression, so neither
+        # assertion is a POSIX literal. They were, until measured: run 37495221347, leg
+        # `test-windows` (2026-10-06), where these two and their sibling in
+        # `tests/test_glob_tool.py` were the only failures in 3,909 passes. The negative
+        # one is the sharper half: `".git/config" not in content` cannot fail on Windows,
+        # where a searched `.git` prints `.git\\config` — a false green about the very
+        # directory this test exists to check is skipped.
+        assert str(Path(".emrg") / "memory" / "MEMORY.md") in content, (
+            f"the .emrg file the description says is read was not searched:\n{content}"
+        )
+        assert str(Path(".git") / "config") not in content, (
+            "the .git directory the description says is skipped was searched"
+        )
+        assert "src.py" in content
+
 
 
 def test_grep_nonexistent_path():
@@ -380,3 +435,83 @@ class TestTheCountSaysWhenItIsAFloor:
         assert result.content.index("floor") < result.content.index("output truncated"), (
             "the summary has to carry its own caveat, not depend on the note at the end"
         )
+
+
+class TestTheCountNamesTheFilesItReallySearched:
+    """`searched N files` counted files the loop only *looked at* (issue #1876).
+
+    Measured on master `38b85268`, 2026-10-06 (`cyc20261006-214703`): the counter was
+    incremented before the size and decode guards, so a tree whose **only** copies of the
+    pattern were a file over `MAX_FILE_SIZE` and a binary one answered
+
+        No matches for 'NEEDLE' in <root> (searched 4 files)
+
+    with the two files holding `NEEDLE` counted among the four "searched". The word is a
+    claim about work done; the skips are named beside it now, the way `glob` names its
+    own (`PR #1875`), and the count's subject is the files really read.
+    """
+
+    HITS = "NEEDLE"
+
+    def _tree(self, root: Path) -> None:
+        (root / "small.txt").write_text("hello world\n", encoding="utf-8")
+        (root / "other.txt").write_text("nothing here\n", encoding="utf-8")
+
+    def _search(self, path: Path):
+        return _run(GrepTool().execute({
+            "pattern": self.HITS, "path": str(path), "intent": "skip probe",
+        }))
+
+    def test_a_file_over_the_cap_is_not_counted_as_searched(self, tmp_path):
+        self._tree(tmp_path)
+        (tmp_path / "big.txt").write_text(
+            f"{self.HITS}\n" + "x" * (MAX_FILE_SIZE + 10), encoding="utf-8"
+        )
+
+        content = self._search(tmp_path).content
+
+        assert "No matches" in content
+        assert "(searched 2 files" in content, (
+            f"two readable files were searched, and files the size guard skipped were "
+            f"counted as searched too: {content}"
+        )
+        assert "1 skipped: 1 over 524288 bytes" in content
+
+    def test_a_file_that_is_not_utf8_is_not_counted_as_searched(self, tmp_path):
+        self._tree(tmp_path)
+        (tmp_path / "binary.bin").write_bytes(b"\xff\xfe" + self.HITS.encode() + b"\x00")
+
+        content = self._search(tmp_path).content
+
+        assert "(searched 2 files" in content
+        assert "1 skipped: 1 not readable as UTF-8 text" in content
+
+    def test_a_search_that_skipped_nothing_says_nothing_about_skipping(self, tmp_path):
+        """The control: the clause reports a measurement, so it is absent when there is none.
+
+        A clause printed unconditionally would pass both legs above while telling a reader
+        about a skip that never happened — and this is the same tree that pins the plain
+        summary in `TestTheCountSaysWhenItIsAFloor`.
+
+        Asserted on the **message**, not on the whole result: the tmp_path pytest builds
+        for this test is named after the test, so `"skipped" not in content` was reading
+        its own directory name and failed on the very run that should have passed.
+        """
+        self._tree(tmp_path)
+
+        summary = self._search(tmp_path).content.splitlines()[0]
+
+        assert summary.endswith("(searched 2 files)"), summary
+
+    def test_the_hit_line_carries_the_same_breakdown(self, tmp_path):
+        """Both summaries answer the same question, so both have to name the same holes."""
+        self._tree(tmp_path)
+        (tmp_path / "big.txt").write_text(
+            f"{self.HITS}\n" + "x" * (MAX_FILE_SIZE + 10), encoding="utf-8"
+        )
+        (tmp_path / "small.txt").write_text(f"a {self.HITS} here\n", encoding="utf-8")
+
+        content = self._search(tmp_path).content
+
+        assert "Found 1 matches" in content
+        assert "(searched 2 files; 1 skipped: 1 over 524288 bytes)" in content

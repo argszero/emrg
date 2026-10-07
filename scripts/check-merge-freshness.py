@@ -70,9 +70,28 @@ deliberately separate implementations because each suite stubs its **own**
 `_gh_json`, so a shared lookup would put a live `gh` request behind the other
 suite's tests.
 
-The run is also required to have *passed* - a failing or cancelled run is not a
-stale verdict, it is a verdict the committer has to deal with on its own terms,
-and this tool says so rather than calling it fresh.
+**Two asks two seconds apart cannot cover that window**, which is why the empty
+answer is no longer reported as `no_run` on its own: the head's commit age decides
+between the two states the empty answer is the shape of. The case above is the
+measurement - `fb672634` was pushed 12:45:21Z and its run was created 12:45:38Z, so
+at the moment the query was made the run did not exist yet, and *no* number of asks
+spanning less than those 17 s could have found it. Inside
+`_REGISTRATION_WINDOW_SECONDS` the empty answer is `_KIND_NO_RUN_YET` ("not evidence
+of a dropped push yet"; the remedy is a park), past it the reading is `_KIND_NO_RUN`
+and the re-trigger remedy stands. Measured 2026-10-07 on this repository: 11 pushes
+and the `Test` run created for each, delay 1-6 s. The same false reading reaches
+the reader by the other hand too - `gh pr checks` prints "no checks reported" for a
+head whose run is registering, which is the sentence §1.1 of the prompt reads as
+"the push event was dropped".
+
+The run is also required to have *passed* - a failing run is not a stale verdict, it is
+a verdict the committer has to deal with on its own terms, and this tool says so rather
+than calling it fresh. **"Failing" means a job of the run concluded `failure`**, which is
+not the same as the run's own conclusion: that one is an aggregate, and GitHub counts a
+*cancelled* job as a failed run. A run whose non-success jobs are all cancellations
+judged nothing, so it is reported as `_KIND_NO_VERDICT` with the remedy a missing verdict
+takes (a re-trigger) rather than as a red verdict whose remedy is to read a cause that
+does not exist - measured 2026-10-06, `cyc20261006-065715`.
 
 Which state is reported when more than one holds
 ------------------------------------------------
@@ -162,6 +181,19 @@ its question. The count is read from the sibling tool that owns it (one extra
 line says so and prices the refresh pessimistically, rather than reporting `0`,
 which is the direction that quietly spends votes.
 
+A finished PR is a third outcome, not a stale one (issue #1837)
+---------------------------------------------------------------
+The question above is about a merge still to come, and a PR that is already **MERGED**
+or **CLOSED** has none. Both halves of the reading then answer *determinately* and
+wrongly: `compare/master...<head>` reports a diverged head (master has moved past a
+merge that landed), and the run lookup finds the passing run CI concluded before it.
+So the tool used to print `STALE (diverged, behind_by=2) - the head does not contain
+master`, price a branch refresh, and exit **1** - a determinate fault about work that
+had already landed. Measured 2026-10-03 (`cyc20261003-224625`) on the merged #1836.
+The state is therefore read first, in the same `gh pr view` the head comes from, and a
+terminal PR is reported as its state with exit **0**: the tool asked its question and
+the answer is "there is no such verdict here", which is a reading rather than a fault.
+
 Usage
 -----
     uv run --no-sync python3 scripts/check-merge-freshness.py <PR> [<PR> ...]
@@ -169,7 +201,8 @@ Usage
 
 Exit codes
 ----------
-    0  every head contains master's tip - CI's merge base is master itself
+    0  every head contains master's tip - CI's merge base is master itself - or the
+       PR is over (MERGED / CLOSED), which is a determinate reading rather than a fault
     1  at least one head does NOT contain master's tip - the verdict is stale
     2  the check could not be made (bad PR, gh failed, unreadable response) -
        fail loud; never report "fresh" for a question that was not answered
@@ -187,7 +220,9 @@ import json
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = "argszero/emrg"
@@ -230,23 +265,60 @@ _UNFINISHED = frozenset({"", "pending", "queued", "in_progress", "requested", "w
 # here reads as "the verdict workflow did not run", not as "the branch has no CI".
 _VERDICT_WORKFLOW = "Test"
 
-# The four ways a verdict can fail to be current. They were prose in `reason`
+# The six ways a verdict can fail to be current. They were prose in `reason`
 # before, which is enough to *report* the state and not enough to choose a
 # remedy: the state decides which action the tool may recommend, and only one of
-# the four is fixed by a refresh (and that one charges the whole vote count).
+# the six is fixed by a refresh (and that one charges the whole vote count).
 _KIND_ANCESTRY = "ancestry"  # the #1137 case: green, but about an older master
 _KIND_NO_RUN = "no_run"  # master is an ancestor but nothing ever judged the head
+_KIND_NO_RUN_YET = "no_run_yet"  # the head is younger than a run takes to appear
 _KIND_RUNNING = "running"  # a run exists and has not concluded
-_KIND_FAILING = "failing"  # a run concluded non-success
+_KIND_FAILING = "failing"  # a job concluded `failure`: the tree was judged and rejected
+_KIND_NO_VERDICT = "no_verdict"  # the run stopped without a job judging the tree
+
+#: How long after a head is committed a push-event run can still be *arriving*.
+#: Inside this window an empty run lookup is not evidence of anything: it is the
+#: shape of a dropped push event **and** the shape of a run that has not been
+#: created yet, and the two are told apart only by waiting past the window. The
+#: number is measured, not chosen. Measured 2026-10-07 on this repository: the
+#: delay between a `PushEvent` and the `Test` run for that same head across the 11
+#: pairs the events feed and the runs API both still carried was 1, 1, 1, 2, 2, 4,
+#: 5, 5, 5, 6 seconds - and 17 s in the case this file's docstring records for
+#: #1585 (head `fb672634` pushed 12:45:21Z, its run created 12:45:38Z), which is
+#: what set this file's re-ask in the first place. 30 is that maximum with room to
+#: spare, and it is the window the re-ask is *supposed* to cover: with
+#: `_RUN_LOOKUP_ATTEMPTS` asks 2 s apart the wait was 2 s, i.e. narrower than the
+#: phenomenon it exists for. Nothing about the run lookup can be made exact - an
+#: empty answer is the same bytes in both states - so past the window the reading
+#: is still `_KIND_NO_RUN`, and inside it the tool refuses to claim one.
+_REGISTRATION_WINDOW_SECONDS = 30.0
+
+#: How this file's python tools are invoked (`Agent.md`, "Test Commands"). The
+#: runner is not decoration: without it a `scripts/*.py` command runs under
+#: whatever python is on PATH rather than the checkout's, so the pytest and the
+#: package imports the tool needs are not the ones it gets. `review-queue.py`
+#: carries the same constant and the same reasoning; it was missing here, which is
+#: how one remedy came to print the `uv run --no-sync python3` spelling for one
+#: command and a bare `scripts/x.py` for the command beside it (reviewed on #1851).
+#: A **shell** script takes `bash`, not this runner: `uv run --no-sync python3
+#: scripts/re-trigger-ci.sh` hands python a bash file and exits 1 with a
+#: SyntaxError, measured 2026-10-04.
+RUNNER = "uv run --no-sync python3"
 
 # How many times the run lookup is asked before an empty answer is taken as *the*
 # answer, and the gap between the asks. The reason is in the module docstring and
 # in `_latest_run_for_head`: an empty answer here is not a missing measurement, it
-# is a *verdict* (`_KIND_NO_RUN`, FRESH refused), and the query was measured
-# serving one stale for a head that has a run. Bounded at two because the state it
-# guards still exists - a dropped push event or a fork PR really has no run - and
-# such a head stays empty through both asks. `review-queue.py` reads this for every
-# open PR, so the run-less head pays the gap once per reader and no more.
+# is a *verdict* (FRESH refused), and the query was measured serving one stale for a
+# head that has a run. Bounded at two because the state it guards still exists - a
+# dropped push event or a fork PR really has no run - and such a head stays empty
+# through both asks. `review-queue.py` reads this for every open PR, so the run-less
+# head pays the gap once per reader and no more.
+#
+# The re-ask answers the *stale payload* half of the empty answer and nothing else:
+# it is not, and cannot be, the guard against a run that has not been created yet,
+# since the two asks span 2 s while that delay was measured at 1-17 s - which is
+# why the age of the head, not a longer wait, decides that half
+# (`_REGISTRATION_WINDOW_SECONDS`, and `_KIND_NO_RUN_YET` below it).
 _RUN_LOOKUP_ATTEMPTS = 2
 _RUN_LOOKUP_DELAY_SECONDS = 2.0
 
@@ -287,8 +359,65 @@ class Verdict:
     run_conclusion: str | None
     stale: bool
     reason: str
-    # Which of the four ways (one of the `_KIND_*` names); "" when fresh.
+    # Which of the six ways (one of the `_KIND_*` names); "" when fresh.
     stale_kind: str = ""
+    #: The run's own id, so a remedy can hand over a command that is runnable as
+    #: printed. Empty when there is no run. Why it is carried rather than looked up
+    #: again by the reader: the only other place this id is visible is the link
+    #: `gh pr checks` prints, and a remedy whose command has to be assembled by hand
+    #: is one the reader can get wrong at the moment they are least able to tell.
+    run_id: str = ""
+    #: GitHub's lifecycle state (`OPEN`, `MERGED`, `CLOSED`). A terminal PR is not a
+    #: stale verdict and not a fresh one - it has no merge left for a verdict to be
+    #: about (issue #1837, and `_terminal` below).
+    state: str = ""
+    merged_at: str = ""
+
+    @property
+    def terminal(self) -> bool:
+        """The PR is over: merged, or closed without merging."""
+        return self.state in votes_counter().TERMINAL_STATES
+
+
+def _head_age_seconds(head: str) -> float | None:
+    """How long ago the head commit was made, or `None` when that is not a reading.
+
+    Asked only where it decides something: the empty-run branch of `check_pr`, i.e.
+    the state this tool spends an extra `gh` call on at most once per run-less head.
+    The commit date is the *committer's* date, so it is a **lower** bound on the
+    head's age (a commit can sit unpushed for any length of time, and a clock is a
+    clock) - which is the direction this reading needs: a head whose commit is
+    younger than the registration window cannot have been pushed long enough ago
+    for its run to have been created and still be missing, so `no_run_yet` is
+    earned by a measurement. The other direction is not claimed anywhere: an *old*
+    commit says nothing, and that case falls through to `_KIND_NO_RUN`.
+
+    `None` is "not measured", and it is returned rather than a zero age: an age that
+    could not be read must not be read as a *young* head, so the unmeasured case
+    keeps the reading this tool gave before this kind existed (`_KIND_NO_RUN`,
+    with the re-trigger remedy) instead of being turned into a refusal by a
+    measurement that never happened. The fail-loud direction here is the opposite
+    of the usual one on purpose: `_KIND_NO_RUN` is the *stronger* claim, and this
+    helper is allowed to weaken it only on evidence.
+
+    The parse is the queue's `instant` rather than a second timestamp reader in
+    this file, for the reason the sibling loaders give. The `--jq` asks for an
+    **object**: `gh api --jq '.field'` prints a bare string, which is not JSON, so
+    the unquoted form would raise out of `_gh_json`'s `json.loads`.
+    """
+    try:
+        raw = _gh_json(
+            ["api", f"repos/{REPO}/commits/{head}", "--jq",
+             "{committed: .commit.committer.date}"]
+        )
+    except (RuntimeError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    stamp = votes_counter().review_queue().instant(str(raw.get("committed") or ""))
+    if stamp is None:
+        return None
+    return (datetime.now(timezone.utc) - stamp).total_seconds()
 
 
 def _latest_run_for_head(head: str) -> dict | None:
@@ -307,13 +436,14 @@ def _latest_run_for_head(head: str) -> dict | None:
 
     An empty answer is re-asked (bounded, `_RUN_LOOKUP_ATTEMPTS`) before it is
     returned as `None`, because `None` is not how this tool says "unknown" - it is
-    `_KIND_NO_RUN` and a refused FRESH, i.e. a sentence claiming the head has no
-    run at all. That sentence was measured being said about head `fb672634`
-    (#1582) by the identical query while GitHub held its run; see the module
-    docstring. The re-ask that *finds* the run is reported on stderr, so a repair
-    of a stale answer is never silent and a later reader can tell flakiness from a
-    one-off. A head that really ran nothing returns `None` from both asks, so the
-    retry cannot manufacture a run.
+    a stale verdict and a refused FRESH. Which one is the caller's to decide, and
+    the age of the head is the input: `_KIND_NO_RUN` is "the head has no run at
+    all", `_KIND_NO_RUN_YET` is "a run may still be arriving". The first was
+    measured being said about head `fb672634` (#1582) by the identical query while
+    GitHub held its run; see the module docstring. The re-ask that *finds* the run
+    is reported on stderr, so a repair of a stale answer is never silent and a
+    later reader can tell flakiness from a one-off. A head that really ran nothing
+    returns `None` from both asks, so the retry cannot manufacture a run.
     """
     for attempt in range(_RUN_LOOKUP_ATTEMPTS):
         run = _ask_latest_run_for_head(head)
@@ -345,7 +475,7 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
             f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
             "--jq",
             "{runs: [.workflow_runs[] | {headSha: .head_sha, name, "
-            "createdAt: .created_at, conclusion}]}",
+            "createdAt: .created_at, conclusion, databaseId: .id}]}",
         ]
     )
     assert isinstance(payload, dict)
@@ -361,6 +491,42 @@ def _ask_latest_run_for_head(head: str) -> dict | None:
     if not matching:
         return None
     return max(matching, key=lambda r: str(r.get("createdAt") or ""))
+
+
+def _run_jobs(run_id: str) -> list[dict] | None:
+    """One run's jobs, or `None` when that list could not be read.
+
+    `None` is "not measured", never "no jobs": this reading exists to tell a run that
+    **judged the tree and rejected it** from one that stopped without judging at all, and an
+    unread list answers neither question. The caller keeps the coarser verdict and says so.
+
+    Why the run's own `conclusion` is not enough (measured 2026-10-06,
+    `cyc20261006-065715`): the workflow run's conclusion is an **aggregate**, and GitHub
+    counts a *cancelled* job as a failed run. Head `50dea4e8`'s run `37372464666` reads
+    `conclusion=failure`, and its jobs are `test: cancelled` (0 steps, 15m of waiting for a
+    runner) and `test-windows: success`. This tool called that "a failing verdict, not a
+    stale one; re-running will not make it fresh", and the reading its own remedy hands over
+    (`scripts/read-run-failure.py 37372464666`) answered **"no failed job … nothing to
+    explain"** - a verdict-shaped sentence about a run that reached no verdict, with a
+    remedy that could not produce a cause.
+    """
+    try:
+        payload = _gh_json(
+            [
+                "api",
+                f"repos/{REPO}/actions/runs/{run_id}/jobs?per_page=100",
+                "--jq",
+                "{jobs: [.jobs[] | {name, conclusion}]}",
+            ]
+        )
+    except RuntimeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list):
+        return None
+    return [j for j in jobs if isinstance(j, dict)]
 
 
 def _tree_note(stale_tree: bool, status: str, behind_by: int, merge_base: str) -> str:
@@ -389,11 +555,43 @@ def check_pr(number: int) -> Verdict:
             "-R",
             REPO,
             "--json",
-            "number,title,headRefOid",
+            "number,title,state,mergedAt,headRefOid",
         ]
     )
     assert isinstance(view, dict)
     head_sha = str(view["headRefOid"])
+    state = str(view.get("state") or "")
+    merged_at = str(view.get("mergedAt") or "")
+
+    if state in votes_counter().TERMINAL_STATES:
+        # Answered before the compare and before the run lookup, and that order is the
+        # point: both ask a question about a merge still to come, and on a finished PR
+        # each produces a *determinate* answer to a question that no longer exists.
+        # Measured 2026-10-03 (`cyc20261003-224625`) on the merged #1836: this tool
+        # returned exit 1 with `STALE (diverged, behind_by=2) - the head does not
+        # contain master`, plus a remedy that prices a branch refresh - work that has
+        # already landed, reported as a fault to fix. Exit 1 is "the verdict is stale";
+        # there is no verdict here to be stale, and `stale=False` (with the terminal
+        # mark in `main`) keeps a caller from reading it as a fault or as FRESH.
+        return Verdict(
+            pr=number,
+            title=str(view["title"]),
+            head_sha=head_sha,
+            merge_base="",
+            ahead_by=0,
+            behind_by=0,
+            run_created_at=None,
+            run_conclusion=None,
+            stale=False,
+            state=state,
+            merged_at=merged_at,
+            reason=(
+                f"the PR is {state}"
+                + (f" (merged {merged_at})" if merged_at else "")
+                + " - it is over, so there is no merge left for a CI verdict to be "
+                "about: this is neither a stale verdict nor a fresh one"
+            ),
+        )
 
     cmp_raw = _gh_json(
         [
@@ -422,6 +620,7 @@ def check_pr(number: int) -> Verdict:
         behind_by=behind_by,
         run_created_at=created,
         run_conclusion=conclusion,
+        run_id=str(run.get("databaseId") or "") if run else "",
     )
 
     if status not in _FRESH_STATUSES and status not in _STALE_STATUSES:
@@ -440,13 +639,39 @@ def check_pr(number: int) -> Verdict:
     # unfinished, a run failed), and only a *passing* run raises the ancestry question.
     stale_tree = status in _STALE_STATUSES
     if run is None:
+        age = _head_age_seconds(head_sha)
+        if age is not None and age < _REGISTRATION_WINDOW_SECONDS:
+            # The head is younger than a run takes to appear, so the empty lookup
+            # is not yet a fact about GitHub - it is the shape of both a dropped
+            # push and a run that is still being created. Refusing to assert one:
+            # the sentence `_KIND_NO_RUN` carries ("there is NO Test run for head
+            # ...") was measured being said about a head that has one, and the
+            # remedy it carries (re-trigger) fires a *second* run on such a head.
+            # `_head_age_seconds` returning `None` (the age could not be read)
+            # keeps the reading below rather than turning an unmeasured age into
+            # this one: the refusal direction has to be earned by a measurement.
+            return Verdict(
+                **common,
+                stale=True,
+                stale_kind=_KIND_NO_RUN_YET,
+                reason=(
+                    f"no {_VERDICT_WORKFLOW} run for head {head_sha[:8]} yet, and the head "
+                    f"was committed {int(age)} s ago - inside the "
+                    f"{int(_REGISTRATION_WINDOW_SECONDS)} s a push-event run takes to "
+                    "appear, so this is not evidence of a dropped push"
+                    f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
+                ),
+            )
         return Verdict(
             **common,
             stale=True,
             stale_kind=_KIND_NO_RUN,
             reason=(
                 f"there is NO {_VERDICT_WORKFLOW} run for head {head_sha[:8]}"
-                f"{_tree_note(stale_tree, status, behind_by, merge_base)} - an unjudged head, "
+                + (f" (committed {int(age)} s ago, past the "
+                   f"{int(_REGISTRATION_WINDOW_SECONDS)} s a run takes to appear)"
+                   if age is not None else "")
+                + f"{_tree_note(stale_tree, status, behind_by, merge_base)} - an unjudged head, "
                 "which `gh pr checks` reports as 'no checks reported'"
             ),
         )
@@ -461,13 +686,52 @@ def check_pr(number: int) -> Verdict:
             ),
         )
     if conclusion != "success":
+        # A non-success run is not automatically a *judgment*. The run's conclusion is an
+        # aggregate over its jobs, and a job that was cancelled never judged anything - so
+        # the jobs are asked, and only a job that concluded `failure` makes this the failing
+        # kind. Everything else (a cancelled job, a job that never got a runner) is a run
+        # that stopped without a verdict, whose remedy is a re-trigger rather than "fix the
+        # failure" - the measured cost of not asking is in `_run_jobs`.
+        jobs = _run_jobs(str(run.get("databaseId") or ""))
+        if jobs is not None:
+            judged = [str(j.get("name") or "?") for j in jobs if j.get("conclusion") == "failure"]
+            stopped = [
+                f"{j.get('name') or '?'}: {j.get('conclusion')}"
+                for j in jobs
+                if j.get("conclusion") and j.get("conclusion") != "success"
+            ]
+            if not judged:
+                return Verdict(
+                    **common,
+                    stale=True,
+                    stale_kind=_KIND_NO_VERDICT,
+                    reason=(
+                        f"the {_VERDICT_WORKFLOW} run for head {head_sha[:8]} concluded "
+                        f"{conclusion!r} without judging the tree - no job of it concluded "
+                        f"`failure` ({', '.join(stopped) if stopped else 'no job concluded'})"
+                        f"{_tree_note(stale_tree, status, behind_by, merge_base)} - so there is "
+                        "no cause to read, and re-running is the remedy a missing verdict takes"
+                    ),
+                )
+            return Verdict(
+                **common,
+                stale=True,
+                stale_kind=_KIND_FAILING,
+                reason=(
+                    f"CI judged head {head_sha[:8]} and rejected it: "
+                    f"{', '.join(judged)} concluded `failure` (run {conclusion!r}) - a failing "
+                    "verdict, not a stale one; re-running will not make it fresh"
+                    f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
+                ),
+            )
         return Verdict(
             **common,
             stale=True,
             stale_kind=_KIND_FAILING,
             reason=(
                 f"CI concluded {conclusion!r} on head {head_sha[:8]} - a failing verdict, "
-                "not a stale one; re-running will not make it fresh"
+                "not a stale one; re-running will not make it fresh. The run's jobs could not "
+                "be read, so which job failed - and whether any did - is not measured here"
                 f"{_tree_note(stale_tree, status, behind_by, merge_base)}"
             ),
         )
@@ -511,8 +775,10 @@ def votes_counter():
     global _sibling
     if _sibling is None:
         spec = importlib.util.spec_from_file_location("check_vote_count", _SIBLING)
-        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-            raise RuntimeError(f"could not load {_SIBLING}")
+        # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+        # loader even for a path that does not exist (measured 2026-10-06), so that
+        # branch could never fire. A sibling that is missing or does not compile
+        # raises out of `exec_module`, and `_entry` reports that as `2`.
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -598,8 +864,22 @@ def _valid_votes(pr: int) -> Price:
         return Price(None, unread=f"{type(exc).__name__}: {exc}".replace("\n", " ")[:200])
 
 
-def _remedy(pr: int, kind: str, price: Price) -> str:
+def _remedy(pr: int, kind: str, price: Price, run_id: str = "") -> str:
     """One line: what to do about this verdict, and what it charges.
+
+    The failing kind's line names a **reading** as well as an action, and the reading
+    is handed over runnable as printed (`run_id` is the verdict's own). Measured
+    2026-10-04: "fix the failure" without a way to read *why* left the reader to
+    reach for `gh run view --log`, which answered **0 bytes with rc 0** for every run
+    measured here, a red one included - a failure to measure wearing the shape of a
+    pass, handed over at the moment the reader is least able to tell. It is not a
+    universal and the remedy does not claim one: a reviewer on the same host and the
+    same `gh` measured one run as answering its whole log, so the axis is not
+    established - what both measurements agree on is the case this remedy exists for,
+    where a red run's `--log` *and* `--log-failed` are both empty and exit 0. The old
+    command is not repeated as a thing to try, for the reason
+    `scripts/check-release-published.py` records: a remedy that lists both hands the
+    reader the broken one.
 
     The price is attached only where it is actually paid - an ancestry-stale
     verdict is the one a refresh cures. The other three kinds get the action that
@@ -629,8 +909,8 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
         if price.valid_votes is None:
             return (
                 f"#{pr}: vote count unavailable ({price.unread or 'not read'}) - read it "
-                f"before refreshing (`scripts/check-vote-count.py {pr}`): a refresh moves "
-                "the head and voids every vote the branch has"
+                f"before refreshing (`{RUNNER} scripts/check-vote-count.py {pr}`): a refresh "
+                "moves the head and voids every vote the branch has"
             )
         if price.valid_votes == 0 and not price.vetoes:
             return (
@@ -645,7 +925,7 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
                 "immediately before it counts as its own - so the earliest vote this head "
                 "can collect is from the cycle after next. If this cycle would have cast "
                 "that first vote, do not push: measure the tree this merge would land "
-                "(`scripts/check-merge-plan-suite.py <PR>`) and the head does not move, "
+                f"(`{RUNNER} scripts/check-merge-plan-suite.py <PR>`) and the head does not move, "
                 "leaving the next cycle free to vote on it"
             )
         if price.valid_votes == 0:
@@ -665,22 +945,34 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
             f"#{pr}: {price.valid_votes} valid vote(s) at risk - a refresh moves the head, "
             f"and the vote counter voids all {price.valid_votes}{beside}. Measure the tree "
             "this merge would land "
-            "instead (`git fetch origin master`, then `scripts/check-merge-plan-suite.py "
-            f"{pr}`) and cast the vote on it (`scripts/cast-vote.py {pr} --body-file <path>`), "
+            "instead (`git fetch origin master`, then "
+            f"`{RUNNER} scripts/check-merge-plan-suite.py {pr}`) and cast the vote on it "
+            f"(`{RUNNER} scripts/cast-vote.py {pr} --body-file <path>`), "
             "stating the landing tree the review is about: the head does not move, so the "
             "votes already cast stay valid and this one is counted - reviews are the channel "
             "the counter reads, a plain comment carries the reading but no vote. The body "
             "must carry this cycle's id (`cycYYYYMMDD-HHMMSS`): the counter reads the voting "
             "cycle out of the body and excludes a review without one, and `gh pr review` "
             "prints nothing on success, so such a vote is spent in silence - which is why the "
-            "casting is done by `scripts/cast-vote.py`, that refuses a body the counter cannot "
+            f"casting is done by `{RUNNER} scripts/cast-vote.py`, that refuses a body the counter cannot "
             "attribute and then reads the count back. Refresh only if that tree fails - those "
             "votes were about a tree that can no longer be merged"
+        )
+    if kind == _KIND_NO_RUN_YET:
+        return (
+            f"#{pr}: park it, the head is younger than a push-event run takes to "
+            f"appear ({int(_REGISTRATION_WINDOW_SECONDS)} s, measured) - an empty run "
+            "lookup here is the shape of a dropped push and of a run still being "
+            "created, and a re-trigger would fire a **second** run on a head whose "
+            "first one is arriving (nothing cancels it: `test.yml` declares no "
+            "concurrency group, so the duplicate runs in parallel and one of them "
+            "judges nothing). Read this PR again next cycle: a head that is still "
+            "run-less then is `no_run`, and the re-trigger below is its remedy"
         )
     if kind == _KIND_NO_RUN:
         return (
             f"#{pr}: no run for this head - re-trigger CI on the same head (`gh workflow run "
-            "test.yml --ref <branch>`, or `scripts/re-trigger-ci.sh <branch>`), which keeps "
+            "test.yml --ref <branch>`, or `bash scripts/re-trigger-ci.sh <branch>`), which keeps "
             "the votes. A refresh would fire a run too, and cost every vote the branch has"
         )
     if kind == _KIND_RUNNING:
@@ -689,9 +981,25 @@ def _remedy(pr: int, kind: str, price: Price) -> str:
             "anyone and neither a refresh nor a re-trigger answers it, so do not block on "
             "this PR: read it again next cycle (host rant 2026-09-24T14:46:10)"
         )
+    if kind == _KIND_NO_VERDICT:
+        return (
+            f"#{pr}: the run stopped without judging the tree, so there is no cause to fix - "
+            "re-trigger CI on the same head (`gh workflow run test.yml --ref <branch>`, or "
+            "`bash scripts/re-trigger-ci.sh <branch>`), which keeps the votes, and park the PR "
+            "until the new run concludes. Re-running is what this kind *does* take: measured "
+            "2026-10-06, a cancelled job is a job that never got a runner (0 steps, 15 minutes "
+            "of waiting), and the alternative remedy - read the failure - answers `no failed "
+            "job in run ... nothing to explain`, because there is none. A refresh would fire a "
+            "run too and cost every vote the branch has"
+        )
     return (
         f"#{pr}: fix the failure - a refresh costs every vote the branch has, and does not "
-        "make a failing run pass"
+        "make a failing run pass. Whose failure it is comes first: read the cause with the "
+        f"reading that answers (`{RUNNER} scripts/read-run-failure.py "
+        f"{run_id}` - the run's step and the block up to its `##[error]`), and ask whether "
+        f"the row is the head's own (`{RUNNER} scripts/check-merge-plan-suite.py {pr}` names the "
+        "failing rows and reports the ones the base tree fails as well, and those belong to "
+        "the base)"
     )
 
 
@@ -742,6 +1050,18 @@ def main(argv: list[str] | None = None) -> int:
                         "stale": v.stale,
                         "reason": v.reason,
                         "stale_kind": v.stale_kind,
+                        # The remedy's own input: a consumer that renders "read why it
+                        # failed" from this reading needs the run the failing verdict is
+                        # about, and re-deriving it means another `gh` query for a value
+                        # the tool already had.
+                        "run_id": v.run_id or None,
+                        # Beside `stale`, because the three-valued outcome
+                        # (fresh / stale / over) does not fit in a boolean: a consumer
+                        # reading `"stale": false` off a merged PR would conclude the
+                        # verdict is current.
+                        "state": v.state,
+                        "terminal": v.terminal,
+                        "merged_at": v.merged_at or None,
                         # Both halves of the price. `valid_votes` alone reads as "0
                         # means free" for a head whose only vote is a standing veto -
                         # the reading #1562 is about - so the veto count is emitted
@@ -756,8 +1076,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         for v in verdicts:
-            mark = "STALE" if v.stale else "FRESH"
-            print(f"#{v.pr} {mark} (head {v.head_sha[:8]}, base {v.merge_base[:8]}) - {v.reason}")
+            # A finished PR gets its own mark: `FRESH` would say a verdict about the
+            # merge is current, and there is no merge (issue #1837). `STALE` is what
+            # this tool said about the merged #1836 before - a determinate fault about
+            # work that had landed.
+            mark = v.state if v.terminal else ("STALE" if v.stale else "FRESH")
+            # No `base` for a terminal PR: the merge base is not read (nothing will be
+            # merged), and `base ` with nothing after it reads as a measurement that
+            # came back empty rather than as one that was never taken.
+            base = "" if v.terminal else f", base {v.merge_base[:8]}"
+            print(f"#{v.pr} {mark} (head {v.head_sha[:8]}{base}) - {v.reason}")
 
     if any(v.stale for v in verdicts):
         print(
@@ -771,10 +1099,30 @@ def main(argv: list[str] | None = None) -> int:
             if not v.stale:
                 continue
             price = prices.get(v.pr, Price(None))
-            print("  " + _remedy(v.pr, v.stale_kind, price), file=sys.stderr)
+            print("  " + _remedy(v.pr, v.stale_kind, price, v.run_id), file=sys.stderr)
         return 1
     return 0
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_entry())

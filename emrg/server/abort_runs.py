@@ -108,6 +108,13 @@ class AbortRuns:
         The record carries ``count`` (how many in a row), ``first_at`` (when the
         run began) and ``last_at`` — the three facts the reading is made of, and
         the three a log line is worth printing.
+
+        ``now`` is **the clock this operation is about**, not merely the stamp's
+        source: the write it triggers prunes with the same instant (see
+        :func:`_save`), so a caller who injects one gets a fully deterministic
+        result. Honouring it in the stamp and ignoring it in the prune is how a
+        back-dated abort came to be silently dropped by the wall clock — a suite
+        that goes red on a calendar date rather than on a change.
         """
         stamp = (now or datetime.now().astimezone()).isoformat(timespec="seconds")
         state = self._load()
@@ -124,7 +131,7 @@ class AbortRuns:
         else:
             entry["count"] = int(entry.get("count", 0)) + 1
             entry["last_at"] = stamp
-        self._save()
+        self._save(now=now)
         return dict(entry)
 
     def clear(self, cause: str, session_id: str) -> None:
@@ -162,9 +169,15 @@ class AbortRuns:
             if isinstance(key, str) and isinstance(entry, dict)
         }
 
-    def _save(self) -> None:
+    def _save(self, *, now: datetime | None = None) -> None:
+        """Write the state, pruning against `now` (the wall clock when omitted).
+
+        `now` is threaded in from :meth:`note` so the clock the caller injected
+        is the one the prune measures against, not two clocks disagreeing about
+        the same record.
+        """
         state = self._load()
-        _prune(state)
+        _prune(state, now=now)
         try:
             atomic_write_bytes(
                 json.dumps(state, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
@@ -178,7 +191,13 @@ class AbortRuns:
 
 def _prune(state: dict[str, dict], *, now: datetime | None = None) -> None:
     """Drop the runs whose last abort is older than :data:`RUN_TTL_DAYS`."""
-    cutoff = (now or datetime.now().astimezone()) - timedelta(days=RUN_TTL_DAYS)
+    moment = now or datetime.now().astimezone()
+    if moment.tzinfo is None:
+        # The same reading `_parse` gives a naive stamp: as local time. A caller
+        # may inject a naive clock (the tests do), and comparing one against the
+        # aware stamp `_parse` returns would raise instead of pruning.
+        moment = moment.astimezone()
+    cutoff = moment - timedelta(days=RUN_TTL_DAYS)
     for key, entry in list(state.items()):
         last = _parse(entry.get("last_at"))
         if last is None or last < cutoff:

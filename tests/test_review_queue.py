@@ -34,6 +34,7 @@ pinned too — an unreadable count is `?` (not `0/3`), an unreadable queue is ex
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -171,19 +172,35 @@ class FakeVotes:
     """
 
     DEFAULT_MIN_VOTES = 3
+    #: The lifecycle states that mean the PR is over. Carried for the same reason as
+    #: the threshold above: the tool asks the counter rather than spelling a second
+    #: copy, so a fake that did not carry it would fail here — which is how the
+    #: second copy was found (measured 2026-10-03, `cyc20261003-231313`).
+    TERMINAL_STATES = ("MERGED", "CLOSED")
 
     def __init__(self, reviews: list[dict] | None = None, mergeable: str = "MERGEABLE",
                  state: str = "CLEAN", head: str = HEAD, valid: int | None = None,
-                 push: str | None = None, exact: bool = True):
+                 push: str | None = None, exact: bool = True,
+                 pr_state: str = "OPEN", merged_at: str = "",
+                 checks: tuple | None = None):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
+        #: GitHub's *lifecycle* state, which is a different field from `state` above
+        #: (the merge state). Kept under its own name so a test cannot pass the merge
+        #: state where the lifecycle one is read and still look right.
+        self.pr_state = pr_state
+        self.merged_at = merged_at
         self.head = head
         self.forced_valid = valid
         #: When this head was pushed — the datum the abstention clause compares
         #: against. `None` keeps the historical default, far from every window.
         self.push = PUSH_TIME if push is None else push
         self.exact = exact
+        #: The head's check-runs, as the counter carries them, and whether the reading
+        #: was taken. `None` means not taken, which is what the counter does for every
+        #: non-`UNSTABLE` head (and what leaves `checks_green` False, the strict side).
+        self.checks = checks
         self.calls: list[tuple[int, int, float]] = []
         #: The real sibling module, attached by `_install` so the fakes can build
         #: its dataclasses instead of a lookalike that would agree with a misreading.
@@ -225,10 +242,14 @@ class FakeVotes:
             push_time_exact=self.exact,
             mergeable=self.mergeable,
             merge_state=self.state,
+            state=self.pr_state,
+            merged_at=self.merged_at,
             votes=votes,
             counted=[],
             valid_count=run if self.forced_valid is None else self.forced_valid,
             needed=needed,
+            checks=self.checks or (),
+            checks_read=self.checks is not None,
         )
 
 
@@ -236,11 +257,12 @@ class FakeFresh:
     """`check-merge-freshness.py`, for both the fresh case and the four stale kinds."""
 
     def __init__(self, stale: bool = False, kind: str = "", behind: int = 0,
-                 reason: str = ""):
+                 reason: str = "", run_id: str = ""):
         self.stale = stale
         self.kind = kind
         self.behind = behind
         self.reason = reason or f"some reason for {kind or 'fresh'}"
+        self.run_id = run_id
         self.calls: list[int] = []
         self.real = None
 
@@ -256,6 +278,7 @@ class FakeFresh:
             behind_by=self.behind,
             run_created_at=None,
             run_conclusion=None,
+            run_id=self.run_id,
             stale=self.stale,
             reason=self.reason,
             stale_kind=self.kind,
@@ -447,7 +470,7 @@ def test_enough_votes_on_a_stale_head_measures_before_merging(mod, monkeypatch, 
 
 def test_a_red_run_is_not_votable_and_names_the_run(mod, monkeypatch, capsys):
     votes = FakeVotes(reviews=[])
-    fresh = FakeFresh(stale=True, kind="failing",
+    fresh = FakeFresh(stale=True, kind="failing", run_id="37194550758",
                       reason="CI concluded 'failure' on head aaaa")
     rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
     out = capsys.readouterr().out
@@ -455,6 +478,28 @@ def test_a_red_run_is_not_votable_and_names_the_run(mod, monkeypatch, capsys):
     assert "ci-red" in out
     assert "gh pr checks 1" in out
     assert "cast-vote.py" not in out
+    # `gh pr checks` names the failing check, not why it failed, and the second half of
+    # step 0.4's duty is "read its failing job's log to a cause". The row has to name the
+    # reading that does, **with this run's id**, so the printed command runs as printed:
+    # an id the reader has to fish out of the link above is one they can get wrong at the
+    # moment they are least able to tell. And the broken path is not repeated as a thing
+    # to try - `gh run view --log-failed` answers 0 bytes with rc 0 on this host (measured
+    # 2026-10-04, a green run included), which is a failure to measure wearing a pass's
+    # shape.
+    assert "read-run-failure.py 37194550758" in out, (
+        "the ci-red row names the failing check but no reading that can produce its "
+        "cause with the run it is about"
+    )
+    assert "--log-failed" not in out, (
+        "the row offers `gh run view --log-failed`, which answers 0 bytes with exit 0 "
+        "here - a failure to measure wearing the shape of a pass"
+    )
+    # A red row is not always the head's: a base-level failure turns every open PR red,
+    # and the reading that separates the two is the plan suite's base comparison.
+    assert "check-merge-plan-suite.py 1" in out, (
+        "without the base comparison the reader cannot tell this head's failure from one "
+        "the base fails too, and fixing the wrong tree is what that costs"
+    )
 
 
 def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsys):
@@ -469,6 +514,37 @@ def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsy
     assert "retrigger-ci" in out
     assert "cast-vote.py" not in out
     assert "git merge FETCH_HEAD" not in out
+    # The command has to run as printed, and this row's did not: `re-trigger-ci.sh` is
+    # a **bash** script, and it was printed behind the python runner, which hands python
+    # a bash file. Measured 2026-10-04: `uv run --no-sync python3 scripts/re-trigger-ci.sh`
+    # exits 1 with `SyntaxError: invalid syntax`. The one row whose whole remedy is
+    # "re-trigger CI" was the one handing over a command that could not re-trigger
+    # anything.
+    #
+    # Carrying `bash` was not the end of it either (#1852, re-opened by cycle
+    # `cyc20261005-054639`): `bash` is on PATH on this host and is not on a Windows one,
+    # so the row now **leads** with the command that needs only `gh` - the tool every
+    # reader of this queue has already run - and keeps the script beneath it. Both halves
+    # are asserted, and by position: a row that puts `bash` first is back to a command
+    # that runs on one host family only.
+    assert "$ gh workflow run test.yml --ref <branch-of-" in out, (
+        "the re-trigger row leads with the host-portable form: `gh workflow run "
+        "test.yml --ref <branch>`, which is what `re-trigger-ci.sh` itself runs"
+    )
+    assert "$ bash scripts/re-trigger-ci.sh" in out, (
+        "the script stays as the alternative under it - it is the shorter spelling "
+        "where `bash` exists"
+    )
+    lead = out.index("$ gh workflow run test.yml")
+    alternative = out.index("$ bash scripts/re-trigger-ci.sh")
+    assert lead < alternative, (
+        "the portable form must come first: the reader who stops at the first line is "
+        "the one this fix is for"
+    )
+    assert "uv run --no-sync python3 scripts/re-trigger-ci.sh" not in out, (
+        "the re-trigger row hands a bash script to python, which exits 1 with a "
+        "SyntaxError - the command cannot run as printed"
+    )
 
 
 def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
@@ -488,6 +564,35 @@ def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
     assert "park" in out
     assert "wait" not in out, "a row that is parked must not be told to wait"
     assert "next cycle" in out, "the deferral has to name when the row comes back"
+    assert "cast-vote.py" not in out
+
+
+def test_a_head_whose_run_is_still_arriving_is_parked_not_retriggered(
+    mod, monkeypatch, capsys
+):
+    """The empty lookup has a second shape, and this row is what tells them apart.
+
+    Measured 2026-10-07 (`cyc20261007-022540`): `gh pr checks` printed "no checks
+    reported" for a head pushed seconds earlier, whose run existed and was
+    registering. The `no_run` row reads that state as a dropped push and hands over
+    a re-trigger - which fires a **second** run beside the one arriving, since
+    `test.yml` declares no concurrency group. The freshness tool now separates the
+    two by the head's age, and this row is where the separation has to *land*: a
+    kind the queue has no row for falls through to the merge-state branch below it.
+    """
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh(stale=True, kind="no_run_yet",
+                      reason="no Test run for head aaaa yet, and the head was "
+                             "committed 4 s ago")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "park" in out
+    assert "next cycle" in out, "the deferral has to name when the row comes back"
+    assert "gh workflow run" not in out, (
+        "a re-trigger here starts a second run on a head whose first one is arriving"
+    )
+    assert "re-trigger-ci.sh" not in out
     assert "cast-vote.py" not in out
 
 
@@ -537,7 +642,14 @@ def test_a_conflict_names_the_merge_and_the_classifier(mod, monkeypatch, capsys)
 
 def test_a_conflict_is_not_reported_as_an_ordinary_blocker(mod, monkeypatch, capsys):
     """A non-conflicting state is the branch's to remove, so the row must not hand
-    the reader a merge cascade for a draft."""
+    the reader a merge cascade for a draft.
+
+    The command is pinned too, because it was the one remedy this family printed that
+    answered nothing: `gh pr view --json mergeable,mergeStateStatus` reprints the fact
+    the row has already stated. What answers is the reading that explains the state,
+    which is the counter's own report (it now carries the head's check-runs) — or, for
+    a text conflict, the classifier.
+    """
     votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="DRAFT")
     fresh = FakeFresh()
     rc = _read(mod, monkeypatch, votes, fresh)
@@ -545,6 +657,87 @@ def test_a_conflict_is_not_reported_as_an_ordinary_blocker(mod, monkeypatch, cap
     assert rc == 0
     assert "unblock" in out
     assert "resolve-conflict" not in out
+    assert "gh pr view 1 -R argszero/emrg --json mergeable,mergeStateStatus" not in out, (
+        "the remedy reprints the row's own fact; the reading that answers is the "
+        "counter's report"
+    )
+    assert "check-vote-count.py 1" in out
+
+
+def test_an_unstable_head_whose_checks_passed_is_votable_not_blocked(mod, monkeypatch,
+                                                                    capsys):
+    """The row for the head this reading was rewritten for - measured, #1865.
+
+    `50dea4e8` reads `UNSTABLE` while every newest check-run on it is green (the
+    rollup keeps a superseded run's `cancelled` check-run), and master is already an
+    ancestor of it, so no remedy the branch could perform would publish a new head.
+    The old row said `unblock` — "the branch has to remove it" — for a branch with
+    nothing to remove and no way to move; the fixed reading finds green checks and
+    reaches the row that spends the cycle on the review instead.
+    """
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    # Built after `_install` attaches the real counter, whose `HeadCheck` these are.
+    _install(mod, monkeypatch, votes, FakeFresh())
+    votes.checks = (
+        votes.real.HeadCheck(
+            name="test", conclusion="success", status="completed", run_id="37390520380",
+            started_at="2026-10-05T23:47:56Z", id=4,
+        ),
+        votes.real.HeadCheck(
+            name="test", conclusion="cancelled", status="completed",
+            run_id="37372464666", started_at="2026-10-05T20:52:57Z", id=2,
+        ),
+    )
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" not in out, "a head whose checks passed is not a branch defect"
+    assert " vote " in out or "vote" in out.splitlines()[0]
+
+
+def test_an_unstable_head_whose_newest_check_never_concluded_is_an_unblock(
+    mod, monkeypatch, capsys
+):
+    """The other direction, so the green row cannot be bought by removing the branch.
+
+    A `cancelled` check-run that is the *newest* of its name means the head has no
+    verdict (measured on #1861's `7409741c`, where the newest `test-windows` check-run
+    is cancelled with 0 steps and the older one - whose runner was lost - is not what
+    decides). That head must still be `unblock`, and the reason must name the check.
+    """
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    _install(mod, monkeypatch, votes, FakeFresh())
+    votes.checks = (
+        votes.real.HeadCheck(
+            name="test", conclusion="success", status="completed", run_id="37390520380",
+            started_at="2026-10-05T23:47:56Z", id=4,
+        ),
+        votes.real.HeadCheck(
+            name="test-windows", conclusion="cancelled", status="completed",
+            run_id="37390520380", started_at="2026-10-05T23:56:31Z", id=2,
+        ),
+    )
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" in out
+    assert "test-windows: cancelled" in out, "the check that holds the state must be named"
+
+
+def test_an_unread_check_run_list_keeps_the_state_blocking(mod, monkeypatch, capsys):
+    """No reading is not a pass: an `UNSTABLE` head whose checks were not read blocks.
+
+    The counter asks for the check-runs only on an `UNSTABLE` head, and the fake here
+    answers the list as empty-or-unread - the state that must never be read as "the
+    checks are fine".
+    """
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    _install(mod, monkeypatch, votes, FakeFresh())
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" in out
+    assert "could not be read" in out
 
 
 # --- the per-cycle rule ----------------------------------------------------
@@ -620,6 +813,122 @@ def test_an_empty_queue_is_an_empty_one(mod, monkeypatch, capsys):
     assert "nothing to review" in out
 
 
+def test_a_finished_pr_is_answered_as_over_and_hands_out_no_command(
+    mod, monkeypatch, capsys
+):
+    """Issue #1837. The row this tool used to print for a PR that had just merged.
+
+    Measured 2026-10-03 (`cyc20261003-224625`): a parallel cycle merged #1836 four
+    seconds after this cycle's scan listed it open, so the queue read a finished PR as
+    a live one and answered `read-first` with
+    `check-vote-count.py <PR> --mergeability-wait 60` — a minute of waiting on a
+    question GitHub never answers for a merged PR (measured live: 6.2 s and the same
+    failure). The state now decides the row, and the freshness half is not read at all:
+    it prices a branch refresh for a branch that is finished.
+    """
+    votes = FakeVotes(pr_state="MERGED", merged_at="2026-10-03T14:46:59Z")
+    fresh = FakeFresh(stale=True, kind="ancestry", behind=2)
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0, "an answered question is not a failure to measure"
+    assert "terminal" in out
+    assert "MERGED" in out and "2026-10-03T14:46:59Z" in out
+    assert "0/3 votes" not in out, "a finished PR has no review left to count"
+    assert "$" not in out, "there is no command to hand a cycle here"
+    assert "--mergeability-wait" not in out, "the wait that cannot succeed"
+    assert fresh.calls == [], "no ancestry question about a PR with no merge left"
+
+
+def test_a_closed_pr_is_not_reported_as_merged(mod, monkeypatch, capsys):
+    """Closed-unmerged is the other terminal state, and it did not land.
+
+    A single "finished" word would be wrong half the time: `CLOSED` says the branch is
+    out of play, and a reader who acted on `MERGED` would look for it on master.
+    """
+    votes = FakeVotes(pr_state="CLOSED")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "CLOSED" in out
+    assert "MERGED" not in out
+
+
+def test_which_states_are_terminal_is_read_from_the_counter(mod, monkeypatch):
+    """The vocabulary has one home, and this tool asks it instead of keeping a copy.
+
+    Measured 2026-10-03 (`cyc20261003-231313`): `Reading.terminal` spelled
+    `("MERGED", "CLOSED")` by hand while the counter introduced `TERMINAL_STATES` as
+    "the one spelling of 'the PR is over' in the family" and the *other* sibling
+    (`check-merge-freshness.py`) already asked it. This file is the one that reads the
+    state off the verdict, so it is the one a drifted copy would mislead.
+
+    The leg narrows the counter's list and requires the row to follow it: a copy in
+    this file would keep saying `MERGED` is terminal and pass a test written the other
+    way round. It is the behavioural half of `test_it_does_not_spell_the_words_itself`.
+    """
+    class _Narrowed:
+        TERMINAL_STATES = ("CLOSED",)
+
+    monkeypatch.setattr(mod, "vote_counter", lambda: _Narrowed)
+    assert mod.Reading(pr=1, head="", state="CLOSED").terminal is True
+    assert mod.Reading(pr=1, head="", state="MERGED").terminal is False, (
+        "the counter says MERGED is not terminal here, so this row must follow it"
+    )
+
+
+def test_an_unread_state_is_not_a_second_failure(mod, monkeypatch):
+    """`""` means "not read", and asking the vocabulary there would raise again.
+
+    Measured 2026-10-03 (`cyc20261003-231313`): making the property ask the counter
+    broke `test_an_unreadable_count_is_a_question_mark_not_zero`, whose fake raises
+    from `check_pr` and carries no vocabulary at all. A row whose count could not be
+    read has no state either, and one failure must not become two.
+    """
+    class _Boom:
+        # No TERMINAL_STATES: touching this fake from here is the defect.
+        def __getattr__(self, name):
+            raise AssertionError(f"the counter was asked for {name!r} despite no state")
+
+    monkeypatch.setattr(mod, "vote_counter", lambda: _Boom())
+    assert mod.Reading(pr=1, head="", state="").terminal is False
+
+
+def test_it_does_not_spell_the_words_itself(mod):
+    """The source half of the same rule, kept beside the behavioural one.
+
+    A rule with two homes is free to drift, and the drift is invisible until the two
+    disagree — which is exactly the state this file was in. The words belong to
+    `check-vote-count.py`; every other tool asks for the list.
+
+    Read with `ast`, not with a substring search: the docstring above `terminal`
+    **quotes** the old spelling while explaining why it is gone, and a text search
+    cannot tell a rule's explanation from a rule's violation. (The first version of
+    this leg was written that way and failed on its own prose — the same lesson
+    `scripts/check_read_parse_guards.py` records about reading what a call is fed
+    rather than the line it sits on.)
+    """
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    copies = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Tuple, ast.Set, ast.List))
+        and {
+            e.value
+            for e in node.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str)
+        }
+        >= {"MERGED", "CLOSED"}
+    ]
+    assert not copies, (
+        "review-queue.py spells the terminal states again at line(s) "
+        f"{copies} - read them from the counter (`vote_counter().TERMINAL_STATES`), the "
+        "way `votes_needed` reads the threshold"
+    )
+
+
 # --- the queue the tool is asked about -------------------------------------
 
 
@@ -683,6 +992,9 @@ def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
         "needed": 3,
         "mergeable": "MERGEABLE",
         "merge_state": "CLEAN",
+        "state": "OPEN",
+        "terminal": False,
+        "merged_at": None,
         "block_reason": "",
         "veto_at_head": False,
         "voted_by_this_cycle": False,
@@ -1310,6 +1622,9 @@ def test_a_rant_row_names_the_project_it_belongs_to(mod, monkeypatch, capsys):
     would have to open the ledger again — the cost the row was added to save. Measured
     2026-10-01 on this host, the queue rendered 39 open rants and every one belonged to
     another project, while this task's ledger rows were all `completed`.
+
+    Read through `--all-rants`, because this test is about the **row's shape** and the
+    default rendering withholds another project's row (that behaviour is pinned next door).
     """
     monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
     rants_of(
@@ -1318,13 +1633,214 @@ def test_a_rant_row_names_the_project_it_belongs_to(mod, monkeypatch, capsys):
         ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
         ("2026-09-30T09:30:16+08:00", "pending", [], ""),
     )
-    mod.main([])
+    mod.main(["--all-rants"])
     out = capsys.readouterr().out
 
     assert "project=silicon-science-cs" in out
     assert "project=(none)" in out, (
         "a row that names no project must say so: §2.2 makes it one to ignore entirely, "
         "and a row that prints nothing there is a row with no such state"
+    )
+
+
+def test_another_projects_rant_is_counted_and_not_printed(mod, monkeypatch, capsys):
+    """The bulk this report pays for, and the row it must not lose.
+
+    Measured 2026-10-04 on this host: 40 open rants, 39 of them `silicon-science-cs` — about
+    8.7KB of a 9.7KB report, rendered for a cycle the prompt itself tells that those rows are
+    not its work. They are now **counted and not printed**, which is the reading's cost and
+    not its content: the header keeps the ledger whole, so nothing is hidden.
+    """
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], "emrg"),
+    )
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "rant 2026-09-30T09:30:16+08:00" in out, "this task's own row is rendered"
+    assert "rant 2026-09-30T09:35:04+08:00" not in out, (
+        "another project's row body is what the default withholds"
+    )
+    header = next(line for line in out.splitlines() if "open rant(s)" in line)
+    assert "2 open rant(s) across 2 project(s)" in header, (
+        "the count stays the ledger's: withholding a row is not hiding it"
+    )
+    withheld = next(line for line in out.splitlines() if "not printed here" in line)
+    assert "1 of them names another project" in withheld, withheld
+    assert "--all-rants" in withheld, (
+        "a withheld row must come with the way to see it, or the reader has no remedy"
+    )
+    assert "`rendered_here` withholds another project's rows and only those" in withheld, (
+        "the reason must name the axis that withholds. It used to say `no issue in "
+        "argszero/emrg can declare them`, which is also true of the project-less row this "
+        "report prints - so it separated nothing (see "
+        "test_the_rant_header_and_the_withheld_line_name_what_withholds)"
+    )
+
+
+def test_a_project_less_rant_is_still_printed_though_it_can_declare_nothing_here(
+    mod, monkeypatch, capsys
+):
+    """`could_declare_here` is not the rendering rule, and the difference is deliberate.
+
+    That predicate answers "could an issue in this repo carry the rant's `Origin:` line",
+    and for a row naming no project it is false. A project-less row is not *another*
+    project's work, though — it is undeclared, and undeclared is something the cycle has to
+    look at. The rows this table prints exist because a cycle reading the queue alone
+    concluded "nothing to review" while three pending rants had no issue (2026-09-29), so
+    hiding an undeclared one would restore exactly that defect for the row most likely to be
+    this task's.
+    """
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:30:16+08:00", "pending", [], ""),
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+    )
+    mod.main([])
+    out = capsys.readouterr().out
+
+    assert "rant 2026-09-30T09:30:16+08:00" in out, "the undeclared row is rendered"
+    assert "project=(none)" in out
+    assert "rant 2026-09-30T09:35:04+08:00" not in out
+    assert mod.could_declare_here("", mod.REPO) is False, (
+        "the two rules must be seen to differ here, or this test would pass under either"
+    )
+    assert mod.rendered_here("", mod.REPO) is True
+
+
+def test_all_rants_prints_the_withheld_rows_and_the_line_disappears(
+    mod, monkeypatch, capsys
+):
+    """The other direction of the same flag: withheld means withheld *by default*."""
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], "emrg"),
+    )
+    mod.main(["--all-rants"])
+    out = capsys.readouterr().out
+
+    assert "rant 2026-09-30T09:35:04+08:00" in out
+    assert "rant 2026-09-30T09:30:16+08:00" in out
+    assert "not printed here" not in out, (
+        "nothing was withheld, so the sentence about withholding would be false"
+    )
+
+
+def test_the_all_rants_help_states_the_withheld_set_the_predicate_defines(mod, capsys):
+    """The `--help` sentence is the only statement of the flag's scope a reader meets.
+
+    It was wrong here: it said the default counts "a rant naming another project (or none)",
+    while `rendered_here` renders a project-less row by default - pinned above, and for the
+    reason that an undeclared row is not *another* project's work. A sentence restating a
+    rule that lives elsewhere is a second copy of it; this holds the copy against the
+    original, the predicate's three answers beside the sentence's two claims.
+    """
+    rendered = [
+        mod.rendered_here(project, mod.REPO)
+        for project in ("emrg", "silicon-science-cs", "")
+    ]
+    assert rendered == [True, False, True], (
+        "the rule the sentence states: this repo's rows, and the rows naming no project"
+    )
+
+    with pytest.raises(SystemExit):
+        mod.main(["--help"])
+    # argparse wraps the text at the terminal width, so a phrase can span a line break: the
+    # claims are read from the help text with its whitespace collapsed, not from its lines.
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert "rendered_here" in out, "the sentence names the rule that decides it"
+    assert "naming no project is still printed" in out, (
+        "the one case the sentence had wrong, now stated the way the predicate reads"
+    )
+
+
+def test_the_rant_header_and_the_withheld_line_name_what_withholds(
+    mod, monkeypatch, capsys
+):
+    """Both sentences a cycle reads on every run, held against the predicate that decides.
+
+    The `--help` copy was fixed for this on the same branch and the report's **header** was
+    not: it still told the reader that "a row naming another project - or none - is not this
+    cycle's work", one line above the project-less row it then printed. The withheld line
+    gave a reason that does not discriminate either - "no issue in argszero/emrg can declare
+    them" is equally true of that project-less row, because `could_declare_here("")` is False
+    too. The rule is `rendered_here`, spelled once, and these are its two copies.
+    """
+    rendered = [
+        mod.rendered_here(project, mod.REPO)
+        for project in ("emrg", "silicon-science-cs", "")
+    ]
+    assert rendered == [True, False, True], (
+        "the rule both sentences state: this repo's rows, and the rows naming no project"
+    )
+    assert mod.could_declare_here("silicon-science-cs", mod.REPO) is False
+    assert mod.could_declare_here("", mod.REPO) is False, (
+        "the reason the withheld line used to give is true of a row this report prints, so "
+        "it is not the reason anything is withheld - which is what this test keeps true"
+    )
+
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], ""),
+    )
+    mod.main([])
+    # The sentences are read with their whitespace collapsed, so the assertions are about
+    # the claim and not about where a line happens to break.
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert out.count("rendered_here") >= 2, (
+        "both sentences name the rule that decides them, the way the --help copy does"
+    )
+    assert "or none" not in out, (
+        "the header's own clause, the defect this pins: a row naming no project is not "
+        "withheld, and a report saying so is contradicted by the row it prints beside it"
+    )
+    assert "one naming no project is undeclared rather than another project's" in out, (
+        "the case the header had wrong, stated the way the predicate reads"
+    )
+    assert "rant 2026-09-30T09:30:16+08:00" in out, (
+        "and the row the header is about really is printed"
+    )
+
+
+def test_the_json_document_keeps_every_rant_row_and_labels_it(mod, monkeypatch, capsys):
+    """A consumer must not silently receive a shorter list than the ledger holds.
+
+    The prose withholds another project's row because its reader pays for the bytes; the
+    document keeps every row and carries the prose's own predicate as a field, spelled from
+    the same function. A JSON path that dropped rows with no marker would be this family's
+    "never a pass" defect in its machine-readable form: a short list read as a whole one.
+    """
+    votes, fresh = FakeVotes(reviews=[]), FakeFresh()
+    monkeypatch.setattr(mod, "local_tree", lambda: ("/checkout", "some-branch", "b" * 40))
+    rants_of(
+        mod,
+        monkeypatch,
+        ("2026-09-30T09:35:04+08:00", "pending", [], "silicon-science-cs"),
+        ("2026-09-30T09:30:16+08:00", "pending", [], ""),
+        ("2026-09-30T09:17:54+08:00", "pending", [], "emrg"),
+    )
+    _run(mod, monkeypatch, votes, fresh, ["1", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    rants = [row for row in payload if row["subject"] == "rant"]
+    assert [row["project"] for row in rants] == ["silicon-science-cs", "", "emrg"]
+    assert [row["rendered"] for row in rants] == [False, True, True], (
+        "the field is the prose's predicate, so a consumer can apply the same rule"
     )
 
 
@@ -1789,3 +2305,39 @@ def test_a_closed_pull_request_is_not_read_as_a_declaring_issue(monkeypatch):
 
     assert rant.closed_issues == []
     assert "no issue yet" in tool.render_rant(rant)
+
+
+def test_a_run_that_judged_nothing_is_retriggered_not_read_for_a_cause(mod, monkeypatch, capsys):
+    """The row beside `ci-red`, and the difference is the whole point.
+
+    Measured 2026-10-06 (`cyc20261006-065715`): a head whose run concluded `failure` only
+    because a *cancelled* job counts as a failed run was given the `ci-red` row, whose
+    remedies are `read-run-failure.py <run>` and the plan suite. The first answered
+    **"no failed job in run … nothing to explain"** - there is no cause, because no job
+    judged the tree - and neither remedy re-runs anything. So the row said "a failing
+    verdict" about a run that reached no verdict, and offered no way out of it.
+
+    This is the same state `no_run` is in - a head with no verdict - so it takes the same
+    action, and the test asserts the *opposite* of the `ci-red` row's assertions: the
+    cause-reading must be absent, because it cannot produce one.
+    """
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh(
+        stale=True,
+        kind="no_verdict",
+        reason="the Test run for head aaaa concluded 'failure' without judging the tree",
+        run_id="37194550758",
+    )
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "retrigger-ci" in out
+    assert "gh workflow run test.yml --ref <branch-of-" in out, (
+        "the remedy is a re-trigger, which starts a run that can actually judge the tree"
+    )
+    assert "read-run-failure.py 37194550758" not in out, (
+        "the cause-reading answers `no failed job … nothing to explain` for exactly this "
+        "state, so handing it over is the defect this row exists to remove"
+    )
+    assert "ci-red" not in out
+    assert "cast-vote.py" not in out, "a head whose run judged nothing is not votable"

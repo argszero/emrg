@@ -32,7 +32,7 @@ re-implemented here:
 * `check-vote-count.py` owns "how many votes are still about this head?" — the
   count, the per-cycle rule, and the mergeability clause;
 * `check-merge-freshness.py` owns "is the green CI about the tree that would land?"
-  — the ancestry, and the four ways a verdict can fail to be current.
+  — the ancestry, and the six ways a verdict can fail to be current.
 
 So the number printed here is the counter's number and the staleness here is the
 freshness tool's *kind*, not a local re-derivation of either. That matters more than
@@ -74,6 +74,23 @@ Usage
     uv run --no-sync python3 scripts/review-queue.py 1342 1343          # just these
     uv run --no-sync python3 scripts/review-queue.py --cycle cyc20260917-221117
     uv run --no-sync python3 scripts/review-queue.py --json
+
+The rant half of the report prints this task's rows by default and **counts** the rest
+----------------------------------------------------------------------------------------
+`open_rant_rows` returns every open rant — the reading stays whole, and the JSON below keeps
+every row too, each labelled `rendered` — but the prose renders only the rows this repo can
+act on, and says how many it withheld. The rule is `rendered_here`: this task's own rants
+(by either spelling), plus the ones naming **no** project. Withheld are the rows naming
+another project, which is the whole of the bulk and none of the work: measured 2026-10-04 on
+this host, 40 open rants of which 39 were `silicon-science-cs`, ~8.7KB of the report's
+~9.7KB, printed every cycle for a reader the template has already told those rows are not
+its own. `--all-rants` prints every row.
+
+A row naming no project is deliberately still printed, though no issue here can declare it:
+undeclared is not another project's work, and the rows this section exists for were added
+after a cycle read "nothing to review" while pending rants without issues sat in the ledger
+(measured 2026-09-29) — so hiding an undeclared one would restore that defect for the row
+most likely to be this task's.
 
 `--cycle` is what turns "may this PR be voted on" into "may *this cycle* still vote
 here" — the counter counts per cycle, so a cycle that has already voted at a head
@@ -137,6 +154,7 @@ import os
 import re
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,10 +176,47 @@ def could_declare_here(project: str, repo: str = REPO) -> bool:
     """
     return bool(project) and project in (repo, repo.rsplit("/", 1)[-1])
 
+
+def rendered_here(project: str, repo: str = REPO) -> bool:
+    """Whether this rant gets a row in the report **by default**.
+
+    This task's own rants, and the ones naming **no** project at all. The withheld case is
+    the one the prompt decides for us in as many words — a rant naming another project is
+    not this instance's to act on — and on this host that is also the whole of the bulk
+    (measured 2026-10-04: 40 open rants, 39 of them `silicon-science-cs`, ~8.7KB of the
+    report's ~9.7KB, paid by every cycle).
+
+    A row naming **no** project is deliberately *not* withheld, even though
+    `could_declare_here` is false for it: that predicate is about whether an issue **in this
+    repo** could carry the rant's `Origin:` line, and a project-less row is not another
+    project's work — it is undeclared, which is a thing the cycle has to look at. The rows
+    this table prints exist because a cycle reading the queue *alone* concluded "nothing to
+    review" while three pending rants had no issue (measured 2026-09-29), so hiding an
+    undeclared rant would restore that defect for the rows most likely to be this task's.
+    """
+    return could_declare_here(project, repo) or not project
+
 #: How the family's tools are invoked (`Agent.md`, "Test Commands"). Printed
 #: commands carry the runner the docstrings and the docs prescribe — a bare
 #: `scripts/x.py` is not executable on this host, so printing one would hand the
 #: reader a command that fails.
+#:
+#: The rule is **by file type**, and the shell half was got wrong here: a `.py`
+#: tool takes this runner, while a `.sh` tool takes `bash` and must never be given
+#: to python. Measured 2026-10-04: `uv run --no-sync python3 scripts/re-trigger-ci.sh`
+#: exits 1 with `SyntaxError: invalid syntax` on line 11 (`set -euo pipefail`) — the
+#: re-trigger row used to print exactly that, so the one row whose remedy is
+#: "re-trigger CI on the same head" handed over a command that could not run.
+#:
+#: Carrying the right runner is not the whole rule either: `bash` is a **host**
+#: dependency, and the row is printed to whichever host is running the cycle. Measured
+#: 2026-10-05 by a reviewer on a Windows host (cycle `cyc20261005-054639`):
+#: `Get-Command bash` -> CommandNotFoundException, a git-bundled `bash.exe` present but
+#: not on PATH, so `bash scripts/re-trigger-ci.sh` could not run there at all - the same
+#: defect one rung on. `gh` is not optional in this family (every tool here reads GitHub
+#: through it) and `test.yml` declares `workflow_dispatch`, so the re-trigger row now
+#: **leads** with `gh workflow run test.yml --ref <branch>`, which is the single command
+#: `re-trigger-ci.sh` itself runs, and keeps the script as the alternative beneath it.
 RUNNER = "uv run --no-sync python3"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -361,8 +416,10 @@ def _sibling(name: str, module_name: str):
     package), so the file is loaded by path and registered under a plain name.
     """
     spec = importlib.util.spec_from_file_location(module_name, SCRIPTS_DIR / name)
-    if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-        raise RuntimeError(f"could not load {name}")
+    # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+    # loader even for a path that does not exist (measured 2026-10-06), so that
+    # branch could never fire. A sibling that is missing or does not compile
+    # raises out of `exec_module`, and `_entry` reports that as `2`.
     module = importlib.util.module_from_spec(spec)
     # Registered before exec: these modules declare dataclasses, and dataclasses
     # resolves annotations through sys.modules[cls.__module__] at class-creation
@@ -621,8 +678,45 @@ class Reading:
     stale: bool = False
     stale_kind: str = ""
     stale_reason: str = ""
+    #: The CI run the stale verdict is about, empty when there is none. The `ci-red`
+    #: row's remedy is built from it: "read why it failed" is runnable as printed only
+    #: if the row has the run, and the alternative - the id in the link `gh pr checks`
+    #: prints - is a command the reader has to assemble by hand.
+    ci_run_id: str = ""
     behind_by: int | None = None
     unread: str = ""
+    #: GitHub's lifecycle state for the PR (`OPEN`, `MERGED`, `CLOSED`). Everything
+    #: else on this row is a question about a *live* PR, so this is read before any
+    #: of them is acted on — see `terminal`. Empty means "not read".
+    state: str = ""
+    merged_at: str = ""
+
+    @property
+    def terminal(self) -> bool:
+        """The PR is over: merged, or closed without merging.
+
+        Measured 2026-10-03 (`cyc20261003-224625`): a cycle hit a merge four seconds
+        after its scan, and the row for that PR was built from the state of a live one
+        — `read-first`, with a `--mergeability-wait 60` that can never answer, because
+        GitHub computes no mergeability for a merged PR. The state is read from the
+        counter's verdict, so a finished PR is answered here rather than mis-filled.
+
+        The vocabulary is read from the counter too, for the reason `votes_needed`
+        states one function up: a second copy of a list is a second answer to "which
+        states mean the PR is over", and the copy that is not read drifts when the
+        original moves. Measured 2026-10-03 (`cyc20261003-231313`): this property
+        spelled `("MERGED", "CLOSED")` by hand while the counter's `TERMINAL_STATES`
+        was introduced as "the one spelling of 'the PR is over' in the family" — the
+        sibling it named (`check-merge-freshness.py`) asks it, and this file, which is
+        the one that reads the state off the verdict, did not.
+
+        `self.state` is asked first, and an empty one returns before the counter is
+        touched: `""` means "not read", which is the state of a row whose count could
+        not be read at all (`unread`). Asking the sibling there would turn one failure
+        into two — measured 2026-10-03 (`cyc20261003-231313`) on this file's own
+        `Boom` fake, which raises from `check_pr` and carries no vocabulary.
+        """
+        return bool(self.state) and self.state in tuple(vote_counter().TERMINAL_STATES)
 
     @property
     def conflict(self) -> bool:
@@ -688,6 +782,19 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
     out.votes = int(verdict.valid_count)
     out.mergeable = str(verdict.mergeable)
     out.merge_state = str(verdict.merge_state)
+    out.state = str(getattr(verdict, "state", "") or "")
+    out.merged_at = str(getattr(verdict, "merged_at", "") or "")
+    if out.terminal:
+        # The freshness half is not read, and that is a decision rather than an
+        # economy: it asks whether a *green CI verdict* would still transfer to the
+        # tree this merge lands, and a finished PR has no merge to land. Measured
+        # 2026-10-03 (`cyc20261003-224625`) on the merged #1836: it reports
+        # `STALE (diverged, behind_by=2) - the head does not contain master` and
+        # prices a branch refresh for a branch that is finished. `head_pushed_at` is
+        # left empty for the same reason the counter's own line omits it: for a
+        # merged PR the timestamp the counter carries there is the *merge* time, and
+        # printing it as a push would misdate the head on the row that is about it.
+        return out
     out.head_pushed_at = str(verdict.push_time)
     out.head_pushed_exact = bool(verdict.push_time_exact)
     if window is not None:
@@ -714,6 +821,7 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
     out.stale = bool(fresh.stale)
     out.stale_kind = str(fresh.stale_kind)
     out.stale_reason = str(fresh.reason)
+    out.ci_run_id = str(getattr(fresh, "run_id", "") or "")
     out.behind_by = int(fresh.behind_by)
     return out
 
@@ -729,7 +837,15 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
     is also the one that makes the rest moot. Each step is a rule from the
     docstring:
 
-    * an unreadable count is first, because every later branch is a decision about a
+    * **a finished PR is answered first** (issue #1837): a PR that is MERGED or CLOSED
+      is nothing to vote on, merge or refresh, and *every* branch below asks a
+      question about a live PR. Measured 2026-10-03 (`cyc20261003-224625`): a merge
+      landed four seconds after a scan listed the PR open, so this tool read a
+      finished PR as a live one and answered `read-first` with a
+      `--mergeability-wait 60` that provably cannot succeed - GitHub computes no
+      mergeability for a merged PR, so the wait is spent on a question with no
+      answer. The row names no command at all: there is nothing here to run;
+    * then an unreadable count, because every later branch is a decision about a
       number this one does not have;
     * a standing veto is "fix push", not "vote" — and it is checked before the
       count, because a veto has already reset the run: a `0/3` caused by a ❌ looks
@@ -757,6 +873,20 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
       reading whose absence stalled a cycle.
     """
     pr = reading.pr
+    if reading.terminal:
+        # No command, because there is none that helps: the PR is over. `read-first`
+        # below is what this used to answer - with a wait flag that cannot succeed -
+        # for a PR merged seconds after the scan listed it (issue #1837).
+        return Action(
+            kind="terminal",
+            why=(
+                f"#{pr} is {reading.state}"
+                + (f" (merged {reading.merged_at})" if reading.merged_at else "")
+                + ": this PR is over, so there is nothing here to vote on, merge or "
+                "refresh - and nothing to read first: the row would otherwise hand out "
+                "a mergeability wait that no merged PR can ever answer"
+            ),
+        )
     if reading.votes is None:
         # The command carries the counter's own wait flag because this branch is
         # where a not-yet-computed mergeability lands: the same question, asked with
@@ -788,7 +918,37 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             kind="ci-red",
             why=reading.stale_reason
             + " - not votable: a vote at this head would be a vote about a tree whose "
-              "CI ran red, and a re-run only helps if the failure was a flake",
+              "CI ran red, and a re-run only helps if the failure was a flake. "
+              "`gh pr checks` names the failing check, not its cause, so read the cause "
+              "with the reading that answers - and before fixing anything, ask whether "
+              "the row is the head's own, because a base-level failure turns every open "
+              "PR red and `check-merge-plan-suite.py` reports the rows the base tree "
+              "fails too",
+            command=f"gh pr checks {pr} -R {repo}",
+            extra=[
+                f"{RUNNER} scripts/read-run-failure.py "
+                f"{reading.ci_run_id or '<run-id from the link above>'}",
+                f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
+            ],
+        )
+    if reading.stale_read and reading.stale_kind == "no_run_yet":
+        # The head is younger than a push-event run takes to appear, so the empty
+        # run lookup is not yet evidence of anything and the row takes `running`'s
+        # verb for the same reason that one does: the head is not votable until a
+        # run concludes, and the re-trigger `no_run` prescribes would fire a
+        # *second* run on a head whose first one is arriving (measured 2026-10-07:
+        # a re-trigger does not cancel it - `test.yml` declares no concurrency
+        # group - so the duplicate runs in parallel). Measured by the row that is
+        # not here: cycle `cyc20261007-022540` read "no checks reported" from
+        # `gh pr checks` seconds after pushing head `338a9a53`, while that head's
+        # run existed and was registering.
+        return Action(
+            kind="park",
+            why=reading.stale_reason
+            + " - parked for this cycle: the head is too young for the empty lookup "
+              "to mean the push was dropped, and a re-trigger here starts a second "
+              "run beside the one arriving. Read this PR again next cycle; a head "
+              "still run-less then is `no_run`, whose row does name the re-trigger",
             command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.stale_read and reading.stale_kind == "no_run":
@@ -797,7 +957,26 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             why=reading.stale_reason
             + " - re-triggering fires a run on the same head, which keeps the votes a "
               "refresh would spend",
-            command=f"{RUNNER} scripts/re-trigger-ci.sh <branch-of-{pr}>",
+            command=f"gh workflow run test.yml --ref <branch-of-{pr}>",
+            extra=[f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>"],
+        )
+    if reading.stale_read and reading.stale_kind == "no_verdict":
+        # A run that stopped without judging the tree is the `ci-red` row's *other* half:
+        # its remedy is `no_run`'s, not "read the failure". Measured 2026-10-06: this row
+        # used to be `ci-red`, and handed over `read-run-failure.py <run>` - whose answer
+        # for a cancelled job is "no failed job … nothing to explain", because there is no
+        # cause to read. The verb stays `park` for the same reason `running` does: the
+        # head is not votable until a run concludes, and the re-trigger starts one.
+        return Action(
+            kind="retrigger-ci",
+            why=reading.stale_reason
+            + " - re-triggering fires a run on the same head, which keeps the votes a "
+              "refresh would spend, and park the PR until that run concludes",
+            command=f"gh workflow run test.yml --ref <branch-of-{pr}>",
+            extra=[
+                f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>",
+                f"gh pr checks {pr} -R {repo}",
+            ],
         )
     if reading.stale_read and reading.stale_kind == "running":
         # The verb is the instruction: "wait" told the reader to block until the run
@@ -814,12 +993,30 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.blocked:
+        # The row used to end "the branch has to remove it" and to hand the reader
+        # `gh pr view --json mergeable,mergeStateStatus` - a command that reprints the
+        # fact the row has just stated. Both were wrong in the same direction: the
+        # non-clean states do *not* share one cure (a `DRAFT` clears when the PR is
+        # marked ready, a `BLOCKED` with a review, a `BEHIND` by the refresh that moves
+        # the head, and an `UNSTABLE` held by a superseded run's check-run not at all),
+        # and the reading that answers "why is this not clean" is the counter's own
+        # report, which now carries the head's check-runs. Measured 2026-10-06
+        # (`cyc20261006-091811`) on #1865, whose row read `unblock` while its newest
+        # check-runs were green and its head already contained master: there was
+        # nothing for the prescribed remedy to publish.
+        conflict = reading.mergeable == "CONFLICTING" or reading.merge_state == "DIRTY"
+        command = (
+            f"{RUNNER} scripts/classify-conflict.py --all"
+            if conflict
+            else f"{RUNNER} scripts/check-vote-count.py {pr}"
+        )
         return Action(
             kind="unblock",
             why=reading.block_reason
             + " - a state of the branch, not of the review: no vote cast here changes "
-              "it, and the branch has to remove it",
-            command=f"gh pr view {pr} -R {repo} --json mergeable,mergeStateStatus",
+              "it, and which move clears it is the state's own (the reason above names "
+              "it; a refresh is only that move for a state that is about the tree)",
+            command=command,
         )
     if window is not None and window.applied:
         pushed = instant(reading.head_pushed_at)
@@ -956,21 +1153,35 @@ def window_note(window: Window | None) -> str:
 def render(reading: Reading, action: Action) -> str:
     """One PR's block: what is true, then what to do, then the exact command."""
     head = reading.head[:8] if reading.head else "????????"
-    votes = f"{reading.votes}/{reading.needed}" if reading.votes is not None else "?"
     marks = []
-    if reading.stale_read and reading.stale:
-        marks.append(f"stale:{reading.stale_kind}")
-    if reading.veto_at_head:
-        marks.append("veto")
-    if reading.voted_here:
-        marks.append("voted-here")
-    if reading.head_pushed_at:
-        # Printed on every row because it is the other half of "may this cycle vote
-        # here": a reader can apply the abstention clause by eye from this datum even
-        # when the tool could not resolve the window it belongs to.
-        marks.append(f"pushed {reading.head_pushed_at}")
+    if reading.terminal:
+        # The count slot carries the state where a live row carries `n/3 votes`: the
+        # number a merged PR's row would print is the history of a review that is
+        # over, and `0/3 votes` on a finished PR reads as work still to do. The
+        # marks are left off for the same reason - `stale:` describes a verdict that
+        # could fail to transfer, and `pushed …` would print the merge time as the
+        # push (the counter carries the merge time in that field for a merged PR).
+        count = reading.state
+        if reading.merged_at:
+            marks.append(f"merged {reading.merged_at}")
+    else:
+        count = (
+            f"{reading.votes}/{reading.needed} votes" if reading.votes is not None
+            else "? votes"
+        )
+        if reading.stale_read and reading.stale:
+            marks.append(f"stale:{reading.stale_kind}")
+        if reading.veto_at_head:
+            marks.append("veto")
+        if reading.voted_here:
+            marks.append("voted-here")
+        if reading.head_pushed_at:
+            # Printed on every row because it is the other half of "may this cycle vote
+            # here": a reader can apply the abstention clause by eye from this datum even
+            # when the tool could not resolve the window it belongs to.
+            marks.append(f"pushed {reading.head_pushed_at}")
     suffix = f"  [{', '.join(marks)}]" if marks else ""
-    lines = [f"#{reading.pr} {votes} votes  head {head}  {action.kind}{suffix}"]
+    lines = [f"#{reading.pr} {count}  head {head}  {action.kind}{suffix}"]
     lines.append(f"    {action.why}")
     if action.command:
         lines.append(f"    $ {action.command}")
@@ -1057,7 +1268,11 @@ def local_tree() -> tuple[str, str, str]:
     return str(SCRIPTS_DIR.parent), branch, head
 
 
-def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = None) -> str:
+def _as_json(
+    readings: list[tuple[Reading, Action]],
+    rants: list[Rant] | None = None,
+    repo: str = REPO,
+) -> str:
     # The clone and its branch ride as *fields* on each reading, the way
     # `check-merge-landed.py` states its tree in `--json`: the document's shape is a
     # list, and a prose line ahead of it would be a second kind of line in a stream a
@@ -1080,6 +1295,12 @@ def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = 
             "needed": reading.needed,
             "mergeable": reading.mergeable,
             "merge_state": reading.merge_state,
+            # The lifecycle state and its consequence, on every row: a consumer that
+            # read `votes: 0` off a finished PR would see the same number as a PR
+            # nobody has reviewed yet, and the two call for different actions.
+            "state": reading.state,
+            "terminal": reading.terminal,
+            "merged_at": reading.merged_at or None,
             "block_reason": reading.block_reason,
             "veto_at_head": reading.veto_at_head,
             "voted_by_this_cycle": reading.voted_here,
@@ -1107,6 +1328,13 @@ def _as_json(readings: list[tuple[Reading, Action]], rants: list[Rant] | None = 
             "issues": rant.issues,
             "message": rant.message,
             "project": rant.project,
+            # The prose rendering withholds another project's rows (a cycle's report is
+            # the surface whose size is paid, and the prompt says those rows are not its
+            # work), but the **document keeps every row** and labels it here instead: a
+            # consumer that lost rows silently would be reading a short list as a whole
+            # one, which is this family's "never a pass" defect in its JSON form. The
+            # field is the prose's own predicate, spelled once - `rendered_here`.
+            "rendered": rendered_here(rant.project, repo),
         }
         for rant in (rants or [])
     )
@@ -1167,6 +1395,14 @@ def main(argv: list[str] | None = None) -> int:
         help="the rant ledger to read (default: $EMRG_RANTS, else ~/.emrg/rants.jsonl). "
              "Open rants are rendered as rows of their own - a queue that showed only "
              "PRs once read as 'nothing to move' while three pending rants had no issue",
+    )
+    parser.add_argument(
+        "--all-rants",
+        action="store_true",
+        help="print every open rant's row, including other projects' - the default "
+             "renders the rows `rendered_here` accepts (this repo's, and the rows "
+             "naming no project: naming no project is still printed, because "
+             "undeclared is not another project's work) and counts the rest",
     )
     parser.add_argument(
         "--json", action="store_true", help="emit the readings as JSON instead of prose"
@@ -1231,7 +1467,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     if args.json:
-        print(_as_json(readings, rants))
+        print(_as_json(readings, rants, args.repo))
     else:
         if not queue:
             # Only claim "nothing" when there is nothing to report on — and that includes
@@ -1281,11 +1517,37 @@ def main(argv: list[str] | None = None) -> int:
                 f"{len(rants)} open rant(s) across {len(counts)} project(s) - {across} - "
                 "each needs an issue and its PR (R5) once it is this task's; the prompt's "
                 "rant section matches a rant to a task by `project` (this task's project, "
-                "or its owner/repo), so a row naming another project - or none - is not "
-                "this cycle's work:"
+                "or its owner/repo), so a row naming another project is not this cycle's "
+                "work and is withheld by default - one naming no project is undeclared "
+                "rather than another project's, and is rendered (`rendered_here` decides "
+                "both):"
             )
+            # Rendered by default: the rows `rendered_here` accepts - this repo's, and the
+            # ones naming no project (a second predicate, `could_declare_here`, is **not**
+            # the rendering rule: it is false for a project-less row too, so it separates
+            # nothing here). Another project's rows are **counted above and not printed** —
+            # the header keeps the ledger whole, so nothing is hidden, and their bodies are
+            # what this section's cost was made of (measured 2026-10-04 on this host: 40 open
+            # rants, 39 of them `silicon-science-cs`, ~8.7KB of a ~9.7KB report, paid by a
+            # cycle for whom the prompt itself says they are not its work). `--all-rants`
+            # prints them all.
+            rendered = rants if args.all_rants else [
+                rant for rant in rants if rendered_here(rant.project, args.repo)
+            ]
+            withheld = len(rants) - len(rendered)
+            if withheld:
+                print(
+                    f"{withheld} of them "
+                    + ("names" if withheld == 1 else "name")
+                    + " another project, so "
+                    + ("its row is" if withheld == 1 else "their rows are")
+                    + " counted above and not printed here: `rendered_here` withholds "
+                    "another project's rows and only those - a row naming no project is "
+                    "undeclared, not another project's, so it is not withheld either. "
+                    f"`{RUNNER} scripts/review-queue.py --all-rants` prints every row."
+                )
             print()
-            for rant in rants:
+            for rant in rendered:
                 print(render_rant(rant))
                 print()
 
@@ -1298,5 +1560,25 @@ def main(argv: list[str] | None = None) -> int:
     return 2 if (unread or rants_unread) else 0
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_entry())

@@ -51,6 +51,22 @@ cannot widen the match either. And if no run comes back even then, the release i
 about **before** any verdict: a release for the tag makes the build half *unmeasured*
 (rc 2, do not re-push), never a fault with a destructive remedy.
 
+A remedy has to be a command that answers:
+
+Measured 2026-10-04 on v0.3.8's red run (36956685533), while this tool's own FAULT was
+being read: the remedy used to send the reader to `gh run view <id> --log-failed`, and on
+that host the command returns **0 bytes with exit 0** -- for this run, for a green one
+(36658495939, v0.3.7) and for a recent `Test` run, so it is the host's log path and not
+this run's. An empty answer that exits 0 reads as "there is nothing to see", which is the
+same shape as reporting "could not measure" as a pass, and it is worst exactly here: the
+reader has just been told the release is missing. `gh api` is unaffected (that job's log
+is 689 KB), so the remedy now names `scripts/read-run-failure.py`, which asks the API,
+prints the failing job's **step** and the block up to its `##[error]`, and keeps "no
+failed job" (rc 1) apart from "the log could not be read" (rc 2). One implementer of the
+reading, two consumers: this tool names the job, that one explains it. The old command is
+not repeated here as a thing to try -- a remedy that offers both hands the reader the
+broken one at the moment they are least able to tell.
+
 Exit codes, the family's contract:
 
     0  the tagged run is green AND the release for the tag is published: not a draft,
@@ -332,9 +348,10 @@ def _read(tag: str, repo: str) -> int:
             f"FAULT: the `{WORKFLOW}` run for {tag} concluded `{conclusion}`, so nothing "
             f"was published for this tag (or the release it created is incomplete: the "
             f"run's own final step is what confirms published/complete/Latest, and it "
-            f"runs even when the upload failed). Read the failing job's log with "
-            f"`gh run view {run_id} --log-failed`, then re-run with "
-            f"`gh run rerun {run_id} --failed`."
+            f"runs even when the upload failed). Read the failing job's step and its "
+            f"output with "
+            f"`uv run --no-sync python3 scripts/read-run-failure.py {run_id}`, then "
+            f"re-run with `gh run rerun {run_id} --failed`."
         )
         return 1
 

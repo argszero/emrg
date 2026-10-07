@@ -29,7 +29,12 @@ class GlobTool(ToolExecutor):
                 "Use this to discover files in a project by name pattern — e.g., "
                 "'**/*.py' for all Python files, 'src/**/*.ts' for TypeScript, "
                 "'**/*test*' for test files. "
-                "Results are capped at 500 matches, sorted by path."
+                "Results are capped at 500 matches, sorted by path. "
+                "Skips hidden entries and the noise directories .git, node_modules, "
+                ".venv and __pycache__, with one exception: .emrg is read, because the "
+                "agent's own state lives there. Says in the result how many paths it "
+                "skipped — the count is what was left after that skip, not what the "
+                "tree holds."
             ),
             parameters={
                 "type": "object",
@@ -45,7 +50,10 @@ class GlobTool(ToolExecutor):
                     "workdir": {
                         "type": "string",
                         "description": (
-                            "Working directory for the pattern (default: project root)."
+                            "Working directory for the pattern (default: project root). "
+                            "The hidden/noise skipping is relative to it, so point it at "
+                            "the directory you mean to search — that is how to read "
+                            "inside a skipped one."
                         ),
                     },
                     "intent": {
@@ -76,20 +84,38 @@ class GlobTool(ToolExecutor):
         logger.debug("glob: pattern=%r in %s", pattern, cwd)
 
         try:
-            matches = sorted(
-                p for p in cwd.glob(pattern)
-                if not self._is_hidden_or_ignored(p, cwd)
-            )
+            matched = sorted(cwd.glob(pattern))
         except (OSError, ValueError) as e:
             return ToolResult(
                 name="glob", content=f"Error: invalid pattern: {e}", error=True
             )
 
+        matches = [p for p in matched if not self._is_hidden_or_ignored(p, cwd)]
+        #: Paths that *matched the pattern* and were then dropped by the skip policy.
+        #: Both messages below name this number, because without it "0" reads as "the
+        #: tree holds none" and "Found N" reads as "the tree holds N" - the two readings
+        #: an agent answers a question about the tree with. Measured 2026-10-06
+        #: (`cyc20261006-192020`) in this checkout's `emrg/gui`: `node_modules/**/package.json`
+        #: matched **352** paths, every one skipped, and the tool answered `No files
+        #: matched`; `**` matched **18014** and kept 293, reported as `Found 293 matches`
+        #: with nothing saying 17721 paths had been dropped on the way.
+        skipped = len(matched) - len(matches)
+
         if not matches:
-            return ToolResult(
-                name="glob",
-                content=f"No files matched pattern '{pattern}' in {cwd}",
-            )
+            content = f"No files matched pattern '{pattern}' in {cwd}"
+            if skipped:
+                # Not "no files matched": the pattern matched, and the answer is about
+                # the skip rather than about the tree. The remedy is the measured one -
+                # `_is_hidden_or_ignored` compares each path *relative to the root it was
+                # given*, so pointing `workdir` at the directory that holds them reads
+                # them (measured: `workdir=<repo>/.git`, pattern `config` returns it).
+                content += (
+                    f" - {skipped} path(s) matched it but were skipped as hidden or "
+                    "ignored, so this is not a reading over the whole tree. That "
+                    "skipping is relative to the workdir: point workdir at the "
+                    "directory that holds them to read them"
+                )
+            return ToolResult(name="glob", content=content)
 
         # Format results
         lines: list[str] = []
@@ -98,7 +124,15 @@ class GlobTool(ToolExecutor):
             suffix = "/" if p.is_dir() else ""
             lines.append(f"  {rel}{suffix}")
 
-        result = f"Found {len(matches)} matches for '{pattern}' in {cwd}:\n"
+        result = f"Found {len(matches)} matches for '{pattern}' in {cwd}"
+        if skipped:
+            # The count's subject, in the shape `grep` uses for its own ("searched N
+            # files"): this number is what was left after the skip, and a reader who
+            # is not told so has no way to tell it from the number the tree holds.
+            result += (
+                f" ({skipped} path(s) also matched but were skipped as hidden or ignored)"
+            )
+        result += ":\n"
         result += "\n".join(lines)
 
         if len(matches) > MAX_RESULTS:
