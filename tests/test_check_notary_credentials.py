@@ -94,6 +94,32 @@ if scenario == "leaky":
     sys.stderr.write("Error: HTTP status code: 401. Invalid credentials.\\n")
     sys.stderr.write("  (echoed argument: " + os.environ["MACOS_NOTARY_APP_PASSWORD"] + ")\\n")
     sys.exit(1)
+if scenario == "history_string":
+    # Measured 2026-10-07 (`cyc20261007-131552`): `len("x") == 1`, so this answered
+    # "1 past submission(s) on record" and exited **0** -- a count invented from a string
+    # and a pass over a reading that never happened.
+    json.dump({"history": "x"}, sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
+if scenario == "history_null":
+    # The key is there and holds nothing. `len(None)` raised out of the process, and an
+    # uncaught exception exits **1** -- this tool's code for *Apple refused the credentials*.
+    json.dump({"history": None}, sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
+if scenario == "history_absent":
+    # A well-formed reply with no `history` field at all. `parsed.get("history", [])`
+    # answered `[]`, so this reported "0 past submission(s) on record" -- a count from a
+    # field that is not in the reply.
+    json.dump({"id": "no-history-key"}, sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
+if scenario == "history_two":
+    # The control for the two arms above: a real list still yields the real count, so a
+    # fix that simply stopped printing counts would fail here.
+    json.dump({"history": [{"id": "sub-1"}, {"id": "sub-2"}]}, sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
 sys.exit(f"stub does not know scenario {scenario!r}")
 '''
 
@@ -579,3 +605,110 @@ def test_the_documented_command_carries_its_variables_into_the_preflight(tmp_pat
             f"the documented command did not carry {name} into the preflight.\n"
             f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
         )
+
+
+# ── The submission-history count is printed only when a list was read ──────────
+#
+# Measured 2026-10-07 (`cyc20261007-131552`) on master `028289f3`, by running the real
+# script against a stubbed `xcrun` that answers `notarytool history` with an exit-0 reply
+# whose `history` field is not a list. One line of code (`len(parsed.get("history", []))`)
+# produced three different wrong answers, and only one of them looked like an error:
+#
+#   `{"history": "x"}`   -> exit 0, "1 past submission(s) on record"   (a count from a string)
+#   `{"history": null}`  -> traceback, exit 1                          (= "Apple refused you")
+#   `{"id": ...}`        -> exit 0, "0 past submission(s) on record"   (a count from no field)
+#
+# The arms below pin each shape and, in the other direction, that a real list still yields
+# its real count — so a "fix" that simply stopped printing counts cannot pass.
+
+
+@_posix_only
+def test_a_history_that_is_not_a_list_is_not_a_count(tmp_path: Path) -> None:
+    """`len()` of a string is not a reading of the submission history.
+
+    `{"history": "x"}` is the worst of the three because it is not an error at all: it
+    printed a count as a fact (`len("x") == 1`) and exited **0**, so a reply whose shape
+    nobody understood passed as "Apple answered the submission-history request". The lookup
+    that exists to catch an unmeasured credential must not manufacture a measurement of its
+    own, so this is `2` — could not measure — with the shape named.
+    """
+    result = _run(tmp_path, "history_string")
+    assert result.returncode == 2, (
+        f"a `history` that is not a list was not read as unmeasurable (exit "
+        f"{result.returncode}).\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    # `(str)`, not `str`: the field's own output is echoed into this same line for
+    # reproducibility, and a bare `str` substring is satisfied by the words around it —
+    # an arm that removed the type name survived a looser form of this assertion.
+    assert "(str)" in result.stdout, (
+        "the shape that arrived was not named, so a host cannot tell a string from a list "
+        f"in the reply.\nstdout={result.stdout!r}"
+    )
+    assert "past submission(s) on record" not in result.stdout, (
+        "a count was printed for a reply that holds no list — the fabricated fact this arm "
+        f"exists to catch.\nstdout={result.stdout!r}"
+    )
+
+
+@_posix_only
+def test_a_history_of_null_does_not_exit_with_apples_refusal_code(tmp_path: Path) -> None:
+    """`len(None)` used to leave the process at **1** — the code for a refused credential.
+
+    Everything a host has to go on is the exit code: `1` sends them to rotate an
+    app-specific password Apple was never asked about, which is the false diagnosis this
+    preflight exists to remove. A reply that cannot be read is `2`, and it says which shape
+    arrived so the reading is reproducible.
+    """
+    result = _run(tmp_path, "history_null")
+    assert result.returncode == 2, (
+        f"a null `history` was not read as unmeasurable (exit {result.returncode}).\n"
+        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    # `NoneType` alone, and deliberately **not** `or "null" in stdout`: the reply is echoed
+    # into this line for reproducibility, so a disjunction naming the field's own text is
+    # satisfied by the echo — an arm that stripped the type name survived exactly that form.
+    assert "NoneType" in result.stdout, (
+        f"the shape that arrived was not named.\nstdout={result.stdout!r}"
+    )
+    assert "Traceback" not in result.stderr, (
+        "the reply was answered with a traceback, so nothing in the output names the field "
+        f"as the cause.\nstderr={result.stderr!r}"
+    )
+
+
+@_posix_only
+def test_a_reply_without_a_history_field_does_not_report_zero_submissions(
+    tmp_path: Path,
+) -> None:
+    """`parsed.get("history", [])` turned an absent field into "0 past submission(s)".
+
+    Exit 0 from `notarytool history` is what "Apple accepted the credentials" looks like,
+    so this stays a pass — but the parenthetical may not state a count that no field
+    carried. The weak true wording is the one that belongs here.
+    """
+    result = _run(tmp_path, "history_absent")
+    assert result.returncode == 0, (
+        f"a well-formed reply with no `history` field stopped being a pass (exit "
+        f"{result.returncode}).\nstdout={result.stdout!r}"
+    )
+    assert "0 past submission(s) on record" not in result.stdout, (
+        "a count was printed for a field the reply does not contain.\n"
+        f"stdout={result.stdout!r}"
+    )
+
+
+@_posix_only
+def test_a_real_list_still_reports_its_real_count(tmp_path: Path) -> None:
+    """The control: the fix must not be "print no counts at all".
+
+    Without this arm, deleting the count entirely would satisfy the three above while
+    removing the reading they are about.
+    """
+    result = _run(tmp_path, "history_two")
+    assert result.returncode == 0, (
+        f"a real history list stopped passing (exit {result.returncode}).\n"
+        f"stdout={result.stdout!r}"
+    )
+    assert "2 past submission(s) on record" in result.stdout, (
+        f"a two-entry history did not report its count.\nstdout={result.stdout!r}"
+    )

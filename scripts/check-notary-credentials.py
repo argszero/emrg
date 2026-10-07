@@ -157,7 +157,31 @@ def probe(xcrun: str | None, env: dict[str, str]) -> tuple[str, str]:
                 f"asks for, so no credentials verdict was reached. Output: "
                 f"{_redact(result.stdout.strip()[:200], secrets)!r}"
             )
-        count = len(parsed.get("history", [])) if isinstance(parsed, dict) else None
+        # A count is printed only when a list was really read. `len()` of whatever the field
+        # happens to hold is not a reading, and measured 2026-10-07 (`cyc20261007-131552`)
+        # it produced all three wrong answers on the same line:
+        #   `{"history": "x"}`    -> "1 past submission(s) on record"  (`len("x") == 1`: a
+        #                            count invented from a string, printed as a fact)
+        #   `{"history": null}`   -> `len(None)`, a traceback out of a tool whose `1` is
+        #                            *Apple refused the credentials* — the false diagnosis
+        #                            this script exists to remove, one code over
+        #   `{"history"}` absent  -> "0 past submission(s) on record"  (a count from a field
+        #                            that is not there)
+        # A field that is present and is not a list is a failure to *measure*, so it is `2`
+        # with the shape named; an absent field keeps the weak-but-true wording rather than
+        # being spent as a verdict. Exit 0 from `notarytool history` is what "Apple accepted
+        # the credentials" looks like, which is why the two `works` paths stay `works`.
+        count = None
+        if isinstance(parsed, dict) and "history" in parsed:
+            history = parsed["history"]
+            if not isinstance(history, list):
+                return "unmeasurable", (
+                    "the call exited 0 but its `history` is not a list "
+                    f"({type(history).__name__}), so no count was read and no credentials "
+                    f"verdict was reached. Output: "
+                    f"{_redact(result.stdout.strip()[:200], secrets)!r}"
+                )
+            count = len(history)
         where = f"{count} past submission(s) on record" if count is not None else "a JSON reply"
         return "works", f"Apple answered the submission-history request ({where})"
 
