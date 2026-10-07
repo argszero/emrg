@@ -327,7 +327,11 @@ uv run --no-sync python3 scripts/check-install-drift.py
 
 It asks one question per file the two trees share — is this content *anywhere* in the
 checkout's history? — and reads no version file at all, because membership is the whole
-question and the release an install happens to be never has to be established. Exit `0` =
+question and the release an install happens to be never has to be established. The id it
+compares is `git hash-object --path=<repo-relative path>`'s, i.e. git's own convention:
+line-ending cleaning (`core.autocrlf`, and this repository's `*.cmd`/`*.bat`/`*.ps1
+text eol=crlf` rule) is applied on both sides, so a line-ending-only difference is not
+reported as an edit. Exit `0` =
 every shared file's content is in history; `1` = at least one is not, printed with its path
 and byte count and with what happens to it; `2` = could not measure (no install tree, no
 git checkout, `git` failed, or the two trees share no path at all) — **never a pass**. The

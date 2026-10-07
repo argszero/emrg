@@ -30,6 +30,7 @@ measurable.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import shutil
 import subprocess
@@ -118,35 +119,155 @@ def _run(install: Path | str, root: Path | str, codec: str | None = None) -> sub
     )
 
 
-def test_the_hash_is_the_one_git_computes(tmp_path: Path) -> None:
-    """The instrument's control: the shortcut stands in for `git hash-object`.
+def test_the_id_is_the_one_git_stores_for_that_path(tmp_path: Path) -> None:
+    """The convention, pinned in both directions on real bytes.
 
-    The scan hashes every shared file in-process instead of spawning `hash-object` per
-    file, so the construction it uses has to be checked against the command it replaces -
-    including the byte that matters, the NUL ending the header.
+    The scan asks git for the id rather than computing one in-process, and the reason is
+    the second half of this test: a raw `sha1("blob <len>\\0" + bytes)` is a *different
+    function* from `hash-object` as soon as a filter applies, and this repository's own
+    `.gitattributes` (`*.cmd`/`*.bat`/`*.ps1 text eol=crlf`) and any host's
+    `core.autocrlf=true` both make one apply.
+
+    So both halves are asserted: for content no filter touches the two agree (the function
+    really is a content hash), and for a CRLF file under `core.autocrlf=true` they
+    deliberately do NOT - and it is git's answer, not the raw one, that the tool must use.
     """
     module = _load(TOOL)
+    root = tmp_path / "repo"
+    (root / "sub").mkdir(parents=True)
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.invalid")
+    _git(root, "config", "user.name", "t")
+
+    def stored(path: Path, relative: str) -> str:
+        return module._git_stored_id(root, path, relative)
+
+    # Half one: with nothing filtering, the id is the plain content hash - including the
+    # byte that makes the construction a blob and not a bare digest.
     for name, payload in (
         ("plain.txt", b"abc"),
         ("empty.txt", b""),
         ("with-nul.txt", b"a\x00b"),
         ("utf8.txt", "prompt \u2014 unicode\n".encode("utf-8")),
-        ("crlf.txt", b"a\r\nb\r\n"),
     ):
         path = tmp_path / name
         path.write_bytes(payload)
-        expected = subprocess.run(
-            ["git", "hash-object", str(path)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=True,
-        ).stdout.strip()
-        assert module._git_blob_sha(path) == expected, (
-            f"{name}: the in-process hash disagrees with `git hash-object`, so every "
-            "membership test below is asking about the wrong id"
+        raw = hashlib.sha1(b"blob %d\x00" % len(payload) + payload).hexdigest()
+        assert stored(path, f"sub/{name}") == raw, (
+            f"{name}: the id this tool compares is not a content hash of the file at all"
         )
+
+    # Half two: the case the first version of this tool got wrong, deterministic on every
+    # platform because the filter is configured here rather than inherited from the host.
+    _git(root, "config", "core.autocrlf", "true")
+    committed = root / "sub" / "file.txt"
+    committed.write_bytes(b"a\nb\n")
+    _git(root, "add", "sub/file.txt")
+    _git(root, "commit", "-q", "-m", "lf blob")
+    blob = _git(root, "rev-parse", "HEAD:sub/file.txt").stdout.strip()
+
+    crlf = tmp_path / "install" / "sub" / "file.txt"
+    crlf.parent.mkdir(parents=True)
+    crlf.write_bytes(b"a\r\nb\r\n")
+    raw = hashlib.sha1(b"blob %d\x00" % len(b"a\r\nb\r\n") + b"a\r\nb\r\n").hexdigest()
+
+    assert stored(crlf, "sub/file.txt") == blob, (
+        "a CRLF file whose committed blob is LF did not answer the committed id: the "
+        "comparison has left git's own convention, which is exactly what made "
+        "`test-windows` red (run 37588646750)"
+    )
+    assert raw != blob, (
+        "the raw construction agrees here, so this fixture no longer exercises the "
+        "divergence it exists to pin - the filter is not being applied"
+    )
+
+
+def test_a_crlf_install_file_is_not_called_drift(tmp_path: Path) -> None:
+    """The regression itself, end to end through the tool's process boundary.
+
+    A clean install tree whose files carry CRLF, in a checkout configured to normalize line
+    endings, must answer `0`. Under the raw construction every such file is reported as an
+    edit - on the Windows leg that was five failing tests, and on a host whose attributes
+    transform a whole file type it would be a reading nobody could use.
+
+    The control is in the same test: changing a byte of that same file must still answer
+    `1`, so this is not a tool that stopped seeing drift.
+    """
+    root = tmp_path / "checkout"
+    (root / "emrg").mkdir(parents=True)
+    (root / "emrg" / "mod.py").write_bytes(b"x = 1\ny = 2\n")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.invalid")
+    _git(root, "config", "user.name", "t")
+    _git(root, "config", "core.autocrlf", "true")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "lf blob")
+
+    install = tmp_path / "install" / "source"
+    (install / "emrg").mkdir(parents=True)
+    (install / "emrg" / "mod.py").write_bytes(b"x = 1\r\ny = 2\r\n")
+
+    clean = _run(install, root)
+    assert clean.returncode == 0, (
+        "an install file differing from the committed blob only in line endings was "
+        f"reported as drift: {clean.stdout!r}"
+    )
+
+    (install / "emrg" / "mod.py").write_bytes(b"x = 1\r\ny = 3\r\n")
+    edited = _run(install, root)
+    assert edited.returncode == 1, (
+        f"a real edit of the same file was not reported: {edited.stdout!r}"
+    )
+
+
+def test_the_repo_relative_path_is_what_decides_the_conversion(tmp_path: Path) -> None:
+    """`--path` is load-bearing, and only a **path-keyed** attribute shows it.
+
+    Attributes are matched against the file's repo-relative path, so the path has to be
+    supplied: the install copy lives outside the checkout, and git cannot derive one. A
+    basename-only rule (`*.cmd`) hides this, because the file's own name matches it either
+    way - found by a mutation arm that dropped the flag and **survived** (cycle
+    `cyc20261007-182502`). With a directory-keyed rule the difference is measurable:
+
+        .gitattributes:  sub/*.cmd text eol=crlf
+        hash-object <file>                -> the raw CRLF id, which no commit holds
+        hash-object --path=sub/a.cmd <f>  -> the committed LF blob
+
+    So a clean install copy of such a file is reported as an edit unless the path is given,
+    which is the whole reason this tool passes it.
+    """
+    root = tmp_path / "checkout"
+    (root / "sub").mkdir(parents=True)
+    (root / ".gitattributes").write_text("sub/*.cmd text eol=crlf\n", encoding="utf-8")
+    (root / "sub" / "a.cmd").write_text("echo hi\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.invalid")
+    _git(root, "config", "user.name", "t")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "lf blob")
+    blob = _git(root, "rev-parse", "HEAD:sub/a.cmd").stdout.strip()
+
+    install = tmp_path / "install" / "source"
+    (install / "sub").mkdir(parents=True)
+    crlf = install / "sub" / "a.cmd"
+    crlf.write_bytes(b"echo hi\r\n")
+
+    module = _load(TOOL)
+    assert module._git_stored_id(root, crlf, "sub/a.cmd") == blob, (
+        "the tool did not answer the committed blob for a CRLF file whose attribute rule "
+        "is keyed on its directory"
+    )
+    without_path = _git(root, "hash-object", str(crlf)).stdout.strip()
+    assert without_path != blob, (
+        "this fixture no longer exercises the flag: without `--path` git answered the "
+        "committed blob, so the rule is not keyed on the path here"
+    )
+
+    proc = _run(install, root)
+    assert proc.returncode == 0, (
+        f"a clean install copy under a path-keyed attribute rule was reported as drift: "
+        f"{proc.stdout!r}"
+    )
 
 
 def test_a_clean_install_tree_answers_zero(install_dir: Path, checkout: Path) -> None:

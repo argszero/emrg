@@ -37,9 +37,23 @@ Two independent confirmations that this is not a one-off:
 
 The question this answers
 -------------------------
-Per file the install tree and this checkout both carry, is the file's exact content
-*somewhere* in this repository's history? If it is not, the file was written by hand and
-the next upgrade destroys it.
+Per file the install tree and this checkout both carry, is the file's content *somewhere*
+in this repository's history? If it is not, the file was written by hand and the next
+upgrade destroys it.
+
+**Which convention "the content" means is asked of git, not decided here.** Git stores a
+file's *cleaned* bytes, and cleaning is a property of the path: this repository pins
+`*.cmd`/`*.bat`/`*.ps1` to LF blobs with a CRLF checkout (`.gitattributes`
+`text eol=crlf`), and a host with `core.autocrlf=true` normalizes every text file. So the
+id this tool compares is `git hash-object --path=<relative path> <file>`'s, which is the
+same convention that produced the blobs in it. Hashing the raw bytes instead answers a
+different question and calls a line-ending difference an edit - measured 2026-10-07
+against both `core.autocrlf=true` and a `eol=crlf` attribute, and caught by `test-windows`
+on this tool's first version (run `37588646750`).
+
+That is also why the comparison is not a shortcut computed in-process: a raw
+`sha1("blob <len>\\0" + bytes)` is faster (measured: 1.2s for this host's 372 shared files,
+one subprocess each) but it is the wrong function.
 
 Membership is asked of `git rev-list --all --objects` - the objects reachable from the
 refs - rather than of a tag or of `HEAD`, because the edit is the thing being detected and
@@ -63,14 +77,18 @@ Named limits
   committed and then orphaned - a deleted branch, a rewritten commit - reads as an edit.
   That is a false positive in the strict sense and the safe direction: both cases mean
   "this content is not in the history you can see".
-* It compares **content**, so an edit that happens to reproduce a committed blob exactly
-  is not drift - by construction, since the committed copy is then a home for it.
+* It compares **content, under git's own line-ending convention**: a file whose only
+  difference from the committed blob is CRLF versus LF reads as *no* drift, because
+  `hash-object --path=<rel>` cleans it exactly as `git add` did. That is deliberate - such
+  a file holds nothing a human added, and reporting it would flood the reading on any host
+  whose attributes or `autocrlf` transform line endings.
+* An edit that happens to reproduce a committed blob exactly is not drift - by
+  construction, since the committed copy is then a home for it.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import subprocess
 import sys
 import traceback
@@ -82,17 +100,37 @@ from pathlib import Path
 DEFAULT_INSTALL_DIR = "~/.emrg/install/source"
 
 
-def _git_blob_sha(path: Path) -> str:
-    """The blob hash `git hash-object <path>` would print, computed here.
+def _git_stored_id(root: Path, path: Path, relative: str) -> str:
+    """The blob id git assigns to `path`'s content **at this path in this checkout**.
 
-    `hash-object` is one subprocess per file and this scan reads every file the two trees
-    share; the hash is a documented construction (`sha1("blob <len>\\0" + bytes)`), and
-    `tests/test_check_install_drift.py::test_the_hash_is_the_one_git_computes` holds this
-    function to `git hash-object`'s answer on real bytes, so the shortcut cannot drift
-    away from the thing it stands in for.
+    Asked of git rather than computed here, and the `--path` is the load-bearing half: it
+    is what makes the answer the one the committed blobs were created with. Git stores a
+    file's *cleaned* bytes, and what "cleaned" means is a property of the path - this
+    repository pins `*.cmd`/`*.bat`/`*.ps1` to LF blobs with a CRLF checkout
+    (`.gitattributes` `text eol=crlf`, because a LF-only `.cmd` is misparsed by cmd.exe),
+    and a host with `core.autocrlf=true` normalizes every text file. Hashing the raw bytes
+    instead would report every such file as drift on such a host - noise, which is how a
+    reading stops being read.
+
+    Measured 2026-10-07 (cycle `cyc20261007-182502`) on synthetic repositories: a CRLF file
+    whose committed blob is LF answers the committed id through `hash-object
+    --path=<rel>` under **both** `core.autocrlf=true` and `*.cmd text eol=crlf`, while the
+    raw construction answers a different id under both. The first version of this tool used
+    the raw construction and `test-windows` caught it (run `37588646750`).
     """
-    data = path.read_bytes()
-    return hashlib.sha1(b"blob %d\x00" % len(data) + data).hexdigest()
+    proc = subprocess.run(
+        ["git", "-C", str(root), "hash-object", f"--path={relative}", str(path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise RuntimeError(
+            detail[0] if detail else f"git hash-object failed for {relative}"
+        )
+    return proc.stdout.strip()
 
 
 def _git(root: Path, *argv: str) -> str:
@@ -150,7 +188,7 @@ def scan(install_dir: Path, root: Path) -> tuple[list[tuple[str, int]], list[str
             skipped.append(relative)
             continue
         checked += 1
-        if _git_blob_sha(path) not in objects:
+        if _git_stored_id(root, path, relative) not in objects:
             drifted.append((relative, path.stat().st_size))
     return drifted, skipped, checked
 
