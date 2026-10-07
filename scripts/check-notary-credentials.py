@@ -169,7 +169,33 @@ def probe(xcrun: str | None, env: dict[str, str]) -> tuple[str, str]:
                 f"asks for, so no credentials verdict was reached. Output: "
                 f"{_redact(result.stdout.strip()[:200], secrets)!r}"
             )
-        count = len(parsed.get("history", [])) if isinstance(parsed, dict) else None
+        # A count is printed only when a list was really read. `len()` of whatever the field
+        # holds is not a reading, and measured 2026-10-08 (`cyc20261008-062404`, on master
+        # `a4229bd7`) it answered three different things from the same line:
+        #   `{"history": "x"}`   -> `works`, "1 past submission(s) on record" — a count
+        #                           invented from a string (`len("x") == 1`) and printed as
+        #                           a fact, the false confidence this whole preflight exists
+        #                           to remove
+        #   `{"history": null}`  -> `len(None)`, an uncaught `TypeError` out of a tool whose
+        #                           `1` means *Apple refused the credentials*: the false
+        #                           diagnosis, one exit code over
+        #   no `history` field   -> "0 past submission(s) on record" — a count from a field
+        #                           that is not there
+        # A present field that is not a list is a *failure to measure*, so it is `2` with the
+        # shape named; an absent field keeps the weak-but-true wording rather than being spent
+        # as a verdict. Exit 0 from `notarytool history` still means the credentials were
+        # accepted, which is why both branches below remain `works`.
+        count = None
+        if isinstance(parsed, dict) and "history" in parsed:
+            history = parsed["history"]
+            if not isinstance(history, list):
+                return "unmeasurable", (
+                    "the call exited 0 but its `history` is not a list "
+                    f"({type(history).__name__}), so no count was read and no credentials "
+                    f"verdict was reached. Output: "
+                    f"{_redact(result.stdout.strip()[:200], secrets)!r}"
+                )
+            count = len(history)
         where = f"{count} past submission(s) on record" if count is not None else "a JSON reply"
         return "works", f"Apple answered the submission-history request ({where})"
 

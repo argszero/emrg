@@ -71,6 +71,24 @@ if scenario == "accepted":
     json.dump({"history": [{"id": "sub-1", "status": "Accepted"}]}, sys.stdout)
     sys.stdout.write("\\n")
     sys.exit(0)
+if scenario == "history_string":
+    # `history` present and not a list. `len("x") == 1`, so this is the shape that made the
+    # line print a count it had never read.
+    json.dump({"history": "x"}, sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
+if scenario == "history_null":
+    # `len(None)` raised out of the tool, whose exit `1` means *Apple refused the
+    # credentials* — the false diagnosis, one exit code over.
+    json.dump({"history": None}, sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
+if scenario == "history_absent":
+    # An exit-0 JSON reply with no `history` field at all: a count here would come from a
+    # field that is not there.
+    json.dump({"status": "ok"}, sys.stdout)
+    sys.stdout.write("\\n")
+    sys.exit(0)
 if scenario == "refused":
     sys.stderr.write("Error: HTTP status code: 401. Invalid credentials. "
                      "Use an app-specific password.\\n")
@@ -202,6 +220,75 @@ def test_working_credentials_pass(tmp_path: Path) -> None:
         f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
     )
     assert "history" in result.stdout or "OK" in result.stdout
+
+
+@_posix_only
+def test_a_real_history_list_still_reports_its_count(tmp_path: Path) -> None:
+    """The control for the two arms below: the fix removes the *invented* count, not counting.
+
+    A guard that stopped printing the number whenever it was asked to would pass both of them
+    while making the reading strictly less informative — the number is the one thing the
+    reply is worth printing for.
+    """
+    result = _run(tmp_path, "accepted")
+    assert result.returncode == 0, f"exit {result.returncode}\nstdout={result.stdout!r}"
+    assert "1 past submission(s) on record" in result.stdout, (
+        "a one-entry `history` list no longer reports its count — the reading lost the one "
+        f"number it exists to print.\nstdout={result.stdout!r}"
+    )
+
+
+@_posix_only
+@pytest.mark.parametrize("scenario, shape", [("history_string", "str"), ("history_null", "NoneType")])
+def test_a_history_that_is_not_a_list_is_unmeasured_and_never_counted(
+    tmp_path: Path, scenario: str, shape: str
+) -> None:
+    """A present `history` field of the wrong shape is a failure to *measure* — exit 2.
+
+    Measured on master `a4229bd7` (2026-10-08): `{"history": "x"}` printed **"1 past
+    submission(s) on record"** and exited **0** — `len("x")` is 1, so a count was invented
+    from a string and reported as a fact. `{"history": null}` raised `TypeError` out of the
+    process at exit **1**, which is this script's code for *Apple refused the credentials*:
+    the false diagnosis, one exit code over. Both are answers this preflight must not give,
+    and neither is reachable by reading the exit code alone.
+    """
+    result = _run(tmp_path, scenario)
+    assert result.returncode == 2, (
+        f"{scenario} answered exit {result.returncode}, expected 2 — a `history` that is not "
+        f"a list is a failure to measure, never a count and never a credential refusal.\n"
+        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    assert "past submission(s)" not in result.stdout, (
+        f"a count was printed for a `history` that is not a list — nothing was read to "
+        f"count.\nstdout={result.stdout!r}"
+    )
+    assert shape in result.stdout, (
+        f"the shape of the field was not named ({shape!r}), so a host cannot tell what "
+        f"Apple (or a wrapper) actually answered.\nstdout={result.stdout!r}"
+    )
+
+
+@_posix_only
+def test_an_absent_history_field_is_not_a_count_of_zero(tmp_path: Path) -> None:
+    """No `history` field is not `history` of length 0 — the second invented count.
+
+    Measured on master `a4229bd7`: `{"status": "ok"}` printed "**0** past submission(s) on
+    record" and exited 0. The weak-but-true wording ("a JSON reply") is what an absent field
+    supports; a `0` asserts that Apple answered with an empty history, which it did not say.
+    """
+    result = _run(tmp_path, "history_absent")
+    assert result.returncode == 0, (
+        f"an exit-0 JSON reply is still the credentials being accepted "
+        f"(exit {result.returncode}).\nstdout={result.stdout!r}"
+    )
+    assert "0 past submission(s)" not in result.stdout, (
+        "a count was printed for a `history` field that is not there — the field's absence "
+        f"was spent as a reading of zero.\nstdout={result.stdout!r}"
+    )
+    assert "a JSON reply" in result.stdout, (
+        f"the absent field was not reported as the weaker reading it is.\n"
+        f"stdout={result.stdout!r}"
+    )
 
 
 # ── The lookalikes: a could-not-measure is never a pass ───────────────────────
