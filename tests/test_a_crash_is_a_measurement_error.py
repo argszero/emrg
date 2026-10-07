@@ -42,6 +42,11 @@ SCRIPTS = REPO_ROOT / "scripts"
 
 #: Every tool that is *run* rather than only imported: each one prints a report and answers
 #: with a code, so each one needs an entry point that cannot answer with a crash's code.
+#: `check-notary-credentials.py` joined 2026-10-07 (`cyc20261007-072231`): it loads no
+#: sibling, so the derivation below could not reach it, and it answers **1 = "Apple refused
+#: the credentials"** — a verdict code — so an uncaught exception was read as Apple's
+#: refusal. Measured on the invocation `DEVELOPMENT.md` recommends for that tool, with the
+#: named file absent: traceback, exit 1.
 TOOLS = [
     "check-merge-freshness.py",
     "check-vote-count.py",
@@ -52,6 +57,8 @@ TOOLS = [
     "check-merge-order.py",
     "check-merge-landed.py",
     "run-mutation-arm.py",
+    "check-notary-credentials.py",
+    "check-install-drift.py",
 ]
 
 
@@ -86,8 +93,13 @@ def test_every_tool_of_the_family_has_the_entry_point():
         )
 
 
-def test_the_rule_has_one_home_not_nine():
-    """Nine copies of a rule are nine chances to drift, so they are pinned equal.
+def test_the_rule_has_one_home_not_one_per_tool():
+    """A copy of a rule per tool is a chance to drift per tool, so they are pinned equal.
+
+    Count-free on purpose: the family has grown since this clause was written (nine members
+    when it was named `…_not_nine`, ten after `check-notary-credentials.py` joined on
+    2026-10-07), and a number in a name is a claim the next member falsifies without
+    touching this file.
 
     Compared through `inspect.getsource` rather than by re-reading the file, because the
     subject is the function each module really defines.

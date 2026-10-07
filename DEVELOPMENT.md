@@ -282,7 +282,7 @@ APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \
 #   uv run --no-sync python3 scripts/check-notary-credentials.py --env-file ~/.emrg/notary.env
 ```
 
-Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's own reply is printed (usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); `2` = the exchange did not complete, so **no verdict was reached — never a pass**, and CI must fail on it too. After fixing, resume the run that failed with `gh run rerun <run-id> --failed`: a tag already pushed is not re-pushed.
+Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's own reply is printed (usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); `2` = the exchange did not complete — **or the `--env-file` named could not be read**, a typo or a file not created yet; the message says which, and in both cases **no verdict was reached — never a pass**, and CI must fail on it too. After fixing, resume the run that failed with `gh run rerun <run-id> --failed`: a tag already pushed is not re-pushed.
 
 The step's two failure modes are told apart by **duration**, not by the exit code: a refused *submission* dies in seconds, while a notarization *verdict* takes minutes, exits 0 and reports `status=Invalid` (the step parses that status and fetches Apple's rejection log for it). `Notarize pkg` names the preflight in its own `::error::` when the submission is refused, so the remedy arrives with the failure.
 
@@ -311,6 +311,44 @@ build is still exit `1`. Install with `brew install actionlint` (check the versi
 gives you; the releases page has the pinned build). CI remains authoritative: this runs
 the same tool at the same version over the same files, not a second implementation of its
 rules.
+
+**The host-side counterpart of the install step.** The daemon renders a built-in task
+template from its own `__file__`, and on a running install that is
+`~/.emrg/install/source/` — a directory the installer wrote, which an upgrade replaces
+**whole**. It is not a git clone, so a file edited there lives in no commit: the edit looks
+like it took effect (it is what renders) and the next install destroys it silently. Ask
+before an upgrade, or whenever a prompt edit seems not to stick:
+
+```bash
+uv run --no-sync python3 scripts/check-install-drift.py
+# a different install tree or checkout:
+#   uv run --no-sync python3 scripts/check-install-drift.py --install-dir <tree> --root <checkout>
+```
+
+It asks one question per file the two trees share — is this content *anywhere* in the
+checkout's history? — and reads no version file at all, because membership is the whole
+question and the release an install happens to be never has to be established. The id it
+compares is `git hash-object --path=<repo-relative path>`'s, i.e. git's own convention:
+line-ending cleaning (`core.autocrlf`, and this repository's `*.cmd`/`*.bat`/`*.ps1
+text eol=crlf` rule) is applied on both sides, so a line-ending-only difference is not
+reported as an edit. Exit `0` =
+every shared file's content is in history; `1` = at least one is not, printed with its path
+and byte count and with what happens to it; `2` = could not measure (no install tree, no
+git checkout, `git` failed, or the two trees share no path at all) — **never a pass**. The
+`1` remedy is the point of the reading: move the change into the checkout and ship it, or
+it is lost.
+
+Measured 2026-10-07 on this host: exactly one shared file is flagged, and it is
+`emrg/server/competition_prompt.md` — the install copy is the `v0.3.7` bytes **plus** a
+hand-appended block that no ref of the repository carries (every other prompt file in the
+tree is byte-identical to `v0.3.7`, so the tree is that release with one hand-edit). The
+block records a host mandate, and the tag the release chain is part-way through (`v0.3.8`)
+contains none of it — so upgrading does not merely fail to ship that rule, it deletes it.
+The competition task hit the same wall from the other side on 2026-10-07: its rants record
+prompt edits refused by its sandbox (the install tree is outside the competition
+workspace), with the correct but incomplete conclusion that "the install tree copy is the
+one that takes effect" — true, and the reason such an edit has to reach the source
+checkout and ship.
 
 **The readable path to a failed run's cause.** `gh run view <id> --log` and `--log-failed` answer
 **0 bytes with exit 0** on a current host for every run, green or red (measured 2026-10-04 on `gh`
@@ -370,9 +408,26 @@ leaves this tool as exit 1 - the code that means 'a clean merge landed an unheal
 sites no longer carry a `if spec is None or spec.loader is None` guard either:
 `importlib.util.spec_from_file_location` returns a spec *and* a loader for a path that does not exist,
 so that branch could never fire — `tests/test_a_crash_is_a_measurement_error.py` pins both halves,
-pins the entry point identical across the family (one rule, not nine copies free to drift apart), and
+pins the entry point identical across the family (one rule, not a copy per tool free to drift apart), and
 derives the family from the source (a `spec_from_file_location` call in code), so a gate that loads a
 sibling and is not in that list fails the module instead of sitting silently outside it.
+
+**The reading that reports a stacked head.** `check-stacked-prs.py` asks whether an open PR would
+land another open PR's commits — the state a reviewer found by hand on #1879, where the branch had
+been cut from #1877's branch and the head carried its commits under a declaration naming neither.
+The tool landed 2026-10-06 (PR #1885) and was then named in **no tracked document**: its own
+docstring, its test, and the private `.emrg/` records were its only carriers, so the reviewer it
+exists for had no way to learn it exists — and it is the reading whose absence is *why it exists*.
+Its list would be `Agent.md`'s merge gates, and that file is **at its prompt cap** (the cap is
+`PROJECT_CONTEXT_MAX_CHARS`, imported and measured by `tests/test_check_stacked_prs.py`, not written
+here), so naming it there needs space freed from something else first: a content decision, not a
+line to squeeze in. This paragraph is therefore its home until that decision is made, and the test
+named above fails the day the cap stops blocking it, so the temporary home cannot outlive its
+reason:
+
+```bash
+uv run --no-sync python3 scripts/check-stacked-prs.py   # 0 clean · 1 a head carrying another open PR's commits · 2 the queue could not be read
+```
 
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 

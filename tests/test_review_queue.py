@@ -593,6 +593,35 @@ def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
     assert "cast-vote.py" not in out
 
 
+def test_a_head_whose_run_is_still_arriving_is_parked_not_retriggered(
+    mod, monkeypatch, capsys
+):
+    """The empty lookup has a second shape, and this row is what tells them apart.
+
+    Measured 2026-10-07 (`cyc20261007-022540`): `gh pr checks` printed "no checks
+    reported" for a head pushed seconds earlier, whose run existed and was
+    registering. The `no_run` row reads that state as a dropped push and hands over
+    a re-trigger - which fires a **second** run beside the one arriving, since
+    `test.yml` declares no concurrency group. The freshness tool now separates the
+    two by the head's age, and this row is where the separation has to *land*: a
+    kind the queue has no row for falls through to the merge-state branch below it.
+    """
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh(stale=True, kind="no_run_yet",
+                      reason="no Test run for head aaaa yet, and the head was "
+                             "committed 4 s ago")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "park" in out
+    assert "next cycle" in out, "the deferral has to name when the row comes back"
+    assert "gh workflow run" not in out, (
+        "a re-trigger here starts a second run on a head whose first one is arriving"
+    )
+    assert "re-trigger-ci.sh" not in out
+    assert "cast-vote.py" not in out
+
+
 # --- branch states, and the one a committer resolves directly --------------
 
 
@@ -735,6 +764,49 @@ def test_an_unread_check_run_list_keeps_the_state_blocking(mod, monkeypatch, cap
     assert rc == 0
     assert "unblock" in out
     assert "could not be read" in out
+
+
+def test_an_unreadable_ci_half_is_not_a_branch_state(mod, monkeypatch, capsys):
+    """A failure in the *other* half must not fall through to the merge-state row.
+
+    Measured live 2026-10-07 (`cyc20261007-203559`): the same head (`d31870d6`, #1893)
+    read twice a minute apart gave `unblock` and then `park`. The `unblock` was this
+    path - a gh timeout in the compare call left `stale_read` False, so the stale
+    branches could not fire and the merge-state row answered instead, prescribing a
+    remedy for a state (`UNSTABLE`) nothing had read. `Reading.unread` carried the
+    reason, and only the `--json` half printed it, and the exit-code table's "a PR in
+    it could not be read" counted only the *count* half.
+
+    Both directions, so the row cannot be bought by deleting the branch-state row: the
+    same fake behind a readable freshness still reaches `unblock`.
+    """
+    class Boom:
+        """`check-merge-freshness.py` when its `gh` call fails (the live symptom)."""
+
+        def check_pr(self, number):
+            raise RuntimeError("simulated gh timeout reading the compare endpoint")
+
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    monkeypatch.setattr(mod, "freshness", lambda: Boom())
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 2, "a PR whose CI half could not be read is a failure to measure"
+    assert "unmeasurable: #1" in out, "the footer must name it, not only the exit code"
+    assert "read-first" in out
+    assert "ancestry unreadable" in out, "the reason belongs on the row, not only in --json"
+    assert "check-merge-freshness.py 1" in out, "the remedy is the re-ask that failed"
+    assert "merge state is UNSTABLE" not in out, (
+        "the branch-state row prescribes a remedy for a state that was never read"
+    )
+
+    # control: the identical reading, with the CI half readable, is the branch-state row
+    monkeypatch.setattr(mod, "freshness", lambda: fresh)
+    assert mod.main(["1", "--prev-cycle", PREV_CYCLE]) == 0
+    control = capsys.readouterr().out
+    assert "unblock" in control
+    assert "unmeasurable" not in control
 
 
 # --- the per-cycle rule ----------------------------------------------------

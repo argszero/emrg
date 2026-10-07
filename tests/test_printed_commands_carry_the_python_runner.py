@@ -73,13 +73,20 @@ number, the four spellings this family writes. The argument is the discriminator
 what keeps the clause off prose: "update `VERSION_SOURCES` in `scripts/bump-version.py`"
 ends at the file name and is not a thing to run, while `scripts/check-vote-count.py <PR>` is.
 
-What the clause reads on this tree, measured 2026-10-06: **37** command-shaped mentions, in
-seven tools - `review-queue.py` 16, `cast-vote.py` 8, `check-merge-freshness.py` 8,
-`bump-version.py` 2, `check-merge-sequence.py` 1, `check-release-published.py` 1,
-`run-mutation-arm.py` 1. The seventh is the newest and the reason this sentence moved: that
-tool's refusal for a gate it cannot load ends with a runnable remedy
-(`uv run --no-sync python3 scripts/check-merge-plan-suite.py --help`), which is a printed
-command like any other and carries the runner like any other. Two of the others are new in one
+What the clause reads on this tree, measured 2026-10-07: **39** command-shaped mentions, in
+eight tools - `bump-version.py` 2, `cast-vote.py` 8, `check-merge-freshness.py` 8,
+`check-merge-sequence.py` 1, `check-release-published.py` 1, `check-stacked-prs.py` 1,
+`review-queue.py` 17, `run-mutation-arm.py` 1. The newest is `review-queue.py`'s row for a PR
+whose CI half could not be read (cycle `cyc20261007-203559`), which names the re-ask that failed
+(`uv run --no-sync python3 scripts/check-merge-freshness.py <PR>`). Before it the newest was
+`check-stacked-prs.py`, and it arrived the same way as the two before it: through a *remedy*. Its
+row for a PR that would
+land another open PR's work ends by naming the instrument that prices what that merge changes
+(`uv run --no-sync python3 scripts/check-merge-landing-diff.py <PR>`), and naming a reading is
+printing a command. The sentence also moved the cycle before, when `run-mutation-arm.py`'s
+refusal for a gate it cannot load gained a runnable remedy
+(`uv run --no-sync python3 scripts/check-merge-plan-suite.py --help`) - a printed command like
+any other, carrying the runner like any other. Two of the others are new in one
 afternoon and both came from a *remedy*: a printed remedy is a printed
 command, so adding one to a tool's repair path moves this number whether or not the author
 was thinking about citations (`review-queue.py`'s no-verdict row, and the reason

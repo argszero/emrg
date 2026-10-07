@@ -48,7 +48,17 @@ Exit codes, the family's contract:
        app-specific password, an Apple ID or team ID that does not match, or a Developer
        Program agreement waiting to be accepted
     2  not measurable: the exchange could not be completed, or completed without a
-       credentials verdict. Never 0, and the CI step must fail on it too
+       credentials verdict, **or the `--env-file` named could not be read**. Never 0,
+       and the CI step must fail on it too
+
+The three variables may come from the environment or from a `--env-file`, and the file
+path is the half a host gets wrong: `DEVELOPMENT.md` documents
+`--env-file ~/.emrg/notary.env` as the way to keep the secrets out of the shell history,
+and measured 2026-10-07 (`cyc20261007-072231`) a path that is not there — a typo, or the
+file not created yet — answered **1** with a bare traceback. `1` is the code this table
+gives Apple's refusal, so the host reading it would go hunting an expired password over
+a mistyped path: the false diagnosis this script exists to remove, one code over. An
+input that could not be read is `2`, named, and it is never spent as a verdict.
 
 Usage:
 
@@ -66,6 +76,8 @@ import re
 import shutil
 import subprocess
 import sys
+import traceback
+from pathlib import Path
 
 #: The three variables `build-release.yml` feeds `notarytool` from, under that file's own
 #: secret names. Read from the environment rather than taken as flags: the preflight must
@@ -226,13 +238,39 @@ def main(argv: list[str] | None = None) -> int:
 
     env = dict(os.environ)
     if args.env_file is not None:
-        env.update(_read_env_file(args.env_file))
+        try:
+            env.update(_read_env_file(args.env_file))
+        except (OSError, UnicodeDecodeError) as exc:
+            # Not a traceback, and above all not exit 1: `1` is this table's code for
+            # Apple refusing the credentials, and a path that is not there would send the
+            # host to re-check an app-specific password over a typo. Measured 2026-10-07
+            # (`cyc20261007-072231`) - `--env-file ~/.emrg/notary.env`, the invocation
+            # `DEVELOPMENT.md` recommends, with that file absent: traceback, exit 1, and
+            # not one word about the file being the cause.
+            #
+            # The environment is deliberately *not* read instead: a preflight that fell
+            # back to whatever else happens to be set would measure a credential set the
+            # caller did not name, which is the same false confidence as a pass.
+            print(
+                f"not measurable: the env file {args.env_file} could not be read "
+                f"({type(exc).__name__}: {exc}). The three variables were to come from this "
+                "file and are not read from the environment instead, so no credential set "
+                "was named - create the file (`KEY=VALUE` lines), fix the path, or export "
+                "the variables and drop the flag.",
+                file=sys.stderr,
+            )
+            return 2
     xcrun = args.xcrun if args.xcrun is not None else shutil.which("xcrun")
     return check(env, xcrun)
 
 
 def _read_env_file(path: str) -> dict[str, str]:
-    """`KEY=VALUE` lines; blank lines and `#` comments ignored. Not a shell script."""
+    """`KEY=VALUE` lines; blank lines and `#` comments ignored. Not a shell script.
+
+    Raises rather than answering an empty set when the file cannot be read: "a file with
+    no variables in it" and "no file" are different readings, and the caller turns the
+    second one into this tool's unmeasurable answer with the path in it.
+    """
     values: dict[str, str] = {}
     with open(path, encoding="utf-8") as handle:
         for line in handle:
@@ -244,5 +282,25 @@ def _read_env_file(path: str) -> dict[str, str]:
     return values
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(_entry())

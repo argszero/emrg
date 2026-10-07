@@ -141,12 +141,57 @@ TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
 #: because "accepts a root" is not visible in the source the way a `tree: ` line is.
 #: `TAKES_A_TREE_ARGUMENT` is here as the member whose tree *is* its argument;
 #: `check_unbound_reads.py` takes the same kind of input behind an optional flag, which
-#: is why it is also in `RUN_HERE` (with no flag it names its own checkout). A guard that
-#: gains a root argument has to be added here and to one of the buckets above.
+#: is why it is also in `RUN_HERE` (with no flag it names its own checkout);
+#: `check-workflows.py` takes one behind `--root` and is classified in the
+#: *cannot-be-run-here* bucket, which is why membership here is checked against the whole
+#: classification rather than against `RUN_HERE` alone (it was added 2026-10-06,
+#: `cyc20261006-214703`: the table was one merge old and already one member short, while
+#: `check-workflows.py` refused both shapes correctly — rc 2 with
+#: `not measurable: no workflow file under …`). A guard that gains a root argument has to
+#: be added here, and this table is a claim like any other: nothing measures it against
+#: the argv each guard really accepts.
 POINTABLE_AT_A_TREE = {
     "check-citation-resolves.py": (),
     "check_unbound_reads.py": ("--root",),
+    "check-workflows.py": ("--root",),
 }
+
+#: The spellings the family's refusals really use. The first two are what this leg's own
+#: measurement produced on 2026-10-06 (`cyc20261006-214703`), by pointing each member in
+#: `POINTABLE_AT_A_TREE` at an empty directory **and** at a path that is not there:
+#: `check-citation-resolves.py` and `check_unbound_reads.py` print `could not measure`,
+#: `check-workflows.py` prints `not measurable`. The leg below asked for the first of those
+#: only, so it could not have covered the third member at all — a matcher written for one
+#: output form is the defect this repository has already paid for (issue #461, the singular
+#: `identity imported` that missed `3 identities imported`).
+#:
+#: `unmeasurable` is carried but is **not** one of those six readings — no member of this
+#: table prints it, in either shape (reviewed 2026-10-06, `cyc20261006-215800`; verified
+#: here). It is here because the family does print it elsewhere — `check-patch-files.py`,
+#: `check-rant-citations.py` and `check-extension-load.py` — so a guard joining the table
+#: with that wording would be reported as printing no reason at all, which would be a false
+#: finding about a truthful guard. The comment says which is measured and which is carried
+#: because the two are different claims about the same tuple.
+REFUSAL_WORDS = ("could not measure", "not measurable", "unmeasurable")
+
+
+def _refusal_reason(out: str) -> str:
+    """The reason a refusal printed after its spelling, or `""` when it printed none.
+
+    Read from the **start of a line**, not from anywhere in the output: the leg's own
+    words are that "the unmeasurable code has to carry the reason", and a substring search
+    is satisfied by a spelling that appears inside a *verdict* line, or inside a docstring
+    echoed by `--help`. Requiring the `:` the family's refusals use is what makes the
+    assertion's sentence true of the thing it asserts (reviewed 2026-10-06,
+    `cyc20261006-215800`).
+    """
+    for line in out.splitlines():
+        for spelling in REFUSAL_WORDS:
+            prefix = f"{spelling}:"
+            if line.startswith(prefix):
+                return line[len(prefix) :].strip()
+    return ""
+
 
 #: Reads a working tree and names it, but cannot be run in this suite. Classified rather
 #: than dropped, because "not run" is the kind of exemption that widens silently.
@@ -167,6 +212,16 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "`tests/test_check_workflows.py::test_the_tree_it_read_is_named_first` runs it as "
         "a subprocess against a `tmp_path` tree and asserts the first line, which holds "
         "with or without the binary because the tree line is printed before the search"
+    ),
+    "check-install-drift.py": (
+        "its subject is the host's installed tree (`~/.emrg/install/source`), not this "
+        "checkout: the verdict is about a *pair* of trees, and a bare checkout carries no "
+        "install, so running it here would measure the host rather than the rule - and on "
+        "a host with a hand-edited install tree its honest answer is rc 1, which is that "
+        "host's drift rather than this tree's defect. It reads a working tree (this "
+        "checkout, through git) and names both halves, and that naming IS verified rather "
+        "than classified: `tests/test_check_install_drift.py::test_the_report_names_both_trees_before_the_verdict` runs it "
+        "as a subprocess against a `tmp_path` install tree and checkout and pins both lines"
     ),
     "check-merge-landed.py": (
         "needs `gh` and the network for the review half. It was classified as a "
@@ -199,6 +254,12 @@ NOT_TREE_READERS = {
         "reads the open issues and PRs and their timelines on the GitHub API - the "
         "subject is the remote queue, so there is no local tree whose name would "
         "answer anything (the repo it read is printed first instead)"
+    ),
+    "check-stacked-prs.py": (
+        "reads every open PR's head and commit list from the GitHub API and reports which "
+        "open PR's head commit another one would land - the subject is the remote queue, so "
+        "no local tree's name would answer anything (the repo it read is printed first "
+        "instead, as check-issue-links.py does)"
     ),
     "check-patch-files.py": "reads the patch files it is given as arguments",
     "check-merge-freshness.py": "requires PR numbers; answers per head and its base",
@@ -246,9 +307,42 @@ def _run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _classified() -> set[str]:
+    """Every guard this file accounts for, in any bucket.
+
+    One home for the set, because two assertions ask about it and the reviewer of the leg
+    that first wrote it in two places was right that they can drift: the sibling check below
+    asks "is every guard on disk classified", and the empty-tree leg asks "is every pointable
+    guard in a bucket that can hold a tree reader". The first wants this union; the second
+    wants `_tree_reading_buckets()`, and having them share one definition is what keeps the
+    two questions about the same classification (reviewed 2026-10-06, `cyc20261006-215800`).
+    """
+    return (
+        set(RUN_HERE)
+        | {TAKES_A_TREE_ARGUMENT}
+        | set(NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE)
+        | set(NOT_TREE_READERS)
+    )
+
+
+def _tree_reading_buckets() -> set[str]:
+    """The buckets a guard that can be pointed at a tree may sit in.
+
+    `NOT_TREE_READERS` is excluded deliberately: a member there answers about something
+    that is not a working tree, so a guard listed as pointable **and** classified as not
+    reading a tree is a contradiction, and this is the set that can still catch it. The
+    wider `_classified()` is the right question for the sibling check ("every script on
+    disk is classified"), which is a different one (reviewed 2026-10-06,
+    `cyc20261006-230355`).
+    """
+    return set(RUN_HERE) | {TAKES_A_TREE_ARGUMENT} | set(NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE)
+
+
 def _first_line(proc: subprocess.CompletedProcess) -> str:
     out = (proc.stdout or "").splitlines()
     return out[0] if out else ""
+
+
 
 
 def _named_root(proc: subprocess.CompletedProcess) -> str:
@@ -267,12 +361,7 @@ def test_every_guard_in_the_family_is_classified() -> None:
     is simply one nobody wrote a test for, which is how the guard this file's docstring
     names came to be missing it.
     """
-    classified = (
-        set(RUN_HERE)
-        | {TAKES_A_TREE_ARGUMENT}
-        | set(NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE)
-        | set(NOT_TREE_READERS)
-    )
+    classified = _classified()
     on_disk = _guards_on_disk()
     assert on_disk - classified == set(), (
         f"these guards are in scripts/ and are not classified above: "
@@ -447,10 +536,11 @@ def test_a_guard_pointed_at_a_tree_it_read_nothing_from_refuses_to_pass(tmp_path
     Both shapes are asked of every member, because they are both "I read no file": a
     directory that exists and holds nothing, and a path that is not a directory at all.
     """
-    unclassified = set(POINTABLE_AT_A_TREE) - (set(RUN_HERE) | {TAKES_A_TREE_ARGUMENT})
+    classified = _tree_reading_buckets()
+    unclassified = set(POINTABLE_AT_A_TREE) - classified
     assert not unclassified, (
         f"{sorted(unclassified)} is listed as pointable at a tree and is in no bucket "
-        "above, so nothing else in this file holds it to the family's rules"
+        "that can hold one, so nothing else in this file holds it to the family's rules"
     )
     for name, flag in POINTABLE_AT_A_TREE.items():
         empty = tmp_path / f"empty-{name}"
@@ -463,9 +553,10 @@ def test_a_guard_pointed_at_a_tree_it_read_nothing_from_refuses_to_pass(tmp_path
                 f"{name} answered rc={proc.returncode} for {label} ({target}) — `0` is "
                 f"\"measured and clean\", and a tree it read no file from is neither:\n{out}"
             )
-            assert "could not measure" in out, (
+            assert _refusal_reason(out), (
                 f"{name}: the unmeasurable code has to carry the reason, or it is not an "
-                f"answer a reader can act on:\n{out}"
+                f"answer a reader can act on — no line starts with one of {REFUSAL_WORDS} "
+                f"followed by a reason:\n{out}"
             )
             assert "OK:" not in out and "collects" not in out, (
                 f"{name} printed a clean verdict as well as refusing — the two halves "
@@ -488,3 +579,45 @@ def test_the_citation_guards_line_is_not_merely_the_default(tmp_path) -> None:
         f"{TAKES_A_TREE_ARGUMENT}: run from {tmp_path} with no argument it named "
         f"{named!r} — its default root is `.`, and that is the tree it read"
     )
+
+
+def test_the_refusal_reader_takes_only_a_line_that_starts_with_the_spelling() -> None:
+    """The reader the leg asserts through, pinned in both directions.
+
+    The leg's own words are that "the unmeasurable code has to carry the reason". The
+    matcher this replaced searched the whole output for the spelling, which a *verdict*
+    line satisfies — so the assertion could pass on a guard that refused in words the term
+    reader cannot act on (reviewed 2026-10-06, `cyc20261006-215800`). Both halves are
+    pinned here because the leg's arms can only show the third member's shape; this is the
+    reader every member is read through.
+    """
+    assert _refusal_reason("could not measure: no test module was read\n") == (
+        "no test module was read"
+    )
+    assert _refusal_reason("not measurable: no workflow file under /tmp/x\n") == (
+        "no workflow file under /tmp/x"
+    )
+    assert _refusal_reason("VERDICT: not measurable: a reason\n") == "", (
+        "a spelling inside another line is a mention, not the refusal this leg reads"
+    )
+    assert _refusal_reason("not measurable:\n") == "", (
+        "the spelling with no reason after it is what the leg exists to refuse"
+    )
+    assert _refusal_reason("") == ""
+
+
+def test_the_legs_bucket_set_is_narrower_than_the_sibling_checks() -> None:
+    """A pointable guard cannot be one that answers about something other than a tree.
+
+    The leg first read the four-bucket union, which `NOT_TREE_READERS` is a member of, so a
+    guard listed as both pointable *and* classified as not reading a tree would have been
+    accepted — the one contradiction this membership check can still catch (reviewed
+    2026-10-06, `cyc20261006-230355`). The wider set stays the sibling check's question:
+    "is every guard on disk classified", which is a different one.
+    """
+    assert _tree_reading_buckets() <= _classified()
+    assert not (_tree_reading_buckets() & set(NOT_TREE_READERS)), (
+        "a bucket that cannot hold a tree reader is in the set the leg checks membership "
+        "against, so the check can no longer fail for the reason it exists"
+    )
+    assert set(NOT_TREE_READERS) <= _classified()

@@ -32,7 +32,7 @@ re-implemented here:
 * `check-vote-count.py` owns "how many votes are still about this head?" — the
   count, the per-cycle rule, and the mergeability clause;
 * `check-merge-freshness.py` owns "is the green CI about the tree that would land?"
-  — the ancestry, and the five ways a verdict can fail to be current.
+  — the ancestry, and the six ways a verdict can fail to be current.
 
 So the number printed here is the counter's number and the staleness here is the
 freshness tool's *kind*, not a local re-derivation of either. That matters more than
@@ -42,12 +42,19 @@ question — the freshness tool asks whether master's tip is an *ancestor* of th
 have produced one word. A second implementation of the vote rule would be a second
 answer to "may we merge this", which is the number every decision below turns on.
 
-Two things the output never does
---------------------------------
+Three things the output never does
+----------------------------------
 * **A count it could not read is not a zero.** `0/3 votes` is the line that says
   "vote freely"; printing it without having read it spends votes in the direction
   that cannot be undone. An unreadable count is reported as `?` with the reason, and
   the action becomes "read it first".
+* **A CI half it could not read is not a branch state.** Each PR is two reads - the
+  count and the sibling gate's ancestry/run half - and the row's later branches are
+  decisions about the second one. When that half raises, the row is `read-first` with
+  the reason, not the branch-state row that falls next: measured 2026-10-07
+  (`cyc20261007-203559`), where a gh timeout in the compare call printed `unblock` -
+  a remedy for a state of the branch - for a head that was merely waiting for CI. The
+  reason is carried on the row and by the `--json` half, and the exit code counts it.
 * **Silence is not an answer.** A failed `gh pr list` and an empty queue are
   different facts, so a failed listing exits 2 and says so, where `no open PRs in
   argszero/emrg - nothing to review` is printed only for a queue actually read.
@@ -858,6 +865,11 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
       cycle may vote on;
     * a text conflict is next: more review does not fix it, and resolving it
       replaces the head and voids whatever votes exist;
+    * then a CI half that could not be read, because the branches below are decisions
+      about it or about the branch state that stands in for it: a row built there would
+      prescribe a remedy for a reading nobody took (measured 2026-10-07,
+      `cyc20261007-203559` - a gh timeout in the compare call printed the merge-state
+      row `unblock` on a head that was only waiting for CI);
     * then the three CI states the freshness tool distinguishes — red, absent,
       unfinished. None of them is votable, and their remedies differ, which is why
       they are not collapsed into "not fresh": a red run is read, an absent one is
@@ -918,6 +930,23 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                     "&& git merge FETCH_HEAD",
             extra=[f"{RUNNER} scripts/classify-conflict.py --all"],
         )
+    if reading.unread:
+        # The CI half was not read: every branch left is either that half (the run's
+        # state) or the branch state that stands in for it, so a row built down there
+        # prescribes a remedy for something nobody measured. Placed *after* the veto and
+        # conflict rows, which are answered by the counter alone and both move the head
+        # anyway - so neither becomes an unanswerable question by the CI half being
+        # missing. Measured 2026-10-07 (`cyc20261007-203559`): the same head read twice a
+        # minute apart gave `unblock` and then `park`, and the `unblock` was this path - a
+        # gh timeout in the compare call left `stale_read` False and the merge-state row,
+        # whose subject is the state of a branch, answered for a state nothing had read.
+        # The remedy is the same re-ask the unreadable count gets: the reading exists, it
+        # just has not been taken.
+        return Action(
+            kind="read-first",
+            why=reading.unread,
+            command=f"{RUNNER} scripts/check-merge-freshness.py {pr}",
+        )
     if reading.stale_read and reading.stale_kind == "failing":
         return Action(
             kind="ci-red",
@@ -935,6 +964,26 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                 f"{reading.ci_run_id or '<run-id from the link above>'}",
                 f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
             ],
+        )
+    if reading.stale_read and reading.stale_kind == "no_run_yet":
+        # The head is younger than a push-event run takes to appear, so the empty
+        # run lookup is not yet evidence of anything and the row takes `running`'s
+        # verb for the same reason that one does: the head is not votable until a
+        # run concludes, and the re-trigger `no_run` prescribes would fire a
+        # *second* run on a head whose first one is arriving (measured 2026-10-07:
+        # a re-trigger does not cancel it - `test.yml` declares no concurrency
+        # group - so the duplicate runs in parallel). Measured by the row that is
+        # not here: cycle `cyc20261007-022540` read "no checks reported" from
+        # `gh pr checks` seconds after pushing head `338a9a53`, while that head's
+        # run existed and was registering.
+        return Action(
+            kind="park",
+            why=reading.stale_reason
+            + " - parked for this cycle: the head is too young for the empty lookup "
+              "to mean the push was dropped, and a re-trigger here starts a second "
+              "run beside the one arriving. Read this PR again next cycle; a head "
+              "still run-less then is `no_run`, whose row does name the re-trigger",
+            command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.stale_read and reading.stale_kind == "no_run":
         return Action(
@@ -1435,7 +1484,19 @@ def main(argv: list[str] | None = None) -> int:
         window,
     )
 
-    unread = [reading.pr for reading, _ in readings if reading.votes is None]
+    # Both halves of a PR's reading count as "could not be read": the count (its verdict
+    # carries no votes at all) and the CI half (the ancestry/run call raised, and the
+    # reason sits in `reading.unread`). The exit-code table above says "a PR in it could
+    # not be read" and means the PR, not one of its two reads - measured 2026-10-07
+    # (`cyc20261007-203559`): an ancestry timeout left rc 0 and no `unmeasurable:` line
+    # while the row under it prescribed a remedy for a state nothing had read. A terminal
+    # PR is excluded: its row is the lifecycle state, which was read, and a finished PR
+    # has no ancestry question left to answer.
+    unread = [
+        reading.pr
+        for reading, _ in readings
+        if reading.votes is None or (reading.unread and not reading.terminal)
+    ]
 
     # Read after the PR rows rather than before: an unreadable ledger is reported
     # alongside the PR reading, not instead of it, so a cycle still gets the half that
