@@ -372,6 +372,29 @@ def test_an_install_file_the_checkout_does_not_track_is_skipped_not_reported(
     )
 
 
+def test_the_drift_verdict_names_what_it_skipped_too(
+    install_dir: Path, checkout: Path
+) -> None:
+    """The skip count is on the acting path as well, not only on the quiet ones.
+
+    Measured 2026-10-08 (`cyc20261008-062404`) on master `a4229bd7`: with one drifted file
+    and one untracked install file, the `1` line read "1 file(s) hold content no shipped
+    commit has; 1 checked" and named no skipped file. The green line above and the
+    could-not-measure line both print the count, so the one verdict a reader acts on was
+    also the one that hid its own coverage — a reading that answered a narrower question
+    than its numbers imply.
+    """
+    (install_dir / SHARED).write_text(RELEASED + "edited in place\n", encoding="utf-8")
+    (install_dir / "packaging_only.txt").write_text("not in the repository\n", encoding="utf-8")
+
+    proc = _run(install_dir, checkout)
+    assert proc.returncode == 1, f"expected drift, got {proc.returncode}: {proc.stdout!r}"
+    assert "1 skipped" in proc.stdout, (
+        f"the drift verdict named the drifted file but not the skipped one, so a reader "
+        f"cannot tell how much of the tree the question was asked of: {proc.stdout!r}"
+    )
+
+
 def test_content_only_a_bookkeeping_ref_holds_is_reported_and_that_ref_named(
     tmp_path: Path,
 ) -> None:

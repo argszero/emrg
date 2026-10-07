@@ -431,7 +431,18 @@ def main(argv: list[str] | None = None) -> int:
 
     for relative, size, note in drifted:
         print(f"{relative} ({size} bytes) - {note}")
-    print(f"{len(drifted)} file(s) hold content no shipped commit has; {checked} checked")
+    # The skip count is part of the reading on every path, not only on the quiet ones: the
+    # two verdicts above print it, and this is the path a reader *acts* on. Measured
+    # 2026-10-08 (`cyc20261008-062404`) on master `a4229bd7`: with one drifted file and one
+    # untracked install file, this line read "1 file(s) hold content no shipped commit has;
+    # 1 checked" and said nothing about the skipped file -- so a reader could not tell
+    # whether the question had been asked of one file or of the whole tree. The tool's own
+    # docstring ("skipped (and counted)") and the sibling arm that pins the green line both
+    # require the number here.
+    print(
+        f"{len(drifted)} file(s) hold content no shipped commit has; "
+        f"{checked} checked, {len(skipped)} skipped as untracked here"
+    )
     print(
         "    this was edited in place. The install tree is not a git clone and an "
         "install/upgrade replaces it whole, so the next one destroys it: move the change "
