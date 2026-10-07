@@ -604,3 +604,129 @@ def test_the_blocker_rule_has_all_three_cases_and_keeps_the_forbidden_list_above
             "the blocker rule does not exclude the hard constraints, so "
             "'bypassing does not affect the score' can be read as covering them"
         )
+
+
+# --- §0.0: the cadence rule the host asked to be written *in this file* --------------------------
+#
+# Measured 2026-10-07 (cycle cyc20261007-130240). The host asked, by name, for the
+# no-slowdown rule to live in `emrg/server/competition_prompt.md` — the message is
+# quotable (`find-host-message.py --pattern '如果有闲置的资源'` ->
+# 2026-10-06T10:40:46) — and the file never carried it: the rule existed only in the
+# tree the running daemon renders from (`~/.emrg/install/source/emrg/server/`), which is
+# not under version control and is overwritten by the next install/upgrade. A rule that
+# lives in a derived copy is a rule that survives until the next build; these tests are
+# what keeps it in the source that ships.
+#
+# Scope note, the same shape as the §4 block below: each assertion is taken against the
+# `### 0.0` block rather than the whole file, because the file discusses the vibe check
+# and cadence in other sections too — a whole-document substring check would stay green
+# after the block was deleted, which is a failure to measure rather than a pass.
+
+
+def _block_0_0() -> tuple[str, str]:
+    """The `### 0.0` cadence block, and the whole text it came from."""
+    text = PROMPT.read_text(encoding="utf-8")
+    parts = text.split("### 0.0 ", 1)
+    assert len(parts) == 2, (
+        "the `### 0.0` cadence block is gone from competition_prompt.md — the host asked for "
+        "this rule *in this file* (2026-10-06T10:40:46) and it may not live only in the "
+        "installed copy, which the next upgrade overwrites"
+    )
+    block = parts[1].split("\n### Current State", 1)[0]
+    assert block.strip(), "the `### 0.0` heading is there but its body is gone"
+    return block, text
+
+
+def test_the_cadence_block_is_read_before_the_round_starts():
+    """Placement, not just presence: §0.0 sits above the first step it constrains.
+
+    A rule parked at the bottom of the file would be found by a reader looking for it and
+    missed by a round that is already running — and the round is what it binds.
+    """
+    _block, text = _block_0_0()
+    assert text.index("### 0.0 ") < text.index("### Current State"), (
+        "the cadence block drifted below the header block — it must be read before the round begins"
+    )
+    assert text.index("### 0.0 ") < text.index("### 0. Preparation"), (
+        "the cadence block drifted below §0. Preparation — the rule binds the round it precedes"
+    )
+
+
+def test_the_rejected_slowdown_grounds_are_named_in_the_block():
+    """The rule lists the grounds it forbids, so it cannot be read as leaving room for them.
+
+    "Never recommend a slowdown" alone is defeated by a plausible reason; the three the
+    host rejected by name are the ones a round reached for on 2026-10-06.
+    """
+    block, _text = _block_0_0()
+    assert "`recommend_slowdown` must be `false`, always" in block
+    for ground in (
+        "no lever left this season",
+        "nothing to do but wait for the score",
+        "submission quota has not refreshed",
+    ):
+        assert ground in block, (
+            f"the rejected slowdown ground {ground!r} is gone from §0.0 — without it the rule "
+            "reads as a preference a round can argue its way around"
+        )
+
+
+def test_waiting_is_not_idle_and_idle_resources_go_to_more_competitions():
+    """The two affirmative halves: where the round turns, and what idle compute buys."""
+    block, _text = _block_0_0()
+    assert '"Waiting" is not "idle"' in block
+    assert "turn to another live competition immediately" in block
+    assert "Phase A" in block, (
+        "the fallback to discovery is gone: a round with every competition waiting has nothing "
+        "left to do in §0.0's terms and would idle"
+    )
+    assert "Idle resources go into entering more competitions" in block
+    # The order of gates is load-bearing: expansion is not a licence to skip the
+    # online-only gate or the compute check the earlier sections make mandatory.
+    assert block.index("§3 online-only gate") < block.index("§0.6 compute feasibility"), (
+        "the expansion clause no longer runs the platforms through the online gate before the "
+        "compute check — the hard constraint is not bypassed by an idle CPU"
+    )
+
+
+def test_only_the_host_may_slow_the_task_down():
+    """The single exception is named, so no in-round judgement can invent another."""
+    block, _text = _block_0_0()
+    assert "Only the host may slow this task down" in block
+    assert "only by explicitly asking for it" in block
+
+
+def test_think_before_acting_covers_the_irreversible_actions():
+    """A quota-consuming action states its case first — the four parts, all present."""
+    block, _text = _block_0_0()
+    assert "Think before acting" in block
+    for part in (
+        "what will be done",
+        "on what evidence",
+        "the expected result",
+        "the cost of failure",
+    ):
+        assert part in block, f"the pre-action statement is missing {part!r}"
+
+
+def test_the_cadence_block_carries_the_host_messages_it_rests_on():
+    """A rule recorded as the host's is a message that can be pointed at (R7).
+
+    Quoted verbatim, in the host's own words, each with its timestamp — so the next
+    cycle can re-run `find-host-message.py` on either quote instead of trusting this file.
+    """
+    block, _text = _block_0_0()
+    for quote, stamp in (
+        (
+            "我看现在又降频了，为什么，不是要求"
+            "evolution/emrg/emrg/server/competition_prompt.md禁止降频了吗？",
+            "2026-10-06T10:40:46",
+        ),
+        ("如果有闲置的资源，则应该参加更多比赛来赢得更多奖金", "2026-10-06T10:40:46"),
+        ("每轮对每个比赛都要做工作，不是每轮只做一个比赛", "2026-10-07T11:52:53"),
+    ):
+        assert quote in block, (
+            f"the host's own words are gone from §0.0: {quote!r} — a paraphrase cannot be "
+            "looked up, and the rule would rest on this instance's inference instead"
+        )
+        assert stamp in block, f"the quote {quote!r} no longer carries its timestamp {stamp}"
