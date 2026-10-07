@@ -283,8 +283,24 @@ def test_a_path_without_xcrun_is_unmeasured_rather_than_passed(tmp_path: Path) -
 # preflight exists to remove, one code over. The arms below hold both halves: an input
 # that cannot be read is `2` and says which file, while the refusal (above) stays `1`.
 #
-# They are not `_posix_only`: the branch returns before `xcrun` is resolved, so nothing
-# here executes the stand-in, and both platforms measure the same reading.
+# The two *unreadable* arms are not `_posix_only`: that branch returns before `xcrun` is
+# resolved, so nothing there executes the stand-in and both platforms measure the same
+# reading. The control that a readable file reaches the call is **two** arms, split by what
+# each one needs to execute:
+#
+#   * the file's values in the header `check()` prints before the probe runs - no stand-in,
+#     so both platforms measure it;
+#   * the exchange itself reached with those values - `_posix_only`, like every other arm
+#     here that runs the stub.
+#
+# That split is not tidiness. Measured on run `37548845041` (this PR's first head, job
+# `112559256441`): the single `rc == 0` control **failed on the Windows leg** (`assert 2 ==
+# 0`) because the shebang stand-in cannot execute there, while its own failure output shows
+# all three values having arrived from the file (`apple-id: dev@example.invalid`, `team-id:
+# TEAMID1234`, `password: set`) and `not measurable` for the check that then could not run.
+# So the reading the control exists for was there on Windows all along, and only the exit
+# code was measuring the host - which is the same "a check reading the wrong half" defect
+# this file pins elsewhere, found by CI rather than by the arm.
 
 
 def test_an_env_file_that_is_not_there_is_unmeasured_never_a_refusal(tmp_path: Path) -> None:
@@ -347,10 +363,16 @@ def test_an_env_file_that_is_a_directory_is_unmeasured_too(tmp_path: Path) -> No
 def test_the_env_file_is_read_when_it_is_really_there(tmp_path: Path) -> None:
     """The control: the arms above must not be satisfiable by never reading the file.
 
-    Same stub, same scenario, and the three variables are **absent from the environment**
-    — so `0` here is only reachable if the file's values are the ones the call was made
-    with. Without this arm, a branch that refused every `--env-file` would pass the pair
-    above while breaking the documented invocation it was added for.
+    Read off the **header**, which `check()` prints before `probe()` resolves `xcrun`, so
+    this is a reading on the file and nothing else - and therefore runs on both platforms.
+    The three variables are absent from the environment, so a header naming ``dev@example.invalid``
+    and ``TEAMID1234`` can only have got them from the file; a branch that refused every
+    `--env-file` would print ``(unset)`` beside each name and fail here.
+
+    The exit code is deliberately **not** asserted: that half of the control needs the
+    stand-in to run, which is the Windows leg's business (measured on run `37548845041` -
+    `assert 2 == 0` while this very header was correct), so it lives in the arm below, with
+    the gate every stand-in-running arm in this file carries.
     """
     env_file = tmp_path / "notary.env"
     env_file.write_text(
@@ -362,12 +384,44 @@ def test_the_env_file_is_read_when_it_is_really_there(tmp_path: Path) -> None:
     )
     result = _run(tmp_path, "accepted", credentials=False, env_file=str(env_file))
 
-    assert result.returncode == 0, (
-        "a readable env file did not carry the credentials into the call.\n"
-        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    for line in (
+        "apple-id: dev@example.invalid",
+        "team-id:  TEAMID1234",
+        "password: set",
+    ):
+        assert line in result.stdout, (
+            f"the readable env file's values did not reach the reading (`{line}` is absent, "
+            f"so the call was made with something other than what the file names).\n"
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
+    assert "password: (unset)" not in result.stdout, (
+        "the file's password did not reach the reading.\n" f"stdout={result.stdout!r}"
     )
-    assert f"apple-id: dev@example.invalid" in result.stdout, (
-        f"the file's values did not reach the reading.\nstdout={result.stdout!r}"
+    assert PASSWORD not in result.stdout + result.stderr
+
+
+@_posix_only
+def test_the_env_file_carries_its_values_into_the_exchange(tmp_path: Path) -> None:
+    """The executed half of that control: the file's values are the call that was made.
+
+    Split from the arm above rather than deleted, because the header alone cannot see a
+    branch that reads the file for the report and sends the environment to `notarytool`:
+    the header would be right and the credential set would be one the caller did not name,
+    which is exactly the false confidence this preflight exists to remove.
+    """
+    env_file = tmp_path / "notary.env"
+    env_file.write_text(
+        f"{APPLE_ID_VAR}=dev@example.invalid\n"
+        f"{PASSWORD_VAR}={PASSWORD}\n"
+        f"{TEAM_ID_VAR}=TEAMID1234\n",
+        encoding="utf-8",
+    )
+    result = _run(tmp_path, "accepted", credentials=False, env_file=str(env_file))
+
+    assert result.returncode == 0, (
+        "a readable env file did not carry its values into the exchange - the stand-in "
+        f"accepts exactly the three the file names.\nstdout={result.stdout!r}\n"
+        f"stderr={result.stderr!r}"
     )
     assert PASSWORD not in result.stdout + result.stderr
 
