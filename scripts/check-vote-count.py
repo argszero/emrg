@@ -498,43 +498,126 @@ _review_queue: object | None = None
 # can turn a self-review into a counted one.
 
 _UNSET: object = object()
-_own_login: object = _UNSET
+_own_logins: object = _UNSET
+
+#: The account a remote URL names, in the forms a GitHub remote is written in: the
+#: scp-like `git@github.com:owner/repo.git` and the URL forms
+#: `https://github.com/owner/repo.git` / `ssh://git@github.com:22/owner/repo.git`.
+#: The host must carry a dot, so a local-path remote — this checkout's own `origin`
+#: is a directory — names nobody rather than being read as an account.
+_REMOTE_OWNER = re.compile(
+    r"^(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::[0-9]+)?[:/]"
+    r"(?P<owner>[^/]+)/[^/]+?/?$"
+)
 
 
-def instance_login() -> str | None:
-    """The login this instance votes under, or `None` when it cannot be read.
+def remote_owners(listing: str) -> frozenset[str]:
+    """Every account a `git remote -v` listing names, or the empty set for none.
 
-    Asked only when the clause would otherwise void a vote (`own_login` below is
-    called from there and nowhere else), so a run with nothing inside a window makes
-    the same number of `gh` calls it always did. `None` is not a failure of the
-    reading: it keeps the clause applied, which is this file's safe direction.
+    A host can push under more than one login, and `gh api user` reports only the one
+    its **token** belongs to: GitHub attributes a push to the account that
+    authenticated, so a host whose remote is `git@github.com:owner/repo` has its
+    pushes recorded as `owner` while its token answers something else. Measured
+    2026-10-08 on this repo: head `d31870d6` (#1893), pushed by a peer's own cycle,
+    carries run `37623098954` with actor `argszero`, while that host's `gh api user`
+    answers `how2how2how2-arch`; the same split shows on #1899's head `b6130da4`
+    (actor `argszero`). Reading a single login un-refused that instance's own pushes —
+    the one direction this clause exists to close — which is what the review on #1900
+    measured (cycle `cyc20261008-013454`).
+
+    The URL's account is not a proof of identity — a member pushing to `someorg/repo`
+    is not `someorg` — but it is the account the URL names, and *over*-inclusion is
+    this clause's safe direction: a login wrongly read as one's own keeps the clause
+    and costs a delay, where one wrongly excluded credits a self-review.
     """
-    global _own_login
-    if _own_login is _UNSET:
+    owners: set[str] = set()
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        url = parts[1]
+        if "://" in url:
+            url = url.split("://", 1)[1]
+        match = _REMOTE_OWNER.match(url)
+        owner = match.group("owner") if match else ""
+        if owner:
+            owners.add(owner)
+    return frozenset(owners)
+
+
+def _git_remote_listing() -> str:
+    """`git remote -v` from the checkout this script lives in, or `""`.
+
+    Run against the script's own repository rather than the working directory: the
+    counter is invoked from a session directory, and `git remote -v` there answers
+    about whatever repository happens to sit above that cwd. `""` parses to no owners,
+    which leaves the token login alone — the reading this tool had before it could
+    read a remote at all, and the one that errs toward keeping the clause.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "remote", "-v"],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def instance_logins() -> frozenset[str]:
+    """Every login this instance pushes under, or the empty set when none can be read.
+
+    The token's login (`gh api user`) **and** the accounts this checkout's remotes name
+    (`git remote -v`), because a host can hold two accounts and GitHub attributes a push
+    to the one that authenticated rather than to the one the counter happened to ask
+    about — `remote_owners` carries the measurement.
+
+    Asked only when the clause would otherwise decide something (`own_login` below is
+    its only caller), so a run with nothing inside a window makes the same number of
+    calls it always did. An empty set is not a failure of the reading: it keeps the
+    clause applied, which is this file's safe direction, and so does a login that
+    cannot be read.
+    """
+    global _own_logins
+    if _own_logins is _UNSET:
+        logins: set[str] = set()
         try:
             payload = _gh_json(["api", "user", "--jq", "{login: .login}"])
         except (RuntimeError, ValueError):
             payload = None
         login = payload.get("login") if isinstance(payload, dict) else None
-        _own_login = str(login) if isinstance(login, str) and login else None
-    return _own_login  # type: ignore[return-value]
+        if isinstance(login, str) and login:
+            logins.add(login)
+        logins |= remote_owners(_git_remote_listing())
+        _own_logins = frozenset(logins)
+    return _own_logins  # type: ignore[return-value]
 
 
 def own_login(author: str | None) -> bool:
     """Was this vote cast by the instance whose cycle records the window came from?
 
-    `True` when it cannot be told apart — an author the payload does not carry, or a
-    login that cannot be read — so an undecided voter keeps the clause, which is the
+    `True` when it cannot be told apart — an author the payload does not carry, or no
+    login that can be read — so an undecided voter keeps the clause, which is the
     direction that costs a delay rather than crediting a self-review (issue #1856).
-    The author is tested *first* so that a payload without one costs no `gh` call,
-    and so that a run which never compares two logins makes none at all.
+
+    **Membership, not equality.** A host may push under more than one login — the
+    remote's account and the token's — and every one of them is this instance's own:
+    reading a single login un-refused this instance's own pushes made under its other
+    one, which is what the review on #1900 measured on 2026-10-08 (a run whose actor is
+    `argszero` against a token answering `how2how2how2-arch`). The author is tested
+    *first* so that a payload without one costs no call, and so that a run which never
+    compares two logins makes none at all.
     """
     if not author:
         return True
-    mine = instance_login()
+    mine = instance_logins()
     if not mine:
         return True
-    return author == mine
+    return author in mine
 
 
 def review_queue():
@@ -566,15 +649,28 @@ def own_head_window(
     *,
     push_time: str,
     push_time_exact: bool,
+    pusher: str = "",
     cycles_log: str | None = None,
 ) -> tuple[bool, str]:
     """Is the head inside the window this vote's own cycle treats as its own?
 
     Answers `(inside, why)`. `inside` means the vote must not count, and `why` is
-    what the reader is told about it; `(False, "")` is the ordinary case.
+    what the reader is told about it; `(False, "")` is the ordinary case, and a
+    non-empty `why` with `inside` False is the one exemption that was decided by a
+    reading rather than by the clock — the row prints it so a reader can see which
+    datum decided.
 
-    Three inputs, and the same rule as the posting side for each of them:
+    Four inputs, and the same rule as the posting side for each of them:
 
+    * **Whose push it is.** The clause is about a head *this* instance pushed, and the
+      window is only a proxy for that: a head the peer pushed inside a gap between this
+      host's cycles fell inside the window and was voided as this instance's own work
+      (measured 2026-10-06, `cyc20261006-122605`; #1856's mirror half). So a `pusher`
+      that reads as a login **outside the set this instance pushes under** exempts the
+      head outright (the set, because a host holds more than one login: `remote_owners`).
+      An unknown one - an empty string, or no login that can be read - keeps the clause,
+      so this can only ever un-void a push that is provably someone else's, never credit
+      a self-review.
     * **The window.** The previous cycle's start when its record can be found, this
       cycle's own start when it cannot — `abstain_window`'s narrowed form, and the
       reason says which of the two was applied, because a window that could not be
@@ -613,6 +709,22 @@ def own_head_window(
         )
     if pushed < window.start:
         return False, ""
+    # The clause is about a head *this* instance pushed, and the window is only a proxy
+    # for that: a head the peer pushed inside a gap between this host's cycles fell inside
+    # the window and was reported as this one's own work (measured 2026-10-06,
+    # `cyc20261006-122605`; #1856's mirror half). A positive reading of a login *outside
+    # the set this instance pushes under* exempts the head; an unknown one keeps the
+    # clause, so this can only ever un-void a push that is provably someone else's. The
+    # set, rather than one login, because a host holds two of them — see `remote_owners`
+    # for the measurement, and `own_login` for the direction each mistake costs. Asked
+    # *here* - after the window has said the head is inside it - so a run whose heads are
+    # all outside their windows still makes no identity call, the laziness
+    # `test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window` pins.
+    if pusher and not own_login(pusher):
+        return False, (
+            f"counts - the head was pushed by {pusher}, which is not a login this "
+            "instance pushes under, so the own-head clause is not asked of it"
+        )
     narrowed = (
         f"; the window could not be widened to the cycle before this one ({window.unresolved})"
         if window.unresolved
@@ -1062,9 +1174,11 @@ class Vote:
     #: id has one candidate author, so it is not ambiguous (see the reader loop).
     ids: tuple[str, ...] = ()
     #: Why a *valid* vote counted when the reading above would otherwise have voided
-    #: it — today, one case: the own-head clause was not asked because the vote was
-    #: cast by another instance (issue #1856). Empty is the ordinary case, and the
-    #: label column prints "counts" for it.
+    #: it — two cases, both "the own-head clause was not asked": the vote was cast by
+    #: another instance (issue #1856), or the head was *pushed* by a login outside the
+    #: set this instance pushes under (the mirror half, and the review on #1900, where
+    #: a reader could not tell an identity's exemption from the clock's ordinary
+    #: answer). Empty is the ordinary case, and the label column prints "counts" for it.
     note: str = ""
 
 
@@ -1133,6 +1247,12 @@ class Verdict:
     head_sha: str
     push_time: str
     push_time_exact: bool
+    #: The login whose CI run fixed `push_time`, or `""` when there was no run to ask
+    #: (the commit-date fallback) or the payload did not carry one. The abstention
+    #: clause reads it to tell a head this instance pushed from one another instance
+    #: did inside a gap between this host's cycles (#1856's mirror half, measured
+    #: 2026-10-06 on `cyc20261006-122605`). Empty keeps the clause applied.
+    pusher: str = ""
     mergeable: str = ""
     merge_state: str = ""
     #: GitHub's lifecycle state: `OPEN`, `MERGED` or `CLOSED`. A terminal one is a
@@ -1398,31 +1518,48 @@ class Verdict:
         return "READY"
 
 
-def _earliest_run_created_at(head: str) -> str:
-    """The earliest CI run creation time GitHub lists for this SHA, or `""`.
+def _earliest_run(head: str) -> tuple[str, str]:
+    """The earliest CI run GitHub lists for this SHA, as `(created_at, actor_login)`.
 
     Re-asked when the answer is empty, because an empty answer is used as a fact
     (`block_reason` reads it as "no CI run exists", and `blocked` turns on it) - see
     `_RUN_LOOKUP_ATTEMPTS` for the measurement that made a single ask untenable. A
-    head that really ran nothing stays empty and returns `""`; the caller then falls
-    back, still flagged inexact, so the retry cannot manufacture a run.
+    head that really ran nothing stays empty and returns `("", "")`; the caller then
+    falls back, still flagged inexact, so the retry cannot manufacture a run.
 
     The re-ask that *finds* the run is reported on stderr: a tool that silently
     repairs a stale answer hides the thing it repairs, and how often this happens is
     the only way a later reader can tell flakiness from a one-off.
+
+    The run's **actor** comes back with its time because the abstention clause is about
+    *whose* push a head is, and the window's start instant is only a proxy for it: from
+    the time alone, a head another instance pushed inside a gap between this host's
+    cycles was attributed to this host (measured 2026-10-06, `cyc20261006-122605`). An
+    actor the payload does not carry reads as `""`, and `""` leaves the clause applied -
+    the exemption is only ever bought by a positive reading of a non-own login. The
+    login is taken from the run whose time is the answer, so the two cannot come from
+    different runs.
     """
     for attempt in range(_RUN_LOOKUP_ATTEMPTS):
-        runs = _gh_json(
+        payload = _gh_json(
             [
                 "api",
                 f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
                 "--jq",
-                '{t: ([.workflow_runs[].created_at] | sort | .[0] // "")}',
+                '{runs: [.workflow_runs[] | {t: (.created_at // ""), '
+                'a: (.actor.login // "")}]}',
             ]
         )
-        assert isinstance(runs, dict)
-        created = runs.get("t")
-        if isinstance(created, str) and created:
+        assert isinstance(payload, dict)
+        raw = payload.get("runs")
+        assert isinstance(raw, list), payload
+        dated = [
+            (str(run.get("t") or ""), str(run.get("a") or ""))
+            for run in raw
+            if isinstance(run, dict) and str(run.get("t") or "")
+        ]
+        if dated:
+            created, actor = min(dated, key=lambda pair: pair[0])
             if attempt:
                 print(
                     f"note: the runs API listed no run for head {head[:8]} and then "
@@ -1430,10 +1567,10 @@ def _earliest_run_created_at(head: str) -> str:
                     "push time is exact after all",
                     file=sys.stderr,
                 )
-            return created
+            return created, actor
         if attempt + 1 < _RUN_LOOKUP_ATTEMPTS:
             time.sleep(_RUN_LOOKUP_DELAY_SECONDS)
-    return ""
+    return "", ""
 
 
 def _head_check_runs(head: str) -> tuple[tuple[HeadCheck, ...], bool]:
@@ -1495,23 +1632,25 @@ def _head_check_runs(head: str) -> tuple[tuple[HeadCheck, ...], bool]:
     return tuple(checks), truncated
 
 
-def _head_push_time(head: str) -> tuple[str, bool]:
+def _head_push_time(head: str) -> tuple[str, bool, str]:
     """Earliest CI run creation time for this SHA, else the commit date.
 
-    Returns `(timestamp, is_exact)`. The run's `createdAt` is the push event time;
-    a commit date can precede the push, so the fallback is flagged rather than
-    silently used.
+    Returns `(timestamp, is_exact, pusher_login)`. The run's `createdAt` is the push
+    event time; a commit date can precede the push, so the fallback is flagged rather
+    than silently used. `pusher_login` is the actor of the run the timestamp came from,
+    and is `""` on the commit-date fallback - there is no run there to ask whose push
+    the head was, which keeps the abstention clause applied rather than guessing.
     """
-    created = _earliest_run_created_at(head)
+    created, actor = _earliest_run(head)
     if created:
-        return created, True
+        return created, True, actor
 
     commit = _gh_json(["api", f"repos/{REPO}/commits/{head}", "--jq", "{t: .commit.committer.date}"])
     assert isinstance(commit, dict)
     committer_date = commit.get("t")
     if not isinstance(committer_date, str) or not committer_date:
         raise RuntimeError(f"cannot determine a push time for head {head[:8]}")
-    return committer_date, False
+    return committer_date, False, ""
 
 
 def _merge_state(view: dict) -> tuple[str, str]:
@@ -1653,7 +1792,7 @@ def check_pr(
             "reporting READY from it would be a verdict this tool has not verified"
         )
 
-    push_time, exact = _head_push_time(head)
+    push_time, exact, pusher = _head_push_time(head)
 
     # The head's check-runs, asked **only** for `UNSTABLE`: it is the one state whose
     # cause the state cannot express, and on every other head the extra `gh` call would
@@ -1757,6 +1896,7 @@ def check_pr(
                     cycle,
                     push_time=push_time,
                     push_time_exact=exact,
+                    pusher=pusher,
                     cycles_log=cycles_log,
                 )
             inside, why = windows[cycle]
@@ -1776,7 +1916,13 @@ def check_pr(
             elif inside:
                 votes.append(Vote(at, kind, cycle, False, why, tuple(ids)))
             else:
-                votes.append(Vote(at, kind, cycle, True, "", tuple(ids)))
+                # `why` is usually empty here — the head is simply outside the window —
+                # but the one exemption that was decided by an *identity* reading instead
+                # of by the clock carries its note, and the vote line prints it, so a
+                # reader can see which datum decided (the review on #1900 asked for it).
+                # It goes in `note`, which is the column a *valid* vote renders, not in
+                # `why`, which only a voided one does.
+                votes.append(Vote(at, kind, cycle, True, "", tuple(ids), why))
 
     # Walk the votes in order, resetting the run on a veto, and counting each
     # cycle at most once inside the trailing run.
@@ -1806,6 +1952,7 @@ def check_pr(
         head_sha=head,
         push_time=push_time,
         push_time_exact=exact,
+        pusher=pusher,
         mergeable=mergeable,
         merge_state=merge_state,
         state=state,
@@ -1875,6 +2022,7 @@ def main(argv: list[str] | None = None) -> int:
                         "head": v.head_sha,
                         "push_time": v.push_time,
                         "push_time_exact": v.push_time_exact,
+                        "head_pusher": v.pusher,
                         "valid_votes": v.valid_count,
                         "needed": v.needed,
                         "mergeable": v.mergeable,

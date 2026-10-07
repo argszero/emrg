@@ -677,6 +677,10 @@ class Reading:
     #: Carried because the abstention clause is a comparison against this instant.
     head_pushed_at: str = ""
     head_pushed_exact: bool = True
+    #: The login whose CI run fixed `head_pushed_at`, or `""` when there was none to
+    #: ask. The abstention clause is about a head *this* instance pushed, and the
+    #: window is only a proxy for that; empty keeps the clause applied.
+    head_pusher: str = ""
     #: The window the clause was applied over, and what it rests on. `window_start`
     #: empty means the clause could not be applied at all — never "no window needed".
     window_start: str = ""
@@ -804,6 +808,7 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
         return out
     out.head_pushed_at = str(verdict.push_time)
     out.head_pushed_exact = bool(verdict.push_time_exact)
+    out.head_pusher = str(getattr(verdict, "pusher", "") or "")
     if window is not None:
         out.window_start = window.window_start_text()
         out.window_source = window.source
@@ -1047,9 +1052,33 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
               "it; a refresh is only that move for a state that is about the tree)",
             command=command,
         )
+    identity_lifted = ""
     if window is not None and window.applied:
         pushed = instant(reading.head_pushed_at)
-        if pushed is not None and pushed >= window.start:
+        # Whose push is it? The window is only a proxy for "this instance pushed it",
+        # and the proxy misreads the ordinary case: a head the peer pushed inside a gap
+        # between this host's cycles lands inside the window and is not this cycle's
+        # work at all (measured 2026-10-06, `cyc20261006-122605`: #1869's head, pushed
+        # by the peer at 04:07:01Z, read `abstain`). A positive reading of a login
+        # *outside the set this instance pushes under* exempts the head; an unknown one
+        # keeps the clause, so the row can only un-abstain on a push that is provably
+        # someone else's. The set rather than one login: a host may hold two (the
+        # remote's account and the token's), and comparing one un-abstained this
+        # instance's own pushes under the other — the review on #1900 measured it on
+        # 2026-10-08 (actor `argszero` against a token answering `how2how2how2-arch`).
+        other_pusher = bool(reading.head_pusher) and not vote_counter().own_login(
+            reading.head_pusher
+        )
+        # Which datum decided, said on the row either way: a reader who cannot see it
+        # cannot tell an abstention the clock produced from one an identity produced,
+        # and those two are corrected in opposite directions.
+        decided = (
+            f"the head's pusher {reading.head_pusher} reads as one of this instance's "
+            "own logins"
+            if reading.head_pusher
+            else "the head carries no pusher reading, so the clause is kept"
+        )
+        if pushed is not None and pushed >= window.start and not other_pusher:
             return Action(
                 kind="abstain",
                 why=f"head pushed {reading.head_pushed_at}, inside the window this cycle "
@@ -1057,8 +1086,13 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                     "merges a head it pushed, and the window immediately before this one "
                     "counts as one's own as well, because every cycle on a host is the same "
                     "instance running again; the next vote here (and the merge) has to come "
-                    "from a later cycle",
+                    f"from a later cycle; {decided}",
                 command=f"{RUNNER} scripts/check-vote-count.py {pr}",
+            )
+        if other_pusher and pushed is not None:
+            identity_lifted = (
+                f"; the head was pushed by {reading.head_pusher}, outside this "
+                "instance's login set, so the own-window clause is not asked of it"
             )
     if reading.votes >= reading.needed:
         if reading.stale:
@@ -1067,14 +1101,16 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                 why=f"{reading.votes}/{reading.needed} votes, but "
                     + reading.stale_reason
                     + " - measure the landing tree before merging; the head does not "
-                      "move, so the votes that carried it here stay valid",
+                      "move, so the votes that carried it here stay valid"
+                    + identity_lifted,
                 command=f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
                 extra=[f"{RUNNER} scripts/check-merge-tree-health.py"],
             )
         return Action(
             kind="merge",
             why=f"{reading.votes}/{reading.needed} valid votes, none predating the head "
-                "push, and the head's green run is about the tree that would land",
+                "push, and the head's green run is about the tree that would land"
+                + identity_lifted,
             command=f"gh pr merge {pr} -R {repo} --squash",
         )
     if reading.voted_here:
@@ -1096,7 +1132,8 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                 + " - measure the tree this merge would land and vote on that reading; "
                   "the head does not move, so the standing votes survive - and read the "
                   "landing diff before voting, because `diff(master, head)` on this head "
-                  "shows the base's own later commits as reversals this PR does not make",
+                  "shows the base's own later commits as reversals this PR does not make"
+                + identity_lifted,
             command=f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
             extra=[
                 f"{RUNNER} scripts/check-merge-landing-diff.py {pr}",
@@ -1105,7 +1142,8 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
         )
     return Action(
         kind="vote",
-        why=f"{reading.votes}/{reading.needed} votes, a fresh head, no unanswered veto",
+        why=f"{reading.votes}/{reading.needed} votes, a fresh head, no unanswered veto"
+            + identity_lifted,
         command=vote_cmd,
     )
 
