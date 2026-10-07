@@ -312,6 +312,40 @@ gives you; the releases page has the pinned build). CI remains authoritative: th
 the same tool at the same version over the same files, not a second implementation of its
 rules.
 
+**The host-side counterpart of the install step.** The daemon renders a built-in task
+template from its own `__file__`, and on a running install that is
+`~/.emrg/install/source/` — a directory the installer wrote, which an upgrade replaces
+**whole**. It is not a git clone, so a file edited there lives in no commit: the edit looks
+like it took effect (it is what renders) and the next install destroys it silently. Ask
+before an upgrade, or whenever a prompt edit seems not to stick:
+
+```bash
+uv run --no-sync python3 scripts/check-install-drift.py
+# a different install tree or checkout:
+#   uv run --no-sync python3 scripts/check-install-drift.py --install-dir <tree> --root <checkout>
+```
+
+It asks one question per file the two trees share — is this content *anywhere* in the
+checkout's history? — and reads no version file at all, because membership is the whole
+question and the release an install happens to be never has to be established. Exit `0` =
+every shared file's content is in history; `1` = at least one is not, printed with its path
+and byte count and with what happens to it; `2` = could not measure (no install tree, no
+git checkout, `git` failed, or the two trees share no path at all) — **never a pass**. The
+`1` remedy is the point of the reading: move the change into the checkout and ship it, or
+it is lost.
+
+Measured 2026-10-07 on this host: exactly one shared file is flagged, and it is
+`emrg/server/competition_prompt.md` — the install copy is the `v0.3.7` bytes **plus** a
+hand-appended block that no ref of the repository carries (every other prompt file in the
+tree is byte-identical to `v0.3.7`, so the tree is that release with one hand-edit). The
+block records a host mandate, and the tag the release chain is part-way through (`v0.3.8`)
+contains none of it — so upgrading does not merely fail to ship that rule, it deletes it.
+The competition task hit the same wall from the other side on 2026-10-07: its rants record
+prompt edits refused by its sandbox (the install tree is outside the competition
+workspace), with the correct but incomplete conclusion that "the install tree copy is the
+one that takes effect" — true, and the reason such an edit has to reach the source
+checkout and ship.
+
 **The readable path to a failed run's cause.** `gh run view <id> --log` and `--log-failed` answer
 **0 bytes with exit 0** on a current host for every run, green or red (measured 2026-10-04 on `gh`
 2.58.0: v0.3.8's failed build `36956685533`, v0.3.7's green build `36658495939`, and a recent `Test`
