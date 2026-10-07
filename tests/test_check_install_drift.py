@@ -70,6 +70,30 @@ def _git(cwd: Path, *argv: str) -> subprocess.CompletedProcess:
     )
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_git_config(tmp_path_factory, monkeypatch) -> None:
+    """This module's fixtures must not inherit the **host's** git configuration.
+
+    Every case here builds a repository and asserts what git stores for a path, so a
+    setting that changes what git stores changes the expected answer - and the settings
+    that do it are exactly the ones a host varies: `core.autocrlf` is unset on this
+    development host and **true** on GitHub's `windows-2025` runner. Measured 2026-10-07
+    (`cyc20261007-203559`): with a global `autocrlf=true` injected, every line-ending
+    transformation applies to *every* path, so a fixture that relied on which paths a rule
+    matches stopped exercising what it claimed, and `test-windows` went red on run
+    `37608201387` for a test asserting exactly that. The assertion was right; the fixture
+    was reading the host.
+
+    Both the fixture's own git calls and the tool subprocess inherit this, because they
+    have to agree on what git stores - pinning only one side would compare two
+    conventions, which is the defect the tool itself was just fixed for.
+    """
+    empty = tmp_path_factory.mktemp("gitconfig") / "empty.gitconfig"
+    empty.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
 @pytest.fixture
 def checkout(tmp_path: Path) -> Path:
     """A one-commit repository holding `SHARED` with the released bytes."""
@@ -445,3 +469,54 @@ def test_the_help_and_both_verdicts_survive_an_ascii_console(
         f"{drift.stderr!r}"
     )
     assert drift.stdout.encode("ascii"), "the report is not ascii-clean"
+
+
+def test_the_module_does_not_inherit_the_hosts_git_config(tmp_path: Path) -> None:
+    """The condition `test-windows` runs under, reproducible on any host.
+
+    The failure this pins was not a wrong assertion - it was a fixture reading the host.
+    GitHub's `windows-2025` runner has `core.autocrlf=true` globally, this development host
+    has it unset, and a case that asserts which paths a conversion rule matches therefore
+    answered differently in the two places (run `37608201387`, `1 failed, 3963 passed`).
+    A green local suite could not have said so, which is the whole cost of the class.
+
+    So the module is run under a deliberately hostile global config with the test deselected
+    (it would otherwise recurse), and every other case must still pass. That makes the
+    platform condition a *measurement* rather than a place-only observation: delete the
+    autouse pinning fixture and this test fails on Linux and macOS alike.
+    """
+    hostile = tmp_path / "hostile.gitconfig"
+    hostile.write_text("[core]\n\tautocrlf = true\n", encoding="utf-8")
+
+    import os
+
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(hostile),
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(Path(__file__).resolve()),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-k",
+            f"not {test_the_module_does_not_inherit_the_hosts_git_config.__name__}",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=600,
+    )
+    assert proc.returncode == 0, (
+        "with the Windows runner's `autocrlf=true` in force, this module's own fixtures "
+        "stopped agreeing with their assertions:\n"
+        f"{proc.stdout[-4000:]}\n{proc.stderr[-2000:]}"
+    )
