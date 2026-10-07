@@ -213,6 +213,16 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "a subprocess against a `tmp_path` tree and asserts the first line, which holds "
         "with or without the binary because the tree line is printed before the search"
     ),
+    "check-install-drift.py": (
+        "its subject is the host's installed tree (`~/.emrg/install/source`), not this "
+        "checkout: the verdict is about a *pair* of trees, and a bare checkout carries no "
+        "install, so running it here would measure the host rather than the rule - and on "
+        "a host with a hand-edited install tree its honest answer is rc 1, which is that "
+        "host's drift rather than this tree's defect. It reads a working tree (this "
+        "checkout, through git) and names both halves, and that naming IS verified rather "
+        "than classified: `tests/test_check_install_drift.py::test_the_report_names_both_trees_before_the_verdict` runs it "
+        "as a subprocess against a `tmp_path` install tree and checkout and pins both lines"
+    ),
     "check-merge-landed.py": (
         "needs `gh` and the network for the review half. It was classified as a "
         "NON-tree-reader when #1618 added it, by the bucket entry that says it 'reads "
