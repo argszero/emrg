@@ -1,4 +1,4 @@
-"""`scripts/check-install-drift.py`: install-tree content no commit of the checkout holds.
+"""`scripts/check-install-drift.py`: install-tree content no shipped commit of the checkout holds.
 
 Why this file exists
 --------------------
@@ -18,8 +18,8 @@ Every case here builds its own checkout and its own install tree under `tmp_path
 subject is a pair of directories, and a test that read this host's real install tree would
 be measuring the host rather than the tool. Nothing here touches `~/.emrg/install`, and
 nothing here reads `~/.emrg/install/version.txt` - that path is named by a permanent red
-line and this tool does not need it (see the docstring's "Membership is asked of
-`git rev-list --all --objects`").
+line and this tool does not need it (see the docstring's "Membership is asked of the
+objects reachable from the refs a release is built from").
 
 Exit codes, at the tool's own process boundary
 ----------------------------------------------
@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -314,7 +316,7 @@ def test_an_edited_file_answers_one_and_names_the_path(
     proc = _run(install_dir, checkout)
     assert proc.returncode == 1, f"an edited install file was not reported: {proc.stdout}"
     assert SHARED in proc.stdout, f"the drifted path is not named: {proc.stdout!r}"
-    assert "1 file(s) hold content no commit has; 2 checked" in proc.stdout, (
+    assert "1 file(s) hold content no shipped commit has; 2 checked" in proc.stdout, (
         f"the summary must name how many of how many: {proc.stdout!r}"
     )
     assert "the next one destroys it" in proc.stdout, (
@@ -367,6 +369,136 @@ def test_an_install_file_the_checkout_does_not_track_is_skipped_not_reported(
     assert "1 skipped" in proc.stdout, (
         f"the skipped file is not counted, so a reader cannot tell it was considered: "
         f"{proc.stdout!r}"
+    )
+
+
+def test_content_only_a_bookkeeping_ref_holds_is_reported_and_that_ref_named(
+    tmp_path: Path,
+) -> None:
+    """A recovery snapshot is not history a release ships, so an edit it alone holds is drift.
+
+    `refs/emrg/rescue/*` is where `scripts/recover-worktree.py` pins a dirty tree's work
+    precisely because it exists nowhere else - which is the point: a snapshot no release
+    builds from cannot make a live install-tree edit safe. Counting it as history is how
+    the install tree's `vibe_check.j2` sat unreported while the tag comparison found it
+    (#1898), so membership is asked of `refs/heads/*`, `refs/remotes/*` and `refs/tags/*`.
+
+    The ref is not discarded from the report either: it is where the bytes still are, and
+    "an upgrade will delete this" is only actionable somewhere to recover them from. The
+    control runs the same pair with the ref deleted, so the naming is exercised in both
+    directions instead of asserted once.
+    """
+    root = tmp_path / "checkout"
+    (root / SHARED).parent.mkdir(parents=True)
+    (root / SHARED).write_text(RELEASED, encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.invalid")
+    _git(root, "config", "user.name", "test")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "released")
+    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+    # The edit, committed on a scratch branch and pinned into the bookkeeping namespace,
+    # then that branch deleted: the bytes now reach nothing a release is built from.
+    edited = "an edit that reaches no shipped ref\n"
+    _git(root, "checkout", "-q", "-b", "scratch")
+    (root / SHARED).write_text(edited, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "the edit")
+    pinned = _git(root, "rev-parse", "HEAD").stdout.strip()
+    rescue = "refs/emrg/rescue/20260101T000000Z"
+    _git(root, "update-ref", rescue, pinned)
+    _git(root, "checkout", "-q", branch)
+    _git(root, "branch", "-D", "scratch")
+
+    install = tmp_path / "install" / "source"
+    (install / SHARED).parent.mkdir(parents=True)
+    (install / SHARED).write_text(edited, encoding="utf-8")
+
+    proc = _run(install, root)
+    assert proc.returncode == 1, (
+        "content reachable only from a recovery snapshot was read as shipped history, "
+        f"which is the whole defect of #1898: {proc.stdout!r}"
+    )
+    assert SHARED in proc.stdout, f"the drifted path is not named: {proc.stdout!r}"
+    assert rescue in proc.stdout, (
+        "the report does not name the ref the bytes are still recoverable from, so it says "
+        f"'an upgrade destroys this' without saying where it lives: {proc.stdout!r}"
+    )
+
+    # The control: with the snapshot gone the file is drift like any other, so the naming
+    # above is about the ref and not a string the tool always prints.
+    _git(root, "update-ref", "-d", rescue)
+    after = _run(install, root)
+    assert after.returncode == 1, after.stdout
+    assert rescue not in after.stdout, f"the ref is named after it was deleted: {after.stdout!r}"
+
+
+def test_an_absent_object_is_tolerated_rather_than_making_the_reading_unmeasurable(
+    tmp_path: Path,
+) -> None:
+    """A clone whose history has a hole must still answer, and must say the hole is there.
+
+    Not hypothetical: measured 2026-10-08 (`cyc20261008-001036`) on the host this tool
+    serves, `git rev-list --branches --tags --remotes --objects` exits 128 on `bad tree
+    object 219ff46e...`, and so does every narrower walk - the hole is in the *history*,
+    which is exactly what a membership question is about. Left intolerant the tool answers
+    `2` on the very host it exists for, and a reading that can only say "could not measure"
+    there measures nothing.
+
+    The hole is forged rather than waited for: the branch's own tree object is removed from
+    the store, so the walk meets an object it does not have - the same condition, on a
+    repository built for the case. Tolerating it can only *remove* a candidate, so the files
+    under the missing tree read as drift: the safe direction, and the count is printed so a
+    narrowed set is never read as the whole one.
+    """
+    root = tmp_path / "checkout"
+    (root / "emrg").mkdir(parents=True)
+    (root / "emrg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.invalid")
+    _git(root, "config", "user.name", "t")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "released")
+
+    install = tmp_path / "install" / "source"
+    (install / "emrg").mkdir(parents=True)
+    (install / "emrg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+
+    intact = _run(install, root)
+    assert intact.returncode == 0, (
+        f"an intact history did not answer cleanly, so this is not a control: {intact.stdout!r}"
+    )
+
+    tree = _git(root, "rev-parse", "HEAD^{tree}").stdout.strip()
+    loose = root / ".git" / "objects" / tree[:2] / tree[2:]
+    assert loose.exists(), (
+        "this fixture needs a freshly written, still-loose object to forge the hole; "
+        f"{tree} is not loose, so the case would not exercise anything"
+    )
+    os.chmod(loose, stat.S_IWRITE)
+    loose.unlink()
+
+    intolerant = subprocess.run(
+        ["git", "-C", str(root), "rev-list", "--branches", "--tags", "--remotes", "--objects"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert intolerant.returncode != 0, (
+        "the forgery did not create the condition: the intolerant walk still finished, so "
+        "this case would pass with or without the tolerance"
+    )
+
+    proc = _run(install, root)
+    assert proc.returncode == 1, (
+        "content under a missing tree is not reachable from the refs a release is built "
+        f"from, so it is drift in the safe direction: {proc.stdout!r} {proc.stderr!r}"
+    )
+    assert "membership: 1 object(s)" in proc.stdout, (
+        "the report does not say how much of history it walked, so a narrowed membership "
+        f"set reads as the whole one: {proc.stdout!r}"
     )
 
 
