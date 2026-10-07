@@ -30,10 +30,13 @@ Apple or reads a real credential.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -742,3 +745,192 @@ def test_the_documented_command_carries_its_variables_into_the_preflight(tmp_pat
             f"the documented command did not carry {name} into the preflight.\n"
             f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
         )
+
+
+# ── The platform gate, mechanised ─────────────────────────────────────────────
+#
+# Measured on run `37548845041` (PR #1887's first head, job `112559256441`): the Windows leg
+# failed one of the `--env-file` arms' controls with `assert 2 == 0`, because the shebang
+# stand-in cannot execute there and the preflight therefore answered 2. The arm was green on
+# this host and nothing here could see the other platform: the gate is applied by hand, arm
+# by arm, and an arm that needs it and has not got it is green everywhere the stand-in runs.
+# One arm - one 11-minute CI round, a reviewer's window, and a fix push that voided the vote
+# standing on the head.
+#
+# So the gate's own condition is mechanised. `Path.chmod` is neutralised, which leaves the
+# stand-in with the mode `write_text` gives it (0644 under any ordinary umask) and makes the
+# preflight's own `subprocess.run` refuse it - the same branch the Windows leg takes, reached
+# on whichever platform is running this. Measured by hand before it was written into a test,
+# on the invocation `DEVELOPMENT.md` documents with an `--xcrun` that exists and is not
+# executable:
+#
+#     notary credentials preflight ... rc=2
+#     not measurable: `.../bin/xcrun` could not be run: [Errno 13] Permission denied
+#
+# The clause is two directions, because either alone is satisfiable by a condition that
+# changes nothing: every arm **without** the gate must pass under it, and an arm the file
+# **does** gate must fail under it. The arms are derived from this module rather than listed,
+# which is the point - the arm that produced this clause was one nobody had listed.
+#
+# The class it governs is narrowed one step, and the step is stated rather than implied: the
+# arms it drives are the ones that **run the preflight through `_run`**, read out of their
+# source. Everything else in this file reads text, or owns a vehicle of its own. That
+# boundary also keeps the clause from reading *itself*: the two arms below create this
+# condition instead of being subject to it, and an undrivable subject would otherwise be
+# reported as covered - which is the failure mode this file pins everywhere else.
+
+
+def _platform_gated(fn) -> bool:
+    """Does this arm carry this module's Windows skip?"""
+    return any(mark.name == "skipif" for mark in getattr(fn, "pytestmark", []))
+
+
+def _drives_the_preflight(fn) -> bool:
+    """Does this arm run the preflight through `_run`? Read out of its source, not its name.
+
+    `_run_the_documented_block` is a different helper with a stand-in of its own: those arms
+    substitute a script that prints the three variables and never invoke the preflight at all,
+    so an ungated one among them is not a subject here.
+    """
+    for node in ast.walk(ast.parse(inspect.getsource(fn))):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_run"
+        ):
+            return True
+    return False
+
+
+def _ungated_arms_that_drive_the_preflight() -> list[tuple[str, object]]:
+    """This module's `test_*` functions that run the preflight and carry no platform gate."""
+    return [
+        (name, fn)
+        for name, fn in sorted(vars(sys.modules[__name__]).items())
+        if name.startswith("test_")
+        and callable(fn)
+        and not _platform_gated(fn)
+        and _drives_the_preflight(fn)
+    ]
+
+
+def _unrunnable_stand_in(tmp_path: Path) -> Path:
+    """A stand-in the preflight cannot execute - the condition the gate exists for.
+
+    Returns the path, and **refuses to proceed** if the file it just wrote is executable
+    anyway: on a host whose umask allows it, a clause that ran on regardless would be
+    certifying the arms under the ordinary condition and reporting nothing about Windows.
+    """
+    stand_in = tmp_path / "premise" / "xcrun"
+    stand_in.parent.mkdir(parents=True, exist_ok=True)
+    stand_in.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    stand_in.chmod(0o755)  # neutralised by the caller, so the mode stays what write_text set
+    mode = stat.S_IMODE(stand_in.stat().st_mode)
+    assert not mode & 0o111, (
+        f"the stand-in at {stand_in} is executable (mode {oct(mode)}) even with `Path.chmod` "
+        f"neutralised, so this host cannot produce the condition the clause reads - it would "
+        f"be measuring the ordinary run and calling it a Windows reading"
+    )
+    return stand_in
+
+
+def test_every_ungated_arm_survives_a_stand_in_that_cannot_run(monkeypatch, tmp_path) -> None:
+    """An arm without the gate must not be measuring the host: run it as Windows would.
+
+    The failure this pins is the one measured on run `37548845041`: an ungated arm asserted
+    the exit code the *exchange* decides, so on the Windows leg it read the stand-in's
+    absence and went red while its own output showed the reading it was written for arriving
+    correctly. Nothing on this host could see it - which is why the condition is reproduced
+    here rather than argued about in a docstring.
+    """
+    ungated = _ungated_arms_that_drive_the_preflight()
+    assert ungated, (
+        "no ungated arm was found - this clause reads the module's own functions, so an empty "
+        "set means it is reading the wrong module, not that the file has grown careful"
+    )
+    # The control for the derivation itself: the gate predicate is compared against an
+    # **independent** reading of the same fact - the decorator lines in the source - because
+    # comparing the predicate with itself (an arm being in `ungated` or not) is true of any
+    # predicate at all. Naming one gated arm here would also make this clause fail on the
+    # defect it exists for *before* reaching it: an arm that loses its gate would trip the
+    # control and never be driven, which is the reading that matters.
+    names = {name for name, _ in ungated}
+    decorators = Path(__file__).read_text(encoding="utf-8").count("\n@_posix_only\n")
+    gated = [
+        name
+        for name, fn in sorted(vars(sys.modules[__name__]).items())
+        if name.startswith("test_") and callable(fn) and _platform_gated(fn)
+    ]
+    assert decorators == len(gated) >= 1, (
+        f"the source carries {decorators} `@_posix_only` decorator(s) and the marks say "
+        f"{len(gated)} arm(s) are gated ({gated}) - the two readings of one fact disagree, so "
+        f"this clause cannot say which arms it is holding to the rule"
+    )
+    # And the class boundary, in the direction that is not true by construction: the clause's
+    # own apparatus must not be among its subjects, or it would drive itself.
+    for apparatus in (
+        "test_every_ungated_arm_survives_a_stand_in_that_cannot_run",
+        "test_a_gated_arm_fails_under_the_condition_the_gate_exists_for",
+    ):
+        assert apparatus not in names, (
+            f"{apparatus} is this clause's own apparatus, not one of its subjects - if it has "
+            f"started driving the preflight, it is being run against itself"
+        )
+
+    def _no_chmod(self, mode, **kwargs):  # noqa: ANN001 - signature match is the point
+        return None
+
+    monkeypatch.setattr(Path, "chmod", _no_chmod)
+    _unrunnable_stand_in(tmp_path)
+
+    failures = []
+    for name, fn in ungated:
+        params = list(inspect.signature(fn).parameters)
+        assert params in ([], ["tmp_path"]), (
+            f"{name} takes {params} besides `tmp_path`, so this clause cannot drive it: give it "
+            f"the platform gate if it needs the stand-in, or teach this clause the fixture - a "
+            f"clause that quietly passed over it would report the file as covered"
+        )
+        target = tmp_path / name
+        target.mkdir()
+        try:
+            fn(target) if params else fn()
+        except pytest.skip.Exception:
+            # An arm that reports the platform cannot run it has claimed nothing about the
+            # stand-in; skipping is the honest answer and the suite says so.
+            continue
+        except AssertionError as exc:
+            failures.append(f"{name}: {exc}")
+
+    assert not failures, (
+        "these arms do not carry the platform gate and still depend on the stand-in having "
+        "run, so on Windows they measure the host rather than the preflight - decorate them "
+        "`@_posix_only`, or read something the exchange cannot influence:\n  "
+        + "\n  ".join(failures)
+    )
+
+
+def test_a_gated_arm_fails_under_the_condition_the_gate_exists_for(monkeypatch, tmp_path) -> None:
+    """The other direction: the condition has to be able to fail an arm that needs the gate.
+
+    Without this, `_unrunnable_stand_in` could return a stand-in that runs perfectly well and
+    the clause above would certify every arm in the file. `test_working_credentials_pass`
+    asserts the code only a completed exchange produces, so under this condition it must
+    fail - and on its own assertion, not on a crash, which is what a wrong reading looks like.
+    """
+
+    def _no_chmod(self, mode, **kwargs):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(Path, "chmod", _no_chmod)
+    _unrunnable_stand_in(tmp_path)
+    target = tmp_path / "gated"
+    target.mkdir()
+
+    with pytest.raises(AssertionError) as raised:
+        test_working_credentials_pass(target)
+
+    assert "did not pass" in str(raised.value), (
+        "the gated arm failed for some reason other than its own reading, so this control does "
+        f"not show that the condition reaches the exchange: {raised.value}"
+    )
