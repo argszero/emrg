@@ -58,6 +58,7 @@ TOOLS = [
     "check-merge-landed.py",
     "run-mutation-arm.py",
     "check-notary-credentials.py",
+    "check-install-drift.py",
 ]
 
 
