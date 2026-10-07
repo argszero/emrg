@@ -59,6 +59,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
+
+from emrg.protocol import InstanceIdentity
+from emrg.server import scheduler as mod
+from tests.task_handler_factory import make_handler
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
@@ -478,6 +483,139 @@ def test_the_task_template_checks_can_report_absence() -> None:
     section = _forbidden_section(
         "### Forbidden\n\n- Do not modify `~/.emrg/config.toml`\n- Must push\n"
     )
+    assert _missing_terms(section, SHARED_STOP_TERMS) == list(SHARED_STOP_TERMS)
+    assert _missing_terms(section, SHARED_UPGRADE_TERMS) == list(SHARED_UPGRADE_TERMS)
+    assert _clause_bullets(section, STOP_CLAUSE_MARK) == []
+    assert _clause_bullets(section, UPGRADE_CLAUSE_MARK) == []
+
+
+def _render_task_template(tmp_path, monkeypatch, carrier: Path) -> str:
+    """One carrier's prompt, rendered by the builder the scheduler uses.
+
+    Every check above reads the template as a **file**, which answers "is the rule in
+    `journal_prompt.md`?" — one level short of this file's own question, "is it in the
+    prompt the cycle runs under?". The two differ, and measurably: the six templates are
+    not static text but Jinja sources (measured 2026-10-08: `{% %}` counts of 7 / 7 / 5 /
+    2 / 2 / 2 across `journal` / `open_source` / `promote` / `competition` / `evolution` /
+    `paper`), so a clause wrapped in `{% if false %}` keeps every file-level assertion
+    above green — the file still carries each term — while the render drops it whole. That
+    is the same one-level-short gap `test_the_rendered_host_prompt_carries_the_rule_not_merely_the_template`
+    closes for `system.j2` and `test_vibe_check_prompt.py` closes for the judge's prompt
+    (issue #1902); this is that closure for the six task carriers.
+
+    Rendered through the **real builder** (`TaskHandler._build_evolution_prompt`), not a
+    fresh `jinja2.Environment(undefined=Undefined).from_string(...)`: a hand-built
+    environment is a second spelling of the one the call site uses, and the prompt under
+    test would then be a prompt no cycle receives — the drift
+    `test_the_five_task_templates_agree_word_for_word` refuses one level over. Going
+    through the builder also means the real context is the one under test, so a clause
+    that is present but conditioned on a task field this file never sets is a failure to
+    measure rather than a pass.
+    """
+    monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+    project_dir = tmp_path / "demoproj"
+    project_dir.mkdir(exist_ok=True)
+    (tmp_path / "projects.yml").write_text(
+        yaml.safe_dump([{"name": "demoproj", "path": str(project_dir)}]), encoding="utf-8"
+    )
+    handler = make_handler(
+        name="demo-task",
+        config={"project": "demoproj"},
+        interval=300,
+        identity=InstanceIdentity(),
+        template_path=carrier,
+    )
+    return handler._build_evolution_prompt()
+
+
+def test_the_rendered_task_templates_carry_both_red_lines(tmp_path, monkeypatch) -> None:
+    """The artifact half of the presence check, taken over all six carriers.
+
+    The file-level check above asks whether the clause is *written*; this asks whether the
+    clause is *delivered*. Both are needed, and neither implies the other: a Jinja
+    construct removes the text from the render while the file keeps every term, and an
+    empty `{% if %}` around the whole §Forbidden section removes it from the render while
+    `_forbidden_section` still finds its heading in the file.
+    """
+    for carrier in TASK_TEMPLATES:
+        section = _forbidden_section(_render_task_template(tmp_path, monkeypatch, carrier))
+        for rule, terms in (("附则二", SHARED_STOP_TERMS), ("附则三", SHARED_UPGRADE_TERMS)):
+            missing = _missing_terms(section, terms)
+            assert not missing, (
+                f"emrg/server/{carrier.name}: the permanent {rule} red line is in the file "
+                f"and not in the prompt a cycle receives — a Jinja construct removes it "
+                f"from the render while every file-level assertion above stays green; "
+                f"missing from the render: {missing}"
+            )
+
+
+def test_the_rendered_task_templates_state_each_red_line_once(tmp_path, monkeypatch) -> None:
+    """The rendered form of the one-copy property, which the file cannot answer.
+
+    `test_every_task_template_states_each_red_line_once` counts bullets in the file; a
+    `{% for %}` over a single written bullet delivers it once per iteration, so the count
+    a reader meets can differ from the count the file holds. Taken together the two are
+    the property: written once **and** delivered once.
+    """
+    for carrier in TASK_TEMPLATES:
+        section = _forbidden_section(_render_task_template(tmp_path, monkeypatch, carrier))
+        for rule, mark in (("附则二", STOP_CLAUSE_MARK), ("附则三", UPGRADE_CLAUSE_MARK)):
+            found = len(_clause_bullets(section, mark))
+            assert found == 1, (
+                f"emrg/server/{carrier.name}: the rendered prompt states the {rule} rule "
+                f"{found} times — a `{{% for %}}` can write the clause once and deliver it "
+                f"more than once, which the file-level count cannot see"
+            )
+
+
+def test_the_render_level_checks_can_report_absence(tmp_path, monkeypatch) -> None:
+    """The control for the two checks above: a clause that survives the file and not the render.
+
+    The control template is `evolution_prompt.md` itself with its two red-line bullets —
+    located by their own marks, so no term is written twice here — wrapped in
+    `{% if false %}`. That is what the defect looks like in the file, so the render-level
+    checks must read it as absent **while the file-level ones read it as present**: the
+    first half of this test asserts the file half still passes, which is the gap the two
+    checks above exist to close. Without the control, a helper that quietly rendered the
+    wrong path, or a `_forbidden_section` that fell back to the file's heading, would keep
+    both checks green over a prompt that carries neither rule.
+    """
+    lines = EVOLUTION_TEMPLATE.read_text(encoding="utf-8").splitlines(keepends=True)
+    heads = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\n").startswith(("## ", "### ")) and line.rstrip("\n").endswith("Forbidden")
+    ]
+    assert heads, "the control needs a §Forbidden heading in the carrier it copies"
+    head = heads[-1]
+    end = len(lines)
+    for index in range(head + 1, len(lines)):
+        if lines[index].startswith("### "):
+            end = index
+            break
+    marks = [
+        index
+        for index in range(head, end)
+        if STOP_CLAUSE_MARK in lines[index] or UPGRADE_CLAUSE_MARK in lines[index]
+    ]
+    assert len(marks) == 2, (
+        f"the control needs one bullet per red line in the carrier it copies; found "
+        f"{len(marks)} — the file-level count check above is what keeps this true"
+    )
+    first = min(marks)
+    wrapped = (
+        lines[:first] + ["{% if false %}\n"] + lines[first:end] + ["{% endif %}\n"] + lines[end:]
+    )
+    carrier = tmp_path / "control_prompt.md"
+    carrier.write_text("".join(wrapped), encoding="utf-8")
+
+    # The file half still reads the rules as present — this is the gap being closed.
+    file_section = _forbidden_section("".join(wrapped))
+    assert not _missing_terms(file_section, SHARED_STOP_TERMS)
+    assert not _missing_terms(file_section, SHARED_UPGRADE_TERMS)
+
+    # The render half must not: both checks above have to report absence here.
+    section = _forbidden_section(_render_task_template(tmp_path, monkeypatch, carrier))
     assert _missing_terms(section, SHARED_STOP_TERMS) == list(SHARED_STOP_TERMS)
     assert _missing_terms(section, SHARED_UPGRADE_TERMS) == list(SHARED_UPGRADE_TERMS)
     assert _clause_bullets(section, STOP_CLAUSE_MARK) == []
