@@ -201,10 +201,24 @@ def _commit_state(repo: str, sha: str) -> str:
     Asked only about a commit that is another open PR's head, and only to let the one
     provable answer through (`LANDED_STATES`). A failure here is not a failure of the
     reading: the row keeps its fault and says the state was not read.
+
+    Measured 2026-10-07: this exception used to escape, so a compare call that failed
+    answered `cannot determine the stacked PRs` (exit `2`) for a queue **that had just been
+    read** - withholding a finding the tool had already taken. The three statements that
+    made it a defect rather than a choice: this return contract, the `unread` / `not read`
+    branches in `main` and `_remedy` (unreachable while the failure raised), and the module
+    docstring's rule that the compare "can prove a carried commit **is** landed ... and never
+    that it is not" - so its silence leaves the fault standing, which is what the code
+    already does when the state is simply not in `LANDED_STATES`.
     """
-    payload = _gh_json(
-        ["api", f"repos/{repo}/compare/master...{sha}", "--jq", "{status: .status}"]
-    )
+    try:
+        payload = _gh_json(
+            ["api", f"repos/{repo}/compare/master...{sha}", "--jq", "{status: .status}"]
+        )
+    except MeasurementError:
+        # The queue and the commit lists were read; only this narrowing was not. Answering
+        # `2` here would report an unreadable queue for a queue that answered.
+        return ""
     if not isinstance(payload, dict):
         raise MeasurementError(f"the compare endpoint answered {type(payload).__name__}")
     return str(payload.get("status") or "")

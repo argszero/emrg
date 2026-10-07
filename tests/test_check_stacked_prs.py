@@ -235,6 +235,47 @@ def test_a_broken_lookup_is_not_a_clean_queue(mod, monkeypatch, capsys):
     assert "OK:" not in cap.out, "a read that failed may not print a clean verdict"
 
 
+def test_a_compare_that_cannot_be_read_keeps_the_fault(mod, monkeypatch, capsys):
+    """A narrowing that failed is not a reading that failed - and the two failures are told apart.
+
+    The compare endpoint is asked for one thing only: to let a *provably landed* head
+    through (`LANDED_STATES`). Its answer can therefore suppress a finding and never create
+    one, so its silence leaves the fault standing - which is what the code already does when
+    the state is simply not in `LANDED_STATES`.
+
+    Both directions here, because the signal that has to discriminate is *which* call
+    failed. Measured 2026-10-07 on the code this arm was written for: with the compare broken
+    and the queue readable, the tool answered `cannot determine the stacked PRs` (rc 2) and
+    printed no row at all - an unreadable queue for a queue that had answered, withholding a
+    finding it had already taken. The second half is the control: with the queue broken the
+    answer is still rc 2, so the two arms are not both reporting "unread".
+    """
+    fake = FakeGh(
+        pulls=[_pull(CARRIER, OWN_HEAD), _pull(OTHER_PR, OLD_HEAD)],
+        commits={CARRIER: [_commit(OLD_HEAD, "emrg: the carried work")]},
+        break_on="/compare/",
+    )
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1, "the carrying queue was read; a compare failure may not unmake that"
+    assert f"#{CARRIER} stacked" in cap.out
+    assert f"carries #{OTHER_PR} head {OLD_HEAD[:8]}" in cap.out
+    assert "compare unread" in cap.out, "the row says which half it could not read"
+    assert "compare state read: not read" in cap.err, (
+        "the remedy repeats the state it was measured from, so a reader can weigh the finding"
+    )
+    assert "cannot determine the stacked PRs" not in cap.err, (
+        "answering 'could not measure' withholds a finding the tool had already taken"
+    )
+
+    # The control: the *queue* failing is still the unmeasurable answer.
+    fake = FakeGh(pulls=[], commits={}, break_on="/pulls?")
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 2, "a queue that was never read answers 2, never a finding"
+    assert "cannot determine the stacked PRs" in cap.err
+
+
 def test_the_open_pr_projection_is_read_not_assumed(mod, monkeypatch, capsys):
     """A projection that did not apply comes back with no `head_sha`, and every PR then looks clean.
 
