@@ -626,6 +626,74 @@ def test_the_two_twins_cut_a_long_stderr_the_same_way():
     assert "head+tail kept" in ours, "and the notice says which end the reader got"
 
 
+def test_the_two_twins_render_a_finished_run_the_same_way():
+    """The renderer is the model-facing contract; the same runs, through both.
+
+    ``render_result`` is where a finished run becomes the text the model reads,
+    and the two twins restate it rather than share it — so the drift the sibling
+    tests pin one helper at a time ran the whole way through it.  It had: pwsh
+    emitted ``[exit code: 0]`` on every success, though its own description
+    promises the marker only for *non-zero* exits; dropped the ``(no output)``
+    placeholder, so a silent successful run reached the model as the empty
+    string; suppressed the signal marker on a timeout; and printed the denial
+    line twice, because the raw marker and its ``with_retry_hint`` form are the
+    same string when the tier advertises no hop.  No test reached any of it: the
+    renderer had no assertion on the pwsh side at all.
+
+    One matrix of runs through both renderers is the reading that reaches it, and
+    the reading that keeps them in step.  It pins the contract rather than either
+    implementation, so editing either twin has to leave the model's reading
+    unchanged.
+    """
+    from emrg.sandbox.contract import sandbox_denial_marker
+    from emrg.tools import bash_tool_v2 as bash
+    from emrg.tools import pwsh_tool_v2 as pwsh_mod
+
+    safe = {"mode": "danger-full-access", "denied": False}
+
+    def make(cls, **kw):
+        run = dict(
+            stdout="", stderr="", exit_code=None, signal=None,
+            timed_out=False, timeout_ms=1000, sandbox=dict(safe),
+        )
+        run.update(kw)
+        return cls(**run)
+
+    denied = {"mode": "read-only", "denied": True}
+    cases = [
+        ("a clean exit keeps only the output", dict(stdout="hi", exit_code=0), ()),
+        ("a silent success still says so", dict(exit_code=0), ()),
+        ("stderr is framed", dict(stderr="warn", exit_code=0), ()),
+        ("a non-zero exit is reported", dict(stdout="hi", exit_code=3), ()),
+        ("a signal death is reported", dict(stdout="hi", signal=9), ()),
+        ("a timeout is reported", dict(stdout="hi", exit_code=1, timed_out=True), ()),
+        ("a timeout with no code reports no code", dict(timed_out=True), ()),
+        ("a timeout and a signal are both reported", dict(signal=9, timed_out=True), ()),
+        ("a denial is announced", dict(exit_code=1, sandbox=dict(denied)), ()),
+        ("a denial adds the hint when a hop is advertised",
+         dict(exit_code=1, sandbox=dict(denied)), ("workspace-write",)),
+    ]
+    for label, kw, modes in cases:
+        theirs = bash.render_result(make(bash.ShellRunResult, **kw), modes)
+        ours = pwsh_mod.render_result(make(pwsh_mod.ShellRunResult, **kw), modes)
+        assert ours == theirs, f"{label}: pwsh {ours!r} != bash {theirs!r}"
+
+    # The contract the description states, asserted on the text itself rather than
+    # only on the twins' agreement — two renderers drifting together in the same
+    # direction would otherwise read as a pass.
+    clean = dict(stdout="hi", exit_code=0)
+    assert bash.render_result(make(bash.ShellRunResult, **clean)) == "hi"
+    assert pwsh_mod.render_result(make(pwsh_mod.ShellRunResult, **clean)) == "hi"
+    silent = make(pwsh_mod.ShellRunResult, exit_code=0)
+    assert pwsh_mod.render_result(silent) == "(no output)"
+    for mod in (bash, pwsh_mod):
+        no_code = mod.render_result(make(mod.ShellRunResult, timed_out=True))
+        assert "[exit code:" not in no_code, f"a run with no code reports none: {no_code!r}"
+    for mod in (bash, pwsh_mod):
+        text = mod.render_result(make(mod.ShellRunResult, exit_code=1, sandbox=dict(denied)))
+        assert text.count(sandbox_denial_marker("read-only")) == 1, text
+
+
 def test_the_pwsh_module_does_not_import_the_bash_executor():
     """The peers are peers: layering one dialect on the other is the shape rejected.
 

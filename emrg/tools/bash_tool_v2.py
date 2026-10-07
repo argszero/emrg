@@ -289,7 +289,7 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
         markers.append(f"[timed out after {result.timeout_ms}ms]")
     if result.signal is not None:
         markers.append(f"[killed by signal: {result.signal}]")
-    elif result.exit_code != 0:
+    elif result.exit_code is not None and result.exit_code != 0:
         markers.append(f"[exit code: {result.exit_code}]")
 
     if not markers:

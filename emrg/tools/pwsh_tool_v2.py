@@ -365,6 +365,14 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
     **last** because it is the anchor a reader greps for.  Non-zero exits are
     reported, not errored — the model decides how to react.
 
+    The contract is the bash twin's, and it is pinned as one rather than asserted
+    in prose (``test_the_two_twins_render_a_finished_run_the_same_way`` drives the
+    same runs through both renderers): this function had drifted into emitting
+    ``[exit code: 0]`` on every success, dropping the ``(no output)`` placeholder,
+    suppressing the signal marker on a timeout, and printing the denial line
+    twice — the raw marker and its ``with_retry_hint`` form being the same string
+    when the tier advertises no hop.
+
     One Windows asymmetry is stated in the tool description rather than handled
     here: a force-killed process there settles as a positive exit code, so it is
     reported as ``[exit code: 1]`` with no signal marker — a fact about the
@@ -385,11 +393,12 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
         if body and not body.endswith("\n"):
             body += "\n"
         body += f"[stderr]\n{stderr}"
+    if not body:
+        body = "(no output)"
 
     markers: list[str] = []
     if result.sandbox.get("denied"):
-        mode = result.sandbox.get("mode", "")
-        markers.append(f"[sandbox: file access denied under {mode} mode]")
+        mode = str(result.sandbox.get("mode", ""))
         markers.append(
             with_retry_hint(
                 sandbox_denial_marker(mode), mode=mode, advertised=escalation_modes,
@@ -397,14 +406,16 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
         )
     if result.timed_out:
         markers.append(f"[timed out after {result.timeout_ms}ms]")
-    elif result.signal is not None:
+    if result.signal is not None:
         markers.append(f"[killed by signal: {result.signal}]")
-    if result.exit_code is not None:
+    elif result.exit_code is not None and result.exit_code != 0:
         markers.append(f"[exit code: {result.exit_code}]")
 
     if not markers:
         return body
-    return body + "\n" + "\n".join(markers) if body else "\n".join(markers)
+    if not body.endswith("\n"):
+        body += "\n"
+    return body + "\n".join(markers)
 
 
 def _fit_streams(stdout: str, stderr: str) -> tuple[str, str]:
