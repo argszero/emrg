@@ -374,6 +374,23 @@ pins the entry point identical across the family (one rule, not nine copies free
 derives the family from the source (a `spec_from_file_location` call in code), so a gate that loads a
 sibling and is not in that list fails the module instead of sitting silently outside it.
 
+**The reading that reports a stacked head.** `check-stacked-prs.py` asks whether an open PR would
+land another open PR's commits — the state a reviewer found by hand on #1879, where the branch had
+been cut from #1877's branch and the head carried its commits under a declaration naming neither.
+The tool landed 2026-10-06 (PR #1885) and was then named in **no tracked document**: its own
+docstring, its test, and the private `.emrg/` records were its only carriers, so the reviewer it
+exists for had no way to learn it exists — and it is the reading whose absence is *why it exists*.
+Its list would be `Agent.md`'s merge gates, and that file is **at its prompt cap** (the cap is
+`PROJECT_CONTEXT_MAX_CHARS`, imported and measured by `tests/test_check_stacked_prs.py`, not written
+here), so naming it there needs space freed from something else first: a content decision, not a
+line to squeeze in. This paragraph is therefore its home until that decision is made, and the test
+named above fails the day the cap stops blocking it, so the temporary home cannot outlive its
+reason:
+
+```bash
+uv run --no-sync python3 scripts/check-stacked-prs.py   # 0 clean · 1 a head carrying another open PR's commits · 2 the queue could not be read
+```
+
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 > **Self-evolution from source**: the evolution workspace expects the repo at `~/.emrg/evolution/emrg`. Packaged installs self-heal (clone on demand + auto-bootstrap projects/tasks); source installs should clone there explicitly if you want the evolution daemon to work on this repo.

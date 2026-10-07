@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from emrg.server.daemon import PROJECT_CONTEXT_MAX_CHARS
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-stacked-prs.py"
 
@@ -305,3 +307,72 @@ def test_a_commit_list_is_read_past_the_first_page(mod, monkeypatch):
     assert len(rows) == 150, "every line of every page is one commit, and none is dropped"
     assert rows[0]["sha"] == f"{0:040d}" and rows[-1]["sha"] == f"{149:040d}"
     assert calls and calls[0][-1] == "--paginate"
+
+
+# ── A gate nobody can find is a gate nobody runs ──────────────────────────────
+#
+# Measured 2026-10-07 (`cyc20261007-103453`), the day after this tool landed: it was named in
+# **no tracked document at all** — not in `Agent.md`'s merge-gate list, not in
+# `DEVELOPMENT.md`, not in `evolution_prompt.md`'s table of readings. The only carriers were
+# its own docstring, this file, and the private `.emrg/` records, which is the wrong direction
+# for a reading whose whole reason for existing is that "no reading in this repository caught
+# it" (PR #1885): the next reviewer who does not already know the name cannot run it.
+#
+# The list it belongs in was at 7997 of the 8000 characters `Agent.md` gets in the prompt, so
+# naming it there needs space freed from something else — a content decision rather than an
+# edit this file may make. The two arms below pin the substitute home and *measure* the reason
+# for it, so the arrangement ends when its reason does instead of by habit.
+
+#: The runnable form, because a bare name is not a command (`scripts/*.py` is mode 644) — the
+#: rule `tests/test_printed_commands_carry_the_python_runner.py` holds for printed remedies,
+#: applied to the document that carries this one.
+_INVOCATION = "uv run --no-sync python3 scripts/check-stacked-prs.py"
+
+#: What it answers, so the reader knows when to reach for it.
+_ANSWERS = "another open PR's commits"
+
+#: The entry `Agent.md`'s merge-gate list would gain, spelled as that list spells its members.
+_AGENT_ENTRY = " · `scripts/check-stacked-prs.py` (a head carrying another open PR's commits)"
+
+
+def test_the_document_names_this_gate_in_a_form_that_runs() -> None:
+    """A gate whose name is in no document is not part of the process, however good it is."""
+    text = (REPO_ROOT / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    assert _INVOCATION in text, (
+        f"DEVELOPMENT.md does not carry `{_INVOCATION}` — the gate is then findable only by "
+        f"someone who already knows it exists"
+    )
+    assert _ANSWERS in text, (
+        f"the document names the gate without the question it answers (`{_ANSWERS}`), so a "
+        f"reader cannot tell when to run it"
+    )
+
+
+def test_the_reason_it_is_not_in_the_agent_brief_is_measured_not_assumed() -> None:
+    """The claim in `DEVELOPMENT.md` is about a size, so it is measured here rather than stated.
+
+    `Agent.md` is injected into the prompt and the daemon keeps only its first
+    `PROJECT_CONTEXT_MAX_CHARS`, so an entry that does not fit is not a line anyone forgot —
+    it is a trade. This arm asserts the trade is still forced: the gate is absent from the list
+    **and** adding it would exceed the cap. The day space is freed, this fails and says what to
+    move, which is the only way a temporary home stops being a permanent one.
+    """
+    agent = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
+    gate_line = [
+        line for line in agent.splitlines() if line.startswith("- Merge gates")
+    ]
+    assert len(gate_line) == 1, (
+        f"expected exactly one `- Merge gates` line in Agent.md, found {len(gate_line)}"
+    )
+
+    assert "check-stacked-prs.py" not in gate_line[0], (
+        "Agent.md's merge-gate list now names this gate, so the stand-in paragraph in "
+        "DEVELOPMENT.md ('The reading that reports a stacked head') has outlived its reason — "
+        "delete it and keep the entry that fits"
+    )
+    assert len(agent) + len(_AGENT_ENTRY) > PROJECT_CONTEXT_MAX_CHARS, (
+        f"Agent.md ({len(agent)} chars) now has room for the entry "
+        f"({len(_AGENT_ENTRY)} chars) inside its {PROJECT_CONTEXT_MAX_CHARS}-character cap, so "
+        f"the reason `DEVELOPMENT.md` gives for this gate living outside the brief no longer "
+        f"holds — move the entry into the merge-gate list"
+    )
