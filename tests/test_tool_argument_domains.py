@@ -41,7 +41,11 @@ from emrg.tools.base import boolean_argument, count_argument
 
 #: (label, kwargs, expected value) for the helper's three answers.
 ACCEPTED = [
-    ("absent, with a default", dict(minimum=1, default=7), 7),
+    # `None` is how this file spells "the caller sent nothing": `count_argument` reads presence
+    # as `is not None`, so a concrete value here takes the *present* path and never reads
+    # `default` at all - measured 2026-10-09, dropping the caller's default in the absent branch
+    # left this case green until the value became `None`.
+    ("absent, with a default", dict(minimum=1, default=7), None),
     ("absent, no default", dict(minimum=0, default=None), None),
     ("zero where the domain admits it", dict(minimum=0, default=5), 0),
     ("an integer", dict(minimum=1, default=5), 3),
