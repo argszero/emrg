@@ -300,6 +300,96 @@ def test_update_rant_unknown_timestamp_and_bad_status(tmp_path):
     assert "invalid status" in msg
 
 
+def test_update_rant_refuses_a_completion_before_the_submission(tmp_path):
+    """A completion stamp cannot precede the instant the rant was submitted.
+
+    The store ranks a completed rant by `completed or timestamp`, and
+    `scripts/check-issue-links.py` reads that same key to decide whether pruning can explain a
+    record a citation names. Its loudest sentence — *the retention rule cannot explain the
+    absence ... this ledger never held it* — assumes a stamp never precedes its own submission
+    instant, so a row that breaks the assumption makes the reading report a record the store
+    really did prune as one that never existed. Both directions are measured here, because the
+    rule is an ordering and an ordering has two: earlier is refused **and nothing is written**,
+    later and equal are accepted.
+    """
+    f = _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+         "status": "in_progress", "progress": None, "completed": None,
+         "message": "test rant"},
+    ])
+    before = f.read_text(encoding="utf-8")
+
+    ok, msg = update_rant(f, "2026-08-18T10:00:00+08:00", status="completed",
+                          completed="2025-01-01T00:00:00+00:00")
+    assert not ok, msg
+    assert "precedes the rant's submission instant" in msg, msg
+    assert f.read_text(encoding="utf-8") == before, "a refused update must write nothing"
+
+    # … and the other direction: at or after the submission instant is accepted. Equal counts
+    # ("completed or timestamp" is a key, so a stamp equal to the submission is in order).
+    ok, msg = update_rant(f, "2026-08-18T10:00:00+08:00", status="completed",
+                          completed="2026-08-18T10:00:00+08:00")
+    assert ok, msg
+    entry = json.loads(f.read_text(encoding="utf-8").strip())
+    assert entry["completed"] == "2026-08-18T10:00:00+08:00"
+
+    # … and a later stamp replaces it.
+    ok, msg = update_rant(f, "2026-08-18T10:00:00+08:00",
+                          completed="2026-08-19T09:00:00+08:00")
+    assert ok, msg
+    entry = json.loads(f.read_text(encoding="utf-8").strip())
+    assert entry["completed"] == "2026-08-19T09:00:00+08:00"
+
+
+def test_update_rant_refuses_a_completion_it_cannot_order(tmp_path):
+    """A stamp the store cannot *show* to follow the submission is refused, not assumed fine.
+
+    Three routes, each named in the message: the stamp is not an instant at all; the row's own
+    timestamp is not one; and the two disagree about carrying a UTC offset, where no order
+    exists (a naive `datetime` and an aware one cannot be compared). The third is the one that
+    hides: the reader can also be handed a citation without an offset, and then its comparison
+    is naive against naive — an unorderable pair whose premise nothing has checked.
+    """
+    stamp = "2026-08-18T10:00:00+08:00"
+    row = {"timestamp": stamp, "project": "emrg", "status": "in_progress",
+           "progress": None, "completed": None, "message": "test rant"}
+
+    f = _write_rant_lines(tmp_path, [dict(row)])
+    ok, msg = update_rant(f, stamp, status="completed", completed="last Tuesday")
+    assert not ok and "is not an ISO instant" in msg, msg
+
+    ok, msg = update_rant(f, stamp, status="completed", completed="2026-08-19T10:00:00")
+    assert not ok and "cannot be ordered" in msg, msg
+    assert "UTC offset" in msg, msg
+
+    f2 = _write_rant_lines(tmp_path, [{**row, "timestamp": "not an instant"}])
+    ok, msg = update_rant(f2, "not an instant", status="completed",
+                          completed="2026-08-19T10:00:00+08:00")
+    assert not ok and "submission instant" in msg, msg
+
+
+def test_the_auto_written_stamp_is_checked_too(tmp_path):
+    """The transition's own stamp goes through the same rule, not only an explicit one.
+
+    A row dated in the future cannot be completed: the stamp the transition would write is
+    *now*, which precedes it. Pinning this is what keeps the write-side rule equal to the
+    premise the reading needs — `completed or timestamp` — rather than to the narrower claim
+    "an explicit stamp is checked".
+    """
+    f = _write_rant_lines(tmp_path, [
+        {"timestamp": "2099-01-01T00:00:00+08:00", "project": "emrg",
+         "status": "in_progress", "progress": None, "completed": None,
+         "message": "a row dated in the future"},
+    ])
+
+    ok, msg = update_rant(f, "2099-01-01T00:00:00+08:00", status="completed")
+
+    assert not ok, msg
+    assert "precedes the rant's submission instant" in msg, msg
+    entry = json.loads(f.read_text(encoding="utf-8").strip())
+    assert entry["status"] == "in_progress" and entry["completed"] is None
+
+
 def test_cleanup_rants_keeps_pending_plus_10_completed(tmp_path):
     entries = []
     # 3 active rants (2 pending + 1 in_progress)
