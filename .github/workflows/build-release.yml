@@ -71,9 +71,52 @@ jobs:
           # this step too, never pass it as "nothing to compare".
           python3 scripts/check-release-tag.py "${GITHUB_REF_NAME}"
 
+  # The credential question is asked **before** the build, for the same reason
+  # `verify-tag` above is: a credential Apple will refuse should cost seconds, not
+  # the fifteen minutes the four platforms take. Measured on tag v0.3.8, run
+  # 36956685533: all four legs built, the macOS leg died at "Notarize pkg", and the
+  # `release` job was skipped because of it -- **nothing was published**, and the
+  # host paid a full build round to learn what a one-second exchange at home (or
+  # here) answers first.
+  #
+  # The reading is `scripts/check-notary-credentials.py` -- the same exchange the
+  # notarize step makes, with the same three secrets under the same names -- and its
+  # exit codes are this job's verdict, all of them: 0 Apple accepted the credentials,
+  # 1 Apple refused them, 2 the exchange did not complete (no verdict was reached).
+  # Non-zero fails the job, 2 included: a gate that passes because it could not reach
+  # a verdict is the "unpublished release while green" this workflow's `release`
+  # comment forbids, and a run that cannot notarize cannot publish either.
+  #
+  # Gated on the same three secrets the notarize step is gated on, so a host who never
+  # configured notarization keeps the documented skip instead of gaining a blocker.
+  # `xcrun` is why the job is macOS rather than a second ubuntu job beside `verify-tag`.
+  verify-credentials:
+    runs-on: macos-15
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      # Job-level env first: a secret cannot be read from an `if:` expression directly
+      # (GitHub rejects the workflow at parse time) -- the same shape `build` uses.
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
+      MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: The credentials the release notarizes with must still be accepted
+        if: env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `set -e` is load-bearing: the preflight's exit 2 (not measurable) must fail
+          # this step too, never pass it as "nothing to check".
+          python3 scripts/check-notary-credentials.py || {
+            rc=$?
+            echo "::error::the notarization preflight answered $rc -- 1 means Apple REFUSED these credentials (an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); 2 means the exchange did not complete, so no verdict was reached. Either way this tag cannot publish a macOS product, and the four-platform build would be spent before saying so. Run the same command at home with the same three variables to read Apple's own reply."
+            exit 1
+          }
+
   build:
-    needs: verify-tag
-    # `verify-tag` 在分支派发时是 skipped，而 skipped 的 needs 会 skip 下游 —— 不带
+    needs: [verify-tag, verify-credentials]
+    # 两个 verify job 在分支派发时都是 skipped，而 skipped 的 needs 会 skip 下游 —— 不带
     # 条件的话，`workflow_dispatch` 打在分支上会让整条流水线以 success 结束却什么都
     # 不构建（master 上那条路径是真构建的）。此条件让本 job 在依赖 **成功或跳过** 时
     # 都执行，在依赖 **失败** 时仍然不执行——后半段同样实测过（同一探针里 `needs:
