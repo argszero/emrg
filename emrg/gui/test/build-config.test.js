@@ -21,6 +21,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const GUI_ROOT = path.join(__dirname, "..");
+// electron-builder 的一切相对路径都以 **GUI_ROOT**（package.json 所在目录）为基准；
+// 产物（dist/runtime、packaging/assets）在仓库根 —— 少一层 `..` 即静默错位。
+const REPO_ROOT = path.resolve(GUI_ROOT, "..", "..");
 const PKG = JSON.parse(fs.readFileSync(path.join(GUI_ROOT, "package.json"), "utf-8"));
 const VENDOR_DIR = path.join(GUI_ROOT, "vendor");
 
@@ -155,16 +158,58 @@ test("electron-builder config: buildResources lives under directories (schema gu
       `(v0.2.47 Build Release 4/4 failure). Place it under directories.buildResources. ` +
       `Actual root keys: ${JSON.stringify(Object.keys(build))}`
   );
+  // 断言的是**解析结果**，不是字符串字面量：`directories.*` 与 extraResources 一样，由
+  // electron-builder 相对工程目录（本目录）解析。旧断言把字面量 "../packaging/assets" 钉死，
+  // 而它从 emrg/gui 解析到 emrg/packaging/assets（不存在）——一个错值被钉成了"已守卫"。
+  const assetsDir = path.join(REPO_ROOT, "packaging", "assets");
   assert.strictEqual(
-    build.directories && build.directories.buildResources,
-    "../packaging/assets",
-    "directories.buildResources must point at ../packaging/assets (icon.icns/ico/png sources)"
+    path.resolve(GUI_ROOT, (build.directories && build.directories.buildResources) || ""),
+    assetsDir,
+    "directories.buildResources must resolve to <repo-root>/packaging/assets (icon.icns/ico/png sources)"
   );
   // icon.icns/ico/png are gen-assets products (gitignored, generated at build time from
   // icon.svg by packaging/gen-assets.sh) — only the committed design source must exist in CI.
-  const assetsDir = path.join(GUI_ROOT, "..", "..", "packaging", "assets");
   assert.ok(
     fs.existsSync(path.join(assetsDir, "icon.svg")),
     `buildResources dir missing design source icon.svg (committed) — gen-assets can't render icons`
+  );
+});
+
+// ── 打包引用解析守卫（cycle cyc20261009-032401）──────────────────────────────
+// electron-builder 把 extraResources 的 `from` 与 directories.buildResources 都相对**工程目录**
+// （emrg/gui/package.json 所在处）解析，源不存在时**只警告不失败**。实测证据（build-release.yml
+// run 37723424917，v0.3.9 tag job 113136083119）：
+//     • file source doesn't exist  from=/home/runner/work/emrg/emrg/emrg/dist/runtime
+//     • file source doesn't exist  from=/home/runner/work/emrg/emrg/emrg/packaging/assets/icon.png
+//     • default Electron icon is used  reason=application icon is not set
+// 构建全绿、产物照发，包里却没有载荷：AppImage 缺 resources/runtime，而 main.js 的
+// ensureAppImageExtracted 首启就复制 process.resourcesPath/runtime 到 ~/.emrg/install ——
+// Linux 用户装完的 GUI 没有运行时。根因是相对路径少一层（落在 emrg/ 内，产物在仓库根）。
+// 本用例钉住**解析结果**：每个 from 必须落到仓库根的那两个产物上，任一退回 "../…" 即红。
+test("electron-builder extraResources resolve to the repo-root build products", () => {
+  const build = PKG.build || {};
+  const PRODUCTS = [path.join(REPO_ROOT, "dist", "runtime"), path.join(REPO_ROOT, "packaging", "assets", "icon.png")];
+  const refs = [];
+  for (const entry of build.extraResources || []) refs.push(["app", entry.from]);
+  for (const p of ["mac", "win", "linux"]) {
+    for (const entry of (build[p] || {}).extraResources || []) refs.push([p, entry.from]);
+  }
+  assert.ok(refs.length > 0, "no extraResources found — the scan is broken");
+  const unresolved = refs
+    .map(([block, from]) => ({ block, from, resolved: path.resolve(GUI_ROOT, from) }))
+    .filter((r) => !PRODUCTS.includes(r.resolved));
+  assert.deepStrictEqual(
+    unresolved.map((r) => `${r.block}: ${r.from} → ${r.resolved}`),
+    [],
+    `extraResources resolve outside the repo-root build products ` +
+      `(${PRODUCTS.map((p) => path.relative(REPO_ROOT, p)).join(", ")}). electron-builder only WARNS ` +
+      `("file source doesn't exist") and ships an artifact without the payload — assert the resolved ` +
+      `path, and remember it is relative to package.json's own directory (emrg/gui), not the repo root.`
+  );
+  // 唯一读 resourcesPath/runtime 的是 Linux AppImage 的首启自解压 —— 少了这条，绿也说明不了问题
+  assert.ok(
+    refs.some(([block, from]) => block === "linux" && path.resolve(GUI_ROOT, from) === path.join(REPO_ROOT, "dist", "runtime")),
+    "the linux block must carry the runtime: main.js ensureAppImageExtracted copies " +
+      "process.resourcesPath/runtime into ~/.emrg/install on first launch (no other platform reads it)"
   );
 });

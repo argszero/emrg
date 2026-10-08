@@ -233,6 +233,17 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
         "`tests/test_check_merge_landed.py` runs it against a `tmp_path` repository with "
         "a `gh` stand-in and pins the first line"
     ),
+    "check-gui-package-refs.py": (
+        "its subject is the packaging products (`dist/runtime` from "
+        "packaging/build-runtime.sh, `packaging/assets/icon.*` from packaging/gen-assets.sh), "
+        "which a clean checkout does not carry - run bare it answers rc 1 about a tree that has "
+        "not been through those steps, which is the packaging job's reading rather than this "
+        "suite's. It reads a working tree (`--root`, default its own emrg/gui) and names it "
+        "before the verdict, and that naming IS verified rather than classified: "
+        "`tests/test_check_gui_package_refs.py` runs it against `tmp_path` project dirs and pins "
+        "the tree line plus each exit code (0 every reference resolves / 1 one does not / 2 "
+        "unreadable manifest)"
+    ),
     "check-release-tag.py": (
         "takes a required release tag, so the bare run this suite performs is not its "
         "invocation - the tag it is asked about does not exist until the host cuts it, so "
