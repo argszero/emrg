@@ -913,4 +913,55 @@ describe("Composer — 图片粘贴/拖拽（rant 2026-09-30T09:35:04）", () =>
     expect(screen.queryByTestId("composer-image-notice")).toBeNull();
     expect(saveImage).not.toHaveBeenCalled();
   });
+
+  it("选图入口存在：格式栏的按钮打开一个 image/* 的文件选择器（此前 renderer 里没有任何 input[type=file]）", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    await waitEditor(s);
+
+    const input = screen.getByTestId("composer-image-input") as HTMLInputElement;
+    expect(input.getAttribute("type")).toBe("file");
+    expect(input.getAttribute("accept")).toBe("image/*");
+    expect(input.multiple).toBe(true);
+
+    const clickSpy = vi.spyOn(input, "click");
+    await userEvent.click(screen.getByTestId("composer-attach-image"));
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("选中的文件走同一条 attach 路径：落盘 + 光标处占位符（与粘贴/拖拽一致）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/pick.png", mime: "image/png" }));
+    const logLine = vi.fn();
+    const s = setup(store, { saveImage, logLine });
+    const editor = await waitEditor(s);
+
+    const input = screen.getByTestId("composer-image-input") as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [pngFile("pick.png")], configurable: true });
+    act(() => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
+    expect(saveImage.mock.calls[0][0]).toMatchObject({ sessionId: "s1", mime: "image/png", label: "pick" });
+    expect(editor.getText()).toContain("[📷 pick]");
+    expect(logLine).toHaveBeenCalledWith("info", expect.stringContaining("[composer:image] attach 1 file(s)"));
+  });
+
+  it("选完复位 input.value：同一张图连选两次都触发 change（第二次不再静默）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/again.png", mime: "image/png" }));
+    const s = setup(store, { saveImage });
+    await waitEditor(s);
+
+    const input = screen.getByTestId("composer-image-input") as HTMLInputElement;
+    for (let i = 0; i < 2; i += 1) {
+      Object.defineProperty(input, "files", { value: [pngFile("again.png")], configurable: true });
+      act(() => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(i + 1));
+      expect(input.value).toBe("");
+    }
+  });
 });

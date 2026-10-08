@@ -170,6 +170,10 @@ export function Composer({
   const pendingRef = useRef<ImageAttach[]>([]);
   const attachRef = useRef<(files: File[], at?: number | null) => void>(() => {});
   const insertRawRef = useRef<(text: string, at?: number | null) => void>(() => {});
+  /** 隐藏的选图入口（rant 2026-09-30T09:35:04 缺口 1：此前 renderer 里没有任何
+   * `input type="file"`，所以「选择图片插入」这条入口根本不存在）。它不新增落盘
+   * 路径——选中的 File 直接交给 attachRef，与粘贴/拖拽走同一条 attachImages。 */
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // tiptap 选项闭包只创建一次 → 变化值走 ref 桥接（menu/submit/selectCmd/t）
   const menuRef = useRef(menu);
   menuRef.current = menu;
@@ -703,6 +707,34 @@ export function Composer({
             <span className={b.labelClass}>{b.label}</span>
           </button>
         ))}
+        {/* 第三条入口：选择图片（与粘贴、拖拽并列）。按钮只负责打开系统选图，
+            落盘/占位符全交给 attachRef —— 三条入口一条路径，失败提示也共用一套 */}
+        <button
+          type="button"
+          className="fmt-btn"
+          title={t("composer.chooseImage")}
+          aria-label={t("composer.chooseImage")}
+          data-testid="composer-attach-image"
+          onMouseDown={(e) => e.preventDefault()} // 防失焦——与格式按钮同款
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <span className="fmt-label-image">🖼</span>
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          data-testid="composer-image-input"
+          onChange={(e) => {
+            const el = e.currentTarget;
+            const picked = Array.from(el.files ?? []);
+            // 复位：同一张图连续选两次也要再触发 change（不清空则第二次没有事件）
+            el.value = "";
+            if (picked.length > 0) attachRef.current(picked, null);
+          }}
+        />
       </div>
       <div className="mode-switcher" role="group" aria-label={t("composer.sandboxTitle")} data-testid="sandbox-switcher">
         {SANDBOX_TIERS.map((tierKey) => {
