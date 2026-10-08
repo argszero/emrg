@@ -229,6 +229,92 @@ def test_an_old_caller_still_sends_a_well_formed_frame() -> None:
     assert ws.sent[0]["cycle_started_at"] == ""
 
 
+# --- the hand-over, at its *production* call site -----------------------------
+#
+# `test_the_scheduler_carries_the_boundary_on_the_frame` above pins one edge of the
+# hand-over: given the instant, the sender puts it on the frame. The instant it is
+# *given* has an edge of its own — `_run_evolution_cycle` computes `cycle_time` and
+# hands it over — and nothing pinned that one. Measured while reviewing this PR
+# (2026-10-08): deleting `cycle_started_at=cycle_time.isoformat()` from that single
+# call site left this file, `tests/test_scheduler.py` and `tests/test_ws_e2e.py`
+# green, because every arm above supplies the argument itself or starts one layer
+# below. That is the defect shape exactly — a value that exists and is not carried —
+# so the arm below drives the **cycle**, not the method.
+
+
+def test_the_cycle_hands_the_run_boundary_to_the_sender(tmp_path, monkeypatch) -> None:
+    """The instant the cycle hands over is the one it stamped on its own `task` frame.
+
+    Driving `_run_evolution_cycle` is what makes this an assertion about the wire
+    rather than about a method: the cycle is free to compute any instant it likes,
+    and the property that matters is that the summariser receives *that* one. So
+    the expected value is not written here — it is read off the `task` frame the
+    same cycle sent, which is the frame the daemon records the run by.
+
+    `_make_cycle_handler` is `tests/test_scheduler.py`'s fully-scripted handler
+    (imported across test modules the way `tests/test_ws_e2e.py` is); it is used
+    for its connection stub alone, and the connection is wrapped below so the
+    frames this cycle sends can be read back.
+    """
+    from emrg.server import scheduler as sched_mod
+    from tests.test_scheduler import _make_cycle_handler
+
+    handler, _ = _make_cycle_handler(
+        tmp_path,
+        frames=[
+            {"request_id": "r1", "content": "Done", "done": True,
+             "delta": False, "session_id": "s"},
+        ],
+    )
+
+    sockets: list = []
+    connect = sched_mod.connect_to_server
+
+    async def capturing_connect():
+        ws = await connect()
+        sockets.append(ws)
+        return ws
+
+    monkeypatch.setattr(sched_mod, "connect_to_server", capturing_connect)
+
+    handed: dict = {}
+
+    async def spy(self, ws, prompt, completion_summary, cycle_started_at=""):
+        handed["cycle_started_at"] = cycle_started_at
+        return None
+
+    monkeypatch.setattr(TaskHandler, "_request_vibe_check", spy)
+
+    asyncio.run(handler._run_evolution_cycle())
+
+    assert sockets, "the cycle never connected, so its frames cannot be read back"
+    frames = []
+    for raw in sockets[0].sent:
+        try:
+            frames.append(json.loads(raw) if isinstance(raw, str) else raw)
+        except (TypeError, ValueError):  # a frame this arm does not read
+            continue
+    task_frames = [f for f in frames if f.get("type") == "task"]
+    assert task_frames, (
+        "the cycle sent no `task` frame, so this arm has no anchor — the frame is "
+        "where the run's own instant is recorded, and the assertion below is that "
+        "the summariser is given the same one"
+    )
+    stamped = task_frames[0].get("timestamp")
+    assert stamped, "the `task` frame carries no timestamp, so the anchor is empty"
+
+    assert "cycle_started_at" in handed, (
+        "the cycle never asked for a vibe check, so the hand-over was not exercised "
+        "at all — this arm would then pass without measuring anything"
+    )
+    assert handed["cycle_started_at"] == stamped, (
+        f"the cycle stamped {stamped!r} on its own `task` frame but handed "
+        f"{handed['cycle_started_at']!r} to the vibe check — the summariser would "
+        "slice the shared session at an instant the run did not start at, which is "
+        "the defect (an empty or wrong boundary reads the neighbour's work)"
+    )
+
+
 # --- the outcome: what the judge is handed -----------------------------------
 
 
