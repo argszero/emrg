@@ -1635,6 +1635,11 @@ def test_an_origin_that_cannot_be_ordered_against_the_ledger_says_so(
 
     assert mod._completed_at_or_after(rows, "2026-09-01T00:00:00") is None
     assert mod._completed_at_or_after(rows, "2026-09-01T00:00:00+08:00") == 1
+    # The other half of the same guard: a token that is not an instant at all is unmeasurable
+    # too, and it reaches the guard by a different route (`_parse_instant` returns `None` rather
+    # than an instant whose offset is missing). Counted as zero it would make the loudest claim
+    # this reading has out of a citation nothing could compare.
+    assert mod._completed_at_or_after(rows, "garbage") is None
 
     rc, out = _run(mod, capsys, ["--rants", str(path)])
 
@@ -1656,6 +1661,179 @@ def test_the_retention_cap_is_the_number_cleanup_uses(mod) -> None:
     from emrg.server.rants import cleanup_rants
 
     assert mod._RETENTION_KEEP == inspect.signature(cleanup_rants).parameters["keep"].default
+
+
+def _completed_ledger(tmp_path, rows: list[dict]):
+    """A ledger of explicit rows, one JSON per line, in the shape `submit_rant` writes."""
+    return _ledger_lines(tmp_path, *[json.dumps(row) for row in rows])
+
+
+def _reversed_order_ledger(tmp_path, count: int = 12):
+    """`count` completed rants whose submission order is the *reverse* of their completion order.
+
+    The fixture the two tests below need, and the shape the retention rule can be caught in:
+    ranked by `completed or timestamp` the store prunes the last-submitted records, ranked by
+    the submission instant alone it prunes the first-submitted ones — so a key that drifts in
+    either file gives a different answer here, and none on a ledger where the two orders agree
+    (`completed = timestamp + 30 min`, which is what the older `cleanup_rants` test builds).
+    """
+    rows = [
+        {
+            "timestamp": f"2026-01-{i + 1:02d}T00:00:00+08:00",
+            "project": "emrg",
+            "status": "completed",
+            "progress": "",
+            "completed": f"2026-12-{count - i:02d}T00:00:00+08:00",
+            "message": "a rant",
+        }
+        for i in range(count)
+    ]
+    return _completed_ledger(tmp_path, rows), rows
+
+
+def _held_timestamps(path) -> set[str]:
+    """The timestamps a ledger file holds after something rewrote it."""
+    return {
+        json.loads(line)["timestamp"]
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    }
+
+
+def test_the_ranking_key_is_the_one_cleanup_ranks_by(mod, tmp_path) -> None:
+    """A sort key cannot be read out of a signature, so it is **driven** out of its owner.
+
+    `test_the_retention_cap_is_the_number_cleanup_uses` measures the cap against `cleanup_rants`'
+    own default, and this reading is only as good as the *key* it ranks by: the whole
+    classification is "how many completed rants are at or after this instant", so a key that
+    drifts — in either file — turns that count into arithmetic about a store that no longer
+    exists, silently, because a count of the wrong records is still a plausible sentence. The
+    owner is the only place the key is defined, so `cleanup_rants` really runs here: the set it
+    keeps is the store's own answer, and the reading's key applied with the reading's cap has
+    to reproduce it.
+    """
+    from emrg.server.rants import cleanup_rants
+
+    path, rows = _reversed_order_ledger(tmp_path)
+
+    kept = cleanup_rants(path, keep=mod._RETENTION_KEEP)
+
+    survivors = _held_timestamps(path)
+    assert kept == len(survivors) == mod._RETENTION_KEEP
+    # Ranked by completion, the two earliest-completing records went.
+    assert survivors == {row["timestamp"] for row in rows[:10]}, sorted(survivors)
+    # … and the fixture discriminates: ranked by the submission instant, a different ten stay.
+    # Without this the test would pass on a ledger where the two keys happen to agree.
+    by_submission = {
+        row["timestamp"]
+        for row in sorted(rows, key=lambda row: row["timestamp"])[-mod._RETENTION_KEEP:]
+    }
+    assert by_submission != survivors
+
+    ranked = sorted(rows, key=mod._retention_key)
+    assert {row["timestamp"] for row in ranked[-mod._RETENTION_KEEP:]} == survivors
+
+
+def test_an_absence_the_store_did_prune_is_not_reported_as_never_held(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The direction that matters: a drifted key makes this row print its loudest sentence.
+
+    The ledger is the one `test_the_ranking_key_is_the_one_cleanup_ranks_by` drives, **after the
+    real `cleanup_rants` has run over it**, so the records it no longer holds are missing by
+    pruning — and the citation names one of them. Counted by completion, every survivor is at or
+    after that instant, the cap is reached, and the row says a prune may explain the absence,
+    which is what happened. Counted by the submission instant instead, one record is, and the
+    same row would say *the retention rule cannot explain the absence … this ledger never held
+    it* — the reading's loudest claim, made about a record the store really did remove.
+    """
+    from emrg.server.rants import cleanup_rants
+
+    path, rows = _reversed_order_ledger(tmp_path)
+    cleanup_rants(path, keep=mod._RETENTION_KEEP)
+    pruned = rows[-1]["timestamp"]
+    assert pruned not in _held_timestamps(path)
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, pruned)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "may have removed it before this reading ran" in detail, detail
+    assert "cannot explain the absence" not in detail, detail
+
+
+def test_a_completed_row_without_a_stamp_ranks_by_its_submission(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The `or timestamp` half of the key: a completed record with no stamp still counts.
+
+    `submit_rant` writes the completion stamp when a status *becomes* `completed`, so a record
+    without one is a legacy row — and that is the case the fallback exists for. Eleven such
+    records submitted a day apart are eleven the cap cannot protect: the store prunes the
+    earliest by its submission instant, so a citation at that instant names a record a prune may
+    have taken. A key that dropped the fallback would count none of them and answer that the
+    retention rule cannot explain the absence.
+    """
+    from emrg.server.rants import cleanup_rants
+
+    rows = [
+        {
+            "timestamp": f"2026-01-{i + 1:02d}T00:00:00+08:00",
+            "project": "emrg",
+            "status": "completed",
+            "progress": "",
+            "completed": None,
+            "message": "a rant",
+        }
+        for i in range(11)
+    ]
+    path = _completed_ledger(tmp_path, rows)
+    cleanup_rants(path, keep=mod._RETENTION_KEEP)
+    pruned = rows[0]["timestamp"]
+    assert pruned not in _held_timestamps(path)
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, pruned)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "the ledger holds 10 completed rant(s) at or after this instant" in detail, detail
+    assert "may have removed it before this reading ran" in detail, detail
+
+
+def test_a_record_completing_exactly_at_the_citation_counts(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """*At or after* includes the instant itself — the difference between `>=` and `>`.
+
+    A record submitted at the cited instant can only complete at it or later, and the retention
+    rule ranks it by that completion, so a record completing **exactly** at the citation is one
+    the cap counts. Reading `>` instead drops every such record from the count, and here that is
+    the whole distance between the two sentences: ten records completing at the cited instant
+    reach the cap, so a prune is a live explanation, while zero does not and the row would say
+    the retention rule cannot explain the absence.
+    """
+    cited = "2026-09-30T10:27:20+08:00"
+    rows = [
+        {
+            "timestamp": f"2026-01-{i + 1:02d}T00:00:00+08:00",
+            "project": "emrg",
+            "status": "completed",
+            "progress": "",
+            "completed": cited,
+            "message": "a rant",
+        }
+        for i in range(10)
+    ]
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, cited)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(_completed_ledger(tmp_path, rows))])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "the ledger holds 10 completed rant(s) at or after this instant" in detail, detail
+    assert "may have removed it before this reading ran" in detail, detail
 
 
 def test_a_near_match_names_the_ledgers_own_spelling(mod, monkeypatch, capsys, tmp_path) -> None:
