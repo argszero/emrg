@@ -327,6 +327,18 @@ jobs:
           npm run build
           test -f dist/index.html
 
+      # ── 打包引用自查（cycle cyc20261009-032401）──────────────────────────
+      # electron-builder 把 `from`/`directories.*` 相对 emrg/gui/package.json 解析，源不存在时
+      # **只警告不失败**：run 37723424917（v0.3.9）就带着这两行发布了没有载荷的产物 ——
+      #   • file source doesn't exist  from=.../emrg/emrg/dist/runtime
+      #   • default Electron icon is used  reason=application icon is not set
+      # 后果集中在 Linux：main.js 的 ensureAppImageExtracted 首启复制 resourcesPath/runtime 到
+      # ~/.emrg/install，缺它则装完的 AppImage 没有运行时。这一步在构建读取之前断言引用可解析
+      # （宿主自查同一条命令，见脚本 --help；PR 阶段由 emrg/gui/test/build-config.test.js 钉住）。
+      - name: Assert electron-builder sources resolve (emrg/gui)
+        shell: bash
+        run: python3 scripts/check-gui-package-refs.py
+
       # ── GUI dist（electron-builder；linux extraResources runtime §5 R64）──
       - name: Build GUI (electron-builder)
         working-directory: emrg/gui
