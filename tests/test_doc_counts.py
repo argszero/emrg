@@ -2156,8 +2156,10 @@ def test_a_literal_ends_at_the_quote_that_closes_it() -> None:
     `_skip_string_literal`'s quote-close clause is reached by no discriminating row:
     changing its `return i + 1` to `return i` leaves this file green (measured
     2026-10-09, cycle `cyc20261009-025303`). The branch *is* reached - the
-    neighbouring mutation `return start + 1` reddens five rows - so this is a wrong
-    reading the suite cannot see, not dead code.
+    neighbouring mutation `return start + 1` reddens rows across this file - so this
+    is a wrong reading the suite cannot see, not dead code. How many rows it reddens
+    is deliberately not written here: that count moves with every row added to this
+    file, so it is measured when it is wanted rather than quoted.
 
     It is not merely theoretical. Resuming on the quote makes the walk re-enter on
     that character and lose its place, so a file with several literals drops spans:
