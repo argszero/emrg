@@ -506,6 +506,17 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 
    The `[review-complete]` marker lets the editor count received reviews.
 
+{% else %}
+
+### 1. No work cycle — `role` is neither `editor` nor `author`
+
+🛑 **STOP — this task's `role` is neither `editor` nor `author`.**
+
+`config.role` in tasks.yml is **`{{ task.role }}`**. Every journal action (triage, review, submit,
+revise) is defined inside a work cycle, so with no cycle selected this prompt would send the round
+to improvise a procedure the journal does not have. **Take no journal action this round.** Set
+`config.role` to `editor` or `author` in tasks.yml; the next round selects the cycle.
+
 {% endif %}
 
 ---

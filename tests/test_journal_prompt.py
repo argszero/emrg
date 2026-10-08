@@ -9,9 +9,28 @@ changes" test, an N3 cap on reusing the journal's own census pipeline with a
 domain swap, prior-belief registration, and top-conference (not
 measurement-archive) positioning) so a future edit cannot silently relax the
 standards back to "file existence + checklist".
+
+Why the render-level legs exist (2026-10-08)
+--------------------------------------------
+The legs above read the file as text, and ``tests/test_prompt_templates.py`` does
+render every template — but with a *minimal* config, which for this template takes the
+``{% if task.get('role', '') == 'editor' %}`` / ``{% elif … == 'author' %}`` dispatch to
+its **else**: neither work cycle renders, and that guard's ``len(rendered) > 500`` still
+passes on the header alone (measured 2026-10-08: 18,441 of 58,528 characters). So the
+role a task is configured with decides which half of the file a round is sent, and
+nothing read it per role. These legs render through the real builder
+(``TaskHandler._build_evolution_prompt``, the single render site for every task template)
+**for each role the host configures**, and read the cycle the role selects — fail-to-
+measure included, because a render that carries no cycle is a failure, not a pass.
 """
 
 from pathlib import Path
+
+import yaml
+
+from emrg.protocol import InstanceIdentity
+from emrg.server import scheduler as mod
+from tests.task_handler_factory import make_handler
 
 PROMPT = Path(__file__).resolve().parent.parent / "emrg" / "server" / "journal_prompt.md"
 
@@ -279,3 +298,121 @@ def test_reference_presentation_is_a_third_citation_axis():
     assert "Check how the references are *presented*" in text
     # Both review templates collect it, or the requirement has no slot to land in.
     assert text.count("- **Reference presentation** (read in the rendered form)") == 2
+
+
+# --- Render-level legs (2026-10-08) --------------------------------------------
+#
+# The class, measured in a different carrier first: a guard that reads a task template
+# as text measures the *file*, not the prompt a round receives, and the daemon renders
+# every task prompt through jinja2 — so the file is not what is sent. #1903
+# (`prompts/vibe_check.j2`) and #1905 (`competition_prompt.md` §0.0) added the missing
+# leg for their carriers. This template has the same exposure and a sharper edge: its
+# whole work cycle sits behind a role dispatch, so `config.role` decides which half of a
+# 58,528-character file a round is sent.
+
+# The work-cycle heading each role selects, and the same string the guard reads.
+ROLE_HEADS = {"editor": "### 1. Editor Work Cycle", "author": "### 1. Author Work Cycle"}
+
+# The fail-closed clause the dispatch renders when neither branch matches, kept as one
+# string so the template and this guard name the same thing.
+NO_ROLE_STOP = "this task's `role` is neither `editor` nor `author`"
+
+
+def _render_journal(tmp_path: Path, monkeypatch, role: str | None) -> str:
+    """The journal template as a round receives it, through the real builder.
+
+    Real env, real context, ``config_dir`` on a tmp tree so no host path is read or
+    written; ``make_handler`` hands the task record, so the production derivation runs.
+    """
+    monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+    project_dir = tmp_path / "demoproj"
+    project_dir.mkdir(exist_ok=True)
+    (tmp_path / "projects.yml").write_text(
+        yaml.safe_dump([{"name": "demoproj", "path": str(project_dir)}]), encoding="utf-8"
+    )
+    config: dict = {"project": "demoproj", "author_id": "demo-inst"}
+    if role is not None:
+        config["role"] = role
+    return make_handler(
+        name="demo-task",
+        config=config,
+        interval=300,
+        identity=InstanceIdentity(),
+        template_path=PROMPT,
+    )._build_evolution_prompt()
+
+
+def _cycle_of(rendered: str, role: str) -> str:
+    """The work cycle the render carries, or a failure to measure — never a pass."""
+    heading = ROLE_HEADS[role]
+    assert heading in rendered, (
+        f"the rendered journal prompt carries no {heading!r} — this test cannot measure "
+        f"what a round with role={role!r} is sent, which is a failure to measure, not a pass"
+    )
+    return rendered
+
+
+def test_the_editor_work_cycle_reaches_the_round_and_not_merely_the_file(tmp_path, monkeypatch):
+    """The editor's operational contract, read on the prompt a round receives."""
+    rendered = _cycle_of(_render_journal(tmp_path, monkeypatch, "editor"), "editor")
+    # The discipline section the file-level test pins, on the render this time.
+    assert "#### Verification discipline — how a claim is discharged" in rendered, (
+        "the editor render lost the verification-discipline section — the file carries it, "
+        "but the round that must apply it is not sent it"
+    )
+    for action in _SIX_ACTIONS:
+        assert action in rendered, f"the editor render lost the discipline action: {action!r}"
+    # Each editor phase sends the reader there, checked per phase (a count would be
+    # satisfied by four mentions in one paragraph).
+    chunks = rendered.split("\n#### ")
+    for heading in ("Phase A: Triage", "Phase B: Decision",
+                    "Phase C: Follow-up", "Phase D: Ops"):
+        chunk = next((c for c in chunks if c.startswith(heading)), None)
+        assert chunk is not None, f"editor {heading} is missing from the render"
+        assert "§Verification discipline" in chunk, (
+            f"editor {heading} does not send the reader to the discipline section in the render"
+        )
+
+
+def test_the_author_work_cycle_reaches_the_round_and_not_merely_the_file(tmp_path, monkeypatch):
+    """The author's contract, and that the dispatch stays exclusive."""
+    rendered = _cycle_of(_render_journal(tmp_path, monkeypatch, "author"), "author")
+    for marker in ("Phase A: Research (in-preparation)", "Phase B: Submit",
+                   "Phase C: Revision", "Phase D: Track"):
+        assert marker in rendered, f"the author render lost {marker!r}"
+    assert ROLE_HEADS["editor"] not in rendered, (
+        "an author round is sent the editor's cycle as well — the dispatch is not exclusive"
+    )
+
+
+def test_the_journal_render_substitutes_values_and_leaves_no_template_syntax(tmp_path, monkeypatch):
+    """The converse: an assertion only the file could satisfy is a file read in disguise."""
+    for role in ROLE_HEADS:
+        rendered = _render_journal(tmp_path, monkeypatch, role)
+        for tag in ("{{", "{%", "{#"):
+            assert tag not in rendered, (
+                f"an unrendered {tag!r} reaches a {role} round — the agent would read "
+                f"template syntax as instruction"
+            )
+        assert "demo-inst" in rendered, (
+            f"the configured author_id does not reach the {role} render"
+        )
+
+
+def test_a_role_the_dispatch_does_not_name_stops_the_round(tmp_path, monkeypatch):
+    """Fail closed: the whole operational contract vanishes when `role` names nothing.
+
+    Measured 2026-10-08 (cyc20261008-085636): a role that is neither `editor` nor `author`
+    rendered **neither** work cycle — 18,457 of 58,528 characters — and every file-level
+    test stayed green. The file's own idiom for a missing required config is to fail closed
+    (the `author_id` STOP banner), so the dispatch does the same.
+    """
+    rendered = _render_journal(tmp_path, monkeypatch, "reviewer")
+    assert NO_ROLE_STOP in rendered, (
+        "a role the dispatch does not name rendered no work cycle and no stop clause — the "
+        "round would improvise a procedure the journal does not have"
+    )
+    for heading in ROLE_HEADS.values():
+        assert heading not in rendered, (
+            f"{heading!r} renders under an unnamed role — the dispatch is not exclusive"
+        )
