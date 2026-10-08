@@ -171,7 +171,15 @@ def test_read_with_start_line_byte_offset(temp_file):
 
 
 def test_read_start_line_byte_offset_at_eol(temp_file):
-    """byte_offset beyond line length yields empty first line."""
+    """An offset past the first line's end empties that line and says so.
+
+    Issue #1928: the arm this replaces read
+    `assert "     3\t" in lines[0] or lines[0].strip().startswith("3")`, and both
+    halves were satisfied by *either* outcome — `lines[0]` is `"     3\t"` when the
+    line is emptied and `"     3\tline 3"` when it is returned whole, whose `.strip()`
+    also starts with "3". So it pinned the docstring, never the behaviour, and the
+    code could ignore the offset unnoticed. Assert the exact first line instead.
+    """
     tool = ReadTool()
     f, _ = temp_file
     result = _run(tool.execute({
@@ -180,10 +188,62 @@ def test_read_start_line_byte_offset_at_eol(temp_file):
         "start_line_byte_offset": 999,
     }))
     assert not result.error
-    # First line (line 3) should be empty or skipped
     lines = result.content.split("\n")
-    # line 3 should be empty (byte offset beyond its length)
-    assert "     3\t" in lines[0] or lines[0].strip().startswith("3")
+    assert lines[0] == "     3\t", (
+        f"an offset past the line's end must return it empty, got {lines[0]!r}"
+    )
+    assert "start_line_byte_offset=999" in result.content
+    assert "the line is 6 characters" in result.content
+    assert "line 4" in result.content  # the rest of the range is untouched
+
+
+def test_read_start_line_byte_offset_exactly_at_the_line_end(temp_file):
+    """An offset equal to the line's length is *past* it, not inside it —
+    the `<` in the old guard is what dropped this case (issue #1928)."""
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({
+        "file_path": str(f),
+        "start_line": 3,
+        "start_line_byte_offset": 6,  # "line 3" is exactly 6 characters
+    }))
+    assert not result.error
+    lines = result.content.split("\n")
+    assert lines[0] == "     3\t", (
+        f"offset 6 of a 6-character line is past its end, got {lines[0]!r}"
+    )
+    assert "at or past its end" in result.content
+    assert "line 4" in result.content
+
+
+def test_read_start_line_byte_offset_inside_names_what_was_shown(temp_file):
+    """Inside the line: the remainder is shown and the note gives the line's
+    length and how much came from the offset — without it a suffix and the whole
+    line are the same bytes."""
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({
+        "file_path": str(f),
+        "start_line": 3,
+        "line_limit": 2,
+        "start_line_byte_offset": 2,
+    }))
+    assert not result.error
+    lines = result.content.split("\n")
+    assert lines[0] == "     3\tne 3", f"got {lines[0]!r}"
+    assert "the line is 6 characters, 4 shown from the offset" in result.content
+
+
+def test_read_line_count_truncation_still_asks_for_offset_zero(temp_file):
+    """The tool's own truncation is by line count, so its continuation hint keeps
+    `start_line_byte_offset=0` (issue #1928, acceptance item 4): the offset that
+    resumes a line is not the one that continues a page."""
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({"file_path": str(f), "line_limit": 2}))
+    assert not result.error
+    assert "truncated at start_line=3" in result.content
+    assert "start_line_byte_offset=0" in result.content
 
 
 def test_read_image_returns_vision_ref(temp_file):

@@ -82,8 +82,13 @@ class ReadTool(ToolExecutor):
                     "start_line_byte_offset": {
                         "type": "integer",
                         "description": (
-                            "Byte offset within the first line to begin reading "
-                            "(default: 0). Use to resume within a truncated line."
+                            "Character offset within the first selected line to "
+                            "start at (default: 0). `read` never cuts a line, so "
+                            "this offset is always the caller's, never a cut this "
+                            "tool made. Inside the line: the remainder is shown, "
+                            "with a note giving the line's length; at or past its "
+                            "end: that line comes back empty, with a note saying "
+                            "so. Counts characters, not bytes."
                         ),
                     },
                     "intent": {
@@ -234,16 +239,42 @@ class ReadTool(ToolExecutor):
         end = min(start + effective_limit, total_lines)
         selected = all_lines[start:end]
 
-        # Apply start_line_byte_offset to the first selected line
+        # Apply start_line_byte_offset to the first selected line — literally.
+        #
+        # The offset is always the caller's: `read` never cuts a line, so nothing
+        # here resumes a truncation of this tool's own making (issue #1928). The
+        # guard that used to sit here applied the offset only when it fell *inside*
+        # the line, and dropped it silently otherwise — returning the whole line,
+        # byte-identical to `start_line_byte_offset=0`, so a reader could not tell
+        # "the offset was applied" from "the offset was ignored". Both outcomes are
+        # now reported instead.
+        offset_note = ""
         if start_line_byte_offset > 0 and selected:
             first_line = selected[0]
-            if start_line_byte_offset < len(first_line):
+            line_no = start + 1
+            line_len = len(first_line)
+            if start_line_byte_offset < line_len:
                 selected[0] = first_line[start_line_byte_offset:]
+                offset_note = (
+                    f"\nstart_line_byte_offset={start_line_byte_offset} of line "
+                    f"{line_no}: the line is {line_len} characters, "
+                    f"{line_len - start_line_byte_offset} shown from the offset"
+                )
+            else:
+                selected[0] = ""
+                offset_note = (
+                    f"\nstart_line_byte_offset={start_line_byte_offset} of line "
+                    f"{line_no}: the line is {line_len} characters, so the offset "
+                    f"is at or past its end — that line is empty here"
+                )
 
         # Format with line numbers
         result_lines: list[str] = []
         for i, line in enumerate(selected):
             result_lines.append(f"{start + i + 1:6d}\t{line}")
+
+        if offset_note:
+            result_lines.append(offset_note)
 
         if not result_lines:
             return ToolResult(
