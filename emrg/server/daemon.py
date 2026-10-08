@@ -1350,6 +1350,34 @@ class EmrgServer:
                         # 订阅记录该连接的 cwd——广播按 (session, cwd) 过滤（rant 17:38:56 根因 3）
                         self._session_subscribers.setdefault(new_sid, {})[ws] = data.get("cwd") or last_cwd or ""
                         last_session_id = new_sid
+                    elif data.get("cwd"):
+                        # A message that names the session **again**, carrying a cwd, is
+                        # the client saying where it now stands — and it must be believed.
+                        #
+                        # The record written above is the *ask's* cwd, which for a resume
+                        # is the client's own, not the session's (app.py: the comment on
+                        # `resolve_session_cwd` says so). The messages that follow —
+                        # `resume_session`, then `task` — carry the canonical cwd and were
+                        # ignored, because the session id had not changed. `_broadcast`
+                        # filters by `_session_task_cwds[sid]`, written from `session.cwd`
+                        # at turn start, so the client stayed a subscriber in the dict and
+                        # was not a target on the wire: it received no `turn_start`, no
+                        # stream, no `done` (a TUI that never finishes its turn), and
+                        # `request_approval` asked its question to nobody while its own
+                        # fail-closed guard read a non-empty subscriber set.
+                        #
+                        # Measured 2026-10-08 (`cyc20261008-170402`): the exact TUI
+                        # sequence, A (the ask carries the client's cwd) → frames NONE,
+                        # approval frames NONE; B (the ask carries the project's cwd) →
+                        # `turn_start`, stream, `turn_end`, `approval_request` +
+                        # `approval_resolved`. Only the ask's cwd differed.
+                        #
+                        # Guarded on `data.get("cwd")` rather than `last_cwd`: a message
+                        # with no cwd of its own must not clobber the record with one it
+                        # never claimed. This does not re-open the ghost hole — a ghost's
+                        # claimed cwd receives frames only when it equals the running
+                        # task's cwd, and that is the sender's own.
+                        self._session_subscribers.setdefault(new_sid, {})[ws] = data["cwd"]
                 if data.get("cwd"):
                     last_cwd = data["cwd"]
                     self._touch_project(last_cwd)
