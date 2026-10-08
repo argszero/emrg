@@ -2340,6 +2340,83 @@ class TestWSWorkspacePanel:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_read_file_refuses_an_out_of_domain_window(self):
+        """The panel's read reads a count, and a count has a domain.
+
+        Issue #1939, measured on master `92f6b093`: `_handle_read_file` read
+        `start_line` / `line_limit` with no domain check, so an out-of-domain
+        value was answered with a **different window** — `line_limit=-3` returned
+        seven lines of a ten-line file (the slice ran off the end), `line_limit=0`
+        returned empty content with `truncated: true`, `"abc"` fell back to "no
+        window" and returned the whole file, and a `start_line` of `0` was
+        clamped to 1. Both directions are pinned here: every out-of-domain value
+        is refused by a frame naming the parameter, the value and the domain and
+        carrying no `content` and no `truncated`; the in-domain controls still
+        return exactly what they did.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                f = work / "doc.txt"
+                f.write_text("\n".join(f"line{i}" for i in range(1, 11)), encoding="utf-8")
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        async def read(**window):
+                            return await self._cmd(
+                                ws, {"type": "read_file", "path": str(f), **window})
+
+                        # ── in domain: the controls ────────────────────────────
+                        whole = await read()
+                        assert whole["content"].split("\n") == [
+                            f"line{i}" for i in range(1, 11)]
+                        assert whole["truncated"] is False
+                        page = await read(start_line=3, line_limit=2)
+                        assert page["content"].split("\n") == ["line3", "line4"]
+                        assert page["truncated"] is True
+                        # A window covering the whole file leaves nothing over.
+                        assert (await read(line_limit=10))["truncated"] is False
+                        # A quoted number and an integral float name the numbers they
+                        # say, and both were read that way before this refusal existed
+                        # — a fix may not swallow a legal call. The tool layer reads
+                        # them the same way (a model that quotes a number means it).
+                        assert (await read(start_line="3", line_limit="2"))["content"] == (
+                            "line3\nline4")
+                        assert (await read(start_line=3.0, line_limit=2.0))["content"] == (
+                            "line3\nline4")
+
+                        # ── out of domain: refused, parameter and value named ──
+                        rows = (
+                            ({"line_limit": -3}, "line_limit", "-3", "integer >= 1"),
+                            ({"line_limit": 0}, "line_limit", "0", "integer >= 1"),
+                            ({"line_limit": "abc"}, "line_limit", "'abc'", "integer >= 1"),
+                            ({"line_limit": 2.5}, "line_limit", "2.5", "integer >= 1"),
+                            ({"line_limit": True}, "line_limit", "True", "integer >= 1"),
+                            ({"line_limit": "2.5"}, "line_limit", "'2.5'", "integer >= 1"),
+                            ({"start_line": 0}, "start_line", "0", "integer >= 1"),
+                            ({"start_line": -5}, "start_line", "-5", "integer >= 1"),
+                            ({"start_line": "abc"}, "start_line", "'abc'", "integer >= 1"),
+                            ({"start_line": 3, "line_limit": -1},
+                             "line_limit", "-1", "integer >= 1"),
+                        )
+                        for kwargs, named, value, domain in rows:
+                            resp = await read(**kwargs)
+                            assert resp["type"] == "file_content", (kwargs, resp)
+                            assert "error" in resp, (kwargs, resp)
+                            assert named in resp["error"], (kwargs, resp)
+                            assert f"(got {value})" in resp["error"], (kwargs, resp)
+                            assert domain in resp["error"], (kwargs, resp)
+                            assert "content" not in resp, (kwargs, resp)
+                            assert "truncated" not in resp, (kwargs, resp)
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_read_file_binary_and_large(self):
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:

@@ -6201,7 +6201,54 @@ class EmrgServer:
         Returns {"type": "file_content", path, content, truncated?, binary?,
         error?}. Binary files report binary=True with empty content (image
         preview is rendered via file:// URL in the renderer, no base64).
+
+        The two window parameters are counts, so they are read against the domain
+        they have — an integer `>= 1` — and an out-of-domain value is refused
+        rather than answered with a *different* window. Measured on master
+        `92f6b093`, 2026-10-08 (issue #1939): `line_limit=-3` came back as
+        **seven** lines of a ten-line file (`all_lines[start-1 : start-1+limit]`
+        slices from the *end*) with `truncated` still computed from the negative
+        value; `line_limit=0` returned an empty `content` with `truncated: true`,
+        which a panel reads as "this file is empty and there is more of it";
+        `line_limit="abc"` raised inside `int()`, was dropped to `None`, and `None`
+        means "no window", so the whole file came back; and `start_line` of `0` or
+        `-5` was clamped to 1 by `max(1, …)` — a different window, silently.
+
+        The wording is the tool layer's, which refuses the same two names the
+        same way (`emrg/tools/read_tool.py`); the rule is spelled here rather than
+        imported because this is the *client protocol* face of it and the tool
+        layer's helper is still in flight (PR #1936): a partial copy of its lines
+        conflicts in either merge order, and a verbatim carry would leave that PR
+        with nothing to merge if this one landed first (both measured with
+        `git merge-tree --write-tree`, 2026-10-08).
         """
+        window: dict[str, int] = {}
+        for name, value in (("start_line", start_line), ("line_limit", line_limit)):
+            if value is None:
+                continue  # absent: the default below speaks for it
+            number = None
+            if not isinstance(value, bool):  # `True` is an `int`, but not a count
+                try:
+                    number = int(value)
+                except (TypeError, ValueError, OverflowError):
+                    # `int()` refuses "abc", NaN and a float with no integer value
+                    # (`OverflowError` is the last of those: JSON `1e999` parses to
+                    # `inf`), and every one of them is out of domain.
+                    number = None
+                if isinstance(value, float) and number != value:
+                    number = None  # a fractional count is not a count
+            if number is None or number < 1:
+                await self._send(ws, {
+                    "type": "file_content",
+                    "error": (
+                        f"{name} must be an integer >= 1 (got {value!r}); this request "
+                        "is refused rather than answered with a different window."
+                    ),
+                })
+                return
+            window[name] = number
+        start = window.get("start_line", 1)
+        limit = window.get("line_limit")
         raw = Path(path_str).expanduser()
         if not raw.is_absolute():
             await self._send(ws, {
@@ -6262,14 +6309,6 @@ class EmrgServer:
         if all_lines and all_lines[-1] == "":
             all_lines.pop()
         total = len(all_lines)
-        try:
-            start = max(1, int(start_line or 1))
-        except (TypeError, ValueError):
-            start = 1
-        try:
-            limit = int(line_limit) if line_limit is not None else None
-        except (TypeError, ValueError):
-            limit = None
         if limit is not None:
             limit = min(limit, self._MAX_READ_LINES)
             selected = all_lines[start - 1 : start - 1 + limit]
