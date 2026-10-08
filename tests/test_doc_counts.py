@@ -30,8 +30,34 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
-    """Extract (label, headline, parts) for every documented GUI count."""
+def _breakdown_parts(breakdown: str) -> list[int] | None:
+    """The counts in a `+`-separated breakdown, or `None` if a part carries none.
+
+    `None` means "this breakdown cannot be read", never a shorter list. The filter that
+    used to skip an unreadable part made the sum below a claim about **the parts that
+    happened to parse**: measured 2026-10-08 (cycle `cyc20261008-130733`), a line naming
+    three parts — `(100: 40 alpha + beta + 60 gamma)` — sums to its headline from the two
+    readable counts and passed, with the third part never read. `_renderer_doc_breakdown`
+    below has always refused such a part (`assert pm, f"could not parse …"`); this is the
+    same rule for the line whose sum the guard checks.
+    """
+    parts: list[int] = []
+    for part in breakdown.split("+"):
+        # each part starts with its count ("22 daemon_client + ..."); the first number per
+        # part is taken, which avoids false digits inside names like i18n
+        m = re.match(r"\s*(\d+)", part)
+        if m is None:
+            return None
+        parts.append(int(m.group(1)))
+    return parts
+
+
+def _gui_breakdowns() -> list[tuple[str, int, list[int] | None]]:
+    """Extract (label, headline, parts) for every documented GUI count.
+
+    `parts` is `None` for a line whose breakdown could not be read - the reader is what
+    decides, and `_gui_breakdown_offences` is where that decision becomes a verdict.
+    """
     found = []
     for doc in ("README.md", "README.cn.md", "Agent.md"):
         text = (REPO_ROOT / doc).read_text(encoding="utf-8")
@@ -44,16 +70,33 @@ def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
             m = re.search(r"\((\d+): ([^)]+)\)", line)
             if not m:
                 continue
-            headline = int(m.group(1))
-            # each breakdown part starts with its count ("22 daemon_client + ...");
-            # take the first number per part (avoids false digits inside names like i18n)
-            parts = [
-                int(re.match(r"\s*(\d+)", part).group(1))
-                for part in m.group(2).split("+")
-                if re.match(r"\s*\d+", part)
-            ]
-            found.append((f"{doc}: {line.strip()[:70]}", headline, parts))
+            found.append(
+                (f"{doc}: {line.strip()[:70]}", int(m.group(1)), _breakdown_parts(m.group(2)))
+            )
     return found
+
+
+def _gui_breakdown_offences(breakdowns: list[tuple[str, int, list[int] | None]]) -> list[str]:
+    """The documented GUI counts that are wrong or unreadable. Pure, so it is testable.
+
+    Two faults, and they answer different questions: a breakdown that does not sum to its
+    headline is *wrong*, and one that could not be read is *unmeasured* - and an unmeasured
+    line must not be reported as a balanced one, which is what skipping the part did.
+    """
+    offences: list[str] = []
+    for label, headline, parts in breakdowns:
+        if parts is None:
+            offences.append(
+                f"{label}: a breakdown part does not start with its count, so the breakdown "
+                f"cannot be summed and headline {headline} is unverifiable - dropping the "
+                "part would make this check a claim about the parts that happened to parse"
+            )
+            continue
+        if sum(parts) != headline:
+            offences.append(
+                f"{label}: breakdown {parts} sums to {sum(parts)} but headline says {headline}"
+            )
+    return offences
 
 
 # --- the Python total is measured, never stored -------------------------------
@@ -251,10 +294,66 @@ def test_the_guard_holds_no_second_copy_of_the_claim_pattern() -> None:
 def test_gui_breakdown_sums_to_headline() -> None:
     breakdowns = _gui_breakdowns()
     assert breakdowns, "no GUI test breakdowns found in README.md/Agent.md"
-    for label, headline, parts in breakdowns:
-        assert sum(parts) == headline, (
-            f"{label}: breakdown {parts} sums to {sum(parts)} but headline says {headline}"
-        )
+    offences = _gui_breakdown_offences(breakdowns)
+    assert not offences, "\n  ".join(offences)
+
+
+# ── An unreadable part is refused, not skipped ────────────────────────────────
+
+
+def _docs_with(monkeypatch, mod, tmp_path, lines: dict[str, str]) -> None:
+    """Point the guard reader `mod` at a scratch tree holding `lines` as its docs.
+
+    Every doc the reader walks is created (empty unless `lines` gives it text): a reader
+    that finds a *missing* doc raises, and this arm is about what it does with an
+    unreadable *line*.
+    """
+    docs = {name: "" for name in ("README.md", "README.cn.md", "Agent.md")}
+    docs.update(lines)
+    for doc, text in docs.items():
+        (tmp_path / doc).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+
+def test_an_unreadable_breakdown_part_is_a_fault_not_a_shorter_sum(tmp_path, monkeypatch) -> None:
+    """The measured shape: three parts, two of them readable, summing to the headline.
+
+    Before 2026-10-08 (cycle `cyc20261008-130733`) the reader dropped `beta` and the check
+    compared `40 + 60` with `100` - green, for a line whose breakdown it had not read. The
+    guard's own `_renderer_doc_breakdown` refuses a part like that; this pins the same rule
+    for the line this check sums. The values are chosen so the *skipping* reader passed: a
+    mutation restoring the drop turns this arm red, which is the point.
+    """
+    mod = _loaded_guard_module()
+    _docs_with(
+        monkeypatch, mod, tmp_path,
+        {"README.md": "GUI: `cd emrg/gui && npm test` (100: 40 alpha + beta + 60 gamma)\n"},
+    )
+    found = mod._gui_breakdowns()
+    assert found, "the scratch doc's count line was not picked up, so nothing was measured"
+    _label, headline, parts = found[0]
+    assert headline == 100
+    assert parts is None, (
+        f"the reader returned {parts!r} for a breakdown whose second part carries no count "
+        "- a shorter list is read as a sum that balanced, which is the defect"
+    )
+    offences = mod._gui_breakdown_offences(found)
+    assert offences and "does not start with its count" in offences[0], (
+        f"an unreadable breakdown produced no fault: offences={offences!r}"
+    )
+
+
+def test_a_readable_breakdown_still_passes(tmp_path, monkeypatch) -> None:
+    """The control: a refusal that fires on a good line would just be a broken guard."""
+    mod = _loaded_guard_module()
+    _docs_with(
+        monkeypatch, mod, tmp_path,
+        {"README.md": "GUI: `cd emrg/gui && npm test` (100: 40 alpha + 60 gamma)\n"},
+    )
+    found = mod._gui_breakdowns()
+    assert found, "the scratch doc's count line was not picked up, so nothing was measured"
+    assert found[0][2] == [40, 60]
+    assert mod._gui_breakdown_offences(found) == []
 
 
 # The canonical test-command lines in Agent.md. Each is a *kind* that may appear
