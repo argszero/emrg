@@ -1,15 +1,33 @@
 // gui-state.test.js — P4 slice 1（rant 2026-08-10T15:07:19）
 // gui_state.json 持久化模块：路径、清洗（上限 20 + 失效条目跳过 + lastActive 倒序）、原子写。
-const { test } = require("node:test");
+const { test, after } = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = require("../gui-state.js");
 
+// Every temp home this file creates, so the run can hand them all back. Without the
+// `after()` hook below, `node --test` left three directories per run behind in
+// `os.tmpdir()` — measured 2026-10-08 on this host: 36 stale `emrg-gui-state-*`
+// directories / 96 KB, i.e. 12 runs, and a long-lived runner accumulates them without
+// bound (a peer measured 672 directories / 1.8 MB). A test that creates host state owes
+// the removal of it, exactly as it owes the assertions.
+const tmpHomes = [];
+
 function tmpHome() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "emrg-gui-state-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "emrg-gui-state-"));
+  tmpHomes.push(dir);
+  return dir;
 }
+
+after(() => {
+  for (const dir of tmpHomes) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    // A cleanup that silently failed would be the same litter with a tidier story.
+    assert.ok(!fs.existsSync(dir), `temp home was not removed: ${dir}`);
+  }
+});
 
 test("gui-state: 路径固定在 <home>/.emrg/gui_state.json", () => {
   const h = tmpHome();
