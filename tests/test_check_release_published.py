@@ -436,3 +436,199 @@ def test_only_a_404_is_the_definite_absence(mod, monkeypatch):
     monkeypatch.setattr(mod, "_gh", server_error)
     with pytest.raises(mod.GhError):
         mod.release_for_tag(TAG, REPO)
+
+
+# ------------------------------------- the reads are public, so a token is not required
+
+
+#: What an unauthenticated `gh` prints and exits with, verbatim (measured 2026-10-08 on
+#: this host: `gh run list` and `gh api` both answer it, rc 4).
+_GH_REFUSAL = (
+    "To get started with GitHub CLI, please run:  gh auth login\n"
+    "Alternatively, populate the GH_TOKEN environment variable with a GitHub API "
+    "authentication token.\n"
+)
+
+
+def _gh_refuses():
+    """`subprocess.run` answering the way an unauthenticated `gh` does."""
+    return lambda *a, **k: _Proc(4, stderr=_GH_REFUSAL)
+
+
+def test_a_gh_that_refuses_to_try_is_re_asked_anonymously(mod, monkeypatch):
+    """Measured 2026-10-08: `gh` unauthenticated answers rc 4 and tries nothing.
+
+    The same endpoints return 200 to an unauthenticated GET, so a verifier that stops at
+    the refusal reports "could not measure" for a question one public request away --
+    which on the host that runs the release chain made the third step of the release
+    chain unrunnable.
+    """
+    monkeypatch.setattr(mod.subprocess, "run", _gh_refuses())
+    monkeypatch.setattr(mod, "_public_api", lambda path: '{"ok": true}')
+    assert json.loads(mod._gh(["api", "repos/o/n/releases/tags/v1"])) == {"ok": True}
+    assert mod.transports_used() == "api.github.com (no token)"
+
+
+def test_a_gh_that_answers_never_asks_the_public_api(mod, monkeypatch):
+    """`gh` goes first: only it can read a private repo, and only it is rate-limited."""
+    asked: list[str] = []
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Proc(0, stdout='{"ok": true}'))
+    monkeypatch.setattr(mod, "_public_api", lambda path: asked.append(path) or "{}")
+    assert mod._gh(["api", "repos/o/n/releases/tags/v1"]) == '{"ok": true}'
+    assert asked == []
+    assert mod.transports_used() == "gh"
+
+
+def test_a_call_gh_made_and_that_failed_is_not_re_asked(mod, monkeypatch):
+    """404 and 500 are answers about the remote, not refusals to ask.
+
+    Re-asking them would spend the anonymous bucket to learn the same thing, and it would
+    blur the one distinction this family keeps: a definite absence (404) must not become
+    "could not measure".
+    """
+    asked: list[str] = []
+    monkeypatch.setattr(
+        mod.subprocess, "run", lambda *a, **k: _Proc(1, stderr="gh: Not Found (HTTP 404)\n")
+    )
+    monkeypatch.setattr(mod, "_public_api", lambda path: asked.append(path) or "{}")
+    with pytest.raises(mod.GhError) as excinfo:
+        mod._gh(["api", "repos/o/n/releases/tags/v1"])
+    assert excinfo.value.http_status == 404
+    assert asked == []
+
+
+def test_a_call_with_no_anonymous_equivalent_refuses_rather_than_guessing(mod, monkeypatch):
+    """A guessed path would answer a different question in the same shape."""
+    monkeypatch.setattr(mod.subprocess, "run", _gh_refuses())
+    with pytest.raises(mod.GhError) as excinfo:
+        mod._gh(["pr", "view", "1"])
+    assert "no anonymous equivalent" in str(excinfo.value)
+
+
+def test_the_run_list_arrives_in_the_field_names_the_callers_read(mod, monkeypatch):
+    """The REST page and `gh --json` spell the same fields differently.
+
+    A caller that read `databaseId` off the REST page would read None, and an unread run
+    id is the "not measurable" this guard must not let arrive as a pass. `headBranch`
+    matters most: `runs_for_tag` filters on it, so dropping it would list the run and then
+    discard it, and the tag would read as one nothing was ever published for.
+    """
+    rest = {
+        "total_count": 1,
+        "workflow_runs": [
+            {
+                "id": RUN_ID,
+                "head_branch": TAG,
+                "status": "completed",
+                "conclusion": "success",
+                "display_title": "emrg: release",
+                "html_url": f"https://github.com/{REPO}/actions/runs/{RUN_ID}",
+            }
+        ],
+    }
+    monkeypatch.setattr(mod.subprocess, "run", _gh_refuses())
+    monkeypatch.setattr(mod, "_public_api", lambda path: json.dumps(rest))
+    assert mod.runs_for_tag(TAG, REPO) == [
+        {
+            "databaseId": RUN_ID,
+            "headBranch": TAG,
+            "status": "completed",
+            "conclusion": "success",
+            "displayTitle": "emrg: release",
+            "url": f"https://github.com/{REPO}/actions/runs/{RUN_ID}",
+        }
+    ]
+
+
+def test_an_envelope_that_is_not_a_run_list_is_not_measurable(mod, monkeypatch):
+    """A JSON object with no `workflow_runs` is not an empty run list."""
+    monkeypatch.setattr(mod.subprocess, "run", _gh_refuses())
+    monkeypatch.setattr(mod, "_public_api", lambda path: '{"total_count": 0}')
+    with pytest.raises(mod.GhError) as excinfo:
+        mod.runs_for_tag(TAG, REPO)
+    assert "workflow_runs" in str(excinfo.value)
+
+
+def test_a_release_absent_anonymously_is_the_definite_absence(mod, monkeypatch):
+    """404 is the answer however it arrived, and it must not read as unmeasurable."""
+    monkeypatch.setattr(mod.subprocess, "run", _gh_refuses())
+
+    def public(path):
+        raise mod.GhError(None, [path], "HTTP 404 from api.github.com", http_status=404)
+
+    monkeypatch.setattr(mod, "_public_api", public)
+    assert mod.release_for_tag(TAG, REPO) is None
+
+
+def test_the_whole_reading_answers_without_a_token(mod, monkeypatch, capsys):
+    """The state measured on 2026-10-08 with v0.3.9 tagged.
+
+    Every read the release chain's third step needs is a public endpoint. Before the
+    fallback this printed `not measurable` and exited 2 while the same three readings
+    were one unauthenticated GET away each.
+    """
+    def public(path: str) -> str:
+        if "/actions/workflows/" in path:
+            return json.dumps(
+                {
+                    "total_count": 1,
+                    "workflow_runs": [
+                        {
+                            "id": RUN_ID,
+                            "head_branch": TAG,
+                            "status": "completed",
+                            "conclusion": "success",
+                            "display_title": "emrg: release v0.3.5 (#1720)",
+                            "html_url": f"https://github.com/{REPO}/actions/runs/{RUN_ID}",
+                        }
+                    ],
+                }
+            )
+        if "/releases/tags/" in path:
+            return json.dumps(_release(assets=("EMRG-0.3.5-macos-arm64.pkg",)))
+        if "/releases/latest" in path:
+            return json.dumps({"tag_name": TAG})
+        raise AssertionError(f"unrouted anonymous read: {path}")
+
+    monkeypatch.setattr(mod.subprocess, "run", _gh_refuses())
+    monkeypatch.setattr(mod, "_public_api", public)
+    code = mod.check(TAG, REPO)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert f"build run: {RUN_ID} completed/success" in out
+    assert "draft=False prerelease=False assets=1" in out
+    assert "asset: EMRG-0.3.5-macos-arm64.pkg" in out
+    assert "github Latest: v0.3.5 (this tag)" in out
+    assert "OK: v0.3.5 built green and is published" in out
+    assert "read via: api.github.com (no token)" in out
+
+
+def test_the_reading_names_gh_when_gh_answers(mod, monkeypatch, capsys):
+    """The other half: a public fallback must not hide that a reading was authenticated.
+
+    Driven through the real `_gh` with only `subprocess.run` replaced -- stubbing `_gh`
+    would replace the very function whose channel the line reports, and the test would
+    then pass for a reading that never named its basis.
+    """
+    def run(argv, **kwargs):
+        if argv[1:3] == ["run", "list"]:
+            return _Proc(0, stdout=json.dumps([_run()]))
+        if argv[1:3] == ["run", "view"]:
+            return _Proc(0, stdout=json.dumps({"jobs": []}))
+        if argv[1] == "api" and "/releases/tags/" in argv[2]:
+            return _Proc(0, stdout=json.dumps(_release()))
+        if argv[1] == "api" and argv[2].endswith("/releases/latest"):
+            return _Proc(0, stdout=json.dumps({"tag_name": TAG}))
+        raise AssertionError(f"unrouted gh call: {' '.join(argv)}")
+
+    def no_public(path: str) -> str:
+        raise AssertionError(f"the public API was asked while gh was answering: {path}")
+
+    monkeypatch.setattr(mod.subprocess, "run", run)
+    monkeypatch.setattr(mod, "_public_api", no_public)
+    code = mod.check(TAG, REPO)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "read via: gh" in out
+    assert "api.github.com" not in out
+

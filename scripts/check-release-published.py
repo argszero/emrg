@@ -67,6 +67,32 @@ reading, two consumers: this tool names the job, that one explains it. The old c
 not repeated here as a thing to try -- a remedy that offers both hands the reader the
 broken one at the moment they are least able to tell.
 
+The reads are public, so a token is not a precondition for them:
+
+Measured 2026-10-08, on the host that runs the release chain: `gh` is installed but not
+authenticated, and it answers every call below with a refusal to *try* --
+`To get started with GitHub CLI, please run: gh auth login`, exit 4. That made this
+step unrunnable exactly where it is used. With v0.3.9 tagged, one unauthenticated GET
+each returned the tag's run (`37723424917`, success), its release (published, 9 assets,
+neither draft nor prerelease) and `releases/latest` (`v0.3.9`) -- so the answer this tool
+exists to print was three public reads away, while the tool printed
+`not measurable` (rc 2) and told the reader to go and authenticate.
+
+A release verifier that only answers when a token happens to be configured is blind at
+the one moment it matters: when the host is reading a published release by hand, and when
+the tag's own run is the only CI that ever exercises signing and notarization. So a call
+`gh` **refused to try** is re-asked of `api.github.com` with no credentials
+(`_public_api`), and the answer is translated into the field names the callers read
+(`_via_public_api`): `id`/`databaseId`, `head_branch`/`headBranch`, `html_url`/`url`,
+`display_title`/`displayTitle`. `gh` still goes first, because only it can read a private
+repo -- and a call `gh` *made* and that failed is never re-asked, because 404 and 500 are
+answers about the remote rather than refusals to ask.
+
+The reading names its own basis (`read via: ...`). An authenticated reading and a public
+one are the same answer only while the repo is public, and `--repo` points this tool at
+other repos; a reading that cannot say which client answered has hidden which question it
+answered.
+
 Exit codes, the family's contract:
 
     0  the tagged run is green AND the release for the tag is published: not a draft,
@@ -75,9 +101,10 @@ Exit codes, the family's contract:
        not by a window) and no release for the tag either; the run failed (the failing
        jobs are listed); no release exists for the tag although its run is green; the
        release is a draft, is a prerelease, or carries no asset
-    2  not measurable -- never 0. `gh` is missing, unauthenticated, or refused the
-       call; the tagged run has not concluded yet; or no run for the tag could be read
-       although a release for the tag does exist, which leaves the build half unmeasured
+    2  not measurable -- never 0. Neither channel answered: `gh` is missing, and a call
+       it refused to try found no answer anonymously either; or the tagged run has not
+       concluded yet; or no run for the tag could be read although a release for the tag
+       does exist, which leaves the build half unmeasured
        and forbids the re-push remedy. A run that is still running is
        exactly the state this reading must not call a pass: the release does not exist
        until the run's own release job has created it, and a guard that passes because
@@ -96,6 +123,8 @@ import json
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 #: The repo whose releases are read when `--repo` is not given. The same default the
 #: sibling API-reading guards use, and printed before any verdict: the subject of this
@@ -111,6 +140,39 @@ WORKFLOW = "build-release.yml"
 #: history: a tag older than any window is still found by its own name. A re-pushed tag
 #: leaves more than one run behind, and the newest is the one that counts.
 RUN_LIMIT = 50
+
+#: Identifies this tool to api.github.com, which refuses requests without one -- the same
+#: constant the sibling `scripts/read-run-failure.py` carries, named per tool so a
+#: rate-limit question can be traced to the reader that spent it.
+USER_AGENT = "emrg-check-release-published"
+
+#: One anonymous request's budget. Anonymous reads share a 60/hour bucket on the host, so
+#: a hung request is not worth waiting out; the reading is retried, never waited on.
+_TIMEOUT = 30
+
+#: How `gh` declines to try at all when no credential is configured: it prints this and
+#: exits 4. Named because it is the one failure that says nothing about the remote --
+#: measured 2026-10-08, `gh run list` and `gh api` both answer it here, while the same
+#: reads return 200 unauthenticated -- and so the one failure this tool must not report as
+#: "could not measure" without asking the public API first.
+_GH_NOT_AUTHENTICATED = "gh auth login"
+
+#: Which channels answered, so the reading names its own basis. A host that sees a
+#: reading must be able to tell an authenticated one from a public one: they are the same
+#: question only while the repo is public, and this tool is pointed at other repos by
+#: `--repo`.
+_TRANSPORT: set[str] = set()
+
+
+def _note_transport(which: str) -> None:
+    _TRANSPORT.add(which)
+
+
+def transports_used() -> str:
+    """The channels that answered, in a stable order, for the reading to print."""
+    order = ["gh", "api.github.com (no token)"]
+    used = [name for name in order if name in _TRANSPORT]
+    return ", ".join(used) if used else "nothing answered"
 
 
 #: `gh api` reports the HTTP status inside its own message -- `gh: Not Found (HTTP 404)`
@@ -143,8 +205,140 @@ class GhError(RuntimeError):
         self.http_status = http_status
 
 
+def _flag(args: list[str], name: str) -> str | None:
+    """The value `name` is bound to in a `gh` argument list, or None when it is absent."""
+    try:
+        return args[args.index(name) + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def _public_path(args: list[str]) -> str | None:
+    """The api.github.com path that answers the same question as this `gh` call.
+
+    Every read this tool makes is a public endpoint, so each has an equivalent; None is
+    the definite "no equivalent is known", which is raised rather than guessed, because a
+    guessed path would answer a different question in the same shape.
+    """
+    if args[:1] == ["api"]:
+        return args[1] if len(args) > 1 else None
+    if args[:2] == ["run", "list"]:
+        repo = _flag(args, "--repo")
+        workflow = _flag(args, "--workflow")
+        branch = _flag(args, "--branch")
+        if not (repo and workflow and branch):
+            return None
+        limit = _flag(args, "--limit") or str(RUN_LIMIT)
+        return (
+            f"repos/{repo}/actions/workflows/{workflow}/runs"
+            f"?branch={branch}&per_page={limit}"
+        )
+    if args[:2] == ["run", "view"]:
+        repo = _flag(args, "--repo")
+        if not repo or len(args) < 3:
+            return None
+        return f"repos/{repo}/actions/runs/{args[2]}/jobs"
+    return None
+
+
+def _public_api(path: str) -> str:
+    """One read from api.github.com with no credentials at all.
+
+    Its own function rather than inlined into `_gh`, because it is the second seam a test
+    drives (patching `subprocess` would replace it for every other module in the process).
+
+    A failed fetch is raised as the same `GhError` `_gh` raises, with the HTTP status
+    carried: `release_for_tag` reads 404 off it as the definite absence, and an answer
+    that arrived as a transport error would turn "no release exists" into "could not
+    measure" -- the two states this family exists to keep apart.
+    """
+    request = urllib.request.Request(
+        f"https://api.github.com/{path}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT},
+    )
+    labelled = [f"api.github.com/{path}"]
+    try:
+        with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raise GhError(
+            None, labelled, f"HTTP {exc.code} from api.github.com", http_status=exc.code
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - a reading that failed, not a crash
+        raise GhError(
+            None, labelled, f"api.github.com could not be reached ({type(exc).__name__}: {exc})"
+        ) from exc
+    return body
+
+
+def _run_as_gh(run: dict) -> dict:
+    """One REST run object under the field names `gh run list --json` uses.
+
+    The translation is by name and not by hope: a caller that read `databaseId` off a raw
+    REST page would read None, and a run whose id did not come back is precisely the
+    "not measurable" this guard must not let arrive as a pass. `headBranch` matters most
+    of all -- `runs_for_tag` filters on it, and a run listed but not matched reads as
+    *this tag has no run*, the fault with the destructive remedy.
+    """
+    return {
+        "databaseId": run.get("id"),
+        "headBranch": run.get("head_branch"),
+        "status": run.get("status"),
+        "conclusion": run.get("conclusion"),
+        "displayTitle": run.get("display_title"),
+        "url": run.get("html_url"),
+    }
+
+
+def _via_public_api(args: list[str]) -> str:
+    """The same call, answered anonymously, in the shape `gh` would have printed.
+
+    Two of the shapes differ and one does not: `run view --json jobs` and `gh api` both
+    hand back the REST body unchanged (a job's `name` and `conclusion` are spelled the
+    same on both sides), while `run list --json` returns a bare list of runs whose fields
+    `gh` renamed -- and it arrives wrapped in the endpoint's own `workflow_runs` envelope,
+    which a caller expecting a list must not be handed.
+    """
+    path = _public_path(args)
+    if path is None:
+        raise GhError(None, args, "no anonymous equivalent is known for this call")
+    body = _public_api(path)
+    # Noted here rather than inside `_public_api`: this is the function that decides the
+    # channel, and a note recorded a layer below the decision would vanish for any caller
+    # that drove the fetch itself -- a reading whose basis is unrecorded is the state this
+    # line exists to prevent.
+    _note_transport("api.github.com (no token)")
+    if tuple(args[:2]) != ("run", "list"):
+        return body
+    payload = json.loads(body)
+    runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+    if not isinstance(runs, list):
+        raise GhError(
+            None,
+            args,
+            "api.github.com's run list carried no `workflow_runs` list",
+        )
+    return json.dumps([_run_as_gh(r) for r in runs if isinstance(r, dict)])
+
+
 def _gh(args: list[str]) -> str:
-    """Run `gh`, failing loud: an unreadable release is not a published one."""
+    """Run `gh`, failing loud: an unreadable release is not a published one.
+
+    **`gh` first, then api.github.com with no credentials, and only when `gh` refused to
+    try.** Measured 2026-10-08 on the host that runs the release chain: `gh` is installed
+    but unauthenticated, so every call this tool makes answers
+
+        To get started with GitHub CLI, please run:  gh auth login
+
+    and exits 4 -- while the same tag's run, its release and `releases/latest` each
+    return 200 to an unauthenticated GET. The documented third step of the release chain
+    was therefore unrunnable in the environment the chain is run from, which is the
+    moment this tool exists for.
+
+    A call `gh` **made** and that failed is never re-asked: 404 and 500 are answers about
+    the remote, not refusals to ask, and re-asking would spend the anonymous bucket to
+    learn the same thing.
+    """
     try:
         proc = subprocess.run(
             ["gh", *args],
@@ -157,6 +351,8 @@ def _gh(args: list[str]) -> str:
         raise GhError(None, args, f"gh is not available on this machine ({exc})") from exc
     if proc.returncode != 0:
         detail = proc.stderr.strip()
+        if _GH_NOT_AUTHENTICATED in detail:
+            return _via_public_api(args)
         status = _HTTP_STATUS.search(detail)
         raise GhError(
             proc.returncode,
@@ -164,6 +360,7 @@ def _gh(args: list[str]) -> str:
             detail,
             http_status=int(status.group(1)) if status else None,
         )
+    _note_transport("gh")
     return proc.stdout
 
 
@@ -304,16 +501,23 @@ def check(tag: str, repo: str) -> int:
     print(f"repo: {repo}")
     print(f"tag: {tag}")
     try:
-        return _read(tag, repo)
+        code = _read(tag, repo)
     except GhError as exc:
         print(
-            f"not measurable: {exc} -- this is not a pass. Check `gh auth status` and "
-            f"run this again."
+            f"not measurable: {exc} -- this is not a pass. A call `gh` refused to try is "
+            f"re-asked of api.github.com with no credentials, so this failure means the "
+            f"read did not answer on either channel: check `gh auth status` and this "
+            f"machine's network, then run this again."
         )
-        return 2
+        code = 2
     except json.JSONDecodeError as exc:
-        print(f"not measurable: gh returned something that is not JSON ({exc})")
-        return 2
+        print(f"not measurable: the answer is not JSON ({exc})")
+        code = 2
+    # Printed whatever the verdict, and last so it never displaces the reading: an
+    # authenticated reading and a public one are the same answer only while the repo is
+    # public, and `--repo` points this tool at other repos.
+    print(f"read via: {transports_used()}")
+    return code
 
 
 def _read(tag: str, repo: str) -> int:
