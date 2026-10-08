@@ -1496,8 +1496,10 @@ def test_an_origin_the_ledger_holds_is_not_a_fault(mod, monkeypatch, capsys, tmp
 def test_an_origin_the_ledger_does_not_hold_is_a_fault(mod, monkeypatch, capsys, tmp_path) -> None:
     """An unresolvable handle is the chain broken at its first joint.
 
-    The row keeps the remedy on it and names the ledger it read — a reader told "no such
-    rant" has to be told *where* it was looked for before the sentence is actionable.
+    The row names the ledger it read — a reader told "no such rant" has to be told *where* it
+    was looked for before the sentence is actionable — and, since the citation has no near
+    spelling here, reports the case it measured rather than offering both: a ledger holding one
+    lone pending rant from 2026-01-01 cannot have *pruned* a record from 2026-09-29.
     """
     _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, RANT_TS)]))
 
@@ -1506,7 +1508,154 @@ def test_an_origin_the_ledger_does_not_hold_is_a_fault(mod, monkeypatch, capsys,
     assert rc == 1, out
     assert "#10 issue ORIGIN-UNRESOLVED" in out, out
     detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
-    assert RANT_TS in detail and "rants.jsonl" in detail and "verbatim" in detail, detail
+    assert RANT_TS in detail and "rants.jsonl" in detail, detail
+    assert "the retention rule cannot explain the absence" in detail, detail
+    # And it does not send the reader to copy a spelling out of the ledger: this ledger never
+    # held the record, so "write it verbatim" names a source that has nothing for them.
+    assert "verbatim" not in detail, detail
+
+
+def _completed_row(ts: str, completed: str) -> str:
+    """One `completed` ledger row, in the shape `submit_rant` writes."""
+    return json.dumps(
+        {
+            "timestamp": ts,
+            "project": "emrg",
+            "status": "completed",
+            "progress": "",
+            "completed": completed,
+            "message": "a rant",
+        }
+    )
+
+
+def test_an_absence_a_prune_could_have_caused_reads_as_one(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The other half of the classification, so the first one is a measurement and not a mood.
+
+    Ten completed rants at or after the cited instant is exactly the cap `cleanup` keeps, so a
+    record from that instant can have been completed and pruned: the row says the retention rule
+    *may* have removed it, which is the branch a reader who wants the handle cannot act on. With
+    fewer than ten the same reading says the opposite (the test above), and one of the two is
+    right for any ledger — that is what makes this a computed sentence rather than a hedge.
+    """
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, RANT_TS)]))
+    path = _ledger_lines(
+        tmp_path,
+        *[
+            _completed_row(f"2026-10-01T00:00:{i:02d}+08:00", f"2026-10-02T00:00:{i:02d}+08:00")
+            for i in range(10)
+        ],
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "may have removed it before this reading ran" in detail, detail
+    assert "cannot explain the absence" not in detail, detail
+
+
+def test_an_absence_the_retention_rule_cannot_explain_says_so(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """Ten *pending* rants above the citation are still not a prune, because nothing is pruned.
+
+    The count is of **completed** records only, and this is the ledger where that matters: the
+    retention rule keeps every pending and in-progress rant whatever its date, so ten of them
+    prove nothing about whether a completed record was removed — and a reader told "a prune may
+    have taken it" would go looking for a copy that was never needed.
+    """
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, RANT_TS)]))
+    path = _ledger(
+        tmp_path, *[f"2026-10-01T00:00:{i:02d}+08:00" for i in range(10)]
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "the ledger holds 0 completed rant(s) at or after this instant" in detail, detail
+    assert "the retention rule cannot explain the absence" in detail, detail
+
+
+def test_a_completed_rant_ranks_by_its_completion_not_its_submission(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The classification uses the key the retention rule sorts by — `completed or timestamp`.
+
+    `cleanup_rants` ranks a completed rant by when it *completed*, falling back to when it was
+    submitted only when the completion stamp is missing. Ranking by the submission instant here
+    would answer a different question than the one the store acted on, and this is the shape
+    where the two disagree: ten records submitted long before the cited instant and completed
+    after it are ten records the cap does not protect, so a citation from that instant can have
+    been pruned. Read by submission instead, the same ledger says the opposite.
+    """
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, RANT_TS)]))
+    path = _ledger_lines(
+        tmp_path,
+        *[
+            _completed_row(f"2026-01-01T00:00:{i:02d}+08:00", f"2026-10-02T00:00:{i:02d}+08:00")
+            for i in range(10)
+        ],
+    )
+
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "the ledger holds 10 completed rant(s) at or after this instant" in detail, detail
+    assert "may have removed it before this reading ran" in detail, detail
+
+
+def test_an_origin_that_cannot_be_ordered_against_the_ledger_says_so(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """An unorderable pair is unmeasurable, never "the ledger never held it".
+
+    A citation that dropped its offset (`2026-09-01T00:00:00`) and a stored instant that kept
+    one are not comparable, so counting the ledger's completed rants "at or after" it would
+    produce a number that answers nothing — and the loudest sentence this reading can print is
+    the one that number would license. The helper returns `None` there and the row says the
+    question is not measurable here.
+    """
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, "2026-09-01T00:00:00")]))
+    rows = [
+        {
+            "timestamp": RANT_TS,
+            "project": "emrg",
+            "status": "completed",
+            "progress": "",
+            "completed": "2026-09-30T00:00:00+08:00",
+            "message": "a rant",
+        }
+    ]
+    path = _ledger_lines(tmp_path, json.dumps(rows[0]))
+
+    assert mod._completed_at_or_after(rows, "2026-09-01T00:00:00") is None
+    assert mod._completed_at_or_after(rows, "2026-09-01T00:00:00+08:00") == 1
+
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "cannot be ordered" in detail, detail
+    assert "cannot explain the absence" not in detail, detail
+
+
+def test_the_retention_cap_is_the_number_cleanup_uses(mod) -> None:
+    """A derived number the reading computes with is measured against its owner, not copied.
+
+    The classification turns on how many completed rants `submit_rant cleanup` keeps; if that
+    default moves and this constant does not, every row's arithmetic is quietly about a store
+    that no longer exists. `cleanup_rants` is the owner, so the two are read against each other.
+    """
+    import inspect
+
+    from emrg.server.rants import cleanup_rants
+
+    assert mod._RETENTION_KEEP == inspect.signature(cleanup_rants).parameters["keep"].default
 
 
 def test_a_near_match_names_the_ledgers_own_spelling(mod, monkeypatch, capsys, tmp_path) -> None:
