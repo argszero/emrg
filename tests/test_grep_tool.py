@@ -571,6 +571,88 @@ def test_grep_refuses_a_budget_below_one(tmp_path):
         assert "Found" not in result.content
 
 
+# ── the boolean flag's domain (issue #1935; the carrier that pass left) ───────
+#
+# `ignore_case` is declared `{"type": "boolean"}` and was read by truthiness, so
+# every string spelling and every non-boolean became **true**. Measured 2026-10-08
+# (`cyc20261008-221427`) on master `f224b4ae`, two-hit fixture: `"false"`, `"no"` and
+# `"FALSE"` each returned *both* hits while `False` returned one — a caller asking for
+# a case-sensitive search got a case-insensitive one, with `error=False`, so nothing
+# in the result said the value had been reinterpreted. `edit`'s `replace_all` already
+# reads this way through `boolean_argument`; this is the same family, one type over
+# from the three counts above, and the same rule answers both now.
+
+
+def test_grep_refuses_a_flag_that_is_not_a_boolean(tmp_path):
+    """A value that is neither a boolean nor its two spellings is refused."""
+    f = tmp_path / "two.txt"
+    f.write_text("HELLO world\nhello there\n")
+    tool = GrepTool()
+    for value in ("no", "FALSE-ish", 2, 1.5, 0, 1, [], {}):
+        result = _run(tool.execute({
+            "pattern": "hello", "path": str(f), "ignore_case": value,
+        }))
+        assert result.error, f"ignore_case={value!r} was accepted"
+        assert "ignore_case" in result.content, (
+            f"the refusal must name the parameter the caller used: {result.content!r}"
+        )
+        assert repr(value) in result.content, (
+            f"the refusal must name the value it refused ({value!r}): {result.content!r}"
+        )
+        assert "Found" not in result.content, "a refused call searched anyway"
+
+
+def test_grep_reads_the_two_spellings_as_the_value_they_name(tmp_path):
+    """`"false"` means false and `"true"` means true — the flag is not inverted.
+
+    This is the defect itself, driven in the direction that was wrong: the string
+    spellings are what a model emits when it quotes the value, and before the fix
+    both of them read as `True`.
+    """
+    f = tmp_path / "two.txt"
+    f.write_text("HELLO world\nhello there\n")
+    tool = GrepTool()
+    for value, hits in ((False, 1), (True, 2), ("false", 1), ("true", 2),
+                        ("FALSE", 1), ("TRUE", 2), (" false ", 1), (None, 1)):
+        args = {"pattern": "hello", "path": str(f)}
+        if value is not None:
+            args["ignore_case"] = value
+        result = _run(tool.execute(args))
+        assert not result.error, f"ignore_case={value!r} was refused: {result.content!r}"
+        assert f"Found {hits} matches" in result.content, (
+            f"ignore_case={value!r} searched with the wrong case rule — expected "
+            f"{hits} hit(s): {result.content.splitlines()[0] if result.content else ''!r}"
+        )
+
+
+def test_both_boolean_parameters_are_read_by_one_rule():
+    """`grep`'s flag and `edit`'s flag answer the same value the same way.
+
+    Two readers of one rule is how this family drifts — measured: `replace_all` was
+    guarded while `ignore_case`, in the file the same PR edited, was not. Driven at
+    the helper both call, so the assertion is about the rule rather than about either
+    tool's plumbing; the tool-level tests above and in test_edit_tool.py cover the
+    plumbing.
+    """
+    from emrg.tools.base import boolean_argument
+
+    values = [True, False, "true", "false", "TRUE", " False ", "no", "", 0, 1, 2.0, None, []]
+    for value in values:
+        grep_answer = boolean_argument({"ignore_case": value}, "ignore_case", default=False)
+        edit_answer = boolean_argument({"replace_all": value}, "replace_all", default=False)
+        assert (grep_answer[0] is None) == (edit_answer[0] is None), (
+            f"the two flags disagree about {value!r}: grep={grep_answer!r} "
+            f"edit={edit_answer!r}"
+        )
+        if grep_answer[0] is None:
+            assert grep_answer[1].startswith("ignore_case ")
+            assert edit_answer[1].startswith("replace_all ")
+        else:
+            assert grep_answer[0] is edit_answer[0], (
+                f"the two flags read {value!r} as different values"
+            )
+
+
 def test_grep_context_inside_its_domain_still_renders_the_block(tmp_path):
     """The control: a legal context still shows the match and its neighbours.
 

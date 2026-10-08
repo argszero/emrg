@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, count_argument
+from emrg.tools.base import ToolExecutor, boolean_argument, count_argument
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,12 @@ class GrepTool(ToolExecutor):
                     },
                     "ignore_case": {
                         "type": "boolean",
-                        "description": "Case-insensitive search (default: false).",
+                        "description": (
+                            "Case-insensitive search (default: false). A value that "
+                            "is not true or false (the strings 'true'/'false' "
+                            "included, which are read as the value they name) is "
+                            "refused rather than read as its opposite."
+                        ),
                     },
                     "context_before": {
                         "type": "integer",
@@ -107,7 +112,25 @@ class GrepTool(ToolExecutor):
         pattern = arguments.get("pattern", "")
         search_path = arguments.get("path") or "."
         file_glob = arguments.get("glob")
-        ignore_case = arguments.get("ignore_case", False)
+
+        # ── The flag, read as the value it names ──
+        #
+        # `ignore_case` is declared `{"type": "boolean"}` and was read by truthiness,
+        # so every string spelling and every non-boolean was read as **true**: a
+        # caller sending `"false"` — the string, which is what a model emits when it
+        # quotes the value — got a case-insensitive search, the exact opposite of the
+        # request, with `error=False` and no hint that anything had been reinterpreted.
+        # Measured 2026-10-08 (`cyc20261008-221427`) on a two-hit fixture: `"false"`,
+        # `"no"` and `"FALSE"` all returned both hits, while `False` returned one.
+        #
+        # `boolean_argument` states the rule, and `edit`'s `replace_all` already reads
+        # it that way — the same family (issue #1935), the same shape, one type over
+        # from the three counts below. It matters less here than there (this flag
+        # decides a *reading*, not how many places a write edits), which is why it
+        # survived that pass; a silently inverted search is still a wrong answer.
+        ignore_case, refusal = boolean_argument(arguments, "ignore_case", default=False)
+        if refusal is not None:
+            return ToolResult(name="grep", content=refusal, error=True)
 
         # ── The three counts, refused rather than reinterpreted ──
         #
