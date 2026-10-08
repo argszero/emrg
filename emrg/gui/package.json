@@ -28,11 +28,7 @@
     "productName": "EMRG",
     "extraResources": [
       {
-        "from": "../dist/runtime",
-        "to": "runtime"
-      },
-      {
-        "from": "../packaging/assets/icon.png",
+        "from": "../../packaging/assets/icon.png",
         "to": "icon.png"
       }
     ],
@@ -88,7 +84,7 @@
       "category": "Development",
       "extraResources": [
         {
-          "from": "../dist/runtime",
+          "from": "../../dist/runtime",
           "to": "runtime"
         }
       ],
@@ -100,7 +96,7 @@
       "perMachine": false
     },
     "directories": {
-      "buildResources": "../packaging/assets"
+      "buildResources": "../../packaging/assets"
     }
   }
 }
