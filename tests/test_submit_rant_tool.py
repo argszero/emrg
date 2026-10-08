@@ -390,6 +390,53 @@ def test_the_auto_written_stamp_is_checked_too(tmp_path):
     assert entry["status"] == "in_progress" and entry["completed"] is None
 
 
+def test_a_completion_stamp_is_written_only_with_the_completed_status(tmp_path):
+    """A stamp the state machine calls unfinished is refused, and the legitimate re-stamp is not.
+
+    The two write paths of `update_rant` disagreed: the transition branch cleared the field for
+    every target but `completed` (`r["completed"] = stamp if target == "completed" else None`),
+    while the explicit-argument branch wrote it unconditionally afterwards. So
+    `status="in_progress", completed=<stamp>` — and a bare `completed` on a `pending` row —
+    stored a completion stamp on a row every reader ranks by its `status` as unfinished, and
+    `action="list"` then printed `status=pending | completed=2026-…` in one row. Refused here,
+    nothing written.
+
+    The last block is the other direction, and it is why this is a guard rather than a
+    prohibition: re-stamping an **already** `completed` row is the documented use of the
+    argument (`_completion_ordering_error`'s own test does it), so a fix that refused every
+    explicit stamp would pass the assertions above and break that one.
+    """
+    stamp = "2026-08-18T10:00:00+08:00"
+    row = {"timestamp": stamp, "project": "emrg", "status": "in_progress",
+           "progress": None, "completed": None, "message": "test rant"}
+
+    # An allowed transition into a non-completed status, while handing over a completion stamp.
+    f = _write_rant_lines(tmp_path, [{**row, "status": "pending"}])
+    before = f.read_text(encoding="utf-8")
+    ok, msg = update_rant(f, stamp, status="in_progress",
+                          completed="2026-08-19T09:00:00+08:00")
+    assert not ok, msg
+    assert "only together with status='completed'" in msg, msg
+    assert f.read_text(encoding="utf-8") == before, "a refused update must write nothing"
+
+    # No status at all: the row stays `pending` and must not take a stamp either.
+    f2 = _write_rant_lines(tmp_path, [{**row, "status": "pending"}])
+    before2 = f2.read_text(encoding="utf-8")
+    ok, msg = update_rant(f2, stamp, completed="2026-08-19T09:00:00+08:00")
+    assert not ok, msg
+    assert "only together with status='completed'" in msg, msg
+    assert f2.read_text(encoding="utf-8") == before2, "a refused update must write nothing"
+
+    # The other direction: an already-completed row may be re-stamped explicitly.
+    f3 = _write_rant_lines(tmp_path, [{**row, "status": "completed",
+                                       "completed": "2026-08-18T12:00:00+08:00"}])
+    ok, msg = update_rant(f3, stamp, completed="2026-08-19T09:00:00+08:00")
+    assert ok, msg
+    entry = json.loads(f3.read_text(encoding="utf-8").strip())
+    assert entry["status"] == "completed"
+    assert entry["completed"] == "2026-08-19T09:00:00+08:00"
+
+
 def test_cleanup_rants_keeps_pending_plus_10_completed(tmp_path):
     entries = []
     # 3 active rants (2 pending + 1 in_progress)

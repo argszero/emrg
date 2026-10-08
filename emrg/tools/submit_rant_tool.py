@@ -124,7 +124,8 @@ class SubmitRantTool(ToolExecutor):
                 "**action=update**: update a rant by its timestamp (status "
                 "follows the pending→in_progress→completed state machine, no "
                 "skipping; completed timestamp auto-written, and any explicit "
-                "one must be at or after the rant's own submission instant). "
+                "one must be at or after the rant's own submission instant and "
+                "accompany status='completed'). "
                 "**action=cleanup**: keep all pending/in_progress rants plus "
                 "the 10 most recent completed, prune older completed. "
                 "All read/write of rants.jsonl MUST go through this tool — "
@@ -190,8 +191,9 @@ class SubmitRantTool(ToolExecutor):
                             "at or after the rant's own submission timestamp (a "
                             "stamp that does not follow it, or that cannot be "
                             "ordered against it, is refused and nothing is "
-                            "written). Normally auto-written when status becomes "
-                            "completed."
+                            "written), and written only together with "
+                            "status='completed'. Normally auto-written when "
+                            "status becomes completed."
                         ),
                     },
                     "intent": {
