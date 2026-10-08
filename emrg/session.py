@@ -54,6 +54,61 @@ def generate_session_id(cwd: Path) -> str:
     return prefix + suffix
 
 
+def _parse_instant(value: object) -> datetime | None:
+    """An ISO-8601 instant from a stored timestamp, or `None` if unreadable.
+
+    `None` is "could not measure", never "epoch": the caller keeps the record
+    when this returns `None`, because excluding evidence is the direction that
+    cannot be noticed.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def records_since(records: list[dict], since: str) -> list[dict]:
+    """The records from `since` (an ISO-8601 instant) onward — the run's own.
+
+    A task session is **one session for every run of that task**: `emrg-evolution-<name>`
+    is reused cycle after cycle, so its history holds all of them. Anything reading
+    "the recent history" as evidence about *this* run therefore reads the previous
+    run's work as if it were this one's, unless it knows where the run began. This
+    function is that knowledge, applied: `since` is the instant the run was dispatched,
+    and it is carried in the `task` frame the scheduler already sends, so no clock is
+    consulted and no state is kept.
+
+    Fail-open in both directions, deliberately:
+
+    * an empty or unparseable `since` returns the list **unchanged** — a window whose
+      start is unknown is the window the session always had, and guessing a boundary
+      would be worse than not having one;
+    * a record whose own timestamp is missing or unreadable is **kept** — dropping it
+      would delete evidence silently, and a summary that read one record too many is
+      the smaller error than one that cannot see a tool call at all.
+
+    Comparing a naive timestamp with an aware one raises, and a stored timestamp is
+    naive local time (`datetime.now().isoformat()`), so exactly one side being aware
+    is treated as unmeasurable rather than as an order.
+    """
+    if not since:
+        return list(records)
+    cutoff = _parse_instant(since)
+    if cutoff is None:
+        return list(records)
+    kept: list[dict] = []
+    for record in records:
+        at = _parse_instant(record.get("timestamp"))
+        if at is None or (at.tzinfo is None) != (cutoff.tzinfo is None):
+            kept.append(record)
+            continue
+        if at >= cutoff:
+            kept.append(record)
+    return kept
+
+
 def records_to_messages(records: list[dict]) -> list[dict]:
     """Convert stored history records to OpenAI-compatible messages.
 
@@ -465,7 +520,7 @@ class Session:
                         logger.warning("corrupt line in history.jsonl, skipping")
         return records
 
-    def get_messages_for_llm(self) -> list[dict]:
+    def get_messages_for_llm(self, since: str = "") -> list[dict]:
         """This session's history, converted to OpenAI-compatible messages.
 
         The conversion itself is :func:`records_to_messages`, which is a function
@@ -474,8 +529,13 @@ class Session:
         *candidate* record list it has not written anywhere, and asking with a
         different conversion than the live request uses would be asking a
         different question than the refusal answered.
+
+        `since` narrows the records first, through :func:`records_since`: a task
+        session is reused by every run of its task, so a reader that wants *this*
+        run's work has to say where it began. The default is the whole history,
+        which is what this method always returned.
         """
-        return records_to_messages(self._read_history())
+        return records_to_messages(records_since(self._read_history(), since))
 
 
     # ── Compact ───────────────────────────────────────────────

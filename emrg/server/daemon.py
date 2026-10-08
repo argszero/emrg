@@ -2096,7 +2096,8 @@ class EmrgServer:
                 pass
 
     async def _task_vibe_check(self, task_name: str, session_id: str, cwd: str,
-                               prompt: str = "", completion_summary: str = "") -> dict:
+                               prompt: str = "", completion_summary: str = "",
+                               cycle_started_at: str = "") -> dict:
         """Structured LLM ask (Ask mode, no tools) about a finished task cycle.
 
         The agent must answer in strict JSON (rant 2026-08-20T10:58:55,
@@ -2138,10 +2139,20 @@ class EmrgServer:
         # Rant 2026-08-19T10:15:43: load the task's own session history by its
         # fixed session_id (session files are organized by cwd). Recent N
         # messages only — the whole session may be very long.
+        #
+        # `cycle_started_at` is the boundary this slice was missing: the session
+        # is reused by every run of this task, so "the last 100 messages" is
+        # mostly *previous* runs whenever this one was light on narrative. The
+        # summariser then describes the neighbour — measured 2026-09-30 on two
+        # consecutive `emrg-task` records whose `work` strings name the same
+        # merge, the second cycle's own findings absent — and `recommend_slowdown`
+        # rides the same call, so a mis-read run can also mis-cadence itself.
+        # The instant is the `task` frame's own `timestamp`, so no clock is read
+        # here; an absent value keeps the old behaviour (`records_since`).
         if session_id and cwd:
             try:
                 session = Session.load(session_id, Path(cwd))
-                history = session.get_messages_for_llm()
+                history = session.get_messages_for_llm(since=cycle_started_at)
                 if history:
                     # Rant 2026-08-19T19:25:56 (root cause): slicing the
                     # validated list can orphan a leading role:"tool" message
@@ -3305,9 +3316,13 @@ class EmrgServer:
             cwd = msg.get("cwd", "")
             prompt = msg.get("prompt", "")
             summary = msg.get("completion_summary", "")
+            # The instant this run was dispatched (the scheduler's `cycle_time`,
+            # which is also the run's id). Absent from an older scheduler, in
+            # which case the evidence is the whole session exactly as before.
+            cycle_started_at = msg.get("cycle_started_at", "")
             try:
                 result = await self._task_vibe_check(
-                    task_name, session_id, cwd, prompt, summary,
+                    task_name, session_id, cwd, prompt, summary, cycle_started_at,
                 )
                 await self._send(ws, {
                     "type": "vibe_check_result",
