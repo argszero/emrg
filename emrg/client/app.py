@@ -635,6 +635,55 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
     return False, None
 
 
+def _clipboard_extraction_verdict(target_path: str) -> bool:
+    """Whether an extraction attempt produced an image — and leave nothing behind.
+
+    Every branch below opens the target **before** the data arrives, so an attempt
+    that fails still leaves a file: the AppleScript `open for access` creates it,
+    `open(target_path, "wb")` truncates it, and `$img.Save(...)` can write a header
+    and then fail. What is left is a **0-byte** file in the session's `images/`
+    directory — not an image, and not visible to anyone: the placeholder is never
+    inserted, so the reader cannot tell it apart from a paste that carried nothing.
+
+    Measured 2026-10-08 (cycle cyc20261008-150345): an AppleScript that opens a POSIX
+    file for access and then fails its `write` leaves the file at 0 bytes. That is
+    exactly the shape of a macOS clipboard that advertises an image flavour the
+    extractor cannot convert — `clipboard info` lists `«class TIFF»`, which
+    `_detect_clipboard_image` counts as an image, while the extraction below always
+    writes the `«class PNGf»` flavour.
+
+    The verdict and the cleanup are therefore one decision rather than two: a target
+    holding no bytes is *removed* and reported as a failure, so no caller can keep
+    the litter by forgetting a branch, and a caller that gets `False` can say the
+    clipboard yielded no image without tripping over a leftover file.
+    """
+    path = Path(target_path)
+    try:
+        if path.stat().st_size > 0:
+            return True
+    except OSError:
+        # Nothing was created at all: a failure with no litter to remove.
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        logger.debug("clipboard: could not remove the empty target %s", path)
+    return False
+
+
+def _report_clipboard_extraction_failure(chat, target_path: str) -> None:
+    """The one place the TUI says an advertised clipboard image produced nothing.
+
+    Two call sites reach it — a paste, and the `/image` token — so the wording cannot
+    diverge between them. The `/image` path has said this all along; the paste path
+    returned in silence, which is literally the first report in this line of work
+    ("Cmd+V does nothing", rant 2026-09-30T09:35:04) and the reason the silence was
+    mistaken for "the paste carried no image".
+    """
+    logger.warning("clipboard: no image could be extracted to %s", target_path)
+    chat.add("system", "无法从剪贴板提取图片。")
+
+
 def _extract_clipboard_image(target_path: str) -> bool:
     """Extract clipboard image as PNG to target_path. Returns True on success."""
     system = platform.system()
@@ -656,8 +705,7 @@ def _extract_clipboard_image(target_path: str) -> bool:
                 capture_output=True, timeout=5,
                 **win32_no_window_kwargs(),
             )
-            path = Path(target_path)
-            return path.exists() and path.stat().st_size > 0
+            return _clipboard_extraction_verdict(target_path)
 
         elif system == "Linux":
             with open(target_path, 'wb') as f:
@@ -667,8 +715,7 @@ def _extract_clipboard_image(target_path: str) -> bool:
                     stdout=f, timeout=5,
                     **win32_no_window_kwargs(),
             )
-            path = Path(target_path)
-            return path.exists() and path.stat().st_size > 0
+            return _clipboard_extraction_verdict(target_path)
 
         elif system == "Windows":
             ps_cmd = (
@@ -683,8 +730,7 @@ def _extract_clipboard_image(target_path: str) -> bool:
                 capture_output=True, timeout=5,
                 **win32_no_window_kwargs(),
             )
-            path = Path(target_path)
-            return path.exists() and path.stat().st_size > 0
+            return _clipboard_extraction_verdict(target_path)
 
     except Exception as e:
         logger.debug("clipboard image extract failed: %s", e)
@@ -2248,6 +2294,13 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     })
                     inp.insert(placeholder + "\n")
                     logger.info("clipboard image saved: %s", filename)
+                else:
+                    # An image was advertised and none could be extracted, so the paste
+                    # must say so rather than look like a paste that carried nothing —
+                    # the two are indistinguishable from outside, which is the original
+                    # report ("Cmd+V does nothing", rant 2026-09-30T09:35:04) and the
+                    # reason this branch existed without an `else` for so long.
+                    _report_clipboard_extraction_failure(chat, tmp_path)
             term.render()
             return True
 
@@ -2953,7 +3006,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                                     if inp.cursor > pos:
                                         inp.cursor -= 6
                                     inp.dirty = True
-                                    chat.add("system", "无法从剪贴板提取图片。")
+                                    _report_clipboard_extraction_failure(chat, tmp_path)
                             else:
                                 # No image in clipboard — remove the token
                                 inp.text = inp.text[:pos] + inp.text[pos+6:]
