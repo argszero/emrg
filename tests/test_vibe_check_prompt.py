@@ -52,7 +52,13 @@ What is asserted
   model) can read as advice;
 * the host's own words and the timestamp are in the template header, so the rule rests
   on a message that can be looked up rather than on this instance's inference (R7);
-* the two carriers are checked **together**: deleting either half fails here.
+* the two carriers are checked **together**: deleting either half fails here;
+* and the artifact measured is the one a **judge receives**, not only the file:
+  `daemon._task_vibe_check` renders this template, so the tests render it through the
+  daemon's own environment and assert on the resulting system prompt. Reading the file
+  answers "is the exception in `vibe_check.j2`?" — one level short of this file's
+  question, and measurably so: wrapped in `{# … #}` the block stays in the file, every
+  file-level assertion stays green, and the render loses it whole (issue #1902).
 """
 
 from __future__ import annotations
@@ -209,4 +215,84 @@ def test_the_task_prompt_and_the_judge_carry_the_rule_together() -> None:
         "one of the two carriers is missing: the task prompt states the rule and this "
         "template is what makes the judge follow it — the judge never sees the task "
         "prompt as a system prompt, only as auxiliary context"
+    )
+
+
+def _render_judge_prompt() -> str:
+    """The system prompt a judge receives, rendered by the daemon's own environment.
+
+    `_get_jinja_env` is what `daemon._task_vibe_check` renders this template with, so a
+    fresh `jinja2.Environment` here could differ in the loader path, in `trim_blocks` or
+    in `lstrip_blocks` — and the artifact under test would then be a prompt no judge ever
+    receives. The context is the one the call site passes, with placeholders, because the
+    block is outside every conditional and no context key can remove it.
+    """
+    from emrg.server.daemon import _get_jinja_env  # noqa: PLC0415
+
+    return _get_jinja_env().get_template("vibe_check.j2").render(
+        task_name="a task", prompt="a requirement", completion_summary="a summary"
+    )
+
+
+def test_the_exception_reaches_the_judge_and_not_merely_the_file() -> None:
+    """The artifact, measured where the template is a template (issue #1902).
+
+    Reading the file answers "is the exception in `vibe_check.j2`?" — one level short of
+    the question this file exists for, which is whether the **judge's** system prompt
+    carries it. Measured 2026-10-08 (`cyc20261008-060209`): wrapping the block in
+    `{# … #}` leaves every term in the file, so all the file-level assertions above stay
+    green, while the render drops 182 characters and every one of those terms with them —
+    `scripts/run-mutation-arm.py` reported `SURVIVED` for exactly that arm. The exception
+    is only worth having if the model reads it.
+
+    Both directions are asserted in one test on purpose: the render must carry what the
+    file says, **and** must not carry what the file keeps for a human reader (the header
+    comment's host quote and its lookup recipe). An assertion only the file could satisfy
+    would be a file read wearing a render's name.
+    """
+    rendered = _render_judge_prompt()
+    for term in (
+        "例外",
+        "硬规则",
+        "必须返回 `false`",
+        "优先于你的判断",
+        "任务要求",
+        "永不降频",
+        "`recommend_slowdown` 必须恒为 false",
+        "有闲置资源就参加更多比赛",
+    ):
+        assert term in rendered, (
+            f"the rendered vibe-check prompt does not carry {term!r}: the exception is in "
+            f"the file and in no render, which is the one failure this guard did not see "
+            f"— a Jinja construct (`{{# … #}}`, `{{% if false %}}`) removes it from the "
+            f"judge's prompt while the file keeps every term"
+        )
+    for comment_only in ("2026-10-06T10:40:46", "find-host-message.py", "Rendered by"):
+        assert comment_only not in rendered, (
+            f"the render carries {comment_only!r}, which the template keeps inside its "
+            f"Jinja header comment for a human reader — either the header moved into the "
+            f"model's prompt (prompt budget spent on provenance) or this assertion is "
+            f"reading the file rather than a render"
+        )
+
+
+def test_the_render_keeps_the_exception_inside_the_field_it_amends() -> None:
+    """Placement survives rendering, which is where the reader meets it (issue #1902).
+
+    The file-level placement test says the block sits between the field and the next one;
+    a Jinja construct can keep that true of the file and reorder or drop it in the render.
+    """
+    rendered = _render_judge_prompt()
+    field_at = rendered.index(FIELD)
+    next_at = rendered.index(NEXT_FIELD)
+    exception_at = rendered.index("例外")
+    assert field_at < exception_at < next_at, (
+        "the rendered prompt does not keep the exception between the `recommend_slowdown` "
+        "field and the field that follows it, so a judge meets the field without its "
+        "exception — or meets the exception where it constrains nothing"
+    )
+    assert "由你根据本任务长期是否值得高频运行判断" in rendered[field_at:exception_at], (
+        "the render drops the field's own description and keeps only the exception: the "
+        "two answer different questions and the exception amends the judgement rather "
+        "than replacing it"
     )
