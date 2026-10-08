@@ -300,6 +300,180 @@ def test_update_rant_unknown_timestamp_and_bad_status(tmp_path):
     assert "invalid status" in msg
 
 
+# ── the completion stamp's domain (the premise #1945's classification rests on) ──
+#
+# `completed` had two writers and neither checked it, so a caller could stamp a record as
+# completing *before* it was submitted. Measured 2026-10-09 (`cyc20261009-003853`): the
+# retention rule ranks a completed record by `completed or timestamp`, so such a row sorts
+# below every survivor and `cleanup_rants` — at its shipped `keep=10`, against the real owner —
+# really pruned it; then `scripts/check-issue-links.py::_absent_origin_reading`, asked about
+# that same instant, printed "the ledger holds 0 completed rant(s) at or after this instant …
+# the handle names no record this ledger ever held". A record the store removed was reported
+# as one it never held. The classifier cannot hedge its way out (a pruned violator is invisible
+# to it), so the invariant is enforced here, where the field is written.
+
+
+def test_a_completion_cannot_precede_its_submission(tmp_path):
+    """Both directions: an earlier stamp is refused, an equal or later one is written.
+
+    The refusal is the point (`_stamp_refusal` states why); the controls are what stop
+    "refused" from passing for "handled" and prove the boundary is `at or after`.
+    """
+    f = _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+         "status": "in_progress", "progress": None, "completed": None,
+         "message": "test rant"},
+    ])
+    # ── out of domain: earlier than the row's own submission ──
+    ok, msg = update_rant(f, "2026-08-18T10:00:00+08:00",
+                          status="completed", completed="2025-01-01T00:00:00+00:00")
+    assert not ok, "a completion earlier than the submission was accepted"
+    assert "completed" in msg and "2025-01-01T00:00:00+00:00" in msg, msg
+    assert "2026-08-18T10:00:00+08:00" in msg, f"the refusal must name the submission too: {msg}"
+    row = json.loads(f.read_text(encoding="utf-8").strip())
+    assert row["status"] == "in_progress", "the refused write landed anyway"
+    assert row["completed"] is None, "the refused stamp was written anyway"
+
+    # ── in domain: exactly at the submission, and after it ──
+    ok, msg = update_rant(f, "2026-08-18T10:00:00+08:00",
+                          completed="2026-08-18T10:00:00+08:00")
+    assert ok, f"a stamp equal to the submission is in domain: {msg}"
+    row = json.loads(f.read_text(encoding="utf-8").strip())
+    assert row["completed"] == "2026-08-18T10:00:00+08:00"
+    ok, msg = update_rant(f, "2026-08-18T10:00:00+08:00",
+                          status="completed", completed="2026-08-18T11:00:00+08:00")
+    assert ok, msg
+    row = json.loads(f.read_text(encoding="utf-8").strip())
+    assert row["status"] == "completed" and row["completed"] == "2026-08-18T11:00:00+08:00"
+
+
+@pytest.mark.parametrize(
+    "value, why",
+    [
+        ("not-a-time", "not an instant"),
+        ("", "empty"),
+        ("2026-08-18T10:00:00", "no offset, against a row that carries one"),
+        (123, "not a string"),
+    ],
+)
+def test_a_completion_stamp_that_cannot_be_ordered_is_refused(tmp_path, value, why):
+    """A value that cannot be shown to follow the submission is refused, not written.
+
+    Reading an unorderable pair as "follows" is what let the violator in; the same
+    family refuses rather than guesses (`count_argument` on a non-numeric count).
+    """
+    f = _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+         "status": "in_progress", "progress": None, "completed": None,
+         "message": "test rant"},
+    ])
+    ok, msg = update_rant(f, "2026-08-18T10:00:00+08:00", completed=value)
+    assert not ok, f"completed={value!r} ({why}) was accepted"
+    assert "completed" in msg, f"the refusal must name the field ({why}): {msg}"
+    row = json.loads(f.read_text(encoding="utf-8").strip())
+    assert row["completed"] is None
+
+
+def test_the_tool_reports_a_completion_stamp_it_cannot_rank(tmp_path, monkeypatch):
+    """The refusal reaches the caller — `ok=False` is not swallowed on the way out.
+
+    The store returning `(False, reason)` is only useful if the tool surfaces it: a
+    refusal that came back as `error=False` would be this family's own defect (the
+    reading says no, the answer says fine). Driven through the tool's own `update`
+    action, which is what a model calls.
+    """
+    import asyncio
+
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    tool = SubmitRantTool()
+    _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-08-18T10:00:00+08:00", "project": "emrg",
+         "status": "in_progress", "progress": None, "completed": None,
+         "message": "test rant"},
+    ])
+    result = asyncio.run(tool.execute({
+        "action": "update",
+        "timestamp": "2026-08-18T10:00:00+08:00",
+        "status": "completed",
+        "completed": "2025-01-01T00:00:00+00:00",
+    }))
+    assert result.error is True, f"the refusal was reported as success: {result.content!r}"
+    assert "completed" in result.content and "2025-01-01T00:00:00+00:00" in result.content
+    entry = json.loads((tmp_path / "rants.jsonl")
+                       .read_text(encoding="utf-8").strip().splitlines()[0])
+    assert entry["status"] == "in_progress" and entry["completed"] is None, entry
+    # the control: a stamp the rule can rank still goes through the same action
+    result = asyncio.run(tool.execute({
+        "action": "update",
+        "timestamp": "2026-08-18T10:00:00+08:00",
+        "status": "completed",
+        "completed": "2026-08-18T12:00:00+08:00",
+    }))
+    assert result.error is False, result.content
+    entry = json.loads((tmp_path / "rants.jsonl")
+                       .read_text(encoding="utf-8").strip().splitlines()[0])
+    assert entry["status"] == "completed" and entry["completed"] == "2026-08-18T12:00:00+08:00"
+
+
+def test_the_auto_written_stamp_is_held_to_the_same_rule(tmp_path):
+    """The transition's own stamp is checked too, and a row it cannot read is refused.
+
+    The auto-written value is this module's claim about the row, so it is held to the same
+    invariant: a submission instant that cannot be read is a row whose stamp nothing can
+    check, and refusing names the real fault instead of writing one that cannot be ranked.
+    """
+    f = _write_rant_lines(tmp_path, [
+        {"timestamp": "not-an-instant", "project": "emrg",
+         "status": "in_progress", "progress": None, "completed": None,
+         "message": "corrupt row"},
+    ])
+    ok, msg = update_rant(f, "not-an-instant", status="completed")
+    assert not ok, "a row whose submission instant cannot be read was completed anyway"
+    assert "timestamp" in msg and "not-an-instant" in msg, msg
+    row = json.loads(f.read_text(encoding="utf-8").strip())
+    assert row["status"] == "in_progress" and row["completed"] is None
+
+
+def test_no_sequence_of_updates_leaves_a_violating_row(tmp_path):
+    """The invariant as a property over a ledger, not a single call.
+
+    Every completed row the store holds must rank at or after its own submission, because
+    that is exactly the premise the retention classifier reads it with.
+
+    The discriminating shape is the **combined** call — a status transition carrying an
+    explicit stamp in one update. Driven as two calls it would prove nothing here: the
+    second call's auto-written stamp overwrites the violating one, so the property holds on
+    a store that accepts everything, which is the assertion-passes-on-the-mutation-it-exists-
+    for shape this family refuses.
+    """
+    import datetime as _dt
+
+    f = tmp_path / "rants.jsonl"
+    f.write_text("", encoding="utf-8")
+    for i in range(3):
+        append_rant(f, f"rant {i}", project="emrg")
+    stamps = [r["timestamp"] for r in list_rants(f)]
+    assert len(stamps) == 3, stamps
+    for ts in stamps:
+        assert update_rant(f, ts, status="in_progress")[0]
+    early = "2020-01-01T00:00:00+08:00"
+    legal = (_dt.datetime.now().astimezone() + _dt.timedelta(minutes=1)).isoformat()
+    refused, _ = update_rant(f, stamps[0], status="completed", completed=early)
+    assert not refused, "the violating stamp was accepted"
+    assert update_rant(f, stamps[1], status="completed", completed=legal)[0]
+    assert update_rant(f, stamps[2], status="completed")[0]
+
+    rows = list_rants(f)
+    completed_rows = [r for r in rows if r["status"] == "completed"]
+    assert len(completed_rows) == 2, "the refused row must not have been completed"
+    for row in completed_rows:
+        key = row["completed"] or row["timestamp"]
+        assert _dt.datetime.fromisoformat(key) >= _dt.datetime.fromisoformat(row["timestamp"]), (
+            f"a completed row ranks below its own submission: {row}"
+        )
+    assert all(r["completed"] != early for r in rows), "the refused stamp is in the ledger"
+
+
 def test_cleanup_rants_keeps_pending_plus_10_completed(tmp_path):
     entries = []
     # 3 active rants (2 pending + 1 in_progress)

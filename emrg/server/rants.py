@@ -31,6 +31,69 @@ _ALLOWED_STATUS_TRANSITIONS = {
 }
 
 
+def _parse_instant(text: object) -> datetime | None:
+    """`text` as an instant, or `None` when it is not one (never a silent zero)."""
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _stamp_refusal(submitted: object, completed: str) -> str | None:
+    """Why `completed` cannot stand as this row's completion stamp, or `None` when it can.
+
+    The retention rule ranks a completed record by ``completed or timestamp``, and
+    `scripts/check-issue-links.py::_absent_origin_reading` classifies an origin the ledger
+    does not hold from that same key — its arithmetic turns on one premise, that an entry
+    cannot complete before it was submitted. Nothing enforced it: this module accepted any
+    explicit stamp, so `update_rant(..., completed="2025-01-01T00:00:00+00:00")` on a row
+    submitted today wrote a record whose completion precedes its submission.
+
+    Measured 2026-10-09 (`cyc20261009-003853` on `ba12ffdb995f`, the tree `check-issue-links`
+    PR #1946 lands) against the real owner at its shipped `keep=10`: 12 records plus one such
+    violator, and the owner **really pruned the violator** — its key sorts below every survivor
+    — while the classifier, asked about that same instant, printed *"the ledger holds 0
+    completed rant(s) at or after this instant … the handle names no record this ledger ever
+    held"*. A record the store removed was reported as one it never held, which is the loudest
+    claim that reading can make.
+
+    So the invariant is enforced where the field is written, which is the only place it can be
+    made a fact rather than an assumption: a stamp that cannot be shown to be at or after the
+    row's own submission is **refused**, never clamped (`count_argument` / `boolean_argument`
+    state the same rule for a tool's parameters — refuse rather than substitute a value the
+    caller did not send).
+
+    :param submitted: the row's own `timestamp` field, whatever the file holds.
+    :param completed: the stamp about to be written.
+    :returns: the refusal to hand back, or `None` when the stamp may be written.
+    """
+    if _parse_instant(submitted) is None:
+        return (
+            f"the row's own timestamp is {submitted!r}, which is not an instant this can be "
+            "ordered against - a completion stamp cannot be shown to follow it. Repair the "
+            "row's timestamp first"
+        )
+    stamp = _parse_instant(completed)
+    if stamp is None:
+        return f"completed must be an ISO timestamp (got {completed!r})"
+    submitted_at = _parse_instant(submitted)
+    if (stamp.tzinfo is None) != (submitted_at.tzinfo is None):
+        return (
+            f"completed {completed!r} and the row's timestamp {submitted!r} cannot be ordered "
+            "(one of them carries no offset), so the stamp cannot be shown to follow the "
+            "submission"
+        )
+    if stamp < submitted_at:
+        return (
+            f"completed {completed!r} precedes the row's own timestamp {submitted!r}: a record "
+            "cannot complete before it was submitted, and one ranked below the instant it cites "
+            "is read by the retention rule as older than it is"
+        )
+    return None
+
+
 def _normalize_rant(raw) -> dict | None:
     """Normalize one parsed line to the canonical 6-field dict.
 
@@ -136,9 +199,13 @@ def update_rant(
     ``completed`` timestamp is auto-written (ISO local time); leaving
     ``completed`` clears the field.
 
+    Both writers of ``completed`` go through `_stamp_refusal`, so a stamp earlier than the
+    row's own ``timestamp`` — or one that cannot be ordered against it — is refused rather
+    than written. Why that matters is stated there.
+
     Returns:
         ``(ok, message)`` — ok=False with a reason on invalid transition /
-        unknown timestamp.
+        unknown timestamp / a completion stamp that cannot stand.
     """
     rants = _read_rants(rants_log)
     for r in rants:
@@ -155,14 +222,26 @@ def update_rant(
                         f"invalid transition: {current} -> {status} "
                         f"(must be pending→in_progress→completed, no skipping)"
                     )
-                r["status"] = status
                 if status == "completed":
-                    r["completed"] = datetime.now().astimezone().isoformat()
+                    # The auto-written stamp is this module's own claim about the row, so it
+                    # is held to the same invariant as a caller's: a row whose submission
+                    # instant cannot be read is refused here rather than given a stamp nothing
+                    # can check.
+                    stamp = datetime.now().astimezone().isoformat()
+                    refusal = _stamp_refusal(r.get("timestamp"), stamp)
+                    if refusal is not None:
+                        return False, refusal
+                    r["status"] = status
+                    r["completed"] = stamp
                 else:
+                    r["status"] = status
                     r["completed"] = None
         if progress is not None:
             r["progress"] = progress
         if completed is not None:
+            refusal = _stamp_refusal(r.get("timestamp"), completed)
+            if refusal is not None:
+                return False, refusal
             r["completed"] = completed
         _write_rants(rants_log, rants)
         return True, f"updated rant {timestamp}: status={r.get('status')!r}"
