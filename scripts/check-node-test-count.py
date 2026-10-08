@@ -53,9 +53,12 @@ GUI (`emrg/gui/test`, `node --test "test/*.test.js"`):
 
 Scope, stated rather than implied: this tool rewrites only the two Node-suite
 headline counts. The Python count belongs to `scripts/check-doc-count.py`, and
-the per-file breakdowns stay with the static guards. It does not run
-`npm install`: a missing `node_modules` is reported as that reason, not as a
-bogus count.
+the per-file breakdowns stay with the static guards - so a write that moves a
+headline out from under a breakdown that *used to* sum to it is reported as
+`INCOMPLETE` with exit 1, not as a finished repair (measured 2026-10-08: the
+half-done write exited 0 while the guard it prints as the next step was red
+twice). It does not run `npm install`: a missing `node_modules` is reported as
+that reason, not as a bogus count.
 """
 
 from __future__ import annotations
@@ -330,6 +333,61 @@ def patch_count(pattern: re.Pattern[str], text: str, value: int) -> str:
     return patched
 
 
+def _count_line_shape(pattern: re.Pattern[str], text: str) -> tuple[int, int] | None:
+    """(headline, per-file breakdown sum) for one count line, or `None`.
+
+    `None` is "this line is not in the shape the guard reads", never a zero: a
+    line whose breakdown cannot be parsed must not read as one that balanced.
+    Parsing mirrors `tests/test_doc_counts.py` (`\\((\\d+): ([^)]+)\\)`, then
+    `<n> <label>` per `+`-separated part) so this tool and that guard agree on
+    what "the breakdown" is.
+    """
+    match = pattern.search(text)
+    if match is None:
+        return None
+    line = text[match.start() :].split("\n", 1)[0]
+    parsed = re.search(r"\((\d+): ([^)]+)\)", line)
+    if parsed is None:
+        return None
+    total = 0
+    for part in parsed.group(2).split("+"):
+        item = re.match(r"\s*(\d+)\s+(\S+)", part)
+        if item is None:
+            return None
+        total += int(item.group(1))
+    return int(parsed.group(1)), total
+
+
+def _breakdowns_broken_by(before: str, after: str) -> list[tuple[str, int, int]]:
+    """Lines whose breakdown balanced before this write and does not after.
+
+    `Agent.md`'s headline is the runner's number, and its per-file breakdown is a
+    *second*, independently pinned statement: `tests/test_doc_counts.py` counts
+    the definitions per file and needs no node_modules. This tool rewrites only
+    the headline, so a write that moves it can leave the line's two halves
+    disagreeing - measured 2026-10-08 (cycle cyc20261008-123717): headline
+    601 -> 604 with the parts still summing 601, "Next: ... pytest
+    tests/test_doc_counts.py", exit **0**, and that next step red twice
+    (`test_gui_breakdown_sums_to_headline`,
+    `test_renderer_breakdown_matches_static_counts`).
+
+    The rule is therefore *not* "the parts must sum to the headline" - this
+    tool's own fixtures carry lines that never did, and a line the parser cannot
+    read is unmeasurable rather than broken. It is the narrower one a repair owes
+    what it touches: **do not hand back a line less consistent than you found
+    it.** Only a line that balanced before and does not now is reported.
+    """
+    broken: list[tuple[str, int, int]] = []
+    for pattern, label in ((RENDERER_LINE, "Renderer"), (GUI_LINE, "GUI")):
+        was = _count_line_shape(pattern, before)
+        now = _count_line_shape(pattern, after)
+        if was is None or now is None:
+            continue
+        if was[0] == was[1] and now[0] != now[1]:
+            broken.append((label, now[1], now[0]))
+    return broken
+
+
 def main(argv: list[str] | None = None) -> int:
     # A merged reader must see the `tree:` line before any verdict, and this
     # family's docstrings promise that order. stdout is block-buffered when it is
@@ -415,8 +473,23 @@ def main(argv: list[str] | None = None) -> int:
         f"\nupdated {DOC.name}: renderer {renderer_doc} -> {renderer_real}, "
         f"GUI {gui_doc} -> {gui_real}"
     )
+    # A headline and its breakdown are two statements about one suite, and this
+    # tool owns only the first. Say so when the write pulled them apart, instead
+    # of ending on a next step that is red (see `_breakdowns_broken_by`).
+    stale = _breakdowns_broken_by(text, patched)
+    for label, parts_sum, headline in stale:
+        print(
+            f"INCOMPLETE: the {label} line's per-file breakdown still sums to "
+            f"{parts_sum}, but its headline is now {headline}."
+        )
+    if stale:
+        print(
+            "The breakdown is pinned by tests/test_doc_counts.py, which needs no "
+            "node_modules: run it to be told each stale part, sync those numbers, "
+            "then re-run this tool."
+        )
     print("Next: uv run --no-sync pytest tests/test_doc_counts.py -q")
-    return 0
+    return 1 if stale else 0
 
 
 if __name__ == "__main__":
