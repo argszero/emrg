@@ -117,6 +117,30 @@ test("preload exposes workspace-panel APIs (listFiles/readFile)", () => {
   }
 });
 
+test("the clipboard-image wire exists end to end (rant 2026-09-30T09:35:04, requirement 4)", () => {
+  // 「系统给的图不受白名单所限」需要一条 renderer 到 main 的线：renderer 解不了的
+  // 格式（macOS 的 image/tiff）只能由有 NSImage 的 main 转成 PNG。renderer 那半在
+  // Composer.test.tsx 里注入假桥测试——注入式测试**看不见线断没断**，所以这条线
+  // 的两端在这里按源码钉住：preload 暴露 `readClipboardImage` → `emrg:readClipboardImage`，
+  // main 注册同一个频道。少任何一端，renderer 的调用在生产里会永远 reject。
+  const preload = fs.readFileSync(path.join(GUI_ROOT, "preload.js"), "utf-8");
+  assert.match(
+    preload,
+    /readClipboardImage: \(\) => ipcRenderer\.invoke\("emrg:readClipboardImage"/,
+    "preload.js must expose readClipboardImage → emrg:readClipboardImage"
+  );
+  const main = fs.readFileSync(path.join(GUI_ROOT, "main.js"), "utf-8");
+  assert.match(
+    main,
+    /ipcMain\.handle\("emrg:readClipboardImage"/,
+    "main.js must handle emrg:readClipboardImage"
+  );
+  // 转换发生在哪一侧是这条线的全部意义：`clipboard.readImage()` 经 NSImage 解码，
+  // `toPNG()` 重新编码。main.js 里没有它，这条线就只是一次拒绝。
+  assert.match(main, /clipboard\.readImage\(\)/, "main.js must read the pasteboard image");
+  assert.match(main, /\.toPNG\(\)/, "main.js must re-encode it as PNG");
+});
+
 
 // ── rant 2026-08-18T12:45:47 (v0.2.47 Build Release) ──
 // #836 把 buildResources 放在 electron-builder config 根级 → schema 校验失败
