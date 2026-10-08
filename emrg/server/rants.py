@@ -122,6 +122,63 @@ def list_rants(
     ]
 
 
+def _instant(text) -> datetime | None:
+    """`text` as an instant, or `None` when it is not one (never a silent zero)."""
+    if not isinstance(text, str):
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _completion_ordering_error(timestamp: str, completed: str) -> str | None:
+    """Why `completed` may not be written on the row submitted at `timestamp`, or `None`.
+
+    The retention rule ranks a completed rant by ``completed or timestamp`` (see
+    `cleanup_rants`), and `scripts/check-issue-links.py` reads that same key to decide whether
+    the *absence* of a record a rant citation names can be explained by pruning at all. Its
+    loudest sentence — "the retention rule cannot explain the absence ... this ledger never
+    held it" — counts the completed records **at or after** the cited instant and therefore
+    rests on one premise: **a completion stamp is never earlier than the row's own submission
+    instant**. Prose cannot hold that premise: a record whose stamp precedes its submission
+    ranks *below* an instant it was submitted after, so the store can prune it while the
+    reading counts it as never held — a definite sentence about a record that really existed.
+
+    So the premise is enforced where the field is written rather than assumed by its reader,
+    and enforced **fail-closed**: a stamp that cannot be *shown* to follow the submission
+    instant is refused too, not accepted as probably fine. The three ways that happens — the
+    stamp is not an instant, the row's own timestamp is not one, and the two disagree about
+    carrying a UTC offset (a naive instant and an aware one have no order at all) — are each
+    named in the message, because "refused" without the reason is a second problem.
+    """
+    submitted = _instant(timestamp)
+    stamp = _instant(completed)
+    if stamp is None:
+        return (
+            f"invalid completed: {completed!r} is not an ISO instant "
+            "(the stamp is the key the retention rule ranks a completed rant by)"
+        )
+    if submitted is None:
+        return (
+            f"invalid completed: the rant's submission instant {timestamp!r} is not an ISO "
+            "instant, so a completion stamp cannot be shown to follow it"
+        )
+    if (stamp.tzinfo is None) != (submitted.tzinfo is None):
+        return (
+            f"invalid completed: {completed!r} and the submission instant {timestamp!r} "
+            "cannot be ordered (one carries a UTC offset and the other does not) - spell "
+            "the stamp with the same offset as the timestamp it belongs to"
+        )
+    if stamp < submitted:
+        return (
+            f"invalid completed: {completed!r} precedes the rant's submission instant "
+            f"{timestamp!r} - a rant cannot be completed before it was submitted, and the "
+            "retention rule would rank the record below an instant it was submitted after"
+        )
+    return None
+
+
 def update_rant(
     rants_log: Path,
     timestamp: str,
@@ -136,15 +193,21 @@ def update_rant(
     ``completed`` timestamp is auto-written (ISO local time); leaving
     ``completed`` clears the field.
 
+    The completion stamp this call **writes** — explicit, or auto-written by the
+    transition — is checked against the row's own submission instant and the
+    update is refused when it does not follow it (`_completion_ordering_error`
+    carries why). Nothing is written when the update is refused.
+
     Returns:
         ``(ok, message)`` — ok=False with a reason on invalid transition /
-        unknown timestamp.
+        unknown timestamp / a completion stamp out of order.
     """
     rants = _read_rants(rants_log)
     for r in rants:
         if r.get("timestamp") != timestamp:
             continue
         current = r.get("status") or "pending"
+        target = current
         if status is not None:
             if status not in ("pending", "in_progress", "completed"):
                 return False, f"invalid status: {status!r} (pending/in_progress/completed)"
@@ -155,11 +218,20 @@ def update_rant(
                         f"invalid transition: {current} -> {status} "
                         f"(must be pending→in_progress→completed, no skipping)"
                     )
-                r["status"] = status
-                if status == "completed":
-                    r["completed"] = datetime.now().astimezone().isoformat()
-                else:
-                    r["completed"] = None
+                target = status
+        # The stamp the transition writes, or the explicit one when given: validated as the
+        # value it is about to store, so the auto-written path is covered too (a row whose
+        # own timestamp is in the future cannot be completed either).
+        stamp = completed
+        if stamp is None and target == "completed" and current != "completed":
+            stamp = datetime.now().astimezone().isoformat()
+        if stamp is not None:
+            problem = _completion_ordering_error(timestamp, stamp)
+            if problem:
+                return False, problem
+        if target != current:
+            r["status"] = target
+            r["completed"] = stamp if target == "completed" else None
         if progress is not None:
             r["progress"] = progress
         if completed is not None:

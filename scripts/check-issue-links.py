@@ -137,7 +137,11 @@ pending and in-progress rants plus the **ten most recent completed** ones, so an
 absent either because the record was pruned or because it was never written. That difference is
 not guessed — it is computed from the ledger the reading already holds: an instant with fewer
 than ten completed rants **at or after** it cannot be a pruned record (an entry at that instant
-would have been kept whatever its status, since completion follows submission), while one with
+would have been kept whatever its status, since completion follows submission — a premise
+`emrg/server/rants.py::update_rant` now *enforces* rather than leaves to prose, refusing a
+completion stamp that does not follow the row's own submission instant, because a row that
+broke it would rank below an instant it was submitted after and be reported here as never
+held), while one with
 ten or more above it may be. The row prints the case it measured, because the reader's next move
 differs — and because the remedy the other case suggests, *write it verbatim*, is available in
 neither: a ledger that does not hold the timestamp holds nothing to copy.
@@ -749,6 +753,17 @@ def _absent_origin_reading(rows: list[dict], cited: str) -> str:
       case, so this covers every status at once;
     * with the cap reached above the cited instant, a prune is a live explanation and the reading
       says that instead.
+
+    The first branch turns on one premise: **a completed row's key is at or after its own
+    submission instant** (a stamp equal to the submission is in order — the key is a rank, not
+    an interval). It is a contract with the writer, not a fact about the arithmetic, so it is
+    named here and enforced there: `emrg/server/rants.py::update_rant` refuses a completion
+    stamp that does not follow the row's timestamp, and
+    `tests/test_check_issue_links.py::test_the_premise_the_count_rests_on_is_enforced_by_the_writer`
+    drives that refusal from this side. A row that broke the premise anyway — one written before
+    the writer checked, or edited by hand — ranks *below* an instant it was submitted after, and
+    the branch below then reports a record the store really pruned as one that never existed:
+    the strongest sentence this reading can print, from a premise nothing here can re-check.
 
     Neither branch offers "write the rant's own timestamp verbatim": there is nothing in a ledger
     that does not hold the timestamp to copy from, and a row whose remedy cannot be performed

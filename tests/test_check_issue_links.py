@@ -1700,6 +1700,83 @@ def _held_timestamps(path) -> set[str]:
     }
 
 
+def test_the_premise_the_count_rests_on_is_enforced_by_the_writer(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """`completion follows submission` is a **contract with `emrg/server/rants.py`**, not a fact
+    about arithmetic, so the reading's soundness is measured against the writer that keeps it.
+
+    The count is "completed records at or after the cited instant", which answers whether the
+    retention rule could have pruned a record submitted at that instant only while every
+    completed row's key (`completed or timestamp`) is at or after its own submission instant. A
+    row whose stamp precedes its submission ranks *below* an instant it was submitted after, so
+    the store can prune it and this reading then prints its loudest sentence — *the retention
+    rule cannot explain the absence ... this ledger never held it* — about a record that really
+    existed. Both halves are driven here: the real `update_rant` refuses such a stamp (so the
+    premise holds at the write site), and a ledger that already carries one — a row no writer
+    can now produce — makes the reading say exactly that.
+    """
+    from emrg.server.rants import cleanup_rants, update_rant
+
+    # Half 1: the writer will not create a violator. Same ledger, a row still open, completed
+    # with a stamp earlier than the instant it was submitted.
+    open_row = tmp_path / "open.jsonl"
+    open_row.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-01T00:00:00+00:00",
+                "project": "emrg",
+                "status": "in_progress",
+                "progress": "",
+                "completed": None,
+                "message": "a rant",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ok, msg = update_rant(
+        open_row,
+        "2026-05-01T00:00:00+00:00",
+        status="completed",
+        completed="2025-01-01T00:00:00+00:00",
+    )
+    assert not ok and "precedes the rant's submission instant" in msg, msg
+
+    # Half 2: with the premise broken by hand, the harm the refusal prevents. Eleven records
+    # that complete in the order they were submitted, plus one submitted *last* and stamped
+    # *first* — the newest submission and the lowest rank.
+    violation = {
+        "timestamp": "2026-12-31T00:00:00+00:00",
+        "project": "emrg",
+        "status": "completed",
+        "progress": "",
+        "completed": "2025-01-01T00:00:00+00:00",
+        "message": "completed before it was submitted",
+    }
+    rows = [
+        {
+            "timestamp": f"2026-05-{i + 1:02d}T00:00:00+00:00",
+            "project": "emrg",
+            "status": "completed",
+            "progress": "",
+            "completed": f"2026-06-{i + 1:02d}T00:00:00+00:00",
+            "message": "a rant",
+        }
+        for i in range(11)
+    ] + [violation]
+    path = _ledger_lines(tmp_path, *[json.dumps(row) for row in rows])
+    cleanup_rants(path, keep=mod._RETENTION_KEEP)
+    assert violation["timestamp"] not in _held_timestamps(path), "the fixture must be pruned"
+
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, violation["timestamp"])]))
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "the retention rule cannot explain the absence" in detail, detail
+
+
 def test_the_ranking_key_is_the_one_cleanup_ranks_by(mod, tmp_path) -> None:
     """A sort key cannot be read out of a signature, so it is **driven** out of its owner.
 
