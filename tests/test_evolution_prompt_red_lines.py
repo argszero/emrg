@@ -47,6 +47,16 @@ round's prompt entirely — `scripts/run-mutation-arm.py` reported `SURVIVED`. T
 the same shape fixed for `emrg/server/prompts/vibe_check.j2` (issue #1902) and
 `emrg/server/competition_prompt.md` (issue #1904); `emrg/server/prompts/system.j2`
 already carries its render-level leg in `test_no_background_process_reach.py`.
+
+Sibling work in flight
+----------------------
+A parallel instance pushed `fix/the-render-carries-the-red-lines-too` (adding a render leg
+over all six task templates to `tests/test_upgrade_chain_red_line.py`) for the two clauses
+its file pins — 附则二 and 附则三. This file pins 附则二 and the **no-background-process**
+clause, and that second clause has no render leg anywhere else (`system.j2`'s is in
+`test_no_background_process_reach.py`, and the other file's term set does not name it), so
+the two branches overlap only on `evolution_prompt.md` × 附则二 and this one is the only
+render leg that clause has. Recorded so a reviewer can prefer one without losing the other.
 """
 
 from __future__ import annotations
