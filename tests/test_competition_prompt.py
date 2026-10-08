@@ -9,10 +9,31 @@ ceremony exception, "reject by default when the rules text is unobtainable",
 "read doubt conservatively") plus the compute-feasibility limit and the
 "stop and ask the host" rule for identity verification — so a future edit
 cannot silently relax the gate the host explicitly set.
+
+Two levels, two questions
+-------------------------
+`competition_prompt.md` is a Jinja2 template: `TaskHandler._build_evolution_prompt`
+renders it with `undefined=jinja2.Undefined` and sends the **result** to the round. So
+the file-level assertions below answer "does the source that ships carry this?", and the
+render-level ones answer "is this what a round is sent?" — neither implies the other. A
+Jinja construct (`{# … #}`, `{% if false %}`) removes text from the prompt while the
+file keeps every character, and a file read cannot see that at all: measured 2026-10-08
+(`cyc20261008-082424`, issue #1904), wrapping §0.0 in `{# … #}` left all five
+load-bearing phrases in the file, every file-level assertion green, and the render 2,301
+characters shorter with none of them — `scripts/run-mutation-arm.py` reported `SURVIVED`
+for exactly that arm. The same shape was fixed for `emrg/server/prompts/vibe_check.j2`
+in issue #1902.
 """
 
 import re
 from pathlib import Path
+
+import pytest
+import yaml
+
+from emrg.protocol import InstanceIdentity
+from emrg.server import scheduler as mod
+from tests.task_handler_factory import make_handler
 
 PROMPT = (
     Path(__file__).resolve().parent.parent
@@ -20,6 +41,47 @@ PROMPT = (
     / "server"
     / "competition_prompt.md"
 )
+
+#: The project the render fixture asks the builder for — a name that appears nowhere in
+#: the template, so "the render carries it" proves a placeholder resolved rather than a
+#: string being copied through.
+PROMPT_PROJECT = "demoproj"
+
+
+@pytest.fixture(scope="module")
+def rendered(tmp_path_factory) -> str:
+    """The competition prompt as a round receives it, rendered by the real builder.
+
+    `TaskHandler._build_evolution_prompt` is the only thing that turns this template
+    into a prompt, so it is what these tests render through: a fresh `jinja2.Environment`
+    here could differ in `trim_blocks`, `lstrip_blocks` or the loader and the artifact
+    under test would then be a prompt no round is ever sent.
+
+    The context is the one a real records-driven call produces (a project and nothing
+    else); `config_dir` is redirected at a tmp tree — the shape
+    `tests/test_evolution_prompt_index_rule.py` uses — so the `projects.yml` read lands
+    on a file this test made, never on the host's `~/.emrg`.
+    """
+    tmp_path = tmp_path_factory.mktemp("competition-prompt")
+    project_dir = tmp_path / PROMPT_PROJECT
+    project_dir.mkdir(exist_ok=True)
+    (tmp_path / "projects.yml").write_text(
+        yaml.safe_dump([{"name": PROMPT_PROJECT, "path": str(project_dir)}]),
+        encoding="utf-8",
+    )
+    original = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        handler = make_handler(
+            name="competition-task",
+            type="competition",
+            config={"project": PROMPT_PROJECT},
+            identity=InstanceIdentity(),
+            template_path=PROMPT,
+        )
+        return handler._build_evolution_prompt()
+    finally:
+        mod.config_dir = original
 
 
 def test_competition_prompt_exists():
@@ -730,3 +792,98 @@ def test_the_cadence_block_carries_the_host_messages_it_rests_on():
             "looked up, and the rule would rest on this instance's inference instead"
         )
         assert stamp in block, f"the quote {quote!r} no longer carries its timestamp {stamp}"
+
+
+# --- §0.0, second level: the prompt a round is actually sent --------------------------------------
+#
+# The block above measures the source that ships — the concern that the rule must not live
+# only in the installed copy the next upgrade overwrites (measured 2026-10-07,
+# cyc20261007-130240). These measure the prompt that arrives: `competition_prompt.md` is a
+# Jinja2 template and only its render reaches the round, so a Jinja construct can take the
+# rule out of every round while the file keeps it whole. Same defect as issue #1902, in a
+# different carrier; `emrg/server/prompts/vibe_check.j2` is where that one was fixed.
+
+
+def _rendered_block_0_0(rendered: str) -> str:
+    """The `### 0.0` cadence block as the round reads it — or a failure to measure.
+
+    Fails rather than passing quietly: a missing block must never read as "nothing to
+    assert", which is the shape a guard takes when its subject is deleted.
+    """
+    parts = rendered.split("### 0.0 ", 1)
+    assert len(parts) == 2, (
+        "the rendered competition prompt has no `### 0.0` cadence block — the round is "
+        "sent a prompt without the host's no-slowdown rule (2026-10-06T10:40:46), whether "
+        "or not the file still carries it"
+    )
+    block = parts[1].split("\n### Current State", 1)[0]
+    assert block.strip(), (
+        "the rendered `### 0.0` heading is there but its body is empty — a template "
+        "construct kept the title and sent nothing underneath it"
+    )
+    return block
+
+
+def test_the_cadence_block_reaches_the_round_and_not_merely_the_file(rendered):
+    """Every load-bearing phrase of §0.0, asserted on the prompt the agent is sent.
+
+    The file-level tests above cannot see this failure: a Jinja comment around the block
+    leaves each phrase in `competition_prompt.md` and drops all of them from the render,
+    so the rule the host asked to be written *in this file* stops binding the round while
+    the guard stays green.
+    """
+    block = _rendered_block_0_0(rendered)
+    for term in (
+        "Never reduce the cadence",
+        "`recommend_slowdown` must be `false`, always",
+        "no lever left this season",
+        "nothing to do but wait for the score",
+        "submission quota has not refreshed",
+        '"Waiting" is not "idle"',
+        "Idle resources go into entering more competitions",
+        "Only the host may slow this task down",
+    ):
+        assert term in block, (
+            f"the rendered §0.0 block does not carry {term!r}: the rule is in the file and "
+            "in no render, which is the one failure a file-level guard cannot see — a Jinja "
+            + "construct (`{{# … #}}`, `{{% if false %}}`) removes it from every round's "
+            + "prompt while the file keeps every phrase"
+        )
+
+
+def test_the_rendered_cadence_block_still_precedes_the_round_it_binds(rendered):
+    """Placement has to survive rendering, which is where the reader meets it.
+
+    The file-level placement test can hold while the render moves or drops the block
+    entirely — this is the ordering the round actually walks past.
+    """
+    assert rendered.index("### 0.0 ") < rendered.index("### Current State"), (
+        "the rendered cadence block drifted below the header block — the round meets its "
+        "project and time anchor before it meets the rule that governs the round"
+    )
+    assert rendered.index("### 0.0 ") < rendered.index("### 0. Preparation"), (
+        "the rendered cadence block drifted below §0. Preparation, so a round that has "
+        "started working has not been told the rule that binds it"
+    )
+
+
+def test_the_render_substitutes_values_and_carries_no_template_syntax(rendered):
+    """The converse: a render must not be a file read wearing a render's name.
+
+    Two ways a render assertion goes vacuous, both closed here. If the block were read
+    with its syntax intact — a `{% raw %}` wrapper, or the text copied out of a literal —
+    the round would be sent `{{ task.project }}` and would be told nothing; and if what
+    this test examined were the file, the same assertion catches it. Then the substituted
+    value has to arrive, so "it rendered" is measured by what the round can read rather
+    than by the absence of braces alone.
+    """
+    assert "{{" not in rendered and "{%" not in rendered, (
+        "the rendered competition prompt still carries Jinja syntax — the round is sent "
+        "template source rather than the prompt it names"
+    )
+    assert PROMPT_PROJECT in rendered, (
+        "the render does not carry the project name "
+        f"{PROMPT_PROJECT!r}: "
+        "`{{ task.project }}` resolved to nothing (`jinja2.Undefined` renders empty), so "
+        "the round is told its project is blank"
+    )
