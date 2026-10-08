@@ -2150,6 +2150,93 @@ def test_the_span_finder_reads_line_comments_before_strings() -> None:
     )
 
 
+def test_a_literal_ends_at_the_quote_that_closes_it() -> None:
+    """The walk resumes *after* the closing quote, not on it.
+
+    `_skip_string_literal`'s quote-close clause is reached by no discriminating row:
+    changing its `return i + 1` to `return i` leaves this file green (measured
+    2026-10-09, cycle `cyc20261009-025303`). The branch *is* reached - the
+    neighbouring mutation `return start + 1` reddens five rows - so this is a wrong
+    reading the suite cannot see, not dead code.
+
+    It is not merely theoretical. Resuming on the quote makes the walk re-enter on
+    that character and lose its place, so a file with several literals drops spans:
+    over the 56 files this finder is run on (`renderer/src/**/*.test.ts(x)`,
+    `emrg/gui/test/**/*.test.js`) the mutated walk answers differently on **9** of
+    them - `renderer/src/components/Composer.test.tsx` reports **3** spans where the
+    true reading is **9**. Six block comments leave the detector's view, so a
+    definition commented out inside one of them goes unreported: the false green
+    this tripwire exists to prevent.
+
+    The body below is a template literal for a measured reason, not for variety: a
+    `"`-delimited literal's mis-start is repaired by the newline clause (the walk
+    resumes just past the opener, meets the line end, and returns - the shapes
+    `const a = "x"; /** docs */` and `const a = "x", b = "y"; /** docs */` read the
+    *same* under both implementations). Only a literal that may cross a line end
+    keeps the damaged walk running, which is why this clause is observable here.
+    """
+    guard = _loaded_guard_module()
+    body = "const t = `x`; /** helper docs */\n"
+    open_at = body.index("`")
+    close_at = body.index("`", open_at + 1)
+    assert body.index("/**") > close_at, (
+        "premise: the doc block sits outside the literal, so it is code"
+    )
+    assert [body[s:e] for s, e in guard._block_comment_spans(body)] == ["/** helper docs */"], (
+        "the doc block must still be seen; a walk that resumes on the closing quote "
+        "re-enters there and loses the rest of the file"
+    )
+
+
+def test_a_template_literal_may_span_a_line_end() -> None:
+    """Only a literal that cannot hold a line end is cut short by one.
+
+    The newline clause carries the guard `quote != "`"` because a template literal is
+    the one literal JavaScript lets cross a line end. Removing it - leaving the
+    return unconditional - is reached by no row: measured 2026-10-09 (cycle
+    `cyc20261009-025303`), this file stays green (79 passed) with the guard gone.
+
+    The body keeps its `/* ... */` run *inside* the literal, which is what makes the
+    reading differ: an unguarded return resumes inside the template, meets those two
+    characters in what is really string text, and reports a block comment that is not
+    there. This row also fails under the quote-close mutation above, because both
+    defects are observable through a multi-line literal; it is the pair that is
+    pinned, and either row failing is a real fault.
+    """
+    guard = _loaded_guard_module()
+    body = "const t = `a\n/* in the template */\nb`;\n/** helper docs */\n"
+    open_at = body.index("`")
+    close_at = body.index("`", open_at + 1)
+    assert open_at < body.index("/* in the template */") < close_at, (
+        "premise: the `/*` run lies inside the literal and before the doc block"
+    )
+    assert [body[s:e] for s, e in guard._block_comment_spans(body)] == ["/** helper docs */"], (
+        "the `/*` inside the template is not code, so it opens no span; with the "
+        "guard gone the line end cuts the literal short and it is read as one"
+    )
+
+
+def test_an_unterminated_literal_swallows_the_rest_of_the_file() -> None:
+    """A literal that never closes runs to EOF, so what follows is not scanned as code.
+
+    The final `return len(text)` is what makes an unterminated literal swallow the
+    remainder rather than being skipped alone. Narrowing it to `return start + 1` is
+    reached by no row: measured 2026-10-09 (cycle `cyc20261009-025303`), this file
+    stays green (79 passed) with it changed.
+
+    The body is deliberately malformed - an unterminated literal can only be the last
+    thing in a file, since a line end closes a `"`-literal and an escape can carry one
+    past - and that is the point: this is the branch a malformed file takes, and it
+    decides whether the `/*` inside the unfinished literal is reported as code.
+    """
+    guard = _loaded_guard_module()
+    body = 'const t = "abc /* not a comment'
+    assert body.count(chr(34)) == 1, "premise: the literal is never closed"
+    assert guard._block_comment_spans(body) == [], (
+        "the `/*` inside the unterminated literal is not code, so it opens no span"
+    )
+
+
 def test_the_detector_and_the_counter_share_one_definition_of_counted() -> None:
     """The two sides of this tripwire must not drift apart again.
 
