@@ -3032,3 +3032,95 @@ class TestWSResolveSessionCwd:
             finally:
                 await cleanup()
         asyncio.run(_test())
+
+    def test_a_session_opened_from_another_project_receives_its_live_frames(self, tmp_path):
+        """The second half of requirement 6: the frames, not only the answer.
+
+        The three tests above guard the *answer*. This one guards the delivery,
+        which is what the requirement is actually about — and it was the half
+        that stayed broken: PR #1748 made the TUI ask first, but the ask carries
+        the *asker's* cwd (app.py says so at its own call site), so the
+        subscription record written from it named project A. The two messages
+        that follow — `resume_session`, then `task` — name project B, the
+        session's real home, and the read loop ignored them: it writes the
+        record only when the session id **changes**, which it did not.
+
+        `_broadcast` filters by the running turn's cwd, so the client stayed a
+        subscriber in the dict and was no target on the wire — measured
+        2026-10-08 (`cyc20261008-170402`): with the ask carrying the asker's
+        cwd, frames NONE and approval frames NONE; with the ask carrying the
+        project's cwd (that is, with the record correct), `turn_start`, the
+        stream, `turn_end`, and `approval_request` + `approval_resolved`. Only
+        the ask's cwd differed. A TUI in that state never finishes its turn,
+        and `request_approval` asks its question to nobody while its own
+        fail-closed guard reads a non-empty subscriber set.
+
+        Without the fix this test fails at `turn_start`: nothing arrives.
+        """
+        async def _test():
+            import emrg.session as session_mod
+
+            project_a = tmp_path / "project_a"
+            project_b = tmp_path / "project_b"
+            for root, sid, text in (
+                (project_a, "s_own", "hello from a"),
+                (project_b, "s_cross", "a scheduled task's cycle"),
+            ):
+                root.mkdir(parents=True, exist_ok=True)
+                sess = session_mod.Session.create_with_id(sid, root)
+                sess.append_message({"type": "message", "role": "user", "content": text,
+                                     "id": "m1", "session_id": sid})
+
+            server, _, cleanup = await _boot_server(tmp_path)
+            try:
+                self._write_index(
+                    {"s_cross": str(project_b / ".emrg" / "sessions" / "s_cross")}
+                )
+                ws = await connect_to_server()
+                try:
+                    # 1. the asker's own session first, so `last_session_id`
+                    #    is not s_cross when the ask below arrives.
+                    await ws.send(json.dumps({"type": "list_history",
+                                              "session_id": "s_own",
+                                              "cwd": str(project_a)}))
+                    await _recv_until(ws, lambda f: f.get("type") == "history_list",
+                                      what="history_list for s_own")
+
+                    # 2. the ask — carrying the ASKER's cwd, as the TUI sends it.
+                    await ws.send(json.dumps({"type": "resolve_session_cwd",
+                                              "session_id": "s_cross",
+                                              "cwd": str(project_a)}))
+                    answered = await _recv_until(
+                        ws, lambda f: f.get("type") == "session_cwd_result",
+                        what="session_cwd_result")
+                    assert answered["cwd"] == str(project_b), answered
+
+                    # 3./4. resume, then type a prompt — both naming s_cross's
+                    #       real home, and both re-naming a session the connection
+                    #       is already subscribed to.
+                    await ws.send(json.dumps({"type": "resume_session",
+                                              "session_id": "s_cross",
+                                              "cwd": str(project_b)}))
+                    await ws.send(json.dumps({"type": "task", "id": "r1",
+                                              "session_id": "s_cross",
+                                              "cwd": str(project_b), "prompt": "hi",
+                                              "timestamp": "2026-10-08T00:00:00Z",
+                                              "images": None,
+                                              "sandbox": "workspace-write"}))
+                    await _recv_until(ws, lambda f: f.get("type") == "turn_start",
+                                      what="turn_start")
+                    await _recv_until(ws, lambda f: f.get("type") == "turn_end",
+                                      what="turn_end")
+
+                    recorded = sorted({cwd for cwd in
+                                       server._session_subscribers.get("s_cross", {}).values()})
+                    assert recorded == [str(project_b)], (
+                        "the subscription record still names the asker's cwd, so the "
+                        "next broadcast will be addressed to nobody again: "
+                        f"{recorded}"
+                    )
+                finally:
+                    await ws.close()
+            finally:
+                await cleanup()
+        asyncio.run(_test())

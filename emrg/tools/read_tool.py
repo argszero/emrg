@@ -85,8 +85,15 @@ class ReadTool(ToolExecutor):
                     "start_line_byte_offset": {
                         "type": "integer",
                         "description": (
-                            "Byte offset within the first line to begin reading "
-                            "(default: 0). Use to resume within a truncated line."
+                            "Offset within the first line to begin reading (default: 0) — "
+                            "for reading one very long line in pieces. Applied to the "
+                            "decoded text, so it counts characters, not bytes (the two "
+                            "differ only for non-ASCII lines; the note it prints says "
+                            "chars). This tool never cuts a line, so no offset of its own "
+                            "making is ever needed: the offset is the caller's. An offset "
+                            "inside the line reports the line's length and what was shown; "
+                            "one at or past the line's end is reported and shows that line "
+                            "empty, never the whole line."
                         ),
                     },
                     "intent": {
@@ -241,11 +248,35 @@ class ReadTool(ToolExecutor):
         end = min(start + effective_limit, total_lines)
         selected = all_lines[start:end]
 
-        # Apply start_line_byte_offset to the first selected line
+        # ── Apply start_line_byte_offset to the first selected line ──
+        #
+        # The offset is honoured **literally**, and the result says what it did. Measured
+        # 2026-10-08 (`cyc20261008-153534`): this left a line whose end the offset was
+        # past **whole**, which is byte-identical to asking for offset 0 — so a caller who
+        # resumed a long line from the wrong byte was handed the entire line and could not
+        # tell its offset had been dropped, while `test_read_start_line_byte_offset_at_eol`
+        # (whose own docstring says "yields empty first line") asserted
+        # `"     3\t" in lines[0] or lines[0].strip().startswith("3")`, which the whole-line
+        # outcome satisfies too. A reading that cannot tell "the offset was applied" from
+        # "the offset was ignored" is not a reading, and this is the family the repo fixed
+        # for its guards (issue #1872: an empty subject is not a clean one).
+        offset_note: str | None = None
         if start_line_byte_offset > 0 and selected:
             first_line = selected[0]
+            selected[0] = first_line[start_line_byte_offset:]
             if start_line_byte_offset < len(first_line):
-                selected[0] = first_line[start_line_byte_offset:]
+                offset_note = (
+                    f"\nnote: line {start + 1} is {len(first_line)} chars; shown from "
+                    f"character {start_line_byte_offset}, so {len(selected[0])} of them"
+                )
+            else:
+                # `[n:]` past the end is `""`, which is the honest answer to the question
+                # that was asked; the note is what keeps it from reading like an empty line.
+                offset_note = (
+                    f"\nnote: start_line_byte_offset={start_line_byte_offset} is at or past "
+                    f"the end of line {start + 1} ({len(first_line)} chars), so that line is "
+                    f"shown empty — none of it was read"
+                )
 
         # Format with line numbers
         result_lines: list[str] = []
@@ -257,6 +288,9 @@ class ReadTool(ToolExecutor):
                 name="read",
                 content=f"(empty range: lines {start + 1}-{end} of {total_lines})",
             )
+
+        if offset_note is not None:
+            result_lines.append(offset_note)
 
         truncated = end < total_lines
         if truncated:
