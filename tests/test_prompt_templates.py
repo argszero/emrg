@@ -1288,7 +1288,7 @@ def test_the_open_source_flow_writes_only_in_the_session_clone() -> None:
     # `read-only` refuse every step of this flow).
     parts = text.split('DEV="{{ source_dir }}', 1)
     assert len(parts) == 2, "B.3 must define the clone as a shell variable the flow can reuse"
-    section = parts[1].split("#### B.4", 1)[0]
+    section = parts[1].split("##### 3.1.4", 1)[0]
     assert "workspace-write" in section and "read-only" in section, (
         "B.3 must state the tier this flow needs and the tier that refuses it — measured: "
         "`git clone`, `git checkout -b`, `git add` and `git commit` are all BLOCK under "
@@ -1364,7 +1364,7 @@ def test_the_default_branch_is_resolved_rather_than_spelled() -> None:
         "the template must keep the resolution mechanism it replaced the literal with"
     )
 
-    clone_block = text.split('DEV="{{ source_dir }}', 1)[1].split("#### B.4", 1)[0]
+    clone_block = text.split('DEV="{{ source_dir }}', 1)[1].split("##### 3.1.4", 1)[0]
     checkout = [
         line
         for block in _fenced_blocks("```bash\n" + clone_block)
