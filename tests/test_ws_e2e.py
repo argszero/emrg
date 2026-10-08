@@ -332,6 +332,78 @@ class TestWSVibeCheck:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_vibe_check_frame_carries_the_run_boundary_into_the_evidence(self):
+        """`cycle_started_at` on the frame must reach the evidence the judge sees.
+
+        A task session is reused by every run of its task, so the daemon's
+        "recent history" slice is mostly the *previous* run whenever this one was
+        light on narrative — measured 2026-09-30 on two consecutive `emrg-task`
+        records whose `work` strings describe the same merge. The scheduler fixes
+        that by sending the instant the run was dispatched; this asserts the
+        receiving half at the real wire, because the two halves of a hand-over bug
+        fail independently — the sender can be correct while the handler drops the
+        field, and every unit test of the summariser still passes.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                sess_dir = tmp / ".emrg" / "sessions" / "emrg-evolution-two-runs-task"
+                sess_dir.mkdir(parents=True, exist_ok=True)
+                (sess_dir / "history.jsonl").write_text(
+                    json.dumps({"type": "message", "role": "user",
+                                "content": "previous run prompt",
+                                "timestamp": "2026-10-08T09:00:05"}) + "\n" +
+                    json.dumps({"type": "message", "role": "assistant",
+                                "content": "the previous run merged PR #1760",
+                                "timestamp": "2026-10-08T09:20:00"}) + "\n" +
+                    json.dumps({"type": "message", "role": "user",
+                                "content": "this run prompt",
+                                "timestamp": "2026-10-08T13:08:26"}) + "\n" +
+                    json.dumps({"type": "message", "role": "assistant",
+                                "content": "this run voted and wrote the record",
+                                "timestamp": "2026-10-08T13:30:00"}) + "\n",
+                    encoding="utf-8",
+                )
+
+                server, _, cleanup = await _boot_server(tmp)
+                try:
+                    seen = {}
+
+                    async def fake_chat(messages, tools=None):
+                        seen["messages"] = messages
+                        return {"content": '{"work": "voted", '
+                                           '"recommend_slowdown": false, "slowdown_reason": ""}'}
+                    server.llm.chat = fake_chat
+
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "task_vibe_check",
+                            "session_id": "emrg-evolution-two-runs-task",
+                            "cwd": str(tmp),
+                            "task_name": "two-runs-task",
+                            "prompt": "run cycle",
+                            "completion_summary": "auxiliary",
+                            "cycle_started_at": "2026-10-08T13:08:25",
+                        }, ensure_ascii=False))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                        assert json.loads(frame).get("ok") is True
+
+                        contents = "\n".join(
+                            str(m.get("content", "")) for m in seen.get("messages", [])
+                        )
+                        assert "this run voted" in contents, contents
+                        assert "the previous run merged" not in contents, (
+                            "the frame's cycle_started_at did not reach the evidence — "
+                            "the handler dropped the boundary and the judge read the "
+                            "previous run's work as this run's"
+                        )
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_vibe_check_long_session_window_leading_tool_stripped(self):
         """Rant 2026-08-19T19:25:56 (root cause): slicing a validated session
         history to the last 100 messages can orphan a leading role:'tool'
