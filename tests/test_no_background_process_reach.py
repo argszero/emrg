@@ -23,8 +23,13 @@ because the temptation lives precisely in a cycle that has gates to run and a wi
 This is the same defect shape `tests/test_language_policy_reach.py` pins for the language
 policy: a rule that governs every actor, stated in carriers some actors never open. The fix
 is placement. `evolution_prompt.md` §Forbidden restates the rule for a cycle's own reader
-and is pinned by `tests/test_evolution_prompt_red_lines.py`; this file pins the carrier
-every session shares.
+and is pinned as a file by `tests/test_evolution_prompt_red_lines.py`; this file pins the
+carrier every session shares, and — since a restatement a cycle is never sent is not a
+restatement — the template's clause on the **render** too
+(`test_the_cycle_template_sends_the_rule_not_merely_states_it`). That render leg is defence
+in depth rather than the rule's only route: `system.j2` is prepended to every session, so a
+construct that removed the clause from this template alone would cost the cycle its own
+copy, not the rule.
 
 Named limit
 -----------
@@ -57,6 +62,25 @@ RED_LINE_TERMS = (
     "detached child",                         # the launcher shape
     "one at a time, with a generous `timeout`",      # what to do instead
     "the turn dies with its task attached",   # the failure, so the rule is not folklore
+    "no cycle may gate, skip or trade it away",
+)
+
+#: The terms of the *same* rule as `evolution_prompt.md` states it in its §Forbidden list.
+#: A separate list rather than a reuse of `RED_LINE_TERMS`, because the two carriers state
+#: one rule in two wordings: the session prompt asks for "one at a time, with a generous
+#: `timeout`" where the cycle template says "one at a time, and is waited for", and the
+#: session prompt names a "detached child" where the template names "no detached
+#: `subprocess`/`Popen`". Which wording a carrier uses is the carrier's business, so this
+#: list pins what the template must not lose — the rule, every shell shape, the launcher
+#: shape in the template's own spelling, the failure that gives the rule its teeth, and
+#: the permanence it claims — rather than the session prompt's phrasing, which would fail
+#: a truthful edit here.
+EVOLUTION_RED_LINE_TERMS = (
+    "Never start a background process",              # the rule itself
+    "No `&`, no `nohup`, no `disown`, no `setsid`",  # every shell shape, in one run
+    "no detached `subprocess`/`Popen`",              # the launcher shape
+    "the turn dies with its task attached",          # the failure, so the rule is not folklore
+    "Permanent and host-established",                # permanence, as this carrier states it
     "no cycle may gate, skip or trade it away",
 )
 
@@ -147,3 +171,88 @@ def test_the_scan_reports_absence() -> None:
     assert _missing_terms(sample, RED_LINE_TERMS) == list(RED_LINE_TERMS)
     doubled = f"{RED_LINE_HEADING}\n\n{RED_LINE_HEADING}\n\n- Must push\n"
     assert doubled.count(RED_LINE_HEADING) == 2
+
+
+#: The section of `evolution_prompt.md` the cycle's own copy of the rule sits under. Its
+#: bullet list runs to EOF, so the block is taken the way that file's own guards take it.
+EVOLUTION_FORBIDDEN_HEADING = "### Forbidden"
+
+
+def _render_evolution_prompt(tmp_path: Path, monkeypatch) -> str:
+    """`evolution_prompt.md` as a cycle receives it, rendered by the real builder.
+
+    Through `TaskHandler._build_evolution_prompt` rather than a fresh
+    `jinja2.Environment`: that method is the only thing that turns this template into a
+    prompt, so a hand-built environment could differ in `trim_blocks` / `lstrip_blocks` /
+    `undefined` or the loader path and the artifact under test would be a prompt no cycle
+    is ever sent. The context is the one a real records-driven call produces — a project
+    and nothing else — and `config_dir` is redirected at a tree this test made, so the
+    `projects.yml` read lands on a file the test wrote and never on the host's `~/.emrg`.
+    """
+    from emrg.protocol import InstanceIdentity  # noqa: PLC0415
+    from emrg.server import scheduler as mod  # noqa: PLC0415
+    from tests.task_handler_factory import make_handler  # noqa: PLC0415
+
+    import yaml  # noqa: PLC0415
+
+    project_dir = tmp_path / "demoproj"
+    project_dir.mkdir(exist_ok=True)
+    (tmp_path / "projects.yml").write_text(
+        yaml.safe_dump([{"name": "demoproj", "path": str(project_dir)}]), encoding="utf-8"
+    )
+    monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+    handler = make_handler(
+        name="demo-task",
+        config={"project": "demoproj"},
+        interval=300,
+        identity=InstanceIdentity(),
+        template_path=REPO_ROOT / "emrg" / "server" / "evolution_prompt.md",
+    )
+    return handler._build_evolution_prompt()
+
+
+def test_the_cycle_template_sends_the_rule_not_merely_states_it(tmp_path, monkeypatch) -> None:
+    """The rule's second carrier, measured on the prompt rather than on the file.
+
+    `evolution_prompt.md` is a Jinja2 template, so the paragraph it devotes to this rule
+    can be in the file and in no prompt: `_build_evolution_prompt` sends the *render*.
+    Measured 2026-10-08 (`cyc20261008-153113`) on master `c851f015`, wrapping the clause's
+    whole line — marker included — in a Jinja comment (`{# - **Never start a background
+    process …** #}`) leaves every file-level term check green (the terms are still in the
+    template, inside the comment) and drops the clause from the render entirely. The
+    session-prompt leg above cannot see that, because it renders a different artifact;
+    `tests/test_evolution_prompt_red_lines.py` cannot either, because it reads this one as
+    a file.
+
+    The rule still reaches a cycle's round through `system.j2`, which the daemon prepends
+    to every session — so this carrier is defence in depth, and it is the reason the terms
+    are pinned here rather than derived from the template: a check that read its
+    expectations out of the file it is judging would find no clause left to look for and
+    pass on the very mutation it exists for.
+    """
+    rendered = _render_evolution_prompt(tmp_path, monkeypatch)
+    block = _block_after(rendered, EVOLUTION_FORBIDDEN_HEADING)
+    assert block, (
+        "the rendered cycle prompt must carry a §Forbidden section: it is present in "
+        "evolution_prompt.md but no render a cycle receives contains it"
+    )
+    missing = _missing_terms(block, EVOLUTION_RED_LINE_TERMS)
+    assert not missing, (
+        f"the rendered §Forbidden of evolution_prompt.md is missing terms: {missing}. The "
+        f"rule is in the template and in no render — a Jinja construct around the clause "
+        f"removes it from every cycle's own copy while the file keeps every term"
+    )
+
+
+def test_the_cycle_template_scan_reports_absence() -> None:
+    """The instrument's control, for the template leg: absence must read as absence.
+
+    Without this, a heading rename or a render that returned nothing would leave the
+    assertion above comparing an empty block against the terms and failing — or, worse, a
+    future edit that made `_block_after` return the whole prompt would make it pass for
+    the wrong reason. Both directions are asserted on text this test owns.
+    """
+    sample = "intro\n\n### Forbidden\n\n- Must push\n"
+    assert _block_after(sample, EVOLUTION_FORBIDDEN_HEADING) != ""
+    assert _missing_terms(sample, EVOLUTION_RED_LINE_TERMS) == list(EVOLUTION_RED_LINE_TERMS)
+    assert _block_after("# Nothing here\n", EVOLUTION_FORBIDDEN_HEADING) == ""
