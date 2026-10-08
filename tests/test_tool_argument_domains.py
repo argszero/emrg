@@ -31,6 +31,7 @@ beside each tool (`tests/test_read_tool.py`, `tests/test_grep_tool.py`,
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -152,8 +153,20 @@ def test_a_shell_call_with_an_out_of_domain_timeout_never_runs(tmp_path, value):
         )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash on the Windows runner is WSL's, not the shell this control runs under in "
+    "CI: `bash.exe` there is the WSL launcher, which with no installed distribution "
+    "prints 'Windows Subsystem for Linux has no installed distributions.' and never runs "
+    "the command (measured 2026-10-08, run 37761817997 on PR #1936). The control asserts "
+    "a command really ran, which no shell on that runner can establish",
+)
 def test_a_positive_shell_timeout_still_runs(tmp_path):
-    """The control: an in-domain timeout still executes, so the refusal is not a wall."""
+    """The control: an in-domain timeout still executes, so the refusal is not a wall.
+
+    The refusal half above stays armed on Windows (both tools refuse before the spawn);
+    only this half needs a shell that runs, and the Windows runner has none.
+    """
     result = _run(bash_tool_v2.BashToolV2().execute({
         "command": "echo HELLO", "workdir": str(tmp_path), "timeout": 5,
         "intent": "print a word",
