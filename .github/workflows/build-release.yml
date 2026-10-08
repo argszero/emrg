@@ -350,6 +350,30 @@ jobs:
         run: bash packaging/bundle-git-gh.sh
 
       # ── 安装器（§10）────────────────────────────────────────
+      # Linux 腿先备好 AppImage 可更新化的两件工具（rant 2026-09-30T11:42:41 要求 2）：
+      # electron-builder 产出的 AppImage 里没有更新信息，修法是上游给的那条唯一的路
+      # ——`appimagetool -u` 重新封装（内嵌 + 生成 `.zsync`），而它需要 `zsyncmake`
+      # 才会写 `.zsync`、需要 `mksquashfs` 才能封装。这里装齐，`make-installer.sh`
+      # 那一步才有工具可按；缺工具时它**失败**而不是降级（一个不内嵌更新信息的
+      # AppImage 正是这条 rant 要修的东西，静默跳过等于把告警留着还让流水线变绿）。
+      - name: AppImage update tooling (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsync squashfs-tools
+          command -v zsyncmake
+          command -v mksquashfs
+          # appimagetool 本身是个 AppImage（Go 静态二进制），CI 里没有 FUSE，
+          # 用 APPIMAGE_EXTRACT_AND_RUN=1 就地解出来跑（同一个变量 make-installer
+          # 调它时也带着）。`--version` 是这条安装步骤的判据：装上了才算备好。
+          curl -fsSL -o /tmp/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage"
+          chmod +x /tmp/appimagetool
+          sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
+          APPIMAGE_EXTRACT_AND_RUN=1 appimagetool --version
+
       - name: Make installer
         shell: bash
         run: bash packaging/make-installer.sh
@@ -509,6 +533,7 @@ jobs:
             dist/artifacts/*.pkg
             dist/artifacts/*.exe
             dist/artifacts/*.AppImage
+            dist/artifacts/*.zsync
             dist/artifacts/*.tar.gz
             dist/artifacts/*.zip
             dist/artifacts/*.run
