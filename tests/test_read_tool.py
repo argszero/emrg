@@ -205,6 +205,45 @@ def test_read_start_line_byte_offset_at_eol(temp_file):
     )
 
 
+def test_read_start_line_byte_offset_exactly_at_the_line_end(temp_file):
+    """An offset *equal* to the line's length is at its end, not inside it.
+
+    The `<` that dropped the offset is an off-by-one, and the arm above cannot see one:
+    with `999` of a 6-character line, flipping the guard to `<=` leaves every assertion
+    there satisfied, because `"line 3"[999:]` and `"line 3"[6:]` are both `""`. Measured
+    2026-10-08 — the `<=` mutant survived the rest of this file, so the defect the issue
+    reports had two spellings, "at" and "past", and only the second one was pinned.
+    """
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({
+        "file_path": str(f),
+        "start_line": 3,
+        "start_line_byte_offset": 6,  # "line 3" is exactly 6 characters
+    }))
+    assert not result.error
+    lines = result.content.split("\n")
+    assert lines[0] == "     3\t", (
+        f"offset 6 of a 6-character line is at its end, so nothing of it is shown, "
+        f"got {lines[0]!r}"
+    )
+    assert "at or past the end of line 3" in result.content, result.content
+    assert "6 chars" in result.content
+    assert "line 4" in result.content  # the rest of the range is untouched
+
+
+def test_read_line_count_truncation_still_asks_for_offset_zero(temp_file):
+    """The tool's own truncation is by *line count*, so its continuation hint keeps
+    `start_line_byte_offset=0`: the offset that resumes a line is not the one that
+    continues a page (issue #1928, acceptance item 4)."""
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({"file_path": str(f), "line_limit": 2}))
+    assert not result.error
+    assert "truncated at start_line=3" in result.content
+    assert "start_line_byte_offset=0" in result.content
+
+
 def test_read_start_line_byte_offset_states_the_remainder(temp_file):
     """An offset inside the line reports the line's length and how much was shown.
 
