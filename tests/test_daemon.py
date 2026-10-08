@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -1957,26 +1958,40 @@ def test_context_message_appends_when_no_final_user_turn(tmp_path):
 
 def test_context_message_refresh_interval_freeze(tmp_path):
     """Within the refresh window the snapshot text stays frozen (byte-identical
-    across requests → prompt-cache friendly); after the window it refreshes."""
+    across requests → prompt-cache friendly); after the window it refreshes.
+
+    Both halves must be *observable*. The clock renders to whole seconds, so two
+    reads inside the same second produce the same text and an assertion that the
+    text changed cannot fail — cycle cyc20261008-155656 removed exactly such a
+    tautology (``!= text1 or == text1``) that had stood there as the only
+    evidence for the refresh half. Seeding the snapshot with a sentinel the clock
+    cannot produce makes each direction discriminating: inside the window the
+    sentinel comes back verbatim, past it the text is rebuilt from the clock.
+    """
     server = _make_server()
     session = Session.create_with_id("ctx-freeze", tmp_path)
     server.llm.config.context_refresh_interval_ms = 60000
+    sentinel = "[context] Current time: 1999-01-01T00:00:00+00:00"
 
+    # Seeded fresh → inside the window → the snapshot is returned byte-for-byte.
+    server._context_snapshots[session.session_id] = (sentinel, time.time() * 1000)
     m1 = server._build_context_message(session)
     assert m1 is not None
-    text1 = m1["content"]
+    assert m1["content"] == sentinel
 
     # Immediately again (same window) → frozen snapshot (same text)
     m2 = server._build_context_message(session)
     assert m2 is not None
-    assert m2["content"] == text1
+    assert m2["content"] == sentinel
 
-    # Force window expiry by backdating the snapshot timestamp
-    text, ts = server._context_snapshots[session.session_id]
-    server._context_snapshots[session.session_id] = (text, ts - 120_000)
+    # Force window expiry by backdating the snapshot timestamp → the stored text
+    # is dropped and the message is rebuilt from the clock.
+    server._context_snapshots[session.session_id] = (
+        sentinel, time.time() * 1000 - 120_000,
+    )
     m3 = server._build_context_message(session)
     assert m3 is not None
-    assert m3["content"] != text1 or m3["content"] == text1  # second may match; assert structure
+    assert m3["content"] != sentinel
     assert m3["content"].startswith("[context] Current time: ")
 
 
