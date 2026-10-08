@@ -88,6 +88,21 @@ printf 'zsync: 0.6.2\\nFilename: %s\\n' "$out" > "$out.zsync"
 
 _STUB_NOOP = "#!/bin/sh\nexit 0\n"
 
+#: 脚本自己是 bash + coreutils，不只是三件打包工具。它们被**链接进替身目录**，于是这一步的
+#: PATH 可以是**封闭的**，只有它自己造的东西。
+#:
+#: 为什么必须封闭：把宿主的 `/usr/bin` 留在 PATH 上，「缺工具」那一侧就成了一句空话 ——
+#: ubuntu 腿装了 `zsync` 与 `squashfs-tools`，那些工具在 /usr/bin 里躺着，替身目录里拿掉
+#: 一份并不等于它不在 PATH 上。实测 2026-10-08（run 37763045245，PR #1938）：同一份测试在
+#: macOS 全绿，在 ubuntu 腿
+#: `test_a_missing_tool_fails_and_names_it[zsyncmake]` / `[mksquashfs]` 双双变红 —— 红的
+#: 是这条测试的模拟，不是脚本（脚本按规矩用了它找得到的工具，并以 0 退出）。
+#: 缺少的名字会以「命令找不到」的形式当场变红，而不是安静地少测一侧。
+_COREUTILS = (
+    "sh", "bash", "mkdir", "mktemp", "cp", "chmod", "rm", "grep", "wc", "tr",
+    "basename", "uname", "dirname", "sed", "cat", "find",
+)
+
 
 def _write_exe(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
@@ -95,11 +110,15 @@ def _write_exe(path: Path, text: str) -> None:
 
 
 def _stub_bin(tmp_path: Path, *, tools: tuple[str, ...] = ("appimagetool", "zsyncmake", "mksquashfs")) -> tuple[Path, Path]:
-    """工具替身目录 + 它们写日志的目录。"""
+    """工具替身目录 + 它们写日志的目录。这个目录就是这一步的**全部** PATH。"""
     bin_dir = tmp_path / "bin"
     log_dir = tmp_path / "stublog"
     bin_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
+    for name in _COREUTILS:
+        real = shutil.which(name)
+        if real is not None:
+            (bin_dir / name).symlink_to(real)
     for tool in tools:
         _write_exe(bin_dir / tool, _STUB_APPIMAGETOOL if tool == "appimagetool" else _STUB_NOOP)
     return bin_dir, log_dir
@@ -131,7 +150,8 @@ def _run_updatable(tmp_path: Path, *, tools: tuple[str, ...]) -> tuple[subproces
     out_dir.mkdir(parents=True, exist_ok=True)
 
     env = {
-        "PATH": f"{bin_dir}:{Path('/usr/bin')}:{Path('/bin')}",
+        # 只有替身目录：宿主的 /usr/bin 会把「被拿走」的工具还回来（见 `_COREUTILS`）。
+        "PATH": str(bin_dir),
         "HOME": str(tmp_path),
         "TMPDIR": str(tmp_path),
         "STUB_LOG": str(log_dir),
