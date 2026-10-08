@@ -268,10 +268,12 @@ def _tool_silence_seconds(arguments: object) -> float:
     except (TypeError, ValueError):
         timeout = _TOOL_SILENCE_DEFAULT_SECONDS
     if not (math.isfinite(timeout) and timeout > 0):
-        # Not a bound at all — zero and below make the tool return at once, and
-        # an infinite one would disable the watchdog while the tool waited just
-        # as long. Falling back keeps the rule one sentence long ("a positive
-        # declared value, else the default") and always yields a finite bound.
+        # Not a bound at all — zero and below cannot bound anything (the shell tool
+        # refuses such a value outright, so the call returns at once, and a tool that
+        # accepted one would return just as fast), and an infinite one would disable
+        # the watchdog while the tool waited just as long. Falling back keeps the rule
+        # one sentence long ("a positive declared value, else the default") and always
+        # yields a finite bound.
         timeout = _TOOL_SILENCE_DEFAULT_SECONDS
     return timeout + _TOOL_SILENCE_GRACE_SECONDS
 

@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, count_argument
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +67,16 @@ class ReadTool(ToolExecutor):
                         "type": "integer",
                         "description": (
                             "Line number to start reading from (default: 1). "
+                            "1 or more; 0 or less is refused rather than read as the "
+                            "first line. "
                             "Alias: offset."
                         ),
                     },
                     "line_limit": {
                         "type": "integer",
                         "description": (
-                            f"The number of lines to read. "
+                            f"The number of lines to read. At least 1; 0 or less is "
+                            f"refused rather than read as the default. "
                             f"Only provide if the file is too large to read at once "
                             f"(default: {DEFAULT_MAX_LINES}, max: {MAX_LINES} for explicit calls). "
                             f"Alias: limit."
@@ -82,7 +85,10 @@ class ReadTool(ToolExecutor):
                     "start_line_byte_offset": {
                         "type": "integer",
                         "description": (
-                            "Offset within the first line to begin reading (default: 0) — "
+                            "Offset within the first line to begin reading "
+                            "(default: 0; 0 or more — a negative value is refused rather "
+                            "than read as an offset of 0, which would silently return the "
+                            "line whole) — "
                             "for reading one very long line in pieces. Applied to the "
                             "decoded text, so it counts characters, not bytes (the two "
                             "differ only for non-ASCII lines; the note it prints says "
@@ -106,29 +112,33 @@ class ReadTool(ToolExecutor):
     async def execute(self, arguments: dict) -> ToolResult:
         file_path = arguments.get("file_path", "")
 
-        # ── Resolve start_line: support both start_line (new) and offset (legacy alias) ──
-        raw_start = (arguments.get("start_line")
-                     or arguments.get("offset", 0) or 0)
-        try:
-            start_line = max(1, int(raw_start))
-        except (TypeError, ValueError):
-            start_line = 1
-
-        # ── Resolve line_limit: support both line_limit (new) and limit (legacy alias) ──
-        raw_limit = arguments.get("line_limit") or arguments.get("limit")
-        line_limit: int | None = None
-        if raw_limit is not None:
-            try:
-                line_limit = int(raw_limit)
-            except (TypeError, ValueError):
-                line_limit = None
-
-        # ── Resolve start_line_byte_offset ──
-        raw_byte_off = arguments.get("start_line_byte_offset", 0) or 0
-        try:
-            start_line_byte_offset = max(0, int(raw_byte_off))
-        except (TypeError, ValueError):
-            start_line_byte_offset = 0
+        # ── Resolve the three numeric parameters, refusing a value outside its
+        #    domain. `count_argument` carries the measurement: each of these used to
+        #    be read as a different number rather than as a caller error — a negative
+        #    `line_limit` sliced from the *end* of the file and named a continuation
+        #    at a negative line number, `line_limit=0` was falsy and read as absent,
+        #    and a negative byte offset was clamped to 0 (the whole line) with no note.
+        start_line, refusal = count_argument(
+            arguments, "start_line", "offset",
+            minimum=1, default=1,
+            hint="Line numbers are 1-based; omit it to start at the first line",
+        )
+        if refusal is not None:
+            return ToolResult(name="read", content=refusal, error=True)
+        line_limit, refusal = count_argument(
+            arguments, "line_limit", "limit",
+            minimum=1, default=None,
+            hint=f"Omit it to use the default of {DEFAULT_MAX_LINES} lines",
+        )
+        if refusal is not None:
+            return ToolResult(name="read", content=refusal, error=True)
+        start_line_byte_offset, refusal = count_argument(
+            arguments, "start_line_byte_offset",
+            minimum=0, default=0,
+            hint="It counts characters in from the start of the line; omit it to read the line whole",
+        )
+        if refusal is not None:
+            return ToolResult(name="read", content=refusal, error=True)
 
         if not file_path:
             return ToolResult(name="read", content="Error: no file_path provided", error=True)
