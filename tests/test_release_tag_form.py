@@ -124,9 +124,19 @@ def test_build_release_checks_the_tag_form_before_building() -> None:
         "would satisfy a substring check"
     )
     needs = jobs.get("build", {}).get("needs")
-    assert needs in ("verify-tag", ["verify-tag"]), (
+    # Membership, not identity: `build` may gain further gates (2026-10-08: the credential
+    # preflight, `verify-credentials`, which is asked before the build for the same reason
+    # this job is). What this pins is that the tag check is **on the path** — asserting the
+    # list was exactly `verify-tag` made a second gate look like a lost one.
+    needs = [needs] if isinstance(needs, str) else list(needs or [])
+    assert "verify-tag" in needs, (
         f"`build` does not depend on `verify-tag` (needs={needs!r}) — the check is orphaned "
         "and cannot fail a build"
+    )
+    assert set(needs) <= set(jobs), (
+        f"`build` needs {sorted(set(needs) - set(jobs))}, which build-release.yml does not "
+        "define — a need naming no job never runs, and GitHub reports the run as failed only "
+        "after the tag is pushed"
     )
     gate = str(jobs["verify-tag"].get("if") or "")
     assert "startsWith(github.ref, 'refs/tags/')" in gate, (
