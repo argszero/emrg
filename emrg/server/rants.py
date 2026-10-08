@@ -193,6 +193,12 @@ def update_rant(
     ``completed`` timestamp is auto-written (ISO local time); leaving
     ``completed`` clears the field.
 
+    The ``completed`` timestamp is the ``completed`` status's shadow: it is written
+    **only** when the resulting status is ``completed`` — auto-written by the
+    transition when none is given, or replaced by an explicit one — and cleared when
+    the status moves off ``completed``. An explicit stamp whose resulting status is
+    anything else is refused, so no row carries a stamp the state machine calls unfinished.
+
     The completion stamp this call **writes** — explicit, or auto-written by the
     transition — is checked against the row's own submission instant and the
     update is refused when it does not follow it (`_completion_ordering_error`
@@ -200,7 +206,8 @@ def update_rant(
 
     Returns:
         ``(ok, message)`` — ok=False with a reason on invalid transition /
-        unknown timestamp / a completion stamp out of order.
+        unknown timestamp / a completion stamp out of order or off the
+        ``completed`` status.
     """
     rants = _read_rants(rants_log)
     for r in rants:
@@ -219,6 +226,18 @@ def update_rant(
                         f"(must be pending→in_progress→completed, no skipping)"
                     )
                 target = status
+        # A completion stamp is the completed status's shadow, and it is written only with it.
+        # Without this the two branches disagreed: the transition cleared the field for every
+        # target but `completed`, while the explicit-argument branch wrote it unconditionally
+        # further down — so `status='in_progress', completed=<stamp>` (and a bare `completed`
+        # on a `pending` row) stored a completion stamp on a row the state machine calls
+        # unfinished, and `action="list"` printed both facts in one row.
+        if completed is not None and target != "completed":
+            return False, (
+                f"invalid completed: {completed!r} is a completion stamp, but the resulting "
+                f"status would be {target!r} - a completion stamp is written only together "
+                f"with status='completed'"
+            )
         # The stamp the transition writes, or the explicit one when given: validated as the
         # value it is about to store, so the auto-written path is covered too (a row whose
         # own timestamp is in the future cannot be completed either).
