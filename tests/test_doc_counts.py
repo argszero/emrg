@@ -705,8 +705,11 @@ _MIDLINE_DEFINITION_FORM = re.compile(
 # glob string, a doc block and one live `it(...)` to
 # `emrg/gui/test/build-config.test.js` makes the regex report `['/**")) {']`
 # where the scanner reports nothing (and the regex is not merely noisy: on the
-# two files of its own suite that spell the pattern out in prose it reads 20
-# spans where 2 exist, 4 where 0).
+# two files of its own suite that spell the pattern out in prose it reads 14
+# spans where 2 exist, 4 where 0 - re-measured 2026-10-09, `cyc20261009-022334`:
+# 14 on the copy that preceded this file's own rewrite, 21 on the copy carrying
+# it because its new comments add spans, and 2 for the scanner on both, so the
+# number is re-measured rather than quoted).
 #
 # What the comment *contains* is still judged by the counter's own pattern
 # (`_would_be_counted`), not by a lookalike of it: an earlier version used
@@ -2171,6 +2174,38 @@ def test_an_escaped_quote_does_not_end_the_string_it_is_inside() -> None:
         "the `/*` inside the string must not open a span - with the escape skip "
         "removed the scan closes the string at the escaped quote and resumes inside "
         "it, reporting a comment that is not there"
+    )
+
+
+def test_a_quote_in_code_position_does_not_swallow_the_block_below() -> None:
+    """The clause that skips an unclosed quote is load-bearing, so it is pinned.
+
+    A quote in **code** position - the apostrophe of a regex literal, the one
+    shape `_block_comment_spans` declares it cannot model - never closes on its
+    line, so the skip is what keeps the walk alive: without it the literal is
+    read as an unterminated string, the walk runs to the end of the file, and the
+    block comment below is never seen. That silent return is the false green this
+    tripwire exists to prevent. Measured 2026-10-09 (`cyc20261009-022334`):
+    removing the clause leaves the whole file green, so this is the row that
+    reaches it; the neighbouring apostrophe row does not, because the
+    line-comment branch answers its input first.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        "const re = /don't/;\n"
+        "/**\n"
+        'it("disabled", () => {});\n'
+        "*/\n"
+        'it("live", () => {});\n'
+    )
+    assert len(guard._DEFINITION_FORM.findall(body)) == 2, (
+        "premise: the counter counted the commented definition too, which is the "
+        "over-count this tripwire reports"
+    )
+    assert guard._commented_out_definitions(body) == ["/**"], (
+        "the one block comment in this body must still be reported - a quote in "
+        "code position is skipped alone, and without that skip the walk runs to "
+        "the end of the file and the block below is never seen"
     )
 
 
