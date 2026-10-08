@@ -1913,6 +1913,116 @@ def test_a_record_completing_exactly_at_the_citation_counts(
     assert "may have removed it before this reading ran" in detail, detail
 
 
+def test_a_citation_newer_than_every_record_says_the_store_never_received_it(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The one fact that decides *which side of the gap the reader is on*.
+
+    A rant timestamp is host-local: it indexes the ledger of the machine that wrote it, so an
+    issue opened elsewhere names a handle that exists, in a store this reading never opens. The
+    row cannot close that gap, but the ledger carries the fact that says so — is the citation
+    newer than every record the store ranks? Here it is, so nothing here ranked above the handle,
+    no retention rule could have displaced it, and the store had not received it by its last
+    write. The row names that record and says which machine the handle can be walked on, instead
+    of sending its reader after a copy that was never here.
+    """
+    cited = "2026-10-05T00:00:00+08:00"
+    path = _ledger_lines(tmp_path, _completed_row("2026-01-01T00:00:00+08:00", "2026-09-01T00:00:00+08:00"))
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, cited)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "this ledger's own newest record is `2026-09-01T00:00:00+08:00`" in detail, detail
+    assert "older than the citation" in detail, detail
+    assert "cannot explain the absence" in detail, detail
+    assert "written on another machine" in detail, detail
+
+
+def test_the_newest_record_is_the_key_the_retention_rule_sorts_by(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """`completed or timestamp` — a submission-only reading names an instant the store ranks *lower*.
+
+    One record submitted in January and completed in October, cited from September: the store
+    ranks that record **above** the citation, so the row may not say the citation is newer than
+    every record it holds. Read by the submission instant alone, the same ledger says exactly
+    that — the sentence this reading prints about a handle nothing here could have held, made
+    from the wrong end of the row.
+    """
+    cited = "2026-09-30T00:00:00+08:00"
+    path = _ledger_lines(tmp_path, _completed_row("2026-01-01T00:00:00+08:00", "2026-10-02T00:00:00+08:00"))
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, cited)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "at or after the citation" in detail, detail
+    assert "older than the citation" not in detail, detail
+
+
+def test_a_record_ranking_exactly_at_the_citation_is_not_newer_than_it(mod) -> None:
+    """`<`, not `<=` — the count's `>=` edge read from the other side.
+
+    A record whose rank key *is* the cited instant is one the store ranks at the citation, not
+    below it. Reading `<=` would call the citation newer than every record the ledger holds and
+    print the sentence that licenses "nothing here could have held it" from a record it holds.
+
+    Called directly rather than through the queue: a stored spelling that lands on the same
+    instant as the citation is caught a step earlier, by `_same_instant_spelling`'s remedy.
+    """
+    rows = [json.loads(_completed_row("2026-01-01T00:00:00+08:00", "2026-09-30T00:00:00+08:00"))]
+
+    text = mod._absent_origin_reading(rows, "2026-09-30T00:00:00+08:00")
+
+    assert "at or after the citation" in text, text
+    assert "older than the citation" not in text, text
+
+
+def test_a_ledger_with_nothing_comparable_does_not_claim_the_citation_is_newer(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """`None` is "not measurable here", so it is not "older than the citation".
+
+    A ledger whose only row carries no instant at all cannot date anything against the citation,
+    and the row says so. Folding that `None` into the "older" branch would make the absent row
+    itself the only evidence for a claim about the store — the same direction this family always
+    refuses, one helper along.
+    """
+    cited = "2026-10-05T00:00:00+08:00"
+    path = _ledger_lines(tmp_path, json.dumps({"timestamp": "garbage", "status": "pending"}))
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, cited)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(path)])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "holds nothing comparable to date it against" in detail, detail
+    assert "older than the citation" not in detail, detail
+
+
+def test_the_newest_record_key_leaves_unorderable_rows_out(mod) -> None:
+    """The helper's own edges, because one of them is a crash rather than a wording.
+
+    A row whose instant is naive is not comparable with an aware citation, and comparing the two
+    raises — so the filter is load-bearing, not cosmetic, and a ledger holding both shapes is the
+    case that shows it. A row with no usable instant at all is skipped rather than read as the
+    empty string, and an empty ledger answers `None`: each of those is "not measurable", never
+    "older than the citation".
+    """
+    aware = {"timestamp": "2026-01-01T00:00:00+00:00", "status": "pending"}
+    mixed = [aware, {"timestamp": "2026-02-01T00:00:00", "status": "pending"}]
+
+    assert mod._newest_record_key(mixed, "2026-06-01T00:00:00+00:00") == aware["timestamp"]
+    assert mod._newest_record_key([{"timestamp": "garbage"}], "2026-06-01T00:00:00+00:00") is None
+    assert mod._newest_record_key([], "2026-06-01T00:00:00+00:00") is None
+    # The key, not the submission instant: the completion stamp of a completed row is what wins.
+    rows = [json.loads(_completed_row("2026-01-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"))]
+    assert mod._newest_record_key(rows, "2026-06-01T00:00:00+00:00") == "2026-05-01T00:00:00+00:00"
+
+
 def test_a_near_match_names_the_ledgers_own_spelling(mod, monkeypatch, capsys, tmp_path) -> None:
     """A citation that drops the microseconds is fixed by writing the stored spelling.
 
