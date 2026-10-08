@@ -687,12 +687,88 @@ _MIDLINE_DEFINITION_FORM = re.compile(
 )
 
 # The eighth escape's span finder (see _commented_out_definitions below).
-# Non-greedy so adjacent comments cannot merge into one span, and `S` for
-# multi-line blocks. What the comment *contains* is judged by the counter's own
-# pattern (`_would_be_counted`), not by a lookalike of it: an earlier version used
+#
+# This used to be `re.compile(r"/\*.*?\*/", re.S)` - non-greedy so adjacent
+# comments could not merge, `S` for multi-line blocks. It is a scanner now,
+# because that regex cannot tell an opener from the same two characters **inside
+# a string literal**. Measured 2026-10-09 (cycle cyc20261009-010332): in a file
+# holding `const GLOBS = ["renderer/**"];` ahead of any one block comment, the
+# first span opened *inside the string* and ran to that comment's terminator, so
+# every live `it(`/`test(` definition between the two was reported as commented
+# out - a guard reddening a file with nothing to repair, prescribing a repair
+# (delete or restore) its author cannot perform, which is how a guard gets
+# trained away. The shape is ordinary here: this repo spells glob patterns
+# `"dir/**"` throughout its build and nav tests. Measured on `4f14cc55`,
+# 2026-10-09 (cycle cyc20261009-010332): the two finders agree on all 56 of this
+# finder's own subjects, so the trap is latent today rather than firing - it
+# fires on an ordinary addition, which is what the tests below pin. Appending a
+# glob string, a doc block and one live `it(...)` to
+# `emrg/gui/test/build-config.test.js` makes the regex report `['/**")) {']`
+# where the scanner reports nothing (and the regex is not merely noisy: on the
+# two files of its own suite that spell the pattern out in prose it reads 20
+# spans where 2 exist, 4 where 0).
+#
+# What the comment *contains* is still judged by the counter's own pattern
+# (`_would_be_counted`), not by a lookalike of it: an earlier version used
 # a separate `_BLOCK_COMMENT_DEFINITION` regex and fired on inline comments the
 # counter had never counted, advising a repair for drift that did not exist.
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+def _skip_string_literal(text: str, start: int) -> int:
+    """The index just past the string literal whose quote sits at `start`.
+
+    A quote that reaches a line end without closing is not a string - JavaScript
+    allows no bare newline inside one - so that one is skipped alone. It is what
+    keeps an apostrophe in prose (`// don't`) from swallowing the rest of the
+    file.
+    """
+    quote = text[start]
+    i = start + 1
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == quote:
+            return i + 1
+        if ch == "\n" and quote != "`":
+            return start + 1
+        i += 1
+    return len(text)
+
+
+def _block_comment_spans(text: str) -> list[tuple[int, int]]:
+    """`(start, end)` for every block comment in JS/TS source, in order.
+
+    A left-to-right scan over the four contexts that decide it - line comment,
+    block comment, string literal, code - so the two characters `/*` open a span
+    where the language puts them and not inside a string. A regex literal is not
+    modelled (one containing `//` or a quote can still mislead the scan): that is
+    a smaller gap than the one this replaces, and on the 56 files this finder is
+    actually run over (`renderer/src/**/*.test.ts(x)`, `emrg/gui/test/**/*.test.js`)
+    the regex and the scanner agree on all of them - measured 2026-10-09 on
+    `4f14cc55`, so this is a trap closed, not a live false red repaired. An
+    unterminated `/*` runs to the end of the file, which is how a compiler reads
+    it.
+    """
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        two = text[i : i + 2]
+        if two == "//":
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            i = newline + 1
+        elif two == "/*":
+            close = text.find("*/", i + 2)
+            spans.append((i, n if close == -1 else close + 2))
+            if close == -1:
+                break
+            i = close + 2
+        elif text[i] in "\"'`":
+            i = _skip_string_literal(text, i)
+        else:
+            i += 1
+    return spans
 # The detector's predicate is the **counter's own pattern**, not a lookalike.
 #
 # A reference implementation on the real runner (pm25coder, 2026-09-10, on this
@@ -786,11 +862,13 @@ def _commented_out_definitions(text: str) -> list[str]:
 
     The predicate is `_would_be_counted` (the counter's own pattern) rather than
     the lookalike `_BLOCK_COMMENT_DEFINITION`, so the detector fires only where
-    there is real drift - see the measurement above `_would_be_counted`.
+    there is real drift - see the measurement above `_would_be_counted`. The
+    spans come from `_block_comment_spans`, which reads strings and line
+    comments first, so an opener spelled inside a string literal is not one.
     """
     found: list[str] = []
-    for block in _BLOCK_COMMENT.finditer(text):
-        body = block.group(0)
+    for start, end in _block_comment_spans(text):
+        body = text[start:end]
         if _would_be_counted(body):
             found.append(body.splitlines()[0].strip())
     return found
@@ -1990,6 +2068,86 @@ def test_the_detector_does_not_fire_where_the_counter_never_counted() -> None:
             f"{label}: the counter and the runner agree here, so the detector must "
             "stay silent - firing would red a file with nothing to repair"
         )
+
+
+def test_an_opener_spelled_inside_a_string_literal_is_not_a_comment() -> None:
+    """A string holding `/*` must not open a span (measured 2026-10-09).
+
+    The shape is ordinary in this repo's own tests - a glob written `"dir/**"` -
+    and the regex this replaced could not tell a string from code: it opened a
+    span *inside* the string and ran it to the next terminator, so every live
+    definition between the two was reported as commented out. Asserted on the
+    span text as well as on the verdict, because a span that merely *exists* is
+    what the old finder produced too - it was in the wrong place.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        '"use strict";\n'
+        'const { test } = require("node:test");\n'
+        'const GLOBS = ["renderer/**", "vendor/**"];\n'
+        "\n"
+        'test("one", () => {});\n'
+        'test("two", () => {});\n'
+        "\n"
+        "/** helper docs */\n"
+        "function whitelistCovers(rel, list) { return true; }\n"
+    )
+    assert len(guard._DEFINITION_FORM.findall(body)) == 2, (
+        "premise: both live definitions are ones the counter counted, so a report "
+        "here would be about code the runner executes"
+    )
+    assert [body[s:e] for s, e in guard._block_comment_spans(body)] == ["/** helper docs */"], (
+        "the only block comment in this file is the trailing doc block; a span that "
+        "starts inside the string is the defect this finder replaced"
+    )
+    assert not guard._commented_out_definitions(body), (
+        "no definition sits inside a block comment here, so the detector must be silent"
+    )
+
+
+def test_the_detector_still_fires_with_an_opener_bearing_string_above_it() -> None:
+    """The positive half, string included: real drift is still reported.
+
+    Silencing the false red must not silence the tripwire - this is the shape the
+    eighth escape exists for, with the string-bearing line in front of it.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        'const GLOBS = ["renderer/**"];\n'
+        "/**\n"
+        'it("disabled", () => {});\n'
+        "*/\n"
+        'it("live", () => {});\n'
+    )
+    assert len(guard._DEFINITION_FORM.findall(body)) == 2, (
+        "premise: the counter counted the commented definition too, which is the "
+        "over-count this tripwire reports"
+    )
+    assert guard._commented_out_definitions(body), (
+        "a commented-out definition must still be reported when a string above it "
+        "carries the two characters `/*`"
+    )
+
+
+def test_the_span_finder_reads_line_comments_before_strings() -> None:
+    """An apostrophe in prose is not an unterminated string.
+
+    Without the line-comment context a `'` in a comment would look like a string
+    opener and could hide a real block comment below it - trading a false red for
+    the false green this tripwire exists to prevent.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        "// don't rewrite the block below by hand\n"
+        "/*\n"
+        'it("disabled", () => {});\n'
+        "*/\n"
+        'it("live", () => {});\n'
+    )
+    assert guard._commented_out_definitions(body), (
+        "the commented-out definition below the apostrophe-bearing comment must "
+        "still be found"
+    )
 
 
 def test_the_detector_and_the_counter_share_one_definition_of_counted() -> None:
