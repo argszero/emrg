@@ -97,8 +97,10 @@ States
 ------
     linked       the reading is complete in both directions
     unclaimed    no open PR declares the issue. The row names what it can see instead:
-                 closed PRs that declared it (the "landed and never closed" shape), or
-                 PRs that referenced it without declaring (a mention is not a claim)
+                 closed PRs that declared it (the "landed and never closed" shape, or the
+                 opposite one - an issue reopened after that PR landed, which says the PR
+                 did not finish it), or PRs that referenced it without declaring (a
+                 mention is not a claim)
     duplicate    more than one open PR declares the same open issue
     one-way      one side names the other and is not named back. Both directions get it,
                  because they have different readers: a PR that declares no issue leaves
@@ -1104,7 +1106,23 @@ def judge_issues(
                     )
                 )
                 continue
-            if refs.declared_closed:
+            if refs.declared_closed and issue.get("state_reason") == "reopened":
+                # The opposite reading from the branch below, and the remedy must not be
+                # the same one. GitHub closed this issue when the declaring PR merged and
+                # a later cycle opened it again, which is a judgement that the PR did not
+                # finish it; telling the reader to close it "with the reading that says
+                # the work is done" would have them undo that judgement on the strength of
+                # the very PR that was found short. Measured 2026-10-08 on #1906: a release
+                # issue whose declaring PR did step 1 of its 4, reopened by the cycle that
+                # landed it - and this row told the next reader to close it.
+                detail = (
+                    f"{_numbers(refs.declared_closed)} declared `Closes #{number}` and are "
+                    "merged or closed, so GitHub closed this issue when they landed - and "
+                    "it has been reopened since, which says that PR did not finish it. "
+                    "Read this issue's own body for what it still leaves; the declaring "
+                    "PR's `Closes` is not the reading that closes it"
+                )
+            elif refs.declared_closed:
                 detail = (
                     f"{_numbers(refs.declared_closed)} declared `Closes #{number}` and "
                     "are merged or closed, which is the shape of work that landed and "

@@ -62,9 +62,23 @@ def mod():
 
 def _issue(
     number: int, title: str = "an issue", created: str = "2026-09-24T10:00:00Z",
-    body: str = "",
+    body: str = "", state_reason: str | None = None,
 ) -> dict:
-    return {"number": number, "title": title, "created_at": created, "body": body}
+    """One issue row, as `/issues` reports it — `state_reason` included, as it always is.
+
+    The field is `None` for an issue never closed and `"reopened"` for one GitHub closed
+    and a later cycle opened again. It is the only thing that separates the two readings
+    of "a merged `Closes` and an issue still open", so the fixtures spell it rather than
+    leave its absence to stand for one of them (`test_a_reopened_issue_is_not_told_to_
+    close_itself` and its control are what hold the pair apart).
+    """
+    return {
+        "number": number,
+        "title": title,
+        "created_at": created,
+        "body": body,
+        "state_reason": state_reason,
+    }
 
 
 def _comment(text: str) -> dict:
@@ -787,6 +801,44 @@ def test_a_merged_declarer_names_the_landed_and_never_closed_shape(
     assert "#30 declared `Closes #10`" in detail
     assert "merged or closed" in detail
     assert "landed and was never closed" in detail
+    assert "reopened" not in detail, (
+        "an issue that was never closed is not a reopened one, and the two are opposite "
+        "readings; if this row carried the reopened words too the pair would be one row "
+        "again and the remedy below would go unfixed"
+    )
+
+
+def test_a_reopened_issue_is_not_told_to_close_itself(mod, monkeypatch, capsys) -> None:
+    """A merged `Closes` with the issue still open has two readings, and they are opposites.
+
+    `state_reason="reopened"` means GitHub closed the issue when the declaring PR landed
+    and a later cycle opened it again — a judgement that the PR did *not* finish it. The
+    default row's remedy ("close this issue with the reading that says the work is done")
+    would have the next reader undo that judgement on the strength of the very PR that was
+    found short, so the row has to say the opposite instead. Measured 2026-10-08 on #1906:
+    a release issue whose declaring PR did step 1 of its 4, reopened by the cycle that
+    landed it, and read by this tool as "landed and was never closed".
+
+    The state stays `unclaimed`, which is what it is — no *open* PR declares the issue.
+    Only the reading it names changes.
+    """
+    fake = FakeGh(
+        [_issue(10, "reopened after a partial PR", state_reason="reopened")],
+        [],
+        {10: [_refers_to(30, is_pr=True, state="closed", body="Closes #10.")]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue UNCLAIMED")
+    assert "#30 declared `Closes #10`" in detail
+    assert "reopened since" in detail, detail
+    assert "landed and was never closed" not in detail, (
+        "the reopened reading contradicts the never-closed one; carrying both would leave "
+        "the remedy this issue needs ruled out still printed"
+    )
 
 
 def test_a_closed_issue_naming_a_pr_is_not_a_live_link(mod, monkeypatch, capsys) -> None:
