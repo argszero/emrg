@@ -85,7 +85,10 @@ class ReadTool(ToolExecutor):
                     "start_line_byte_offset": {
                         "type": "integer",
                         "description": (
-                            "Offset within the first line to begin reading (default: 0) — "
+                            "Offset within the first line to begin reading "
+                            "(default: 0; 0 or more — a negative value is refused rather "
+                            "than read as an offset of 0, which would silently return the "
+                            "line whole) — "
                             "for reading one very long line in pieces. Applied to the "
                             "decoded text, so it counts characters, not bytes (the two "
                             "differ only for non-ASCII lines; the note it prints says "

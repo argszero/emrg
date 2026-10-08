@@ -179,16 +179,15 @@ def test_a_positive_shell_timeout_still_runs(tmp_path):
 #: only place a caller is told the domain *before* the call, so a description that
 #: states no bound is the declaration half of the same defect.
 #:
-#: `read.start_line_byte_offset` has no row: its description is being rewritten by
-#: the open PR #1929 (the offset is honoured literally there, and the text says what
-#: the note reports), so adding the domain sentence here would make the two branches
-#: edit the same lines and conflict. The behaviour is pinned either way
-#: (`tests/test_read_tool.py::test_read_refuses_a_negative_byte_offset`), and the
-#: sentence lands with that rewrite — recorded in the issue this file serves (#1935)
-#: so the omission is a stated gap rather than a silently missing row.
+#: `read.start_line_byte_offset` was the last missing row, and its absence was **stated**
+#: rather than silent: its description was being rewritten by the then-open PR #1929, so
+#: editing the same lines here would have conflicted. #1929 merged (`2893bfad`) with a
+#: description that named no bound, and the row was added on top of that rewrite — the
+#: three carriers of `read` now declare their domains in the same table.
 DOMAINS = [
     (read_tool.ReadTool(), "start_line", ("1 or more", "at least 1", ">= 1")),
     (read_tool.ReadTool(), "line_limit", ("at least 1", "1 or more", ">= 1")),
+    (read_tool.ReadTool(), "start_line_byte_offset", ("0 or more", "at least 0", ">= 0")),
     (grep_tool.GrepTool(), "context_before", ("0 or more", "at least 0", ">= 0")),
     (grep_tool.GrepTool(), "context_after", ("0 or more", "at least 0", ">= 0")),
     (grep_tool.GrepTool(), "max_results", ("at least 1", "1 or more", ">= 1")),
