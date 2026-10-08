@@ -94,6 +94,15 @@ export interface ComposerProps {
   cancel?: (sessionId: string) => Promise<unknown>;
   /** / 指令路由回调（Batch 5 接线：/clear /model /memory …） */
   onCommand?: (routing: CommandRouting) => void;
+  /**
+   * 父级接管档位时传入：点击只上报意图，显示值取自 `sandbox` prop（rant
+   * 2026-09-30T09:30:16，GUI 半边）。档位属于**会话**、由 daemon 落盘并广播，
+   * 所以有它时本组件不再持副本——客户端先改自己那份，一旦 daemon 拒绝
+   * （非法档位、无会话）它就会「对自己正确、对别的客户端错误」。
+   *
+   * 不传 = 维持原样（单挂载/单测）：本地 state 决定了显示与随消息下发的档位。
+   */
+  onSandboxChange?: (mode: string) => void;
   /** 测试注入：挂载后回填 tiptap Editor 实例（命令驱动测试用） */
   editorRef?: MutableRefObject<Editor | null>;
 }
@@ -147,6 +156,7 @@ export function Composer({
   logLine: logLineProp,
   cancel: cancelProp,
   onCommand,
+  onSandboxChange,
   editorRef,
 }: ComposerProps) {
   const { t } = useI18n();
@@ -159,7 +169,17 @@ export function Composer({
   busyRef.current = busy;
   // 沙箱档位（重构回归恢复，rant 2026-08-30T16:34:29）：默认 workspace-write（vanilla 同款），
   // 发送时随消息下发；切换仅允许三档（与 vanilla setSandbox 校验一致）。
-  const [tier, setTier] = useState<SandboxTier>(sanitizeSandbox(sandbox) ?? "workspace-write");
+  // 父级接管后（rant 2026-09-30T09:30:16 GUI 半边）本 state 只是**回落**：档位归
+  // daemon 的会话属性，显示读 `sandbox` prop，点击走 onSandboxChange 上报。
+  const [localTier, setLocalTier] = useState<SandboxTier>(sanitizeSandbox(sandbox) ?? "workspace-write");
+  const parentOwnsTier = typeof onSandboxChange === "function";
+  const tier: SandboxTier = parentOwnsTier
+    ? (sanitizeSandbox(sandbox) ?? "workspace-write")
+    : localTier;
+  const chooseTier = (next: SandboxTier): void => {
+    if (parentOwnsTier) onSandboxChange?.(next);
+    else setLocalTier(next);
+  };
   // ⚠️ (rant 2026-08-28T22:27:01) 链接改用应用内对话框收集 URL（Electron 禁用 window.prompt）
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [linkHref, setLinkHref] = useState("");
@@ -728,7 +748,7 @@ export function Composer({
               aria-label={t(i18nKey)}
               aria-pressed={tier === tierKey}
               data-testid={`sandbox-${tierKey}`}
-              onClick={() => setTier(tierKey)}
+              onClick={() => chooseTier(tierKey)}
             >
               {t(shortKey)}
             </button>

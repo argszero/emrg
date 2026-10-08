@@ -43,6 +43,20 @@ interface EmrgWindow {
     init?: () => Promise<InitResult>;
     onEvent?: (cb: (evt: DaemonEventFrame) => void) => () => void;
     sendMessage?: (p: SendMessagePayload) => Promise<{ requestId?: string }>;
+    /**
+     * The two optional channels the bridge needs as well, and the reason this
+     * interface is not just "init/onEvent/sendMessage" any more: a method that
+     * exists in preload.js but is absent from *this* literal reaches the bridge as
+     * `undefined`, and the bridge then answers from its no-op default — which for
+     * `respondApproval` meant the GUI's approval dialog sent nothing at all (rant
+     * 2026-09-29T15:52:38, GUI half; found 2026-10-08).
+     */
+    setSandbox?: (p: { sessionId: string; mode: string }) => Promise<unknown>;
+    respondApproval?: (p: {
+      sessionId: string;
+      requestId: string;
+      approved: boolean;
+    }) => Promise<{ ok?: boolean }>;
   };
 }
 
@@ -73,6 +87,26 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.sendMessage) return { requestId: p.requestId };
           return emrg.sendMessage(p);
+        },
+        // Both wrappers read `window.emrg` per call (like the two above, to tolerate a
+        // late-injected bridge) and **throw** when the channel is absent, because the
+        // bridge distinguishes the two answers: a missing method is "this build cannot
+        // do it" (`false`), which a wrapper that always resolved would misreport as
+        // "done". Same reason the refusal path is a `throw` here and not a silent no-op.
+        setSandbox: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.setSandbox) throw new Error("setSandbox unavailable");
+          return emrg.setSandbox(p);
+        },
+        // Without this the GUI's approval dialog answered nothing: the click reached
+        // `bridge.respondApproval`, found `emrg.respondApproval` undefined and returned
+        // false, while `emrg:respondApproval` sat in main.js and preload.js unreached —
+        // the daemon then held the confined call until its own timeout refused it
+        // (rant 2026-09-29T15:52:38, GUI half).
+        respondApproval: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.respondApproval) throw new Error("respondApproval unavailable");
+          return emrg.respondApproval(p);
         },
       },
       transcript,

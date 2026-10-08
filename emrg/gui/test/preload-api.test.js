@@ -23,7 +23,7 @@ const path = require("node:path");
 
 const PRELOAD = fs.readFileSync(path.join(__dirname, "..", "preload.js"), "utf8");
 
-/** 冻结的期望 API 面：53 invoke 方法（按 preload.js 实际顺序）+ onEvent */
+/** 冻结的期望 API 面：55 invoke 方法（按 preload.js 实际顺序）+ onEvent */
 const EXPECTED_INVOKE_METHODS = [
   "init",
   "sendMessage",
@@ -37,6 +37,7 @@ const EXPECTED_INVOKE_METHODS = [
   "getOpenSessions",
   "renameSession",
   "setModel",
+  "setSandbox",
   "clearSession",
   "compactSession",
   "respondApproval",
@@ -118,8 +119,8 @@ function parseApiBlock(block) {
 
 const api = parseApiBlock(extractApiBlock());
 
-test("window.emrg exposes the full 55-member contract (54 invoke + onEvent)", () => {
-  // 54 invoke 方法全部存在（防误删/改名）
+test("window.emrg exposes the full 56-member contract (55 invoke + onEvent)", () => {
+  // 55 invoke 方法全部存在（防误删/改名）
   for (const name of EXPECTED_INVOKE_METHODS) {
     assert.ok(api.invoke.has(name), `缺少 invoke 方法 ${name}`);
   }

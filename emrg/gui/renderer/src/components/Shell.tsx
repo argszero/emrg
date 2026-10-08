@@ -731,7 +731,19 @@ export function Shell() {
                 }
                 onLoadOlder={onScrollTop}
               />
-              <Composer store={transcript} sid={activeSid} busy={busy} onCommand={handleCommand} />
+              <Composer
+                store={transcript}
+                sid={activeSid}
+                busy={busy}
+                onCommand={handleCommand}
+                // The session's sandbox tier, as the daemon reported it (rant
+                // 2026-09-30T09:30:16, GUI half): `sandbox_set` for a change made
+                // anywhere, `resume_result.meta.sandbox` for the session this client
+                // just opened. `null` = the daemon has not said, and the chip shows
+                // its own default rather than pretending to know.
+                sandbox={activeSid ? (appState.sandboxBySid[activeSid] ?? null) : null}
+                onSandboxChange={(mode) => void bridge.setSandbox(activeSid, mode)}
+              />
             </>
           )}
         </main>

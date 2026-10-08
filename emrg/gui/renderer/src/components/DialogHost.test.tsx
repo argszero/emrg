@@ -33,6 +33,9 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     busyBySid: {},
     turnStartBySid: {},
     disconnectedBySid: {},
+    // No frame has reported a session's sandbox tier to this fixture (rant
+    // 2026-09-30T09:30:16, GUI half) — absent is "the daemon has not said".
+    sandboxBySid: {},
     upgradeBanner: null,
     pendingApproval: null,
     ...over,
