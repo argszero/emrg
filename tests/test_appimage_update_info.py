@@ -54,10 +54,26 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build-release.yml"
 VERSION = "9.9.9"
 ARCH = "x86_64"
 REPO_SLUG = "argszero/emrg"
+#: 一个**不是**本仓库的 slug。对象的输入与断言的期望值都从被注入的那个 slug 派生，
+#: 所以「读 `GITHUB_REPOSITORY`」与「写死本仓库的 owner/repo」在这一行上必然产出不同的
+#: 串 —— 而用本仓库的 slug 驱动时两者逐字节相同，任何变异臂都杀不掉（实测于 #1938）。
+FORK_SLUG = "someone-else/emrg-fork"
 OUT_NAME = f"EMRG-{VERSION}-{ARCH}.AppImage"
+
+
+def _expected_update_info(slug: str) -> str:
+    """按被注入的 slug 派生期望串。
+
+    期望值不得写死成某一个 slug：写死了，同一个陷阱就在上一层重建 —— 断言与对象一起
+    吃同一个字面量，仍然分不出「读进来的」与「写死的」。
+    """
+    owner, _, repo = slug.partition("/")
+    return f"gh-releases-zsync|{owner}|{repo}|latest|EMRG-*-{ARCH}.AppImage.zsync"
+
+
 #: AppImageSpec 的 `gh-releases-zsync` 形态（draft.md#github-releases）：
 #: 传输方式 | GitHub 用户/组织 | 仓库 | release tag | `.zsync` 的文件名（`*` 为规范允许的通配）
-EXPECTED_UPDATE_INFO = f"gh-releases-zsync|argszero|emrg|latest|EMRG-*-{ARCH}.AppImage.zsync"
+EXPECTED_UPDATE_INFO = _expected_update_info(REPO_SLUG)
 
 
 # ── 替身 ────────────────────────────────────────────────────────────────────
@@ -139,8 +155,15 @@ def _fake_source(tmp_path: Path) -> Path:
     return src
 
 
-def _run_updatable(tmp_path: Path, *, tools: tuple[str, ...]) -> tuple[subprocess.CompletedProcess, Path, Path]:
-    """执行 `make-appimage-updatable.sh`，回 (结果, 输出目录, 替身日志目录)。"""
+def _run_updatable(
+    tmp_path: Path, *, tools: tuple[str, ...], slug: str | None = REPO_SLUG
+) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    """执行 `make-appimage-updatable.sh`，回 (结果, 输出目录, 替身日志目录)。
+
+    `slug` 是被注入的 `GITHUB_REPOSITORY`；`None` 表示**不设**这个变量，用来驱动
+    「变量缺席」那一行。默认值是本仓库的 slug，只是为了让老用例少改一行 —— 断言「串
+    是从环境读来的」的用例必须显式换一个 slug，否则它就是被喂了自己要的答案。
+    """
     if shutil.which("bash") is None:  # pragma: no cover - POSIX-less host
         pytest.skip("no bash on PATH: this guard drives the script itself, which it cannot run")
 
@@ -155,9 +178,10 @@ def _run_updatable(tmp_path: Path, *, tools: tuple[str, ...]) -> tuple[subproces
         "HOME": str(tmp_path),
         "TMPDIR": str(tmp_path),
         "STUB_LOG": str(log_dir),
-        "GITHUB_REPOSITORY": REPO_SLUG,
         "ARCH": ARCH,
     }
+    if slug is not None:
+        env["GITHUB_REPOSITORY"] = slug
     result = subprocess.run(
         ["bash", str(UPDATABLE), str(src), str(out_dir), OUT_NAME],
         cwd=str(tmp_path), env=env, capture_output=True, text=True,
@@ -221,6 +245,72 @@ def test_the_embedded_update_information_names_this_release(tmp_path):
         "appimagetool 的 SOURCE 不是 --appimage-extract 解出来的 AppDir"
     )
     assert (log_dir / "arch").read_text(encoding="utf-8").strip() == ARCH
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash on the Windows runner is WSL's, not the shell these scripts run under in CI",
+)
+def test_the_update_information_follows_the_repository_it_is_built_from(tmp_path):
+    """内嵌的 owner/repo 必须**来自环境**，而不是写死的本仓库。
+
+    上面那条用例（用本仓库 slug 驱动、再断言这个 slug）分不出两件事：当对象吃的 slug
+    与期望串里的 slug 是同一个时，「读 `GITHUB_REPOSITORY`」与「写 `argszero|emrg`」
+    产出逐字节相同的串 —— 实测过，把脚本里的 `${OWNER}|${REPO_NAME}` 换成字面量
+    `argszero|emrg`，整份文件 10/10 全绿（#1938 的评审）。这里用**另一个** slug 驱动，
+    于是那种实现必然把这一行变红，而它正是 docstring 承诺的那句话。
+    """
+    result, _out_dir, log_dir = _run_updatable(
+        tmp_path, tools=("appimagetool", "zsyncmake", "mksquashfs"), slug=FORK_SLUG)
+    assert result.returncode == 0, f"报告失败：{result.stdout}{result.stderr}"
+
+    info = (log_dir / "update-info").read_text(encoding="utf-8").strip()
+    expected = _expected_update_info(FORK_SLUG)
+    assert info == expected, (
+        f"从 {FORK_SLUG} 构建，内嵌的更新信息串却是 {info!r}（期望 {expected!r}）—— "
+        f"写死的 owner/repo 会让 fork 出去的用户被更新到别人的仓库"
+    )
+    # 更新信息里那个 `.zsync` 的名字仍须与产物同名：换了 slug 不该动文件名那一段。
+    assert info.split("|")[-1] == f"{OUT_NAME}.zsync".replace(VERSION, "*")
+
+
+@pytest.mark.parametrize(
+    "slug, why",
+    [
+        (None, "变量缺席"),
+        ("", "空串"),
+        ("emrg", "没有 owner/repo 的分隔斜杠"),
+        ("/emrg", "owner 为空"),
+        ("argszero/", "repo 为空"),
+        ("argszero/emrg/extra", "多于一个斜杠"),
+    ],
+)
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash on the Windows runner is WSL's, not the shell these scripts run under in CI",
+)
+def test_a_slug_that_is_not_owner_repo_is_refused(tmp_path, slug, why):
+    """形态不对的 slug 必须在**碰任何工具之前**就失败，且不留下产物。
+
+    这条分支原先没有被任何用例驱动过，所以它可以被删掉而文件仍然全绿 —— 而删掉之后，
+    一条 owner 为空的更新信息串会安静地发布出去。`/emrg`、`argszero/` 与 `a/b/c` 三种
+    形态原先**通过**了那道守卫（它只看「有没有斜杠」），产物同样是指向不存在仓库的串，
+    所以这里的每一行都是被判据本身拦下的，不是被别的东西顺手拦下的。
+    """
+    result, out_dir, _log = _run_updatable(
+        tmp_path, tools=("appimagetool", "zsyncmake", "mksquashfs"), slug=slug)
+
+    assert result.returncode != 0, (
+        f"slug={slug!r}（{why}）被接受了：{result.stdout}{result.stderr}"
+    )
+    combined = result.stdout + result.stderr
+    assert "GITHUB_REPOSITORY" in combined, (
+        f"失败报文没有点名是哪个变量（{why}）：{combined[:300]!r}"
+    )
+    assert not list(out_dir.iterdir()), (
+        f"失败之后还留下了产物 {sorted(p.name for p in out_dir.iterdir())} —— "
+        f"半个产物比没有产物更坏：上传步骤会把它当作成品"
+    )
 
 
 # ── 2. 缺工具即失败，不降级 ─────────────────────────────────────────────────
