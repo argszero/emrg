@@ -26,9 +26,10 @@ Two halves, deliberately different in kind
 ------------------------------------------
 * **static** — two rules over `scripts/` and the `emrg/` package:
   1. every `subprocess` call that asks for text (`text=True` /
-     `universal_newlines=True`) must also pin `encoding=`, unless its *child
-     program* is one that writes the Windows console code page
-     (`_CONSOLE_PROGRAMS`);
+     `universal_newlines=True`) must also pin `encoding=` **to a UTF-8
+     spelling**, unless its *child program* is one that writes the Windows
+     console code page (`_CONSOLE_PROGRAMS`). The value is what is credited, not
+     the key - see "The key was credited, never the value" below;
   2. the locale codec (`locale.getpreferredencoding()` and friends) must not be
      named at all, except in the one file whose subject is the console code page.
   This half covers call sites no test drives, which is where the surviving
@@ -91,6 +92,35 @@ were the same error - drawing the line on syntax ("does it spell `encoding=`?")
 instead of on subject ("does this child emit UTF-8?"). The rules now resolve what can
 be resolved (splat providers, locally aliased kwarg dicts, concatenated argv) and
 report only what they cannot.
+
+The key was credited, never the value
+-------------------------------------
+The paragraph above got the splat path right and then left the *direct* path one
+level down from it: `encoding=NAME` was credited the moment the keyword was
+spelled, whatever its value. Measured on the version before this one, with the
+rule itself as the probe: `encoding="locale"` (the locale decode written out
+loud, Python 3.10+), `encoding="gbk"` and `encoding=sys.stdout.encoding` all
+reported **zero** violations - while the *same* spellings through a splat
+(`**{"encoding": "locale"}`) were reported, because that path reads its value.
+One rule, two readers, two answers: the module's own headline class was
+reintroducible by writing it as a literal. Both paths now resolve the value, a
+non-literal value is reported rather than trusted, and the one call in the tree
+whose hostile codec is its *subject* is exempted by name in `_NON_UTF8_PINS`,
+with the same reason-and-liveness discipline as the other exemptions.
+
+The remedy said more than the rule checked
+------------------------------------------
+The failure message has always prescribed `encoding="utf-8", errors="replace"`,
+but rule one only ever asked for `encoding=`, and the two are not the same
+claim. Measured before this version: **58** call sites pin `encoding="utf-8"`
+with no `errors=` at all. The value of `errors=` is not something this scan can
+judge - it depends on what the text is *for*: `"replace"` is right for text that
+is displayed or counted, and wrong for text that names a path, because a
+replaced byte addresses no file (measured once: `git diff` in a repository with
+latin-1 paths raised `UnicodeDecodeError`, and the repair was
+`"surrogateescape"`). So the rule still asks for the pin alone, and the *remedy*
+now says what the rule checks and names the decision it cannot make, rather than
+prescribing one value it never verifies.
 """
 
 from __future__ import annotations
@@ -223,6 +253,24 @@ _CREATIONFLAGS_KEYS = {"creationflags"}
 # pins, and a dict that carries one must not make a call look pinned.
 _UTF8_SPELLINGS = {"utf-8", "utf8"}
 
+# Direct `encoding=` spellings that are deliberately *not* UTF-8, and why. Format:
+# (relative path, the codec as written) -> reason. Keyed by path + codec rather
+# than by line number so an edit further down the file cannot silently move the
+# exemption onto a different call, and every entry is asserted still to be *hit*
+# by the rule it exempts (`test_the_non_utf8_pin_exemptions_are_live`), so the
+# blind spot cannot widen without CI saying so - the same discipline as
+# `_CONSOLE_DECODE_ALLOWED` and `_CREATIONFLAGS_PROVIDERS`.
+_NON_UTF8_PINS = {
+    ("tests/test_check_install_drift.py", "ascii"): (
+        "The decode *is* the test's subject: "
+        "test_the_help_and_both_verdicts_survive_an_ascii_console drives the drift "
+        "script's --help and both verdicts through a deliberately hostile codec, "
+        "because a crash on the drift path would be read as exit code 1 - the code "
+        "that means 'drift found'. That is the opposite of the locale dependency "
+        "this rule guards against, and pinning it to UTF-8 would delete the test."
+    ),
+}
+
 
 def _leading_text(value: ast.expr) -> str:
     """The leading literal text of an expression, or "" if it does not start literal.
@@ -265,6 +313,55 @@ def _child_program(node: ast.Call, assigns: dict[str, ast.expr]) -> str:
     return parts[0] if parts else ""
 
 
+def _encoding_pin(value: ast.expr) -> tuple[bool, str | None]:
+    """`(is_utf8_pin, the codec as written or None)` for an `encoding=` value.
+
+    The single home of "is this a UTF-8 pin", called by the dict path
+    (`_dict_literal_keys`), the direct path (`_credited_kwargs`) and the two
+    text-by-construction call forms, so the three readers cannot answer it
+    differently - which is exactly what happened before: the splat path read the
+    value and the direct path read the key, and `encoding="locale"` was therefore
+    a pin at one call shape and a violation at the other.
+
+    A non-literal value returns `(False, None)` rather than a guess: the
+    conservative direction is to report the call, and a computed codec is
+    precisely what a reader has to look at.
+    """
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        codec = value.value
+        return codec.lower().replace("_", "-") in _UTF8_SPELLINGS, codec
+    return False, None
+
+
+def _credited_kwargs(
+    node: ast.Call, rel: str, exemptions: dict[tuple[str, str], str]
+) -> tuple[set[str], str | None]:
+    """`(the keywords this call may be credited for, the uncredited encoding value)`.
+
+    `encoding` is credited only through `_encoding_pin`, or when `(rel, codec)` is
+    in `exemptions` - a call whose deliberate hostile codec is its own subject.
+    The second element describes the value that was *not* credited (`repr` of the
+    literal, or a phrase when it is not a literal), so the reporter can name what
+    it saw instead of saying "no encoding=" about a call that has one.
+    """
+    keys: set[str] = set()
+    uncredited: str | None = None
+    for keyword in node.keywords:
+        if keyword.arg is None:
+            continue  # a `**splat`: handled by the caller
+        if keyword.arg != "encoding":
+            keys.add(keyword.arg)
+            continue
+        pinned, codec = _encoding_pin(keyword.value)
+        if pinned or (codec is not None and (rel, codec) in exemptions):
+            keys.add("encoding")
+        elif codec is not None:
+            uncredited = repr(codec)
+        else:
+            uncredited = "a value this scan cannot read"
+    return keys, uncredited
+
+
 def _dict_literal_keys(value: ast.expr) -> set[str] | None:
     """The keys a dict literal may contribute, or None when the value is not one.
 
@@ -285,10 +382,8 @@ def _dict_literal_keys(value: ast.expr) -> set[str] | None:
     for key, val in zip(value.keys, value.values):
         if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
             return None  # `**{**a, **b}` or a computed key: not statically known
-        if key.value == "encoding":
-            literal = val.value if isinstance(val, ast.Constant) else None
-            if not (isinstance(literal, str) and literal.lower().replace("_", "-") in _UTF8_SPELLINGS):
-                continue  # not a UTF-8 pin: contribute nothing
+        if key.value == "encoding" and not _encoding_pin(val)[0]:
+            continue  # not a UTF-8 pin: contribute nothing
         keys.add(key.value)
     return keys
 
@@ -331,9 +426,17 @@ def _splat_keys(value: ast.expr, assigns: dict[str, ast.expr]) -> set[str] | Non
 
 
 def _text_mode_calls(
-    source: str, label: str = "<string>"
-) -> list[tuple[int, str, set[str], str]]:
-    """(lineno, func_name, kwargs, child_program) for every text-mode call in `source`.
+    source: str,
+    label: str = "<string>",
+    exemptions: dict[tuple[str, str], str] | None = None,
+) -> list[tuple[int, str, set[str], str, str | None]]:
+    """(lineno, func_name, kwargs, child_program, uncredited_encoding) per call.
+
+    `kwargs` holds the keywords the call may be *credited* for, so a spelled
+    `encoding=` that is not a UTF-8 pin is absent from it and its value is
+    described in the last field (None when there is nothing to report). That split
+    is the fix for the direct-form hole documented at the top of this module: the
+    caller used to see only key names, and a key name is not a value.
 
     A call is text-mode if it asks for text (`text=True` / `universal_newlines=True`)
     directly, or if it splats a provider that could supply either key. Locally
@@ -343,7 +446,13 @@ def _text_mode_calls(
     Keywords forwarded through an *unknown* splat cannot be read, so such a call
     reports the empty name `"**"` in place of the func name - the caller can then
     refuse to treat it as clean instead of assuming the options are visible.
+
+    `exemptions` is `_NON_UTF8_PINS` and is only ever passed as `{}` by
+    `test_the_non_utf8_pin_exemptions_are_live`, which needs to see the call the
+    exemption is hiding in order to prove it is still there.
     """
+    if exemptions is None:
+        exemptions = _NON_UTF8_PINS
     tree = ast.parse(source)
     assigns: dict[str, ast.expr] = {
         t.id: node.value
@@ -352,7 +461,7 @@ def _text_mode_calls(
         for t in node.targets
         if isinstance(t, ast.Name)
     }
-    found: list[tuple[int, str, set[str], str]] = []
+    found: list[tuple[int, str, set[str], str, str | None]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -363,22 +472,24 @@ def _text_mode_calls(
         )
         if name in _TEXT_BY_CONSTRUCTION:
             # No `text=`/`universal_newlines=` to look for: the decode is the
-            # function's whole job. Same repair as an explicit text-mode call.
+            # function's whole job. Same repair as an explicit text-mode call,
+            # and the same value-not-key credit: `getoutput(cmd, encoding='gbk')`
+            # is the hole this field exists to report.
+            kwargs, uncredited = _credited_kwargs(node, label, exemptions)
             found.append(
-                (node.lineno, name, {k.arg for k in node.keywords if k.arg},
-                 _child_program(node, assigns))
+                (node.lineno, name, kwargs, _child_program(node, assigns), uncredited)
             )
             continue
         if name in _UNPINNABLE_TEXT_CALLS:
             # Attribute access is enough (no module resolution needed), and the
             # empty kwarg set is what distinguishes it in `_violations`.
             found.append(
-                (node.lineno, name, set(), _child_program(node, assigns))
+                (node.lineno, name, set(), _child_program(node, assigns), None)
             )
             continue
         if name not in _SUBPROCESS_FUNCS:
             continue
-        kwargs = {k.arg for k in node.keywords if k.arg}
+        kwargs, uncredited = _credited_kwargs(node, label, exemptions)
         unknown = False
         for k in node.keywords:
             if k.arg is not None:
@@ -390,9 +501,13 @@ def _text_mode_calls(
                 kwargs |= supplied
         if unknown:
             # options are forwarded; text= and encoding= may both be in there
-            found.append((node.lineno, "**", kwargs, _child_program(node, assigns)))
+            found.append(
+                (node.lineno, "**", kwargs, _child_program(node, assigns), uncredited)
+            )
         elif kwargs & _TEXT_KWARGS:
-            found.append((node.lineno, name, kwargs, _child_program(node, assigns)))
+            found.append(
+                (node.lineno, name, kwargs, _child_program(node, assigns), uncredited)
+            )
     return found
 
 
@@ -453,7 +568,11 @@ def _scan_roots() -> list[Path]:
     return sorted(files)
 
 
-def _violations(source: str, rel: str) -> list[str]:
+def _violations(
+    source: str,
+    rel: str,
+    exemptions: dict[tuple[str, str], str] | None = None,
+) -> list[str]:
     """The calls in `source` that must be pinned but are not. Pure, so it is testable.
 
     Split out of the scan below deliberately: this decision - "is this call exempt?"
@@ -461,14 +580,29 @@ def _violations(source: str, rel: str) -> list[str]:
     real file. A mutation that widened the exemption to `if True:` therefore left the
     suite green, because every site the scan *reached* was legitimately exempt; the
     rule's reach and its logic had never been tested separately.
+
+    A spelled `encoding=` counts only when its value is a UTF-8 pin, so the third
+    branch below reports the calls the first two mistakenly *credit* - the direct
+    form of the same mistake `_dict_literal_keys` refuses to make.
     """
     out: list[str] = []
-    for lineno, func, kwargs, child in _text_mode_calls(source, rel):
+    for lineno, func, kwargs, child, uncredited in _text_mode_calls(
+        source, rel, exemptions
+    ):
         if child in _CONSOLE_PROGRAMS:
             continue
         if "encoding" in kwargs:
             continue
         where = f"child {child!r}" if child else "child not statically known"
+        if uncredited is not None:
+            out.append(
+                f"{rel}:{lineno} subprocess.{func}("
+                f"{', '.join(sorted(kwargs))}) pins encoding to {uncredited}, which "
+                f"is not a UTF-8 spelling ({where}) - the child emits UTF-8, so that "
+                "value is the locale decode written out loud, which is the class this "
+                "rule exists to stop. Pin `encoding='utf-8'`"
+            )
+            continue
         if func in _UNPINNABLE_TEXT_CALLS:
             out.append(
                 f"{rel}:{lineno} {func}() decodes with the locale codec and takes "
@@ -510,9 +644,16 @@ def test_every_text_mode_subprocess_pins_its_encoding() -> None:
         "so it raises UnicodeDecodeError (or silently mojibakes) on a non-UTF-8 "
         "host (cp936/GBK, cp1252) for data that is correctly UTF-8 - the class "
         "behind #1119/#1121, issue #1132, and the clipboard/`ps` path readers. "
-        'Add `encoding="utf-8", errors="replace"`, or - if the child really writes '
-        "the Windows console code page - add it to _CONSOLE_PROGRAMS with a "
-        "reason:\n  " + "\n  ".join(violations)
+        'Pin `encoding="utf-8"` - the *value* is what counts, and has to be a '
+        "UTF-8 spelling (`encoding=\"locale\"` is this same decode written out "
+        "loud, and no path credits it). Also decide `errors=`, which this rule "
+        "does not check because the right value depends on what the text is for: "
+        "without it one invalid byte raises UnicodeDecodeError instead of "
+        "returning (measured: `git diff` in a repository with latin-1 paths), so "
+        'use `"replace"` for text you display or count and `"surrogateescape"` '
+        "for text that names a path - a replaced byte addresses no file. Or - if "
+        "the child really writes the Windows console code page - add it to "
+        "_CONSOLE_PROGRAMS with a reason:\n  " + "\n  ".join(violations)
     )
 
 
@@ -595,18 +736,18 @@ def test_the_scan_catches_an_unpinned_site() -> None:
         "r = subprocess.run(['taskkill', '/F'], capture_output=True, **kw)\n"
     )
 
-    assert [f for _, f, _, _ in _text_mode_calls(bad)] == ["run"], (
+    assert [f for _, f, _, _, _ in _text_mode_calls(bad)] == ["run"], (
         "the scan no longer sees a plain unpinned call"
     )
-    flagged = [(f, k) for _, f, k, _ in _text_mode_calls(bad) if "encoding" not in k]
+    flagged = [(f, k) for _, f, k, _, _ in _text_mode_calls(bad) if "encoding" not in k]
     assert flagged, "an unpinned call must be reported, not just seen"
 
-    seen_pinned = [k for _, _, k, _ in _text_mode_calls(pinned)]
+    seen_pinned = [k for _, _, k, _, _ in _text_mode_calls(pinned)]
     assert seen_pinned and all("encoding" in k for k in seen_pinned), (
         "a pinned call must be seen and must not be reported"
     )
 
-    assert [f for _, f, _, _ in _text_mode_calls(forwarded)] == ["**"], (
+    assert [f for _, f, _, _, _ in _text_mode_calls(forwarded)] == ["**"], (
         "a call forwarding an unknown **kwargs must be reported as unreadable, "
         "never ignored"
     )
@@ -625,7 +766,7 @@ def test_the_scan_catches_an_unpinned_site() -> None:
         "import subprocess\n"
         "r = subprocess.run(['gh'], text=True, **win32_no_window_kwargs())\n"
     )
-    assert [f for _, f, _, _ in _text_mode_calls(beside)] == ["run"], (
+    assert [f for _, f, _, _, _ in _text_mode_calls(beside)] == ["run"], (
         "a splat must not hide a text=True written beside it"
     )
 
@@ -670,6 +811,73 @@ def test_a_splat_provider_is_resolved_by_value_not_by_name() -> None:
             "splatted into is a locale-dependent decode and must be reported - "
             "crediting the name instead of the binding is the false negative this "
             "checks for"
+        )
+
+
+def test_an_encoding_value_that_is_not_a_utf8_pin_is_reported() -> None:
+    """The `encoding=` *value* decides at a direct call, exactly as through a splat.
+
+    The bug this closes was measured with the rule itself as the probe: on the
+    version before it, `encoding="locale"` - the locale decode written out loud -
+    reported zero violations at a direct call and one through a splat
+    (`**{"encoding": "locale"}`), because the direct path credited the *key* and
+    the splat path read the *binding*. The rule's own headline class was therefore
+    reintroducible by choosing one call shape over the other, and the value of
+    `encoding=` was the only thing that could have said so.
+
+    Both directions, on every spelling the docstring calls a pin and every shape it
+    calls a non-pin, including a value the scan cannot read at all.
+    """
+    def call(value: str) -> str:
+        return (
+            "import subprocess, sys\n"
+            f"r = subprocess.run(['gh'], text=True, encoding={value})\n"
+        )
+
+    for value in ('"utf-8"', '"UTF-8"', '"utf_8"', "'utf8'"):
+        assert _violations(call(value), "probe.py") == [], (
+            f"encoding={value} is a UTF-8 spelling and must be credited as the pin"
+        )
+
+    for label, value in (
+        ("the locale codec written out loud", '"locale"'),
+        ("a locale codec by another name", '"gbk"'),
+        ("a hostile codec chosen on purpose", '"ascii"'),
+        ("a value this scan cannot read", "sys.stdout.encoding"),
+    ):
+        found = _violations(call(value), "probe.py")
+        assert found, (
+            f"encoding={value} ({label}) is not a UTF-8 pin, so the call is not "
+            "pinned - reporting it is the whole rule, and crediting the key instead "
+            "of the value is the false negative this checks for"
+        )
+        assert "encoding to " in found[0] and "has no encoding=" not in found[0], (
+            "the report must name the value it refused to credit, never claim the "
+            f"call has no encoding= when it has one: {found[0]!r}"
+        )
+
+
+def test_the_non_utf8_pin_exemptions_are_live() -> None:
+    """Each exemption still hides a call that really pins the codec it names.
+
+    An exemption with a stale subject widens the blind spot silently - the failure
+    `_CONSOLE_DECODE_ALLOWED` has a dead-entry test for. This one drives the rule
+    with `exemptions={}`, so the call the exemption hides becomes visible again and
+    the entry can be checked against it. Keyed by (path, codec): a line number would
+    move, a bare path would keep excusing the file after the hostile decode left it.
+    """
+    assert _NON_UTF8_PINS, (
+        "an empty exemption table would make this test pass over nothing - the "
+        "non-UTF-8 pin branch would then be unreachable in the tree"
+    )
+    for (rel, codec), reason in _NON_UTF8_PINS.items():
+        path = REPO_ROOT / rel
+        assert path.exists(), f"exempted file is gone: {rel} (reason: {reason})"
+        forced = _violations(path.read_text(encoding="utf-8"), rel, exemptions={})
+        assert any(f"encoding to {codec!r}" in v for v in forced), (
+            f"{rel} is exempted for a deliberate {codec!r} codec, but no call there "
+            "pins one any more - remove the exemption (reason given: "
+            f"{reason}); the rule reported instead: {forced}"
         )
 
 
@@ -745,7 +953,7 @@ def test_the_invisible_entry_points_are_reported() -> None:
         "b = subprocess.getstatusoutput('gh pr list')\n"
         "c = os.popen('gh pr list').read()\n"
     )
-    seen = {f for _, f, _, _ in _text_mode_calls(src)}
+    seen = {f for _, f, _, _, _ in _text_mode_calls(src)}
     assert seen == {"getoutput", "getstatusoutput", "popen"}, (
         f"every entry point that decodes with the locale codec must be seen; got {seen}"
     )
