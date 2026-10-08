@@ -92,10 +92,14 @@ function main() {
   // rant 2026-08-11T17:37:03：打包版曾用 Electron 默认图标（蓝色原子球）。
   // package.json build.mac/win/linux.icon 显式指向 packaging/assets 单文件修复主图标；
   // 这里为 Windows/Linux 窗口标题栏提供运行时图标（打包版经 extraResources 落到 resources/icon.png）。
+  // 两个候选都从 emrg/gui/ 出发解析：打包版 main.js 在 resources/app/，`../icon.png` 即
+  // resources/icon.png（extraResources 的 to）；源码版要的是仓库根目录的产物，因此是
+  // `../../packaging/assets/` —— 写少一级会落到不存在的 emrg/packaging/，被下面的
+  // existsSync 静默跳过，窗口一直用默认图标（package.json 的同族引用见 #1958）。
   function windowIconPath() {
     const candidates = [
       path.join(__dirname, "..", "icon.png"), // packaged: resources/icon.png（extraResources）
-      path.join(__dirname, "..", "packaging", "assets", "icon.png"), // source: 仓库 packaging/assets/icon.png
+      path.join(__dirname, "..", "..", "packaging", "assets", "icon.png"), // source: 仓库根 packaging/assets/icon.png
     ];
     return candidates.find((p) => fs.existsSync(p)) || undefined;
   }

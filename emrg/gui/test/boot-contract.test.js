@@ -89,6 +89,47 @@ test("boot chain: ensureConnected must exist and be the daemon-connect entry", (
   );
 });
 
+test("boot chain: the window icon candidates resolve to the products they name", () => {
+  // 不是 boot 链的一环，但同属"main.js 静态契约"这一族，而且形状与上面几条一样：源码里
+  // 写着一件事，运行时不声不响地做另一件。
+  //
+  // rant 2026-08-11T17:37:03 的修复在两个载体各写了同一串路径：package.json 的 refs（#1958
+  // 修正）与本函数的 source 候选。后者写少一级——从 emrg/gui/ 出发 `../packaging/assets/icon.png`
+  // 落在不存在的 emrg/packaging/assets/icon.png，而产物在仓库根 packaging/assets/icon.png
+  // （gen-assets.sh 写出的地方）。`candidates.find(fs.existsSync)` 静默跳过写错的路径，所以它
+  // 一直返回 undefined：源码启动的窗口用 Electron 默认图标，而注释声称指向仓库产物。
+  //
+  // 断言量的是**路径算术**（照 main.js 自己写的字面量解析），不是拼写：只把字面量抄一遍的
+  // 守卫在路径改对之前也会通过。
+  const main = read("main.js");
+  const fn = main.match(/function windowIconPath\(\)\s*\{[\s\S]*?\n  \}/);
+  assert.ok(fn, "main.js must define windowIconPath()");
+  const candidates = [...fn[0].matchAll(/path\.join\(__dirname((?:\s*,\s*"[^"]*")+)\)/g)].map(
+    (call) => [...call[1].matchAll(/"([^"]*)"/g)].map((part) => part[1])
+  );
+  assert.ok(
+    candidates.length >= 2,
+    `windowIconPath must list its candidates as path.join(__dirname, ...) calls (got ${candidates.length})`
+  );
+  const resolved = candidates.map((parts) => path.resolve(GUI_ROOT, ...parts));
+  // packaged：extraResources 的 to:"icon.png" 落在 resources/icon.png，而打包版 main.js 在
+  // resources/app/ —— 所以从 emrg/gui/ 读是 `../icon.png`。
+  const packaged = path.resolve(GUI_ROOT, "..", "icon.png");
+  assert.ok(
+    resolved.includes(packaged),
+    `the packaged candidate must resolve to resources/icon.png (${packaged}); got ${JSON.stringify(resolved)}`
+  );
+  // source：仓库根目录的 packaging/assets/icon.png —— gen-assets.sh 的产物，不是 emrg/ 下的副本。
+  const repoRoot = path.resolve(GUI_ROOT, "..", "..");
+  const source = path.join(repoRoot, "packaging", "assets", "icon.png");
+  assert.ok(
+    resolved.includes(source),
+    `the source candidate must resolve to ${source} (gen-assets.sh's product), not to a copy ` +
+      `under emrg/ — a path one level short is skipped silently by existsSync and the window ` +
+      `falls back to Electron's default icon; got ${JSON.stringify(resolved)}`
+  );
+});
+
 test("boot chain: renderer DaemonBridgeProvider must call window.emrg.init() on mount", () => {
   // v0.2.81 事故点本体（rant 2026-08-27T10:53:38）：React 迁移把 renderer 的 init 调用
   // 整个丢掉——main 侧 ensureConnected() 的唯一 renderer 驱动入口消失 → GUI 永不断连。
