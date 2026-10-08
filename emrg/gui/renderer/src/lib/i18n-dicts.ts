@@ -49,6 +49,9 @@ export const ZH_DICT: Record<string, string> = {
   "composer.imageReasonRead": "图片未插入：读取失败（{msg}）",
   "composer.imageReasonSave": "图片未插入：落盘失败（{msg}）",
   "composer.imageReasonEmpty": "图片未插入：这次粘贴里没有取到图片文件（剪贴板类型：{types}）",
+  // rant 2026-09-30T09:35:04 要求 4：名单外的类型不再以「拒绝」收场——先请 main 把剪贴板
+  // 里的图归一成 PNG（macOS 的 TIFF 正是这一种），只有那一步也拿不到才拒绝并报出类型
+  "composer.imageReasonClipboard": "图片未插入：{types} 本端不能直接使用，系统剪贴板也没给出可转换的图",
   "composer.chooseImage": "选择图片插入",
   "composer.formatBar": "格式栏",
   "composer.bold": "粗体 (⌘B)",
@@ -470,6 +473,7 @@ export const EN_DICT: Record<string, string> = {
   "composer.imageReasonRead": "Image not inserted: reading it failed ({msg})",
   "composer.imageReasonSave": "Image not inserted: saving it failed ({msg})",
   "composer.imageReasonEmpty": "Image not inserted: this paste carried no image file (clipboard types: {types})",
+  "composer.imageReasonClipboard": "Image not inserted: {types} cannot be used as-is, and the clipboard offered no convertible image",
   "composer.chooseImage": "Choose an image",
   "composer.formatBar": "Format bar",
   "composer.bold": "Bold (⌘B)",

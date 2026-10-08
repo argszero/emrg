@@ -5,7 +5,7 @@
  * 安全：contextIsolation + nodeIntegration:false + sandbox:true（renderer 零网络权限）。
  */
 
-const { app, BrowserWindow, dialog, ipcMain, shell, WebContentsView } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell, WebContentsView } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -424,6 +424,40 @@ vision = false
       if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf); // 同名去重
       logger.info(`[gui:saveImage] ${filename} (${buf.length} bytes)`);
       return { path: finalPath, mime: `image/${mm[1].toLowerCase()}` };
+    });
+
+    // rant 2026-09-30T09:35:04 要求 4：「系统给的图不受白名单所限」。
+    //
+    // macOS 把菜单栏、截图工具给的图声明为 `image/tiff`，而 renderer 不能解码 TIFF
+    // （Chromium 只出 png/jpeg/gif/webp/bmp/svg，且 canvas 无 TIFF 解码器）—— 于是
+    // 「系统给的图」在 GUI 只能被拒绝，而 TUI 能收：同一个矛盾。转换必须发生在有
+    // NSImage 的一侧，TUI 的做法是向 macOS 要 `«class PNGf»`
+    // （`emrg/client/app.py::_extract_clipboard_image`），这里是同一个动作 ——
+    // Electron 的 `clipboard.readImage()` 经 NSImage 解码，`toPNG()` 重新编码。
+    // 此后白名单只是「不必转换就能直接收」的快路径，不再是「系统给什么」的边界。
+    //
+    // 读剪贴板失败/为空都返回 null 并留一行日志：renderer 会把它变成输入框旁的可见
+    // 提示（要求 3），所以「剪贴板里没有图」与「读失败」在日志里也分得开。
+    ipcMain.handle("emrg:readClipboardImage", async () => {
+      try {
+        const img = clipboard.readImage();
+        if (!img || img.isEmpty()) {
+          logger.info("[gui:readClipboardImage] empty: the clipboard holds no image");
+          return null;
+        }
+        const buf = img.toPNG();
+        if (!buf || buf.length === 0) {
+          logger.warn("[gui:readClipboardImage] refused: the clipboard image converted to 0 bytes");
+          return null;
+        }
+        const size = img.getSize();
+        logger.info(`[gui:readClipboardImage] ${buf.length} bytes as PNG (${size.width}x${size.height})`);
+        return { data: buf.toString("base64"), mime: "image/png", name: "clipboard.png" };
+      } catch (e) {
+        const why = e && e.message ? e.message : String(e);
+        logger.warn(`[gui:readClipboardImage] refused: ${why}`);
+        throw new Error(`clipboard image unavailable: ${why}`);
+      }
     });
 
     ipcMain.handle("emrg:listSessions", async () => listSessions());
