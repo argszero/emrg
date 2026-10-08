@@ -31,6 +31,22 @@ the routes they close). What no test can show is that an agent reading the templ
 obeys it — which is precisely why the clauses exist beside those guards rather than
 instead of them. The same reasoning leaves this file responsible for one question
 only: is the rule stated where an instance's prompt is built from?
+
+Two levels, two questions
+-------------------------
+Being stated in the file and reaching the round are **not** the same question:
+`evolution_prompt.md` is a Jinja2 template and `TaskHandler._build_evolution_prompt`
+sends its **render**. So the section assertions below answer "does the shipped source
+carry the clause?", and the render-level ones answer "is this what a cycle is
+actually sent?" — neither implies the other. A Jinja construct (`{# … #}`,
+`{% if false %}`) removes text from every round's prompt while the file keeps every
+character, and a file read cannot see that at all: measured 2026-10-08
+(`cyc20261008-084957`), wrapping the two `### Forbidden` red-line clauses in
+`{# … #}` left all nine file-level assertions green and dropped the clauses from the
+round's prompt entirely — `scripts/run-mutation-arm.py` reported `SURVIVED`. This is
+the same shape fixed for `emrg/server/prompts/vibe_check.j2` (issue #1902) and
+`emrg/server/competition_prompt.md` (issue #1904); `emrg/server/prompts/system.j2`
+already carries its render-level leg in `test_no_background_process_reach.py`.
 """
 
 from __future__ import annotations
@@ -38,6 +54,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
+
+from emrg.protocol import InstanceIdentity
+from emrg.server import scheduler as mod
+from tests.task_handler_factory import make_handler
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
@@ -153,3 +174,93 @@ def test_a_template_without_a_forbidden_section_is_not_silently_healthy() -> Non
     """A missing section is a failure to measure, never a pass."""
     with pytest.raises(AssertionError):
         _forbidden_section("# A template with no Forbidden section")
+
+
+# --- The second level: the prompt a cycle is actually sent -----------------------------------
+#
+# The assertions above read the file. `evolution_prompt.md` is rendered before it reaches a
+# round, so a Jinja construct can take a clause out of every round while the file keeps it
+# whole — the same defect as issues #1902 and #1904, in a third carrier.
+
+
+@pytest.fixture(scope="module")
+def rendered(tmp_path_factory) -> str:
+    """The evolution prompt as a round receives it, rendered by the real builder.
+
+    `TaskHandler._build_evolution_prompt` is the only thing that turns this template into
+    a prompt, so it is what these tests render through: a fresh `jinja2.Environment` here
+    could differ in `trim_blocks`, `lstrip_blocks`, `undefined` or the loader, and the
+    artifact under test would then be a prompt no cycle is ever sent.
+
+    The context is the one a real records-driven call produces (a project and nothing
+    else); `config_dir` is redirected at a tmp tree — the shape
+    `tests/test_evolution_prompt_index_rule.py` uses — so the `projects.yml` read lands on
+    a file this test made, never on the host's `~/.emrg`.
+    """
+    tmp_path = tmp_path_factory.mktemp("red-lines")
+    project_dir = tmp_path / "demoproj"
+    project_dir.mkdir(exist_ok=True)
+    (tmp_path / "projects.yml").write_text(
+        yaml.safe_dump([{"name": "demoproj", "path": str(project_dir)}]), encoding="utf-8"
+    )
+    original = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        handler = make_handler(
+            name="demo-task",
+            config={"project": "demoproj"},
+            interval=300,
+            identity=InstanceIdentity(),
+            template_path=TEMPLATE,
+        )
+        return handler._build_evolution_prompt()
+    finally:
+        mod.config_dir = original
+
+
+@pytest.mark.parametrize(
+    "name, terms",
+    [(name, terms) for name, _clause, terms in RED_LINES],
+    ids=[name for name, _clause, _terms in RED_LINES],
+)
+def test_each_red_line_reaches_the_round_and_not_merely_the_file(
+    rendered: str, name: str, terms: tuple[str, ...]
+) -> None:
+    """Every load-bearing term of each clause, asserted on the prompt a cycle is sent.
+
+    The file-level test above cannot see this failure: a Jinja construct around the
+    clause leaves every term in `evolution_prompt.md` and drops all of them from the
+    render, so the rule the host asked to be stated *where an instance's prompt is built
+    from* stops reaching the instance while the guard stays green. Measured 2026-10-08
+    (`cyc20261008-084957`): wrapping the two clauses in `{# … #}` left the file-level
+    assertions green and `run-mutation-arm.py` reported `SURVIVED` for exactly that arm.
+    """
+    missing = _missing_terms(rendered, terms)
+    assert not missing, (
+        f"the rendered evolution prompt does not carry the {name} red line (missing: "
+        f"{missing}): the rule is in the file and in no render, which is the one failure "
+        "a file-level guard cannot see — a Jinja construct (`{# … #}`, `{% if false %}`) "
+        "removes it from every round's prompt while the file keeps every term"
+    )
+
+
+def test_the_render_substitutes_values_and_is_not_a_file_read(rendered: str) -> None:
+    """The converse: a render assertion must not be a file read wearing a render's name.
+
+    Two ways the test above would go vacuous if this were unchecked, both closed here.
+    Were the fixture to hand back the file's text — or the terms read with their Jinja
+    syntax intact, as `{% raw %}` or a copied-out literal would leave them — the round
+    would be sent `{{ task.project }}` and told nothing, and the presence assertions
+    above would still pass on the file's own characters. So the render must carry no
+    template syntax **and** must carry the value a placeholder resolved to, which is a
+    reading neither the file nor an unresolved render can produce.
+    """
+    assert "{{" not in rendered and "{%" not in rendered, (
+        "the rendered evolution prompt still carries Jinja syntax — the round is sent "
+        "template source rather than the prompt it names"
+    )
+    assert "demoproj" in rendered, (
+        "the render does not carry the project name the record configured: "
+        "`{{ task.project }}` resolved to nothing, so the round is told its project is "
+        "blank and this test is reading a file rather than a render"
+    )
