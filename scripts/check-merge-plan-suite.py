@@ -1461,7 +1461,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"could not measure: {exc}", file=sys.stderr)
             return 2
 
-        print("plan: " + " -> ".join(f"#{number}" for number, _ in heads))
+        # …and the *head* measured, for the same reason as the base above: the plan is
+        # built from these commits, and `_fetch_head` resolves each by fetching
+        # `pull/<N>/head` from `origin` - a fetch that exited 0 says only that the fetch
+        # succeeded, not that the commit it produced is the PR's. A plan line naming
+        # only `#<N>` reports *which PR was asked for* while leaving *which commit the
+        # plan was built from* invisible, so a stale `refs/pull/<N>/head` yields a
+        # suite verdict about a tree of a commit that is not the PR and nothing in the
+        # output says so (measured 2026-10-08, `cyc20261008-233700`: a stale
+        # `refs/pull/1946/head` printed `suite OK` for tree `b7479087a15a` where the
+        # head GitHub names, `8f7d3523`, lands `ba12ffdb995f`).
+        print(
+            "plan: "
+            + " -> ".join(f"#{number} ({commit[:8]})" for number, commit in heads)
+        )
         if args.steps:
             return _judge_every_step(base, heads)
         # Both are filled only when the final tree is red, and both are read only on that

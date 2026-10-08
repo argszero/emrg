@@ -315,9 +315,11 @@ def test_a_guard_in_one_pr_and_its_violation_in_another_are_green_alone_but_not_
 
     assert together.returncode == 1, together.stdout + together.stderr
     assert "test_no_token_under_data_or_src" in (together.stdout + together.stderr)
-    assert "plan: #1 -> #2" in together.stdout
-    # The verdict names the tree it measured: "which tree answered?" is the defect
-    # this family of tools exists to remove.
+    assert re.search(
+        r"plan: #1 \([0-9a-f]{8}\) -> #2 \([0-9a-f]{8}\)", together.stdout
+    ), together.stdout
+    # The verdict names the tree it measured, and the plan names the head each step was
+    # built from: "which tree answered?" is the defect this family exists to remove.
     assert re.search(r"final tree [0-9a-f]{12} \([0-9a-f]{40}\)", together.stdout)
 
 
@@ -333,7 +335,41 @@ def test_a_reordered_plan_is_reported_in_the_order_it_was_given(
 
     proc = _run_tool(repo, "7", "3")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "plan: #7 -> #3" in proc.stdout
+    assert re.search(
+        r"plan: #7 \([0-9a-f]{8}\) -> #3 \([0-9a-f]{8}\)", proc.stdout
+    ), proc.stdout
+
+
+def test_the_plan_names_the_commit_each_head_actually_is(
+    queue: tuple[Path, Path],
+) -> None:
+    """The plan line names *which commit* each step was built from, not just the number.
+
+    `_fetch_head` resolves a PR head by fetching `pull/<N>/head` from `origin`, and a
+    fetch that exited 0 says only that the fetch succeeded - not that the commit it
+    produced is the PR's. On this host `origin` is a **local checkout** whose
+    `refs/pull/<N>/head` an earlier run may have minted with `git update-ref`, so a
+    stale ref is not distinguishable at the fetch from a fresh one. Measured
+    2026-10-08 (`cyc20261008-233700`): a stale `refs/pull/1946/head` made this gate
+    print `suite OK` for tree `b7479087a15a` - a green verdict about a commit that is
+    not the PR - where the head GitHub names, `8f7d3523`, lands `ba12ffdb995f`.
+
+    A plan line reporting only `#<N>` answers *which PR was asked for* and leaves
+    *which commit the plan was built from* invisible, which is how that defect stays
+    silent. So the head each step is built from is named beside its number, and this
+    test pins it to the branch's **real** commit - the number alone satisfies a
+    `#1 -> #2` shape, but only the real sha satisfies this.
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"a.md": "a\n"})
+    head = _publish(repo, origin, 1, "one")
+
+    proc = _run_tool(repo, "1")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # Not just "eight hex characters": the plan names the commit the branch really is,
+    # so a gate that echoed a different object (a stale ref, an unpinned name) fails.
+    assert f"#1 ({head[:8]})" in proc.stdout, proc.stdout
 
 
 def test_a_step_that_conflicts_leaves_no_final_tree(queue: tuple[Path, Path]) -> None:
