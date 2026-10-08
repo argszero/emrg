@@ -116,6 +116,22 @@ export interface DaemonAppState {
   turnStartBySid: Record<string, number>;
   /** 每会话断线标记（P3 finalize：后台会话断线不触发全局 UI） */
   disconnectedBySid: Record<string, boolean>;
+  /**
+   * The session's sandbox tier, as the daemon last reported it (rant
+   * 2026-09-30T09:30:16, GUI half).
+   *
+   * The tier belongs to the *session* and the daemon is its only writer, so the
+   * GUI holds no tier of its own — this map is the display of what the daemon
+   * said, written from two frames and never from a click: `sandbox_set` (both the
+   * requester's own reply and another client's broadcast carry it) and
+   * `resume_result.meta.sandbox`, which is the only one a session opened *later*
+   * can be told by, because a broadcast is never replayed.
+   *
+   * An absent key means "the daemon has not said", which is not the same as
+   * `workspace-write`: the chip falls back to its own default for display, but
+   * nothing here should claim a tier the daemon never stated.
+   */
+  sandboxBySid: Record<string, string>;
   /** upgrade 事件（心跳检测 installed ≠ current → "重启生效"横幅；null=无待重启提示） */
   upgradeBanner: { current: string; installed: string } | null;
   /**
@@ -145,7 +161,11 @@ const KEY = (sid?: string | null): string => sid || SID_NULL;
 export interface ResumeResultData {
   type?: string;
   session_id?: string;
-  meta?: { turn?: { running?: boolean; started_at?: number | null } | null } | null;
+  meta?: {
+    turn?: { running?: boolean; started_at?: number | null } | null;
+    /** 会话已存的 sandbox 档位（daemon `resolve_client_tier`；未设置过也会报默认档） */
+    sandbox?: string | null;
+  } | null;
 }
 
 /**
@@ -168,6 +188,21 @@ export function resumeTurnInstantMs(meta: unknown): number | null {
   return started * 1000;
 }
 
+/**
+ * The session's stored sandbox tier from a `resume_result` snapshot, or null when
+ * the frame stated none (rant 2026-09-30T09:30:16, GUI half).
+ *
+ * Same reasoning as `resumeTurnInstantMs` above: the snapshot is the *only* frame a
+ * session opened later can learn the tier from, because `sandbox_set` is a
+ * broadcast and a broadcast is never replayed. `null` means "the daemon did not
+ * say", which is not a tier — claiming `workspace-write` here would put a value in
+ * the store that the daemon never reported.
+ */
+export function resumeSandboxMode(meta: unknown): string | null {
+  const mode = (meta as { sandbox?: unknown } | null | undefined)?.sandbox;
+  return typeof mode === "string" && mode ? mode : null;
+}
+
 export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
   return createSnapshotStore<DaemonAppState>({
     connected: false,
@@ -186,6 +221,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     busyBySid: {},
     turnStartBySid: {},
     disconnectedBySid: {},
+    sandboxBySid: {},
     upgradeBanner: null,
     pendingApproval: null,
   });
@@ -230,6 +266,13 @@ export interface DaemonBridgeDeps {
       requestId: string;
       approved: boolean;
     }): Promise<{ ok?: boolean }>;
+    /**
+     * Set a session's sandbox tier (preload.setSandbox；未接线时为 undefined）。
+     *
+     * Only the intent crosses: main resolves the session's cwd and the daemon
+     * stores and broadcasts the tier (rant 2026-09-30T09:30:16, GUI half).
+     */
+    setSandbox?(p: { sessionId: string; mode: string }): Promise<unknown>;
   };
   transcript: TranscriptStore;
   t?: TranslateFn;
@@ -254,6 +297,12 @@ export interface DaemonBridge {
    * takes the first answer only.
    */
   respondApproval(approved: boolean): Promise<boolean>;
+  /**
+   * Ask the daemon to set this session's sandbox tier (rant 2026-09-30T09:30:16,
+   * GUI half). The store is updated by the `sandbox_set` frame that comes back, not
+   * by this call — see the implementation.
+   */
+  setSandbox(sid: string | null, mode: string): Promise<boolean>;
 }
 
 export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
@@ -409,10 +458,31 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         const k = KEY(resume.session_id ?? sid);
         const startedMs = resumeTurnInstantMs(resume.meta);
         const { [k]: _drop, ...rest } = store.get().turnStartBySid;
+        // The tier the session already carries (rant 2026-09-30T09:30:16, GUI half):
+        // `sandbox_set` is broadcast and never replayed, so this snapshot is the only
+        // way a session opened *after* the change can show it.
+        const storedTier = resumeSandboxMode(resume.meta);
         store.update((s) => ({
           ...s,
           turnStartBySid: startedMs === null ? rest : { ...s.turnStartBySid, [k]: startedMs },
           busyBySid: { ...s.busyBySid, [k]: startedMs !== null },
+          ...(storedTier === null
+            ? {}
+            : { sandboxBySid: { ...s.sandboxBySid, [k]: storedTier } }),
+        }));
+        break;
+      }
+      case "sandbox_set": {
+        // The session's tier, from whichever of the two frames carried it: the
+        // requester's own reply and every other connection's broadcast are the same
+        // payload (rant 2026-09-30T09:30:16, GUI half). A refusal is this same type
+        // carrying `error` and no usable `mode`, so it is not read as a tier.
+        const d = data as { session_id?: string; mode?: unknown; error?: unknown };
+        if (typeof d.mode !== "string" || !d.mode) break;
+        const k = KEY(d.session_id ?? sid);
+        store.update((s) => ({
+          ...s,
+          sandboxBySid: { ...s.sandboxBySid, [k]: d.mode as string },
         }));
         break;
       }
@@ -666,5 +736,29 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     return true;
   }
 
-  return { store, dispose, handleFrame, applyInit, respondApproval };
+  /**
+   * Ask the daemon to set this session's sandbox tier.
+   *
+   * Nothing is written to the store here, and that is the point (rant
+   * 2026-09-30T09:30:16, GUI half): the click is a request, not a state change, and
+   * the tier the chip then shows is the one the daemon's `sandbox_set` frame
+   * reports. A client that moved its own copy first would be right about itself and
+   * wrong about every other client whenever the daemon refused.
+   *
+   * Returns false when there is nothing to ask with — no session, or a build whose
+   * preload predates this API — rather than pretending the tier was set.
+   */
+  async function setSandbox(sid: string | null, mode: string): Promise<boolean> {
+    if (!sid) return false;
+    const sender = emrg.setSandbox;
+    if (typeof sender !== "function") return false;
+    try {
+      await sender({ sessionId: sid, mode });
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  return { store, dispose, handleFrame, applyInit, respondApproval, setSandbox };
 }

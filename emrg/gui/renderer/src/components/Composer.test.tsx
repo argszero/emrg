@@ -22,6 +22,8 @@ function setup(
     busy?: boolean;
     cancel?: (sessionId: string) => Promise<unknown>;
     onCommand?: (r: { type: "command" | "unknown"; cmd: string; args?: string[] }) => void;
+    sandbox?: string | null;
+    onSandboxChange?: (mode: string) => void;
     saveImage?: (payload: { sessionId?: string | null; data: string; label: string; mime?: string }) =>
       Promise<{ path: string; mime?: string }>;
     logLine?: (level: string, msg: string) => void;
@@ -654,6 +656,41 @@ describe("Composer — 格式栏与快捷键（Stage 2, rant 14:07:29）", () =>
     s.press("Enter");
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0].sandbox).toBe("read-only");
+  });
+
+  it("沙箱切换器：父级接管时显示 daemon 报的档位，点击只上报、自己不动（rant 2026-09-30T09:30:16 GUI 半边）", async () => {
+    const store = createTranscriptStore();
+    const asked: string[] = [];
+    setup(store, { sandbox: "read-only", onSandboxChange: (m) => asked.push(m) });
+    await waitFor(() => expect(screen.getByTestId("sandbox-switcher")).toBeTruthy());
+    // 显示的是 prop（daemon 说的），不是本组件默认的 workspace-write
+    expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTestId("sandbox-workspace-write").getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(screen.getByTestId("sandbox-danger-full-access"));
+    expect(asked).toEqual(["danger-full-access"]);
+    // 点击不改显示：档位等 daemon 的 sandbox_set 回来（客户端不先改自己那份）
+    expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTestId("sandbox-danger-full-access").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("沙箱切换器：父级接管时，随消息下发的档位也是 daemon 报的那个", async () => {
+    const store = createTranscriptStore();
+    const sent: Array<{ sandbox?: string | null }> = [];
+    const s = setup(store, {
+      sandbox: "danger-full-access",
+      onSandboxChange: () => {},
+      sendMessage: async (o) => {
+        sent.push({ sandbox: o.sandbox });
+        return { requestId: o.requestId };
+      },
+    });
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("full access please");
+    });
+    s.press("Enter");
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].sandbox).toBe("danger-full-access");
   });
 
   it("沙箱切换器：切到 danger-full-access → 发送消息带 danger-full-access sandbox", async () => {

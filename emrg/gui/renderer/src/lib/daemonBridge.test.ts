@@ -18,14 +18,15 @@ function setup() {
   });
   const transcript = createTranscriptStore({ t });
   const sendMessage = vi.fn().mockResolvedValue({ requestId: "req-1" });
+  const setSandbox = vi.fn().mockResolvedValue({ ok: true });
   let cb: ((evt: DaemonEventFrame) => void) | null = null;
   const disposeCb = vi.fn();
   const onEvent = vi.fn((handler: (evt: DaemonEventFrame) => void) => {
     cb = handler;
     return disposeCb;
   });
-  const bridge = createDaemonBridge({ onEvent, emrg: { sendMessage }, transcript, t });
-  return { bridge, transcript, t, sendMessage, onEvent, disposeCb, emit: (f: DaemonEventFrame) => cb?.(f) };
+  const bridge = createDaemonBridge({ onEvent, emrg: { sendMessage, setSandbox }, transcript, t });
+  return { bridge, transcript, t, sendMessage, setSandbox, onEvent, disposeCb, emit: (f: DaemonEventFrame) => cb?.(f) };
 }
 
 function entriesText(store: ReturnType<typeof createTranscriptStore>, sid: string | null = null): string[] {
@@ -438,4 +439,59 @@ describe("createDaemonBridge", () => {
       vi.useRealTimers();
     }
   });
+  // ── 会话 sandbox 档位（rant 2026-09-30T09:30:16，GUI 半边）────────────────────
+  // 三件事各测一边：广播进 store、快照进 store、点击只上报。第二件是广播**不会重放**
+  // 的后果——打开一个早就设过档位的会话，唯一能告诉它的帧就是这份快照。
+
+  it("sandbox_set → 该会话的档位进 store（另一个客户端设的那一份同形）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "sandbox_set", sid: "s1", data: { type: "sandbox_set", session_id: "s1", mode: "read-only" } });
+    expect(bridge.store.get().sandboxBySid["s1"]).toBe("read-only");
+  });
+
+  it("sandbox_set 的拒绝帧（带 error、无 mode）→ 不写档位：拒绝不是一次设置", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "sandbox_set", sid: "s1", data: { type: "sandbox_set", error: "unknown sandbox mode 'nope'" } });
+    expect(bridge.store.get().sandboxBySid["s1"]).toBeUndefined();
+  });
+
+  it("resume_result 的 meta.sandbox → 会话一打开就显示已存档位", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { sandbox: "danger-full-access" } },
+      sid: "s1",
+    } as DaemonEventFrame);
+    expect(bridge.store.get().sandboxBySid["s1"]).toBe("danger-full-access");
+  });
+
+  it("resume_result 没报档位 → 不写：「daemon 没说」不是 workspace-write", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { turn: { running: false, started_at: null } } },
+      sid: "s1",
+    } as DaemonEventFrame);
+    expect(bridge.store.get().sandboxBySid["s1"]).toBeUndefined();
+  });
+
+  it("setSandbox 只上报：store 不动，档位等 daemon 的 sandbox_set 回来", async () => {
+    const { bridge, setSandbox } = setup();
+    await bridge.setSandbox("s1", "read-only");
+    expect(setSandbox).toHaveBeenCalledWith({ sessionId: "s1", mode: "read-only" });
+    // 先改自己那份，就是「对自己正确、对别的客户端错误」的那个缺陷。
+    expect(bridge.store.get().sandboxBySid["s1"]).toBeUndefined();
+  });
+
+  it("setSandbox 没有会话、或这条构建没接线 → false，不假装设上了", async () => {
+    const { bridge } = setup();
+    expect(await bridge.setSandbox(null, "read-only")).toBe(false);
+    const noWire = createDaemonBridge({
+      onEvent: vi.fn(() => vi.fn()),
+      emrg: { sendMessage: vi.fn() },
+      transcript: createTranscriptStore(),
+    });
+    expect(await noWire.setSandbox("s1", "read-only")).toBe(false);
+  });
+
 });

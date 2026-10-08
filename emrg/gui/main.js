@@ -954,6 +954,29 @@ vision = false
       return { ok: true };
     });
 
+    // The daemon owns the tier vocabulary (`emrg/server/policy.py::SANDBOX_MODES`).
+    // This copy is only the GUI boundary's cheap check before the wire; the daemon
+    // refuses an unknown mode on its own (`_handle_set_sandbox`) and says so.
+    const SANDBOX_MODES = ["read-only", "workspace-write", "danger-full-access"];
+
+    ipcMain.handle("emrg:setSandbox", async (_e, { sessionId, mode }) => {
+      // Rant 2026-09-30T09:30:16 (GUI half): the renderer states the intent and nothing
+      // else. The tier is the *session's*, so it is the daemon that stores and broadcasts
+      // it; the cwd the command must carry is resolved here, with the same helper
+      // `emrg:sendMessage` uses, so no client has to hold a copy of either.
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      if (!SANDBOX_MODES.includes(mode)) throw new Error("invalid sandbox mode");
+      const sessionCwd = resolveSessionCwd(sessionId) || DEFAULT_CWD;
+      let conn = connManager?.get(sessionId);
+      if (!conn || !conn.connected) {
+        // Same defensive open as `emrg:sendMessage`: a click after a reconnect must work
+        // rather than silently doing nothing.
+        conn = await openSession(sessionId, sessionCwd, { resume: false });
+      }
+      conn.sendSetSandbox({ sessionId, cwd: sessionCwd, mode });
+      return { ok: true };
+    });
+
     ipcMain.handle("emrg:openFile", async (_e, { filePath }) => {
       // GUI / 指令 WorkBuddy P1：产物面板打开文件（系统默认程序）
       if (typeof filePath !== "string" || !filePath.trim()) throw new Error("invalid file path");

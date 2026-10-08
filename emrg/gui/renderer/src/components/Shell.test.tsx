@@ -39,6 +39,7 @@ function mockEmrg() {
   const sendRant = vi.fn().mockResolvedValue({ ok: true, count: 11 });
   const restartDaemon = vi.fn().mockResolvedValue({ ok: true });
   const setModel = vi.fn().mockResolvedValue({ ok: true });
+  const setSandbox = vi.fn().mockResolvedValue({ ok: true });
   const triggerTask = vi.fn().mockResolvedValue({ ok: true });
   const switchSession = vi.fn().mockResolvedValue({ ok: true });
   (window as unknown as { emrg?: unknown }).emrg = {
@@ -59,6 +60,7 @@ function mockEmrg() {
     sendRant,
     restartDaemon,
     setModel,
+    setSandbox,
     triggerTask,
     switchSession,
   };
@@ -78,6 +80,7 @@ function mockEmrg() {
     sendRant,
     restartDaemon,
     setModel,
+    setSandbox,
     triggerTask,
     switchSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
@@ -111,6 +114,25 @@ async function typeIntoComposer(text: string) {
 }
 
 describe("Shell (Batch 5 slice 3 chat wiring)", () => {
+  it("the session's sandbox tier is the daemon's: a broadcast moves the chip, a click asks (rant 2026-09-30T09:30:16, GUI half)", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    // Nothing has reported a tier yet → the chip shows its own default, which is not
+    // a claim about the daemon (the store key is absent, not "workspace-write").
+    await waitFor(() => expect(screen.getByTestId("sandbox-workspace-write").getAttribute("aria-pressed")).toBe("true"));
+    // A tier set in the TUI arrives as this frame — the chip follows the daemon.
+    m.emit({ type: "sandbox_set", sid: "s1", data: { type: "sandbox_set", session_id: "s1", mode: "read-only" } });
+    await waitFor(() => expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true"));
+    expect(screen.getByTestId("sandbox-workspace-write").getAttribute("aria-pressed")).toBe("false");
+    // Clicking asks the daemon and moves nothing by itself.
+    await userEvent.click(screen.getByTestId("sandbox-danger-full-access"));
+    await waitFor(() => expect(m.setSandbox).toHaveBeenCalledWith({ sessionId: "s1", mode: "danger-full-access" }));
+    expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true");
+  });
+
   afterEach(() => {
     delete (window as unknown as { emrg?: unknown }).emrg;
   });

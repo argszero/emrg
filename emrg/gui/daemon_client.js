@@ -837,6 +837,20 @@ class DaemonClient {
     return rid;
   }
 
+  /** Set this session's sandbox tier; the daemon persists it and broadcasts `sandbox_set`.
+   *
+   * Rant 2026-09-30T09:30:16 (GUI half): the tier belongs to the *session*, so a
+   * client keeps none of its own — it asks the daemon and renders the
+   * `sandbox_set` frame that comes back. Fire-and-forget on purpose: the answer
+   * *is* the event (the requester's own reply and every other connection's
+   * broadcast are the same frame shape), and pairing it through `_pending`
+   * would swallow the requester's own reply in `_resolvePending` before the
+   * renderer could see it.
+   */
+  sendSetSandbox({ sessionId, cwd, mode }) {
+    this.sendCommand("set_sandbox", { session_id: sessionId, cwd, mode });
+  }
+
   sendCommand(type, params = {}) {
     // Wire message type last: a payload field named "type" (e.g. the task type in
     // task CRUD) must never override the wire message type (rant 2026-08-14T21:48:00).
@@ -909,6 +923,23 @@ class DaemonClient {
   _classify(frame) {
     // 命令响应优先（pending 配对）
     if (this._resolvePending(frame)) return;
+
+    if (frame.type === "sandbox_set") {
+      // The session's sandbox tier (rant 2026-09-30T09:30:16, GUI half). One frame
+      // shape covers the requester's own reply and every other connection's
+      // broadcast, because the daemon sends the same payload to both
+      // (`daemon.py::_handle_set_sandbox`). It must be forwarded *here*, ahead of
+      // the `frame.error` catch-all: a refused mode arrives as this same type
+      // carrying `error`, so the refusal belongs to the tier surface rather than
+      // to the generic error stream.
+      //
+      // Before this branch existed the success frame matched nothing below (its
+      // only keys are `type`/`session_id`/`mode`), so it fell to the unknown-frame
+      // log at the bottom of this function and reached no renderer: a tier set in
+      // the TUI was invisible in the GUI, and the GUI could not set one at all.
+      this._emit("sandbox_set", frame);
+      return;
+    }
 
     if (frame.type === "approval_request") {
       // The daemon is holding a confined call open until a client answers
