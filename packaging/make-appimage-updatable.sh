@@ -48,14 +48,18 @@ mkdir -p "$OUT_DIR"
 # tag 用 `latest`（本项目的 release 一律发布为 Latest，不是 draft / prerelease），
 # filename 里的 `*` 是规范允许的通配，版本号因此不必出现在更新信息里。
 REPO_SLUG="${GITHUB_REPOSITORY:-}"
-if [ -z "$REPO_SLUG" ] || [ "${REPO_SLUG%%/*}" = "$REPO_SLUG" ]; then
+OWNER="${REPO_SLUG%%/*}"
+REPO_NAME="${REPO_SLUG#*/}"
+# 形态是 owner/repo：**恰好一个斜杠，且两半都非空**。只看「有没有斜杠」会放过
+# `/emrg`、`argszero/` 与 `a/b/c` —— 三者的产物都是一条 owner 或 repo 为空、
+# 指向不存在仓库的更新信息串，而那正是这条守卫要拦下的东西。
+if [ -z "$REPO_SLUG" ] || [ -z "$OWNER" ] || [ -z "$REPO_NAME" ] \
+   || [ "$REPO_NAME" = "$REPO_SLUG" ] || [ "${REPO_NAME#*/}" != "$REPO_NAME" ]; then
   echo "!! GITHUB_REPOSITORY 未设置或不是 owner/repo 形态（拿到 '${REPO_SLUG}'）——" >&2
   echo "   更新信息串必须指向 .zsync 真正所在的 release，猜一个 owner/repo 会让用户的" >&2
   echo "   更新指向别人的仓库。在 CI 里它由 Actions 注入；本地跑请显式导出它。" >&2
   exit 1
 fi
-OWNER="${REPO_SLUG%%/*}"
-REPO_NAME="${REPO_SLUG#*/}"
 # 架构可由环境显式给出（测试与交叉构建），否则取宿主架构 —— 它同时决定产物名里的
 # 那一段与更新信息串里 `.zsync` 的通配形态，两处必须是同一个值。
 ARCH="${ARCH:-$(uname -m)}"
