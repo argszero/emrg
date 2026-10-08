@@ -171,19 +171,86 @@ def test_read_with_start_line_byte_offset(temp_file):
 
 
 def test_read_start_line_byte_offset_at_eol(temp_file):
-    """byte_offset beyond line length yields empty first line."""
+    """An offset at or past the line's end shows that line empty, and says so.
+
+    Rewritten 2026-10-08 (`cyc20261008-153534`) after this arm was measured **unable to
+    fail**: it read `line 3` (6 chars) with offset 999 and asserted
+    `"     3\\t" in lines[0] or lines[0].strip().startswith("3")`, and the tool returned
+    the **whole line** — which satisfies both halves, because `"     3\\tline 3"` begins
+    with `"     3\\t"`. So the docstring above said "yields empty first line" while the
+    code did the opposite, and nothing here could tell the two apart. The assertions
+    below are the two outcomes separated: the line is empty, the whole line is absent,
+    and the notice names the offset and the line's real length.
+    """
     tool = ReadTool()
     f, _ = temp_file
+    assert len("line 3") == 6
     result = _run(tool.execute({
         "file_path": str(f),
         "start_line": 3,
         "start_line_byte_offset": 999,
     }))
     assert not result.error
-    # First line (line 3) should be empty or skipped
     lines = result.content.split("\n")
-    # line 3 should be empty (byte offset beyond its length)
-    assert "     3\t" in lines[0] or lines[0].strip().startswith("3")
+    # The numbered first line holds nothing after the tab.
+    assert lines[0] == "     3\t", f"line 3 should be shown empty, got {lines[0]!r}"
+    # The subject is not silently handed back instead: that output is what offset 0
+    # produces, and the caller cannot tell the two apart.
+    assert "line 3" not in lines[0], (
+        "the whole line came back for an offset past its end — byte-identical to offset 0"
+    )
+    # The fact is stated, with both numbers a reader needs.
+    assert "999" in result.content and "6 chars" in result.content, (
+        f"the ignored offset was not reported: {result.content!r}"
+    )
+
+
+def test_read_start_line_byte_offset_states_the_remainder(temp_file):
+    """An offset inside the line reports the line's length and how much was shown.
+
+    The other half of the same defect: with the offset applied, the output was a *suffix*
+    printed with its line number and no way to tell it apart from the whole line — so a
+    caller chunking a long line could not know whether more of it followed.
+    """
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({
+        "file_path": str(f),
+        "start_line": 3,
+        "start_line_byte_offset": 2,
+    }))
+    assert not result.error
+    lines = result.content.split("\n")
+    assert lines[0] == "     3\tne 3", f"expected the suffix from character 2, got {lines[0]!r}"
+    assert "6 chars" in result.content and "character 2" in result.content, (
+        f"the partial read was not reported as partial: {result.content!r}"
+    )
+    assert "4 of them" in result.content, (
+        f"the notice does not say how much of the line was shown: {result.content!r}"
+    )
+
+
+def test_read_never_cuts_a_line(temp_file):
+    """The premise `start_line_byte_offset`'s description states, measured.
+
+    A line is returned whole however long it is, so no offset of the tool's own making
+    exists: the offset belongs to a caller chunking a line itself. That is what the
+    schema description now says, and this arm is what makes the sentence falsifiable —
+    a line cap added later (the shape that would make the tool produce offsets) fails
+    here rather than quietly re-defining the parameter.
+    """
+    tool = ReadTool()
+    _, d = temp_file
+    long_line = "x" * 5000 + "END-OF-LINE"
+    big = d / "oneline.txt"
+    big.write_text("short\n" + long_line + "\n")
+    result = _run(tool.execute({"file_path": str(big), "start_line": 2}))
+    assert not result.error
+    shown = result.content.split("\n")[0]
+    assert shown == f"     2\t{long_line}", (
+        f"line 2 is {len(long_line)} chars and came back with {len(shown) - 8} of them — "
+        "a line was cut, which is the offset-producing behaviour the description denies"
+    )
 
 
 def test_read_image_returns_vision_ref(temp_file):
