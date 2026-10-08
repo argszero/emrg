@@ -515,3 +515,75 @@ class TestTheCountNamesTheFilesItReallySearched:
 
         assert "Found 1 matches" in content
         assert "(searched 2 files; 1 skipped: 1 over 524288 bytes)" in content
+
+
+# ── the numeric parameters' domains (issue #1935) ─────────────────────────────
+#
+# Measured 2026-10-08 (`cyc20261008-175325`) on a one-match fixture. A negative
+# context was not merely odd: `max(0, i - context_before)` starts *after* the
+# match, so the block printed its `five.txt:3:` header and **no line at all** —
+# the matching line was dropped — and the same value collapsed the stop budget
+# `max_results * (2 + cb + ca)` below zero, so the search stopped at the first
+# match and the summary read "the search stopped at its result budget
+# (max_results=200)", with a remedy ("raise max_results") aimed at a cause that
+# was not the cause. Both are refused now.
+
+
+def test_grep_refuses_a_negative_context(tmp_path):
+    """A negative context is refused, and no false budget claim is made."""
+    f = tmp_path / "five.txt"
+    f.write_text("alpha\nbeta\nGAMMA\ndelta\nepsilon\n")
+    tool = GrepTool()
+    for key in ("context_before", "context_after"):
+        result = _run(tool.execute({"pattern": "GAMMA", "path": str(f), key: -2}))
+        assert result.error, f"{key}=-2 was accepted"
+        assert key in result.content and "-2" in result.content
+        # The defect's second half: a cut attributed to a budget that was not the
+        # cause. Nothing may be claimed about a search that did not run.
+        assert "Found" not in result.content
+        assert "result budget" not in result.content
+        assert "GAMMA" not in result.content, "the block was not rendered at all or half-rendered"
+
+
+def test_grep_refuses_a_context_that_is_not_a_number(tmp_path):
+    """A value that cannot be read as a count is refused, not read as 0."""
+    f = tmp_path / "five.txt"
+    f.write_text("alpha\nGAMMA\n")
+    result = _run(GrepTool().execute({
+        "pattern": "GAMMA", "path": str(f), "context_before": "two",
+    }))
+    assert result.error
+    assert "context_before" in result.content and "two" in result.content
+    assert "Found" not in result.content
+
+
+def test_grep_refuses_a_budget_below_one(tmp_path):
+    """0 and negative budgets are refused — 0 used to be read as the default."""
+    f = tmp_path / "five.txt"
+    f.write_text("alpha\nbeta\nGAMMA\ndelta\nepsilon\n")
+    tool = GrepTool()
+    for value in (0, -1):
+        result = _run(tool.execute({
+            "pattern": "GAMMA", "path": str(f), "max_results": value,
+        }))
+        assert result.error, f"max_results={value} was accepted"
+        assert "max_results" in result.content and str(value) in result.content
+        assert "Found" not in result.content
+
+
+def test_grep_context_inside_its_domain_still_renders_the_block(tmp_path):
+    """The control: a legal context still shows the match and its neighbours.
+
+    Without it, "refused" could pass for "handled" — the three refusals above only
+    prove the tool says no, never that it still says yes where it should.
+    """
+    f = tmp_path / "five.txt"
+    f.write_text("alpha\nbeta\nGAMMA\ndelta\nepsilon\n")
+    result = _run(GrepTool().execute({
+        "pattern": "GAMMA", "path": str(f), "context_before": 1, "context_after": 1,
+    }))
+    assert not result.error
+    assert "Found 1 matches" in result.content
+    for line in ("beta", ">GAMMA", "delta"):
+        assert line in result.content
+    assert "result budget" not in result.content, "a complete search is not a cut one"

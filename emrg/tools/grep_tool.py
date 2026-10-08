@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, count_argument
 
 logger = logging.getLogger(__name__)
 
@@ -71,15 +71,27 @@ class GrepTool(ToolExecutor):
                     },
                     "context_before": {
                         "type": "integer",
-                        "description": "Number of context lines to show before each match.",
+                        "description": (
+                            "Number of context lines to show before each match "
+                            "(0 or more; a negative value is refused rather than read "
+                            "as a different window)."
+                        ),
                     },
                     "context_after": {
                         "type": "integer",
-                        "description": "Number of context lines to show after each match.",
+                        "description": (
+                            "Number of context lines to show after each match "
+                            "(0 or more; a negative value is refused rather than read "
+                            "as a different window)."
+                        ),
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": f"Maximum matches to return (default: {MAX_RESULTS}).",
+                        "description": (
+                            f"Maximum matches to return (default: {MAX_RESULTS}; at "
+                            "least 1 — 0 or less is refused rather than read as the "
+                            "default)."
+                        ),
                     },
                     "intent": {
                         "type": "string",
@@ -96,9 +108,35 @@ class GrepTool(ToolExecutor):
         search_path = arguments.get("path") or "."
         file_glob = arguments.get("glob")
         ignore_case = arguments.get("ignore_case", False)
-        context_before = arguments.get("context_before") or 0
-        context_after = arguments.get("context_after") or 0
-        max_results = arguments.get("max_results") or MAX_RESULTS
+
+        # ── The three counts, refused rather than reinterpreted ──
+        #
+        # A negative context was not merely odd: `max(0, i - context_before)` starts
+        # *after* the match, so the block printed its header and no line at all — the
+        # matching line itself was dropped — and the same value collapsed the stop
+        # budget below to zero, so the search stopped at the first match and the
+        # summary blamed `max_results`. `count_argument` states the rule.
+        context_before, refusal = count_argument(
+            arguments, "context_before",
+            minimum=0, default=0,
+            hint="It is a number of lines to show before each match; omit it for none",
+        )
+        if refusal is not None:
+            return ToolResult(name="grep", content=refusal, error=True)
+        context_after, refusal = count_argument(
+            arguments, "context_after",
+            minimum=0, default=0,
+            hint="It is a number of lines to show after each match; omit it for none",
+        )
+        if refusal is not None:
+            return ToolResult(name="grep", content=refusal, error=True)
+        max_results, refusal = count_argument(
+            arguments, "max_results",
+            minimum=1, default=MAX_RESULTS,
+            hint=f"Omit it to use the default of {MAX_RESULTS} matches",
+        )
+        if refusal is not None:
+            return ToolResult(name="grep", content=refusal, error=True)
 
         if not pattern:
             return ToolResult(

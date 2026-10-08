@@ -9,7 +9,7 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, boolean_argument
 from emrg.tools.file_policy import resolve_file_target
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,9 @@ class EditTool(ToolExecutor):
                         "type": "boolean",
                         "description": (
                             "If true, replace all occurrences of old_string. "
-                            "If false (default), old_string must be unique."
+                            "If false (default), old_string must be unique. A value "
+                            "that is not true or false (the strings 'true'/'false' "
+                            "included) is refused rather than read as its opposite."
                         ),
                     },
                     "intent": {
@@ -72,7 +74,11 @@ class EditTool(ToolExecutor):
         file_path = arguments.get("file_path", "")
         old = arguments.get("old_string", "")
         new = arguments.get("new_string", "")
-        replace_all = arguments.get("replace_all", False)
+        # Refused rather than read by truthiness: `"false"` is a truthy string, and
+        # this flag decides how many places the edit writes to (`boolean_argument`).
+        replace_all, refusal = boolean_argument(arguments, "replace_all", default=False)
+        if refusal is not None:
+            return ToolResult(name="edit", content=refusal, error=True)
 
         if not file_path:
             return ToolResult(name="edit", content="Error: no file_path provided", error=True)
