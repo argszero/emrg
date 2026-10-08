@@ -142,7 +142,22 @@ would have been kept whatever its status, since completion follows submission �
 completion stamp that does not follow the row's own submission instant, because a row that
 broke it would rank below an instant it was submitted after and be reported here as never
 held), while one with
-ten or more above it may be. The row prints the case it measured, because the reader's next move
+ten or more above it may be.
+
+A **third** case belongs to the same paragraph, because it changes the reader's move: a rant
+timestamp is host-local, indexing the ledger of the machine that wrote it
+(`check-rant-citations.py` records a reporter measuring 0 of 24 citations resolving on a second
+host — issue #1252), so an issue opened elsewhere names a handle that exists, in a store this
+process never reads. That is not guessed either: the row names the newest instant this ledger
+ranks a record by — the same `completed or timestamp` key the retention rule sorts by — and says
+whether the citation is newer than it. A citation newer than every record is one no prune could
+have displaced *and* one the store had not received by its last write, so the row is about a
+chain that cannot be walked from here; one that is not leaves the question where the retention
+arithmetic left it. The resolution stays a file read and never becomes a network call, so a row
+may say the handle can only be walked where it was opened — a different statement from a copy
+that could be restored.
+
+The row prints the case it measured, because the reader's next move
 differs — and because the remedy the other case suggests, *write it verbatim*, is available in
 neither: a ledger that does not hold the timestamp holds nothing to copy.
 
@@ -740,6 +755,36 @@ def _completed_at_or_after(rows: list[dict], cited: str) -> int | None:
     return count
 
 
+def _newest_record_key(rows: list[dict], cited: str) -> str | None:
+    """The newest instant the ledger ranks *any* row by, or `None` when none is comparable.
+
+    Every row is measured by the key the retention rule and this reading both use —
+    ``completed or timestamp`` — and not by its submission instant alone: a completed row ranks
+    by when it *completed*, so a submission-only reading of "the ledger's newest record" can name
+    an instant the store itself ranks lower, in a sentence a reader is meant to act on.
+
+    Compared by parsed instant rather than by the string, because the store is sorted by the
+    string and a ledger whose rows mix offsets does not sort the way it reads. Rows whose instant
+    is not comparable with the citation (one aware, one naive) are left out rather than ordered
+    against it: an unorderable pair answers nothing (see `_completed_at_or_after`). `None` means
+    the question could not be measured here — never that the ledger is empty, and never that its
+    newest record is older than the citation.
+    """
+    want = _parse_instant(cited)
+    newest: str | None = None
+    newest_instant: dt.datetime | None = None
+    for row in rows:
+        key = row.get("completed") or row.get("timestamp")
+        if not isinstance(key, str) or not key:
+            continue
+        held = _parse_instant(key)
+        if want is None or held is None or (want.tzinfo is None) != (held.tzinfo is None):
+            continue
+        if newest_instant is None or held > newest_instant:
+            newest, newest_instant = key, held
+    return newest
+
+
 def _absent_origin_reading(rows: list[dict], cited: str) -> str:
     """Why the ledger does not hold `cited`, computed from the ledger's own retention rule.
 
@@ -765,9 +810,23 @@ def _absent_origin_reading(rows: list[dict], cited: str) -> str:
     the branch below then reports a record the store really pruned as one that never existed:
     the strongest sentence this reading can print, from a premise nothing here can re-check.
 
+    **The other half of the scope, and the reason the remedy is what it is.** A handle this
+    reading cannot resolve is not necessarily a defect in the issue: a rant timestamp is
+    host-local, indexing the ledger of the machine that *wrote* it (`check-rant-citations.py`
+    records a reporter measuring 0 of 24 citations resolving on a second host — issue #1252), so
+    an issue opened elsewhere names a record that exists, in a store this reading never sees.
+    The reader's move therefore depends on a fact the ledger carries, and the row measures it
+    rather than assuming it: **is the citation newer than every record this ledger ranks?** If it
+    is, nothing here ranked above the handle, the retention rule cannot have displaced it, and
+    the store had not received it by its own last write — the row is about a chain that cannot be
+    walked from here. If it is not, the store has received records at least as recent, and the
+    question stays where the retention arithmetic left it.
+
     Neither branch offers "write the rant's own timestamp verbatim": there is nothing in a ledger
     that does not hold the timestamp to copy from, and a row whose remedy cannot be performed
-    sends its reader to a file for a value that is not there.
+    sends its reader to a file for a value that is not there. For the same reason neither sends
+    a reader looking for the submitting session *on this host* without saying that the session
+    may not have run here at all.
     """
     count = _completed_at_or_after(rows, cited)
     if count is None:
@@ -775,22 +834,43 @@ def _absent_origin_reading(rows: list[dict], cited: str) -> str:
             "the citation and the ledger's completed rants cannot be ordered (one of them "
             "carries no offset), so whether the retention rule could have removed it is not "
             "measurable here - and the ledger holds nothing to copy, so this line can only be "
-            "corrected against whatever submitted the rant"
+            "corrected against whatever submitted the rant, on whatever machine that was"
+        )
+    newest = _newest_record_key(rows, cited)
+    want = _parse_instant(cited)
+    held = _parse_instant(newest) if newest else None
+    if held is not None and want is not None and held < want:
+        store = (
+            f"this ledger's own newest record is `{newest}`, older than the citation, so nothing "
+            "here ranked above the handle and the ledger had not received it by its last write"
+        )
+    elif held is not None:
+        store = (
+            f"this ledger's own newest record is `{newest}`, at or after the citation, so the "
+            "store has received records at least as recent as this handle"
+        )
+    else:
+        store = (
+            "every handle of this kind indexes the ledger of the machine that wrote it, and this "
+            "store holds nothing comparable to date it against"
         )
     if count < _RETENTION_KEEP:
         return (
             f"the ledger holds {count} completed rant(s) at or after this instant, fewer than "
             f"the {_RETENTION_KEEP} `submit_rant cleanup` keeps, so a rant dated at this instant "
-            "would still be in the ledger whatever its status - the retention rule cannot "
-            "explain the absence, and there is nothing here to copy: the handle names no record "
-            "this ledger ever held. Re-derive the origin from whatever submitted the rant (the "
-            "session or command that did), or record the issue as carrying a chain that cannot "
-            "be walked"
+            f"would still be in the ledger whatever its status - the retention rule cannot "
+            f"explain the absence, and {store}. So either the handle was written on another "
+            "machine, where a rant timestamp resolves against that machine's own ledger and this "
+            "row says nothing about the chain, or nothing wrote it at all: an origin written "
+            "here can only be corrected against whatever submitted the rant (the session or "
+            "command that did), and one written elsewhere can only be walked where it was opened"
         )
     return (
         f"the ledger holds {count} completed rant(s) at or after this instant, so the retention "
         f"rule - all pending and in-progress rants plus the {_RETENTION_KEEP} most recent "
-        "completed ones - may have removed it before this reading ran, and no copy remains here"
+        f"completed ones - may have removed it before this reading ran, and no copy remains here; "
+        f"{store}. A citation written on another machine reads the same way, so clear this row "
+        "where the rant lives before treating it as work"
     )
 
 
@@ -811,7 +891,9 @@ def judge_origins(
       says which of the two histories it measured: when a stored timestamp differs from the
       citation only by the precision a writer dropped, it names that stored spelling — a remedy
       a writer can follow — and otherwise it reports whether the retention rule could have
-      pruned the record at all.
+      pruned the record at all, and whether the citation is newer than every record the ledger
+      ranks: the fact that decides whether this store could have held the handle, or whether it
+      was written on the machine that owns the ledger it resolves against.
     * `origin-duplicate` — two or more **open** issues declare the same rant and at least
       one of them carries no `Part: n/N`. R5's default is one rant, one issue; the split is
       legitimate only when every part says which part it is, so an unlabelled one makes the
