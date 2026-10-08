@@ -1498,15 +1498,62 @@ def test_an_origin_the_ledger_does_not_hold_is_a_fault(mod, monkeypatch, capsys,
 
     The row keeps the remedy on it and names the ledger it read — a reader told "no such
     rant" has to be told *where* it was looked for before the sentence is actionable.
+
+    The ledger here holds a row **newer** than the citation, which is what keeps this the
+    "pruned or never written" case: `cleanup` drops the oldest records, so a handle newer
+    than every row the file holds is decided the other way (the test below).
+    """
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, RANT_TS)]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, "2026-10-01T00:00:00+08:00"))])
+
+    assert rc == 1, out
+    assert "#10 issue ORIGIN-UNRESOLVED" in out, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert RANT_TS in detail and "rants.jsonl" in detail and "verbatim" in detail, detail
+
+
+def test_a_citation_newer_than_every_row_was_not_written_against_this_ledger(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """`cleanup` drops the **oldest** records, so a newer handle cannot have been pruned.
+
+    The file therefore has a decided answer for this citation — it was written against a
+    ledger this one is not (the shape of an issue filed from another host, whose ledger is
+    private to that host) — and the remedy has to be that, because "write the rant's own
+    timestamp verbatim" asks for something this file would not resolve either. Measured
+    2026-10-08 (cycle `cyc20261008-174307`): #1931/#1933/#1937, all filed from another
+    host, cite 2026-09-29/09-30 while this host's ledger holds nothing after 2026-09-24.
     """
     _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, RANT_TS)]))
 
     rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, "2026-01-01T00:00:00+08:00"))])
 
     assert rc == 1, out
-    assert "#10 issue ORIGIN-UNRESOLVED" in out, out
     detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
-    assert RANT_TS in detail and "rants.jsonl" in detail and "verbatim" in detail, detail
+    assert "cannot have been pruned" in detail, detail
+    assert "write the rant's own timestamp verbatim" not in detail, detail
+
+
+def test_a_citation_the_ledger_cannot_order_keeps_the_wider_wording(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The discriminator's own limit: a naive stamp is not ordered, so it decides nothing.
+
+    `submit_rant` writes an offset, but a hand-written or older row need not, and comparing
+    a naive stamp against an aware one is a question with no answer rather than one with the
+    answer "older". The row then keeps the wording that was printed before the discriminator
+    existed — the safe direction, because the wider sentence is never *wrong*, only less
+    specific.
+    """
+    _install(mod, monkeypatch, _linked_issues([_issue_with_origin(10, "2026-09-29T15:52:49")]))
+
+    rc, out = _run(mod, capsys, ["--rants", str(_ledger(tmp_path, "2026-01-01T00:00:00+08:00"))])
+
+    assert rc == 1, out
+    detail = _detail(out, "#10 issue ORIGIN-UNRESOLVED")
+    assert "write the rant's own timestamp verbatim" in detail, detail
+    assert "cannot have been pruned" not in detail, detail
 
 
 def test_a_near_match_names_the_ledgers_own_spelling(mod, monkeypatch, capsys, tmp_path) -> None:

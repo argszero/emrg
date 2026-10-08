@@ -138,6 +138,14 @@ rant completed and was pruned reads `origin-unresolved` exactly like one never w
 row says so, because the reader's next move differs (worth the ledger's absence or not) and a
 row that hid the difference would be asking for a timestamp no file holds.
 
+What it *can* decide, because `cleanup` drops the oldest records rather than the newest: a
+cited handle newer than every row the file holds cannot have been pruned from it, so the
+citation was written against a ledger this file is not — the case of an issue filed from
+another host, whose ledger is private to that host. Those rows say so and send the reader to
+where the rant lives, instead of the remedy that asks for a re-spelling this file would not
+resolve either. It is a one-sided discriminator: a handle older than the newest row may be
+pruned or never written, and those rows keep the wider wording.
+
 Exit codes
 ----------
 0  every open issue has exactly one open PR declaring it, each declaration is named back
@@ -675,6 +683,37 @@ def _same_instant_spelling(stored: str, cited: str) -> bool:
     )
 
 
+def _instant(stamp: str) -> dt.datetime | None:
+    """`stamp` as an **aware** datetime, or `None` when it does not parse or has no offset.
+
+    Only ever used to *order* two handles, never to resolve one, so an unparseable stamp
+    leaves the question unanswered and the caller keeps the wider wording. A naive stamp is
+    refused rather than assumed into a zone: `submit_rant` writes an offset, and a stamp read
+    as the wrong zone orders two handles the wrong way round — the one thing this comparison
+    exists for. (The refusal is the safe direction: the wider wording is the one that was
+    printed before this discriminator existed.)
+    """
+    try:
+        parsed = dt.datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _newest_stored(store: set[str]) -> dt.datetime | None:
+    """The latest instant the ledger holds, or `None` when none of what it holds parses.
+
+    `cleanup` keeps every pending and in-progress rant plus the **ten most recent completed**
+    ones, so it drops the *oldest* records. That makes the file's own newest stamp a
+    discriminator rather than a decoration: a handle **newer** than every row the file holds
+    cannot have been pruned from it, so its absence is evidence the citation was not written
+    against this file — where a handle older than the newest row may equally be pruned or
+    never written, and no read of this file can tell those two apart.
+    """
+    instants = [i for i in (_instant(s) for s in store) if i is not None]
+    return max(instants) if instants else None
+
+
 def judge_origins(
     issues: list[dict], store: set[str], where: str
 ) -> dict[int, tuple[str, str]]:
@@ -709,10 +748,21 @@ def judge_origins(
     whose origin was never written. That is the right direction here — an open issue whose
     rant is gone is a chain a reader cannot walk either way — and the detail says so, which
     is what keeps the row actionable.
+
+    What the file *can* still decide, and prints when it can: `cleanup` drops the
+    **oldest** records, so a cited handle newer than every row the file holds cannot have
+    been pruned from it. Where that holds the remedy sends the reader to wherever that
+    rant lives instead of asking for a re-spelling this file would not resolve either —
+    measured 2026-10-08 (cycle `cyc20261008-174307`), the three open `origin-unresolved`
+    rows (#1931/#1933/#1937, all filed from another host) cite 2026-09-29/09-30 while this
+    host's ledger holds nothing after 2026-09-24. The limit of the discriminator is stated
+    with it: a handle **older** than the newest row may equally be pruned or never written,
+    and no read of this file tells those apart, so those rows keep the wider wording.
     """
     faults: dict[int, tuple[str, str]] = {}
     by_ts: dict[str, set[int]] = {}
     labelled: dict[int, bool] = {}
+    newest = _newest_stored(store)
     for issue in issues:
         number = int(issue["number"])
         body = issue.get("body") or ""
@@ -722,18 +772,43 @@ def judge_origins(
             if ts in store:
                 continue
             near = sorted(t for t in store if _same_instant_spelling(t, ts))
-            remedy = (
-                f"the ledger holds `{near[0]}` - write it verbatim"
-                if near
-                else "write the rant's own timestamp verbatim (the ledger is the only "
-                "place it is spelled)"
-            )
+            cited = _instant(ts)
+            if near:
+                remedy = f"the ledger holds `{near[0]}` - write it verbatim"
+                tail = (
+                    "The ledger keeps every pending and in-progress rant and only the ten "
+                    "most recent completed ones, so a pruned origin reads the same as one "
+                    "never written: an open issue whose rant is gone is a chain no reader "
+                    "can walk"
+                )
+            elif cited is not None and newest is not None and cited > newest:
+                remedy = (
+                    f"`{newest.isoformat()}` is the newest rant this ledger holds and "
+                    "`cleanup` drops the oldest completed records, so a handle newer than "
+                    "that one cannot have been pruned - the citation was written against a "
+                    "ledger this file is not"
+                )
+                tail = (
+                    "An open issue whose rant is gone is a chain no reader can walk, and "
+                    "re-spelling the timestamp from here would name a record this file "
+                    "still does not hold: this one is fixed where that rant lives, not "
+                    "here"
+                )
+            else:
+                remedy = (
+                    "write the rant's own timestamp verbatim (the ledger is the only "
+                    "place it is spelled)"
+                )
+                tail = (
+                    "The ledger keeps every pending and in-progress rant and only the ten "
+                    "most recent completed ones, so a pruned origin reads the same as one "
+                    "never written: an open issue whose rant is gone is a chain no reader "
+                    "can walk"
+                )
             faults[number] = (
                 "origin-unresolved",
-                f"the origin line names rant `{ts}`, which {where} does not hold - {remedy}. "
-                "The ledger keeps every pending and in-progress rant and only the ten most "
-                "recent completed ones, so a pruned origin reads the same as one never "
-                "written: an open issue whose rant is gone is a chain no reader can walk",
+                f"the origin line names rant `{ts}`, which {where} does not hold - "
+                f"{remedy}. {tail}",
             )
     for ts, numbers in by_ts.items():
         if len(numbers) < 2:
