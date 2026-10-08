@@ -2150,6 +2150,30 @@ def test_the_span_finder_reads_line_comments_before_strings() -> None:
     )
 
 
+def test_an_escaped_quote_does_not_end_the_string_it_is_inside() -> None:
+    """A `\\"` inside a string is not its end, so the `/*` after it is not code.
+
+    `_skip_string_literal`'s third clause - the escape skip - is load-bearing and,
+    like the newline clause #1949 pinned, reached by no row: measured 2026-10-09
+    (cycle `cyc20261009-023556`), deleting it leaves this file green (79 passed).
+    Without it the walk closes the string at the escaped quote and resumes inside
+    it, so a `/* ... */` run in the string's own text is reported as a block
+    comment that is not there.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        'const s = "a\\"/* not a comment */";\n'
+        "/** helper docs */\n"
+        'it("live", () => {});\n'
+    )
+    assert '\\"' in body, "premise: the string carries an escaped quote"
+    assert [body[a:b] for a, b in guard._block_comment_spans(body)] == ["/** helper docs */"], (
+        "the `/*` inside the string must not open a span - with the escape skip "
+        "removed the scan closes the string at the escaped quote and resumes inside "
+        "it, reporting a comment that is not there"
+    )
+
+
 def test_the_detector_and_the_counter_share_one_definition_of_counted() -> None:
     """The two sides of this tripwire must not drift apart again.
 
