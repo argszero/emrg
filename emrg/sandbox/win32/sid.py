@@ -54,6 +54,30 @@ def workspace_write_sid(workspace_root: str) -> str:
     return f"S-1-4-{first}-{second}"
 
 
+def root_write_sid(root: str) -> str:
+    """Derive one host-named writable root's capability SID (``S-1-4-x-y``).
+
+    Deliberately the *same* derivation as :func:`workspace_write_sid`, and the
+    same domain: the SID is a pure function of the canonical path, so one
+    derivation is what makes the ACE the seam materialized and the SID the runner
+    puts in the token two readings of one fact.  A second domain would let them
+    disagree about which path was granted, and this stack fails **open** when
+    they do — the token would allow a root no ACE names, or the ACE would stand
+    for a root no token carries.
+
+    Nothing here assumes a container: a host may name a directory or a single
+    file, and Windows ACLs are per-object, so a file path derives exactly as a
+    directory path does.  A name collision is therefore possible in principle —
+    a root equal to some session's workspace derives that workspace's SID — and
+    that is refused where it can be seen (``AclSandbox`` requires every write SID
+    it is handed to be distinct) rather than silently widening a grant.
+
+    :param root: the canonical root path, a directory or a single file.
+    :returns: the SDDL string form.
+    """
+    return workspace_write_sid(root)
+
+
 def temp_write_sid(temp_dir: str) -> str:
     """Derive one private temp directory's write SID (``S-1-4-x-y-1``).
 

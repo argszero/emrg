@@ -28,6 +28,7 @@ import pytest
 
 from emrg.sandbox.policy import SandboxPolicy
 from emrg.sandbox.providers import win32 as provider
+from emrg.sandbox.roots import canonical_path
 from emrg.sandbox.win32 import ffi
 from emrg.sandbox.win32.ffi import SIDAndAttributes
 from emrg.sandbox.win32.runner import (
@@ -50,6 +51,7 @@ from emrg.sandbox.win32.sid import (
     assert_private_temp_disjoint,
     assert_temp_root_outside_workspace,
     contains_directory,
+    root_write_sid,
     temp_write_sid,
     workspace_write_sid,
 )
@@ -311,12 +313,98 @@ def test_a_workspace_ace_that_could_not_be_applied_is_cleaned_up_and_not_recorde
 
 
 def test_a_workspace_cleanup_failure_that_itself_fails_is_raised_as_such(store, tmp_path):
-    """Both the apply and the cleanup failing is a different error, and says so."""
+    """Both the apply and the cleanup failing is a different error, and says so.
+
+    The wording is the *standing* grant's rather than the workspace's: one helper
+    now materializes the workspace's ACE and every host-named root's, and a
+    message naming the workspace would be read as a root it never mentioned.
+    ``test_an_extra_root_ace_that_could_not_be_applied_is_cleaned_up_and_not_cached``
+    is the other half — the same helper, reached through the other caller.
+    """
     built, _ = store
     workspace, temps = _workspace_and_temps(tmp_path)
     CONTROLLER.update(fail_workspace_add=True, fail_dispose=True)
-    with pytest.raises(RuntimeError, match="workspace grant failed and its cleanup also failed"):
+    with pytest.raises(RuntimeError, match="standing grant failed and its cleanup also failed"):
         built.materialize("s1", str(workspace), temp_root=str(temps))
+
+
+def test_a_host_named_root_gets_its_own_standing_ace_once(store, tmp_path):
+    """One capability SID and one standing ACE per host-named root (rant §7).
+
+    Both spellings item 7 asks for are covered, because the two go down the same
+    path and differ only in what the host pointed at: a directory, granted as a
+    tree by the inheritable ACE, and a **single file**, which Windows grants as
+    the object itself.  The measurement that matters is the *identity*: the SID is
+    a pure function of the path, so a root that got the workspace's derivation (or
+    the temp's) would hand this session a capability nobody asked for, and the
+    assertion below names which derivation each path must carry.
+    """
+    built, made = store
+    workspace, temps = _workspace_and_temps(tmp_path)
+    directory = tmp_path / "outside"
+    directory.mkdir()
+    single = tmp_path / "outside.txt"
+    single.write_text("host\n", encoding="utf-8")
+    roots = (str(directory), str(single))
+
+    built.materialize("s1", str(workspace), temp_root=str(temps), extra_roots=roots)
+
+    standing = {grant.added[0][0]: grant for grant in made if grant.added and grant.added[0][1]}
+    assert set(standing) == {str(workspace), canonical_path(str(directory)), canonical_path(str(single))}
+    assert standing[canonical_path(str(directory))].write_sid == root_write_sid(canonical_path(str(directory)))
+    assert standing[canonical_path(str(single))].write_sid == root_write_sid(canonical_path(str(single)))
+    assert standing[str(workspace)].write_sid == workspace_write_sid(str(workspace)), (
+        "the workspace keeps its own derivation — the extra roots add identities, they do not replace one"
+    )
+    assert all(grant.disposed is False for grant in standing.values()), (
+        "a standing ACE is the reuse cache: disposing it would force the next provision to rebuild the tree"
+    )
+
+    # A second session, and a second call in the first: the ACEs are reused, not
+    # re-applied — the whole point of a path-keyed cache.
+    before = len(made)
+    built.materialize("s1", str(workspace), temp_root=str(temps), extra_roots=roots)
+    built.materialize("s2", str(workspace), temp_root=str(temps), extra_roots=roots)
+    assert [grant for grant in made[before:] if grant.added and grant.added[0][1]] == [], (
+        "a standing ACE is materialized once per path per server lifetime"
+    )
+
+    # And a call that names no root does not conjure one: the roots are the
+    # policy's, not the store's memory of a previous call.
+    plain = built.materialize("s3", str(workspace), temp_root=str(temps))
+    plain_grants = [grant for grant in made[before:] if grant.added and grant.added[0][1]]
+    assert plain_grants == [], f"an unrooted call granted something ({plain_grants})"
+    assert plain.directory.startswith(str(temps))
+
+
+def test_an_extra_root_ace_that_could_not_be_applied_is_cleaned_up_and_not_cached(store, tmp_path):
+    """Fail closed at the *root*: a session never runs under a capability it was half given.
+
+    The order is deliberate and this test is what pins it — the roots are
+    materialized before the workspace, so a root that cannot be granted stops the
+    call before a temp directory exists to leak, and no cache entry is written for
+    the failed path (a cached failure would be indistinguishable from a grant).
+    """
+    built, made = store
+    workspace, temps = _workspace_and_temps(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = canonical_path(str(outside))
+    CONTROLLER["fail_workspace_add"] = True
+    with pytest.raises(RuntimeError, match="SetNamedSecurityInfoW failed"):
+        built.materialize("s1", str(workspace), temp_root=str(temps), extra_roots=(str(outside),))
+    failed = made[0]
+    assert failed.write_sid == root_write_sid(root)
+    assert failed.added == [] and failed.disposed is True, "the failed grant is revoked before the raise"
+    assert list(temps.iterdir()) == [], "no private temp is created for a policy that could not be granted"
+
+    CONTROLLER["fail_workspace_add"] = False
+    capability = built.materialize("s1", str(workspace), temp_root=str(temps), extra_roots=(str(outside),))
+    assert os.path.isdir(capability.directory)
+    attempts = [grant.added for grant in made if grant.write_sid == root_write_sid(root)]
+    assert attempts == [[], [(root, True)]], (
+        f"the retry applies the standing ACE rather than trusting a cache entry from the failed attempt ({attempts})"
+    )
 
 
 def test_clear_reports_every_revocation_it_could_not_complete(store, tmp_path):
@@ -423,6 +511,100 @@ def test_an_agentless_run_gets_no_sid_flags_so_the_runner_owns_its_temp(store, m
     assert made == [], "an agentless call materializes no grant for a session to release"
 
 
+def test_the_runner_argv_carries_one_extra_root_flag_per_host_named_root(store, monkeypatch, tmp_path):
+    """The host's roots reach the runner as paths, canonical and without duplicates.
+
+    The flag carries no SID on purpose: the runner derives each root's capability
+    SID from the path it is handed, so the ACE the seam materialized and the
+    restricting list the token is built with cannot name two different roots.  A
+    duplicated spelling would be the same root twice — one ACE, two identities in
+    the token — which ``AclSandbox`` refuses; the de-duplication here is what
+    keeps the refusal for a caller that *meant* one root twice.
+    """
+    built, made = store
+    monkeypatch.setattr(provider, "STORE", built)
+    workspace, temps = _workspace_and_temps(tmp_path)
+    directory = tmp_path / "outside"
+    directory.mkdir()
+    single = tmp_path / "outside.txt"
+    single.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temps))
+    policy = SandboxPolicy(
+        mode="workspace-write",
+        workspace_root=str(workspace),
+        session_id="s1",
+        extra_roots=(str(directory), str(single), str(directory) + os.sep + ".", str(directory)),
+    )
+
+    argv = provider.runner_argv(policy)
+
+    flags = [argv[i + 1] for i, token in enumerate(argv) if token == "--extra-root"]
+    assert flags == [
+        canonical_path(str(directory)),
+        canonical_path(str(single)),
+    ], f"one canonical flag per distinct root, in the host's order ({flags})"
+    assert argv[-1] == canonical_path(str(single)), "the flags sit after the SIDs, before the seam's --"
+    assert argv[argv.index("--write-sid") + 1] == workspace_write_sid(str(workspace))
+    # And the seam really materialized them, because the runner grants nothing
+    # itself on this path (``manage_dacls=False``).
+    standing = {grant.added[0][0] for grant in made if grant.added and grant.added[0][1]}
+    assert standing == {str(workspace), canonical_path(str(directory)), canonical_path(str(single))}
+
+
+def test_a_read_only_policy_never_hands_the_runner_an_extra_root(store, monkeypatch, tmp_path):
+    """The tier's whole definition is that it grants no root — even one the session names.
+
+    A stored root is legitimate at ``read-only`` (``roots.judge_root_addition``
+    says so, and it takes effect when the tier flips), so the flag has to be
+    dropped **here**, where the tier is known, rather than trusted not to arrive.
+    """
+    built, made = store
+    monkeypatch.setattr(provider, "STORE", built)
+    workspace, temps = _workspace_and_temps(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temps))
+
+    argv = provider.runner_argv(
+        SandboxPolicy(
+            mode="read-only",
+            workspace_root=str(workspace),
+            session_id="s1",
+            extra_roots=(str(outside),),
+        )
+    )
+
+    assert "--extra-root" not in argv, argv
+    assert "--write-sid" not in argv and "--temp-write-sid" not in argv, argv
+    assert made == [], "read-only materializes nothing, not even for a root it was told about"
+
+
+def test_an_agentless_run_still_carries_its_extra_roots(store, monkeypatch, tmp_path):
+    """No session means the runner owns its DACLs — including the roots it was given.
+
+    The two branches differ in who applies the ACE, never in what the policy
+    granted: dropping the roots here would make a root writable for ``bash`` and
+    not for the ``pwsh`` seam's own spawn, which is the asymmetry the single
+    ``policy.extra_roots`` field exists to prevent.
+    """
+    built, made = store
+    monkeypatch.setattr(provider, "STORE", built)
+    workspace, temps = _workspace_and_temps(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temps))
+
+    argv = provider.runner_argv(
+        SandboxPolicy(mode="workspace-write", workspace_root=str(workspace), extra_roots=(str(outside),))
+    )
+
+    assert [argv[i + 1] for i, token in enumerate(argv) if token == "--extra-root"] == [
+        canonical_path(str(outside))
+    ]
+    assert "--write-sid" not in argv, "an agentless run still gets no SID flags"
+    assert made == [], "an agentless call materializes no grant for a session to release"
+
+
 def test_temp_root_is_usable_answers_the_precondition_the_runner_asserts(monkeypatch, tmp_path):
     """The precondition is askable before a spawn, not only at it."""
     workspace = tmp_path / "ws"
@@ -492,6 +674,87 @@ def test_the_modes_contradicting_their_grants_are_refused(tmp_path):
     sandbox, owned = build("--mode", "workspace-write", "--write-sid", sid, "--temp-write-sid", temp_sid)
     assert (owned, sandbox.manage_dacls) == (None, False)
     assert sandbox.temp_dir == str(temps)
+
+
+def test_the_runner_parses_the_extra_roots_in_order_and_derives_their_sids(tmp_path):
+    """The runner reads paths, not SIDs — and closes the loop by deriving them.
+
+    Two things are measured here.  ``--extra-root`` is **repeatable** and
+    order-preserving, because the roots are a list rather than a set: the seam
+    renders the policy in the host's order and this side must not shuffle it.  And
+    each root's capability SID is derived from the path *in this process*, so the
+    ACE (`grant_write` on the seam's side) and the restricting list (this token)
+    are two readings of one string rather than two files agreeing about a string —
+    the same shape as ``--write-sid``'s check, which fails loudly when the two
+    disagree.
+    """
+    workspace, temps = _workspace_and_temps(tmp_path)
+    directory = tmp_path / "outside"
+    directory.mkdir()
+    single = tmp_path / "outside.txt"
+    single.write_text("x", encoding="utf-8")
+
+    parsed = parse_args(
+        [
+            "--workspace", str(workspace),
+            "--temp", str(temps),
+            "--mode", "workspace-write",
+            "--extra-root", str(directory),
+            "--extra-root", str(single),
+            "--", "python",
+        ]
+    )
+    assert parsed.extra_roots == [str(directory), str(single)]
+
+    sandbox, owned = _build_sandbox(parsed)
+    assert owned is not None, "the runner owns its private temp when the seam hands it no SIDs"
+    assert sandbox.extra_grants == [
+        (str(directory), root_write_sid(str(directory))),
+        (str(single), root_write_sid(str(single))),
+    ], "a single file is a root like a directory — the SID is a function of the path, not of what it is"
+    assert sandbox.manage_dacls is True, "with no SIDs from the seam, the runner applies these ACEs itself"
+
+
+def test_an_extra_root_the_runner_cannot_find_is_a_runner_failure(tmp_path):
+    """A root that does not exist must fail at the runner, never mid-child."""
+    workspace, temps = _workspace_and_temps(tmp_path)
+    with pytest.raises(RunnerFailure, match="--extra-root does not exist"):
+        _build_sandbox(
+            parse_args(
+                [
+                    "--workspace", str(workspace),
+                    "--temp", str(temps),
+                    "--mode", "workspace-write",
+                    "--extra-root", str(tmp_path / "not-there"),
+                    "--", "python",
+                ]
+            )
+        )
+
+
+def test_read_only_refuses_an_extra_root_even_when_the_seam_hands_it_one(tmp_path):
+    """A0 is "no root", so a caller that names one has contradicted itself.
+
+    Refused rather than dropped quietly: the seam already refuses to pass one
+    (``test_a_read_only_policy_never_hands_the_runner_an_extra_root``), and this
+    side's refusal is what makes an argv disagreeing with the policy a loud
+    failure instead of a run under a tier whose definition was just ignored.
+    """
+    workspace, temps = _workspace_and_temps(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with pytest.raises(RunnerFailure, match="read-only does not accept --extra-root"):
+        _build_sandbox(
+            parse_args(
+                [
+                    "--workspace", str(workspace),
+                    "--temp", str(temps),
+                    "--mode", "read-only",
+                    "--extra-root", str(outside),
+                    "--", "python",
+                ]
+            )
+        )
 
 
 def test_an_agentless_workspace_write_run_owns_its_private_temp_and_dacls(tmp_path):
@@ -1113,6 +1376,52 @@ def test_the_sandbox_refuses_a_grant_shape_that_contradicts_its_mode(tmp_path):
     assert read_only.temp_dir is None, "read-only grants no temp write capability"
 
 
+def test_the_sandbox_refuses_an_extra_root_it_cannot_grant_safely(tmp_path):
+    """Three refusals, each one a way the extra-root mechanism could go quietly wrong.
+
+    A missing path is refused because ``grant_write`` on nothing would throw later
+    and *outside* the argv the host can read.  A root whose SID collides with the
+    workspace's (or the temp's) is refused because the token's restricting list
+    would then carry one identity for two paths — the grant would be wider than
+    what was named, and nothing downstream can tell.  And ``read-only`` accepts no
+    root at all: a shape that described one would mean the tier's whole definition
+    had been contradicted one field away from where anyone looks.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    single = tmp_path / "outside.txt"
+    single.write_text("x", encoding="utf-8")
+    sid = workspace_write_sid(str(workspace))
+
+    with pytest.raises(ValueError, match="extra root does not exist"):
+        AclSandbox(writable_dirs=[str(workspace)], temp_dir=None, mode="workspace-write",
+                   write_sid=sid, extra_grants=[(str(tmp_path / "gone"), root_write_sid("/gone"))])
+    with pytest.raises(ValueError, match="must be distinct"):
+        AclSandbox(writable_dirs=[str(workspace)], temp_dir=None, mode="workspace-write",
+                   write_sid=sid, extra_grants=[(str(outside), sid)])
+    with pytest.raises(ValueError, match="read-only does not accept write SIDs"):
+        AclSandbox(writable_dirs=[], temp_dir=None, mode="read-only",
+                   extra_grants=[(str(outside), root_write_sid(str(outside)))])
+
+    # Both spellings item 7 names are accepted, and each keeps its own identity.
+    sandbox = AclSandbox(
+        writable_dirs=[str(workspace)],
+        temp_dir=None,
+        mode="workspace-write",
+        write_sid=sid,
+        extra_grants=[
+            (str(outside), root_write_sid(str(outside))),
+            (str(single), root_write_sid(str(single))),
+        ],
+    )
+    assert sandbox.extra_grants == [
+        (str(outside), root_write_sid(str(outside))),
+        (str(single), root_write_sid(str(single))),
+    ]
+
+
 # ── the boundary itself (Windows only) ────────────────────────────────────
 
 
@@ -1292,7 +1601,7 @@ def test_grant_caller_grants_a_sid_that_its_own_buffer_still_owns(tmp_path, monk
 
 
 def _confined(
-    argv: list[str], workspace, temp_root, mode: str, cwd: str | None = None
+    argv: list[str], workspace, temp_root, mode: str, cwd: str | None = None, extra_roots: tuple = ()
 ) -> subprocess.CompletedProcess:
     """Spawn the runner the way the seam does, and let the child report for itself.
 
@@ -1307,6 +1616,11 @@ def _confined(
     confined child inherits it (``spawn_restricted`` passes it through), and a test
     whose subject *is* a command's behaviour in a directory has to spawn from that
     directory or it measures the test runner's instead.
+
+    ``extra_roots`` are the host-named roots, one ``--extra-root`` each.  On this
+    path the runner owns its DACLs (no SID flags are passed), so it is the
+    runner's own grant that makes a root writable — which is the measurement the
+    host's ``/sandbox add`` rests on and the one no macOS host can take.
     """
     env = dict(os.environ)
     env.update(runner_import_env())
@@ -1319,6 +1633,7 @@ def _confined(
             str(temp_root),
             "--mode",
             mode,
+            *[flag for root in extra_roots for flag in ("--extra-root", str(root))],
             "--",
             *argv,
         ],
@@ -1517,6 +1832,76 @@ def test_a_workspace_write_run_inherits_the_capability_and_nothing_outside_it(tm
     assert not escaped.exists(), f"the sandbox did not hold outside the workspace ({_evidence(refused)})"
     assert refused.returncode != 0, f"the refusing child claimed success ({_evidence(refused)})"
     assert "denied" in refused.stderr.lower(), refused.stderr
+
+
+@needs_windows
+def test_a_host_named_root_outside_the_workspace_is_writable(tmp_path):
+    """Item 7 on the platform whose grant model had to grow: a root, and its control.
+
+    Both spellings the host may name are here — a **directory** and a **single
+    file** — because Windows grants per object, and the single file is the arm
+    that could plausibly be refused by the ACL layer even though the SID derives
+    from the path either way.
+
+    Each arm is paired with its control, and the control is one variable wide: the
+    same file, the same child, the same ambient ACEs, and only ``--extra-root``
+    differs.  The refusal is therefore the restricting check's — ``_grant_caller``
+    has given the running user's own SID access to the root, so a run that failed
+    for a *directory* reason would fail both arms rather than one.
+
+    The refusals are read off the **host**, not off the exit code: a write that
+    never happened exits non-zero for whatever reason, and an exit code says
+    nothing about which byte landed.  So both halves are asserted — the child was
+    told "denied", and the file on the host still holds exactly what it held.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    named_in_directory = outside / "written.txt"
+    single = tmp_path / "single.txt"
+    single.write_text("host\n", encoding="utf-8")
+    api = ffi.win32()
+    for path in (workspace, tmp_path, outside, single):
+        _grant_caller(api, path)
+
+    granted = _confined(
+        [sys.executable, "-c", _write_script([named_in_directory, single])],
+        workspace,
+        tmp_path,
+        "workspace-write",
+        extra_roots=(outside, single),
+    )
+    assert granted.returncode == 0, f"the host-named roots were not granted ({_evidence(granted)})"
+    assert named_in_directory.exists(), f"a host-named directory was not writable ({_evidence(granted)})"
+    assert single.read_text(encoding="utf-8") == "x", (
+        f"a host-named single file was not writable ({_evidence(granted)})"
+    )
+
+    # The controls: the identical child without the flags, one run per subject, so
+    # neither can hide behind the other's failure.  The single file's arm also
+    # measures the *withdrawal* semantics: the ACE the granted run applied to it
+    # is standing and still on the file, and the write is refused anyway, because
+    # what allows a write here is the token's restricting list and not the DACL.
+    single.write_text("host\n", encoding="utf-8")
+    denied_file = _confined(
+        [sys.executable, "-c", _write_script([single])], workspace, tmp_path, "workspace-write"
+    )
+    assert single.read_text(encoding="utf-8") == "host\n", (
+        f"an unnamed file outside the workspace was written ({_evidence(denied_file)})"
+    )
+    assert denied_file.returncode != 0 and "denied" in denied_file.stderr.lower(), _evidence(denied_file)
+
+    denied_dir = _confined(
+        [sys.executable, "-c", _write_script([outside / "refused.txt"])],
+        workspace,
+        tmp_path,
+        "workspace-write",
+    )
+    assert not (outside / "refused.txt").exists(), (
+        f"an unnamed directory outside the workspace was writable ({_evidence(denied_dir)})"
+    )
+    assert denied_dir.returncode != 0 and "denied" in denied_dir.stderr.lower(), _evidence(denied_dir)
 
 
 @needs_windows
@@ -1762,6 +2147,89 @@ class _FakeKernel32:
     def LocalFree(self, pointer):
         self.freed.append(int(getattr(pointer, "value", pointer) or 0))
         return 0
+
+
+class _FakeSidParseApi(_FakeAclApi):
+    """``_FakeAclApi`` plus the one call ``_parse_sid`` makes, handing out distinct addresses.
+
+    Distinct on purpose: the assertion this fake exists for is *which* root each
+    address in the token's restricting list belongs to, and three identical
+    pointers would let a sandbox that parsed one SID and reused it for every root
+    pass.
+    """
+
+    def __init__(self, blob: bytes = b"SIDBLOB!") -> None:
+        super().__init__(blob)
+        self.asked: list[str] = []
+        self.next_address = ctypes.addressof(self.sid_block)
+
+    def ConvertStringSidToSidW(self, sid, sid_slot):
+        self.asked.append(sid)
+        self.next_address += 0x100
+        sid_slot._obj.value = self.next_address
+        return 1
+
+
+def test_init_grants_and_carries_each_host_named_root(tmp_path, monkeypatch):
+    """The extra roots at the site that decides: the ACE applied and the token's list.
+
+    Two halves of one fact, and the ACL stack fails **open** when they disagree —
+    an ACE under a SID no token carries grants nothing, and a SID in the token
+    with no ACE under it allows nothing, but a SID *shared* between two paths
+    would widen one grant into another.  So both directions are named here: which
+    path got which SID (`grant_write`), and which addresses the restricting list
+    was built from (`restricting_sids`), in the policy's order.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    directory = tmp_path / "outside"
+    directory.mkdir()
+    single = tmp_path / "outside.txt"
+    single.write_text("x", encoding="utf-8")
+    api = _FakeSidParseApi()
+    granted: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        "emrg.sandbox.win32.sandbox.grant_write",
+        lambda bindings, path, sid_ptr: granted.append((path, sid_ptr)),
+    )
+    monkeypatch.setattr(
+        "emrg.sandbox.win32.sandbox.set_token_default_dacl_grant",
+        lambda bindings, token, sid_ptr: None,
+    )
+    workspace_sid = workspace_write_sid(str(workspace))
+    sandbox = AclSandbox(
+        writable_dirs=[str(workspace)],
+        temp_dir=None,
+        mode="workspace-write",
+        write_sid=workspace_sid,
+        extra_grants=[
+            (str(directory), root_write_sid(str(directory))),
+            (str(single), root_write_sid(str(single))),
+        ],
+    )
+    sandbox.init(api=api)
+
+    assert api.asked == [
+        workspace_sid,
+        root_write_sid(str(directory)),
+        root_write_sid(str(single)),
+    ], "every SID is parsed from the string the ACE was derived from, in the policy's order"
+    assert [path for path, _ in granted] == [str(workspace), str(directory), str(single)], (
+        "each root's own ACE is applied to that root"
+    )
+    extra_pointers = [sid_ptr for _, sid_ptr in sandbox._extra_sid_ptrs]
+    assert extra_pointers == [granted[1][1], granted[2][1]], "the token points at the root's own parsed SID"
+    owners = [ctypes.addressof(owner) for owner in sandbox._owned_sids]
+    assert api.restricting_sids == [*owners, granted[0][1], *extra_pointers], (
+        "the restricting list is the logon SID, Everyone, then the workspace and every "
+        "host-named root — and nothing else, which is what keeps a root from widening "
+        "a grant the policy never named"
+    )
+
+    sandbox.dispose()
+    assert sorted(api.kernel32.freed) == sorted([granted[0][1], *extra_pointers]), (
+        "every SID the token was pointed at is released exactly once"
+    )
 
 
 def test_init_owns_every_sid_the_restricted_token_is_pointed_at(tmp_path, monkeypatch):
