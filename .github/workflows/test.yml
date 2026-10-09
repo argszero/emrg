@@ -25,6 +25,12 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
+      # The Linux sandbox dialect's runner. `test_bwrap_really_binds_a_named_file_writable`
+      # measures a single-file extra root by *running* bwrap rather than by asserting its
+      # argv (rant 2026-10-09T09:43:39 §7), and that test skips where the binary is
+      # absent - so without this step the leg would report a skip and measure nothing.
+      - name: Ensure bubblewrap (the Linux sandbox dialect's runner)
+        run: command -v bwrap >/dev/null || (sudo apt-get update && sudo apt-get install -y bubblewrap)
       - run: uv sync
       - run: uv run pytest tests/ -v
       - uses: actions/setup-node@v5
