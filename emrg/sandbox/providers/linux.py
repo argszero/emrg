@@ -126,6 +126,23 @@ def bwrap_profile_args(policy: SandboxPolicy) -> list[str]:
     if policy.mode == "workspace-write":
         args += ["--tmpfs", "/tmp"]
         args += ["--bind", policy.workspace_root, policy.workspace_root]
+        # The host-named roots, bound back over the read-only view exactly as the
+        # workspace is (rant 2026-10-09T09:43:39 §7).  Read from the same policy
+        # field every other dialect reads, so `bash` and `write` grant the same
+        # set; this provider is the one that cannot read the derived *list*
+        # directly, because a mount namespace expresses "writable" by mounting
+        # over a path while the list also carries paths it deliberately does not
+        # mount (the shared `/tmp`, which is a private tmpfs here — see the
+        # docstring above).  Binding the extra roots and nothing else keeps that
+        # choice and honours the host's.
+        #
+        # A single-file root is bound the same way.  `--bind` on a file needs a
+        # destination to exist, which it does for a path the host just named on
+        # this machine; this host cannot run bwrap at all, so that pairing is
+        # **unmeasured** here and is exactly why the acceptance below names it
+        # rather than claiming it.
+        for extra in policy.extra_roots:
+            args += ["--bind", extra, extra]
     return args
 
 

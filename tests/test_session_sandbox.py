@@ -23,6 +23,8 @@ import inspect
 import json
 from pathlib import Path
 
+import re
+
 import pytest
 
 from emrg.config import LlmConfig
@@ -173,7 +175,15 @@ def test_the_client_turn_path_resolves_the_tier_before_the_loop_starts():
     assert "resolve_client_tier(session" in loop_source
 
     inject_source = inspect.getsource(EmrgServer._inject_tool_arguments)
-    assert "session.sandbox" not in inject_source
+    # A word-boundary test rather than a substring one. The rule is "the tier is
+    # not read here", and the injection *does* read a sibling of the tier's
+    # attribute — ``session.sandbox_roots``, the host-named writable roots (rant
+    # 2026-10-09T09:43:39). ``"session.sandbox" in source`` cannot tell the two
+    # apart, because the longer name contains the shorter one as a prefix, so the
+    # substring form reddens on a change that has nothing to do with the tier.
+    # ``\b`` after ``sandbox`` matches only when no word character follows, which
+    # is exactly "the attribute itself, not a name that starts with it".
+    assert not re.search(r"session\.sandbox\b", inject_source)
     assert "resolve_client_tier" not in inject_source
 
 

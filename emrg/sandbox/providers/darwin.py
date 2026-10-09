@@ -22,6 +22,8 @@ rather than assumed (blueprint §3.3, §3.4):
 
 from __future__ import annotations
 
+import os
+
 from emrg.sandbox.contract import Runner, RunnerFailureRule
 from emrg.sandbox.policy import SandboxPolicy
 from emrg.sandbox.roots import writable_roots
@@ -109,9 +111,27 @@ def seatbelt_profile_args(policy: SandboxPolicy) -> list[str]:
     ]
     roots = writable_roots(policy)
     if roots:
-        grants = " ".join(f"(subpath {sbpl_string(root)})" for root in roots)
+        grants = " ".join(_root_grant(root) for root in roots)
         forms.append(f"(allow file-write* {grants})")
     return ["-p", " ".join(forms)]
+
+
+def _root_grant(root: str) -> str:
+    r"""One writable root as an SBPL clause — ``literal`` for a file, ``subpath`` for a directory.
+
+    Both forms match their own path, so a directory and a file would both work
+    spelled ``subpath``.  The difference is what else they match: ``subpath``
+    covers everything *under* the path as well, which is the intent for a
+    directory and a widening for a file — the host names one file
+    (``/sandbox add ~/notes.md``), and ``subpath`` would grant the whole tree if
+    that name ever became a directory.  ``literal`` is exactly the named path,
+    which is what was asked for (rant 2026-10-09T09:43:39 §7).
+
+    :param root: one canonical writable root.
+    :returns: the SBPL clause granting write access to it.
+    """
+    form = "subpath" if os.path.isdir(root) else "literal"
+    return f"({form} {sbpl_string(root)})"
 
 
 def runner_argv(policy: SandboxPolicy) -> list[str]:
