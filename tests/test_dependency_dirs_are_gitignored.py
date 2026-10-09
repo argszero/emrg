@@ -280,10 +280,23 @@ def test_the_reading_is_the_repositorys_rules_and_not_the_machines_global_file(t
     hostile = tmp_path / "hostile"
     hostile.mkdir()
     (hostile / "ignore").write_text("node_modules\n.venv\n", encoding="utf-8")
-    (hostile / "gitconfig").write_text(
-        f"[core]\n\texcludesFile = {hostile / 'ignore'}\n", encoding="utf-8"
+    #: Written by `git config --file`, never by hand: a config file's value goes through git's
+    #: parser, and a **Windows** path in an unquoted hand-written value is a syntax error for it
+    #: (`fatal: bad config line 2`, measured 2026-10-09 on this test's own `test-windows` leg of
+    #: PR #1970 — the file failed to parse there, so no hostile rule was in force and the premise
+    #: assertion below reddened). Git's own writer picks the quoting that survives its own parser,
+    #: so this construction is a property git holds rather than one this test re-states; the `-c`
+    #: values the probes use are taken literally, which is why only this hand-written file broke.
+    hostile_config = hostile / "gitconfig"
+    subprocess.run(
+        [
+            "git", "config", "--file", str(hostile_config),
+            "core.excludesFile", str(hostile / "ignore"),
+        ],
+        check=True, capture_output=True, text=True, timeout=60,
+        encoding="utf-8", errors="replace",
     )
-    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(hostile / "gitconfig")}
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(hostile_config)}
 
     relative = "emrg/gui/node_modules"
     #: Bound to locals before the assertions: pytest renders an inline call's arguments in the
@@ -295,7 +308,12 @@ def test_the_reading_is_the_repositorys_rules_and_not_the_machines_global_file(t
     assert unpinned is True, (
         "the global excludes file this test installs did not reach `git check-ignore`, so the "
         "pinned reading below would prove nothing about the defect class — the premise is that "
-        "the machine's configuration can answer for a name the repository's slashed rule does not"
+        "the machine's configuration can answer for a name the repository's slashed rule does "
+        "not. Two causes have been seen: a hand-written config value that git cannot parse"
+        " (a Windows path, measured on this test's own `test-windows` leg of PR #1970 — build "
+        "the file with `git config --file` and let git do the quoting), and an environment where "
+        "`GIT_CONFIG_GLOBAL` is not honoured. Run the probe by hand and read its stderr before "
+        "changing the assertion."
     )
     assert pinned is False, (
         f"with the slashed rules above in force, git still reports {relative} as ignored, so the "
