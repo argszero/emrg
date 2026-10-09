@@ -291,9 +291,12 @@ Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's
 The step's two failure modes are told apart by **duration**, not by the exit code: a refused *submission* dies in seconds, while a notarization *verdict* takes minutes, exits 0 and reports `status=Invalid` (the step parses that status and fetches Apple's rejection log for it). `Notarize pkg` names the preflight in its own `::error::` when the submission is refused, so the remedy arrives with the failure.
 
 **The host-side counterpart of the workflow gate.** CI runs `actionlint` over
-`.github/workflows/` on every push (`rhysd/actionlint@v1.7.12`, in `test.yml`; the gate
-exists because #441 reached a push with a workflow that referenced the `secrets` context
-in an `if:`), and a workflow edit used to have no local way to be checked first: the
+`.github/workflows/` on every push (in `test.yml`: the pinned release binary, downloaded
+into `$RUNNER_TEMP` with the version taken from that step's `ACTIONLINT_VERSION` — before
+it, the `rhysd/actionlint@v1.7.12` Docker action, which built its own image at run time and
+reddened the whole `test` leg whenever Docker Hub throttled anonymous pulls, issue #2019.
+The gate exists because #441 reached a push with a workflow that referenced the `secrets`
+context in an `if:`), and a workflow edit used to have no local way to be checked first: the
 instructed `actionlint .github/workflows/*.yml` is a command this host does **not** have
 (measured 2026-10-04: actionlint, shellcheck, node and npm are all absent from PATH here,
 while `brew` and `docker` are present). So the check is one command, and it answers

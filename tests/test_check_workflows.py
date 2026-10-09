@@ -44,9 +44,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-workflows.py"
 DEV = REPO_ROOT / "DEVELOPMENT.md"
 
-#: A minimal workflow file. The tool reads these for the `uses:` line and hands them to
-#: actionlint; nothing else about them matters to it.
+#: A minimal workflow file. The tool reads these for the pin and hands them to actionlint;
+#: nothing else about them matters to it. Two spellings of the pin, because the gate has
+#: run both: the Docker action (`uses:`) and the pinned release binary the step downloads
+#: (`ACTIONLINT_VERSION:`) - a reading that covered one would report "no gate" for a tree
+#: that has one.
 _CLEAN_YML = "name: t\non: push\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: rhysd/actionlint@v1.7.12\n"
+_CLEAN_ENV_YML = "name: t\non: push\nenv:\n  ACTIONLINT_VERSION: \"1.7.12\"\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - run: actionlint\n"
 _RETIRED_YML = "name: t\non: push\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
 
 
@@ -165,18 +169,38 @@ def test_the_real_checkout_pins_actionlint_in_its_own_workflow() -> None:
 
     Asserted against the file rather than a literal, because a literal here would be the
     second copy of the version this script exists to avoid: if the gate is moved or the
-    pin is bumped, the reader of this test should see which file says so.
+    pin is bumped, the reader of this test should see which file says so. The spelling is
+    asserted, not just the number: the value the step downloads is the one the tool reads,
+    and a workflow that declared it anywhere else would leave the two readings apart.
     """
     mod = _load_module()
     pin = mod.pinned_version(REPO_ROOT)
     assert pin, (
-        "no workflow in this checkout runs `rhysd/actionlint`, so check-workflows.py's "
-        "question has no gate to be the counterpart of"
+        "no workflow in this checkout pins actionlint (`uses: rhysd/actionlint@vX` or "
+        "`ACTIONLINT_VERSION: \"X\"`), so check-workflows.py's question has no gate to be "
+        "the counterpart of"
     )
     text = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
-    assert f"rhysd/actionlint@v{pin}" in text, (
-        f"the tool read {pin!r} from somewhere other than the workflow that runs the gate"
+    assert f'ACTIONLINT_VERSION: "{pin}"' in text, (
+        f"the tool read {pin!r} from somewhere other than the step that runs the gate"
     )
+
+
+def test_the_pin_is_also_read_from_the_release_step_spelling(
+    mod, monkeypatch, capsys, tmp_path
+) -> None:
+    """The second spelling of the pin has its own control, so neither can rot unseen.
+
+    `_CLEAN_YML` pins through the Docker action's `uses:` line, the shape this gate ran
+    first; this one pins through `ACTIONLINT_VERSION`, the shape the release-binary step
+    uses (issue #2019). Both are read from the tree, so both need a fixture that would go
+    red if the reading lost one - a tree whose only pin is the env var must not answer
+    "no gate found", which is what a matcher for one spelling alone would do.
+    """
+    _install(mod, monkeypatch, FakeActionlint(version="1.7.12"))
+    code, out, err = _run_main(mod, capsys, _tree(tmp_path, text=_CLEAN_ENV_YML))
+    assert code == 0, err
+    assert "pins v1.7.12" in out, "the env-var spelling must be read as the pin"
 
 
 # --- the three verdicts -------------------------------------------------------
@@ -270,7 +294,10 @@ def test_a_tree_whose_workflows_run_no_actionlint_is_not_measurable(
     _install(mod, monkeypatch, FakeActionlint())
     code, _, err = _run_main(mod, capsys, _tree(tmp_path, text=_RETIRED_YML))
     assert code == 2
-    assert "runs `rhysd/actionlint`" in err
+    assert "runs a pinned actionlint" in err
+    assert "ACTIONLINT_VERSION" in err, (
+        "the reason has to name the spelling a reader would use, or the remedy is a guess"
+    )
 
 
 def test_a_binary_that_cannot_report_its_version_is_not_measurable(

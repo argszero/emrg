@@ -6,9 +6,9 @@ The class this exists for
 This repository states the convention twice - `Agent.md` and the evolution loop - that a
 CI check needs a **host-side counterpart**, or a host cannot self-check before CI and pays
 a wasted round. The actionlint gate is the one gate here with no counterpart at all: CI
-runs `rhysd/actionlint@v1.7.12` (`.github/workflows/test.yml`, added by #441 after a
-workflow that referenced the `secrets` context in an `if:` reached a push), and the loop
-that edits workflows is told to "run `actionlint .github/workflows/*.yml` locally".
+lints `.github/workflows/` (`.github/workflows/test.yml`, added by #441 after a workflow
+that referenced the `secrets` context in an `if:` reached a push) and the loop that edits
+workflows is told to "run `actionlint .github/workflows/*.yml` locally".
 
 On this host that command does not exist, so the instruction answers nothing:
 
@@ -70,10 +70,22 @@ from pathlib import Path
 #: Where a workflow lives, relative to the tree's root.
 WORKFLOW_DIR = Path(".github") / "workflows"
 
-#: The `uses:` line that runs the gate. Parsed from the tree rather than spelled here:
-#: the workflow is the file the gate itself reads, and a second copy of the version in
-#: this script is a copy free to disagree with it.
-PIN = re.compile(r"uses:\s*rhysd/actionlint@(?P<version>v?\d[\w.\-]*)")
+#: How a workflow declares the actionlint build the gate runs. Two spellings, both read
+#: from the tree rather than spelled here - the workflow is the file the gate itself
+#: reads, and a second copy of the version in this script is a copy free to disagree
+#: with it:
+#:
+#: * `uses: rhysd/actionlint@v1.7.12` - the Docker action this gate ran first. It builds
+#:   its own image at run time, pulling alpine/golang/shellcheck-alpine from Docker Hub
+#:   anonymously, and the per-IP throttle that hits reddens the whole leg (issue #2019);
+#: * `ACTIONLINT_VERSION: "1.7.12"` - the pinned release binary `test.yml` downloads
+#:   today, with no registry in the path.
+#:
+#: Both are kept, so a tree that has not moved yet still gets a reading instead of "no
+#: gate found".
+PIN = re.compile(
+    r"(?:uses:\s*rhysd/actionlint@|ACTIONLINT_VERSION:\s*[\"']?)(?P<version>v?\d[\w.\-]*)"
+)
 
 #: What `actionlint --version` prints: the bare release, or a line naming where it is
 #: installed. The first dotted triple is the version either way.
@@ -205,9 +217,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if pin is None:
         reason = (
-            f"none of this tree's {len(files)} workflow file(s) runs `rhysd/actionlint`, so "
-            "there is no pinned build for a local run to be the counterpart of - this is "
-            "not a pass"
+            f"none of this tree's {len(files)} workflow file(s) runs a pinned actionlint "
+            "(`uses: rhysd/actionlint@vX` or `ACTIONLINT_VERSION: \"X\"`), so there is no "
+            "pinned build for a local run to be the counterpart of - this is not a pass"
         )
         return _unmeasured(args, root, reason, pin, len(files))
 
