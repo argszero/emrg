@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from emrg._win import win32_no_window_kwargs
+from emrg.config import logs_dir
 from emrg.connect import (
     AuthError,
     cleanup_server,
@@ -74,7 +75,7 @@ async def start_daemon() -> subprocess.Popen:
     if _spawn_attempts >= _MAX_SPAWN_ATTEMPTS:
         raise RuntimeError(
             f"daemon failed to start after {_MAX_SPAWN_ATTEMPTS} attempts — "
-            "please run 'emrg server' manually and check emrgd.log"
+            "please run 'emrg server' manually and check ~/.emrg/logs/emrgd.log"
         )
     _spawn_attempts += 1
     logger.info("starting emrgd daemon (attempt %d/%d)...", _spawn_attempts, _MAX_SPAWN_ATTEMPTS)
@@ -130,7 +131,7 @@ def _log_path() -> Path:
     wrong in exactly the case this diagnostic is for: tests and the GUI's
     isolated-HOME runs point HOME elsewhere after the module is loaded.
     """
-    return Path.home() / ".emrg" / "emrgd.log"
+    return logs_dir() / "emrgd.log"
 
 
 def _start_stderr_path() -> Path:
@@ -142,7 +143,7 @@ def _start_stderr_path() -> Path:
     file exists for are exactly the ones that happen before it and therefore never
     reach `emrgd.log`.
     """
-    return Path.home() / ".emrg" / "emrgd-start.err"
+    return logs_dir() / "emrgd-start.err"
 
 
 def _truncate_start_stderr(path: Path):

@@ -174,7 +174,9 @@ function main() {
   // ── 日志（G84）──────────────────────────────────────────
 
   function createLogger() {
-    const logDir = path.join(os.homedir(), ".emrg");
+    // Rant 2026-10-09T14:20:18: the application log directory, shared with the
+    // daemon and pinned by tests/test_log_dir_pairing.py (JS cannot import Python).
+    const logDir = path.join(os.homedir(), ".emrg", "logs");
     const logPath = path.join(logDir, "emrg-gui.log");
     let fd = null;
     try {
@@ -1086,7 +1088,7 @@ vision = false
       writeConfig(toml);
       // 保存后不需要重启：运行中的 daemon 自己监视该文件，并在原地应用新版本
       // （emrg/server/config_reload.py，2s 轮询读字节+sha256；变更键会写进
-      //  ~/.emrg/emrgd.log 的 "config.toml reloaded: changed=…" 一行）。
+      //  ~/.emrg/logs/emrgd.log 的 "config.toml reloaded: changed=…" 一行）。
       // 旧机制已删除：客户端曾比对 config mtime 并 SIGTERM/SIGKILL 整个 daemon
       // ——一次配置编辑不该杀掉正在跑的调度器（含演化周期）与所有已连客户端。
       if (wasRunning) {

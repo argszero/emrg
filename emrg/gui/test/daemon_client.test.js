@@ -1146,8 +1146,22 @@ test("P2 ownStream: 断连 → 释放锁", async () => {
 // ⚠️ 本组不 spawn 真实进程、不探测端口、不触碰真实 daemon（MANIFESTO 第四条附则二）：
 // spawn 打桩，isRunning 打桩。测的是纯部件（标记/差值读取/失败描述）＋打桩驱动的等待循环。
 
-/** emrgd.log 的规范位置（HOME/USERPROFILE 已被 beforeEach 重定向到临时目录）。 */
-const logFile = () => path.join(os.homedir(), ".emrg", "emrgd.log");
+/** emrgd.log 的规范位置（HOME/USERPROFILE 已被 beforeEach 重定向到临时目录）。
+ *  Rant 2026-10-09T14:20:18：应用级日志进了 ~/.emrg/logs/，所以这个夹具也必须读
+ *  代码读的那个目录——它写、_readLogTail 读，两边不同的话这些测试就是在测空气。 */
+const logFile = () => {
+  const file = path.join(os.homedir(), ".emrg", "logs", "emrgd.log");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  return file;
+};
+
+/** 子进程 stderr 诊断文件的位置——同样在 logs/ 下，目录一并建好。
+ *  生产代码 `_openStartStderr()` 自己会 mkdir，但夹具是直接写的，所以这里也得建。 */
+const startErrFile = () => {
+  const file = EMRGD_START_ERR();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  return file;
+};
 
 test("#1283 本次没写 → 尾部为空；本次写了 → 只给本次的字节", () => {
   const client = new DaemonClient();
@@ -1527,7 +1541,7 @@ test("#1276 GUI：失败文案报真的等过的窗口，不是敲进去的数",
 
 test("#1276 本次启动的 stderr 文件被截断：报给宿主的只有本次的字节", () => {
   const client = new DaemonClient();
-  const err = EMRGD_START_ERR();
+  const err = startErrFile();
   assert.ok(path.resolve(err).startsWith(path.resolve(tmpHome) + path.sep), "诊断文件必须在临时 HOME 内");
   fs.writeFileSync(err, "previous attempt: ImportError: no such patch\n");
   const fd = client._openStartStderr();
@@ -1545,7 +1559,7 @@ test("#1276 在装日志 handler 之前死掉的子进程：由它自己的 stde
   const client = new DaemonClient();
   fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
   const mark = client._logMark(logFile());
-  fs.writeFileSync(EMRGD_START_ERR(), "Traceback (most recent call last):\nImportError: boom\n");
+  fs.writeFileSync(startErrFile(), "Traceback (most recent call last):\nImportError: boom\n");
   const detail = client._startupFailureDetail(mark, { exitCode: 1 }, undefined, EMRGD_START_ERR());
   assert.ok(detail.includes("ImportError: boom"), "子进程自己的原因就是这一节新增的事实");
   assert.ok(!detail.includes("SIGTERM"), "上一轮的关闭仍不得当作本次的原因");
@@ -1557,7 +1571,7 @@ test("#1276 子进程的遗言排在日志尾巴之前（顺序即论证）", ()
   fs.writeFileSync(logFile(), "previous\n");
   const mark = client._logMark(logFile());
   fs.appendFileSync(logFile(), "this attempt: config.toml is not valid TOML\n");
-  fs.writeFileSync(EMRGD_START_ERR(), "child: ImportError: no module named 'x'\n");
+  fs.writeFileSync(startErrFile(), "child: ImportError: no module named 'x'\n");
   const detail = client._startupFailureDetail(mark, { exitCode: 1 }, undefined, EMRGD_START_ERR());
   assert.ok(detail.includes("ImportError") && detail.includes("config.toml"));
   assert.ok(detail.indexOf("ImportError") < detail.indexOf("config.toml"));
@@ -1594,7 +1608,7 @@ test("#1276 捕获了却真的没写：这一句沉默才成立", () => {
 test("#1276 stderr 的行上限保住 traceback 的结尾，读不到不抛异常", () => {
   const client = new DaemonClient();
   const frames = Array.from({ length: 60 }, (_, i) => `  File "f${i}.py", line ${i}, in <module>`).join("\n");
-  fs.writeFileSync(EMRGD_START_ERR(), `Traceback (most recent call last):\n${frames}\nImportError: the cause\n`);
+  fs.writeFileSync(startErrFile(), `Traceback (most recent call last):\n${frames}\nImportError: the cause\n`);
   const got = client._readStartStderr();
   assert.ok(got.includes("ImportError: the cause"), "最后一行才是说出原因的那一行");
   assert.strictEqual(got.split(/\r?\n/).length, 40, "上限 40 行，且确实生效");

@@ -109,7 +109,7 @@ vision = true
 
 **A `config.toml` edit never restarts the daemon.** The client used to compare this file's mtime against the running server's start time and SIGTERM→SIGKILL it when the file looked newer — which killed the running scheduler handlers (a live evolution cycle among them) and dropped every connected client, to apply an edit the daemon now applies itself. That branch is gone; a **source** change is the only thing that still restarts the daemon. Both sections are live: `[llm]` as described above, and `[update]` (`enabled`, `delay_minutes`) — the daemon's upgrade manager holds the same object the reloader writes to, so a change lands on its next 5-minute check. The upgrade *interval* stays hard-coded and is not a field of that section.
 
-Verify from the daemon log (`~/.emrg/emrgd.log`): every accepted edit logs one line naming the keys that moved —
+Verify from the daemon log (`~/.emrg/logs/emrgd.log`): every accepted edit logs one line naming the keys that moved —
 
 ```
 config.toml reloaded: changed=max_tokens,temperature
@@ -675,7 +675,7 @@ Whichever entry point you started spawns the daemon and waits for it to accept
 connections. When that wait runs out, the error carries what is known about the
 attempt: whether the child is still running, its exit code if it is not, the
 daemon log lines **this** attempt appended, and the contents of
-`~/.emrg/emrgd-start.err` (the child's own stderr, which is where a failure
+`~/.emrg/logs/emrgd-start.err` (the child's own stderr, which is where a failure
 before logging starts can be read at all).
 
 **Both entry points read the same variable**, `EMRG_START_TIMEOUT`, in seconds:

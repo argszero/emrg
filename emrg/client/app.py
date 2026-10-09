@@ -822,7 +822,7 @@ def _contain_stderr_for_tui() -> _StderrContainment:
 
     This is the client's counterpart of the daemon's ``_redirect_std_streams``
     (rant 2026-08-25T09:25:32): the daemon already dies *silently* into
-    ``~/.emrg/emrgd-crash.log``; the client died *visibly*, because nothing
+    ``~/.emrg/logs/emrgd-crash.log``; the client died *visibly*, because nothing
     had claimed its stderr.
 
     Installed by ``run_client`` for the whole client session — *before*
