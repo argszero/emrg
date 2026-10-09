@@ -449,9 +449,21 @@ def test_bwrap_really_binds_a_named_file_writable(outside):
     Requirement 7 says the single-file pairing "must be measured before support is
     claimed", and the provider's comment says so in its own words. The pair is
     asserted in both directions on one directory: the **named** file is writable
-    through the mount, and an unnamed sibling beside it is not — so a pass cannot
-    come from the bind being ignored, and a refusal cannot come from the whole
-    directory being writable.
+    through the mount, and the bytes written beside it never reach the host — so a
+    pass cannot come from the bind being ignored, and a refusal cannot come from
+    the whole directory being writable.
+
+    **The second half is read on the host, not from the exit code**, and that is a
+    deliberate correction: ``bwrap_profile_args`` mounts a private ``--tmpfs
+    /tmp``, and pytest's own base is *under* it on Linux
+    (``/tmp/pytest-of-runner/…``, printed by the run that reddened on the exit-code
+    form of this assertion). Inside the sandbox the sibling's directory is
+    therefore re-created empty inside that private tmpfs, the write succeeds, and
+    the exit code says nothing about which mount granted what — a reading that
+    named the environment rather than the mechanism. Where the bytes *landed*
+    discriminates in both environments: a mount over the **directory** would have
+    re-exposed the host file and the reading below shows it, while a mount over the
+    **file** leaves it untouched.
 
     Skipped where there is no bubblewrap, and CI's ubuntu leg installs it, so the
     skip is a fact about this host rather than about the mechanism.
@@ -476,11 +488,15 @@ def test_bwrap_really_binds_a_named_file_writable(outside):
         [*runner_argv(policy), "--", "sh", "-c", f'echo nope >> "{sibling}"'],
         capture_output=True, text=True, encoding="utf-8", timeout=120,
     )
-    assert denied.returncode != 0, (
-        "the unnamed sibling in the same directory is writable, so the mount is not "
-        "what granted the named file"
+    # The reading below is "the host file is unchanged", which a sibling write that
+    # never ran would satisfy for free. ``bwrap``'s own fatal printer writes the
+    # ``bwrap: `` prefix this backend classifies as a *runner* failure, so its
+    # absence is what says the command really ran and the reading is about it.
+    assert "bwrap: " not in denied.stderr, denied.stderr
+    assert sibling.read_text(encoding="utf-8") == "host\n", (
+        f"a write to the sibling reached the host (exit {denied.returncode}), so the "
+        f"mount granted the whole directory rather than the named file"
     )
-    assert sibling.read_text(encoding="utf-8") == "host\n"
 
 
 # ── §5 only the host names a root ─────────────────────────────────────────
