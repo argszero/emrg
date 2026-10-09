@@ -4031,7 +4031,11 @@ class EmrgServer:
                         summary = await self._compact_with_fallback(
                             session, records, source="auto-compact",
                         )
-                        count = session.compact(summary, keep_recent=5)
+                        count = session.compact(
+                            summary,
+                            keep_recent=5,
+                            max_tail_chars=self._retained_tail_budget_chars(),
+                        )
                         logger.info("auto-compact done: %d messages compacted", count)
                         # Surface shrank below the anchor baseline — drop the
                         # stale usage anchor so the next round re-anchors from
@@ -5300,6 +5304,27 @@ class EmrgServer:
     # API usage, so this only needs to be in the right ballpark.
     _TOKENS_PER_IMAGE = 1000
 
+    def _retained_tail_budget_chars(self) -> int | None:
+        """Characters a compacted history's retained tail may hold (issue #1992).
+
+        Derived from the gate the tail has to satisfy rather than from a new
+        constant: the trigger is the token count at which the surface is judged
+        too large, and the estimator needs at least two characters per token, so
+        a tail of `trigger` *characters* contributes at most half the trigger in
+        tokens — which leaves the system prompt, the tool schemas and the
+        summary the room they need instead of re-arming the gate on the very
+        next round.
+
+        `None` when auto-compact is off (threshold 0): there is no trigger to
+        derive a budget from, and inventing one would trim tails for a host who
+        never asked for any of this.
+        """
+        threshold = self.llm.config.auto_compact_threshold
+        if threshold <= 0.0:
+            return None
+        budget = int(self.llm.config.context_window * threshold)
+        return budget if budget > 0 else None
+
     def _estimate_tokens(
         self,
         messages: list[dict],
@@ -5465,7 +5490,11 @@ class EmrgServer:
             return
 
         # Apply compact
-        count = session.compact(summary, keep_recent=5)
+        count = session.compact(
+            summary,
+            keep_recent=5,
+            max_tail_chars=self._retained_tail_budget_chars(),
+        )
         # Rant 2026-08-24T02:06:34 (review fix on PR #948): mirror the
         # auto-compact handling — a manual compact also deliberately shrinks
         # the surface, so drop the stale usage anchor and mark the drop.
@@ -5680,7 +5709,11 @@ class EmrgServer:
             summary = await self._compact_with_fallback(
                 session, session._read_history(), source=source,
             )
-            compacted = session.compact(summary, keep_recent=5)
+            compacted = session.compact(
+                summary,
+                keep_recent=5,
+                max_tail_chars=self._retained_tail_budget_chars(),
+            )
         except Exception:
             logger.exception("%s: the session could not be shrunk", source)
             return None

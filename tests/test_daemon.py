@@ -1137,6 +1137,66 @@ def test_compact_fallback_passes_through_a_success():
     assert calls == []
 
 
+# ── The retained-tail budget: compaction must shrink the surface (issue #1992) ──
+#
+# Measured on session s_260727_0946_dfa1 (2026-10-09): one `grep` tool result of
+# 2,676,553 chars sat in the newest five records, `compact(keep_recent=5)` sliced
+# them without a size check, and the gate re-fired — 102 compactions in a day,
+# every retried request refused as overlong. The daemon derives the budget from
+# the gate's own trigger rather than inventing a constant, and hands it to
+# `Session.compact`; these tests hold both ends of that wire.
+
+
+def test_retained_tail_budget_is_derived_from_the_gate_trigger():
+    """The budget is the count the gate fires at, and None when the gate is off."""
+    server = _make_server()
+    server.llm.config.context_window = 1024000
+    server.llm.config.auto_compact_threshold = 0.17
+    assert server._retained_tail_budget_chars() == 174080  # == the trigger
+
+    server.llm.config.auto_compact_threshold = 0.0
+    assert server._retained_tail_budget_chars() is None  # no gate, no trimming
+
+
+def test_handle_compact_leaves_the_surface_below_the_trigger(tmp_path):
+    """Issue #1992's acceptance: one compact, and the estimate is under the gate.
+
+    Before the fix the estimate was unmoved by a compaction (the log's own
+    `auto-compact done: 36 messages compacted` followed 11 s later by
+    `triggered: ~845309 tokens > 174080`), so the gate re-armed on every round.
+    """
+    server = _make_server()
+    server.llm.config.context_window = 20000
+    server.llm.config.auto_compact_threshold = 0.5  # trigger = 10_000 tokens
+    trigger = int(server.llm.config.context_window * server.llm.config.auto_compact_threshold)
+    session = Session.create_with_id("oversized-tail", tmp_path)
+    for i in range(8):
+        session.append_message({"type": "message", "role": "user", "content": f"msg {i}"})
+    session.append_message({
+        "type": "message", "role": "user", "content": "G" * 60000,
+    })
+
+    async def _summarize(session_, records, *, source):
+        return "a summary"
+
+    server._compact_with_fallback = _summarize
+
+    before = server._estimate_tokens(session.get_messages_for_llm())
+    assert before > trigger  # otherwise the test proves nothing
+
+    asyncio.run(server._handle_compact(session, None))
+
+    # The seam that broke: the daemon's call passes the budget, so the oversized
+    # record is trimmed and the surface really shrinks. A test of Session alone
+    # cannot see a daemon that forgets the argument.
+    assert server._estimate_tokens(session.get_messages_for_llm()) < trigger
+    tail = session._read_history()[-1]
+    assert tail["truncated"] is True
+    assert "truncated on compaction" in tail["content"]
+    # Still a message with its role — the tail stays a usable conversation.
+    assert tail["role"] == "user"
+
+
 # ── _adaptive_chunk_summarize: the split decision is the classifier's ──
 #
 # The chunker used to carry its own two-spelling list, so a marker the
