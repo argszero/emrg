@@ -38,6 +38,7 @@ from websockets.exceptions import ConnectionClosed
 from emrg._win import win32_no_window_kwargs
 from emrg.config import (
     LlmConfig,
+    SandboxConfig,
     config_dir,
     logs_dir,
     find_model_entry,
