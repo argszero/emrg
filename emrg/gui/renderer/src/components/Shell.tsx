@@ -18,6 +18,7 @@ import { Composer, type CommandRouting } from "./Composer";
 import { DialogHost, type DialogHostHandle } from "./DialogHost";
 import {
   HISTORY_PAGE,
+  type HistoryPageState,
   applyHistoryPage,
   createHistoryPages,
   historyPageState,
@@ -426,6 +427,23 @@ export function Shell() {
   const [, publishPaging] = useReducer((n: number) => n + 1, 0);
 
   /**
+   * 加载状态的**唯一写入点**：改了就叫一次重渲染。
+   *
+   * 只在每个 loader 的 `finally` 里发布是不够的 —— 那样 `st.loading = true` 从未到达
+   * 渲染：翻页途中顶部条仍是**可点的 BUTTON**，点下去在 `st.loading` 早退处什么也不做
+   * （宿主报障里「长得像能点、点下去是死的」那一类，只是换了一个分支），而
+   * `canLoadOlder(hasMore, loading)` 的 `loading` 那一半在生产里恒为 false。两个写入点
+   * 各写一遍 `publishPaging()` 也不对：同一条规则的两份副本，漏一处不会有任何信号
+   * ——`TranscriptView.test.tsx` 是**传 prop** 钉的组件契约，看不见生产读取点。
+   * 所以收成一个函数，进入与落定都走它（issue #1979，评审 cyc20261009-151044）。
+   */
+  function setPagingLoading(st: HistoryPageState, loading: boolean) {
+    const changed = st.loading !== loading;
+    st.loading = loading;
+    if (changed) publishPaging();
+  }
+
+  /**
    * 顶部条文案：规则在 `lib/history.ts:loadBarKey` 一处，两个写入点都走这里。
    * `paged` = 这是一次翻页的结果（首屏那次传 false —— 问的问题不同，见该函数的注释）。
    */
@@ -441,7 +459,7 @@ export function Shell() {
     if (!b?.listHistory) return;
     const st = historyPageState(historyPagesRef.current, sid);
     if (st.loading) return;
-    st.loading = true;
+    setPagingLoading(st, true);
     try {
       const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, includeRecords: true });
       const page = res.messages || [];
@@ -455,8 +473,8 @@ export function Shell() {
         sid,
       );
     } finally {
-      st.loading = false;
-      publishPaging();
+      // 落定也走同一个写入点：`hasMore` / `oldestIndex` 是在 try 里改的，这一句把它们一起推出去。
+      setPagingLoading(st, false);
     }
   }
 
@@ -467,7 +485,7 @@ export function Shell() {
     if (!b?.listHistory) return;
     const st = historyPageState(historyPagesRef.current, sid);
     if (!st.hasMore || st.loading || st.oldestIndex === null) return;
-    st.loading = true;
+    setPagingLoading(st, true);
     try {
       const res = await b.listHistory({
         sessionId: sid,
@@ -486,8 +504,8 @@ export function Shell() {
         sid,
       );
     } finally {
-      st.loading = false;
-      publishPaging();
+      // 落定也走同一个写入点：`hasMore` / `oldestIndex` 是在 try 里改的，这一句把它们一起推出去。
+      setPagingLoading(st, false);
     }
   }
 

@@ -359,6 +359,40 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(bar.textContent).toBe("No more history");
   });
 
+  it("while an older page is in flight the bar is already not a control (rant 2026-10-09T09:25:00)", async () => {
+    // 钉的是**生产读取点**，不是组件契约：`canLoadOlder(hasMore, loading)` 的 `loading`
+    // 那一半到底会不会被渲染出来。只在每个 loader 的 `finally` 里 publish 时，`loading =
+    // true` 从未到达渲染 —— 翻页途中顶部条仍是可点的 BUTTON，点下去在 `st.loading` 早退处
+    // 什么也不做（宿主报障里「长得像能点、点下去是死的」那一类，换了一个分支）。复查
+    // cyc20261009-151044 的否决就断在这里：把更早那页换成一个**未兑现**的 promise，
+    // 在它还没落定时问 DOM 要标签名。`TranscriptView.test.tsx` 传 prop 看不见这一条。
+    const m = mockEmrg();
+    let release: (v: unknown) => void = () => {};
+    const pending = new Promise((res) => { release = res; });
+    const newest = [{ record_index: 4, kind: "message", role: "user", content: "newest-1" }];
+    const older = [{ record_index: 1, kind: "message", role: "user", content: "older-1" }];
+    m.listHistory.mockImplementation((p: { beforeIndex?: number } = {}) =>
+      p.beforeIndex != null
+        ? (pending as Promise<{ messages: unknown[]; hasMore: boolean }>)
+        : Promise.resolve({ messages: newest, hasMore: true }),
+    );
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText("newest-1")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("history-load-bar"));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(2));
+    // 此刻更早那页还没落定：条形件必须已经退化成状态文字。
+    expect(screen.getByTestId("history-load-bar").tagName).toBe("DIV");
+
+    // 落定之后仍然不是控件（翻到头了），并且更早那页真的进来了。
+    act(() => release({ messages: older, hasMore: false }));
+    await waitFor(() => expect(screen.getByText(older[0].content)).toBeInTheDocument());
+    expect(screen.getByTestId("history-load-bar").tagName).toBe("DIV");
+  });
+
   it("shows the connection status + model from the status broadcast", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));
