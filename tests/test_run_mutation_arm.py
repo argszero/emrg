@@ -357,6 +357,25 @@ class TestTheSmallReadings:
     def test_a_run_with_no_failed_line_names_no_node(self, mod) -> None:
         assert mod._failed_node("1 passed in 0.02s") == ""
 
+    def test_every_failed_node_is_read_not_only_the_first(self, mod) -> None:
+        """Which nodes failed is the evidence a refused pre-flight turns on.
+
+        One of them says no more than "something failed"; the whole list is what shows
+        whether the failures are the arm's own target or files it never touched.
+        """
+        out = (
+            "FAILED tests/test_bash_v2_boundary.py::test_a - AssertionError\n"
+            "FAILED tests/test_check_node_test_count.py::test_b - AssertionError\n"
+            "FAILED tests/test_bash_v2_boundary.py::test_c - AssertionError\n"
+            "12 failed, 4381 passed in 165.56s\n"
+        )
+        assert mod._failed_nodes(out) == [
+            "tests/test_bash_v2_boundary.py::test_a",
+            "tests/test_check_node_test_count.py::test_b",
+            "tests/test_bash_v2_boundary.py::test_c",
+        ]
+        assert mod._failed_nodes("1 passed in 0.02s") == []
+
     def test_a_non_unique_anchor_has_no_mutation(self, mod) -> None:
         assert mod._apply("x x", "x", "y") is None
 
@@ -976,6 +995,76 @@ class TestARefusedPreflightNamesTheCauseItFound:
         assert (tree / "subject.py").read_text(encoding="utf-8") == before, (
             "a refused pre-flight must not have written anything"
         )
+
+    def test_the_reason_points_at_the_failing_nodes_when_the_run_named_some(self, mod) -> None:
+        """The fourth cause, and the only one the run states in its own output.
+
+        A refusal whose failures are in files the arm never touched is *not* a node-id
+        problem and *not* an interpreter problem, and the two remedies above are both
+        wrong for it. The nodes are what say so.
+        """
+        reason = mod._why_target_broken(
+            1,
+            4381,
+            "FAILED tests/test_bash_v2_boundary.py::test_a - assert 1 == 2\n"
+            "12 failed, 4381 passed in 165.56s\n",
+            "/checkout/.venv/bin/python3",
+        )
+        assert "already red" in reason, reason
+        assert "pre-flight line" in reason, reason
+
+    def test_the_reason_keeps_the_shape_it_had_when_the_run_named_none(self, mod) -> None:
+        """The control: a collection error and a missing module name no node, so no clause.
+
+        Without this, the sentence could be printed unconditionally and the report would
+        send the reader looking for a list that is not there.
+        """
+        for out in (
+            "ERROR: not found: tests/test_x.py::test_hello\n",
+            "/usr/bin/python3: No module named pytest\n",
+        ):
+            reason = mod._why_target_broken(1, 0, out, "/usr/bin/python3")
+            assert "already red" not in reason, reason
+
+    def test_a_refused_preflight_prints_the_nodes_it_failed_on(self, mod, tree, capsys) -> None:
+        """End to end, on a tree whose failures are unrelated to the arm's target.
+
+        Measured 2026-10-09 (`cyc20261009-133913`): a full-suite arm was refused with
+        `failed node: -` while its output held twenty `FAILED` lines, every one of them in
+        another file. The report is the only place a reader could have seen that.
+        """
+        (tree / "tests" / "test_other.py").write_text(
+            "def test_oops():\n    assert 1 == 2\n", encoding="utf-8"
+        )
+        before = (tree / "subject.py").read_text(encoding="utf-8")
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name', node="tests")
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_TARGET_BROKEN, out
+        assert "the pre-flight failed before any mutation, on:" in out, out
+        assert "tests/test_other.py::test_oops" in out, (
+            f"the node that failed is the evidence the verdict turns on:\n{out}"
+        )
+        assert (tree / "subject.py").read_text(encoding="utf-8") == before, (
+            "a refused pre-flight must not have written anything"
+        )
+
+    def test_the_json_report_carries_the_failing_nodes(self, mod, tree, capsys) -> None:
+        """The other consumer gets them too, as a field rather than only as prose."""
+        (tree / "tests" / "test_other.py").write_text(
+            "def test_oops():\n    assert 1 == 2\n", encoding="utf-8"
+        )
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name', node="tests",
+                  json_out=True)
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == mod.EXIT_TARGET_BROKEN, payload
+        assert payload["preflight_failures"] == ["tests/test_other.py::test_oops"], payload
+
+    def test_a_kill_prints_no_preflight_failure_block(self, mod, tree, capsys) -> None:
+        """The control for the print: the block belongs to the refusal, not to the report."""
+        rc = _arm(mod, tree, old=GREETING, new='return "goodbye " + name')
+        out = capsys.readouterr().out
+        assert rc == mod.EXIT_KILLED, out
+        assert "the pre-flight failed before any mutation" not in out, out
 
 
 class TestAGateThatWillNotLoadIsAVerdict:
