@@ -20,8 +20,63 @@ jobs:
       # #441 教训：workflow 文件的 if: secrets 等解析错误人工审查易漏
       # （actionlint 可捕获），push 后才在 build-release 触发时暴露。
       # → CI 全量校验所有 workflow，解析错误立即失败（R82 固化）。
+      # The pinned release binary, not `rhysd/actionlint@v1.7.12`: that action builds its
+      # own image at run time, which pulls alpine, golang and shellcheck-alpine from
+      # `registry-1.docker.io` anonymously. Docker Hub rate-limits those per IP and the
+      # hosted runners share addresses, so when the limit is hit this leg dies in ~20 s
+      # before a single test runs (measured 2026-10-09: runs 37990298947, 37990543473,
+      # 37992404489 and the master push 37992520930, all at this step; issue #2019). A red
+      # leg is not votable, so one throttle window freezes every open PR at once while
+      # master reads red for no commit's fault. Same tool, same version, no registry.
       - name: Actionlint (workflow lint)
-        uses: rhysd/actionlint@v1.7.12
+        env:
+          # The pin, and the only copy of it: `scripts/check-workflows.py` reads it out of
+          # this file (the host-side counterpart), and tests/test_check_workflows.py
+          # asserts it stays findable there.
+          ACTIONLINT_VERSION: "1.7.12"
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$url" | tar -xz -C "$RUNNER_TEMP" actionlint
+          bin="$RUNNER_TEMP/actionlint"
+          # The container this replaced bundled shellcheck; the release binary does not, and
+          # actionlint runs shellcheck over `run:` blocks only when it finds one on PATH. So
+          # installing the linter is not the same as keeping that half of the gate: a gate
+          # that quietly stopped running it would keep the name while checking less. Both
+          # halves are asserted below -- the binary answers, and it still reports a finding
+          # that only the linter can supply (never write a comment line here that begins with
+          # the word `# shellcheck`: this file's prose is shell to the linter, and a line
+          # shaped like its directive is a parse error, measured 2026-10-10).
+          command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+          command -v shellcheck >/dev/null
+          "$bin" -version
+          probe="$(mktemp -d)"
+          mkdir -p "$probe/.github/workflows"
+          cat > "$probe/.github/workflows/probe.yml" <<'PROBE'
+          name: probe
+          on: push
+          jobs:
+            p:
+              runs-on: ubuntu-latest
+              steps:
+                - run: echo $UNQUOTED
+          PROBE
+          # The path is explicit on purpose. With no argument actionlint lints the nearest
+          # *repository's* `.github/workflows`, which from a temporary directory is the
+          # checkout that contains it - an answer about this tree, not about the probe
+          # (measured on this host with 1.7.12: the same file answers clean by that route
+          # and `SC2086` by this one). The lint below passes its files for the same reason.
+          if (cd "$probe" && "$bin" .github/workflows/probe.yml >/dev/null 2>&1); then
+            echo "::error::actionlint found nothing in a workflow with an unquoted expansion - the shellcheck half of this gate is not running"
+            exit 1
+          fi
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no workflow file under .github/workflows, so nothing was linted"
+            exit 1
+          fi
+          "$bin" "${files[@]}"
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
