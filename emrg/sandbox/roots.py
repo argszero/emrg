@@ -274,13 +274,29 @@ def judge_extra_root(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
     if not path or not path.strip():
         return ExtraRootVerdict("", refusal="no path given — name the file or directory to add")
     expanded = os.path.expanduser(path.strip())
-    if not os.path.isabs(expanded):
+    # `os.path.isabs` is the *platform's* answer, and on Windows it calls every
+    # drive-less rooted spelling relative — `/`, `/tmp/x` — which is not what it
+    # means here: such a path does not resolve under the cwd, so the sandbox has
+    # to read it as absolute (the same rule `emrg/tools/file_policy.is_absolute_path`
+    # states for a *target*, and the reason it exists as a helper at all). One
+    # spelling is deliberately still refused off POSIX: a leading backslash, which
+    # on POSIX is an ordinary filename character and would resolve against the
+    # daemon's own cwd — the exact accident this rule is here to prevent.
+    # Measured: CI run 37878525434, where the platform-only test turned a host's
+    # `/` into "not an absolute path" instead of the root refusal below.
+    if not os.path.isabs(expanded) and not expanded.startswith("/"):
         return ExtraRootVerdict(expanded, refusal=(
             f"{path!r} is not an absolute path — name it absolutely or start it "
             "with `~`, so the path granted and the path shown are the same one"
         ))
     canonical = canonical_path(expanded)
-    if canonical == os.sep:
+    # A filesystem root is a path that is its own parent — the definition, and
+    # the reason this is not written `canonical == os.sep`: a Windows root is
+    # `C:\`, which is not `os.sep`, and a host who types `/` there means the root
+    # too. The spelled form is checked alongside it because `realpath` may map a
+    # bare `/` somewhere other than a root on a platform whose cwd is on a drive;
+    # the two spellings one idea, so neither can let a whole filesystem through.
+    if expanded == "/" or canonical == os.path.dirname(canonical):
         return ExtraRootVerdict(canonical, refusal=(
             f"{path!r} is the filesystem root — that reach is the tier "
             "danger-full-access, chosen as a tier rather than assembled from a "

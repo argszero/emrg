@@ -108,6 +108,38 @@ def _grants(profile_args: list[str]) -> list[str]:
     return [r[1:-1].replace('\\"', '"').replace("\\\\", "\\") for r in raw]
 
 
+def _grants_by_form(profile_args: list[str]) -> dict[str, list[str]]:
+    """The same grants, kept under the form the profile spelled them with.
+
+    A list of paths cannot answer "was this pinned as ``literal`` or as
+    ``subpath``" — and that distinction is the whole subject of the file/dir rule,
+    since both forms match their own path. So the form is read out of the profile
+    with the path, and the paths are unescaped exactly as :func:`_grants` does,
+    because a profile is a *parsed* language: SBPL doubles the separator, so a raw
+    Windows path appears in it with its backslashes escaped and a substring test
+    against the unescaped spelling reddens there and nowhere else (CI run
+    37878525434).
+    """
+    profile = " ".join(profile_args)
+    out: dict[str, list[str]] = {"subpath": [], "literal": []}
+    for form, quoted in re.findall(r'\((subpath|literal) ("(?:[^"\\]|\\.)*")\)', profile):
+        out[form].append(quoted[1:-1].replace('\\"', '"').replace("\\\\", "\\"))
+    return out
+
+
+def _names_path(text: str, path: str) -> bool:
+    """Whether a line names this path, tolerating the escaping its spelling adds.
+
+    The codebase spells a path in model-facing text with ``repr`` (the fence's
+    refusal text does, and so does the boundary line), and ``repr`` escapes the
+    separators on Windows only. Asking "is this path in this text" therefore has
+    to undo that escaping rather than compare a raw spelling — the same round trip
+    :func:`_grants` makes for the profile, and the same rule the suite learned as
+    "assert the property, not the platform's rendering of it".
+    """
+    return path in text or path in text.replace("\\\\", "\\")
+
+
 def _ws_policy(workspace, extra=()) -> SandboxPolicy:
     return resolve_policy(mode="workspace-write", workspace_root=str(workspace), extra_roots=extra)
 
@@ -175,6 +207,33 @@ def test_a_relative_path_is_refused(outside):
     verdict = judge_extra_root("notes", _ws_policy(ws))
 
     assert verdict.refusal and "absolute" in verdict.refusal
+
+
+def test_a_drive_less_rooted_spelling_is_never_called_relative(outside):
+    """"Does not resolve under the cwd" is the rule, and `isabs` is not it.
+
+    On Windows every drive-less rooted spelling — `/`, `/tmp/x` — answers
+    ``os.path.isabs(...) == False``, so a rule that reads the platform's answer
+    alone calls a host's absolute path relative. This asserts the *property*
+    rather than the platform: such a spelling may be refused for whatever reason
+    the path deserves (here: it does not exist), but never as "not an absolute
+    path".
+
+    **This guard's power is one-legged, and saying so is the point.** It runs on
+    both legs but can only redden the Windows one: on POSIX ``os.path.isabs``
+    already answers True for this spelling, so the defect is invisible there.
+    Measured — reverting the fix and re-running this file on macOS leaves it
+    green (33 passed), while CI run 37878525434 is the Windows run where the
+    platform-only rule turned a host's `/` into the wrong refusal. A guard that
+    is armed on one leg is worth having and must not be described as if both
+    could kill it.
+    """
+    ws, _ = outside
+
+    verdict = judge_extra_root("/emrg-probe-not-a-real-path", _ws_policy(ws))
+
+    assert verdict.refusal, verdict
+    assert "not an absolute path" not in verdict.refusal, verdict.refusal
 
 
 def test_a_path_that_does_not_exist_is_refused(outside):
@@ -340,11 +399,11 @@ def test_a_file_root_is_granted_literally_and_a_directory_as_a_tree(outside):
     a_file.write_text("x", encoding="utf-8")
     policy = _ws_policy(ws, extra=(canonical_path(str(a_dir)), canonical_path(str(a_file))))
 
-    profile = " ".join(seatbelt_profile_args(policy))
+    forms = _grants_by_form(seatbelt_profile_args(policy))
 
-    assert f'(subpath "{canonical_path(str(a_dir))}")' in profile
-    assert f'(literal "{canonical_path(str(a_file))}")' in profile
-    assert f'(subpath "{canonical_path(str(a_file))}")' not in profile
+    assert canonical_path(str(a_dir)) in forms["subpath"]
+    assert canonical_path(str(a_file)) in forms["literal"]
+    assert canonical_path(str(a_file)) not in forms["subpath"]
 
 
 def test_bwrap_binds_every_extra_root(outside):
@@ -598,7 +657,7 @@ def test_the_context_line_names_the_roots_and_is_fresh_inside_the_freeze(outside
 
     text = server._build_context_message(session)["content"]
 
-    assert canonical_path(str(elsewhere)) in text
+    assert _names_path(text, canonical_path(str(elsewhere)))
     assert "cannot add to or widen" in text
 
 
