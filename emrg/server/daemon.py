@@ -28,7 +28,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import yaml
