@@ -40,6 +40,7 @@ from emrg.config import (
     LlmConfig,
     SandboxConfig,
     config_dir,
+    logs_dir,
     find_model_entry,
     load_sandbox_config,
     load_update_config,
@@ -6922,7 +6923,7 @@ class EmrgServer:
         asyncio.create_task(_reflect())
 
 
-_EXIT_RECORD_PATH = Path.home() / ".emrg" / "emrgd-exit.log"
+_EXIT_RECORD_PATH = logs_dir() / "emrgd-exit.log"
 
 
 class DaemonExit:
@@ -6945,7 +6946,7 @@ class DaemonExit:
 
 
 def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) -> None:
-    """Append a one-line JSON exit record to ~/.emrg/emrgd-exit.log and mirror
+    """Append a one-line JSON exit record to ~/.emrg/logs/emrgd-exit.log and mirror
     it into emrgd.log (rant 2026-08-25T09:25:32 — daemon silent death).
 
     The dedicated file is append-only and survives emrgd.log rotation
