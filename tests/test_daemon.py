@@ -225,6 +225,54 @@ def test_system_prompt_rant_handling_section(tmp_path):
     assert "/rant" in rendered
 
 
+def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
+    """A task's only channel to its own prompt text is a rant (rant 2026-10-09T14:35:15).
+
+    The loop this closes, measured on 2026-10-09: the `competition` task wanted rules added
+    to `emrg/server/competition_prompt.md`, and it could do nothing about it from its own
+    workspace. Two copies exist — the repository's, which nothing reads at runtime, and the
+    install tree's, which is the one `_resolve_task_template` returns and which sits outside
+    every task's workspace and is replaced whole by the next upgrade — so a task that writes
+    the file it can reach is writing something no round reads, and a task that writes the one
+    that matters cannot. The host ruled it directly (2026-10-09T14:34:54, session
+    `emrg-evolution-competition-task`): 「你不能直接修改competition_prompt.md，丢宇emrg项目，
+    你只能提rant」.
+
+    Asserted on the **render**: `system.j2` is the single render site every session receives,
+    so a rule placed here reaches a `competition` or `paper` session that opens no other
+    carrier — the placement reasoning `tests/test_language_policy_reach.py` records for the
+    same shape.
+    """
+    server = _make_server()
+    rendered = server._build_system_prompt()
+    assert "A task cannot change its own prompt text" in rendered, (
+        "the rendered system prompt does not say who owns a task's prompt file — the rule "
+        "is then carried by no artifact a task session receives"
+    )
+    assert "`project: emrg`" in rendered, (
+        "the rule must name the channel (a rant against `emrg`), because 'you may not write "
+        "it' without a route leaves the task with nowhere to go"
+    )
+    assert "install tree" in rendered, (
+        "the reason the write does not work is missing: without it the rule reads as a "
+        "policy preference rather than a description of two copies"
+    )
+    # R7: a rule recorded as the host's is a message that can be pointed at, so the quote
+    # is verbatim and the command that re-finds it is right beside it.
+    assert "2026-10-09T14:34:54" in rendered, (
+        "the host message the rule rests on is gone, so the rule rests on this instance's "
+        "inference instead"
+    )
+    assert "丢宇emrg项目" in rendered, (
+        "the host's own words are not quoted verbatim — the message is re-findable only by "
+        "the exact string, and a paraphrase cannot be looked up"
+    )
+    assert "find-host-message.py --pattern '不能直接修改competition_prompt.md'" in rendered, (
+        "the render does not say how to re-find the message, so the next reader has to "
+        "trust this file"
+    )
+
+
 def test_system_prompt_temp_file_rules_section(tmp_path):
     """Temp File Rules section renders with the session tmp dir (rant
     2026-08-25T18:10:57): throwaway scripts must go under the session

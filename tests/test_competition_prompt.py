@@ -206,9 +206,81 @@ def test_phase_state_machine_is_complete():
         "Phase F — Archive",
     ]:
         assert phase in text, f"phase missing: {phase}"
-    # One phase per round, and the baseline anchor rule.
-    assert "A round advances one phase" in text
+    # One phase per round *per competition*, and the baseline anchor rule. The old
+    # sentence here ("A round advances one phase — do not do several unrelated things in
+    # one round") sat next to §0.0 item 2, which requires every round to work all active
+    # competitions, and the round resolved that conflict the wrong way on 2026-10-07
+    # (one round touched 1 of 8; the host corrected it, 2026-10-07T11:52:53). The rule the
+    # test pins is now the replacement's: the round's unit of work is the *set*.
+    assert '"One phase per round" means one phase PER COMPETITION' in text
+    assert "A round advances one phase — do not do several unrelated things" not in text, (
+        "the sentence that read as 'one competition per round' is back — it contradicts "
+        "§0.0 item 2 and was the mis-reading the host corrected on 2026-10-07"
+    )
     assert "Submit at least once successfully and obtain a leaderboard score" in text
+
+
+def test_the_round_covers_every_active_competition():
+    """§1's affirmative half: the round's unit of work is the set, not one competition.
+
+    Rant 2026-10-09T14:35:15 (§1). §0.0 item 2 requires every round to work all active
+    competitions and this section's old first sentence required "exactly one phase ...
+    do not do several unrelated things in one round"; a round that read the second as
+    "one competition" produced a round that touched 1 of 8 (2026-10-07), and the host
+    corrected it. Three clauses carry the rule, and each closes a different dodge: the
+    traversal, the mandatory increment, and the ledger that forces a stated reason.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "The round's unit of work is the set of ACTIVE competitions" in text
+    assert "Every round must traverse ALL active competitions" in text
+    assert "Every competition must show an increment each round" in text
+    # The dodge list has to name the excuses it rejects, or each reads as a reason.
+    assert "a per-competition submission-quota ledger" in text
+    for excuse in (
+        "I was busy with another competition",
+        "it was waiting",
+        "it was already submitted",
+        "Waiting for evidence",
+        "no point submitting",
+        "did not get to it",
+    ):
+        assert excuse in text, (
+            f"the rejected ground {excuse!r} is gone from §1 — a rule that does not name "
+            "the excuse it refuses is argued around by it"
+        )
+
+
+def test_the_workspace_hygiene_section_is_placed_before_the_phase_machine():
+    """§0.7, and *where* it sits: a tidy-up rule read after the work has started is late.
+
+    Rant 2026-10-09T14:35:15 (§0.7). Measured in `competitions/532510-zhihu-tables/` on
+    2026-10-07: 466 files at the top level and the competition's single living document
+    present but visually buried, so the host could not find it. The section belongs with
+    the other preparation steps, above §1 and the phase table.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "#### 0.7 Workspace hygiene" in text
+    for rule in (
+        "Root-level budget",
+        "No `.bak` litter",
+        "Predictable paths",
+        "Verify after reorganising",
+    ):
+        assert rule in text, f"§0.7 lost the {rule!r} rule"
+    # The four rules are load-bearing in their specifics, not just their headings: the
+    # budget names what may stay, the litter rule caps the copies, and the last one exists
+    # because a tidy-up can break a live pipeline silently.
+    assert "`主文档.md`" in text
+    assert "**at most one**, or none" in text
+    assert "must never silently break a live pipeline" in text
+    assert text.index("#### 0.7 Workspace hygiene") < text.index("### 1. Assess progress"), (
+        "§0.7 drifted below §1 — the rule binds the round's own housekeeping, and a round "
+        "that has already begun working meets it too late"
+    )
+    assert text.index("#### 0.7 Workspace hygiene") < text.index("#### Phase A"), (
+        "§0.7 drifted below the phase table, so a round is told to tidy up only after it "
+        "has produced the files the rule is about"
+    )
 
 
 def test_rejected_competitions_are_not_re_evaluated():
@@ -886,4 +958,49 @@ def test_the_render_substitutes_values_and_carries_no_template_syntax(rendered):
         f"{PROMPT_PROJECT!r}: "
         "`{{ task.project }}` resolved to nothing (`jinja2.Undefined` renders empty), so "
         "the round is told its project is blank"
+    )
+
+
+# --- the 2026-10-09 rant's two sections, at the level a round actually reads ----------------------
+#
+# Same two levels as above, for the same reason. §0.7 and §1's first sentence are new text
+# in a Jinja2 template: a `{# … #}` around either removes it from every round's prompt while
+# the file keeps every character, and that is the one failure a file-level guard cannot see
+# (measured 2026-10-08, `cyc20261008-082424`, issue #1904 — `run-mutation-arm.py` reported
+# SURVIVED for exactly that arm).
+
+
+def test_the_coverage_and_hygiene_rules_reach_the_round_and_not_merely_the_file(rendered):
+    """The new sentences, asserted on the prompt a round is sent."""
+    for term in (
+        "The round's unit of work is the set of ACTIVE competitions",
+        "Every round must traverse ALL active competitions",
+        '"One phase per round" means one phase PER COMPETITION',
+        "Every competition must show an increment each round",
+        "a per-competition submission-quota ledger",
+        "I was busy with another competition",
+        "#### 0.7 Workspace hygiene",
+        "Root-level budget",
+        "No `.bak` litter",
+        "Predictable paths",
+        "Verify after reorganising",
+        "must never silently break a live pipeline",
+    ):
+        assert term in rendered, (
+            f"the rendered competition prompt does not carry {term!r}: the rule is in the "
+            "file and in no render, so every round is sent a prompt without it"
+        )
+
+
+def test_the_rendered_hygiene_section_still_precedes_the_round_it_binds(rendered):
+    """Placement has to survive rendering, which is where the round meets it."""
+    assert rendered.index("#### 0.7 Workspace hygiene") < rendered.index(
+        "### 1. Assess progress"
+    ), (
+        "the rendered §0.7 drifted below §1 — a round that has already started working is "
+        "told to tidy up after the fact"
+    )
+    assert "'s unit of work is the set of ACTIVE competitions" in rendered, (
+        "§1's first sentence did not survive the render, so the round is sent the section "
+        "without the rule that fixes its mis-reading"
     )

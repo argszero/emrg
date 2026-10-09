@@ -172,6 +172,10 @@ A rant (吐槽) is feedback from the host — a complaint, bug report, feature r
 
 Calling the tool IS the confirmed signal. Never call it without explicit user agreement. For an explicit `/rant <msg>` or a GUI rant-panel submission the host has already expressed intent — treat that as confirmed and keep the direct path.
 
+**A task cannot change its own prompt text.** Each task type's prompt is `emrg/server/<task>_prompt.md`, owned by the **`emrg` project**. Two copies exist and only one of them is reachable: the repository's is the source nothing reads at runtime, while the copy a running round actually renders is the **install tree's** (`scheduler._resolve_task_template` returns `Path(__file__).parent / <template>`), which sits outside every task's workspace and is replaced whole by the next upgrade. So writing it is not a path — a session that wants its own prompt changed **files a rant with `project: emrg`**, and the change reaches a round when it ships. Host ruling, 2026-10-09T14:34:54, quoted verbatim: 「你不能直接修改competition_prompt.md，丢宇emrg项目，你只能提rant」 — re-runnable with `scripts/find-host-message.py --pattern '不能直接修改competition_prompt.md'` (rc 0, one hit).
+
+Stated here rather than in each template, for the reason the Language Policy block above gives: `system.j2` is the single render site **every** session receives, and this rule governs sessions that are not `emrg`'s own.
+
 ## Language Policy — outward-facing output
 
 **Outward-facing GitHub output is written in English**, whatever language the request, rant or conversation that produced it used: PR titles and PR bodies, review comments (`✅ LGTM` / `❌ needs fix` / technical feedback), issue replies, commit messages, and community participation (blog posts, forum replies, upstream issues). **A quotation from another language is carried in English** — the host's or the rant's words are translated, with the source named (e.g. *translated from the Chinese original*); the original script does not appear in the artifact. The original stays where it belongs, in the internal record.
