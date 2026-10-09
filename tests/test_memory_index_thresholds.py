@@ -61,7 +61,12 @@ directory the test creates.
 import logging
 from pathlib import Path
 
-from emrg.memory import INDEX_SIZE_WARN, ProjectMemoryStore, SessionMemoryStore
+from emrg.memory import (
+    INDEX_SIZE_WARN,
+    MemoryStore,
+    ProjectMemoryStore,
+    SessionMemoryStore,
+)
 from emrg.server.daemon import EmrgServer
 
 # A CJK row is ~3 bytes per character; an ASCII row is 1, which is the whole point
