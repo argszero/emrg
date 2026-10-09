@@ -405,6 +405,36 @@ def _text_mode_calls(
 _VENDORED_DIRS = {"node_modules", "site-packages", ".venv", "venv", "dist-info"}
 
 
+def _is_vendored(path: Path, root: Path) -> bool:
+    """Is `path` inside a vendored tree, judged from `root` - the tree it was read under?
+
+    Root-relative, and the **only** spelling of this decision in the module. The form
+    this file used at two of its five sites read the **absolute** path, so the verdict
+    was about where the machine put the tree rather than about the tree: a checkout
+    under any directory named `node_modules` is entirely "vendored", and the assertion
+    that guards the exclusion then fires on every first-party file.
+
+    Measured 2026-10-10 on commit `d8ea2c55`, this module run from two places with the
+    same bytes under them - `<plain>/checkout` and `<tmp>/node_modules/checkout`:
+
+        plain:      17 passed
+        node_modules: 3 failed, 14 passed
+          AssertionError: vendored file leaked into the scan set:
+            .../node_modules/checkout/emrg/config.py
+
+    Every other first-party guard in this repo already relativises before testing
+    (`check-undefined-names.py`, `check-unbound-reads.py`, `check-doc-count.py`,
+    `test_probe_guard_reach.py`), so this is the sentence of issue #2021 - "where the
+    machine put the checkout decides what it judges" - carried by a second module.
+
+    :param path: the file to judge, reached under `root`.
+    :param root: the root it was read from - the repo for a walk of the repo, the
+        fixture directory for a walk of a fixture.
+    :returns: True when a directory component of `path` relative to `root` is vendored.
+    """
+    return bool(_VENDORED_DIRS & set(path.relative_to(root).parts))
+
+
 def _tracked_first_party_py() -> list[Path]:
     """Every tracked `.py` file git knows about, minus vendored trees.
 
@@ -433,20 +463,21 @@ def _tracked_first_party_py() -> list[Path]:
     return [
         REPO_ROOT / rel
         for rel in proc.stdout.split("\0")
-        if rel.endswith(".py") and not _VENDORED_DIRS & set(Path(rel).parts)
+        if rel.endswith(".py") and not _is_vendored(REPO_ROOT / rel, REPO_ROOT)
     ]
 
 
 def _scan_roots() -> list[Path]:
     """Every tracked first-party Python file this rule covers.
 
-    Vendored trees are excluded by `_VENDORED_DIRS`, and the exclusion is asserted
-    to be doing something (rather than silently matching nothing).
+    Vendored trees are excluded by `_is_vendored`, judged from `REPO_ROOT` like every
+    other read of this tree, and the exclusion is asserted to be doing something
+    (rather than silently matching nothing).
     """
     files = _tracked_first_party_py()
     assert files, "git reported no first-party Python files - the fixture is broken"
     vendored_paths = [
-        p for p in PACKAGE.rglob("*.py") if _VENDORED_DIRS & set(p.parts)
+        p for p in PACKAGE.rglob("*.py") if _is_vendored(p, REPO_ROOT)
     ]
     for v in vendored_paths:
         assert v not in files, f"vendored file leaked into the scan set: {v}"
@@ -920,7 +951,7 @@ def test_the_scan_equals_the_index_and_every_directory_is_reached(tmp_path: Path
     expected = sorted(
         (REPO_ROOT / rel).resolve()
         for rel in tracked_all
-        if rel.endswith(".py") and not _VENDORED_DIRS & set(Path(rel).parts)
+        if rel.endswith(".py") and not _is_vendored(REPO_ROOT / rel, REPO_ROOT)
     )
     assert expected, "git reported no first-party Python files - the fixture is broken"
     scanned = sorted(p.resolve() for p in _scan_roots())
@@ -933,7 +964,7 @@ def test_the_scan_equals_the_index_and_every_directory_is_reached(tmp_path: Path
     # must contribute at least one scanned file. A refactor that drops `tests/` (or
     # `packaging/`) from the scan *and* re-anchors the equality would still fail here.
     tops = {Path(rel).parts[0] for rel in tracked_all if rel.endswith(".py")
-            and not _VENDORED_DIRS & set(Path(rel).parts)}
+            and not _is_vendored(REPO_ROOT / rel, REPO_ROOT)}
     scanned_tops = {p.relative_to(REPO_ROOT).parts[0] for p in scanned}
     missing = tops - scanned_tops
     assert not missing, (
@@ -948,19 +979,76 @@ def test_the_scan_equals_the_index_and_every_directory_is_reached(tmp_path: Path
         "tests/ must be scanned: the module's own probe reads a child process too"
     )
 
-    # The vendored exclusion is exercised on a synthetic tree rather than on
-    # `emrg/gui/node_modules`: that tree exists only where someone ran `npm install`,
-    # and asserting it exists made an earlier version of this test fail on both CI
-    # jobs while passing locally.
-    tree = tmp_path / "pkg" / "node_modules" / "vendored"
-    tree.mkdir(parents=True)
-    (tree / "third_party.py").write_text("x = 1\n", encoding="utf-8")
-    (tree.parent.parent / "ours.py").write_text("x = 1\n", encoding="utf-8")
-    found = [p for p in (tmp_path / "pkg").rglob("*.py")]
-    assert len(found) == 2, "the fixture must contain one vendored and one first-party file"
-    assert [p for p in found if not _VENDORED_DIRS & set(p.parts)] == [
-        tmp_path / "pkg" / "ours.py"
-    ], "the vendored exclusion must drop the third-party file and keep ours"
+    # The vendored exclusion has a test of its own, on a tree whose *location* is the
+    # finding: `test_the_vendored_exclusion_judges_the_tree_not_where_it_sits`.
+
+
+def test_the_vendored_exclusion_judges_the_tree_not_where_it_sits(tmp_path: Path) -> None:
+    """Both directions of the exclusion, on a tree that sits under a vendored name.
+
+    The fixture's **location** is the point. `emrg/gui/node_modules` exists only where
+    someone ran `npm install`, so the exclusion is exercised on a synthetic tree - and
+    the version of this check that preceded this test put that tree under a plain
+    directory, where the absolute-path spelling it used and the root-relative one agree.
+    An ancestor named `node_modules` is what tells them apart, and it is not exotic:
+    it is the layout issue #2021 was filed for, one module over.
+
+    Both directions are asserted on the same tree: the ordinary module inside the
+    tree's own vendored directory is skipped, and the ordinary module beside it is
+    judged - a predicate that answered "vendored" to everything would satisfy neither
+    assertion while looking like a passing exclusion.
+    """
+    root = tmp_path / "node_modules" / "checkout" / "emrg"
+    (root / "node_modules" / "dep").mkdir(parents=True)
+    (root / "ours.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "node_modules" / "dep" / "third_party.py").write_text("x = 1\n", encoding="utf-8")
+
+    found = sorted(root.rglob("*.py"))
+    assert len(found) == 2, "the fixture must hold one first-party file and one vendored one"
+    assert [p for p in found if not _is_vendored(p, root)] == [root / "ours.py"], (
+        "an ordinary module must be judged even when an ancestor of the tree is named "
+        "`node_modules`, and a file inside the tree's own vendored directory must stay "
+        "skipped: the exclusion reads the tree it was pointed at, not the machine"
+    )
+
+
+def test_the_vendored_decision_has_one_spelling() -> None:
+    """Every read of `_VENDORED_DIRS` lives in `_is_vendored`.
+
+    Five sites used to spell this decision themselves, and two of them spelled it over
+    an absolute path - the drift that produced the measured failure above. The
+    property is "one owner", so it is read off this module's own AST rather than
+    asserted in prose: a re-spelled inline predicate is a compile-time fact, and it is
+    the shape that let the two disagree in the first place.
+
+    Read from the AST, not from the text, so the docstrings that quote the old spelling
+    (this file and `_is_vendored`) are not counted as code.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    parents = {
+        child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+    }
+
+    def enclosing_function(node: ast.AST) -> str:
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return node.name
+        return "<module>"
+
+    owner = "_is_vendored"
+    outside = [
+        (enclosing_function(node), node.lineno)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and node.id == "_VENDORED_DIRS"
+        and not isinstance(node.ctx, ast.Store)  # the declaration itself
+        and enclosing_function(node) != owner
+    ]
+    assert not outside, (
+        f"`_VENDORED_DIRS` is read outside `{owner}` at {outside} - the vendored "
+        "decision must be made in one place, from the root of the tree being read"
+    )
 
 
 def test_the_exemption_decides_on_the_child_not_the_file() -> None:
