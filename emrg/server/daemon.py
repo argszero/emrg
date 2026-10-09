@@ -73,7 +73,8 @@ from emrg.server.git_utils import (
 )
 from emrg.sandbox import escalation
 from emrg.sandbox.policy import DEFAULT_MODE as DEFAULT_SANDBOX_MODE
-from emrg.sandbox.policy import SANDBOX_MODES
+from emrg.sandbox.policy import SANDBOX_MODES, resolve_policy
+from emrg.sandbox.roots import judge_extra_root
 from emrg.server import content_risk_probe
 from emrg.server.tool_types import ToolResult
 from emrg.memory import (
@@ -204,6 +205,15 @@ from emrg.server.scheduler import TaskScheduler
 from emrg.server import logcontext
 
 logger = logging.getLogger(__name__)
+
+#: The tools a **host-named writable root** reaches (rant 2026-10-09T09:43:39).
+#:
+#: The same set the tier is injected into, and it must stay that set: a root a
+#: spawned command can write but ``write`` cannot (or the reverse) is exactly the
+#: asymmetry ``emrg/sandbox/roots.py`` exists to make impossible. Written once
+#: here because the injection site reads it twice — for the tier and for the
+#: roots — and two hand-written unions would be two chances to drift apart.
+_ROOT_CONSUMING_TOOLS = SHELL_TOOL_NAMES | {"write", "edit"}
 
 # ── Jinja2 template environment for system prompt ──
 _jinja_env = None
@@ -3023,6 +3033,15 @@ class EmrgServer:
                 ws,
             )
 
+        elif msg_type == "set_sandbox_roots":
+            await self._handle_set_sandbox_roots(
+                msg.get("session_id", ""),
+                msg.get("cwd", ""),
+                msg.get("op", ""),
+                msg.get("path", ""),
+                ws,
+            )
+
         elif msg_type == "list_projects":
             await self._handle_list_projects(ws)
 
@@ -3735,6 +3754,20 @@ class EmrgServer:
         if tc_name in SHELL_TOOL_NAMES | {"write", "edit"} and req.sandbox:
             args["sandbox"] = req.sandbox
             args["workspace"] = cwd
+        if tc_name in _ROOT_CONSUMING_TOOLS:
+            # The session's host-named writable roots, injected for the same
+            # reason the tier is and with one deliberate difference: this write
+            # is **unconditional**, so a value the model put in the call is
+            # replaced rather than honoured (rant 2026-10-09T09:43:39 §4 — only
+            # the host names a root).  The tier's injection is guarded by
+            # `req.sandbox` because a call carrying no tier is a host session
+            # that keeps its unconfined default; silence there cannot widen
+            # anything, since it resolves to `danger-full-access`.  A list of
+            # roots has no such neutral value — an honoured model-supplied list
+            # would be a sandbox whose boundary the sandboxed decided — so the
+            # safe form is the unconditional one: whatever the session holds,
+            # including nothing, is what the call runs with.
+            args["writable_roots"] = session.sandbox_roots
 
     async def _apply_escalation(
         self, tc_name: str, args: dict, session, req: TaskRequest,
@@ -4610,7 +4643,41 @@ class EmrgServer:
             if (time.time() * 1000 - last_ts) < interval_ms:
                 text = last_text  # within refresh window — keep frozen snapshot
         self._context_snapshots[session.session_id] = (text, time.time() * 1000)
+        boundary = self._writable_boundary_line(session)
+        if boundary:
+            text = f"{text}\n{boundary}"
         return {"role": "user", "content": text}
+
+    @staticmethod
+    def _writable_boundary_line(session: Session) -> str:
+        """The session's host-named writable roots as one context line.
+
+        Rant 2026-10-09T09:43:39 §8. Until this existed, the model's only channel
+        to the writable boundary was the denial text it read *after* a refused
+        write — so a session whose host had named a root learned about it by
+        failing. The line closes that.
+
+        Two choices are deliberate. It is appended **outside** the frozen
+        snapshot above: the freeze exists so consecutive requests within
+        ``context_refresh_interval_ms`` send byte-identical context for the prompt
+        cache's sake, and a host who names a root mid-window must not have to wait
+        for the window to expire before the boundary moves — the freeze is about
+        the clock, not about the boundary. And it is silent when the session
+        carries no extra roots: the tier's own boundary is the workspace plus the
+        temp areas, which the prompt already places by naming the cwd, so a line
+        restating it would be noise in every session that never used this feature.
+
+        :param session: the session whose turn is being built.
+        :returns: the context line, or ``""`` when the session names no root.
+        """
+        roots = session.sandbox_roots
+        if not roots:
+            return ""
+        listed = ", ".join(repr(root) for root in roots)
+        return (
+            "[context] This session may also write (host-named, equal to the "
+            f"workspace for writing): {listed} — you cannot add to or widen these."
+        )
 
     def _inject_context_message(self, session: Session, messages: list[dict]) -> None:
         """Insert the dynamic-context message before the user prompt.
@@ -5927,6 +5994,105 @@ class EmrgServer:
         # in the other client's status line without a reload.
         await self._broadcast_all(frame, exclude=ws)
 
+    async def _handle_set_sandbox_roots(
+        self, session_id: str, cwd: str, op: str, path: str, ws
+    ) -> None:
+        """Add, remove or list a session's host-named writable roots.
+
+        Rant 2026-10-09T09:43:39. The middle tier the mode table was missing: a
+        ``workspace-write`` session could reach a file outside its workspace only
+        by lifting *every* boundary (``danger-full-access``), and
+        ``escalation.hops_from`` lists exactly that one hop. These roots are the
+        host's narrower instrument — named per session, visible, removable.
+
+        Three properties this handler inherits from ``_handle_set_sandbox`` and
+        keeps deliberately:
+
+        * **the daemon is the only writer** — the session's ``meta.json`` is
+          persisted here and nowhere else, and the frame is broadcast so the
+          other client shows the same list without a reload;
+        * **refusals happen before the write**, so a path this handler rejects is
+          never stored and never inherited by a later turn;
+        * **the model has no route to it** — this is a client message, not a tool,
+          so the only way a root is named is a person typing the command. The
+          model's own route out of the tier stays the approval-gated one-hop
+          escalation (requirement 4).
+
+        ``op=list`` is a read: it answers the asking connection and announces
+        nothing, because a display refresh is not a state change. The two writing
+        ops reply to the requester *and* broadcast, excluded from the echo, so the
+        frame's shape is the same on both paths and a client renders one thing.
+        """
+        if not session_id or not cwd:
+            await self._send(ws, {
+                "type": "sandbox_roots",
+                "error": "set_sandbox_roots requires session_id and cwd",
+            })
+            return
+        if op not in ("add", "remove", "list"):
+            await self._send(ws, {
+                "type": "sandbox_roots",
+                "session_id": session_id,
+                "error": f"unknown op {op!r} (expected one of add, remove, list)",
+            })
+            return
+        session = self._get_or_create_session(session_id, Path(cwd))
+        if op == "list":
+            await self._send(ws, {
+                "type": "sandbox_roots",
+                "session_id": session_id,
+                "op": "list",
+                "roots": session.sandbox_roots,
+            })
+            return
+        # The policy the *session* is under, so "already covered" is judged
+        # against the tier in force and against the roots already stored — naming
+        # the workspace, a temp area, or a root added a moment ago is reported
+        # rather than repeated (requirement 5).
+        policy = resolve_policy(
+            mode=resolve_client_tier(session),
+            workspace_root=cwd,
+            session_id=session_id,
+            extra_roots=session.sandbox_roots,
+        )
+        verdict = judge_extra_root(path, policy)
+        if verdict.refusal:
+            await self._send(ws, {
+                "type": "sandbox_roots",
+                "session_id": session_id,
+                "op": op,
+                "roots": session.sandbox_roots,
+                "error": verdict.refusal,
+            })
+            return
+        roots = session.sandbox_roots
+        if op == "remove":
+            # Removal is idempotent and never a refusal: a path that is not in the
+            # list is answered with the list as it stands, which is the state the
+            # host asked for. The comparison is on the canonical spelling, so a
+            # path removed with a different spelling than it was added with still
+            # comes out.
+            remaining = [r for r in roots if r != verdict.canonical]
+            notice = None if len(remaining) != len(roots) else (
+                f"{verdict.canonical!r} was not one of this session's roots — "
+                "nothing to remove"
+            )
+            if len(remaining) != len(roots):
+                session.set_sandbox_roots(remaining)
+        else:
+            notice = verdict.notice
+            if notice is None:
+                session.set_sandbox_roots([*roots, verdict.canonical])
+        frame = {
+            "type": "sandbox_roots",
+            "session_id": session_id,
+            "op": op,
+            "roots": session.sandbox_roots,
+            "notice": notice,
+        }
+        await self._send(ws, frame)
+        await self._broadcast_all(frame, exclude=ws)
+
     def _apply_model_switch(self, model_name: str) -> dict:
         """The state change behind `/model`, as one reusable step.
 
@@ -6057,6 +6223,12 @@ class EmrgServer:
                 # a client opening a session must be able to show the state another
                 # client set, and `sandbox_set` is a broadcast that is never replayed.
                 "sandbox": resolve_client_tier(session),
+                # The host-named writable roots ride the same snapshot, for the
+                # same reason (rant 2026-10-09T09:43:39 §1): they are session
+                # state the daemon owns, `sandbox_roots` is a broadcast that is
+                # never replayed, so this is the only frame a client opening a
+                # session later can learn them from.
+                "sandbox_roots": session.sandbox_roots,
                 # A client opening a session learns the session's live state
                 # here, because `turn_start`/`turn_end` are broadcasts — they
                 # are addressed to whoever is subscribed at the time and are

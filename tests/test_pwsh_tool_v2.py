@@ -467,7 +467,10 @@ def test_every_mounted_dialect_receives_the_session_cwd(tmp_path):
     dialect added to the roster is covered here without editing this test.
     """
     server = _instantiate()
-    session = SimpleNamespace(cwd=tmp_path)
+    # `sandbox_roots` is part of what the injection reads now (rant
+    # 2026-10-09T09:43:39): the session's host-named writable roots ride the same
+    # call as the tier. Empty here, because this test's subject is the roster.
+    session = SimpleNamespace(cwd=tmp_path, sandbox_roots=[])
     for name in sorted(SHELL_TOOL_NAMES):
         args: dict = {}
         server._inject_tool_arguments(

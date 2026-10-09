@@ -24,6 +24,7 @@ from typing import Iterable
 
 from emrg.memory import SessionMemoryStore
 from emrg.sandbox.policy import SANDBOX_MODES
+from emrg.sandbox.roots import canonical_path
 from emrg.sessions_index import remove_session_index, upsert_session_index
 
 logger = logging.getLogger(__name__)
@@ -260,6 +261,13 @@ class Session:
         # session's silence keeps meaning "unconfined" (`policy.DEFAULT_MODE`),
         # and a property that answered the default would erase that difference.
         self._sandbox: str | None = None
+        # The roots the host named for this session on top of the tier, in the
+        # order they were added (rant 2026-10-09T09:43:39). Empty is the honest
+        # default: a session nobody has named a root for grants exactly what its
+        # tier derives, which is what every session did before this existed.
+        # Canonical spellings only — the writer canonicalizes before storing, so
+        # a reader never has to wonder which spelling was meant.
+        self._sandbox_roots: list[str] = []
 
         # Lazy-initialized memory store
         self._memory_store = None
@@ -348,6 +356,9 @@ class Session:
             session._updated_at = meta.get("updated_at", "")
             session._last_compact_at = meta.get("last_compact_at")
             session._sandbox = meta.get("sandbox")
+            stored_roots = meta.get("sandbox_roots")
+            if isinstance(stored_roots, list):
+                session._sandbox_roots = [r for r in stored_roots if isinstance(r, str)]
         logger.info("session loaded: %s (%d messages)", session_id, session._message_count)
         return session
 
@@ -419,6 +430,35 @@ class Session:
         self._sandbox = mode
         self._save_meta()
         logger.info("session sandbox tier set: %s -> %s", self.session_id, mode)
+
+    @property
+    def sandbox_roots(self) -> list[str]:
+        """The host-named writable roots this session carries, in added order.
+
+        A copy, so a reader cannot mutate the session's list by accident — the
+        daemon injects this value into every tool call, and an injected list a
+        tool could edit in place would be a second writer of a fact the daemon
+        owns.
+        """
+        return list(self._sandbox_roots)
+
+    def set_sandbox_roots(self, roots: "list[str] | tuple[str, ...]") -> None:
+        """Replace this session's host-named writable roots and persist them.
+
+        The **only** writer of the key, and it does not validate the paths: the
+        refusals (``/``, the home directory, a root covering a protected daemon
+        file) belong to the daemon's command, which is where a person is waiting
+        for an answer and where a refusal can name the reason.  This method is
+        storage.  Its one precondition is the shape the reader depends on —
+        absolute, canonical spellings — and it canonicalizes rather than
+        trusting the caller, so a symlink handed in here is stored as the path
+        the enforcement layer will actually compare against.
+        """
+        self._sandbox_roots = [canonical_path(str(r)) for r in roots]
+        self._save_meta()
+        logger.info(
+            "session sandbox roots set: %s -> %d root(s)", self.session_id, len(self._sandbox_roots)
+        )
 
     # ── Message persistence ───────────────────────────────────
 
@@ -647,6 +687,8 @@ class Session:
         # session's path from a client turn's (rant 2026-09-30T09:30:16).
         if self._sandbox:
             meta["sandbox"] = self._sandbox
+        if self._sandbox_roots:
+            meta["sandbox_roots"] = list(self._sandbox_roots)
         if title is not None:
             meta["title"] = title
         else:

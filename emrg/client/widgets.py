@@ -822,7 +822,8 @@ _COMMAND_HELP: dict[str, str] = {
     "/clear":    "Clear current session history and start fresh",
     "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
     "/model":    "Switch LLM model [/model | /model <name>]",
-    "/sandbox":  "Set this session's sandbox tier [/sandbox | /sandbox <mode>]",
+    "/sandbox":  "Set this session's sandbox tier, or its extra writable roots "
+                 "[/sandbox | /sandbox <mode> | /sandbox add|remove|list <path>]",
     "/trigger":  "List or manually trigger scheduled tasks [/trigger | /trigger <name>]",
     "/task-session": "Open a scheduled task's session (no args = interactive picker)",
     "/skills":   "List loaded skills (user + project)",

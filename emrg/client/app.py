@@ -950,6 +950,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     # None until the session's snapshot or a `sandbox_set` frame says; this client
     # never decides it, it only displays what the daemon resolved.
     current_sandbox: str | None = None
+    # This session's host-named writable roots, as the daemon reports them
+    # (rant 2026-10-09T09:43:39). Display only, exactly like the tier above: the
+    # daemon owns the list, this client renders what a frame or a session
+    # snapshot says.
+    current_roots: list[str] = []
 
     def _narrate_the_stop() -> None:
         """Say that the turn stopped, from whichever frame made that knowable.
@@ -1112,7 +1117,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, _welcomed
         nonlocal turn_ended_cancelled, cancel_receipt_held
-        nonlocal current_model, current_vision, current_sandbox
+        nonlocal current_model, current_vision, current_sandbox, current_roots
         nonlocal _last_center, _elapsed_task, conn
         nonlocal _request_start, turn_running
         # /task-session: the daemon's verdict on a task's session decides whether
@@ -1494,7 +1499,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             # A brand-new session has no tier of its own yet: the
                             # previous session's must not be shown against it (the
                             # next turn's `turn_start` says what it really runs at).
+                            # The same is true of the host-named writable roots —
+                            # they belong to the session that was named, and a new
+                            # one starts with none (rant 2026-10-09T09:43:39 §9).
                             current_sandbox = None
+                            current_roots = []
                             chat.rows.clear()
                             chat.dirty = True
                             chat.add("system", f"Created new session {new_sid} — continue chatting.")
@@ -1864,6 +1873,38 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     term.render()
                     continue
 
+                # Host-named writable roots — the `/sandbox add|remove|list`
+                # replies and their broadcast (rant 2026-10-09T09:43:39). One
+                # frame shape for the three ops, so this is one branch: an
+                # `error` is a refusal (the daemon names the rule), a `notice` is
+                # "nothing changed, and here is why", and neither means the list
+                # below is the state the session now carries. The `op` only picks
+                # the sentence, never the list — the list is always the daemon's.
+                if data.get("type") == "sandbox_roots":
+                    err = data.get("error", "")
+                    notice = data.get("notice", "")
+                    sid = data.get("session_id", "")
+                    op = data.get("op", "")
+                    if not sid or sid == session_id:
+                        current_roots = list(data.get("roots") or [])
+                    if err:
+                        chat.add("system", f"Sandbox roots: {err}")
+                    elif notice:
+                        chat.add("system", f"Sandbox roots: {notice}")
+                    elif op == "list":
+                        listing = (
+                            ", ".join(current_roots) if current_roots
+                            else "none — this session writes only inside its workspace"
+                        )
+                        chat.add("system", f"Extra writable roots: {listing}")
+                    elif op == "remove":
+                        chat.add("system", "Sandbox root removed.")
+                    else:
+                        added = current_roots[-1] if current_roots else ""
+                        chat.add("system", f"Sandbox root added: {added}")
+                    term.render()
+                    continue
+
                 # Tasks list response (for /trigger + /task-session interactive mode)
                 if data.get("type") == "tasks_list":
                     nonlocal task_sel
@@ -2039,6 +2080,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # otherwise the setting is invisible until someone changes it
                     # again. Reset for every resume: this is the new session's.
                     current_sandbox = meta.get("sandbox") or None
+                    current_roots = list(meta.get("sandbox_roots") or [])
 
                     # /task-session: the session exists, so the client now moves
                     # into that task's project — before the history replay below,
@@ -3148,19 +3190,28 @@ Streaming
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
-                # Handle /sandbox command (rant 2026-09-30T09:30:16). The same
-                # two shapes as /model: with an argument it sets directly, without
-                # one it opens a picker built from the one mode vocabulary. Both
-                # only send `set_sandbox` — the daemon validates, persists and
-                # broadcasts, and this client keeps no tier of its own.
+                # Handle /sandbox command (rant 2026-09-30T09:30:16, extended by
+                # rant 2026-10-09T09:43:39). Three shapes now, and the client
+                # only ever sends a command: `add`/`remove`/`list` go to
+                # `set_sandbox_roots`, a recognised mode goes to `set_sandbox`,
+                # and no argument opens the picker. The daemon validates,
+                # persists and broadcasts in every case, so this client keeps no
+                # tier and no root list of its own — it displays what arrives.
                 if text.lower().startswith("/sandbox"):
-                    parts = text.split(None, 1)
-                    mode_arg = parts[1].strip() if len(parts) > 1 else ""
-                    if mode_arg:
+                    parts = text.split(None, 2)
+                    sub = parts[1].strip() if len(parts) > 1 else ""
+                    rest = parts[2].strip() if len(parts) > 2 else ""
+                    if sub in ("add", "remove", "list"):
                         await conn.send_command(
-                            "set_sandbox", session_id=session_id, cwd=cwd, mode=mode_arg
+                            "set_sandbox_roots",
+                            session_id=session_id, cwd=cwd, op=sub, path=rest,
                         )
-                        status.update(center=f"setting sandbox tier to {mode_arg}...")
+                        status.update(center=f"sandbox roots: {sub}...")
+                    elif sub:
+                        await conn.send_command(
+                            "set_sandbox", session_id=session_id, cwd=cwd, mode=sub
+                        )
+                        status.update(center=f"setting sandbox tier to {sub}...")
                     else:
                         sandbox_sel.widget = SandboxSelector(
                             list(SANDBOX_MODES), current_sandbox or ""
@@ -3168,6 +3219,14 @@ Streaming
                         sandbox_sel.active = True
                         chat.add(sandbox_sel.widget)
                         status.update(center="select sandbox tier")
+                        # The picker shows the tier; the roots are the daemon's and
+                        # are asked for, never remembered — one read, one reply, so
+                        # what `/sandbox` shows cannot drift from what the session
+                        # actually carries (rant 2026-10-09T09:43:39 §1).
+                        await conn.send_command(
+                            "set_sandbox_roots",
+                            session_id=session_id, cwd=cwd, op="list", path="",
+                        )
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
