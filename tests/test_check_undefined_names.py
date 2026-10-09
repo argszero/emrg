@@ -198,6 +198,45 @@ class TestItFires:
 
         assert _run(tree).returncode == 1
 
+    def test_an_annotation_with_no_value_at_module_level_is_reported(self, tmp_path) -> None:
+        """`x: int` records an annotation and stores nothing (issue #2007).
+
+        The read is on a later line, and that is the line the finding must name:
+        a bare annotation reads nothing itself, so the only evidence that this name
+        is used at all is the `Load` below it.
+        """
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            _cache: dict
+            print(_cache)
+            """,
+        )
+
+        proc = _run(tree)
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "emrg/bad.py:2" in _reported(proc)
+        assert "_cache" in proc.stdout
+
+    def test_an_annotation_with_no_value_in_a_function_is_reported(self, tmp_path) -> None:
+        """The same shape inside a function raises `UnboundLocalError` when it is reached."""
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            def f():
+                y: int
+                return y
+            """,
+        )
+
+        proc = _run(tree)
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "emrg/bad.py:3" in _reported(proc)
+        assert "y" in proc.stdout
+
+
 class TestItStaysSilent:
     def test_a_module_level_binding_covers_every_read(self, tmp_path) -> None:
         tree = _tree(
@@ -312,6 +351,76 @@ class TestItStaysSilent:
 
                 def method(self):
                     return self.A
+            """,
+        )
+
+        assert _run(tree).returncode == 0
+
+    def test_a_class_body_annotation_is_a_field_not_a_finding(self, tmp_path) -> None:
+        """The acceptance item of issue #2007, and the reason the fix is not one line.
+
+        `session: str` in a class body declares a *field*. Nothing reads the name in
+        that scope, so `is_referenced()` is False there, and a rule that let a
+        declaration-only name through that gate reports it with **no read line at all**
+        (`:0`). A prototype that did exactly that reported 69 findings on this
+        checkout, every one a named field. Hence: a bare annotation is not a binding,
+        but it earns no relaxation of the read gate.
+        """
+        tree = _tree(
+            tmp_path,
+            good="""\
+            from typing import NamedTuple
+
+            class Message(NamedTuple):
+                session: str
+                text: str
+            """,
+        )
+
+        proc = _run(tree)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        # ... and nothing was reported without a line: the failure mode above is a
+        # finding whose `:0` names no read, which a return code alone cannot tell apart
+        # from a clean tree.
+        assert ":0" not in _reported(proc), proc.stdout
+
+    def test_a_valued_annotation_is_a_binding(self, tmp_path) -> None:
+        """`x: int = 1` is the shape `symtable` cannot tell from `x: int`, and it binds."""
+        tree = _tree(
+            tmp_path,
+            good="""\
+            x: int = 1
+            print(x)
+            """,
+        )
+
+        assert _run(tree).returncode == 0
+
+    def test_an_unread_declaration_is_not_reported(self, tmp_path) -> None:
+        """The other half of the same gate: nothing reads it, so there is nothing to name."""
+        tree = _tree(
+            tmp_path,
+            good="""\
+            _cache: dict
+            """,
+        )
+
+        assert _run(tree).returncode == 0
+
+    def test_a_declaration_later_bound_elsewhere_is_clean(self, tmp_path) -> None:
+        """A bare annotation is not the name's *only* form here, so the module binds it."""
+        tree = _tree(
+            tmp_path,
+            good="""\
+            _cache: dict
+
+            def setup():
+                global _cache
+                _cache = {}
+
+            def get():
+                return _cache
             """,
         )
 
