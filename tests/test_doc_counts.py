@@ -2209,6 +2209,65 @@ def test_a_quote_in_code_position_does_not_swallow_the_block_below() -> None:
     )
 
 
+def test_a_template_literal_crossing_a_line_hides_no_comment_inside_it() -> None:
+    """A `` ` `` quotes a string that legally spans lines, so a newline does not end it.
+
+    `_skip_string_literal`'s newline clause carries one exception - `quote != "`"` -
+    and no row reached it, the same way the clause itself (#1949) and the escape skip
+    beside it (#1955) had none: measured 2026-10-09 (cycle `cyc20261009-071031`),
+    dropping the condition leaves this file green (**80 passed**). It is load-bearing:
+    without it the walk stops at the first newline **inside** the template and resumes
+    there, so a `/* ... */` run in the template's own text is reported as a block
+    comment that is not there - a span that then judges every definition below it, the
+    false red this file's history is made of. The shape is not exotic: 22 of the 56
+    files this finder runs over already carry a multi-line backtick literal (measured
+    the same way); only a `/*` run inside one is absent today, which is why this is a
+    trap closed rather than a live false red repaired.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        "const sql = `\n"
+        "/* not a comment */\n"
+        "`;\n"
+        'it("live", () => {});\n'
+    )
+    assert "`" in body and "/*" in body, (
+        "premise: the template spans a line and carries a comment-like run"
+    )
+    assert [body[a:b] for a, b in guard._block_comment_spans(body)] == [], (
+        "the `/*` inside the template literal must not open a span - with the "
+        "backtick exception dropped the walk stops at the first newline inside the "
+        "template, resumes inside it, and reports a comment that is not there"
+    )
+
+
+def test_an_unterminated_opener_runs_to_the_end_of_the_file() -> None:
+    """An unclosed `/*` is a comment to EOF, which is how a compiler reads it.
+
+    The `close == -1` half of `_block_comment_spans` has no row either: measured
+    2026-10-09 (cycle `cyc20261009-071031`), replacing `n if close == -1 else close + 2`
+    with `close + 2` leaves this file green (**80 passed**), and the same holds for the
+    `break` that stops the walk. It is load-bearing, and what it decides is the
+    detector's verdict rather than the span alone: everything below the opener is
+    inside the comment, so a definition down there really is commented out and the
+    tripwire must report it. Left unpinned, the paragraph in the scanner's docstring
+    that states this ("An unterminated `/*` runs to the end of the file") is prose
+    nothing measures.
+    """
+    guard = _loaded_guard_module()
+    body = 'const a = 1;\n/* not closed\nit("swallowed", () => {});\n'
+    assert len(guard._DEFINITION_FORM.findall(body)) == 1, (
+        "premise: the counter counted the definition the unterminated comment swallows"
+    )
+    assert [body[a:b] for a, b in guard._block_comment_spans(body)] == [body[body.index("/*") :]], (
+        "an unterminated `/*` runs to the end of the file, so the span is the whole "
+        "tail - not a two-character span, which is what `close + 2` would store"
+    )
+    assert guard._commented_out_definitions(body) == ["/* not closed"], (
+        "the swallowed definition must be reported: it is inside the comment"
+    )
+
+
 def test_the_detector_and_the_counter_share_one_definition_of_counted() -> None:
     """The two sides of this tripwire must not drift apart again.
 
