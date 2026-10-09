@@ -186,6 +186,38 @@ def test_a_word_far_from_a_timestamp_is_not_a_citation(snippet):
     assert sites_of(snippet, text) == []
 
 
+@pytest.mark.parametrize("text", [
+    "- x (rant 2026-08-01T10:00:00)\n",
+    "- Host ruling, 2026-10-09T14:34:54: only a rant may change a task prompt.\n",
+    "   Host directive 2026-10-06T10:40:46: an explicit no-slowdown instruction wins.\n",
+])
+def test_every_citation_spelling_the_class_uses_opens_a_site(snippet, text):
+    """`rant`, `ruling` and `directive` each introduce a citation - all three are sites.
+
+    The class spells the same reference three ways, and the matcher knew only the
+    first (measured 2026-10-09 on `94504e5d`: the `rant`-only set read 39 sites and
+    could not see `vibe_check.j2`'s `Host directive 2026-10-06T10:40:46` at all, so its
+    rc 0 was about an inventory that had not moved). A spelling the matcher cannot see
+    is a host-local citation that ships with no record and nobody is told.
+    """
+    sites = sites_of(snippet, text)
+    assert len(sites) == 1
+    found = snippet.problems(sites)
+    assert len(found) == 1 and "public record" in found[0], (
+        "the spelling was recognised but did not demand a record - which is the same "
+        "outcome as not recognising it"
+    )
+
+
+@pytest.mark.parametrize("text", [
+    "- x (PR #1986; ruling 2026-10-09T14:34:54)\n",
+    "- x Host directive 2026-10-06T10:40:46 (PR #1899)\n",
+])
+def test_a_record_beside_the_newer_spellings_satisfies_the_rule(snippet, text):
+    """Both directions: the widened word set must not be unsatisfiable."""
+    assert snippet.problems(sites_of(snippet, text)) == []
+
+
 def test_a_wrapped_parenthetical_is_one_site(snippet):
     """The block's parentheses keep it one site - in both directions.
 

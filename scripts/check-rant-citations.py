@@ -20,7 +20,12 @@ reads 47 sites and 33 timestamps without the CI README (47/32 on `f07368ba`, the
 master commit it joined, before this template's own citations were rewritten into
 records), and each figure is a reading of the tree it names rather than an estimate.
 (The figure printed here said 29 until issue #1289 measured it: neither it nor the
-27 records-only timestamps.) Code
+27 records-only timestamps.) The citation words are the class's own three spellings -
+`rant`, `ruling`, `directive` (see `CITATION`): the original one-word set scanned 39
+sites on `94504e5d` and could see neither `vibe_check.j2`'s `Host directive
+2026-10-06T10:40:46` nor the `Host ruling` line this widening was measured against, so
+it answered rc 0 about an inventory that had not moved - measured 2026-10-09, where the
+widened set reads 41 sites on that same tree. Code
 comments are deliberately out of scope (the same
 spelling occurs in 1300+ lines there): a comment's citation is a historical note
 about why the line exists, and rewriting those burns the `git log -S` trail that
@@ -150,11 +155,22 @@ HOST_OWNED = "emrg/server/evolution_prompt.md"
 #: entry so the list could not quietly become "things nobody got to".
 DEBT: dict[tuple[str, str], str] = {}
 
-#: A citation: the word "rant"/"rants" followed within three non-digits by a
+#: A citation: one of the class's citation words followed within three non-digits by a
 #: timestamp. Three characters, not a line: `(rant 2026-…` and `(rants\n  2026-…`
 #: are the same citation, while a timestamp that is *not* introduced by the word
-#: cannot be a rant citation - which is what keeps `system.j2`'s memory-format
+#: cannot be a citation - which is what keeps `system.j2`'s memory-format
 #: example (`event_at: 2026-01-15T14:30:00`) out of scope.
+#:
+#: The word set is not just `rant`. The rule is about a **host-local reference**, and
+#: the class spells the same reference three ways: `rant` (`(rant 2026-08-23T08:04:26 …`),
+#: `ruling` (`Host ruling, 2026-10-09T14:34:54 (PR #1986)`), and `directive`
+#: (`Host directive 2026-10-06T10:40:46`, `vibe_check.j2`). Measured 2026-10-09 on
+#: `94504e5d`: the rant-only spelling scanned 39 sites and could not see the two
+#: `directive`/`ruling` sites that sit in this very class, so the guard answered rc 0
+#: *about an inventory that did not move* - the failure mode its own header warns about.
+#: `rulings?`/`directives?` were added because of that reading, not by preference, and
+#: the widened scan finds 40 sites with **no** site unbacked by a record (a wider word
+#: set that reddened the tree would be a false positive, not a finding).
 #:
 #: The word is a **named** group because a caller has to be able to repeat it
 #: verbatim: a timestamp run (`rant ts1 + ts2`) whose two times resolve to
@@ -162,7 +178,8 @@ DEBT: dict[tuple[str, str], str] = {}
 #: supply it - that is the whole match, timestamp included, so repeating it
 #: duplicates the first timestamp (measured, then fixed, 2026-09-16).
 CITATION = re.compile(
-    r"\b(?P<word>[Rr]ants?)\b[^0-9\n]{0,3}(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)"
+    r"\b(?P<word>[Rr]ants?|[Rr]ulings?|[Dd]irectives?)\b[^0-9\n]{0,3}"
+    r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)"
 )
 
 #: Any full timestamp inside a citation block - the citation itself, or one that
