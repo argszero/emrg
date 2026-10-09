@@ -24,6 +24,14 @@ Two grants, two lifetimes (the blueprint's own split):
   its own SID, so sibling sessions sharing a workspace cannot enter one
   another's temp trees.  That ACE is *revocable*, and
   :func:`release_session` is where it goes.
+
+The **host-named extra roots** are the first kind, not a third: one capability
+SID derived from each root's own canonical path, one standing ACE per path,
+cached beside the workspace's.  That is what makes them withdrawable without any
+teardown — the ACE stands, and the *policy* is what grants the root per call
+(``--extra-root``), so a call that no longer names it builds a token whose
+restricting list no longer carries that SID and the write is refused again
+(rant ``2026-10-09T09:43:39`` §7).
 """
 
 from __future__ import annotations
@@ -37,10 +45,12 @@ from dataclasses import dataclass
 
 from emrg.sandbox.contract import Runner, RunnerFailureRule
 from emrg.sandbox.policy import SandboxPolicy
+from emrg.sandbox.roots import canonical_path
 from emrg.sandbox.win32.ffi import Win32Bindings, win32
 from emrg.sandbox.win32.grants import AclWriteGrant
 from emrg.sandbox.win32.sid import (
     assert_temp_root_outside_workspace,
+    root_write_sid,
     temp_write_sid,
     workspace_write_sid,
 )
@@ -176,7 +186,7 @@ class TempCapability:
 
 
 class GrantStore:
-    """Server-lifetime write grants: standing per workspace, revocable per pair.
+    """Server-lifetime write grants: standing per path, revocable per pair.
 
     :param api: a binding table to use (tests); defaults to the host's on first
         use, so importing this module stays platform-neutral.
@@ -184,7 +194,12 @@ class GrantStore:
 
     def __init__(self, api: Win32Bindings | None = None) -> None:
         self._api = api
-        self._workspaces: dict[str, AclWriteGrant] = {}
+        #: Standing grants, keyed by the canonical path they name — the workspace
+        #: root and every host-named extra root live here together, because they
+        #: are one kind of thing: a capability SID derived from a path, with an ACE
+        #: that is never revoked.  What makes a root *effective* is the policy, not
+        #: this cache (see :func:`runner_argv`).
+        self._standing: dict[str, AclWriteGrant] = {}
         self._temps: dict[str, TempCapability] = {}
 
     def _bindings(self) -> Win32Bindings:
@@ -196,8 +211,40 @@ class GrantStore:
             self._api = win32()
         return self._api
 
+    def _materialize_standing(self, path: str) -> None:
+        """Materialize one path's standing capability ACE, once per server lifetime.
+
+        Fail-closed: a grant that could not be applied is disposed before the
+        error propagates — and a standing ACE that survived a post-apply throw is
+        *not* revoked, because it is the intended end state rather than an error
+        artifact.
+
+        :param path: the canonical root path, a directory or a single file.
+        :raises Win32Error: when the grant failed.
+        """
+        if path in self._standing:
+            return
+        api = self._bindings()
+        grant = AclWriteGrant.create(workspace_write_sid(path), api)
+        try:
+            grant.add(path, standing=True)
+        except BaseException as error:  # noqa: BLE001 - cleanup, then re-raise
+            try:
+                grant.dispose()
+            except BaseException as cleanup_error:  # noqa: BLE001 - reported
+                raise RuntimeError(
+                    "windows-acl standing grant failed and its cleanup also failed"
+                ) from cleanup_error
+            raise error
+        self._standing[path] = grant
+
     def materialize(
-        self, session_id: str, workspace_root: str, *, temp_root: str | None = None
+        self,
+        session_id: str,
+        workspace_root: str,
+        *,
+        temp_root: str | None = None,
+        extra_roots: tuple[str, ...] | list[str] = (),
     ) -> TempCapability:
         """Materialize one policy's ACEs, once per pair per server lifetime.
 
@@ -206,30 +253,31 @@ class GrantStore:
         survived a post-apply throw is *not* revoked — it is the intended end
         state, not an error artifact.
 
+        The host-named extra roots are materialized the same way and with the same
+        lifetime as the workspace's, one ACE per path (rant
+        ``2026-10-09T09:43:39`` §7).  That is what keeps them *withdrawable*: the
+        ACE stands, but only the call that still names the root passes
+        ``--extra-root``, so the restricted token of the next call no longer
+        carries that root's SID and the write is refused again — immediately, with
+        no whole-tree revocation on the write path.
+
         :param session_id: the calling session's identity.
         :param workspace_root: the canonical workspace root.
         :param temp_root: the parent for the private temp directory; defaults
             to the host temp root.
+        :param extra_roots: the policy's host-named roots, canonicalized here so a
+            spelling the host typed and the path the ACE names are one value.
         :returns: the pair's private temp directory and write capability.
         :raises ValueError: when the temp root is inside the workspace.
         """
         api = self._bindings()
         root = temp_root or tempfile.gettempdir()
         assert_temp_root_outside_workspace(workspace_root, root)
-        write_sid = workspace_write_sid(workspace_root)
-        if workspace_root not in self._workspaces:
-            grant = AclWriteGrant.create(write_sid, api)
-            try:
-                grant.add(workspace_root, standing=True)
-            except BaseException as error:  # noqa: BLE001 - cleanup, then re-raise
-                try:
-                    grant.dispose()
-                except BaseException as cleanup_error:  # noqa: BLE001 - reported
-                    raise RuntimeError(
-                        "windows-acl workspace grant failed and its cleanup also failed"
-                    ) from cleanup_error
-                raise error
-            self._workspaces[workspace_root] = grant
+        # Before the temp capability's cache is consulted, so a session that adds a
+        # root mid-life gets its ACE on the call that first names it.
+        for extra in extra_roots:
+            self._materialize_standing(canonical_path(extra))
+        self._materialize_standing(workspace_root)
         key = json.dumps([str(session_id), workspace_root])
         existing = self._temps.get(key)
         if existing is not None:
@@ -264,7 +312,9 @@ class GrantStore:
     def release_session(self, session_id: str) -> None:
         """Revoke and remove every temp capability one session holds.
 
-        The standing workspace ACEs are left in place, by design.
+        The standing ACEs — the workspace's and every host-named root's — are left
+        in place, by design: they are the capability cache, and what withdraws a
+        root is the policy no longer naming it.
 
         :param session_id: the session whose temp grants end here.
         """
@@ -277,7 +327,7 @@ class GrantStore:
                 shutil.rmtree(capability.directory, ignore_errors=True)
 
     def clear(self) -> None:
-        """Revoke every revocable grant and drop the store (workspace ACEs stand).
+        """Revoke every revocable grant and drop the store (standing ACEs stand).
 
         :raises RuntimeError: when one or more revocations failed.
         """
@@ -289,7 +339,7 @@ class GrantStore:
                 failures.append(exc)
             shutil.rmtree(capability.directory, ignore_errors=True)
         self._temps.clear()
-        self._workspaces.clear()
+        self._standing.clear()
         if failures:
             error = RuntimeError(f"windows-acl grant disposal reported {len(failures)} failure(s)")
             error.failures = failures  # type: ignore[attr-defined]
@@ -312,18 +362,44 @@ def runner_argv(policy: SandboxPolicy) -> list[str]:
     creates and removes a random private child directory for that one
     invocation, and under ``read-only`` it needs no temp capability at all.
 
+    The host-named extra roots ride along as repeated ``--extra-root`` flags on
+    **every** ``workspace-write`` invocation (rant ``2026-10-09T09:43:39`` §7),
+    and never under ``read-only``, whose whole definition is that it grants no
+    root.  Under a session the ACEs are materialized here first, standing like
+    the workspace's; without one the runner owns its DACLs and grants them
+    itself.  Either way the flag carries only a path — the SID is derived on the
+    consuming side from that same path, so a granted ACE and an allowed token
+    cannot name different roots.
+
+    The roots are canonicalized and de-duplicated in order, because the SID is a
+    function of the path: two spellings of one root would otherwise materialize
+    one ACE and push two ``--extra-root`` flags, and ``AclSandbox`` would refuse
+    the duplicate identity it saw.
+
     :param policy: the resolved per-call policy.
     :returns: the runner argv, before the seam's ``--`` and the caller's argv.
     """
     workspace = policy.workspace_root
-    if policy.mode == "read-only" or policy.session_id is None:
+    if policy.mode == "read-only":
         return [
             *runner_invocation(),
             "--workspace", workspace,
             "--temp", tempfile.gettempdir(),
             "--mode", policy.mode,
         ]
-    capability = STORE.materialize(policy.session_id, workspace)
+    extra_roots = _extra_root_spellings(policy)
+    extra_flags: list[str] = []
+    for root in extra_roots:
+        extra_flags += ["--extra-root", root]
+    if policy.session_id is None:
+        return [
+            *runner_invocation(),
+            "--workspace", workspace,
+            "--temp", tempfile.gettempdir(),
+            "--mode", policy.mode,
+            *extra_flags,
+        ]
+    capability = STORE.materialize(policy.session_id, workspace, extra_roots=extra_roots)
     return [
         *runner_invocation(),
         "--workspace", workspace,
@@ -331,7 +407,24 @@ def runner_argv(policy: SandboxPolicy) -> list[str]:
         "--mode", policy.mode,
         "--write-sid", workspace_write_sid(workspace),
         "--temp-write-sid", capability.write_sid,
+        *extra_flags,
     ]
+
+
+def _extra_root_spellings(policy: SandboxPolicy) -> tuple[str, ...]:
+    """The policy's host-named roots, canonical, de-duplicated, order preserved.
+
+    :param policy: the resolved per-call policy.
+    :returns: the canonical spellings.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for spelling in policy.extra_roots:
+        canonical = canonical_path(spelling)
+        if canonical not in seen:
+            seen.add(canonical)
+            out.append(canonical)
+    return tuple(out)
 
 
 def release_session(session_id: str) -> None:

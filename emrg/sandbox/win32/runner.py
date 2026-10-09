@@ -13,7 +13,15 @@ the same contract)::
 
     python -m emrg.sandbox.win32.runner --workspace <dir> --temp <dir>
         --mode <read-only|workspace-write>
-        [--write-sid <S-1-4-…> --temp-write-sid <S-1-4-…>] -- <argv...>
+        [--write-sid <S-1-4-…> --temp-write-sid <S-1-4-…>]
+        [--extra-root <path>]… -- <argv...>
+
+``--extra-root`` carries the host-named writable roots of the policy (rant
+``2026-10-09T09:43:39`` §7).  It is repeatable, may name a directory or a single
+file, and never carries a SID: the runner derives each root's capability SID from
+the path itself, so the ACE the seam materialized and the restricting list this
+token is built with cannot name two different paths.  Under ``read-only`` the
+flag is refused outright — that tier grants no root at all.
 
 ``--write-sid`` + ``--temp-write-sid`` are the seam's grant contract: the
 **caller** has already materialized distinct workspace and private-temp ACEs and
@@ -52,7 +60,12 @@ from dataclasses import dataclass
 
 from emrg.sandbox.win32.ffi import Win32Bindings, set_environment_variable, win32
 from emrg.sandbox.win32.sandbox import AclSandbox
-from emrg.sandbox.win32.sid import assert_temp_root_outside_workspace, temp_write_sid, workspace_write_sid
+from emrg.sandbox.win32.sid import (
+    assert_temp_root_outside_workspace,
+    root_write_sid,
+    temp_write_sid,
+    workspace_write_sid,
+)
 from emrg.sandbox.win32.spawn import exit_status_for_mirroring
 
 #: The signature every runner-side failure prints, and the seam matches.
@@ -123,12 +136,18 @@ class ParsedArgs:
     mode: str
     write_sid: str | None
     temp_write_sid: str | None
+    extra_roots: list[str]
     command: str
     args: list[str]
 
 
 def parse_args(raw: list[str]) -> ParsedArgs:
     """Parse the runner's own argv.
+
+    ``--extra-root`` is repeatable and order-preserving: the host-named roots are
+    a list, and the runner derives each root's SID from **the path it was given**
+    (see :func:`_build_sandbox`), so the seam's ACE and the token's SID cannot
+    disagree about which path was granted.
 
     :param raw: the arguments after the module name.
     :returns: the parsed invocation.
@@ -139,6 +158,7 @@ def parse_args(raw: list[str]) -> ParsedArgs:
     mode: str | None = None
     write_sid: str | None = None
     temp_write_sid_value: str | None = None
+    extra_roots: list[str] = []
     index = 0
     while index < len(raw):
         token = raw[index]
@@ -160,6 +180,8 @@ def parse_args(raw: list[str]) -> ParsedArgs:
             write_sid = value
         elif token == "--temp-write-sid":
             temp_write_sid_value = value
+        elif token == "--extra-root":
+            extra_roots.append(value)
         else:
             fail(f"unknown argument: {token}")
     if workspace is None:
@@ -177,6 +199,7 @@ def parse_args(raw: list[str]) -> ParsedArgs:
         mode=mode,
         write_sid=write_sid,
         temp_write_sid=temp_write_sid_value,
+        extra_roots=extra_roots,
         command=argv[0],
         args=list(argv[1:]),
     )
@@ -273,9 +296,25 @@ def _build_sandbox(parsed: ParsedArgs) -> tuple[AclSandbox, str | None]:
     seam_managed = parsed.write_sid is not None or parsed.temp_write_sid is not None
     if parsed.mode == "read-only" and seam_managed:
         fail("read-only does not accept --write-sid or --temp-write-sid")
+    if parsed.mode == "read-only" and parsed.extra_roots:
+        # The tier grants nothing by definition, so the refusal is the runner's
+        # too rather than only the seam's: an argv carrying an extra root under
+        # read-only is a caller that believes it granted something.
+        fail("read-only does not accept --extra-root")
     if parsed.mode == "workspace-write" and (parsed.write_sid is None) != (parsed.temp_write_sid is None):
         fail("workspace-write requires --write-sid and --temp-write-sid together")
     assert_temp_root_outside_workspace(parsed.workspace, parsed.temp)
+
+    # Each root's SID is derived *here*, from the path this process was handed —
+    # never passed in.  The seam runs as the deployer and owns the ACE; the token
+    # this runner builds is the only other half of that fact, and deriving it from
+    # the same string the ACE names is what makes a mismatch impossible by
+    # construction rather than by two files agreeing.
+    extra_grants: list[tuple[str, str]] = []
+    for root in parsed.extra_roots:
+        if not os.path.exists(root):
+            fail(f"--extra-root does not exist: {root}")
+        extra_grants.append((root, root_write_sid(root)))
 
     write_sid: str | None = None
     private_temp: str | None = None
@@ -300,6 +339,7 @@ def _build_sandbox(parsed: ParsedArgs) -> tuple[AclSandbox, str | None]:
         mode=parsed.mode,
         write_sid=write_sid,
         temp_write_sid=private_temp_sid,
+        extra_grants=extra_grants,
         manage_dacls=not seam_managed,
     )
     return sandbox, owned_temp

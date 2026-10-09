@@ -97,6 +97,16 @@ class AclSandbox:
         ``workspace-write`` grants a temp directory, and never equal to
         ``write_sid`` (otherwise a sibling session could use the shared
         workspace capability inside this session's temp tree).
+    :param extra_grants: the host-named extra writable roots, each paired with
+        the capability SID derived from **its own** path (rant
+        ``2026-10-09T09:43:39``, item 7).  One SID per root rather than one for
+        all of them, for the same reason the workspace has its own: the SID is a
+        pure function of the path, and the token is what grants it — so dropping
+        a root from the next call's argv stops that write immediately, with no
+        DACL teardown on a hot path.  A path that is a **file** is accepted here
+        as well as a directory: Windows ACLs are per-object, and the single-file
+        case is the one half of item 7 the Windows leg has not yet measured
+        (the seam's ``GrantStore`` word is the standing-ACE cache for both).
     :param manage_dacls: whether this instance owns its DACL grants.  ``False``
         means the caller (the seam's grant store) already materialized them, so
         ``init``/``dispose`` neither grant nor revoke.
@@ -110,6 +120,7 @@ class AclSandbox:
         mode: str,
         write_sid: str | None = None,
         temp_write_sid: str | None = None,
+        extra_grants: "list[tuple[str, str]] | tuple[tuple[str, str], ...]" = (),
         manage_dacls: bool = True,
     ) -> None:
         self.mode = mode
@@ -127,15 +138,39 @@ class AclSandbox:
         self.write_sid = write_sid
         self.temp_write_sid = temp_write_sid
 
+        # An extra root is granted per object, so its existence — not its
+        # directory-ness — is the precondition (item 7 asks for files too).
+        resolved_extras: list[tuple[str, str]] = []
+        for path, sid in extra_grants:
+            absolute = os.path.abspath(path)
+            if not os.path.exists(absolute):
+                raise ValueError(f"AclSandbox extra root does not exist: {absolute}")
+            resolved_extras.append((absolute, sid))
+        self.extra_grants = resolved_extras
+
         if mode == "workspace-write" and write_sid is None:
             raise ValueError(
                 "AclSandbox workspace-write requires a write SID — derive it from the workspace "
                 "via workspace_write_sid()"
             )
-        if mode == "read-only" and (write_sid is not None or temp_write_sid is not None):
+        if mode == "read-only" and (
+            write_sid is not None or temp_write_sid is not None or resolved_extras
+        ):
             raise ValueError("AclSandbox read-only does not accept write SIDs")
         if write_sid is not None and temp_write_sid == write_sid:
             raise ValueError("AclSandbox workspace and temp write SIDs must be distinct")
+        # One identity per root is what makes a root grantable *and* droppable on
+        # its own: two roots sharing a SID would share a fate, and a SID equal to
+        # the workspace's or the temp's would silently widen that grant instead of
+        # adding one.
+        named = {sid for sid in (write_sid, temp_write_sid) if sid is not None}
+        for path, sid in resolved_extras:
+            if sid in named:
+                raise ValueError(
+                    f"AclSandbox extra root SID must be distinct from every other write SID: "
+                    f"{sid} ({path})"
+                )
+            named.add(sid)
         if temp_dir is None and temp_write_sid is not None:
             raise ValueError("AclSandbox temp write SID requires a temp directory")
         if mode == "workspace-write" and temp_dir is not None and temp_write_sid is None:
@@ -159,6 +194,11 @@ class AclSandbox:
         #: which is for the SIDs the OS allocated (``ConvertStringSidToSidW``).
         self._owned_sids: list[ctypes.Array] = []
         self._granted: list[tuple[str, int]] = []
+        #: The host-named roots' parsed SIDs, each beside the path it was derived
+        #: from.  They are OS allocations like the workspace's and the temp's — the
+        #: token points at them for the child's whole life — so they are freed on
+        #: the same two exits and by the same helper.
+        self._extra_sid_ptrs: list[tuple[str, int]] = []
 
     @property
     def temp_dir(self) -> str | None:
@@ -192,16 +232,34 @@ class AclSandbox:
             self._temp_write_sid_ptr = (
                 None if self.temp_write_sid is None else _parse_sid(bindings, self.temp_write_sid)
             )
+            for path, sid in self.extra_grants:
+                self._extra_sid_ptrs.append((path, _parse_sid(bindings, sid)))
             if self._temp_dir is not None:
                 if not os.path.isdir(self._temp_dir):
                     raise ValueError(
                         f"AclSandbox temp dir does not exist or is not a directory: {self._temp_dir}"
                     )
-                assert_private_temp_disjoint(self.writable_dirs, self._temp_dir)
+                # The extra roots belong in this check, not only the workspace: a
+                # root that *contains* the private temp would hand the temp's
+                # revocable capability the whole tree it sits in, so the temp would
+                # stop being private — the same reason the workspace is checked.
+                assert_private_temp_disjoint(
+                    [*self.writable_dirs, *(path for path, _ in self.extra_grants)],
+                    self._temp_dir,
+                )
 
             if self.manage_dacls and self._write_sid_ptr is not None:
                 for path in self.writable_dirs:
                     grant_write(bindings, path, self._write_sid_ptr)
+                # Standing, exactly like the workspace ACE, and for the same
+                # reason: the SID is a pure function of the canonical path, so the
+                # ACE is a cache rather than session state — and the *policy* is
+                # what grants it per call (`--extra-root`), so a host who removes
+                # the root stops passing it and the very next call's token no
+                # longer carries the SID.  Revoking instead would put a whole-tree
+                # propagation on a hot path and buy nothing.
+                for path, sid_ptr in self._extra_sid_ptrs:
+                    grant_write(bindings, path, sid_ptr)
                 if self._temp_dir is not None and self._temp_write_sid_ptr is not None:
                     # Recorded before the grant: grant_write can throw after a
                     # successful apply, and the fail-closed path must still
@@ -214,7 +272,13 @@ class AclSandbox:
             world_sid = make_well_known_sid(bindings, abi.WIN_WORLD_SID)
             self._owned_sids.append(world_sid.buffer)
             write_sids = [
-                sid for sid in (self._write_sid_ptr, self._temp_write_sid_ptr) if sid is not None
+                sid
+                for sid in (
+                    self._write_sid_ptr,
+                    self._temp_write_sid_ptr,
+                    *(sid_ptr for _, sid_ptr in self._extra_sid_ptrs),
+                )
+                if sid is not None
             ]
             restricted_token = create_restricted_token(
                 bindings, current_token, logon_sid.address, write_sids, world_sid.address, self.mode
@@ -274,10 +338,13 @@ class AclSandbox:
                     failures.append(exc)
             _free_sid_best_effort(bindings, self._write_sid_ptr, "workspace write SID", failures)
             _free_sid_best_effort(bindings, self._temp_write_sid_ptr, "temp write SID", failures)
+            for path, sid_ptr in self._extra_sid_ptrs:
+                _free_sid_best_effort(bindings, sid_ptr, f"extra root write SID ({path})", failures)
             self._owned_sids = []
             self._token = None
             self._write_sid_ptr = None
             self._temp_write_sid_ptr = None
+            self._extra_sid_ptrs = []
             self._granted = []
             if failures:
                 aggregate = RuntimeError(
@@ -319,8 +386,11 @@ class AclSandbox:
         self._owned_sids = []
         _free_sid_best_effort(api, self._write_sid_ptr, "workspace write SID", failures)
         _free_sid_best_effort(api, self._temp_write_sid_ptr, "temp write SID", failures)
+        for path, sid_ptr in self._extra_sid_ptrs:
+            _free_sid_best_effort(api, sid_ptr, f"extra root write SID ({path})", failures)
         self._write_sid_ptr = None
         self._temp_write_sid_ptr = None
+        self._extra_sid_ptrs = []
         if self._token is not None:
             try:
                 if int(api.kernel32.CloseHandle(ctypes.c_void_p(self._token))) == 0:
