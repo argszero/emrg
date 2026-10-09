@@ -231,7 +231,11 @@ retry is one step). Exit `0`/`1`/`2` are those three; `3` TARGET-BROKEN (the tar
 pass *before* the mutation — the report names which cause it read: a target that does not resolve, an
 interpreter that cannot import pytest, or another module the run could not import, named from the run's
 own `No module named <name>` line — because that sentence names a missing *plugin* as readily as a
-missing pytest, and reading it as pytest made the report assert a cause nobody measured), `4`
+missing pytest, and reading it as pytest made the report assert a cause nobody measured — and it also
+prints the nodes the pre-flight failed on, because those names settle the cause before the node id does:
+a list naming files other than the target's own is a tree that was already red before the arm ran, and
+the node-id remedy is then wrong — so withholding them left the reader with a remedy aimed at a cause
+that was not the cause), `4`
 NO-MUTATION (the anchor does not occur exactly once), `5`
 RESTORE-MISMATCH. It snapshots the file, pre-flights the target unmutated, pins `HOME`/`TMPDIR` for the
 child only, and restores **byte for byte** on every path, including its own failure — so an arm cannot

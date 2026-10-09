@@ -10,7 +10,7 @@ import {
   type TranscriptStore,
 } from "../lib/transcript";
 import { createMarkdownRenderer, type MarkdownRenderer, type StreamState } from "../lib/markdown";
-import { scrollCompensation } from "../lib/history";
+import { canLoadOlder, scrollCompensation, shouldLoadOlder } from "../lib/history";
 import { toolPhrases } from "../lib/copywriting";
 import { useI18n, type TranslateFn } from "../lib/i18n";
 import { MarkdownText } from "./MarkdownText";
@@ -40,13 +40,26 @@ export interface TranscriptViewProps {
   sid?: string | null;
   /** 注入 markdown 渲染器（测试/浏览器接线用；缺省按 t 构造降级渲染器） */
   renderer?: MarkdownRenderer;
-  /** 滚动到顶加载更早历史（rant 2026-09-01T20:19:40）：hasMore && !loading 时允许触发 */
-  canLoadOlder?: boolean;
+  /**
+   * 服务端还有更早的一页，与是否正在取这一页 —— 判定的两条事实，**原样**传进来
+   * （rant 2026-09-01T20:19:40）。此前这里是合成后的 `canLoadOlder`，容器因此再也
+   * 分不清「没有更早的页」与「正在取」；判定本身只有一处：`lib/history.ts` 的
+   * `shouldLoadOlder` / `canLoadOlder`（issue #1979）。
+   */
+  hasMore?: boolean;
+  loading?: boolean;
   /** 滚动到顶 / 点击顶部条的回调（触发方防抖；vanilla loadOlderHistory 语义） */
   onLoadOlder?: () => void;
 }
 
-export function TranscriptView({ store, sid = null, renderer, canLoadOlder = false, onLoadOlder }: TranscriptViewProps) {
+export function TranscriptView({
+  store,
+  sid = null,
+  renderer,
+  hasMore = false,
+  loading = false,
+  onLoadOlder,
+}: TranscriptViewProps) {
   // 版本号快照：每次 store 变更 +1（getSnapshot 稳定引用，满足 useSyncExternalStore 要求）
   const version = useSyncExternalStore(store.subscribe, store.getVersion);
   const { t } = useI18n();
@@ -77,15 +90,16 @@ export function TranscriptView({ store, sid = null, renderer, canLoadOlder = fal
     if (!el) return;
     const onScroll = () => {
       updateAutoScroll(el);
-      // 滚动到顶 → 加载更早一页（rant 2026-09-01T20:19:40：scrollTop<=2 && canLoadOlder；
-      // 防抖由 onLoadOlder 触发方负责）
-      if (onLoadOlder && canLoadOlder && el.scrollTop <= 2) {
+      // 滚动到顶 → 加载更早一页（rant 2026-09-01T20:19:40；防抖由 onLoadOlder 触发方负责）。
+      // 判定不在这里重写：它就是 `lib/history.ts` 的 `shouldLoadOlder`（issue #1979 ——
+      // 此处曾有一份副本，而生产路径读的正是副本，于是改库里的阈值不会有任何效果）。
+      if (onLoadOlder && shouldLoadOlder(el.scrollTop, hasMore, loading)) {
         onLoadOlder();
       }
     };
     el.addEventListener("scroll", onScroll, { capture: true });
     return () => el.removeEventListener("scroll", onScroll, { capture: true });
-  }, [updateAutoScroll, canLoadOlder, onLoadOlder]);
+  }, [updateAutoScroll, hasMore, loading, onLoadOlder]);
 
   // 新消息 append/流入 → 若 autoScroll 为 true 则滚到底。
   // 依赖 version（每次 store 变更 +1）而非 entries.length：流式文本是原地 append
@@ -161,10 +175,10 @@ export function TranscriptView({ store, sid = null, renderer, canLoadOlder = fal
       {loadBar ? (
         // 顶部历史条（宿主报障 2026-10-08：点击「↑ 加载更早消息」没有任何效果）。CSS 一直写着
         // `cursor: pointer`、文案也一直是祈使句（"↑ 加载更早消息"），但它此前只是纯文本 div——
-        // 可点的样子、不可点的实体。`canLoadOlder`（hasMore && !loading）为真时它是**真按钮**
+        // 可点的样子、不可点的实体。`canLoadOlder(hasMore, loading)` 为真时它是**真按钮**
         // （键盘可达、点击即触发与滚动到顶同一个防抖回调）；为假时（加载中 / 没有更多）退化为
-        // 状态文字，不再冒充控件。
-        canLoadOlder && onLoadOlder ? (
+        // 状态文字，不再冒充控件。与上面的 scroll 触发读同一条规则（issue #1979）。
+        canLoadOlder(hasMore, loading) && onLoadOlder ? (
           <button
             type="button"
             className="history-load-bar"
