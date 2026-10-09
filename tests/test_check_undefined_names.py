@@ -16,6 +16,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-undefined-names.py"
 
@@ -159,6 +161,115 @@ class TestItStaysSilent:
         )
 
         assert _run(tree).returncode == 0
+
+    def test_an_augmented_assignment_with_nothing_else_binding_it_is_reported(
+        self, tmp_path
+    ) -> None:
+        """`x += 1` reads `x`; bound nowhere, the read can only raise (issue #2005).
+
+        Three independent facts hid this shape, so it is pinned as three assertions'
+        worth of behaviour rather than one: the target is `Store`, not `Load`;
+        `symtable` calls it *assigned*; and `symtable` calls it **not referenced**.
+        The line is named, because `del`/`+=` is where the lookup that finds nothing
+        actually happens.
+        """
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            def f():
+                counter += 1
+            """,
+        )
+
+        proc = _run(tree)
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "emrg/bad.py:2" in _reported(proc)
+        assert "counter" in proc.stdout
+
+    def test_an_augmented_assignment_at_module_level_is_reported(self, tmp_path) -> None:
+        """The same shape outside a function raises `NameError`, not `UnboundLocalError`."""
+        tree = _tree(tmp_path, bad="total += 1\n")
+
+        proc = _run(tree)
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "emrg/bad.py:1" in _reported(proc)
+        assert "total" in proc.stdout
+
+    def test_a_del_of_a_name_nothing_binds_is_reported(self, tmp_path) -> None:
+        """`del x` looks `x` up to remove it, so an unbound `x` is a `NameError` too."""
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            def f():
+                del undefined_name
+            """,
+        )
+
+        proc = _run(tree)
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "emrg/bad.py:2" in _reported(proc)
+        assert "undefined_name" in proc.stdout
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            # a value established first, in the same scope
+            "def f():\n    counter = 0\n    counter += 1\n",
+            # a parameter
+            "def f(counter):\n    counter += 1\n",
+            # `global`: the declaration is the claim the module provides it
+            "x = 0\ndef f():\n    global x\n    x += 1\n",
+            # a for target
+            "def f(items):\n    for total in items:\n        total += 1\n",
+            # `with ... as`, and a `del` after it
+            "with open('/dev/null') as fh:\n    del fh\n",
+            # `except ... as`, and a `del` after it
+            "try:\n    pass\nexcept OSError as exc:\n    del exc\n",
+            # a walrus target
+            "def f():\n    (n := 1)\n    n += 1\n",
+            # a match capture
+            "def f(v):\n    match v:\n        case [*rest]:\n            rest += [1]\n",
+            # `nonlocal`: the enclosing function binds it
+            "def outer():\n    c = 0\n    def inner():\n        nonlocal c\n        c += 1\n    return inner\n",
+            # an import
+            "import os\ndef f():\n    os.path.join('a', 'b')\n",
+            # a plain assignment, then a del of it
+            "x = 1\ndel x\n",
+        ],
+    )
+    def test_a_real_binding_keeps_the_read_before_write_line_clean(
+        self, tmp_path, source
+    ) -> None:
+        """The other direction: the set must not manufacture a finding.
+
+        Every form here binds the name somewhere the rule can see, so the reopened
+        gate (`is_referenced`, `is_assigned`) must not turn any of them into a
+        finding. `x = 0; x += 1` is the shape the third fact would break if
+        `_read_before_write_names` counted the augmented target itself as a binding.
+        """
+        tree = _tree(tmp_path, good=source)
+
+        assert _run(tree).returncode == 0, source
+
+    def test_a_name_read_only_before_a_binding_is_still_reported(self, tmp_path) -> None:
+        """The reopened gates must not silence an ordinary unbound read.
+
+        `is_referenced` and `is_assigned` are consulted for every symbol, so a guard
+        that let the `read_before_write` set widen the gate for names outside it
+        would stop seeing the incident shape entirely.
+        """
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            def f():
+                return undefined_plain_read
+            """,
+        )
+
+        assert _run(tree).returncode == 1
 
     def test_parameters_locals_imports_and_builtins_are_bindings(self, tmp_path) -> None:
         tree = _tree(
