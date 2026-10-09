@@ -277,6 +277,20 @@ def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
         "store, so a reader on a second host has nothing to resolve — the public record "
         "spelled beside it is the anchor that survives"
     )
+    # The scope is the half a reader on another host acts on. Without it the paragraph
+    # reads as a command that works everywhere, and a session that runs it and reads
+    # `NOT FOUND` (rc 1) concludes the host never said it — the failure mode this
+    # paragraph exists to close (reviewer finding on #1986, reproduced on two hosts).
+    assert "host-local" in rendered and "NOT FOUND" in rendered, (
+        "the paragraph no longer says the citation is host-local: that reading was taken "
+        "on the machine that recorded the message, and a reader elsewhere can only "
+        "reproduce it as `NOT FOUND` — stated, that is a scope; unstated, it is a "
+        "contradiction the reader cannot resolve"
+    )
+    assert "You cannot modify competition_prompt.md directly" in rendered, (
+        "the quotation from another language ships untranslated, against the Language "
+        "Policy block seven lines below that these paragraphs cite for their placement"
+    )
     assert "丢宇emrg项目" in rendered, (
         "the host's own words are not quoted verbatim — the message is re-findable only by "
         "the exact string, and a paraphrase cannot be looked up"
