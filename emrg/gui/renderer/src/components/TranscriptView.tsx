@@ -42,7 +42,7 @@ export interface TranscriptViewProps {
   renderer?: MarkdownRenderer;
   /** 滚动到顶加载更早历史（rant 2026-09-01T20:19:40）：hasMore && !loading 时允许触发 */
   canLoadOlder?: boolean;
-  /** 滚动到顶回调（触发方防抖；vanilla loadOlderHistory 语义） */
+  /** 滚动到顶 / 点击顶部条的回调（触发方防抖；vanilla loadOlderHistory 语义） */
   onLoadOlder?: () => void;
 }
 
@@ -158,7 +158,27 @@ export function TranscriptView({ store, sid = null, renderer, canLoadOlder = fal
 
   return (
     <div className="transcript-view" data-testid="transcript-view" ref={viewportRef}>
-      {loadBar ? <div className="history-load-bar">{loadBar}</div> : null}
+      {loadBar ? (
+        // 顶部历史条（宿主报障 2026-10-08：点击「↑ 加载更早消息」没有任何效果）。CSS 一直写着
+        // `cursor: pointer`、文案也一直是祈使句（"↑ 加载更早消息"），但它此前只是纯文本 div——
+        // 可点的样子、不可点的实体。`canLoadOlder`（hasMore && !loading）为真时它是**真按钮**
+        // （键盘可达、点击即触发与滚动到顶同一个防抖回调）；为假时（加载中 / 没有更多）退化为
+        // 状态文字，不再冒充控件。
+        canLoadOlder && onLoadOlder ? (
+          <button
+            type="button"
+            className="history-load-bar"
+            data-testid="history-load-bar"
+            onClick={onLoadOlder}
+          >
+            {loadBar}
+          </button>
+        ) : (
+          <div className="history-load-bar" data-testid="history-load-bar">
+            {loadBar}
+          </div>
+        )
+      ) : null}
       {entries.map((entry, i) => (
         <EntryView key={i} entry={entry} index={i} t={t} md={md} store={store} sid={sid} />
       ))}

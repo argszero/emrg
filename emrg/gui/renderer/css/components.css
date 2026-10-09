@@ -100,8 +100,17 @@
   font-size: var(--fs-secondary);
   color: var(--accent);
   padding: var(--sp-2) 0;
-  cursor: pointer;
   user-select: none;
+}
+/* 还有更早历史时它是 <button>（宿主报障 2026-10-08：此前是纯文本，点不动；`cursor: pointer`
+   一直写在上面那条规则里，文案也一直是祈使句）。元素级复位在 base.css，这里只补两件它需要的
+   事：占满整行（button 默认 inline-block），以及不随 :active 缩放——整行条缩放看着像抖动。 */
+button.history-load-bar {
+  display: block;
+  width: 100%;
+}
+button.history-load-bar:active {
+  transform: none;
 }
 
 /* Markdown 内容排版 */

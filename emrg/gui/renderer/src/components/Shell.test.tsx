@@ -294,6 +294,28 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByText(older[0].content)).toBeInTheDocument());
   });
 
+  it("clicking the load bar asks for the older page, same cursor as the scroll path (host report 2026-10-08)", async () => {
+    // 宿主报障：「点击加载更早消息，没有任何效果」。断在接缝上：条形件的 onClick → Shell 的
+    // onScrollTop（150ms 防抖）→ loadOlderHistory。滚动那条路一直是好的，两条路必须落到同一个
+    // 游标上——所以这里断言的不是「回调被调用」，而是 daemon 真收到了 beforeIndex=4 那一页。
+    const m = mockEmrg();
+    const { older } = mockTwoHistoryPages(m);
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText("newest-1")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("history-load-bar"));
+
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(2));
+    expect(m.listHistory).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ sessionId: "s1", includeRecords: true, beforeIndex: 4 }),
+    );
+    await waitFor(() => expect(screen.getByText(older[0].content)).toBeInTheDocument());
+  });
+
   it("prepends an older page as one block, keeping record order (rant 2026-09-20T18:58:44)", async () => {
     const m = mockEmrg();
     const { newest, older } = mockTwoHistoryPages(m);
