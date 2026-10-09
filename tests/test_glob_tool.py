@@ -171,13 +171,14 @@ def test_the_emrg_directory_it_declares_as_read_really_is_read(temp_cwd):
 
     assert not result.error
     assert "Found 1 matches" in result.content, result.content
-    # Spelled the way the tool prints it — `str(path.relative_to(root))`, the platform's
-    # own separator — and written as that same expression, so the assertion is not a
-    # POSIX literal. It was one until measured: run 37495221347, leg `test-windows`
-    # (2026-10-06), where this line and its sibling in `tests/test_grep_tool.py` were the
-    # only two failures in 3,909 passes. `skipif(win32)` would have left the other
-    # platform unmeasured, which is the state that let it through.
-    assert str(Path(".emrg") / "memory" / "MEMORY.md") in result.content
+    # `.as_posix()`, because the tool now renders `path.relative_to(root).as_posix()`: a
+    # report's path is `/`-separated on every platform, which is what makes it assertable
+    # at all. This line used to be `str(Path(".emrg") / "memory" / "MEMORY.md")` — the
+    # platform's own separator — which was portable *only* while the tool was not, and it
+    # went red on `test-windows` the moment the tool became deterministic (run
+    # 37990298947, 2026-10-10). The earlier history is in the note it replaces: run
+    # 37495221347 (2026-10-06), where the POSIX literal failed the same leg.
+    assert (Path(".emrg") / "memory" / "MEMORY.md").as_posix() in result.content
     assert "skipped" not in result.content, (
         "the .emrg path was dropped by the skip policy the description says reads it"
     )

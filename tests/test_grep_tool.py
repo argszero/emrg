@@ -183,18 +183,23 @@ class TestTheHiddenDirectoryItKeepsIsDeclared:
 
         content = self._search(tmp_path).content
 
-        # Both paths are spelled the way the tool prints them — `str(path.relative_to(root))`,
-        # the platform's own separator — and written as that same expression, so neither
-        # assertion is a POSIX literal. They were, until measured: run 37495221347, leg
-        # `test-windows` (2026-10-06), where these two and their sibling in
-        # `tests/test_glob_tool.py` were the only failures in 3,909 passes. The negative
-        # one is the sharper half: `".git/config" not in content` cannot fail on Windows,
-        # where a searched `.git` prints `.git\\config` — a false green about the very
-        # directory this test exists to check is skipped.
-        assert str(Path(".emrg") / "memory" / "MEMORY.md") in content, (
+        # `.as_posix()`, because the tool now renders `path.relative_to(root).as_posix()`:
+        # a report's path is `/`-separated on every platform. Both lines used to be
+        # `str(Path(...) / ...)` — the platform's separator — which was portable only while
+        # the tool was not, and both went red on `test-windows` the moment it became
+        # deterministic (run 37990298947, 2026-10-10). The earlier history is in the note
+        # they replace (run 37495221347, 2026-10-06, the POSIX literal failing the same leg).
+        #
+        # The negative one is the sharper half, and the rewrite makes it sharper still: it
+        # exists to notice a `.git` that was searched when the description says it is
+        # skipped, and while the tool rendered the platform's separator the comparison
+        # against `.git\\config` on Windows could not fail whatever the tool did — a false
+        # green about the very directory this test is for. Now both sides are `/`-separated,
+        # so it fails exactly when `.git` was searched.
+        assert (Path(".emrg") / "memory" / "MEMORY.md").as_posix() in content, (
             f"the .emrg file the description says is read was not searched:\n{content}"
         )
-        assert str(Path(".git") / "config") not in content, (
+        assert (Path(".git") / "config").as_posix() not in content, (
             "the .git directory the description says is skipped was searched"
         )
         assert "src.py" in content
