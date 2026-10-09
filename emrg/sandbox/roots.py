@@ -207,14 +207,61 @@ class ExtraRootVerdict(NamedTuple):
     Collapsing refusal and notice into one boolean would make "I will not" and
     "you already have it" the same message, which is exactly the confusion
     requirement 6 of the rant exists to prevent.
+
+    ``store`` is what tells the caller which of the last two happened, and it is
+    a field rather than something inferred from ``notice`` because the two do not
+    coincide: a root named at ``read-only`` is **stored and carries a notice**
+    (it is on the session's list from now on, and takes effect when the tier
+    rises), while one already covered is **not stored and carries one too**.
+    Reading ``notice is None`` as "store it" stored nothing in the first case
+    while the sentence the host read said "stored for this session" — measured
+    2026-10-09 on head ``4eb69bab``, where the tier flip the sentence advised
+    left the list empty.
     """
 
     #: The canonical path the verdict is about — empty only when no path was given.
     canonical: str
     #: Why the host may not name this root. ``None`` means it was not refused.
     refusal: str | None = None
-    #: Why there is nothing to change. ``None`` means there is nothing to report.
+    #: What to tell the host when the outcome is more than a plain acceptance.
     notice: str | None = None
+    #: Whether the caller should add ``canonical`` to the session's list. False
+    #: only for a path already covered — a refusal never reaches this field.
+    store: bool = True
+
+
+def _absolute_root_spelling(path: str) -> tuple[str, str | None]:
+    """Rules 1–2: a path was named, and it is absolute (or ``~``-rooted).
+
+    These two are about *reading* a path rather than granting one, which is why
+    both ``/sandbox add`` and ``/sandbox remove`` apply them and why they live
+    here instead of inside the add-only judge. Every other rule in
+    :func:`judge_extra_root` answers "may this path become writable", and a
+    removal is not asking that (see :func:`judge_root_removal`).
+
+    :param path: the path as the host typed it.
+    :returns: ``(canonical, None)`` when it identifies a root, else
+        ``(spelling, refusal)``.
+    """
+    if not path or not path.strip():
+        return "", "no path given — name the file or directory"
+    expanded = os.path.expanduser(path.strip())
+    # `os.path.isabs` is the *platform's* answer, and on Windows it calls every
+    # drive-less rooted spelling relative — `/`, `/tmp/x` — which is not what it
+    # means here: such a path does not resolve under the cwd, so the sandbox has
+    # to read it as absolute (the same rule `emrg/tools/file_policy.is_absolute_path`
+    # states for a *target*, and the reason it exists as a helper at all). One
+    # spelling is deliberately still refused off POSIX: a leading backslash, which
+    # on POSIX is an ordinary filename character and would resolve against the
+    # daemon's own cwd — the exact accident this rule is here to prevent.
+    # Measured: CI run 37878525434, where the platform-only test turned a host's
+    # `/` into "not an absolute path" instead of the root refusal below.
+    if not os.path.isabs(expanded) and not expanded.startswith("/"):
+        return expanded, (
+            f"{path!r} is not an absolute path — name it absolutely or start it "
+            "with `~`, so the root named and the root shown are the same one"
+        )
+    return canonical_path(expanded), None
 
 
 def judge_extra_root(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
@@ -226,6 +273,12 @@ def judge_extra_root(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
     compare, or refused with a sentence a person can act on. The refusals live
     next to :func:`writable_roots` rather than in the client because a client is
     an entry point and a display — the same reason the tier is the daemon's.
+
+    **This function answers the add question only.** Its rules 3–6 are about
+    granting, and applying them to a removal is the defect
+    :func:`judge_root_removal` exists to undo; the two calls are separate
+    functions rather than one function with an ``op`` flag so that a caller
+    cannot inherit the wrong rule set by leaving a default alone.
 
     Six rules, and each is here rather than at the fence for one reason: a
     refusal at the fence is a *silent* denial of a write the host thought they
@@ -258,45 +311,38 @@ def judge_extra_root(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
        Linux from binding nothing.
 
     A path that survives all six but is **already writable** is not refused: it is
-    reported. Naming the workspace, a temp area, or a root added a moment ago
-    changes nothing, and saying so is the requirement ("明确回报，不静默重复").
+    reported, and ``store`` is False so the caller adds nothing. Naming the
+    workspace, a temp area, or a root added a moment ago changes nothing, and
+    saying so is the requirement ("明确回报，不静默重复").
+
+    Surviving the six at ``read-only`` is a third outcome again: the root **is**
+    stored (``store`` is True), and the notice says when it will take effect.
+    The host's list follows the session and the tier decides what has effect, so
+    a root named now is not lost by the tier being low — it was the other way
+    round before this, and the sentence promised what the code did not do.
 
     :param path: the path as the host typed it.
     :param policy: the session's policy **including its stored extra roots**, so
         that re-adding one is recognised as already covered.
-    :returns: the verdict — canonical spelling, and any refusal or notice.
+    :returns: the verdict — the canonical spelling, whether to store it, and any
+        refusal or notice.
     """
     # Imported here rather than at module scope: ``emrg.session`` imports this
     # module for ``canonical_path``, and that happens before the tool package is
     # on the import path. The list still has one home; this is a reference.
     from emrg.tools.file_policy import protected_paths
 
-    if not path or not path.strip():
-        return ExtraRootVerdict("", refusal="no path given — name the file or directory to add")
-    expanded = os.path.expanduser(path.strip())
-    # `os.path.isabs` is the *platform's* answer, and on Windows it calls every
-    # drive-less rooted spelling relative — `/`, `/tmp/x` — which is not what it
-    # means here: such a path does not resolve under the cwd, so the sandbox has
-    # to read it as absolute (the same rule `emrg/tools/file_policy.is_absolute_path`
-    # states for a *target*, and the reason it exists as a helper at all). One
-    # spelling is deliberately still refused off POSIX: a leading backslash, which
-    # on POSIX is an ordinary filename character and would resolve against the
-    # daemon's own cwd — the exact accident this rule is here to prevent.
-    # Measured: CI run 37878525434, where the platform-only test turned a host's
-    # `/` into "not an absolute path" instead of the root refusal below.
-    if not os.path.isabs(expanded) and not expanded.startswith("/"):
-        return ExtraRootVerdict(expanded, refusal=(
-            f"{path!r} is not an absolute path — name it absolutely or start it "
-            "with `~`, so the path granted and the path shown are the same one"
-        ))
-    canonical = canonical_path(expanded)
+    canonical, refusal = _absolute_root_spelling(path)
+    if refusal:
+        return ExtraRootVerdict(canonical, refusal=refusal)
     # A filesystem root is a path that is its own parent — the definition, and
     # the reason this is not written `canonical == os.sep`: a Windows root is
     # `C:\`, which is not `os.sep`, and a host who types `/` there means the root
     # too. The spelled form is checked alongside it because `realpath` may map a
     # bare `/` somewhere other than a root on a platform whose cwd is on a drive;
     # the two spellings one idea, so neither can let a whole filesystem through.
-    if expanded == "/" or canonical == os.path.dirname(canonical):
+    # `expanduser` leaves `/` alone, so the stripped spelling is its expanded one.
+    if path.strip() == "/" or canonical == os.path.dirname(canonical):
         return ExtraRootVerdict(canonical, refusal=(
             f"{path!r} is the filesystem root — that reach is the tier "
             "danger-full-access, chosen as a tier rather than assembled from a "
@@ -320,13 +366,62 @@ def judge_extra_root(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
         ))
     for root in writable_roots(policy):
         if canonical == root or canonical.startswith(root.rstrip(os.sep) + os.sep):
-            return ExtraRootVerdict(canonical, notice=(
+            return ExtraRootVerdict(canonical, store=False, notice=(
                 f"{root!r} already grants this path under the session's tier — "
                 "nothing to add"
             ))
-    if policy.mode == "read-only":
-        return ExtraRootVerdict(canonical, notice=(
-            f"stored for this session, but the tier read-only grants no writable "
-            f"root — set the tier to workspace-write for {canonical!r} to apply"
+    # The session's own list is consulted separately, because ``writable_roots``
+    # only carries it under ``workspace-write``: at ``read-only`` that derivation
+    # is empty by definition, so the loop above cannot see the root stored a
+    # moment ago and a second ``add`` of it would be stored twice.
+    stored = [canonical_path(extra) for extra in policy.extra_roots]
+    if any(canonical == root or canonical.startswith(root.rstrip(os.sep) + os.sep)
+           for root in stored):
+        return ExtraRootVerdict(canonical, store=False, notice=(
+            f"{canonical!r} is already one of this session's roots — nothing to add"
         ))
+    if policy.mode == "read-only":
+        # Stored, not merely described: the sentence says the root is on the list
+        # from now on and names what makes it take effect. ``store`` is what says
+        # so — reading ``notice`` as "do not store" made this branch keep nothing
+        # while telling the host it had, so the tier flip it advised left the
+        # list empty (measured 2026-10-09 on head ``4eb69bab``). Storing here is
+        # harmless by construction: ``writable_roots`` returns ``[]`` for this
+        # mode, so a stored root can never widen a tier that grants none.
+        return ExtraRootVerdict(canonical, notice=(
+            "stored for this session, but the tier read-only grants no writable "
+            "root — it takes effect when the tier becomes workspace-write"
+        ))
+    return ExtraRootVerdict(canonical)
+
+
+def judge_root_removal(path: str, policy: SandboxPolicy) -> ExtraRootVerdict:
+    """Judge one ``/sandbox remove`` — the canonical spelling, or why it cannot be read.
+
+    Removal asks a different question from :func:`judge_extra_root`, and this is
+    a separate function so the two cannot be confused again: every rule there is
+    about *granting* — the filesystem root, the home directory, the protected
+    state files, and "the path must exist" (which exists because a directory is
+    granted as ``subpath`` and a file as ``literal``, a choice a removal never
+    makes). None of them has a meaning for a withdrawal. Running them anyway
+    made a root whose path was deleted impossible to withdraw — measured
+    2026-10-09 on head ``4eb69bab``: the command answered "does not exist" and
+    left the root stored, and since ``writable_roots`` carries a stored spelling
+    whether or not it exists, the grant came back live the moment the path did.
+
+    Two rules remain, both from :func:`_absolute_root_spelling`, and both are
+    about reading the path: one must be named, and it must be absolute. A refusal
+    here therefore means "this is not a path I can read", never "the policy would
+    not grant this" — a path that is simply not on the list is answered with the
+    list as it stands, which is what "removal is idempotent" means.
+
+    :param path: the path as the host typed it.
+    :param policy: unused — carried so the two judges are called alike, and so a
+        later removal rule has somewhere to read the session's state from.
+    :returns: the verdict — canonical spelling, and a refusal only for a path
+        that could not be read.
+    """
+    canonical, refusal = _absolute_root_spelling(path)
+    if refusal:
+        return ExtraRootVerdict(canonical, refusal=refusal)
     return ExtraRootVerdict(canonical)

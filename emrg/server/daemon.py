@@ -74,7 +74,7 @@ from emrg.server.git_utils import (
 from emrg.sandbox import escalation
 from emrg.sandbox.policy import DEFAULT_MODE as DEFAULT_SANDBOX_MODE
 from emrg.sandbox.policy import SANDBOX_MODES, resolve_policy
-from emrg.sandbox.roots import judge_extra_root
+from emrg.sandbox.roots import judge_extra_root, judge_root_removal
 from emrg.server import content_risk_probe
 from emrg.server.tool_types import ToolResult
 from emrg.memory import (
@@ -6022,6 +6022,12 @@ class EmrgServer:
         nothing, because a display refresh is not a state change. The two writing
         ops reply to the requester *and* broadcast, excluded from the echo, so the
         frame's shape is the same on both paths and a client renders one thing.
+
+        **``remove`` is judged by its own rules.** ``add`` answers "may this path
+        become writable" and applies six granting rules; a withdrawal is not
+        asking that, so it applies only the two that read a path — see
+        ``judge_root_removal``. A refusal is a path the handler could not read,
+        never a policy verdict, and nothing about a removal depends on the tier.
         """
         if not session_id or not cwd:
             await self._send(ws, {
@@ -6055,7 +6061,16 @@ class EmrgServer:
             session_id=session_id,
             extra_roots=session.sandbox_roots,
         )
-        verdict = judge_extra_root(path, policy)
+        # The op's own judge. They are two functions because they answer two
+        # questions: `add` applies the six granting rules (is this a path the
+        # policy may open), `remove` applies only the two that read a path. One
+        # judge for both let the existence rule run on removals, which made a
+        # root whose path was deleted impossible to withdraw (measured
+        # 2026-10-09 on head `4eb69bab`).
+        verdict = (
+            judge_root_removal(path, policy) if op == "remove"
+            else judge_extra_root(path, policy)
+        )
         if verdict.refusal:
             await self._send(ws, {
                 "type": "sandbox_roots",
@@ -6067,11 +6082,12 @@ class EmrgServer:
             return
         roots = session.sandbox_roots
         if op == "remove":
-            # Removal is idempotent and never a refusal: a path that is not in the
-            # list is answered with the list as it stands, which is the state the
-            # host asked for. The comparison is on the canonical spelling, so a
-            # path removed with a different spelling than it was added with still
-            # comes out.
+            # Removal is idempotent and never a policy refusal: a path that is not
+            # in the list is answered with the list as it stands, which is the
+            # state the host asked for. (A path that cannot be *read* is refused
+            # above, and that is the judge's rule rather than this one's.) The
+            # comparison is on the canonical spelling, so a path removed with a
+            # different spelling than it was added with still comes out.
             remaining = [r for r in roots if r != verdict.canonical]
             notice = None if len(remaining) != len(roots) else (
                 f"{verdict.canonical!r} was not one of this session's roots — "
@@ -6080,8 +6096,13 @@ class EmrgServer:
             if len(remaining) != len(roots):
                 session.set_sandbox_roots(remaining)
         else:
+            # `store` is the judge's decision, not something inferred from a
+            # notice: a root already covered is not stored, while one named at
+            # `read-only` is stored *and* carries a notice. Reading a notice as
+            # "do not store" kept nothing in that second case while the sentence
+            # told the host it had (measured 2026-10-09 on head `4eb69bab`).
             notice = verdict.notice
-            if notice is None:
+            if verdict.store:
                 session.set_sandbox_roots([*roots, verdict.canonical])
         frame = {
             "type": "sandbox_roots",

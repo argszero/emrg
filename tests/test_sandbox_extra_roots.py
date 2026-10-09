@@ -43,7 +43,12 @@ from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import SandboxPolicy, resolve_policy
 from emrg.sandbox.providers.darwin import seatbelt_profile_args
 from emrg.sandbox.providers.linux import bwrap_profile_args
-from emrg.sandbox.roots import canonical_path, judge_extra_root, writable_roots
+from emrg.sandbox.roots import (
+    canonical_path,
+    judge_extra_root,
+    judge_root_removal,
+    writable_roots,
+)
 from emrg.server.daemon import EmrgServer
 from emrg.session import Session
 
@@ -572,6 +577,169 @@ def test_remove_withdraws_the_root_and_is_idempotent(outside):
     second = [f for f in again if f.get("type") == "sandbox_roots"][-1]
     assert second["roots"] == [] and "error" not in second
     assert second["notice"] and "nothing to remove" in second["notice"]
+
+
+def test_an_add_at_read_only_is_stored_and_takes_effect_when_the_tier_rises(outside):
+    """The sentence and the behaviour are one thing (the rejection on #1976, finding 1).
+
+    Naming a root at ``read-only`` answered "stored for this session" while
+    storing nothing, so the tier flip the sentence advised left the list empty —
+    measured on head ``4eb69bab``. Storing is the reading this pins, and the two
+    facts the design already states make it safe: the list follows the session
+    (requirement 9), and the *mode* decides what has effect — ``writable_roots``
+    returns ``[]`` for ``read-only``, so a stored root can never widen a tier
+    that grants none.
+    """
+    ws, elsewhere = outside
+    session = Session.create_with_id("s_ro_add", ws)
+    session.set_sandbox("read-only")
+    server = _server()
+
+    frames = _drive(server, {
+        "type": "set_sandbox_roots",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "op": "add",
+        "path": str(elsewhere),
+    })
+
+    reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
+    assert "error" not in reply, reply
+    assert reply["notice"] and "stored for this session" in reply["notice"]
+    # What that sentence claims, measured rather than read.
+    assert reply["roots"] == [canonical_path(str(elsewhere))]
+    assert Session.load(session.session_id, ws).sandbox_roots == [
+        canonical_path(str(elsewhere))
+    ]
+
+    # And the advice it gives: raising the tier makes the root apply, with no
+    # second `add` — which is the whole of what the sentence promises.
+    _drive(server, {
+        "type": "set_sandbox",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "mode": "workspace-write",
+    })
+    stored = Session.load(session.session_id, ws).sandbox_roots
+    policy = resolve_policy(
+        mode="workspace-write", workspace_root=str(ws), extra_roots=tuple(stored)
+    )
+    assert canonical_path(str(elsewhere)) in writable_roots(policy)
+
+
+def test_a_root_added_twice_at_read_only_is_stored_once(outside):
+    """The duplicate check cannot come from ``writable_roots`` at this tier.
+
+    That derivation is empty under ``read-only``, so the loop over it sees
+    nothing and a second ``add`` of the same path would be appended again. The
+    session's own list is what has to be consulted — which is why the check is
+    written separately rather than left to the tier's allow-list.
+    """
+    ws, elsewhere = outside
+    session = Session.create_with_id("s_ro_twice", ws)
+    session.set_sandbox("read-only")
+    server = _server()
+    add = {
+        "type": "set_sandbox_roots",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "op": "add",
+        "path": str(elsewhere),
+    }
+
+    _drive(server, add)
+    frames = _drive(server, add)
+
+    reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
+    assert reply["notice"] and "already one of this session's roots" in reply["notice"]
+    assert reply["roots"] == [canonical_path(str(elsewhere))]
+    assert Session.load(session.session_id, ws).sandbox_roots == [
+        canonical_path(str(elsewhere))
+    ]
+
+
+def test_a_root_whose_path_is_gone_can_still_be_withdrawn(outside):
+    """Withdrawal is judged on the path, not on whether it could be granted.
+
+    The rejection on #1976 (finding 2): the existence rule ran on removals too,
+    so a root whose directory the host deleted answered "does not exist" and
+    stayed stored. A grant that cannot be withdrawn is bad on its own, and worse
+    because ``writable_roots`` carries a stored spelling whether or not it
+    exists — so the reach came back live the moment the path did.
+    """
+    ws, elsewhere = outside
+    gone = elsewhere / "gone-dir"
+    gone.mkdir()
+    session = Session.create_with_id("s_gone_remove", ws)
+    session.set_sandbox("workspace-write")
+    server = _server()
+
+    _drive(server, {
+        "type": "set_sandbox_roots",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "op": "add",
+        "path": str(gone),
+    })
+    assert Session.load(session.session_id, ws).sandbox_roots == [canonical_path(str(gone))]
+
+    gone.rmdir()  # the host deletes the directory, then wants the grant back
+
+    frames = _drive(server, {
+        "type": "set_sandbox_roots",
+        "session_id": session.session_id,
+        "cwd": str(ws),
+        "op": "remove",
+        "path": str(gone),
+    })
+
+    reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
+    assert "error" not in reply, reply
+    assert reply["roots"] == []
+    assert Session.load(session.session_id, ws).sandbox_roots == []
+
+
+def test_a_removal_still_refuses_a_path_it_cannot_read(outside):
+    """The other side of the split: reading a path is removal's own rule.
+
+    A relative spelling would resolve against the daemon's own cwd, so the entry
+    withdrawn and the entry shown could be different ones. That rule survives —
+    it is a refusal not to *grant* but to *read*, and it is what keeps a removal
+    from being a permissive command.
+    """
+    ws, elsewhere = outside
+    session = Session.create_with_id("s_remove_unreadable", ws)
+    session.set_sandbox_roots([str(elsewhere)])
+    server = _server()
+    stored = [canonical_path(str(elsewhere))]
+
+    for bad in ("relative-thing", ""):
+        frames = _drive(server, {
+            "type": "set_sandbox_roots",
+            "session_id": session.session_id,
+            "cwd": str(ws),
+            "op": "remove",
+            "path": bad,
+        })
+        reply = [f for f in frames if f.get("type") == "sandbox_roots"][-1]
+        assert reply.get("error"), (bad, reply)
+        assert Session.load(session.session_id, ws).sandbox_roots == stored
+
+
+def test_removal_does_not_inherit_the_add_rules(outside):
+    """The two judges answer two questions, and this is the difference exactly.
+
+    ``add`` refuses a path it could not grant; ``remove`` accepts a path it can
+    read. One path that does not exist is the cheapest witness of the split, and
+    it is reachable without a session — so this pins the contract itself rather
+    than the command that calls it.
+    """
+    ws, elsewhere = outside
+    policy = resolve_policy(mode="workspace-write", workspace_root=str(ws))
+    never_there = str(elsewhere / "never-there")
+
+    assert judge_extra_root(never_there, policy).refusal
+    assert judge_root_removal(never_there, policy).refusal is None
 
 
 def test_list_answers_the_asker_and_announces_nothing(outside):
