@@ -13,11 +13,20 @@ Two halves, and they are deliberately not the same instrument:
   skips elsewhere.  Its subject is the interpreter hole the old static scan could
   not close: a ``python3 -c`` write is refused by the kernel, not by a parser.
 
-The outside location is a sibling of the pytest temp dir *inside the per-user
-temp root* — outside ``/tmp`` and outside ``tempfile.gettempdir()``, so it lies
-outside every root a ``workspace-write`` policy grants.  That is what stops a
-test from passing on the temp grant while believing it proved the workspace
-grant.
+The outside location is found by a **ladder** of candidate parents, and the first
+one this host will let the scratch tree be created under wins: the parent of
+``tempfile.gettempdir()`` first, then ``/var/tmp``.  Both are outside ``/tmp`` and
+outside ``tempfile.gettempdir()``, so the scratch tree lies outside every root a
+``workspace-write`` policy grants — which is what stops a test from passing on
+the temp grant while believing it proved the workspace grant.
+
+The first rung is the one a dev host uses, so that geometry is unchanged.  The
+second is what a CI runner needs, where the temp root *is* ``/tmp`` and its parent
+is ``/``: the non-root ``runner`` user cannot create anything there, so every test
+in this file that takes the fixture skipped on the ubuntu leg — the whole bash-v2
+boundary family, argv and all, had no CI measurement.  A ladder, rather than a
+retry of the same rung, is also why the fixture still skips honestly when no rung
+can be created: a refusal is not a pass.
 
 The boundary half is per-backend and skips where its backend is absent: the
 darwin tests need ``sandbox-exec``, and the linux tests (P3) need a ``bwrap``
@@ -40,6 +49,7 @@ import emrg.sandbox.providers.linux as linux_provider
 
 from emrg.sandbox.contract import SandboxUnavailableError, sandbox_denial_marker
 from emrg.sandbox.policy import SandboxPolicy
+from emrg.sandbox.roots import writable_roots
 from emrg.tools.bash_tool_v2 import (
     BashToolV2,
     _decode_output,
@@ -99,26 +109,105 @@ class Boundary:
         )
 
 
+def _scratch_parents() -> list[Path]:
+    """The candidate parents for the scratch tree, in the order they are tried.
+
+    Rung 1 is the parent of ``tempfile.gettempdir()``: the temp root is a granted
+    root and its parent is not, which is what gives the fixture a genuine
+    outside on a dev host.  Rung 2 is ``/var/tmp``, present and world-writable on
+    the CI runners and outside ``/tmp`` as well as the temp root.
+
+    The ladder is ordered, not a set: a host that can use rung 1 keeps using it,
+    so the geometry every existing darwin run measured is the geometry it still
+    measures.
+    """
+    return [
+        Path(os.path.realpath(tempfile.gettempdir())).parent,
+        Path(os.path.realpath("/var/tmp")),
+    ]
+
+
+def scratch_base(candidates=None) -> Path | None:
+    """The scratch tree created under the first candidate that accepts it, or ``None``.
+
+    Creation *is* the measurement — a candidate is usable only if the base
+    directory can really be made under it — so this is the same act the fixture
+    needs, not a proxy for it (``os.access`` on a directory that never holds the
+    tree would answer a different question, and answers it for root optimistically).
+
+    ``candidates`` exists so a test can hand the ladder a parent it knows to be
+    unusable; production calls it with none and gets :func:`_scratch_parents`.
+    """
+    for parent in _scratch_parents() if candidates is None else candidates:
+        base = Path(parent) / f"emrg-v2-boundary-{os.getpid()}"
+        try:
+            if base.exists():
+                shutil.rmtree(base)
+            base.mkdir(parents=True)
+        except OSError:
+            continue
+        return base
+    return None
+
+
 @pytest.fixture
 def boundary():
     """A scratch pair whose parent is outside /tmp and outside gettempdir().
 
     ``tempfile.gettempdir()`` is a granted root; its *parent* is not, which is
-    what gives the test a genuine outside.  If the host refuses that directory the
-    test cannot be honest about the boundary, so it skips rather than passes.
+    what gives the test a genuine outside.  If the host refuses every rung of the
+    ladder the test cannot be honest about the boundary, so it skips rather than
+    passes — and the reason names every parent that was tried, because "cannot
+    create a scratch tree" without the paths is a skip nobody can act on.
     """
-    parent = Path(os.path.realpath(tempfile.gettempdir())).parent
-    base = parent / f"emrg-v2-boundary-{os.getpid()}"
-    try:
-        if base.exists():
-            shutil.rmtree(base)
-        base.mkdir(parents=True)
-    except OSError as exc:  # pragma: no cover - host-specific
-        pytest.skip(f"cannot create a scratch tree outside the temp root: {exc}")
+    base = scratch_base()
+    if base is None:
+        tried = ", ".join(str(parent) for parent in _scratch_parents())
+        pytest.skip(f"cannot create a scratch tree outside the temp root (tried {tried})")
     try:
         yield Boundary(base)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+# ── the ladder that finds a genuine outside ───────────────────────────────
+
+
+class TestTheScratchLadder:
+    """The fixture's own premise, which is what skipped the family on the ubuntu leg."""
+
+    def test_the_temp_root_parent_is_the_first_rung(self):
+        """A host that can use rung 1 must keep it: every earlier darwin reading is on it."""
+        assert _scratch_parents()[0] == Path(os.path.realpath(tempfile.gettempdir())).parent
+
+    def test_the_second_rung_lies_outside_every_root_a_workspace_write_grants(self, tmp_path):
+        """The fixture is honest only while the scratch tree is outside the grant.
+
+        Asked of the real derivation rather than of a hand-written copy of it,
+        because the copy is the thing that drifts: a rung added later is checked
+        by this same rule.
+        """
+        policy = SandboxPolicy(mode="workspace-write", workspace_root=str(tmp_path))
+        second = _scratch_parents()[1]
+        for granted in writable_roots(policy):
+            root = Path(os.path.realpath(granted))
+            assert second != root, f"the second rung is a granted root itself: {root}"
+            assert root not in second.parents, f"the second rung is inside {root}"
+
+    def test_a_parent_that_cannot_hold_the_tree_is_passed_over(self, tmp_path):
+        """The defect the ladder exists for: one rung refusing is not the end of the search."""
+        (tmp_path / "a-file").write_text("not a directory", encoding="utf-8")
+        blocked = tmp_path / "a-file" / "under-it"
+        ok = tmp_path / "ok"
+        base = scratch_base([blocked, ok])
+        assert base is not None, "a usable rung was passed over"
+        assert base.parent == ok
+        assert base.is_dir()
+
+    def test_no_rung_at_all_reads_as_none(self, tmp_path):
+        """And ``None`` is the honest answer: the caller skips, it does not pass."""
+        (tmp_path / "a-file").write_text("not a directory", encoding="utf-8")
+        assert scratch_base([tmp_path / "a-file" / "under-it"]) is None
 
 
 # ── fail closed: the half that runs on every platform ─────────────────────
