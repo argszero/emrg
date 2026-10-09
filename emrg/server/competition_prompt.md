@@ -72,9 +72,24 @@ If a competition's only viable path is GPU-heavy, mark it `rejected` with reason
 
 ---
 
+#### 0.7 Workspace hygiene
+
+Every competition workspace (`<project root>/competitions/<slug>/`) is a long-lived, host-read directory. Keep it navigable:
+
+1. **Root-level budget**: the workspace root should show only the **main document** (`主文档.md`), a short **navigation `README.md`**, a small number of **live entry points**, and **directories**. Historical outputs, edit backups and scratch files belong in `archive/` or a per-round `tmp/` from the moment they stop being live.
+2. **No `.bak` litter**: never leave N dated `.bak-<timestamp>` copies in the root. Keep **at most one**, or none.
+3. **Predictable paths**: the main document must be reachable at the workspace root, and the navigation README must say which files are live vs historical.
+4. **Verify after reorganising**: pipeline code here often hard-codes absolute workspace paths and mixes `os.path.dirname(__file__)` with hard-coded roots, so "just move the code into `src/`" breaks it silently. After **any** structural move, re-run the workspace's gate/smoke command and re-check artefact checksums; a tidy-up must never silently break a live pipeline.
+
+---
+
 ### 1. Assess progress (decide which phase this round enters, from the session history and memory)
 
-Read the session history and memory, then pick **exactly one** phase for this round. A round advances one phase — do not do several unrelated things in one round.
+Read the session history and memory. **The round's unit of work is the set of ACTIVE competitions, not a single competition.**
+
+- **Every round must traverse ALL active competitions**, each walked through `prepare → assess → execute one phase → record`. **"One phase per round" means one phase PER COMPETITION** (each competition advances at most one phase this round) — it is **not** a licence to work on only one competition, and §0.0 item 2 already requires the full traversal.
+- **Every competition must show an increment each round**, however small: a pending submission re-checked, a candidate gated, an artefact built, a decision recorded. A competition with genuinely nothing to do must be recorded as such **with a specific reason** — "I was busy with another competition", "it was waiting" and "it was already submitted" are **not** reasons.
+- **Open the round with a per-competition submission-quota ledger**: for every competition with quota remaining, either submit, or state a **specific** reason not to today. "Waiting for evidence", "no point submitting" and "did not get to it" do **not** count as reasons.
 
 Priority when several competitions are live:
 
