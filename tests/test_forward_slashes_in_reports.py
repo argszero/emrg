@@ -66,8 +66,29 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: and a sibling guard parses it.
 SWEPT = ("emrg", "scripts")
 
-#: Directories that hold no source this rule owns.
+#: Directories that hold no source this rule owns. Read **relative to the root the sweep was
+#: pointed at**, never against an absolute path: an ancestor of the checkout carrying one of
+#: these names is not an in-tree directory, and reading past the root let it silence the whole
+#: sweep (measured 2026-10-10 on this file's own tree: the same commit answered 11 passed under
+#: `<plain>/wt` and `only 0 file(s) were judged` under `<plain>/node_modules/wt`).
 SKIPPED = {".venv", "__pycache__", "node_modules"}
+
+
+def swept_files(base: Path) -> list[Path]:
+    """Every `.py` under `base` the skip does not exclude, in a stable order.
+
+    The skip reads `path.relative_to(base).parts`, so it is a fact about the tree it was
+    pointed at rather than about where the machine put the checkout; the directories the skip
+    is for stay skipped, because inside `base` they are the vendored trees it means.
+
+    :param base: the root to walk.
+    :returns: the paths, sorted.
+    """
+    return [
+        path
+        for path in sorted(Path(base).rglob("*.py"))
+        if not SKIPPED & set(path.relative_to(base).parts)
+    ]
 
 
 def _is_relative_to_call(node: ast.AST) -> bool:
@@ -238,9 +259,7 @@ class TestThisTree:
             base = REPO_ROOT / directory
             if not base.is_dir():
                 continue
-            for path in sorted(base.rglob("*.py")):
-                if any(part in SKIPPED for part in path.parts):
-                    continue
+            for path in swept_files(base):
                 try:
                     source = path.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError):
@@ -258,4 +277,35 @@ class TestThisTree:
             "and `emrg\\bad.py` on Windows, so every assertion written against the POSIX "
             "spelling passes here and fails `test-windows`. Render `.as_posix()`: "
             + ", ".join(found)
+        )
+
+
+class TestTheSweep:
+    def test_the_skip_reads_the_path_relative_to_the_root(self, tmp_path: Path) -> None:
+        """Two directions on one tree, and the tree is put where the skip's own name is an ancestor.
+
+        The sweep is given a root that **sits under** a directory named `node_modules` -- the
+        component the skip is about -- and must still judge the module inside it. An absolute
+        `set(path.parts)` cannot tell that ancestor from an in-tree directory, so it skipped the
+        whole sweep and the counting assertion above read 0 file(s) judged (measured 2026-10-10:
+        the same commit passed on a plain path and failed under a `node_modules` one). The
+        directory the skip is for must keep being skipped, which is the exclusion's purpose.
+        """
+        root = tmp_path / "node_modules" / "checkout" / "emrg"
+        root.mkdir(parents=True)
+        (root / "subject.py").write_text('print(f"{p.relative_to(root)}")\n', encoding="utf-8")
+        vendored = root / "node_modules" / "dep"
+        vendored.mkdir(parents=True)
+        (vendored / "captured.py").write_text(
+            'print(f"{p.relative_to(root)}")\n', encoding="utf-8"
+        )
+
+        judged = [path.name for path in swept_files(root)]
+
+        assert "subject.py" in judged, (
+            f"the ordinary module under {root} was not judged - the sweep answers about where "
+            f"the checkout sits rather than about the tree: {judged}"
+        )
+        assert "captured.py" not in judged, (
+            f"an in-tree vendored directory must stay skipped: {judged}"
         )
