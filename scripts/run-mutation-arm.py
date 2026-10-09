@@ -75,6 +75,13 @@ earlier assertion on the same test fires first (it echoed `assert 1 < 0`; that f
 killed the arm in one step). The block is printed for this verdict only - for KILLED the
 expectation already matched, and for the refusals there is nothing to search for.
 
+A refused pre-flight prints the nodes that failed *before* the mutation, capped at
+`_PREFLIGHT_FAILURES_PRINTED`, under the `preflight:` line. Same reasoning one state
+earlier: the refusal's remedy has to name a cause, and "check the node id" is one of
+three - a node-id cause and a tree that was already red both reach it. The failing nodes
+are the datum that tells them apart, pytest prints them unasked, and measured
+2026-10-09 (`cyc20261009-133913`) a refusal with twenty failures printed none of them.
+
 What it does, in order
 ----------------------
 1. snapshot the named file and resolve the mutation anchor (exactly one occurrence);
@@ -219,6 +226,12 @@ _ECHOED_ASSERTION = re.compile(r"^[>E]\s+(?P<text>.*\bassert\b.*)$")
 _ASSERTION_CANDIDATES = 5
 _ASSERTION_MAX_CHARS = 200
 
+#: How many of a refused pre-flight's failing nodes the report prints by name. Capped for
+#: the same reason as the candidates above, and the count it leaves out is printed rather
+#: than dropped: a reader who has to know whether the list named one file or twenty can
+#: see it, and the names are the evidence the verdict turns on.
+_PREFLIGHT_FAILURES_PRINTED = 5
+
 
 def _purge_bytecode(target: Path) -> list[str]:
     """Delete the bytecode caches that could answer for the mutated file.
@@ -276,13 +289,28 @@ def _combined(proc: subprocess.CompletedProcess[str]) -> str:
     return (proc.stdout or "") + (proc.stderr or "")
 
 
-def _failed_node(out: str) -> str:
-    """The first `FAILED <node>` line pytest printed, or empty - evidence, not a count."""
+def _failed_nodes(out: str) -> list[str]:
+    """Every `FAILED <node>` line pytest printed, in order - evidence, not a count.
+
+    All of them rather than the first, because which nodes failed is the datum that
+    separates the two situations one verdict covers: a target that is wrong fails on
+    its own nodes, while a tree that was already red fails on files the arm never
+    touched. Measured 2026-10-09 (`cyc20261009-133913`): a refused pre-flight on a
+    tree whose every failure was in another file printed `failed node: -`, and the
+    remedy sent the reader to the node id - which was not wrong.
+    """
+    found: list[str] = []
     for line in out.splitlines():
         stripped = line.strip()
         if stripped.startswith("FAILED "):
-            return stripped[len("FAILED ") :].split(" - ")[0].strip()
-    return ""
+            found.append(stripped[len("FAILED ") :].split(" - ")[0].strip())
+    return found
+
+
+def _failed_node(out: str) -> str:
+    """The first `FAILED <node>` line pytest printed, or empty - evidence, not a count."""
+    nodes = _failed_nodes(out)
+    return nodes[0] if nodes else ""
 
 
 def _passed_count(out: str) -> int:
@@ -463,6 +491,26 @@ def _why_no_interpreter(exc: BaseException) -> str:
     )
 
 
+def _names_the_failing_nodes(out: str) -> str:
+    """One sentence for the refusal whose pre-flight failed on named nodes, or "".
+
+    Present only when the run named some, because the sentence points at evidence that
+    is then in the report: the node-id reading is one of three causes and it is the one
+    that is wrong whenever the failures are in files this arm never touched. Measured
+    2026-10-09 (`cyc20261009-133913`): a full-suite arm on PR #1978's head was refused
+    with 20 failures, every one of them in an unrelated file, and the verdict sent the
+    reader to the node id and the interpreter instead of showing them.
+    """
+    if not _failed_nodes(out):
+        return ""
+    return (
+        " The nodes that failed before any mutation are named under the pre-flight line, "
+        "and their names settle the cause before the node id does: a list naming files "
+        "other than the target's own is a tree that was already red before this arm ran, "
+        "and then no node id was wrong"
+    )
+
+
 def _why_target_broken(rc: int, passed: int, out: str, interpreter: str) -> str:
     """Why the pre-flight refused, read from the run's own output.
 
@@ -517,7 +565,7 @@ def _why_target_broken(rc: int, passed: int, out: str, interpreter: str) -> str:
         "tests/test_x.py::TestC::test_y). The run was made with the interpreter this "
         f"tool resolved ({interpreter}); if that is not the one you meant, run the arm "
         "through the checkout's runner(s) rather than a bare python3, which can resolve "
-        "to the installed interpreter"
+        f"to the installed interpreter.{_names_the_failing_nodes(out)}"
     )
 
 
@@ -531,6 +579,13 @@ class Arm:
         self.original = original
         self.preflight = "skipped" if args.no_preflight else "pending"
         self.failed_node = ""
+        #: the nodes the *pre-flight* failed on, in pytest's own order. Printed on a
+        #: refusal because their names are the only datum that separates "this arm's
+        #: target is wrong" from "this tree was already red before the arm ran" - and
+        #: the verdict's prose names the node id either way. Measured 2026-10-09
+        #: (`cyc20261009-133913`): a refusal whose 20 failures were all in files the
+        #: arm never touched printed `failed node: -`.
+        self.preflight_failures: list[str] = []
         self.restored: bool | None = None
         self.verdict = ""
         self.why = ""
@@ -566,6 +621,7 @@ class Arm:
             "expect": self.args.expect,
             "interpreter": self.interpreter,
             "preflight": self.preflight,
+            "preflight_failures": list(self.preflight_failures),
             "failed_node": self.failed_node,
             "mutated_rc": self.mutated_rc,
             "mutated_passed": self.mutated_passed,
@@ -591,6 +647,18 @@ def _report(arm: Arm, as_json: bool) -> None:
     print(f"target: {', '.join(arm.args.node)}")
     print(f"interpreter: {arm.interpreter or '(not resolved - the arm stopped first)'}")
     print(f"preflight: {arm.preflight}")
+    if arm.verdict == TARGET_BROKEN and arm.preflight_failures:
+        # The refusal's own evidence, and the reason it is here rather than in the
+        # verdict's prose: which nodes failed is what tells the reader whether the arm's
+        # target is wrong or the whole tree was already red, and both shapes reach this
+        # verdict. Measured 2026-10-09 (`cyc20261009-133913`), where that list was the
+        # only thing separating a broken full-suite arm from a broken tree.
+        print("the pre-flight failed before any mutation, on:")
+        for node in arm.preflight_failures[:_PREFLIGHT_FAILURES_PRINTED]:
+            print(f"  {node}")
+        hidden = len(arm.preflight_failures) - _PREFLIGHT_FAILURES_PRINTED
+        if hidden > 0:
+            print(f"  ... and {hidden} more")
     print(f"mutated run: rc={arm.mutated_rc} passed={arm.mutated_passed}")
     print(f"failed node: {arm.failed_node or '-'}")
     print(f"restored byte-for-byte: {arm.restored}")
@@ -715,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
                 # causes it was is read from the output, not assumed - see
                 # `_why_target_broken`.
                 arm.preflight = f"refused (rc={proc.returncode}, {passed} passed)"
+                arm.preflight_failures = _failed_nodes(_combined(proc))
                 arm.decide(
                     TARGET_BROKEN,
                     _why_target_broken(
