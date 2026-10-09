@@ -278,7 +278,11 @@ class TestTheRefusals:
         offenders, unreadable = scan_tree(tmp_path)
 
         assert unreadable == [], unreadable
-        assert offenders == ["tests/bad.py:6"], offenders
+        # Built the way the scanner builds it, so the expectation names the fact (this
+        # file, this line) and not the separator: written as `"tests/bad.py:6"` it passes
+        # on POSIX and fails on Windows, where the report reads `tests\bad.py:6`
+        # (measured: run 37983292835, `test-windows`).
+        assert offenders == [f"{Path('tests') / 'bad.py'}:6"], offenders
 
 
 def test_the_rule_is_about_python_not_prose() -> None:
