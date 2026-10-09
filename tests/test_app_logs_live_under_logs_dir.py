@@ -376,16 +376,40 @@ def _root_log_hits(text: str, suffix: str | None = None) -> list[tuple[int, str,
     return hits
 
 
-def _source_files() -> list[Path]:
+def _source_files(root: Path = REPO_ROOT) -> list[Path]:
+    """Every file below `root` that the declared roots, suffixes and skip set admit.
+
+    A function of `root`, so the scope can be driven on a tree a test builds. While it
+    was hardwired to `REPO_ROOT`, the only scope any test could measure was this
+    checkout's, and the declared roots could not be read back at all.
+    """
     files: list[Path] = []
-    for root in (REPO_ROOT / name for name in _SCAN_ROOTS):
-        for path in sorted(root.rglob("*")):
+    for name in _SCAN_ROOTS:
+        base = root / name
+        for path in sorted(base.rglob("*")):
             if path.suffix not in _SCAN_SUFFIXES or not path.is_file():
                 continue
-            if _SCAN_SKIP_PARTS & set(path.relative_to(REPO_ROOT).parts):
+            if _SCAN_SKIP_PARTS & set(path.relative_to(root).parts):
                 continue
             files.append(path)
     return files
+
+
+def _roots_contributing_nothing(root: Path) -> list[str]:
+    """Declared roots carrying no file this scan reads, in declaration order.
+
+    The enforcement asserts `scanned > 50`, which cannot see a **single** root leaving
+    the walk: measured 2026-10-10 on this checkout, `emrg/` carries 224 of the 279
+    files, so `scripts/` (43), `packaging/` (10), `bin/` (2) or even `emrg/` (224 -> 55)
+    can each vanish and the threshold still passes. A root named in `_SCAN_ROOTS` is a
+    claim about the scope, so it is read back rather than assumed.
+    """
+    seen = {name: 0 for name in _SCAN_ROOTS}
+    for path in _source_files(root):
+        head = path.relative_to(root).parts[0]
+        if head in seen:
+            seen[head] += 1
+    return [name for name in _SCAN_ROOTS if not seen[name]]
 
 
 def test_the_detector_fires_on_a_root_log_path_and_not_on_another_file(tmp_path):
@@ -460,3 +484,38 @@ def test_no_source_builds_a_log_path_under_the_config_root():
         "exists: "
         + "; ".join(offenders)
     )
+
+
+def test_every_declared_scan_root_still_carries_a_file():
+    """The declaration is read back, so a root that stopped being walked fails by name.
+
+    `scanned > 50` above cannot see one root going: measured 2026-10-10, `emrg/` carries
+    224 of the 279 files, so any single root can vanish and the threshold still passes.
+    This measures the declaration against **the tree** — a declared root that no longer
+    carries a file the walk admits. It cannot see an edit to `_SCAN_ROOTS` itself, which
+    is a different question: the family's roots are pinned to each other in
+    `tests/test_guard_scan_scope_pairing.py`, and these four differ from that family's
+    deliberately (`bin/` is a root here, `tests/` is not).
+    """
+    gone = _roots_contributing_nothing(REPO_ROOT)
+    assert gone == [], (
+        f"declared scan root(s) {gone} carry no file this scan reads, so the guard has "
+        f"silently shrunk by that much while still claiming to cover {list(_SCAN_ROOTS)} - "
+        "either the directory left the tree or the walk stopped admitting its files"
+    )
+
+
+def test_a_declared_root_that_is_not_there_is_reported(tmp_path):
+    """The other direction: a root that is absent has to be named, not silently skipped."""
+    for name in _SCAN_ROOTS:
+        (tmp_path / name).mkdir()
+    (tmp_path / "bin" / "launch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    assert _roots_contributing_nothing(tmp_path) == [
+        name for name in _SCAN_ROOTS if name != "bin"
+    ], "a declared root with no admittable file is a root the scan does not read"
+
+    for name in _SCAN_ROOTS:
+        (tmp_path / name / f"{name}.py").write_text("pass\n", encoding="utf-8")
+
+    assert _roots_contributing_nothing(tmp_path) == []

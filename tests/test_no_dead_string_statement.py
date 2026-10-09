@@ -104,6 +104,54 @@ def dead_string_statements(source: str) -> list[int]:
     return sorted(found)
 
 
+def scanned_files(root: Path) -> list[Path]:
+    """Every `.py` under `root`'s scanned dirs that the skip set does not exclude.
+
+    The skip test reads the path **relative to `root`**, which is what makes this a
+    function of `root` alone: an absolute-parts test would answer differently on a
+    machine whose checkout happens to sit under a directory named `build`, `dist` or
+    `node_modules`, and a reading that depends on where the machine put the tree is not
+    a reading of the tree. The three scripts in this family spell the same test the same
+    way.
+    """
+    out: list[Path] = []
+    for name in SCANNED_DIRS:
+        base = root / name
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            if set(path.relative_to(root).parts) & SKIP_DIRS:
+                continue
+            out.append(path)
+    return out
+
+
+def scan_tree(root: Path) -> tuple[list[str], list[str]]:
+    """Read `root`; return (`offenders`, `unreadable`).
+
+    `unreadable` is the leg that keeps a clean verdict honest - a file this rule could
+    not read is not a file it cleared - and it is returned rather than asserted here so
+    that the caller can tell the two apart, and so that a tree this rule cannot read has
+    a test of its own instead of being pinned by nothing.
+    """
+    offenders: list[str] = []
+    unreadable: list[str] = []
+    for path in scanned_files(root):
+        rel = path.relative_to(root)
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            unreadable.append(f"{rel} ({type(exc).__name__})")
+            continue
+        try:
+            lines = dead_string_statements(source)
+        except SyntaxError as exc:
+            unreadable.append(f"{rel} (SyntaxError: {exc.msg})")
+            continue
+        offenders += [f"{rel}:{line}" for line in lines]
+    return offenders, unreadable
+
+
 class TestTheRuleIsReal:
     def test_the_inserted_docstring_shape_is_reported(self) -> None:
         """The exact defect, reduced: a new docstring inserted above the old one."""
@@ -172,26 +220,7 @@ class TestTheRuleIsReal:
 class TestThisTree:
     def test_no_dead_string_statement_is_written_in_this_tree(self) -> None:
         """The enforcement — and it reads the tree it names."""
-        offenders: list[str] = []
-        unreadable: list[str] = []
-        for name in SCANNED_DIRS:
-            base = REPO_ROOT / name
-            if not base.is_dir():
-                continue
-            for path in sorted(base.rglob("*.py")):
-                if set(path.parts) & SKIP_DIRS:
-                    continue
-                try:
-                    source = path.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError) as exc:
-                    unreadable.append(f"{path.relative_to(REPO_ROOT)} ({type(exc).__name__})")
-                    continue
-                try:
-                    lines = dead_string_statements(source)
-                except SyntaxError as exc:
-                    unreadable.append(f"{path.relative_to(REPO_ROOT)} (SyntaxError: {exc.msg})")
-                    continue
-                offenders += [f"{path.relative_to(REPO_ROOT)}:{line}" for line in lines]
+        offenders, unreadable = scan_tree(REPO_ROOT)
         assert not unreadable, (
             "a file this rule could not read is not a file it cleared: " + ", ".join(unreadable)
         )
@@ -203,16 +232,57 @@ class TestThisTree:
 
     def test_the_scan_reaches_the_family_it_names(self) -> None:
         """A scan that finds no file would pass the assertion above for the wrong reason."""
-        scanned = [
-            p
-            for name in SCANNED_DIRS
-            for p in (REPO_ROOT / name).rglob("*.py")
-            if set(p.parts) & SKIP_DIRS == set()
-        ]
+        scanned = scanned_files(REPO_ROOT)
         assert len(scanned) > 100, f"the scan saw only {len(scanned)} files"
         assert REPO_ROOT / "scripts" / "check-vote-count.py" in scanned, (
             "the file whose defect this rule came from must be in the scan"
         )
+
+
+class TestTheRefusals:
+    """A reading of nothing is not a clean reading, and the leg that says so needs a test.
+
+    Both legs are driven on a root this file builds, which is what the extraction bought:
+    before it, the scan lived inside the enforcement test and walked `REPO_ROOT` only, so
+    the `unreadable` branch could not be reached by any input and a later edit that dropped
+    it would have left the file green while the rule silently cleared what it could not
+    read.
+    """
+
+    def test_a_file_that_will_not_parse_is_not_a_clean_reading(self, tmp_path: Path) -> None:
+        tree = tmp_path / "emrg"
+        tree.mkdir()
+        (tree / "broken.py").write_text("def f(:\n    pass\n")
+        (tree / "fine.py").write_text('"""Docs."""\n\n\ndef f():\n    return 1\n')
+
+        offenders, unreadable = scan_tree(tmp_path)
+
+        assert offenders == [], offenders
+        assert len(unreadable) == 1, unreadable
+        assert "broken.py" in unreadable[0] and "SyntaxError" in unreadable[0], unreadable
+
+    def test_the_same_rule_reports_the_dead_shape_on_a_root(self, tmp_path: Path) -> None:
+        """The other direction, at the layer the synthetic sources above do not cover."""
+        tree = tmp_path / "tests"
+        tree.mkdir()
+        (tree / "bad.py").write_text(
+            '"""Docs."""\n'
+            "\n"
+            "\n"
+            "def f():\n"
+            '    """One."""\n'
+            '    """Two."""\n'
+            "    return 1\n"
+        )
+
+        offenders, unreadable = scan_tree(tmp_path)
+
+        assert unreadable == [], unreadable
+        # Built the way the scanner builds it, so the expectation names the fact (this
+        # file, this line) and not the separator: written as `"tests/bad.py:6"` it passes
+        # on POSIX and fails on Windows, where the report reads `tests\bad.py:6`
+        # (measured: run 37983292835, `test-windows`).
+        assert offenders == [f"{Path('tests') / 'bad.py'}:6"], offenders
 
 
 def test_the_rule_is_about_python_not_prose() -> None:

@@ -55,6 +55,25 @@ all three, and only for a name no other form in the module binds -- so a real
 binding (an assignment, a parameter, `for`/`with`/`except ... as`, an import, a
 walrus, a match capture, `global`/`nonlocal`) keeps its line clean.
 
+A declaration that binds nothing
+--------------------------------
+An annotation **with no value** is the third shape that declares a name without
+binding one, and until 2026-10-10 (issue #2007) it was invisible for the same reason:
+
+    x: int      # records the annotation in __annotations__; the namespace gets nothing
+
+`symtable` cannot tell `x: int` from `x: int = 1` -- both come back
+`is_assigned=True, is_annotated=True` -- so the "is it bound at all" half answered yes
+from a line that bound nothing. The AST has the discriminator it lacks:
+`AnnAssign.value is None`.
+
+Two refinements stop this from becoming a false-positive machine, and both are
+load-bearing. It does **not** relax the read gate -- a bare annotation reads nothing,
+so it could earn no relaxation anyway, and relaxing it reports class-body fields
+(`class Message(NamedTuple): session: str`) with no line at all: a prototype measured
+that as **69 findings on this checkout**. And it only removes the name's *binding*
+status; a name another form binds, or that nothing reads, is still left alone.
+
 What it does not claim
 ----------------------
 It reads *binding*, not reachability: a name bound nowhere is reported wherever it
@@ -208,24 +227,30 @@ def _has_star_import(tree: ast.Module) -> bool:
 def _binding_names(tree: ast.Module) -> set[str]:
     """Every name some form in this module binds, other than a read-before-write target.
 
-    The forms that establish a value: assignment and `AnnAssign` targets, walrus
-    targets, comprehension and `for` targets, `with ... as`, `except ... as`,
-    parameters, imports, `def`/`class` names, `global`/`nonlocal`, `match`
-    captures and a type alias. `ast.Name(Store)` covers most of them; the rest are
-    listed because the interpreter holds them as strings, not nodes.
+    The forms that establish a value: assignment and a **valued** `AnnAssign` target,
+    walrus targets, comprehension and `for` targets, `with ... as`, `except ... as`,
+    parameters, imports, `def`/`class` names, `global`/`nonlocal`, `match` captures
+    and a type alias. `ast.Name(Store)` covers most of them; the rest are listed
+    because the interpreter holds them as strings, not nodes.
+
+    Two shapes reach this loop as a `Store` Name without binding anything, so both are
+    excluded by node identity -- `x += 1` (which reads `x` first) and `x: int` with no
+    value (which records the annotation and stores nothing). `del` targets are `Del`,
+    never `Store`, so they need no such care.
     """
     names: set[str] = set()
-    # An `AugAssign` target is a `Store` Name like any other, so the `ctx` test below
-    # would count the very target this file is trying to see through. They are
-    # collected by node identity and skipped here; `del` targets are `Del`, never
-    # `Store`, so they need no such care.
-    augmented_targets = {
-        id(node.target)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
-    }
+    non_binding_targets: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and id(node) in augmented_targets:
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            non_binding_targets.add(id(node.target))
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and node.value is None
+            and isinstance(node.target, ast.Name)
+        ):
+            non_binding_targets.add(id(node.target))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and id(node) in non_binding_targets:
             continue
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             names.add(node.id)
@@ -285,6 +310,45 @@ def _read_before_write_names(tree: ast.Module) -> set[str]:
     return (augmented | deleted) - _binding_names(tree)
 
 
+def _declaration_only_names(tree: ast.Module) -> set[str]:
+    """Names whose **only** binding in this module is an annotation with no value.
+
+    `x: int` evaluates its annotation and records it in `__annotations__`; it stores
+    nothing in the namespace, so a read of `x` is an error -- `NameError` at module
+    level, `UnboundLocalError` inside a function (measured 2026-10-10, issue #2007):
+
+        >>> x: int
+        >>> print(x)
+        NameError: name 'x' is not defined
+
+    `symtable` cannot tell the two annotations apart -- `'x: int'` and `'x: int = 1'`
+    both come back `is_assigned=True, is_annotated=True` -- so the "is it bound at all"
+    half of the rule answered *yes* from a line that bound nothing. The AST has the
+    discriminator `symtable` lacks: `AnnAssign.value is None`.
+
+    **This set does not relax the read gate**, and that is the whole difficulty of the
+    change. A bare annotation reads nothing, so it contributes no read line: a name
+    whose only appearance is a class-body annotation (`class Message(NamedTuple):
+    session: str`) has `is_referenced() == False` in that scope, and letting it through
+    the gate reports a finding with **no line at all**. A prototype that did exactly
+    that reported 69 findings on this checkout, every one a named field. Only a name
+    something else in the module actually reads is reported, which the gate decides on
+    its own.
+
+    Module-wide and conservative, like its sibling above: a name any other form binds
+    is left alone, and the cost of being wrong is a missed finding.
+    """
+    bare: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.AnnAssign)
+            and node.value is None
+            and isinstance(node.target, ast.Name)
+        ):
+            bare.add(node.target.id)
+    return bare - _binding_names(tree)
+
+
 def _module_bindings(top: symtable.SymbolTable) -> set[str]:
     """Every name the module level binds: assignments, imports, defs and classes.
 
@@ -311,7 +375,11 @@ def _scope_paths(
 
 
 def _unbound_by_scope(
-    top: symtable.SymbolTable, module_bound: set[str], read_before_write: set[str]
+    top: symtable.SymbolTable,
+    module_bound: set[str],
+    read_before_write: set[str],
+    does_not_bind: set[str],
+    reads_by_scope: dict[tuple[str, ...], dict[str, list[int]]],
 ) -> dict[tuple[str, ...], set[str]]:
     """Names each scope reads and nothing visible binds, keyed by the scope's path.
 
@@ -322,24 +390,50 @@ def _unbound_by_scope(
     the module level binds it, or when the interpreter provides it. What is left is
     a read whose lookup can find nothing.
 
-    `read_before_write` is the one exception to the first clause: `symtable` calls
-    `x += 1` and `del x` *assignments*, so `is_assigned` would exempt a name whose
-    only binding is the line that has to read it first. Those names are not exempt
-    on that ground; every other exemption still applies to them, a parameter or a
-    `global` among them.
+    Two sets correct the *first* clause, and they are deliberately not the same one:
+
+    * `read_before_write` -- `x += 1` and `del x` -- are exempt from `is_assigned()`
+      **and** are let through the `is_referenced()` gate, because `symtable` reports
+      an augmented-assignment target as assigned and *not* referenced while the line
+      itself reads the name.
+    * `does_not_bind` (which contains `read_before_write` and the declaration-only
+      names) is exempt from `is_assigned()` **only**. A bare annotation reads nothing,
+      so it earns no relaxation of the gate: a name nothing reads stays silent, which
+      is what keeps a class-body field out of the findings.
+
+    The gate has a **second authority**, and it is the AST: `reads_by_scope` is where
+    a scope's own reads are recorded (the same walk that names the finding's line), so
+    a name it shows this scope reads is let through even when `symtable` says
+    otherwise. `is_referenced()` alone is not enough, because it is blind in one more
+    place than `read_before_write` covers -- a read *inside an inlined comprehension*.
+    PEP 709 inlines a list/set/dict comprehension into the enclosing frame, so the
+    element expression's `Load` never reaches the enclosing symbol's `is_referenced()`
+    (measured 2026-10-10 on issue #2009's head: a bare `x: int` read only by
+    `[x for _ in range(3)]` was reported by neither gate arm, while the same read in a
+    generator expression -- a real child scope -- was). The relaxation is safe for the
+    reason the other one is: a class-body field is read by nothing, so no AST read
+    exists to let it through.
+
+    Every other exemption still applies to those names, a parameter or a `global`
+    among them.
     """
     out: dict[tuple[str, ...], set[str]] = {}
     for path, table in _scope_paths(top, ()).items():
         names: set[str] = set()
         for symbol in table.get_symbols():
             name = symbol.get_name()
-            # `symtable` does not flag an augmented-assignment target as referenced --
-            # it reports `is_assigned` and nothing else -- so `read_before_write` names
-            # are let through this gate, having been shown by the AST to read the name.
-            if not symbol.is_referenced() and name not in read_before_write:
+            # Two things make `symtable` report a name as unreferenced while the AST
+            # shows this scope reading it: `x += 1`/`del x` (whose target it calls
+            # assigned-and-only-assigned), and a read inside an inlined comprehension.
+            # `read_before_write` covers the first, `reads_by_scope` the second.
+            if (
+                not symbol.is_referenced()
+                and name not in read_before_write
+                and name not in reads_by_scope.get(path, {})
+            ):
                 continue
             if (
-                (symbol.is_assigned() and name not in read_before_write)
+                (symbol.is_assigned() and name not in does_not_bind)
                 or symbol.is_parameter()
                 or symbol.is_imported()
                 or symbol.is_namespace()
@@ -416,10 +510,15 @@ def check_file(path: Path) -> tuple[list[Finding], bool]:
         return [], False
     top = symtable.symtable(source, str(path), "exec")
     read_before_write = _read_before_write_names(tree)
-    unbound = _unbound_by_scope(
-        top, _module_bindings(top) - read_before_write, read_before_write
-    )
+    does_not_bind = read_before_write | _declaration_only_names(tree)
     per_scope, everywhere = _load_lines(tree)
+    unbound = _unbound_by_scope(
+        top,
+        _module_bindings(top) - does_not_bind,
+        read_before_write,
+        does_not_bind,
+        per_scope,
+    )
     findings: list[Finding] = []
     for scope_path, names in sorted(unbound.items()):
         lines_by_name = per_scope.get(scope_path, {})
