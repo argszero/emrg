@@ -3820,15 +3820,28 @@ class EmrgServer:
         system_prompt = self._build_system_prompt(session)
         history_messages = session.get_messages_for_llm()
 
-        # Persist user message (with image references if present)
+        # Persist user message (with image references if present). The moment is
+        # stamped here, once, and then travels to the clients in the frame below —
+        # the *same string* the record holds, so the row a client shows live and
+        # the row a reopen replays can never disagree about a message's time
+        # (rant 2026-10-09T09:25:00). Stamping in the client instead would make
+        # each client's clock the source, which is the divergence this replaces.
+        user_stamp = datetime.now().isoformat()
         user_record: dict = {
             "type": "message",
             "role": "user",
             "content": req.prompt,
+            "timestamp": user_stamp,
         }
         if req.images:
             user_record["images"] = req.images
         session.append_message(user_record)
+        await self._broadcast(session.session_id, {
+            "type": "user_message",
+            "request_id": req.id,
+            "session_id": session.session_id,
+            "timestamp": user_stamp,
+        })
 
         user_content = self._build_user_content(req.prompt, req.images, self.llm.config.vision)
         messages: list[dict] = [
@@ -4287,11 +4300,15 @@ class EmrgServer:
                     })
                     return
 
-                # Persist assistant message
+                # Persist assistant message. Stamped once here and sent on in the
+                # frame below, so the live row's clock is the value a reopen reads
+                # out of the record (rant 2026-10-09T09:25:00).
+                assistant_stamp = datetime.now().isoformat()
                 session.append_message({
                     "type": "message",
                     "role": "assistant",
                     "content": full_content,
+                    "timestamp": assistant_stamp,
                 })
 
                 # Append the assistant reply to the local messages so the
@@ -4314,6 +4331,9 @@ class EmrgServer:
                     "done": True,
                     "delta": False,
                     "session_id": session.session_id,
+                    # The reply's own moment, the same string the record holds
+                    # (rant 2026-10-09T09:25:00).
+                    "timestamp": assistant_stamp,
                     # rant 21:52:18: authoritative current-context message count.
                     "context_messages": len(messages),
                 })
@@ -4489,10 +4509,16 @@ class EmrgServer:
                 reasoning=full_reasoning,
             )
 
+            # Persisted and framed from one stamp: the live row's time and the
+            # time a reopen reads out of the record are the same string, by
+            # construction rather than by two clocks agreeing (rant
+            # 2026-10-09T09:25:00).
+            assistant_stamp = datetime.now().isoformat()
             session.append_message({
                 "type": "message",
                 "role": "assistant",
                 "content": full_content,
+                "timestamp": assistant_stamp,
             })
 
             # Append the assistant reply to the local messages so the LLM
@@ -4514,6 +4540,10 @@ class EmrgServer:
                 "done": True,
                 "delta": False,
                 "session_id": session.session_id,
+                # The moment the record was written, not a client's receipt time:
+                # a client that reopens the session must show this same value
+                # (rant 2026-10-09T09:25:00).
+                "timestamp": assistant_stamp,
                 # rant 21:52:18: current LLM context size (system + history +
                 # user + all tool results + assistant replies) — authoritative
                 # for the TUI status bar message count.

@@ -12,6 +12,7 @@ from rich.cells import cell_len
 from rich.style import Style
 from emrg.client.python_tui import ChatRow, ToolCard
 from emrg.client.python_tui.widgets.base import Line, Span, Widget
+from emrg.client.python_tui.widgets.chat_row import format_message_time
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown, UserMarkdown
 
 
@@ -920,18 +921,30 @@ class ChatHistory(Widget):
     @dirty.setter
     def dirty(self, v): self._dirty = v
 
-    def add(self, role_or_widget, content=None):
+    def add(self, role_or_widget, content=None, timestamp=None):
+        """Append a row. `timestamp` is the daemon's moment for the message.
+
+        It is threaded here rather than stamped by the widget: every row's time
+        has to be the value the daemon persisted, or a reopen would show a
+        different one (rant 2026-10-09T09:25:00).
+
+        Returns the row, so a caller that does not yet know the moment — the row
+        it just echoed locally, before the daemon has written the record — can
+        set it when the daemon's frame arrives.
+        """
         if isinstance(role_or_widget, Widget):
             self.rows.append(role_or_widget)
         elif role_or_widget == "user":
             # Plan B (rant 2026-08-18T18:52:45, superseding 18:50:14): user
             # messages render as markdown (free width wrap, CJK handling)
             # while keeping the "> " prefix + cyan role visual.
-            self.rows.append(UserMarkdown(content or ""))
+            self.rows.append(UserMarkdown(content or "", timestamp=timestamp))
         else:
-            self.rows.append(ChatRow(role=role_or_widget, content=content or ""))
+            self.rows.append(ChatRow(role=role_or_widget, content=content or "",
+                                     timestamp=timestamp))
         self._line_cache.append(None)  # 新 row 无缓存
         self._dirty = True
+        return self.rows[-1]
 
     def remove(self, row):
         """Remove a widget from the chat — used for transient UI overlays."""

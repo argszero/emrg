@@ -43,7 +43,7 @@ def test_a_message_record_becomes_its_own_role_row():
         {"record_index": 1, "kind": "message", "role": "assistant", "content": long_body},
     ])
 
-    assert rows == [("user", "hello"), ("assistant", long_body)]
+    assert rows == [("user", "hello", ""), ("assistant", long_body, "")]
 
 
 def test_a_role_the_records_mode_does_not_project_is_skipped():
@@ -61,7 +61,7 @@ def test_a_role_the_records_mode_does_not_project_is_skipped():
         {"record_index": 3, "kind": "message", "role": "user", "content": "kept"},
     ])
 
-    assert rows == [("user", "kept")]
+    assert rows == [("user", "kept", "")]
 
 
 def test_a_tool_result_names_the_tool_and_whether_it_failed():
@@ -77,8 +77,8 @@ def test_a_tool_result_names_the_tool_and_whether_it_failed():
          "tool_call_id": "c2", "content": "file body", "error": False},
     ])
 
-    assert rows[0] == ("tool", "  bash error: boom in the log")
-    assert rows[1] == ("tool", "  read result: file body")
+    assert rows[0] == ("tool", "  bash error: boom in the log", "")
+    assert rows[1] == ("tool", "  read result: file body", "")
 
 
 def test_a_tool_result_without_a_name_is_still_a_row():
@@ -87,7 +87,7 @@ def test_a_tool_result_without_a_name_is_still_a_row():
         {"record_index": 5, "kind": "tool_result", "content": "body", "error": False},
     ])
 
-    assert rows == [("tool", "  tool result: body")]
+    assert rows == [("tool", "  tool result: body", "")]
 
 
 def test_an_unknown_kind_is_skipped_rather_than_rendered_blank():
@@ -101,7 +101,7 @@ def test_an_unknown_kind_is_skipped_rather_than_rendered_blank():
         {"record_index": 1, "kind": "something_new", "content": "not mine"},
     ])
 
-    assert rows == [("user", "kept")]
+    assert rows == [("user", "kept", "")]
 
 
 def test_a_malformed_record_does_not_take_the_replay_down():
@@ -113,13 +113,58 @@ def test_a_malformed_record_does_not_take_the_replay_down():
     """
     rows = _replay_rows(["not a record", None, 42, {"kind": "message", "role": "user", "content": "ok"}])
 
-    assert rows == [("user", "ok")]
+    assert rows == [("user", "ok", "")]
 
 
 def test_an_empty_or_absent_history_is_no_rows():
     """A session with no records replays to nothing, which the caller then reports."""
     assert _replay_rows([]) == []
     assert _replay_rows(None) == []
+
+
+def test_each_record_carries_its_own_moment_out_of_the_replay():
+    """The third element is the record's `timestamp`, per record — never one for all.
+
+    Rant 2026-10-09T09:25:00. A reopen must show the time the daemon persisted for
+    *that* message; a mapping that dropped the field here would leave the whole
+    transcript clockless while the live one had clocks, which is the divergence the
+    requirement removes. Per record rather than per page, so a single stray value
+    cannot make every message claim the same minute.
+    """
+    rows = _replay_rows([
+        {"kind": "message", "role": "user", "content": "first",
+         "timestamp": "2026-10-09T09:25:00"},
+        {"kind": "message", "role": "assistant", "content": "second",
+         "timestamp": "2026-10-09T09:26:30"},
+    ])
+
+    assert rows == [
+        ("user", "first", "2026-10-09T09:25:00"),
+        ("assistant", "second", "2026-10-09T09:26:30"),
+    ]
+
+
+def test_a_record_written_before_the_moment_was_carried_replays_without_one():
+    """An older record has no `timestamp`: the row gets "", not a fabricated time.
+
+    The mapping hands on what the record holds — an empty third element — and the
+    row renders no clock for it. Inventing "now" here would make an old session
+    read as if every message were sent at reopen time.
+    """
+    rows = _replay_rows([
+        {"kind": "message", "role": "user", "content": "old"},
+    ])
+
+    assert rows == [("user", "old", "")]
+
+
+def test_a_tool_row_carries_no_moment():
+    """A tool record has no clock of its own; the row is a card or a flat line."""
+    rows = _replay_rows([
+        {"kind": "tool_result", "tool_name": "bash", "content": "out", "error": False},
+    ])
+
+    assert rows == [("tool", "  bash result: out", "")]
 
 
 # ── The replay builds the same tool cards a live session does ──────────
@@ -155,7 +200,7 @@ def test_a_tool_call_and_its_result_build_one_card_not_two_rows():
          "content": "file1\nfile2", "error": False},
     ])
 
-    assert [kind for kind, _ in rows] == ["assistant", "tool_card"]
+    assert [kind for kind, _, _ in rows] == ["assistant", "tool_card"]
     card = rows[1][1]
     assert isinstance(card, ToolCard)
     assert card.tool_call_id == "c1"
@@ -193,7 +238,7 @@ def test_a_card_is_paired_by_tool_call_id_not_by_position():
          "content": "FIRST-OUT", "error": False},
     ])
 
-    cards = {card.tool_call_id: card for kind, card in rows if kind == "tool_card"}
+    cards = {card.tool_call_id: card for kind, card, _ in rows if kind == "tool_card"}
     assert set(cards) == {"first", "second"}
     assert cards["first"].output == "FIRST-OUT"
     assert cards["second"].output == "SECOND-OUT"
@@ -215,7 +260,7 @@ def test_a_call_with_no_result_is_still_a_card():
     """A turn killed mid-call showed a card live; the replay must not lose it."""
     rows = _replay_rows([_call("c1", "bash", '{"command": "sleep 99"}')])
 
-    assert [kind for kind, _ in rows] == ["assistant", "tool_card"]
+    assert [kind for kind, _, _ in rows] == ["assistant", "tool_card"]
     assert rows[1][1].status == "pending"
     assert rows[1][1].output == ""
 
@@ -248,6 +293,6 @@ def test_a_malformed_tool_call_does_not_take_the_replay_down():
 
     rows = _replay_rows([record])
 
-    assert [kind for kind, _ in rows] == ["assistant", "tool_card"]
+    assert [kind for kind, _, _ in rows] == ["assistant", "tool_card"]
     assert rows[1][1].name == "read"
     assert rows[1][1].arguments == {}

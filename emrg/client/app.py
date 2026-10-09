@@ -251,7 +251,7 @@ def _cards_from_tool_calls(tool_calls) -> list[ToolCard]:
     return cards
 
 
-def _replay_rows(messages) -> list[tuple[str, object]]:
+def _replay_rows(messages) -> list[tuple[str, object, str]]:
     """The rows a resumed session replays, from the daemon's record list.
 
     Rant 2026-09-29T15:52:49, requirement 4. The TUI used to render a session by
@@ -273,7 +273,7 @@ def _replay_rows(messages) -> list[tuple[str, object]]:
     it, matched by `tool_call_id` — the same pairing the live stream uses, never by
     position.
 
-    The rows are `(kind, payload)` pairs; `assistant` is deliberately its own kind
+    The rows are `(kind, payload, timestamp)` triples; `assistant` is deliberately its own kind
     rather than pre-wrapped, because the caller renders it through
     `StreamingMarkdown` for colour. What the daemon's records mode emits is its own
     contract and it is narrow: `kind: "message"` for the user and assistant roles
@@ -283,7 +283,7 @@ def _replay_rows(messages) -> list[tuple[str, object]]:
     put the TUI and the GUI back on two different content paths, which is the
     defect that requirement removes.
     """
-    rows: list[tuple[str, object]] = []
+    rows: list[tuple[str, object, str]] = []
     calls: dict[str, ToolCard] = {}
     for record in messages or []:
         if not isinstance(record, dict):
@@ -291,11 +291,16 @@ def _replay_rows(messages) -> list[tuple[str, object]]:
         kind = record.get("kind")
         if kind == "message":
             role = record.get("role")
+            # The record's own moment, read straight off it: the row a reopen
+            # shows must carry the value the daemon persisted, not a fresh one
+            # (rant 2026-10-09T09:25:00). Absent on records written before the
+            # field was carried, which renders as no clock at all.
+            stamp = str(record.get("timestamp") or "")
             if role in ("user", "assistant"):
-                rows.append((str(role), str(record.get("content") or "")))
+                rows.append((str(role), str(record.get("content") or ""), stamp))
             if role == "assistant":
                 for card in _cards_from_tool_calls(record.get("tool_calls")):
-                    rows.append(("tool_card", card))
+                    rows.append(("tool_card", card, ""))
                     if card.tool_call_id:
                         calls[card.tool_call_id] = card
         elif kind == "tool_result":
@@ -312,7 +317,7 @@ def _replay_rows(messages) -> list[tuple[str, object]]:
             name = str(record.get("tool_name") or "tool")
             body = str(record.get("content") or "").strip()
             mark = "error" if record.get("error") else "result"
-            rows.append(("tool", f"  {name} {mark}: {body[:500]}"))
+            rows.append(("tool", f"  {name} {mark}: {body[:500]}", ""))
     return rows
 
 
@@ -925,6 +930,14 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         """Format left status: version + session title + short ID + model."""
         return _format_status_left(title, sid, model, vision, sandbox)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
+    # The row this client echoed locally for its own user message, and the id of
+    # the request it belongs to. The moment that message was written does not
+    # exist in this client — only the daemon knows it, and it arrives in a
+    # `user_message` frame — so the row is parked here until that frame lands, and
+    # matched by **request id** so a peer client's turn, or a scheduled task's,
+    # cannot stamp a row it did not cause (rant 2026-10-09T09:25:00).
+    pending_user_row = None
+    pending_user_rid = ""
     # Set from a `done` frame whose `cancelled` field is true, so a receipt that
     # arrives after the ending still finds a turn this client is showing (rant
     # 2026-09-20T12:50:13; both frame orders are measured and named in
@@ -1113,6 +1126,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, _welcomed
         nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, current_vision, current_sandbox
+        nonlocal pending_user_row, pending_user_rid
         nonlocal _last_center, _elapsed_task, conn
         nonlocal _request_start, turn_running
         # /task-session: the daemon's verdict on a task's session decides whether
@@ -1347,6 +1361,29 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             cancel_receipt_held = True
                     continue
 
+                if data.get("type") == "user_message":
+                    # The daemon writes the host's message and tells every client
+                    # the moment it did (rant 2026-10-09T09:25:00). This client
+                    # already put its own row on screen at submit — echoing text
+                    # is instant and must stay instant — so the clock is filled in
+                    # here, from the daemon's value, which is why a reopen shows
+                    # the same one.
+                    #
+                    # Matched by request id, never by "the last user row": the
+                    # frame is a broadcast, so a peer client's turn (or a
+                    # scheduled task's) reaches this client too, and position
+                    # would let it stamp a row belonging to someone else's
+                    # message.
+                    if (pending_user_row is not None
+                            and str(data.get("request_id") or "") == pending_user_rid):
+                        pending_user_row.timestamp = str(data.get("timestamp") or "")
+                        pending_user_row.dirty = True
+                        chat.dirty = True
+                        pending_user_row = None
+                        pending_user_rid = ""
+                        _render_throttled()
+                    continue
+
                 if data.get("type") == "turn_start":
                     # Rant 2026-09-02T10:36:26：daemon 权威 turn 开始帧——把本地计时
                     # 对齐到实际执行时刻（排队请求目前从发送时刻起算，计时偏大）。
@@ -1418,6 +1455,19 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     turn_ended_cancelled = data.get("cancelled") is True
                     busy = False
                     turn_running = False  # the session's turn is over, whoever started it
+                    # The reply's own moment, written by the daemon into the record
+                    # and sent on the frame that ends the turn — the live row must
+                    # show what a reopen will read, and this client has no clock of
+                    # its own to offer (rant 2026-10-09T09:25:00). Absent on the
+                    # endings that persist no reply (cancel, max rounds, error), so
+                    # the row keeps the empty clock those replies deserve.
+                    _reply_stamp = str(data.get("timestamp") or "")
+                    if _reply_stamp:
+                        _md = chat.last_markdown()
+                        if _md is not None:
+                            _md.timestamp = _reply_stamp
+                            _md.dirty = True
+                            chat.dirty = True
                     # Cancel elapsed timer
                     if _elapsed_task:
                         _elapsed_task.cancel()
@@ -1685,11 +1735,12 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         if not isinstance(count, int) or count < 0:
                             count = len(rows)
                         msg_count = count
-                        for kind, content in rows:
+                        for kind, content, stamp in rows:
                             if kind == "assistant":
                                 # StreamingMarkdown for colour rendering (rant #28).
                                 md = StreamingMarkdown()
                                 md.feed(content)
+                                md.timestamp = stamp
                                 chat.add(md)
                             elif kind == "tool_card":
                                 # A widget, handed straight to the chat: a resumed
@@ -1698,7 +1749,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                                 # nothing to read (rant 2026-09-30T09:17:54).
                                 chat.add(content)
                             else:
-                                chat.add(kind, content)
+                                chat.add(kind, content, timestamp=stamp)
                         title_extra = ""
                         if meta.get("title"):
                             title_extra = f" [{meta['title']}]"
@@ -2253,6 +2304,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task, _pending_images
         nonlocal turn_running
+        nonlocal pending_user_row, pending_user_rid
         nonlocal _skills_confirm
         # The daemon is holding a tool call open on this answer; `handle_key`
         # consumes it at the "next line is the answer" branch below. Declared
@@ -3268,7 +3320,11 @@ Streaming
                 # starting (issue: a stale finished task blocked the restart).
                 _ensure_elapsed_timer()
                 logger.debug("SUBMIT: text=%r", text)
-                chat.add("user", inp.text)
+                # Echoed at once so typing stays instant, and parked: the clock on
+                # it can only come from the daemon, which writes the record and
+                # answers with `user_message` (rant 2026-10-09T09:25:00).
+                pending_user_row = chat.add("user", inp.text)
+                pending_user_rid = ""  # set once the daemon names the request
                 history.append(text); stream_buffer = ""
                 history_index = -1  # reset history navigation on submit
                 chat.add("assistant", "")
@@ -3294,6 +3350,7 @@ Streaming
                                                 cwd=cwd, title=auto_title)
                 rid = await conn.send_task(session_id=session_id, cwd=cwd, prompt=text,
                                            images=images)
+                pending_user_rid = rid
                 if was_busy:
                     _queued_sends.append({"id": rid, "prompt": text, "images": images})
                 logger.info("task sent, prompt_len=%d chars", len(text))
