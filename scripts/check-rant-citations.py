@@ -35,11 +35,12 @@ reading of the tree it names rather than an estimate.
 scanned 39 sites and could see neither `vibe_check.j2`'s `Host directive
 2026-10-06T10:40:46` nor the `Host ruling` line this widening was measured against, so
 it answered rc 0 about an inventory that had not moved - measured 2026-10-09, the
-widened set reads 40 sites on that same tree and 41 on the tree this change lands,
-which adds one `ruling` site to `system.j2`. Each figure names its tree: `40` is
-`94504e5d` and `41` is the landing tree, because widening the word set alone was not
-enough - on `94504e5d` the widened scan also reddens, its new `vibe_check.j2` site
-carrying no record, which is why this change adds one there.
+widened set reads 40 sites on that same tree and 41 on the tree that widening landed
+on, which adds one `ruling` site to `system.j2`. Each figure names its tree - `40` is
+`94504e5d`, `41` is that landing tree, and **neither is the class today**, which the
+paragraph above and `--measure` report - because widening the word set alone was not
+enough: on `94504e5d` the widened scan also reddens, its new `vibe_check.j2` site
+carrying no record, which is why that change added one there.
 
 The class is enumerated by hand, and **the enumeration is itself read**: a name
 listed twice and a prompt template the list omits are the same defect pointing in
@@ -203,8 +204,9 @@ DEBT: dict[tuple[str, str], str] = {}
 #: `94504e5d` - the 39 plus `vibe_check.j2`'s newly visible `directive` - and exactly
 #: that one carries **no** record, so the widening reddens the tree rather than leaving
 #: it at rc 0. That redness is the finding, not a false positive: this change adds the
-#: missing record beside that site, and the landing tree reads 41 sites with none
-#: unbacked (its extra one is `system.j2`'s `ruling`).
+#: missing record beside that site, and the tree that widening landed on read 41 sites
+#: with none unbacked (its extra one is `system.j2`'s `ruling`) - that tree's figure,
+#: not the class's now, which `--measure` prints.
 #:
 #: `hosts?` is the fourth, added 2026-10-09 for issue #1989, and it is the same lesson
 #: one step further: `competition_prompt.md` carried **four** `host, <ts>:` citations
