@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { act } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { TranscriptView } from "./TranscriptView";
 import { createTranscriptStore, type TranscriptStore } from "../lib/transcript";
 import { I18nProvider } from "../lib/i18n";
@@ -107,10 +107,21 @@ function makeTextDrivenMarked(): { marked: MarkedLike; dompurify: { sanitize(h: 
   };
 }
 
-function setup(store: TranscriptStore, sid?: string | null, renderer?: MarkdownRenderer) {
+function setup(
+  store: TranscriptStore,
+  sid?: string | null,
+  renderer?: MarkdownRenderer,
+  paging?: { canLoadOlder?: boolean; onLoadOlder?: () => void },
+) {
   return render(
     <I18nProvider lang="zh">
-      <TranscriptView store={store} sid={sid} renderer={renderer ?? fakeMd} />
+      <TranscriptView
+        store={store}
+        sid={sid}
+        renderer={renderer ?? fakeMd}
+        canLoadOlder={paging?.canLoadOlder}
+        onLoadOlder={paging?.onLoadOlder}
+      />
     </I18nProvider>,
   );
 }
@@ -128,6 +139,32 @@ describe("TranscriptView", () => {
     expect(userDiv).not.toBeNull();
     expect(userDiv!.textContent).toBe("hello");
     expect(container.querySelector(".history-load-bar")).toHaveTextContent("加载历史中…");
+  });
+
+  it("顶部历史条可加载更早历史时是一个真按钮，点击触发上翻回调（宿主报障 2026-10-08）", () => {
+    // 宿主原话：「另外点击加载更早消息，没有任何效果」。CSS 一直有 `cursor: pointer`、文案一直
+    // 是祈使句，实体却是一个没有 onClick 的 div —— 可点的样子、不可点的实体。
+    const store = createTranscriptStore({ t: (k) => k });
+    store.setLoadBar("↑ 加载更早消息", "s1");
+    const onLoadOlder = vi.fn();
+    setup(store, "s1", undefined, { canLoadOlder: true, onLoadOlder });
+    const bar = screen.getByTestId("history-load-bar");
+    expect(bar.tagName).toBe("BUTTON");
+    fireEvent.click(bar);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("没有更早历史时顶部条退化为状态文字，不再是控件（点击无处可去）", () => {
+    // 「没有更多历史」/ 正在加载 —— 此时它只是状态行：没有 button 角色，点它也不触发回调。
+    const store = createTranscriptStore({ t: (k) => k });
+    store.setLoadBar("没有更多历史", "s1");
+    const onLoadOlder = vi.fn();
+    const { container } = setup(store, "s1", undefined, { canLoadOlder: false, onLoadOlder });
+    const bar = container.querySelector(".history-load-bar")!;
+    expect(bar.tagName).toBe("DIV");
+    expect(screen.queryByRole("button")).toBeNull();
+    fireEvent.click(bar);
+    expect(onLoadOlder).not.toHaveBeenCalled();
   });
 
   it("用户消息 markdown 渲染：富文本不字面显示（rant 2026-08-28T14:07:29 验收）", async () => {
