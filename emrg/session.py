@@ -580,23 +580,106 @@ class Session:
 
     # ── Compact ───────────────────────────────────────────────
 
-    def compact(self, summary: str, keep_recent: int = 5) -> int:
+    #: Appended to a retained record that the tail budget had to cut. Issue
+    #: #1992: `keep_recent` was an unconditional slice, so one oversized tool
+    #: result — a `grep` returned 2,676,553 chars in session s_260727_0946_dfa1
+    #: on 2026-10-09 — stayed in the retained tail through every compaction.
+    #: The surface then never fell below the auto-compact gate's trigger: the
+    #: gate re-fired round after round (102 compacts in a day), each retried
+    #: request was refused as overlong, and the session stopped answering —
+    #: a compaction reporting success while nothing shrank.
+    TAIL_TRUNCATION_NOTICE = (
+        "\n\n[truncated on compaction: this record held {total} chars, and one "
+        "record of the retained tail may hold at most {budget}; {omitted} chars "
+        "were dropped. The untrimmed record is still in history_YYMMDD.jsonl.]"
+    )
+
+    @staticmethod
+    def _record_chars(record: dict) -> int:
+        """The size `compact` budgets: a record's content, as stored."""
+        content = record.get("content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+        return len(content)
+
+    def _fit_tail(self, recent: list[dict], max_tail_chars: int) -> list[dict]:
+        """Return ``recent`` with every record trimmed to its share of the budget.
+
+        The budget is **shared equally** among the retained records, and only a
+        record that is over its share is touched. Spreading it newest-first was
+        the first attempt: the oversized record took the whole budget and the
+        older — much smaller — ones were then dropped, which is the wrong trade
+        here. The summarizer that produced this compact may have been the
+        chunker, and that one summarizes only the records *before* `keep_recent`
+        (`_chunked_compact`: ``to_compact = records[:-keep_recent]``), so a
+        dropped tail record is gone from the conversation, not absorbed into the
+        summary. Sharing keeps every live turn's end and trims only what is over
+        its share; the total is then at most the budget by construction.
+
+        Text records only: a record whose content is not a string (a multimodal
+        list) is left as it is — slicing it would destroy parts — and the
+        estimator bounds those with `_TOKENS_PER_IMAGE`.
+        """
+        share = max(1, max_tail_chars // max(1, len(recent)))
+        fitted: list[dict] = []
+        for record in recent:
+            if self._record_chars(record) > share:
+                record = self._trim_record(record, share)
+            fitted.append(record)
+        return fitted
+
+    def _trim_record(self, record: dict, max_chars: int) -> dict:
+        """Copy ``record`` with its text content cut to ``max_chars`` + the notice."""
+        record = dict(record)
+        content = record.get("content", "")
+        if not isinstance(content, str):
+            return record
+        notice = self.TAIL_TRUNCATION_NOTICE.format(
+            total=len(content),
+            budget=max_chars,
+            omitted=len(content) - max_chars,
+        )
+        record["content"] = content[: max(0, max_chars - len(notice))] + notice
+        record["truncated"] = True
+        return record
+
+    def compact(
+        self,
+        summary: str,
+        keep_recent: int = 5,
+        max_tail_chars: int | None = None,
+    ) -> int:
         """Replace old messages with a summary, keeping the most recent ones.
 
         Args:
             summary: The LLM-generated summary text.
             keep_recent: Number of most recent records to preserve.
+            max_tail_chars: Budget for the retained tail. ``None`` keeps the
+                historical behaviour — ``keep_recent`` records whatever their
+                size; a number gives the retained records an equal share of it
+                and trims those over their share (issue #1992).
 
         Returns:
-            Number of messages that were compacted.
+            Number of messages that were compacted. A record trimmed to the tail
+            budget is still in the history, so it does not count.
         """
         records = self._read_history()
 
         if len(records) <= keep_recent:
-            return 0
-
-        compacted = records[:-keep_recent]
-        recent = records[-keep_recent:]
+            if max_tail_chars is None:
+                return 0
+            # Nothing left to summarize away, but the retained tail can still be
+            # over budget — and returning 0 here without trimming is exactly
+            # issue #1992's trap: the gate re-fires on every round forever.
+            recent = self._fit_tail(records, max_tail_chars)
+            if recent == list(records):
+                return 0
+            compacted = []
+        else:
+            compacted = records[:-keep_recent]
+            recent = records[-keep_recent:]
+            if max_tail_chars is not None:
+                recent = self._fit_tail(recent, max_tail_chars)
 
         summary_record = {
             "timestamp": datetime.now().isoformat(),
@@ -623,7 +706,15 @@ class Session:
         self._updated_at = self._last_compact_at
         self._save_meta()
 
-        logger.info("compact: %d messages → summary (kept %d)", len(compacted), len(recent))
+        # `len(compacted)` is still the honest count: a record trimmed to fit the
+        # tail budget is *retained* (it keeps its place in the history), so it is
+        # not one of the records the summary replaced.
+        trimmed = sum(1 for r in recent if r.get("truncated"))
+        logger.info(
+            "compact: %d messages → summary (kept %d%s)",
+            len(compacted), len(recent),
+            f", {trimmed} trimmed to the tail budget" if trimmed else "",
+        )
         return len(compacted)
 
     def drop_history_records(self, positions: Iterable[int]) -> int:

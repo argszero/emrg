@@ -28,7 +28,7 @@ import pytest
 
 from emrg.config import load_sandbox_config
 from emrg.protocol import TaskRequest
-from emrg.server.daemon import EmrgServer
+from emrg.server.daemon import EmrgServer, build_shell_tool
 from emrg.tools import ToolRegistry
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
@@ -66,6 +66,20 @@ def _mounted_shell(server):
     """
     name = server._mounted_shell_tool_name()
     return name, server.tools.get(name)
+
+
+def test_the_default_config_branch_builds_a_tool():
+    """The branch `build_shell_tool`'s own docstring advertises, called the way it says.
+
+    Issue #1990: the signature's default was ``sandbox_config: Optional[SandboxConfig] =
+    None`` with ``config = sandbox_config or SandboxConfig()`` below it, and the module
+    did not import ``SandboxConfig`` -- a ``NameError`` for the first caller that used the
+    default. Every caller, production and test, passed a config, so no leg reached the
+    line: a static guard reading names found it, and this is the leg that would have found
+    it by running it. The class is asserted loosely because which dialect answers is the
+    platform's business (``test_the_daemon_mounts_the_dialects_executor``).
+    """
+    assert isinstance(build_shell_tool(), (BashToolV2, PwshToolV2))
 
 
 def test_both_executors_answer_to_the_same_tool_name():

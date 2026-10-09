@@ -542,6 +542,110 @@ class TestSessionCompact:
         assert records[0]["type"] == "summary"
         assert records[1]["content"] == "msg 4"
 
+    # ── max_tail_chars: the retained tail budget (issue #1992) ──
+    #
+    # `keep_recent` was an unconditional slice, so one oversized tool result
+    # stayed in the tail through every compaction: the surface never fell below
+    # the auto-compact gate's trigger, the gate re-fired round after round, and
+    # every retried request was refused as overlong. Measured on session
+    # s_260727_0946_dfa1 (2026-10-09): a single `grep` result of 2,676,553
+    # chars, 102 compactions in a day, the log's own
+    # `auto-compact done: 36 messages compacted` followed 11 s later by
+    # `auto-compact triggered: ~845309 tokens > 174080` — the estimate unchanged.
+
+    def test_compact_tail_budget_trims_a_record_larger_than_the_budget(self, tmp_path):
+        """A retained record over its share of the budget is trimmed, not kept whole."""
+        session = Session.create(tmp_path)
+        session.append_message({"role": "user", "content": "small"})
+        session.append_message(
+            {"type": "tool_result", "tool_call_id": "c0", "content": "G" * 20000}
+        )
+
+        session.compact("summary", keep_recent=5, max_tail_chars=4000)
+
+        records = session._read_history()
+        tail = [r for r in records if r.get("type") != "summary"]
+        assert [r["content"] for r in tail if not r.get("truncated")] == ["small"]
+        big = tail[-1]
+        assert big["truncated"] is True
+        # The budget is the property, not the trimming mechanics: the retained
+        # tail has to fit it, or the gate re-arms on the very next round.
+        assert sum(Session._record_chars(r) for r in tail) <= 4000
+        assert "truncated on compaction" in big["content"]
+        # The record is still a record — compaction trims the surface, it does
+        # not silently drop the turn's tool result from the conversation.
+        assert big["type"] == "tool_result" and big["tool_call_id"] == "c0"
+
+    def test_compact_tail_budget_trims_instead_of_dropping_live_records(self, tmp_path):
+        """Every retained record keeps its place; only the oversized are cut.
+
+        The `keep_recent` most recent records are the live end of the
+        conversation. Dropping the small ones to make room for one giant is the
+        loss this test forecloses: the chunked summarizer covers only
+        ``records[:-keep_recent]``, so a dropped tail record is not in the
+        summary either.
+        """
+        session = Session.create(tmp_path)
+        for i in range(6):
+            session.append_message({"role": "user", "content": f"record {i} " + "X" * 2000})
+
+        session.compact("summary", keep_recent=5, max_tail_chars=4000)
+
+        records = session._read_history()
+        assert records[0]["type"] == "summary"
+        tail = records[1:]
+        assert len(tail) == 5  # keep_recent records, none evicted by the budget
+        assert sum(Session._record_chars(r) for r in tail) <= 4000
+        for i, record in enumerate(tail):
+            assert record["content"].startswith(f"record {i + 1} ")  # order kept
+            assert record["truncated"] is True
+            assert "truncated on compaction" in record["content"]
+
+    def test_compact_tail_budget_returns_what_the_summary_replaced(self, tmp_path):
+        """The count is the records the summary replaced; a trim is not one of them."""
+        session = Session.create(tmp_path)
+        for i in range(3):
+            session.append_message({"role": "user", "content": f"msg {i}"})
+        session.append_message(
+            {"type": "tool_result", "tool_call_id": "c0", "content": "G" * 20000}
+        )
+
+        # Nothing to summarize away (history is shorter than keep_recent), but the
+        # tail is over budget — the trap of issue #1992 is returning 0 here and
+        # leaving the surface unchanged.
+        assert session.compact("s1", keep_recent=5, max_tail_chars=4000) == 0
+        assert len(session._read_history()) == 5  # summary + the 4 records
+        assert session._read_history()[-1]["truncated"] is True
+
+        for i in range(3, 8):
+            session.append_message({"role": "user", "content": f"msg {i}"})
+        removed = session.compact("s2", keep_recent=5, max_tail_chars=4000)
+        assert removed == 5  # everything before the newest 5, summary replaced it
+        assert len(session._read_history()) == 6  # summary + 5 retained
+        assert sum(Session._record_chars(r) for r in session._read_history()[1:]) <= 4000
+
+    def test_compact_without_a_budget_keeps_the_whole_tail(self, tmp_path):
+        """No budget ⇒ the historical behaviour, byte for byte.
+
+        This is what makes the daemon's argument the fix: nothing trims unless
+        a caller asks for a budget, so a session whose config disables
+        auto-compaction is untouched.
+        """
+        session = Session.create(tmp_path)
+        for i in range(3):
+            session.append_message({"role": "user", "content": f"msg {i}"})
+        session.append_message(
+            {"type": "tool_result", "tool_call_id": "c0", "content": "G" * 20000}
+        )
+
+        assert session.compact("summary", keep_recent=5) == 0
+
+        records = session._read_history()
+        assert len(records) == 4  # untouched: no summary record, nothing trimmed
+        assert not any(r.get("type") == "summary" for r in records)
+        assert records[-1]["content"] == "G" * 20000
+        assert "truncated" not in records[-1]
+
 
 class TestSessionRename:
     """Tests for Session.rename()."""

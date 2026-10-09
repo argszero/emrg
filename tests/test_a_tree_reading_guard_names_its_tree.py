@@ -110,6 +110,7 @@ RUN_HERE = (
     "check-rant-citations.py",
     "check_nonlocal.py",
     "check_unbound_reads.py",
+    "check-undefined-names.py",
 )
 
 #: The one `RUN_HERE` member whose *subject* the tree under test can genuinely lack, and
@@ -153,6 +154,7 @@ TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
 POINTABLE_AT_A_TREE = {
     "check-citation-resolves.py": (),
     "check_unbound_reads.py": ("--root",),
+    "check-undefined-names.py": ("--root",),
     "check-workflows.py": ("--root",),
 }
 
