@@ -27,6 +27,9 @@ const api = {
   // rant 2026-09-30T09:30:16（GUI 半边）：会话 sandbox 档位——客户端只发意图，
   // daemon 落盘并广播 `sandbox_set`（自己那份回执与其他客户端收到的广播同形）。
   setSandbox: (payload) => ipcRenderer.invoke("emrg:setSandbox", payload),
+  // rant 2026-10-09T09:43:39（GUI 半边）：会话的额外可写根——宿主点名一个路径、
+  // daemon 按当前档位的规则裁定并落盘，回帧是唯一的列表来源（客户端不自己记）。
+  setSandboxRoots: (payload) => ipcRenderer.invoke("emrg:setSandboxRoots", payload),
   clearSession: (payload) => ipcRenderer.invoke("emrg:clearSession", payload),
   compactSession: (payload) => ipcRenderer.invoke("emrg:compactSession", payload),
   // Approval channel (rant 2026-09-29T15:52:38.987951+08:00, requirement 1):

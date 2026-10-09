@@ -1017,6 +1017,33 @@ vision = false
       return { ok: true };
     });
 
+    // The daemon's own op vocabulary (`_handle_set_sandbox_roots`). The check is
+    // cheap and local; the daemon validates the *path* — against the tier in
+    // force, and by its own rules — and that verdict is the only one that counts.
+    const SANDBOX_ROOT_OPS = ["add", "remove", "list"];
+
+    ipcMain.handle("emrg:setSandboxRoots", async (_e, { sessionId, op, path }) => {
+      // Rant 2026-10-09T09:43:39 (GUI half): the host names a path, the daemon
+      // judges it. Same shape as `emrg:setSandbox` — the renderer states the
+      // intent, this resolves the cwd the command must carry, and no client keeps
+      // a copy of the root list.
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      if (!SANDBOX_ROOT_OPS.includes(op)) throw new Error("invalid sandbox roots op");
+      // An empty path is the daemon's to refuse (`judge_extra_root` answers with
+      // the rule it could not read); the boundary only refuses a non-string so a
+      // malformed IPC payload cannot reach the wire.
+      if (path !== undefined && typeof path !== "string") throw new Error("invalid path");
+      const sessionCwd = resolveSessionCwd(sessionId) || DEFAULT_CWD;
+      let conn = connManager?.get(sessionId);
+      if (!conn || !conn.connected) {
+        // Same defensive open as `emrg:setSandbox`: a click after a reconnect must
+        // work rather than silently doing nothing.
+        conn = await openSession(sessionId, sessionCwd, { resume: false });
+      }
+      conn.sendSetSandboxRoots({ sessionId, cwd: sessionCwd, op, path: path ?? "" });
+      return { ok: true };
+    });
+
     ipcMain.handle("emrg:openFile", async (_e, { filePath }) => {
       // GUI / 指令 WorkBuddy P1：产物面板打开文件（系统默认程序）
       if (typeof filePath !== "string" || !filePath.trim()) throw new Error("invalid file path");

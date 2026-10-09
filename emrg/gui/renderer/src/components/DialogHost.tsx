@@ -21,6 +21,7 @@ import { SkillsDialog } from "./SkillsDialog";
 import { RewindDialog } from "./RewindDialog";
 import { OpenSessionDialog, type OpenSessionStep } from "./OpenSessionDialog";
 import { NewSessionDialog } from "./NewSessionDialog";
+import { SandboxRootsDialog } from "./SandboxRootsDialog";
 
 /**
  * DialogHost — Batch 5 slice 4：对话框宿主 + /指令路由落地层。
@@ -68,10 +69,18 @@ function bridge(): EmrgBridge | undefined {
 }
 
 /** 列表式对话框（各自持有 open 布尔 + 数据加载 effect） */
-type ListDialogKind = "help" | "memory" | "skills" | "rewind" | "sessions" | "newSession";
+type ListDialogKind = "help" | "memory" | "skills" | "rewind" | "sessions" | "newSession" | "sandboxRoots";
 type ListDialogOpen = Record<ListDialogKind, boolean>;
 
-const CLOSED: ListDialogOpen = { help: false, memory: false, skills: false, rewind: false, sessions: false, newSession: false };
+const CLOSED: ListDialogOpen = {
+  help: false,
+  memory: false,
+  skills: false,
+  rewind: false,
+  sessions: false,
+  newSession: false,
+  sandboxRoots: false,
+};
 
 export interface DialogHostProps {
   /** 激活会话（null = 未激活） */
@@ -84,6 +93,15 @@ export interface DialogHostProps {
   appState: DaemonAppState;
   /** 会话切换（Shell setActiveSid；删除激活会话时传 null 让 Shell 自动选相邻） */
   onSwitchSession: (sid: string | null) => void;
+  /**
+   * 会话额外可写根的 add / remove / list（rant 2026-10-09T09:43:39, GUI half）。
+   *
+   * Shell 把它接到 `bridge.setSandboxRoots` —— 与 `setSandbox` 同一条路：本层只上报
+   * 意图，daemon 按当前档位裁定路径、落盘并回 `sandbox_roots` 帧，列表由那份帧渲染。
+   * 未接线（单测 / 无 preload）时为 undefined：对话框仍可打开并显示「未知」，
+   * 只是发不出命令。
+   */
+  onSandboxRootsOp?: (op: "add" | "remove" | "list", path: string) => void;
 }
 
 export interface DialogHostHandle {
@@ -95,6 +113,14 @@ export interface DialogHostHandle {
   openDelete(sid?: string): void;
   openSessions(): void;
   openNewSession(): void;
+  /**
+   * /sandbox [add|remove <路径> | list]（rant 2026-10-09T09:43:39, GUI half）。
+   *
+   * 无参或 `list` → 打开对话框（打开即向 daemon 要一次 list）；`add`/`remove` 带路径
+   * → 直接发那一次写；其余 → 一行用法提示。TUI 的 `/sandbox <mode>` 在 GUI 里不另开一条
+   * 命令：档位在这里是输入框上方那三个按钮，再加一条同名命令只会让两条路各说各话。
+   */
+  openSandbox(args: string[]): void;
   /** /resume <id>：直接切换会话 */
   resumeSession(sid: string): void;
   /** /clear /compact /version /image：无需对话框的直接执行类指令 */
@@ -102,7 +128,7 @@ export interface DialogHostHandle {
 }
 
 export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function DialogHost(
-  { sid, sessions, transcript, appState, onSwitchSession },
+  { sid, sessions, transcript, appState, onSwitchSession, onSandboxRootsOp },
   ref,
 ) {
   const { t } = useI18n();
@@ -233,6 +259,36 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
     }
     const cur = sessions.find((s) => s.session_id === target);
     dispatch({ type: "open-rename", payload: { sessionId: target, currentTitle: cur?.title } });
+  }
+
+  /**
+   * /sandbox [add <路径> | remove <路径> | list]（rant 2026-10-09T09:43:39, GUI half）。
+   *
+   * 打开对话框与 `list` 是同一条路：本层没有列表可显，列表是 daemon 的，而 `list` 帧
+   * 只回答发问的那条连接（一个显示刷新不是状态变更，所以不广播）——因此「要列表」与
+   * 「打开那个能看见列表的地方」在同一次点击里完成，对话框挂载即发 `list`。
+   * 写操作不必先开对话框：`add`/`remove` 直接发，回帧会落到 transcript 与 store。
+   */
+  function openSandbox(args: string[]): void {
+    const sub = (args[0] ?? "").trim().toLowerCase();
+    const rest = args.slice(1).join(" ").trim();
+    if (!sub || sub === "list") {
+      if (!needSession()) return;
+      openDialog("sandboxRoots");
+      return;
+    }
+    if (sub === "add" || sub === "remove") {
+      if (!needSession()) return;
+      // 空路径由本层挡下（`main.js` 也放行空串让 daemon 自己裁）：这里能给出
+      // 一条能照抄的用法，而 daemon 的拒绝文本是给「路径不合规」用的。
+      if (!rest) {
+        transcript.addSystemMessage(t("sandboxRoots.needPath", { op: sub }), sid);
+        return;
+      }
+      onSandboxRootsOp?.(sub, rest);
+      return;
+    }
+    transcript.addSystemMessage(t("sandboxRoots.usage"), sid);
   }
 
   function openDelete(sidOverride?: string): void {
@@ -383,6 +439,7 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
       openDialog("sessions");
     },
     openNewSession: () => openDialog("newSession"),
+    openSandbox,
     resumeSession: (target) => onSwitchSession(target),
     runDirect,
   }));
@@ -475,6 +532,17 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
         }}
         onNewProject={newProject}
         onDismiss={() => closeDialog("newSession")}
+      />
+      <SandboxRootsDialog
+        open={listDialog.sandboxRoots}
+        sid={sid}
+        // 两处 `sid ? … : null` 不是防御性写法：store 的键是会话，没有激活会话时
+        // 没有可问的主语，界面该显示的是「先开一个会话」而不是一个借来的列表。
+        // `?? null` 与 `sandboxBySid` 同一个语义：缺席 = daemon 还没说，不是空列表。
+        roots={sid ? (appState.sandboxRootsBySid[sid] ?? null) : null}
+        notice={sid ? (appState.sandboxRootsNoticeBySid[sid] ?? null) : null}
+        onOp={onSandboxRootsOp}
+        onDismiss={() => closeDialog("sandboxRoots")}
       />
     </>
   );

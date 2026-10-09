@@ -856,6 +856,25 @@ class DaemonClient {
     this.sendCommand("set_sandbox", { session_id: sessionId, cwd, mode });
   }
 
+  /** Add, remove or list this session's host-named writable roots.
+   *
+   * Rant 2026-10-09T09:43:39 (GUI half). The daemon is the only writer: it
+   * validates against the tier in force, persists `meta.json` and answers with a
+   * `sandbox_roots` frame; this client keeps no list of its own. Fire-and-forget
+   * for the same reason as `sendSetSandbox`: the answer *is* the event, and
+   * pairing it through `_pending` would swallow the requester's own reply before
+   * the renderer could see it.
+   *
+   * `op=list` is a read — it answers the asking connection and broadcasts nothing
+   * — so the caller that wants the list must ask for it (the dialog does, on
+   * open).
+   */
+  sendSetSandboxRoots({ sessionId, cwd, op, path = "" }) {
+    this.sendCommand("set_sandbox_roots", {
+      session_id: sessionId, cwd, op, path,
+    });
+  }
+
   sendCommand(type, params = {}) {
     // Wire message type last: a payload field named "type" (e.g. the task type in
     // task CRUD) must never override the wire message type (rant 2026-08-14T21:48:00).
@@ -943,6 +962,23 @@ class DaemonClient {
       // log at the bottom of this function and reached no renderer: a tier set in
       // the TUI was invisible in the GUI, and the GUI could not set one at all.
       this._emit("sandbox_set", frame);
+      return;
+    }
+
+    if (frame.type === "sandbox_roots") {
+      // The session's host-named extra writable roots (rant 2026-10-09T09:43:39,
+      // GUI half). One frame shape covers all three ops and both paths: the
+      // requester's own reply and every other connection's broadcast carry the
+      // same payload (`daemon.py::_handle_set_sandbox_roots`), and a refusal or a
+      // `notice` arrives as this same type rather than as `command_result` or the
+      // generic error stream — the daemon answers `sandbox_roots` to every one of
+      // them, so the reason belongs to the roots surface and not to the error log.
+      //
+      // Before this branch existed the frame matched nothing below (its keys are
+      // `type`/`session_id`/`op`/`roots`), so it fell to the unknown-frame log at
+      // the bottom of this function: a root added in the TUI was invisible in the
+      // GUI, and the GUI could not name one at all.
+      this._emit("sandbox_roots", frame);
       return;
     }
 

@@ -52,6 +52,18 @@ interface EmrgWindow {
      * 2026-09-29T15:52:38, GUI half; found 2026-10-08).
      */
     setSandbox?: (p: { sessionId: string; mode: string }) => Promise<unknown>;
+    /**
+     * The session's extra writable roots (rant 2026-10-09T09:43:39, GUI half).
+     * Listed here for the same reason as the two above: preload.js exposes it,
+     * and a name missing from *this* literal reaches the bridge as `undefined`,
+     * which the bridge reports as "this build cannot do it" — a GUI that opens
+     * the dialog and then sends nothing.
+     */
+    setSandboxRoots?: (p: {
+      sessionId: string;
+      op: "add" | "remove" | "list";
+      path?: string;
+    }) => Promise<unknown>;
     respondApproval?: (p: {
       sessionId: string;
       requestId: string;
@@ -97,6 +109,14 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.setSandbox) throw new Error("setSandbox unavailable");
           return emrg.setSandbox(p);
+        },
+        // The roots op, on the same terms: read `window.emrg` per call, and throw
+        // rather than resolve when the channel is missing, so the bridge's `false`
+        // keeps meaning "this build cannot do it" instead of "done".
+        setSandboxRoots: async (p) => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.setSandboxRoots) throw new Error("setSandboxRoots unavailable");
+          return emrg.setSandboxRoots(p);
         },
         // Without this the GUI's approval dialog answered nothing: the click reached
         // `bridge.respondApproval`, found `emrg.respondApproval` undefined and returned

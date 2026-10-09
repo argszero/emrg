@@ -213,3 +213,24 @@ test("electron-builder extraResources resolve to the repo-root build products", 
       "process.resourcesPath/runtime into ~/.emrg/install on first launch (no other platform reads it)"
   );
 });
+
+test("the extra-writable-roots wire exists end to end (rant 2026-10-09T09:43:39, GUI half)", () => {
+  // 与 clipboard-image 那条同一个理由：renderer 那半用注入的假窗测试，**看不见线断没断**。
+  // 这条线是 preload 暴露 `setSandboxRoots` → `emrg:setSandboxRoots`，main 注册同一个频道，
+  // 再交给 `conn.sendSetSandboxRoots` 发上 wire。少任何一端，界面会打开、会接受输入，
+  // 然后什么也不发生（#1764 与审批通道都栽在这道缝上）。
+  const preload = fs.readFileSync(path.join(GUI_ROOT, "preload.js"), "utf-8");
+  assert.match(
+    preload,
+    /setSandboxRoots: \(payload\) => ipcRenderer\.invoke\("emrg:setSandboxRoots"/,
+    "preload.js must expose setSandboxRoots → emrg:setSandboxRoots"
+  );
+  const main = fs.readFileSync(path.join(GUI_ROOT, "main.js"), "utf-8");
+  assert.match(main, /ipcMain\.handle\("emrg:setSandboxRoots"/, "main.js must handle emrg:setSandboxRoots");
+  // 意图只走一条路：renderer 给 op + 路径，cwd 由 main 解析（与 emrg:setSandbox 同款），
+  // 路径的裁定留给 daemon —— main 里出现第二套路径规则就是「两处各说各话」。
+  assert.match(main, /conn\.sendSetSandboxRoots\(\{ sessionId, cwd: sessionCwd, op, path/, "main.js must hand the op to the client");
+  const client = fs.readFileSync(path.join(GUI_ROOT, "daemon_client.js"), "utf-8");
+  assert.match(client, /sendCommand\("set_sandbox_roots"/, "daemon_client.js must send set_sandbox_roots");
+  assert.match(client, /frame\.type === "sandbox_roots"/, "daemon_client.js must forward the sandbox_roots frame");
+});

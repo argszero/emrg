@@ -40,6 +40,7 @@ function mockEmrg() {
   const restartDaemon = vi.fn().mockResolvedValue({ ok: true });
   const setModel = vi.fn().mockResolvedValue({ ok: true });
   const setSandbox = vi.fn().mockResolvedValue({ ok: true });
+  const setSandboxRoots = vi.fn().mockResolvedValue({ ok: true });
   const triggerTask = vi.fn().mockResolvedValue({ ok: true });
   const switchSession = vi.fn().mockResolvedValue({ ok: true });
   (window as unknown as { emrg?: unknown }).emrg = {
@@ -61,6 +62,7 @@ function mockEmrg() {
     restartDaemon,
     setModel,
     setSandbox,
+    setSandboxRoots,
     triggerTask,
     switchSession,
   };
@@ -81,6 +83,7 @@ function mockEmrg() {
     restartDaemon,
     setModel,
     setSandbox,
+    setSandboxRoots,
     triggerTask,
     switchSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
@@ -131,6 +134,38 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await userEvent.click(screen.getByTestId("sandbox-danger-full-access"));
     await waitFor(() => expect(m.setSandbox).toHaveBeenCalledWith({ sessionId: "s1", mode: "danger-full-access" }));
     expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("the session's extra writable roots are the daemon's too: the frame moves the chip, and the click opens the one surface that can name one (rant 2026-10-09T09:43:39, GUI half)", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    // Nobody has asked yet → the chip is there but claims no count: `0` would be a
+    // state the daemon never reported (same rule as the tier chip above it).
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("Roots"));
+    expect(screen.getByTestId("sandbox-roots-open")).not.toHaveTextContent("Roots 0");
+    // A root added by the TUI (or another GUI) arrives as this frame and the chip follows.
+    m.emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: { type: "sandbox_roots", session_id: "s1", op: "add", roots: ["/tmp/scratch"] },
+    });
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("Roots 1"));
+    // The click sends nothing but the read the dialog needs on open — the whole point
+    // of this test: preload → provider → bridge → dialog is a chain of four names, and
+    // a name missing from any of them ends as a dialog that opens and says nothing.
+    await userEvent.click(screen.getByTestId("sandbox-roots-open"));
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-dialog")).toBeInTheDocument());
+    await waitFor(() => expect(m.setSandboxRoots).toHaveBeenCalledWith({ sessionId: "s1", op: "list", path: "" }));
+    expect(screen.getByTestId("sandbox-roots-row")).toHaveAttribute("data-root", "/tmp/scratch");
+    // Type a path and add it: the op leaves on the same chain, and the list on screen
+    // does **not** move by itself — only the daemon's next frame may move it.
+    await userEvent.type(screen.getByTestId("sandbox-roots-path"), "/tmp/other");
+    await userEvent.click(screen.getByTestId("sandbox-roots-add"));
+    await waitFor(() => expect(m.setSandboxRoots).toHaveBeenCalledWith({ sessionId: "s1", op: "add", path: "/tmp/other" }));
+    expect(screen.getAllByTestId("sandbox-roots-row")).toHaveLength(1);
   });
 
   afterEach(() => {

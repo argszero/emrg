@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRef, type RefObject } from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { DialogHost, type DialogHostHandle } from "./DialogHost";
 import { I18nProvider } from "../lib/i18n";
 import { createTranscriptStore, type TranscriptStore } from "../lib/transcript";
@@ -36,6 +36,8 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     // No frame has reported a session's sandbox tier to this fixture (rant
     // 2026-09-30T09:30:16, GUI half) — absent is "the daemon has not said".
     sandboxBySid: {},
+    sandboxRootsBySid: {},
+    sandboxRootsNoticeBySid: {},
     upgradeBanner: null,
     pendingApproval: null,
     ...over,
@@ -77,7 +79,15 @@ function mockEmrg(over: Record<string, unknown> = {}) {
   return { bridge, calls };
 }
 
-function setup(opts: { sid?: string | null; sessions?: SessionSummary[]; over?: Record<string, unknown> } = {}) {
+function setup(opts: {
+  sid?: string | null;
+  sessions?: SessionSummary[];
+  over?: Record<string, unknown>;
+  /** 会话额外可写根的上报通道（Shell 由 bridge.setSandboxRoots 接上） */
+  onSandboxRootsOp?: (op: "add" | "remove" | "list", path: string) => void;
+  /** appState 覆盖（store 里已有的根/notice 由它注入） */
+  state?: Partial<DaemonAppState>;
+} = {}) {
   const { bridge, calls } = mockEmrg(opts.over);
   const ref: RefObject<DialogHostHandle | null> = createRef();
   const store = createTranscriptStore();
@@ -90,8 +100,9 @@ function setup(opts: { sid?: string | null; sessions?: SessionSummary[]; over?: 
         sid={sid}
         sessions={sessions}
         transcript={store}
-        appState={appState()}
+        appState={appState(opts.state)}
         onSwitchSession={onSwitchSession}
+        onSandboxRootsOp={opts.onSandboxRootsOp}
       />
     </I18nProvider>,
   );
@@ -273,5 +284,73 @@ describe("DialogHost (Batch 5 slice 4)", () => {
     await waitFor(() => expect(screen.getByTestId("memory-dialog")).toBeInTheDocument());
     await ref.current?.runDirect("/version", []);
     expect(sysMsgs(store, null).length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * /sandbox 路由（rant 2026-10-09T09:43:39, GUI half）。
+ *
+ * 四条路各测一次，因为它们的**去向**不同：无参与 `list` 去对话框（列表只在那里
+ * 看得见），`add`/`remove` 直接发一次写，其余落在用法提示上——而所有这些都要先有会话。
+ */
+describe("DialogHost /sandbox 路由", () => {
+  it("无参 → 打开对话框，并把它问来的列表渲染出来", async () => {
+    const onOp = vi.fn();
+    const { ref } = setup({ sid: "s1", onSandboxRootsOp: onOp, state: { sandboxRootsBySid: { s1: ["/tmp/a"] } } });
+    act(() => ref.current?.openSandbox([]));
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-dialog")).toBeInTheDocument());
+    // 打开即问：列表只回答发问的那条连接。
+    expect(onOp).toHaveBeenCalledWith("list", "");
+    expect(screen.getByTestId("sandbox-roots-row")).toHaveAttribute("data-root", "/tmp/a");
+  });
+
+  it("list → 同一条路（它是刷新，不是第二种界面）", async () => {
+    const onOp = vi.fn();
+    const { ref } = setup({ sid: "s1", onSandboxRootsOp: onOp });
+    act(() => ref.current?.openSandbox(["list"]));
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-dialog")).toBeInTheDocument());
+    expect(onOp).toHaveBeenCalledWith("list", "");
+  });
+
+  it("add / remove 带路径 → 直接发那一次写，不必先开对话框", async () => {
+    const onOp = vi.fn();
+    const { ref } = setup({ sid: "s1", onSandboxRootsOp: onOp });
+    act(() => ref.current?.openSandbox(["add", "/tmp/scratch"]));
+    expect(onOp).toHaveBeenCalledWith("add", "/tmp/scratch");
+    act(() => ref.current?.openSandbox(["remove", "/tmp/scratch"]));
+    expect(onOp).toHaveBeenCalledWith("remove", "/tmp/scratch");
+    expect(screen.queryByTestId("sandbox-roots-dialog")).toBeNull();
+  });
+
+  it("带路径的 add 里路径有空格 → 整段都算路径（parser 已按空白切过一次）", () => {
+    const onOp = vi.fn();
+    const { ref } = setup({ sid: "s1", onSandboxRootsOp: onOp });
+    act(() => ref.current?.openSandbox(["add", "/tmp/my", "folder"]));
+    expect(onOp).toHaveBeenCalledWith("add", "/tmp/my folder");
+  });
+
+  it("add / remove 缺路径 → 一行能照抄的用法，不发命令", () => {
+    const onOp = vi.fn();
+    const { ref, store } = setup({ sid: "s1", onSandboxRootsOp: onOp });
+    act(() => ref.current?.openSandbox(["add"]));
+    expect(onOp).not.toHaveBeenCalled();
+    expect(sysMsgs(store, "s1").some((m) => m.includes("/sandbox add /tmp/scratch"))).toBe(true);
+  });
+
+  it("不认识子命令（含 TUI 的 `/sandbox <mode>`）→ 用法提示，不是静默无事发生", () => {
+    const onOp = vi.fn();
+    const { ref, store } = setup({ sid: "s1", onSandboxRootsOp: onOp });
+    act(() => ref.current?.openSandbox(["workspace-write"]));
+    expect(onOp).not.toHaveBeenCalled();
+    expect(sysMsgs(store, "s1").some((m) => m.includes("Usage: /sandbox"))).toBe(true);
+  });
+
+  it("没有激活会话 → 提示先开会话，且不发任何命令、不弹框", () => {
+    const onOp = vi.fn();
+    const { ref, store } = setup({ sid: null, onSandboxRootsOp: onOp });
+    act(() => ref.current?.openSandbox(["add", "/tmp/a"]));
+    expect(onOp).not.toHaveBeenCalled();
+    expect(sysMsgs(store, null)).toContain("Start a conversation first.");
+    expect(screen.queryByTestId("sandbox-roots-dialog")).toBeNull();
   });
 });

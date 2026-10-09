@@ -119,6 +119,21 @@ export interface ComposerProps {
    * 不传 = 维持原样（单挂载/单测）：本地 state 决定了显示与随消息下发的档位。
    */
   onSandboxChange?: (mode: string) => void;
+  /**
+   * The session's extra writable roots, as the daemon last reported them, or
+   * null/undefined when it has not said (rant 2026-10-09T09:43:39, GUI half).
+   *
+   * Display only — same authority rule as `sandbox`: the list is the daemon's,
+   * and this component renders it rather than holding one. `null` and `[]` are
+   * deliberately different: `[]` is "this session has no extra roots", `null` is
+   * "nobody has asked", and only the second should read as unknown.
+   */
+  sandboxRoots?: string[] | null;
+  /**
+   * 父级接管「额外可写根」入口时传入：点击只上报意图（打开管理对话框）。
+   * 不传 = 不渲染入口（单挂载/单测），与 `onSandboxChange` 的约定一致。
+   */
+  onManageSandboxRoots?: () => void;
   /** 测试注入：挂载后回填 tiptap Editor 实例（命令驱动测试用） */
   editorRef?: MutableRefObject<Editor | null>;
 }
@@ -204,6 +219,8 @@ export function Composer({
   cancel: cancelProp,
   onCommand,
   onSandboxChange,
+  sandboxRoots = null,
+  onManageSandboxRoots,
   editorRef,
 }: ComposerProps) {
   const { t } = useI18n();
@@ -895,6 +912,26 @@ export function Composer({
             </button>
           );
         })}
+        {typeof onManageSandboxRoots === "function" ? (
+          // The entry to the extra writable roots (rant 2026-10-09T09:43:39, GUI
+          // half). It sits inside the tier group because the two are one subject:
+          // a root is the narrower instrument you reach for *instead of* lifting
+          // the tier, and a host looking for either looks here. The count is the
+          // daemon's list, and it is omitted while nobody has asked — a `0` there
+          // would claim a state the daemon never reported.
+          <button
+            type="button"
+            className="mode-btn"
+            title={t("composer.rootsTitle")}
+            aria-label={t("composer.rootsTitle")}
+            data-testid="sandbox-roots-open"
+            onClick={onManageSandboxRoots}
+          >
+            {sandboxRoots === null
+              ? t("composer.rootsShort")
+              : t("composer.rootsShortCount", { n: String(sandboxRoots.length) })}
+          </button>
+        ) : null}
       </div>
       <div className="composer-card">
         <EditorContent editor={editor} className="composer-editor" />
