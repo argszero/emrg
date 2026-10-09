@@ -30,7 +30,27 @@ jobs:
       # argv (rant 2026-10-09T09:43:39 §7), and that test skips where the binary is
       # absent - so without this step the leg would report a skip and measure nothing.
       - name: Ensure bubblewrap (the Linux sandbox dialect's runner)
-        run: command -v bwrap >/dev/null || (sudo apt-get update && sudo apt-get install -y bubblewrap)
+        run: |
+          command -v bwrap >/dev/null || (sudo apt-get update && sudo apt-get install -y bubblewrap)
+          # Installing it is not enough. Ubuntu 23.10+ restricts **unprivileged user
+          # namespaces** through AppArmor, and bwrap needs one before it can start any
+          # command; with the restriction on, every invocation dies with
+          #   bwrap: setting up uid map: Permission denied
+          # The first run of this leg did exactly that (run 37943772666), and the failure
+          # is the host refusing to create the namespace, not the argv under test being
+          # wrong. The runner is an ephemeral VM, so lifting it here is scoped to this job.
+          # A runner that has no such knob is not broken - older kernels allow the
+          # namespace outright - so the knob is read and reported, never assumed.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns) -> 0"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # Then assert the runner can run what it just installed: a leg that installs
+          # bwrap and then skips the measurement is the shape this PR exists to remove, so
+          # if bwrap still cannot start, this step fails here with bwrap's own words rather
+          # than letting the suite report a green skip.
+          bwrap --ro-bind / / -- true
+          echo "bwrap runs: the Linux cases below measure rather than skip."
       - run: uv sync
       - run: uv run pytest tests/ -v
       - uses: actions/setup-node@v5
