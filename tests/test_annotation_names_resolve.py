@@ -231,3 +231,51 @@ def test_the_reader_reports_a_name_nothing_binds(tmp_path: Path) -> None:
     # class-body annotation - three forms, all silent.
     assert all("good.py" not in f for f in findings), findings
     assert reads == 7, reads
+
+
+class TestTheRefusals:
+    """What this reading does with input it cannot read, and the two inputs that prove it.
+
+    Both legs below are reachable and correct, and until now **nothing supplied the input
+    that reaches them**: every file and every annotation the tests above build parses, so
+    removing either line left this file green (measured 2026-10-10, both arms SURVIVED on
+    `e991fcc8`). The siblings in this family pin their own `unreadable` leg on a synthetic
+    root (`tests/test_check_undefined_names.py::TestTheRefusals`,
+    `tests/test_no_dead_string_statement.py::TestTheRefusals`); this file is the one that
+    declares the tolerance in prose and then never exercises it.
+    """
+
+    def test_a_file_that_will_not_parse_is_not_a_clean_reading(self, tmp_path: Path) -> None:
+        """A file the scan could not read is not a file it cleared - and says so."""
+        tree = tmp_path / "emrg"
+        tree.mkdir()
+        (tree / "broken.py").write_text("def f(:\n    pass\n")
+        (tree / "fine.py").write_text('def f() -> "Nope":\n    return 1\n')
+
+        findings, files, reads, unparsed = scan(tmp_path)
+
+        assert len(unparsed) == 1, unparsed
+        assert "broken.py" in unparsed[0] and "SyntaxError" in unparsed[0], unparsed
+        # The sibling is still read: an unreadable file does not abandon the scan.
+        assert files == 2 and reads == 1, (files, reads)
+        assert [f.split("names ")[1].split(",")[0] for f in findings] == ["'Nope'"], findings
+
+    def test_a_string_annotation_that_will_not_parse_names_nothing(self, tmp_path: Path) -> None:
+        """A forward reference that is not an expression is not a finding, and not a crash.
+
+        The *same module* carries one that does parse, so this pins the tolerance to the
+        annotation rather than to the file: `return set()` is per annotation, and a scan
+        that abandoned the module here would lose the finding beside it.
+        """
+        tree = tmp_path / "emrg"
+        tree.mkdir()
+        (tree / "odd.py").write_text(
+            'x: "not a type("\n\n\ndef g() -> "AlsoNope":\n    return 1\n'
+        )
+
+        findings, files, reads, unparsed = scan(tmp_path)
+
+        assert unparsed == [], unparsed
+        assert [f.split("names ")[1].split(",")[0] for f in findings] == ["'AlsoNope'"], findings
+        assert (files, reads) == (1, 1), (files, reads)
+
