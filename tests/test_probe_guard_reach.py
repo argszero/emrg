@@ -130,6 +130,27 @@ def _spelling(node: ast.AST) -> str:
     return text if len(text) <= 72 else text[:69] + "..."
 
 
+def _scanned_files(root: Path) -> list[Path]:
+    """Every `.py` under `root` that the skips do not exclude, in a stable order.
+
+    One expression decides what both the instrument and the counting test read, so the two
+    cannot drift into reading different trees.
+
+    The skip reads the path **relative to `root`**, not the absolute one: `set(path.parts)`
+    over the absolute path answers about where the machine put the checkout, so any ancestor
+    directory named `node_modules` silenced the whole scan (measured 2026-10-10, issue #2021:
+    the same tree answered 0 modules under `.../node_modules/checkout` and 170 under
+    `.../plain/checkout`). Sibling scans in this suite spell it this way, and the
+    root-relative form keeps an in-tree vendored tree skipped, which is what the exclusion is
+    for.
+    """
+    return [
+        path
+        for path in sorted(Path(root).rglob("*.py"))
+        if not _SKIPPED_COMPONENTS & set(path.relative_to(root).parts)
+    ]
+
+
 def _import_time_kill_bindings(root: Path) -> list[str]:
     """`file:line: spelling` for every import-time **capture** of the kill function.
 
@@ -139,9 +160,7 @@ def _import_time_kill_bindings(root: Path) -> list[str]:
     is not a file it cleared.
     """
     found: list[str] = []
-    for path in sorted(Path(root).rglob("*.py")):
-        if _SKIPPED_COMPONENTS & set(path.parts):
-            continue
+    for path in _scanned_files(root):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"), str(path))
         except SyntaxError as exc:  # pragma: no cover - a broken tree is its own report
@@ -205,18 +224,39 @@ def test_the_scan_reads_the_tree_it_clears():
     size (61 modules under `emrg/` excluding the vendored tree, 115 under
     `tests/`, this file included).
     """
-    def scanned(root: Path) -> list[Path]:
-        return [
-            p
-            for p in root.rglob("*.py")
-            if not _SKIPPED_COMPONENTS & set(p.parts)
-        ]
-
-    assert len(scanned(REPO_ROOT / "emrg")) >= 55, (
-        f"the product scan found only {len(scanned(REPO_ROOT / 'emrg'))} module(s)"
+    assert len(_scanned_files(REPO_ROOT / "emrg")) >= 55, (
+        f"the product scan found only {len(_scanned_files(REPO_ROOT / 'emrg'))} module(s)"
     )
-    assert len(scanned(REPO_ROOT / "tests")) >= 100, (
-        f"the suite scan found only {len(scanned(REPO_ROOT / 'tests'))} module(s)"
+    assert len(_scanned_files(REPO_ROOT / "tests")) >= 100, (
+        f"the suite scan found only {len(_scanned_files(REPO_ROOT / 'tests'))} module(s)"
+    )
+
+
+def test_the_skip_reads_the_path_relative_to_the_root(tmp_path):
+    """Two directions on one tree, and the tree is put where the exclusion lives.
+
+    The instrument is given a root that **sits under** a directory named `node_modules` — the
+    component the exclusion is about — and must still judge the module inside it. An absolute
+    `set(path.parts)` cannot tell that ancestor from an in-tree vendored tree, so it skipped
+    the whole scan and the counting test above reported a product of 0 modules (measured
+    2026-10-10, issue #2021). The vendored tree under the root must still be skipped, which is
+    the exclusion's purpose: the file planted there is reported if it is ever read.
+    """
+    root = tmp_path / "node_modules" / "checkout" / "emrg"
+    root.mkdir(parents=True)
+    (root / "subject.py").write_text("from os import kill as k\n", encoding="utf-8")
+    vendored = root / "node_modules" / "dep"
+    vendored.mkdir(parents=True)
+    (vendored / "captured.py").write_text("from os import kill\n", encoding="utf-8")
+
+    found = _import_time_kill_bindings(root)
+
+    assert [f for f in found if "subject.py" in f], (
+        f"the ordinary module under {root} was not judged - the scan answers about where the "
+        f"checkout sits rather than about the tree: {found}"
+    )
+    assert not [f for f in found if "captured.py" in f], (
+        f"the vendored tree under the root must stay skipped: {found}"
     )
 
 
