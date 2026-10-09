@@ -2,7 +2,7 @@
 
 The reading, and the two it found
 ---------------------------------
-Four guards in `scripts/` ask questions of the *value* space — is a read bound
+The guards in `scripts/` ask questions of the *value* space — is a read bound
 (`check-undefined-names.py`), is it bound before its own scope reads it
 (`check_unbound_reads.py`), did a nested write declare it (`check_nonlocal.py`). None
 asks about a **name written in an annotation**, and `from __future__ import annotations`
@@ -59,9 +59,28 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: What a tree-reading guard must say before its verdict, and what it must not walk.
-SCANNED_ROOTS = ("emrg", "scripts", "tests")
-SKIP_DIRS = frozenset({"node_modules", ".venv", "__pycache__", ".git", ".emrg"})
+#: What a tree-reading guard must say before its verdict, and what it must not walk. Both
+#: are the family's own values -- the same roots and the same skip set the three guards in
+#: `scripts/` and `tests/test_no_dead_string_statement.py` declare -- because this file
+#: judges the same tree they do: a root or a skip that drifts here would leave a file one
+#: of them judges unjudged by this one, silently. `tests/test_guard_scan_scope_pairing.py`
+#: pins the relation.
+SCANNED_ROOTS = ("emrg", "scripts", "tests", "packaging")
+SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".emrg",
+        ".venv",
+        "venv",
+        "node_modules",
+        "build",
+        "dist",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
+)
 BUILTIN_NAMES = frozenset(dir(builtins))
 
 

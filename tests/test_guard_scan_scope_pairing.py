@@ -2,10 +2,10 @@
 
 Why this file exists
 --------------------
-Three first-party guards judge the same tree -- the read-before-binding check, the
-unbound-name check, and the dead-string-statement check -- and each spells the scope it walks
-as its own module-level literal. The three spellings are identical today, and the relation
-between two of them is asserted **in prose**:
+Every first-party guard that judges this tree -- the read-before-binding check, the
+unbound-name check, the dead-string-statement check, the annotation-name check -- spells the
+scope it walks as its own module-level literal. The spellings are identical today, and the
+relation between two of them is asserted **in prose**:
 
     #: Directories the scan covers, relative to the tree root -- the same first-party
     #: set `check_unbound_reads.py` reads, so a file that guard judges is judged here.
@@ -14,7 +14,9 @@ between two of them is asserted **in prose**:
 That sentence is the whole reason the two guards can be read as one instrument, and nothing
 held it: a change that adds a root to one file leaves the other on the old tuple, silences a
 file one guard judges, and every existing test on either side stays green -- each is asserted
-against its own spelling. The skip set below it is the same shape, spelled three times again.
+against its own spelling. The skip set below it is the same shape, spelled once per guard
+again, and the tables below are what hold both: a guard that joins the family, or one whose
+spelling drifts, is admitted here or fails here.
 
 This is the reasoning `tests/test_log_dir_pairing.py` records for the log directory, applied
 where no language boundary is in the way: both sides are Python literals in this checkout, so
@@ -33,7 +35,7 @@ This pins the scope the guards **declare**, not the files each one actually ends
 guard could declare the right roots and still skip a file for another reason (a parse error, a
 missing directory). What it closes is the silent one-sided divergence, which is the failure the
 prose claim could not survive. `tests/test_no_dead_string_statement.py`'s smaller skip set is
-deliberately **not** pinned to the other three -- issue #1999 records why that is a separate
+deliberately **not** pinned to the others -- issue #1999 records why that is a separate
 decision rather than an oversight.
 """
 
@@ -50,14 +52,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ROOT_DECLARATIONS = {
     "scripts/check_unbound_reads.py": "SCANNED_DIRS",
     "scripts/check-undefined-names.py": "SCANNED_ROOTS",
+    "tests/test_annotation_names_resolve.py": "SCANNED_ROOTS",
     "tests/test_no_dead_string_statement.py": "SCANNED_DIRS",
 }
 
-#: Scripts that declare the directories they **skip**, and the name each uses.
+#: Guards that declare the directories they **skip**, and the name each uses.
 SKIP_DECLARATIONS = {
     "scripts/check-citation-resolves.py": "SKIP_DIRS",
     "scripts/check_unbound_reads.py": "SKIPPED_DIRS",
     "scripts/check-undefined-names.py": "SKIPPED_DIRS",
+    "tests/test_annotation_names_resolve.py": "SKIP_DIRS",
 }
 
 
@@ -130,7 +134,7 @@ def test_one_value_refuses_a_disagreement(tmp_path):
     assert _one_value({"a": (), "b": ()}) == ()
 
 
-def test_the_three_guards_declare_the_same_scan_roots():
+def test_the_tree_reading_guards_declare_the_same_scan_roots():
     """The prose claim in `check-undefined-names.py`, held by a reading instead of a sentence."""
     read = _read_all(ROOT_DECLARATIONS)
     missing = [name for name, value in read.items() if value is None]
@@ -148,8 +152,8 @@ def test_the_three_guards_declare_the_same_scan_roots():
     )
 
 
-def test_the_scripts_declare_the_same_skipped_directories():
-    """The same shape again: one skip set, three scripts, no pin until now."""
+def test_the_tree_reading_guards_declare_the_same_skipped_directories():
+    """The same shape again: one skip set, declared once per guard, no pin until now."""
     read = _read_all(SKIP_DECLARATIONS)
     missing = [name for name, value in read.items() if value is None]
     assert not missing, f"these script(s) no longer declare a skip set: {missing}"
