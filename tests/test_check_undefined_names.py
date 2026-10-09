@@ -47,6 +47,18 @@ def _run(root: Path, *extra: str) -> subprocess.CompletedProcess:
     )
 
 
+def _reported(proc: subprocess.CompletedProcess) -> str:
+    """The guard's report with separators normalised.
+
+    `Finding.render` prints `path.relative_to(root)`, which renders with the platform's
+    separator -- `emrg\\bad.py` on Windows. What these assertions are about is *which file
+    and which lines* a finding names, never which separator this platform happens to use;
+    the POSIX spelling passed here and failed `test-windows` (run 37923398190, measured
+    2026-10-09), the same defect `tests/test_check_unbound_reads.py` records.
+    """
+    return proc.stdout.replace("\\", "/")
+
+
 class TestItFires:
     def test_the_incident_shape_is_reported(self, tmp_path) -> None:
         """The shipped shape, reduced to two lines: a call, and no binding anywhere."""
@@ -61,7 +73,7 @@ class TestItFires:
         proc = _run(tree)
 
         assert proc.returncode == 1, proc.stdout + proc.stderr
-        assert "emrg/bad.py:2" in proc.stdout
+        assert "emrg/bad.py:2" in _reported(proc)
         assert "new_task_id" in proc.stdout
         assert "in h()" in proc.stdout
 
@@ -88,7 +100,7 @@ class TestItFires:
         proc = _run(tree)
 
         assert proc.returncode == 1, proc.stdout + proc.stderr
-        assert "emrg/bad.py:7" in proc.stdout
+        assert "emrg/bad.py:7" in _reported(proc)
         assert "in reader()" in proc.stdout
 
     def test_every_read_line_is_named_not_just_the_first(self, tmp_path) -> None:
@@ -113,7 +125,7 @@ class TestItFires:
         proc = _run(tree)
 
         assert proc.returncode == 1, proc.stdout + proc.stderr
-        assert "emrg/bad.py:4, 5" in proc.stdout
+        assert "emrg/bad.py:4, 5" in _reported(proc)
 
 
 class TestItStaysSilent:
