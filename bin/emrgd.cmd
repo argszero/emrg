@@ -10,7 +10,7 @@ set PYTHONPATH=%PREFIX%\source;%PREFIX%\lib;%PYTHONPATH%
 set PYTHONDONTWRITEBYTECODE=1
 REM R90: python.exe copy lives in bin/, DLLs in python-dist/ -> loader would miss them -> use the exe in python-dist (same dir as DLLs)
 REM Windowless daemon: when the GUI spawns this script, python.exe (console subsystem) would open a black console window;
-REM prefer pythonw.exe (GUI subsystem, no window). Logs go to ~/.emrg/emrgd.log
+REM prefer pythonw.exe (GUI subsystem, no window). Logs go to ~/.emrg/logs/emrgd.log
 REM (RotatingFileHandler); StreamHandler only attaches, no console so logging is unaffected.
 set PYEXE=%DIR%\python-dist\pythonw.exe
 if not exist "%PYEXE%" set PYEXE=%DIR%\python-dist\python.exe

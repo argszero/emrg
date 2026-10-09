@@ -8,12 +8,20 @@ while `~/.emrg/logs/` already existed and was already a log home (`stop_all-*.lo
 *application-level* logs now live in :func:`emrg.config.logs_dir` under these
 names — the names did not change, only the directory.
 
-This is the **only** place in the source that still names a log file in the config
+This is the only place in the source that *writes* to a log file in the config
 root, and only because the migration below has to read the leftovers from there.
 That is deliberate: `tests/test_app_logs_live_under_logs_dir.py` fails on any
 *other* source line that joins the config root with a log name, so a log file
 added to a writer without being added to `APP_LOG_FILES` is caught rather than
 grandfathered by a `*.log` pattern.
+
+That guard's cover is worth stating, because a guard whose verdict outruns its
+walk is how the same reader gets dropped twice: it walks `emrg/`, `scripts/`,
+`packaging/` and `bin/`, over `.py`, `.js`, `.sh`, `.cmd`, `.bat` and `.ps1`, and
+it allows exactly two exemptions — this module's migration, for a name in
+`APP_LOG_FILES`, and `packaging/smoke-test.sh`'s capture of the daemon's console
+output (`emrgd-debug.log`), which it writes *before* the daemon exists to create
+`logs/`. Both are enumerated; neither is a wildcard.
 
 The client-side logs (`<cwd>/.emrg/emrg-client.log` and
 `emrg-client-crash.log`) are **not** in this list: they are cwd-relative, not

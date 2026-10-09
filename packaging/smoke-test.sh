@@ -20,7 +20,7 @@ PASS=0; FAIL=0
 smoke_home="$(mktemp -d)"
 # 红线守卫（rant 2026-08-25T10:38:34 / MANIFESTO 第四条附则二）：绝不以任何形式
 # stop/restart daemon。临时 daemon（步骤 2 自起）在 Windows 上仍持有
-# $HOME/.emrg/emrgd.log 等文件句柄 → 此处 rm 可能 "Device or resource busy"；
+# $HOME/.emrg/logs/emrgd.log 等文件句柄 → 此处 rm 可能 "Device or resource busy"；
 # 2>/dev/null || true 使清理尽力而为（失败不改变退出码），残留临时 HOME 由
 # CI runner 的 orphan-process 清理兜底，本机由 56031 端口守卫降级兜底。
 trap 'rm -rf "$smoke_home" 2>/dev/null || true' EXIT
@@ -98,7 +98,7 @@ if [ ! -f "$HOME/.emrg/emrgd.token" ]; then
   echo "  [debug] emrgd-debug.log:" >&2
   cat "$HOME/.emrg/emrgd-debug.log" 2>/dev/null || true
   echo "  [debug] emrgd.log (tail):" >&2
-  tail -20 "$HOME/.emrg/emrgd.log" 2>/dev/null || true
+  tail -20 "$HOME/.emrg/logs/emrgd.log" 2>/dev/null || true
   fail "daemon did not write token file"
 else
   token=$(cat "$HOME/.emrg/emrgd.token")

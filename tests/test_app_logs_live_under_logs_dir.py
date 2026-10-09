@@ -303,16 +303,38 @@ def test_the_migration_reports_a_leftover_it_cannot_place(tmp_path, monkeypatch)
 
 # ── the static guard ───────────────────────────────────────────────────────
 
+#: The suffixes in which a bare `~/…` path is a command or a redirect rather than
+#: prose. Measured 2026-10-09, when the shape was first added: applied to every
+#: file it fired on three comments that *cite* the log path as evidence —
+#: `emrg/gui/daemon_client.js`, `emrg/gui/preload.js`, `emrg/server/scheduler.py`
+#: — which is exactly the "a mention is not a construction" line this guard has
+#: always drawn. `$HOME` and `%USERPROFILE%` are unambiguous wherever they appear,
+#: so those two keep the whole walk.
+_SHELL_SUFFIXES = {".sh", ".cmd", ".bat", ".ps1"}
+
 #: How a source file can build a log path whose directory is the config root.
 #: Each is a *construction*, not a mention: a docstring or a host-facing message
-#: naming `~/.emrg/logs/emrgd.log` is the point of the change, not a defect.
+#: naming `~/.emrg/logs/emrgd.log` is the point of the change, not a defect. The
+#: third element is the suffixes a shape is meaningful in, or `None` for all.
 _ROOT_LOG_PATTERNS = (
     ('python `Path.home() / ".emrg" / <name>`',
-     re.compile(r'Path\.home\(\)\s*/\s*"\.emrg"\s*/\s*"(?P<name>[^"]+)"')),
+     re.compile(r'Path\.home\(\)\s*/\s*"\.emrg"\s*/\s*"(?P<name>[^"]+)"'), None),
     ("python `config_dir() / <name>`",
-     re.compile(r'config_dir\(\)\s*/\s*"(?P<name>[^"]+)"')),
+     re.compile(r'config_dir\(\)\s*/\s*"(?P<name>[^"]+)"'), None),
     ('js `path.join(os.homedir(), ".emrg", <name>)`',
-     re.compile(r'path\.join\(\s*os\.homedir\(\)\s*,\s*"\.emrg"\s*,\s*"(?P<name>[^"]+)"')),
+     re.compile(r'path\.join\(\s*os\.homedir\(\)\s*,\s*"\.emrg"\s*,\s*"(?P<name>[^"]+)"'), None),
+    # The shell and Windows shapes, added with the walk that reads them. On
+    # 2026-10-09 a peer review found `packaging/smoke-test.sh` still tailing
+    # `$HOME/.emrg/emrgd.log` after the move — a reader on the release workflow's
+    # own failure path — which a scan of `.py`/`.js` under `emrg/` and `scripts/`
+    # could not see. The claim this guard backs is about the *source*, and the
+    # source of a release is shell scripts as much as Python.
+    ("shell `$HOME/.emrg/<name>`",
+     re.compile(r'\$\{?HOME\}?[\\/]\.emrg[\\/](?P<name>[A-Za-z0-9][\w.-]*)'), None),
+    ("shell `~/.emrg/<name>`",
+     re.compile(r'(?<![\w$~])~/\.emrg/(?P<name>[A-Za-z0-9][\w.-]*)'), _SHELL_SUFFIXES),
+    ("windows `%USERPROFILE%\\.emrg\\<name>`",
+     re.compile(r'%USERPROFILE%[\\/]\.emrg[\\/](?P<name>[A-Za-z0-9][\w.-]*)'), None),
 )
 
 #: What counts as a log file name. A rotation suffix is admitted (`emrgd.log.1`)
@@ -321,14 +343,33 @@ _ROOT_LOG_PATTERNS = (
 #: exemption is `APP_LOG_FILES`, spelled out.
 _LOG_NAME = re.compile(r"^.+\.(?:log|err)(?:\.\d+)?$")
 
-_SCAN_SUFFIXES = {".py", ".js"}
+_SCAN_SUFFIXES = {".py", ".js", ".sh", ".cmd", ".bat", ".ps1"}
+#: Every root the walk visits, so the guard's cover can be read off one line. A
+#: new directory of shipped source belongs here; anything generated (`dist/`) or
+#: vendored (`node_modules/`) does not.
+_SCAN_ROOTS = ("emrg", "scripts", "packaging", "bin")
 _SCAN_SKIP_PARTS = {"test", "tests", "node_modules", "dist", "__pycache__"}
 
+#: The harness's own capture, and the second exemption beside the migration list.
+#: `packaging/smoke-test.sh` redirects the daemon's console output into
+#: `emrgd-debug.log` **before** the daemon exists to create `logs/`, so that file
+#: cannot move into it; nothing in the daemon ever opens it. Scoped to the pair
+#: (the file that writes it, the name it writes) rather than to the name, so a
+#: `emrgd-debug.log` built anywhere else still fails this guard.
+_HARNESS_CAPTURE = (REPO_ROOT / "packaging" / "smoke-test.sh", "emrgd-debug.log")
 
-def _root_log_hits(text: str) -> list[tuple[int, str, str]]:
+
+def _root_log_hits(text: str, suffix: str | None = None) -> list[tuple[int, str, str]]:
+    """Every root-log construction in `text`, for a file of `suffix`.
+
+    `suffix` is the file's own (`.py`, `.sh`, …): a pattern may declare the
+    suffixes it is meaningful in, and one pattern does (`_SHELL_SUFFIXES`).
+    """
     hits: list[tuple[int, str, str]] = []
     for lineno, line in enumerate(text.splitlines(), 1):
-        for label, pattern in _ROOT_LOG_PATTERNS:
+        for label, pattern, suffixes in _ROOT_LOG_PATTERNS:
+            if suffixes is not None and suffix not in suffixes:
+                continue
             for match in pattern.finditer(line):
                 if _LOG_NAME.match(match.group("name")):
                     hits.append((lineno, label, match.group("name")))
@@ -337,7 +378,7 @@ def _root_log_hits(text: str) -> list[tuple[int, str, str]]:
 
 def _source_files() -> list[Path]:
     files: list[Path] = []
-    for root in (REPO_ROOT / "emrg", REPO_ROOT / "scripts"):
+    for root in (REPO_ROOT / name for name in _SCAN_ROOTS):
         for path in sorted(root.rglob("*")):
             if path.suffix not in _SCAN_SUFFIXES or not path.is_file():
                 continue
@@ -349,17 +390,44 @@ def _source_files() -> list[Path]:
 
 def test_the_detector_fires_on_a_root_log_path_and_not_on_another_file(tmp_path):
     """The instrument's control: a scan that matches nothing proves nothing."""
-    assert _root_log_hits('log_file = Path.home() / ".emrg" / "emrgd.log"') == [
+    assert _root_log_hits('log_file = Path.home() / ".emrg" / "emrgd.log"', ".py") == [
         (1, 'python `Path.home() / ".emrg" / <name>`', "emrgd.log")
     ]
-    assert _root_log_hits('log_file = config_dir() / "emrg-gui.log"') == [
+    assert _root_log_hits('log_file = config_dir() / "emrg-gui.log"', ".py") == [
         (1, "python `config_dir() / <name>`", "emrg-gui.log")
     ]
-    assert _root_log_hits('const x = path.join(os.homedir(), ".emrg", "emrgd-start.err");') == [
-        (1, 'js `path.join(os.homedir(), ".emrg", <name>)`', "emrgd-start.err")
+    assert _root_log_hits(
+        'const x = path.join(os.homedir(), ".emrg", "emrgd-start.err");', ".js"
+    ) == [(1, 'js `path.join(os.homedir(), ".emrg", <name>)`', "emrgd-start.err")]
+    # the shell and Windows shapes, each with a control of its own — a pattern with
+    # no control is a pattern nobody knows is looking at anything
+    assert _root_log_hits('  tail -20 "$HOME/.emrg/emrgd.log" 2>/dev/null || true', ".sh") == [
+        (1, "shell `$HOME/.emrg/<name>`", "emrgd.log")
     ]
+    assert _root_log_hits("cat ~/.emrg/emrg-gui.log", ".sh") == [
+        (1, "shell `~/.emrg/<name>`", "emrg-gui.log")
+    ]
+    assert _root_log_hits(r"type %USERPROFILE%\.emrg\emrgd-crash.log", ".cmd") == [
+        (1, "windows `%USERPROFILE%\\.emrg\\<name>`", "emrgd-crash.log")
+    ]
+    # the `$HOME` shape is asked of a Python file too, because that is where a
+    # shell command is *written* as often as in a `.sh`: the shape is unambiguous
+    # and keeps the whole walk
+    assert _root_log_hits('subprocess.run("cat $HOME/.emrg/emrgd.log", shell=True)', ".py") == [
+        (1, "shell `$HOME/.emrg/<name>`", "emrgd.log")
+    ]
+    # ... and each stays silent on the *moved* spelling, which is the point of the
+    # change: the segment after `.emrg/` is the directory, not a log name
+    assert _root_log_hits('tail -20 "$HOME/.emrg/logs/emrgd.log"', ".sh") == []
+    assert _root_log_hits('echo "logs go to ~/.emrg/logs/emrgd.log"', ".sh") == []
+    assert _root_log_hits(r"echo %USERPROFILE%\.emrg\logs\emrgd.log", ".cmd") == []
+    # the `~` shape's scope, both directions: in a shell file it is a path, and in
+    # a comment it is a mention — the three lines it first fired on here were
+    # comments citing the log as evidence
+    assert _root_log_hits('cat ~/.emrg/emrg-gui.log', ".js") == []
+    assert _root_log_hits("// 实测（`~/.emrg/emrg-gui.log`，176404 行）", ".js") == []
     # a non-log file under the config root is not this guard's business
-    assert _root_log_hits('token = config_dir() / "emrgd.token"') == []
+    assert _root_log_hits('token = config_dir() / "emrgd.token"', ".py") == []
 
 
 def test_no_source_builds_a_log_path_under_the_config_root():
@@ -367,9 +435,13 @@ def test_no_source_builds_a_log_path_under_the_config_root():
     scanned = 0
     for path in _source_files():
         scanned += 1
-        for lineno, label, name in _root_log_hits(path.read_text(encoding="utf-8", errors="replace")):
+        for lineno, label, name in _root_log_hits(
+            path.read_text(encoding="utf-8", errors="replace"), path.suffix
+        ):
             if path == LOGFILES_MODULE and name in APP_LOG_FILES:
                 continue  # the migration list is the only exemption, and it is explicit
+            if (path, name) == _HARNESS_CAPTURE:
+                continue  # the smoke test's own capture, before logs/ exists
             offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno} [{label}] {name!r}")
     assert scanned > 50, (
         f"the scan visited {scanned} file(s); a scan that reads nothing passes for the "
@@ -378,7 +450,13 @@ def test_no_source_builds_a_log_path_under_the_config_root():
     assert not offenders, (
         "these source lines build a log path under the config root, where nothing "
         "should still write one (rant 2026-10-09T14:20:18): the log directory is "
-        "`emrg.config.logs_dir()`, and the migration in emrg/logfiles.py is the only "
-        "place allowed to name a root log — and only for a name in APP_LOG_FILES: "
+        "`emrg.config.logs_dir()`. The scan covers "
+        + ", ".join(f"`{name}/`" for name in _SCAN_ROOTS)
+        + " ("
+        + ", ".join(sorted(_SCAN_SUFFIXES))
+        + "), and exactly two exemptions are allowed: the migration in "
+        "`emrg/logfiles.py`, for a name in `APP_LOG_FILES`, and the smoke test's own "
+        "capture of the daemon's console output, which is written before `logs/` "
+        "exists: "
         + "; ".join(offenders)
     )
