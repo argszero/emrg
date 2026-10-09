@@ -69,6 +69,9 @@ from pathlib import Path
 
 #: Directories the scan covers, relative to the tree root -- the same first-party
 #: set `check_unbound_reads.py` reads, so a file that guard judges is judged here.
+#: That equality is **read**, not asserted here: `tests/test_guard_scan_scope_pairing.py`
+#: parses this declaration and that one and pins them to each other (issue #1999), so
+#: widening one guard's reach without the other fails there rather than going quiet.
 SCANNED_ROOTS = ("emrg", "scripts", "tests", "packaging")
 
 #: Never descended into. `.emrg` matters most: it holds session scratch trees
