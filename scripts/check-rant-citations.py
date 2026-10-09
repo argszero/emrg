@@ -21,11 +21,15 @@ master commit it joined, before this template's own citations were rewritten int
 records), and each figure is a reading of the tree it names rather than an estimate.
 (The figure printed here said 29 until issue #1289 measured it: neither it nor the
 27 records-only timestamps.) The citation words are the class's own three spellings -
-`rant`, `ruling`, `directive` (see `CITATION`): the original one-word set scanned 39
-sites on `94504e5d` and could see neither `vibe_check.j2`'s `Host directive
+`rant`, `ruling`, `directive` (see `CITATION`): on `94504e5d` the original one-word set
+scanned 39 sites and could see neither `vibe_check.j2`'s `Host directive
 2026-10-06T10:40:46` nor the `Host ruling` line this widening was measured against, so
-it answered rc 0 about an inventory that had not moved - measured 2026-10-09, where the
-widened set reads 41 sites on that same tree. Code
+it answered rc 0 about an inventory that had not moved - measured 2026-10-09, the
+widened set reads 40 sites on that same tree and 41 on the tree this change lands,
+which adds one `ruling` site to `system.j2`. Each figure names its tree: `40` is
+`94504e5d` and `41` is the landing tree, because widening the word set alone was not
+enough - on `94504e5d` the widened scan also reddens, its new `vibe_check.j2` site
+carrying no record, which is why this change adds one there. Code
 comments are deliberately out of scope (the same
 spelling occurs in 1300+ lines there): a comment's citation is a historical note
 about why the line exists, and rewriting those burns the `git log -S` trail that
@@ -168,9 +172,12 @@ DEBT: dict[tuple[str, str], str] = {}
 #: `94504e5d`: the rant-only spelling scanned 39 sites and could not see the two
 #: `directive`/`ruling` sites that sit in this very class, so the guard answered rc 0
 #: *about an inventory that did not move* - the failure mode its own header warns about.
-#: `rulings?`/`directives?` were added because of that reading, not by preference, and
-#: the widened scan finds 40 sites with **no** site unbacked by a record (a wider word
-#: set that reddened the tree would be a false positive, not a finding).
+#: `rulings?`/`directives?` were added because of that reading, not by preference: the
+#: widened scan reads 40 sites on `94504e5d` - the 39 plus `vibe_check.j2`'s newly
+#: visible `directive` - and exactly that one carries **no** record, so the widening
+#: reddens the tree rather than leaving it at rc 0. That redness is the finding, not a
+#: false positive: this change adds the missing record beside that site, and the landing
+#: tree reads 41 sites with none unbacked (its extra one is `system.j2`'s `ruling`).
 #:
 #: The word is a **named** group because a caller has to be able to repeat it
 #: verbatim: a timestamp run (`rant ts1 + ts2`) whose two times resolve to
