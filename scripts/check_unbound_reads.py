@@ -285,7 +285,12 @@ def scan(root: Path) -> tuple[list[str], list[str], int]:
                 continue
             for name, read_line, bind_line, function in file_findings:
                 findings.append(
-                    f"{path.relative_to(root)}:{read_line}  in {function}()  reads "
+                    # `.as_posix()`, not `str(...)`: `str(Path.relative_to(...))` renders
+                    # with the platform's separator, so this report would read
+                    # `emrg\bad.py:2` on Windows and every assertion written against the
+                    # POSIX spelling would pass here and fail `test-windows`
+                    # (measured 2026-10-09, run 37923398190, on the sibling guard).
+                    f"{path.relative_to(root).as_posix()}:{read_line}  in {function}()  reads "
                     f"{name!r} before its first binding at {bind_line}"
                 )
             read += 1
