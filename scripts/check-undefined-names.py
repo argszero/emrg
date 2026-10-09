@@ -36,6 +36,25 @@ It was latent only because the one production call site always passes a config, 
 the default branch the docstring advertises was unreachable by accident rather than
 by contract.
 
+A read that does not look like one
+---------------------------------
+Two forms dereference a name without reading it in the `ast.Load` sense, and each is
+a guaranteed error when nothing else binds it -- `UnboundLocalError` inside a
+function, `NameError` at module level, the first being a subclass of the second:
+
+    x += 1     # reads x to combine it, then writes it; all twelve operators
+    del x      # looks x up to remove it
+
+Both were invisible until 2026-10-10 (issue #2005), for **three** independent
+reasons, each of which had to be closed: the read detector records only
+`ast.Load` and these targets are `Store`/`Del`; `symtable` reports them as
+*assigned*, so "is it bound" answered yes from the line that can only raise; and it
+reports them as **not referenced**, so the walk that asks "is this name read"
+dropped them first. `_read_before_write_names` is what carries the AST's answer to
+all three, and only for a name no other form in the module binds -- so a real
+binding (an assignment, a parameter, `for`/`with`/`except ... as`, an import, a
+walrus, a match capture, `global`/`nonlocal`) keeps its line clean.
+
 What it does not claim
 ----------------------
 It reads *binding*, not reachability: a name bound nowhere is reported wherever it
@@ -178,6 +197,86 @@ def _has_star_import(tree: ast.Module) -> bool:
     return False
 
 
+def _binding_names(tree: ast.Module) -> set[str]:
+    """Every name some form in this module binds, other than a read-before-write target.
+
+    The forms that establish a value: assignment and `AnnAssign` targets, walrus
+    targets, comprehension and `for` targets, `with ... as`, `except ... as`,
+    parameters, imports, `def`/`class` names, `global`/`nonlocal`, `match`
+    captures and a type alias. `ast.Name(Store)` covers most of them; the rest are
+    listed because the interpreter holds them as strings, not nodes.
+    """
+    names: set[str] = set()
+    # An `AugAssign` target is a `Store` Name like any other, so the `ctx` test below
+    # would count the very target this file is trying to see through. They are
+    # collected by node identity and skipped here; `del` targets are `Del`, never
+    # `Store`, so they need no such care.
+    augmented_targets = {
+        id(node.target)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and id(node) in augmented_targets:
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.alias):
+            # `import a.b` binds `a`; `import a.b as c` and `from m import x as y` bind the alias.
+            names.add(node.asname or node.name.split(".")[0])
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.Global):
+            names.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            names.update(node.names)
+        elif isinstance(node, ast.MatchAs) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchStar) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+    return names
+
+
+def _read_before_write_names(tree: ast.Module) -> set[str]:
+    """Names whose **only** binding in this module is a read-before-write target.
+
+    `x += 1` dereferences `x` to combine it with the right-hand side, and `del x`
+    looks `x` up to remove it; neither establishes a value, so both raise when
+    nothing else binds the name -- `UnboundLocalError` inside a function,
+    `NameError` at module level, and the first is a subclass of the second. All
+    twelve augmented operators are the same shape (measured 2026-10-10).
+
+    They are invisible without this set, for three independent reasons that have to
+    be closed together: the read detector records only `ast.Load`, and a target like
+    this is `Store`/`Del`; `symtable` reports both as *assigned*, so the "is it
+    bound" half answers yes from the very line that can only raise; and it reports
+    them as **not referenced** as well, so the walk that asks "is this name read"
+    drops them before the other two questions are ever asked. Each was measured
+    separately on 2026-10-10.
+
+    This is the module-wide reading the rest of the file already uses: a name that
+    some other form binds anywhere is left alone, even in a scope that cannot see
+    that binding. The conservative direction is deliberate -- it costs a missed
+    finding, never a fabricated one.
+    """
+    augmented: set[str] = set()
+    deleted: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            augmented.add(node.target.id)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    deleted.add(target.id)
+    return (augmented | deleted) - _binding_names(tree)
+
+
 def _module_bindings(top: symtable.SymbolTable) -> set[str]:
     """Every name the module level binds: assignments, imports, defs and classes.
 
@@ -204,7 +303,7 @@ def _scope_paths(
 
 
 def _unbound_by_scope(
-    top: symtable.SymbolTable, module_bound: set[str]
+    top: symtable.SymbolTable, module_bound: set[str], read_before_write: set[str]
 ) -> dict[tuple[str, ...], set[str]]:
     """Names each scope reads and nothing visible binds, keyed by the scope's path.
 
@@ -214,16 +313,25 @@ def _unbound_by_scope(
     itself the claim that the module provides it -- not this rule's question), when
     the module level binds it, or when the interpreter provides it. What is left is
     a read whose lookup can find nothing.
+
+    `read_before_write` is the one exception to the first clause: `symtable` calls
+    `x += 1` and `del x` *assignments*, so `is_assigned` would exempt a name whose
+    only binding is the line that has to read it first. Those names are not exempt
+    on that ground; every other exemption still applies to them, a parameter or a
+    `global` among them.
     """
     out: dict[tuple[str, ...], set[str]] = {}
     for path, table in _scope_paths(top, ()).items():
         names: set[str] = set()
         for symbol in table.get_symbols():
             name = symbol.get_name()
-            if not symbol.is_referenced():
+            # `symtable` does not flag an augmented-assignment target as referenced --
+            # it reports `is_assigned` and nothing else -- so `read_before_write` names
+            # are let through this gate, having been shown by the AST to read the name.
+            if not symbol.is_referenced() and name not in read_before_write:
                 continue
             if (
-                symbol.is_assigned()
+                (symbol.is_assigned() and name not in read_before_write)
                 or symbol.is_parameter()
                 or symbol.is_imported()
                 or symbol.is_namespace()
@@ -273,6 +381,17 @@ def _load_lines(
             if isinstance(current, ast.Name) and isinstance(current.ctx, ast.Load):
                 note(names, current.id, current.lineno)
                 note(everywhere, current.id, current.lineno)
+            elif isinstance(current, ast.AugAssign) and isinstance(current.target, ast.Name):
+                # `x += 1` reads `x` before it writes it, so the line is where the
+                # lookup that can find nothing actually happens (see
+                # `_read_before_write_names`).
+                note(names, current.target.id, current.lineno)
+                note(everywhere, current.target.id, current.lineno)
+            elif isinstance(current, ast.Delete):
+                for target in current.targets:
+                    if isinstance(target, ast.Name):
+                        note(names, target.id, current.lineno)
+                        note(everywhere, target.id, current.lineno)
             stack.extend(ast.iter_child_nodes(current))
 
     root_names: dict[str, list[int]] = {}
@@ -288,7 +407,10 @@ def check_file(path: Path) -> tuple[list[Finding], bool]:
     if _has_star_import(tree):
         return [], False
     top = symtable.symtable(source, str(path), "exec")
-    unbound = _unbound_by_scope(top, _module_bindings(top))
+    read_before_write = _read_before_write_names(tree)
+    unbound = _unbound_by_scope(
+        top, _module_bindings(top) - read_before_write, read_before_write
+    )
     per_scope, everywhere = _load_lines(tree)
     findings: list[Finding] = []
     for scope_path, names in sorted(unbound.items()):
