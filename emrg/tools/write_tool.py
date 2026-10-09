@@ -86,6 +86,7 @@ class WriteTool(ToolExecutor):
             mode=arguments.get("sandbox"),
             workspace_root=str(arguments.get("workspace") or os.getcwd()),
             session_id=arguments.get("session_id"),
+            extra_roots=arguments.get("writable_roots"),
         )
         reason = file_refusal(target, policy)
         if reason:
