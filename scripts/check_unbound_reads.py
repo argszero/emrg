@@ -39,7 +39,13 @@ enclosing function (good enough: a comprehension cannot bind the enclosing
 scope's names) and its own target names are not treated as this scope's
 bindings.
 
-Exit codes: 0 clean, 1 findings, 2 unmeasurable (a tree that will not parse).
+Exit codes: 0 clean, 1 findings, 2 unmeasurable - a root that is not a directory, a
+tree that will not parse, or a root the scan read no file from. The third is not a
+detail: `0` means "measured and clean", and a scan that read nothing has measured
+nothing (measured 2026-10-06, `cyc20261006-165503`: `--root` at a missing or an empty
+tree printed the OK line with rc 0, because nothing distinguished "no findings in 300
+files" from "no findings in none"; `check-citation-resolves.py` states the same rule
+for its own empty set, and both now refuse under it).
 """
 
 from __future__ import annotations
@@ -248,10 +254,18 @@ def check_file(path: Path) -> list[tuple[str, int, int, str]]:
     return findings
 
 
-def scan(root: Path) -> tuple[list[str], list[str]]:
-    """(findings as lines, files that could not be measured)."""
+def scan(root: Path) -> tuple[list[str], list[str], int]:
+    """(findings as lines, files that could not be measured, files that were read).
+
+    The third element is what separates "nothing to report" from "nothing was
+    measured": both lists are empty for a tree that carries no file to read at
+    all, and the two are opposite readings. The caller turns a zero into the
+    unmeasurable answer, and prints the count on the clean verdict so a reader
+    can see the subject the verdict is about rather than having to trust it.
+    """
     findings: list[str] = []
     unmeasured: list[str] = []
+    read = 0
     for directory in SCANNED_DIRS:
         base = root / directory
         if not base.is_dir():
@@ -274,7 +288,8 @@ def scan(root: Path) -> tuple[list[str], list[str]]:
                     f"{path.relative_to(root)}:{read_line}  in {function}()  reads "
                     f"{name!r} before its first binding at {bind_line}"
                 )
-    return findings, unmeasured
+            read += 1
+    return findings, unmeasured, read
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -298,7 +313,15 @@ def main(argv: list[str] | None = None) -> int:
     sys.stdout.reconfigure(line_buffering=True)
     print(f"tree: {root}")
 
-    findings, unmeasured = scan(root)
+    if not root.is_dir():
+        print(
+            f"could not measure: {root} is not a directory, so no file was read - "
+            "`0` says measured and clean, and this is neither",
+            file=sys.stderr,
+        )
+        return 2
+
+    findings, unmeasured, read = scan(root)
 
     for line in findings:
         print(f"ERROR: {line}")
@@ -320,8 +343,19 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if read == 0:
+        print(
+            f"could not measure: no Python file was read under {root} (this guard "
+            f"scans {', '.join(SCANNED_DIRS)} below the root), so nothing was judged - "
+            "a reading of nothing is not a clean reading.",
+            file=sys.stderr,
+        )
+        return 2
     if not args.quiet:
-        print("OK: no name is read before its first binding in its own function scope.")
+        print(
+            "OK: no name is read before its first binding in its own function scope "
+            f"({read} file(s) read)."
+        )
     return 0
 
 

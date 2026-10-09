@@ -15,17 +15,31 @@ The **instruction class**: prose a reader is expected to *act on* - the built-in
 task-prompt templates, the evolution template, the upgrade/vibe-check prompts, the
 GUI redesign spec, and the CI README the host reads to set the release Secrets.
 Twelve files: the ten of the 2026-09-16 measurement - 49 citation sites over 35
-distinct timestamps, counted
+distinct timestamps on that day's tree, counted
 as `len({t for s in sites for t in s.timestamps})` over `scan_tree` - plus two the
 class was missing until 2026-10-05, `competition_prompt.md` and
-`prompts/memory_compaction.j2` (neither carries a site, so every count here is
-unchanged; see `missing_templates` for the reading that catches the omission). The
-same tree
-reads 47 sites and 33 timestamps without the CI README (47/32 on `f07368ba`, the
+`prompts/memory_compaction.j2` (see `missing_templates` for the reading that
+catches the omission). The same tree
+read 47 sites and 33 timestamps without the CI README (47/32 on `f07368ba`, the
 master commit it joined, before this template's own citations were rewritten into
-records), and each figure is a reading of the tree it names rather than an estimate.
+records). Re-measured 2026-10-09 on the tree issue #1989 lands, the twelve-file
+class reads **45 sites over 30 distinct timestamps in 9 of the 12 files**, and 43
+sites over 28 timestamps in 8 files without the CI README. `memory_compaction.j2`
+carries no site; `competition_prompt.md` carries four, and all four are the bare
+`host, <ts>:` spelling this class could not see before, which is why admitting the
+file and widening the word set are one change rather than two. Each figure is a
+reading of the tree it names rather than an estimate.
 (The figure printed here said 29 until issue #1289 measured it: neither it nor the
-27 records-only timestamps.)
+27 records-only timestamps.) The citation words are the class's own four spellings -
+`rant`, `ruling`, `directive`, and the bare `host` (see `CITATION`): on `94504e5d` the original one-word set
+scanned 39 sites and could see neither `vibe_check.j2`'s `Host directive
+2026-10-06T10:40:46` nor the `Host ruling` line this widening was measured against, so
+it answered rc 0 about an inventory that had not moved - measured 2026-10-09, the
+widened set reads 40 sites on that same tree and 41 on the tree this change lands,
+which adds one `ruling` site to `system.j2`. Each figure names its tree: `40` is
+`94504e5d` and `41` is the landing tree, because widening the word set alone was not
+enough - on `94504e5d` the widened scan also reddens, its new `vibe_check.j2` site
+carrying no record, which is why this change adds one there.
 
 The class is enumerated by hand, and **the enumeration is itself read**: a name
 listed twice and a prompt template the list omits are the same defect pointing in
@@ -170,11 +184,36 @@ HOST_OWNED = "emrg/server/evolution_prompt.md"
 #: entry so the list could not quietly become "things nobody got to".
 DEBT: dict[tuple[str, str], str] = {}
 
-#: A citation: the word "rant"/"rants" followed within three non-digits by a
+#: A citation: one of the class's citation words followed within three non-digits by a
 #: timestamp. Three characters, not a line: `(rant 2026-…` and `(rants\n  2026-…`
 #: are the same citation, while a timestamp that is *not* introduced by the word
-#: cannot be a rant citation - which is what keeps `system.j2`'s memory-format
+#: cannot be a citation - which is what keeps `system.j2`'s memory-format
 #: example (`event_at: 2026-01-15T14:30:00`) out of scope.
+#:
+#: The word set is not just `rant`. The rule is about a **host-local reference**, and
+#: the class spells the same reference four ways: `rant` (`(rant 2026-08-23T08:04:26 …`),
+#: `ruling` (`Host ruling, 2026-10-09T14:34:54 (PR #1986)`), `directive`
+#: (`Host directive 2026-10-06T10:40:46`, `vibe_check.j2`), and the **bare** `host`
+#: (`host, 2026-10-06T10:40:46:`, `competition_prompt.md` - the form that carries no
+#: second word at all). Measured 2026-10-09 on `94504e5d`: the rant-only spelling
+#: scanned 39 sites and could not see the two `directive`/`ruling` sites that sit in
+#: this very class, so the guard answered rc 0 *about an inventory that did not move* -
+#: the failure mode its own header warns about. `rulings?`/`directives?` were added
+#: because of that reading, not by preference: the widened scan reads 40 sites on
+#: `94504e5d` - the 39 plus `vibe_check.j2`'s newly visible `directive` - and exactly
+#: that one carries **no** record, so the widening reddens the tree rather than leaving
+#: it at rc 0. That redness is the finding, not a false positive: this change adds the
+#: missing record beside that site, and the landing tree reads 41 sites with none
+#: unbacked (its extra one is `system.j2`'s `ruling`).
+#:
+#: `hosts?` is the fourth, added 2026-10-09 for issue #1989, and it is the same lesson
+#: one step further: `competition_prompt.md` carried **four** `host, <ts>:` citations
+#: that no spelling reached, so admitting the file to the class (issue #1989's other
+#: half) was not enough on its own - the file was invisible *and* its spelling was.
+#: The bare form only fires where no other word precedes the timestamp (the alternation
+#: is tried left to right and `Host ruling, <ts>` still matches through `ruling`, since
+#: `host` cannot reach the timestamp past ` ruling, ` - nine characters, over the
+#: three the window allows), so the count does not double.
 #:
 #: The word is a **named** group because a caller has to be able to repeat it
 #: verbatim: a timestamp run (`rant ts1 + ts2`) whose two times resolve to
@@ -182,7 +221,8 @@ DEBT: dict[tuple[str, str], str] = {}
 #: supply it - that is the whole match, timestamp included, so repeating it
 #: duplicates the first timestamp (measured, then fixed, 2026-09-16).
 CITATION = re.compile(
-    r"\b(?P<word>[Rr]ants?)\b[^0-9\n]{0,3}(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)"
+    r"\b(?P<word>[Rr]ants?|[Rr]ulings?|[Dd]irectives?|[Hh]osts?)\b[^0-9\n]{0,3}"
+    r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)"
 )
 
 #: Any full timestamp inside a citation block - the citation itself, or one that

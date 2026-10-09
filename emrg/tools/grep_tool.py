@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, count_argument
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,8 @@ class GrepTool(ToolExecutor):
     """Search file contents using regex patterns with optional context lines.
 
     Returns matches as filename:line_number: content. Skips binary files,
-    hidden dirs, and files over 512KB.
+    hidden dirs (except `.emrg`, where the agent's own state lives), and files
+    over 512KB.
     """
 
     def definition(self) -> ToolDefinition:
@@ -35,7 +36,9 @@ class GrepTool(ToolExecutor):
                 "Supports -i (case-insensitive), context lines before/after matches, "
                 "file glob filtering, and output truncation caps. "
                 "Use this instead of 'bash grep' for cross-platform pattern search "
-                "with automatic binary/hidden file skipping."
+                "with automatic binary/hidden file skipping. Hidden entries are skipped "
+                "with one exception: .emrg is read, because the agent's own state lives "
+                "there."
             ),
             parameters={
                 "type": "object",
@@ -68,15 +71,27 @@ class GrepTool(ToolExecutor):
                     },
                     "context_before": {
                         "type": "integer",
-                        "description": "Number of context lines to show before each match.",
+                        "description": (
+                            "Number of context lines to show before each match "
+                            "(0 or more; a negative value is refused rather than read "
+                            "as a different window)."
+                        ),
                     },
                     "context_after": {
                         "type": "integer",
-                        "description": "Number of context lines to show after each match.",
+                        "description": (
+                            "Number of context lines to show after each match "
+                            "(0 or more; a negative value is refused rather than read "
+                            "as a different window)."
+                        ),
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": f"Maximum matches to return (default: {MAX_RESULTS}).",
+                        "description": (
+                            f"Maximum matches to return (default: {MAX_RESULTS}; at "
+                            "least 1 — 0 or less is refused rather than read as the "
+                            "default)."
+                        ),
                     },
                     "intent": {
                         "type": "string",
@@ -93,9 +108,35 @@ class GrepTool(ToolExecutor):
         search_path = arguments.get("path") or "."
         file_glob = arguments.get("glob")
         ignore_case = arguments.get("ignore_case", False)
-        context_before = arguments.get("context_before") or 0
-        context_after = arguments.get("context_after") or 0
-        max_results = arguments.get("max_results") or MAX_RESULTS
+
+        # ── The three counts, refused rather than reinterpreted ──
+        #
+        # A negative context was not merely odd: `max(0, i - context_before)` starts
+        # *after* the match, so the block printed its header and no line at all — the
+        # matching line itself was dropped — and the same value collapsed the stop
+        # budget below to zero, so the search stopped at the first match and the
+        # summary blamed `max_results`. `count_argument` states the rule.
+        context_before, refusal = count_argument(
+            arguments, "context_before",
+            minimum=0, default=0,
+            hint="It is a number of lines to show before each match; omit it for none",
+        )
+        if refusal is not None:
+            return ToolResult(name="grep", content=refusal, error=True)
+        context_after, refusal = count_argument(
+            arguments, "context_after",
+            minimum=0, default=0,
+            hint="It is a number of lines to show after each match; omit it for none",
+        )
+        if refusal is not None:
+            return ToolResult(name="grep", content=refusal, error=True)
+        max_results, refusal = count_argument(
+            arguments, "max_results",
+            minimum=1, default=MAX_RESULTS,
+            hint=f"Omit it to use the default of {MAX_RESULTS} matches",
+        )
+        if refusal is not None:
+            return ToolResult(name="grep", content=refusal, error=True)
 
         if not pattern:
             return ToolResult(
@@ -134,7 +175,21 @@ class GrepTool(ToolExecutor):
         #: is this list's length, and nothing downstream re-derives it from the
         #: rendered text — see the summary below for what that cost.
         block_starts: list[int] = []
-        files_searched = 0
+        #: Files the loop really read and searched — **not** files it looked at. The two
+        #: were the same variable until 2026-10-06 (`cyc20261006-214703`), which made the
+        #: summary's `(searched N files)` a false statement: the counter was incremented
+        #: before the size and decode guards, so a tree whose only copies of the pattern
+        #: were a >512KB file and a binary one came back as
+        #: `No matches for 'NEEDLE' in <root> (searched 4 files)` — the two files holding
+        #: it counted among the four "searched". "Searched" is a claim about work done;
+        #: the skips are reported beside it for the same reason `glob` names its skips.
+        files_read = 0
+        #: The two ways a collected file is not read, kept apart because their remedies
+        #: differ (raise `MAX_FILE_SIZE` / a search that can read bytes vs. a text
+        #: search that will not read this file at all). A stat that fails is the second
+        #: kind: nothing about the file could be measured, so it was not searched either.
+        oversize = 0
+        undecodable = 0
         stop = False
         #: Set when the loop stopped at the result budget rather than at the end of the
         #: tree. The count is then a **floor**, and the summary has to say so: a number
@@ -145,21 +200,24 @@ class GrepTool(ToolExecutor):
         for filepath in files:
             if stop:
                 break
-            files_searched += 1
 
             # Skip large files
             try:
                 if filepath.stat().st_size > MAX_FILE_SIZE:
+                    oversize += 1
                     continue
             except OSError:
+                undecodable += 1
                 continue
 
             # Read and search
             try:
                 text = filepath.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
+                undecodable += 1
                 continue
 
+            files_read += 1
             # A file that ends with a newline splits into one element more than it has
             # lines: the trailing '' is the position *after* the last terminator, not a
             # line of the file. Left in, it is searchable — so a pattern that can match
@@ -194,12 +252,27 @@ class GrepTool(ToolExecutor):
                         search_cut = True
                         break
 
+        #: What was *not* searched, named in the same line as what was. The subject of
+        #: `searched N files` is the files the loop really read, and these two numbers
+        #: are what a reader subtracts from the tree to know what the answer covers — a
+        #: skip that is not stated is indistinguishable from a tree that holds no match.
+        #: Empty when nothing was skipped, so the sentence stays a measurement rather
+        #: than boilerplate (pinned in both directions in `tests/test_grep_tool.py`).
+        skipped = ""
+        if oversize or undecodable:
+            parts = []
+            if oversize:
+                parts.append(f"{oversize} over {MAX_FILE_SIZE} bytes")
+            if undecodable:
+                parts.append(f"{undecodable} not readable as UTF-8 text")
+            skipped = f"; {oversize + undecodable} skipped: " + ", ".join(parts)
+
         if not results:
             return ToolResult(
                 name="grep",
                 content=(
                     f"No matches for '{pattern}' in {root} "
-                    f"(searched {files_searched} files)"
+                    f"(searched {files_read} files{skipped})"
                     + (f" matching '{file_glob}'" if file_glob else "")
                 ),
             )
@@ -228,14 +301,14 @@ class GrepTool(ToolExecutor):
             summary = (
                 f"Found {matches_found} matches for '{pattern}' in {root}, where the "
                 f"search stopped at its result budget (max_results={max_results}) after "
-                f"{files_searched} file(s) - so this count is a floor and the tree may "
-                f"hold more. Narrow the pattern or the path, or raise max_results, to "
+                f"{files_read} file(s){skipped} - so this count is a floor and the tree "
+                f"may hold more. Narrow the pattern or the path, or raise max_results, to "
                 f"count them all:\n\n"
             )
         else:
             summary = (
                 f"Found {matches_found} matches for '{pattern}' "
-                f"in {root} (searched {files_searched} files):\n\n"
+                f"in {root} (searched {files_read} files{skipped}):\n\n"
             )
 
         # Truncate if too many lines — at a **block boundary**, and the note names the

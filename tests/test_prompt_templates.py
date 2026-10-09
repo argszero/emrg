@@ -41,6 +41,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import jinja2
+import pytest
 import yaml
 
 from emrg.protocol import InstanceIdentity
@@ -1248,6 +1249,54 @@ def _host_tree_git_writes(text: str) -> list[str]:
     return offenders
 
 
+# B.3 — the contribution flow's clone. Named once, because more than one guard reads that
+# region and every one of them has to be cut on a heading that is actually there.
+_B3_HEADING = "##### 3.1.4 "
+_B3_NEXT_HEADING = "##### 3.1.5 "
+
+
+def _bounded_section(text: str, heading: str, ends_at: str) -> str:
+    """One template section, bounded at its next heading — *both* ends positively controlled.
+
+    `str.split(x, 1)[0]` returns the *whole* string when `x` is absent, so a region written
+    as `text.split(start, 1)[1].split(end, 1)[0]` widens silently to the end of the file the
+    moment `end` is renamed, and the assertions then pass on content the guard never meant to
+    read. That is not hypothetical here: the `##### 3.1.4` bound these tests used to carry
+    never engaged at all — the marker sits *before* the slice's start, so the region was the
+    whole tail of the file, and moving the tier statement out of §3.1.4 left the assertion
+    green (issue #1961). Asserting both headings are present is the positive control that
+    turns "the bound moved" into a failure instead of a wider region.
+    """
+    after_start = text.split(heading, 1)
+    assert len(after_start) == 2, (
+        f"the template must still carry the {heading!r} heading — this region is anchored on it"
+    )
+    body = after_start[1].split(ends_at, 1)
+    assert len(body) == 2, (
+        f"{heading!r} must still be followed by {ends_at!r}: without its closing bound the "
+        "region runs to the end of the file, and the assertions below would read text this "
+        "guard never meant to read"
+    )
+    return body[0]
+
+
+def test_the_bounded_section_refuses_a_bound_that_is_not_there() -> None:
+    """The helper's own control: a heading that moved must raise, never widen.
+
+    Both directions are the ones issue #1961 is about — a renamed **end** heading (the
+    region becomes the whole tail, which is how a bound reads as a tightening and behaves
+    as none) and a renamed **start** heading (the region the assertions are about is gone).
+    """
+    text = f"{_B3_HEADING}\nfirst\n{_B3_NEXT_HEADING}\nsecond\n"
+    assert _bounded_section(text, _B3_HEADING, _B3_NEXT_HEADING) == "\nfirst\n", (
+        "the region is what lies between the two headings and nothing after them"
+    )
+    with pytest.raises(AssertionError):
+        _bounded_section(text.replace(_B3_NEXT_HEADING, "##### 3.1.6 "), _B3_HEADING, _B3_NEXT_HEADING)
+    with pytest.raises(AssertionError):
+        _bounded_section(text.replace(_B3_HEADING, "##### 3.1.9 "), _B3_HEADING, _B3_NEXT_HEADING)
+
+
 def test_the_open_source_flow_writes_only_in_the_session_clone() -> None:
     """`{{ source_dir }}` is the host's tree: no branch, commit or push inside it.
 
@@ -1285,10 +1334,12 @@ def test_the_open_source_flow_writes_only_in_the_session_clone() -> None:
     # The tier half is bound to B.3 rather than asserted anywhere in the file: a location
     # without the tier that unlocks it sends the next reader to the same dead end one layer
     # down, which is what the rant measured (both the configured and the failed-convergence
-    # `read-only` refuse every step of this flow).
-    parts = text.split('DEV="{{ source_dir }}', 1)
-    assert len(parts) == 2, "B.3 must define the clone as a shell variable the flow can reuse"
-    section = parts[1].split("#### B.4", 1)[0]
+    # `read-only` refuse every step of this flow). The bound is `_bounded_section`, which
+    # asserts *both* headings: the slice this replaced cut nothing at all (issue #1961).
+    section = _bounded_section(text, _B3_HEADING, _B3_NEXT_HEADING)
+    assert 'DEV="{{ source_dir }}' in section, (
+        "B.3 must define the clone as a shell variable the flow can reuse"
+    )
     assert "workspace-write" in section and "read-only" in section, (
         "B.3 must state the tier this flow needs and the tier that refuses it — measured: "
         "`git clone`, `git checkout -b`, `git add` and `git commit` are all BLOCK under "
@@ -1364,10 +1415,14 @@ def test_the_default_branch_is_resolved_rather_than_spelled() -> None:
         "the template must keep the resolution mechanism it replaced the literal with"
     )
 
-    clone_block = text.split('DEV="{{ source_dir }}', 1)[1].split("#### B.4", 1)[0]
+    # Bounded on both headings, like the tier guard above — same slice, same no-op bound
+    # (issue #1961). The region starts at the *heading* rather than inside the fence the
+    # clone block sits in, so `_fenced_blocks` sees that block whole and the old
+    # `"```bash\n" + …` opener (which restored the fence the mid-block slice cut) is gone.
+    clone_block = _bounded_section(text, _B3_HEADING, _B3_NEXT_HEADING)
     checkout = [
         line
-        for block in _fenced_blocks("```bash\n" + clone_block)
+        for block in _fenced_blocks(clone_block)
         for line in block
         if "git checkout -b" in line
     ]

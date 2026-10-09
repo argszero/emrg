@@ -116,6 +116,50 @@ export interface DaemonAppState {
   turnStartBySid: Record<string, number>;
   /** 每会话断线标记（P3 finalize：后台会话断线不触发全局 UI） */
   disconnectedBySid: Record<string, boolean>;
+  /**
+   * The session's sandbox tier, as the daemon last reported it (rant
+   * 2026-09-30T09:30:16, GUI half).
+   *
+   * The tier belongs to the *session* and the daemon is its only writer, so the
+   * GUI holds no tier of its own — this map is the display of what the daemon
+   * said, written from two frames and never from a click: `sandbox_set` (both the
+   * requester's own reply and another client's broadcast carry it) and
+   * `resume_result.meta.sandbox`, which is the only one a session opened *later*
+   * can be told by, because a broadcast is never replayed.
+   *
+   * An absent key means "the daemon has not said", which is not the same as
+   * `workspace-write`: the chip falls back to its own default for display, but
+   * nothing here should claim a tier the daemon never stated.
+   */
+  sandboxBySid: Record<string, string>;
+  /**
+   * The session's host-named extra writable roots, as the daemon last reported
+   * them (rant 2026-10-09T09:43:39, GUI half).
+   *
+   * Same shape of authority as `sandboxBySid` and the same reason for it: the
+   * daemon judges every path against the tier in force, persists the list in the
+   * session's `meta.json`, and is its only writer — so this map is a display, not
+   * a copy. It is written from a `sandbox_roots` frame (the reply to an add /
+   * remove / list, or another client's broadcast of a write) and from
+   * `resume_result.meta.sandbox_roots`, the only way a session opened later can be
+   * told, because a broadcast is never replayed.
+   *
+   * An absent key means "the daemon has not said", which is not the same as an
+   * empty list: a session with no roots and a session nobody has asked about are
+   * different states, and only the second one should show a "loading" surface.
+   */
+  sandboxRootsBySid: Record<string, string[]>;
+  /**
+   * The last word the daemon had on a roots op for this session: a refusal (the
+   * rule it named), a "nothing changed" notice, or a plain success.
+   *
+   * It rides the same frames as the list and is kept *beside* it rather than
+   * inferred from a change in it — a `remove` of a path that was never a root
+   * changes nothing and still has something to say, and an `add` at `read-only`
+   * stores the path while reporting that it will not apply. Both were measured
+   * on head `4eb69bab`; reading a notice as "do not store" is the bug they cost.
+   */
+  sandboxRootsNoticeBySid: Record<string, SandboxRootsNotice>;
   /** upgrade 事件（心跳检测 installed ≠ current → "重启生效"横幅；null=无待重启提示） */
   upgradeBanner: { current: string; installed: string } | null;
   /**
@@ -138,6 +182,22 @@ export interface PendingApproval {
   sessionId: string | null;
 }
 
+/**
+ * What the daemon said about a roots op, beyond the list itself.
+ *
+ * `kind` is the *daemon's* three-way answer, not a client's guess: `error` is a
+ * refusal that names the rule (`verdict.refusal`), `notice` is "nothing changed,
+ * and here is why" (`verdict.notice` — an already-covered path, or a root stored
+ * under a tier that gives no root), and `ok` is a write that went through. A
+ * frame carrying both `error` and `roots` still has a list worth rendering: the
+ * refusal is about the path, never about the roots already stored.
+ */
+export interface SandboxRootsNotice {
+  kind: "ok" | "notice" | "error";
+  text: string;
+  op: string;
+}
+
 const SID_NULL = "__emrg_null_sid__";
 const KEY = (sid?: string | null): string => sid || SID_NULL;
 
@@ -145,7 +205,13 @@ const KEY = (sid?: string | null): string => sid || SID_NULL;
 export interface ResumeResultData {
   type?: string;
   session_id?: string;
-  meta?: { turn?: { running?: boolean; started_at?: number | null } | null } | null;
+  meta?: {
+    turn?: { running?: boolean; started_at?: number | null } | null;
+    /** 会话已存的 sandbox 档位（daemon `resolve_client_tier`；未设置过也会报默认档） */
+    sandbox?: string | null;
+    /** 会话已存的额外可写根（daemon 每个快照都发；空列表 = 确实没有） */
+    sandbox_roots?: string[] | null;
+  } | null;
 }
 
 /**
@@ -168,6 +234,38 @@ export function resumeTurnInstantMs(meta: unknown): number | null {
   return started * 1000;
 }
 
+/**
+ * The session's stored sandbox tier from a `resume_result` snapshot, or null when
+ * the frame stated none (rant 2026-09-30T09:30:16, GUI half).
+ *
+ * Same reasoning as `resumeTurnInstantMs` above: the snapshot is the *only* frame a
+ * session opened later can learn the tier from, because `sandbox_set` is a
+ * broadcast and a broadcast is never replayed. `null` means "the daemon did not
+ * say", which is not a tier — claiming `workspace-write` here would put a value in
+ * the store that the daemon never reported.
+ */
+export function resumeSandboxMode(meta: unknown): string | null {
+  const mode = (meta as { sandbox?: unknown } | null | undefined)?.sandbox;
+  return typeof mode === "string" && mode ? mode : null;
+}
+
+/**
+ * The session's stored extra writable roots from a `resume_result` snapshot, or
+ * null when the snapshot did not carry a list (rant 2026-10-09T09:43:39, GUI half).
+ *
+ * Unlike the tier, this key is written on **every** snapshot — `daemon.py` sends
+ * `session.sandbox_roots` unconditionally, because an empty list is a fact about
+ * the session and the `sandbox_roots` frame is a broadcast that is never replayed.
+ * So `[]` here is "this session has no extra roots", and `null` is "the snapshot
+ * did not say" — the two must not collapse into one, or a session opened later
+ * would claim a state the daemon never reported.
+ */
+export function resumeSandboxRoots(meta: unknown): string[] | null {
+  const roots = (meta as { sandbox_roots?: unknown } | null | undefined)?.sandbox_roots;
+  if (!Array.isArray(roots)) return null;
+  return roots.filter((r): r is string => typeof r === "string");
+}
+
 export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
   return createSnapshotStore<DaemonAppState>({
     connected: false,
@@ -186,6 +284,9 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     busyBySid: {},
     turnStartBySid: {},
     disconnectedBySid: {},
+    sandboxBySid: {},
+    sandboxRootsBySid: {},
+    sandboxRootsNoticeBySid: {},
     upgradeBanner: null,
     pendingApproval: null,
   });
@@ -230,6 +331,26 @@ export interface DaemonBridgeDeps {
       requestId: string;
       approved: boolean;
     }): Promise<{ ok?: boolean }>;
+    /**
+     * Set a session's sandbox tier (preload.setSandbox；未接线时为 undefined）。
+     *
+     * Only the intent crosses: main resolves the session's cwd and the daemon
+     * stores and broadcasts the tier (rant 2026-09-30T09:30:16, GUI half).
+     */
+    setSandbox?(p: { sessionId: string; mode: string }): Promise<unknown>;
+    /**
+     * Add, remove or list a session's extra writable roots (preload.setSandboxRoots；
+     * 未接线时为 undefined）。
+     *
+     * Only the intent crosses: main resolves the session's cwd, and the daemon
+     * judges the path against the tier in force, stores it and answers with a
+     * `sandbox_roots` frame (rant 2026-10-09T09:43:39, GUI half).
+     */
+    setSandboxRoots?(p: {
+      sessionId: string;
+      op: "add" | "remove" | "list";
+      path?: string;
+    }): Promise<unknown>;
   };
   transcript: TranscriptStore;
   t?: TranslateFn;
@@ -254,6 +375,14 @@ export interface DaemonBridge {
    * takes the first answer only.
    */
   respondApproval(approved: boolean): Promise<boolean>;
+  /**
+   * Ask the daemon to set this session's sandbox tier (rant 2026-09-30T09:30:16,
+   * GUI half). The store is updated by the `sandbox_set` frame that comes back, not
+   * by this call — see the implementation.
+   */
+  setSandbox(sid: string | null, mode: string): Promise<boolean>;
+  /** 会话的额外可写根：add / remove / list（daemon 裁定并回帧，客户端不自己记） */
+  setSandboxRoots(sid: string | null, op: "add" | "remove" | "list", path?: string): Promise<boolean>;
 }
 
 export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
@@ -409,11 +538,94 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         const k = KEY(resume.session_id ?? sid);
         const startedMs = resumeTurnInstantMs(resume.meta);
         const { [k]: _drop, ...rest } = store.get().turnStartBySid;
+        // The tier the session already carries (rant 2026-09-30T09:30:16, GUI half):
+        // `sandbox_set` is broadcast and never replayed, so this snapshot is the only
+        // way a session opened *after* the change can show it.
+        const storedTier = resumeSandboxMode(resume.meta);
+        // The roots ride the same snapshot and for the same reason (rant
+        // 2026-10-09T09:43:39, GUI half): the `sandbox_roots` frame is a broadcast
+        // that is never replayed, so a session opened *after* a root was added —
+        // by the TUI, by another GUI, or by this one before a restart — has no
+        // other way to learn the list.
+        const storedRoots = resumeSandboxRoots(resume.meta);
         store.update((s) => ({
           ...s,
           turnStartBySid: startedMs === null ? rest : { ...s.turnStartBySid, [k]: startedMs },
           busyBySid: { ...s.busyBySid, [k]: startedMs !== null },
+          ...(storedTier === null
+            ? {}
+            : { sandboxBySid: { ...s.sandboxBySid, [k]: storedTier } }),
+          ...(storedRoots === null
+            ? {}
+            : { sandboxRootsBySid: { ...s.sandboxRootsBySid, [k]: storedRoots } }),
         }));
+        break;
+      }
+      case "sandbox_set": {
+        // The session's tier, from whichever of the two frames carried it: the
+        // requester's own reply and every other connection's broadcast are the same
+        // payload (rant 2026-09-30T09:30:16, GUI half). A refusal is this same type
+        // carrying `error` and no usable `mode`, so it is not read as a tier.
+        const d = data as { session_id?: string; mode?: unknown; error?: unknown };
+        if (typeof d.mode !== "string" || !d.mode) break;
+        const k = KEY(d.session_id ?? sid);
+        store.update((s) => ({
+          ...s,
+          sandboxBySid: { ...s.sandboxBySid, [k]: d.mode as string },
+        }));
+        break;
+      }
+      case "sandbox_roots": {
+        // The session's extra writable roots, from whichever path carried them:
+        // the requester's own reply for an add / remove / list, or another
+        // connection's broadcast of a write (rant 2026-10-09T09:43:39, GUI half).
+        // A refusal is this same type carrying `error`, so it is read as the
+        // daemon's answer about the *path* — the list beside it is still the
+        // state the session carries, which is why `roots` is read first and
+        // unconditionally.
+        const d = data as {
+          session_id?: string; op?: unknown; roots?: unknown;
+          error?: unknown; notice?: unknown;
+        };
+        const k = KEY(d.session_id ?? sid);
+        const roots = Array.isArray(d.roots)
+          ? d.roots.filter((r): r is string => typeof r === "string")
+          : null;
+        const error = typeof d.error === "string" && d.error ? d.error : "";
+        const notice = typeof d.notice === "string" && d.notice ? d.notice : "";
+        const op = typeof d.op === "string" ? d.op : "";
+        const said: SandboxRootsNotice | null = error
+          ? { kind: "error", text: error, op }
+          : notice
+            ? { kind: "notice", text: notice, op }
+            : op && op !== "list"
+              ? { kind: "ok", text: "", op }
+              : null;
+        store.update((s) => {
+          // The notice is the daemon's *latest* word, so a frame that carries none
+          // clears the one before it: `op=list` is a fresh read of the list, and a
+          // refusal shown against a path the host has since fixed would be a claim
+          // about a state the daemon has just contradicted. The words themselves do
+          // not vanish — a refusal also lands in the transcript (below).
+          const notices = { ...s.sandboxRootsNoticeBySid };
+          if (said === null) delete notices[k];
+          else notices[k] = said;
+          return {
+            ...s,
+            ...(roots === null ? {} : { sandboxRootsBySid: { ...s.sandboxRootsBySid, [k]: roots } }),
+            sandboxRootsNoticeBySid: notices,
+          };
+        });
+        // `op=list` answers only the connection that asked, so the TUI half shows
+        // the listing in its chat. The GUI's surface is the dialog, which reads
+        // the store — a system message for a read would put a line in the
+        // transcript every time the dialog opens. A *write* (or its refusal) is
+        // worth a line: another client's change would otherwise be invisible to a
+        // GUI user who is not looking at the dialog.
+        if (op && op !== "list") {
+          const text = error || notice || (roots?.length ? roots[roots.length - 1] : "");
+          if (text) transcript.addSystemMessage(text, d.session_id ?? sid ?? null);
+        }
         break;
       }
       case "turn_start": {
@@ -666,5 +878,59 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     return true;
   }
 
-  return { store, dispose, handleFrame, applyInit, respondApproval };
+  /**
+   * Ask the daemon to set this session's sandbox tier.
+   *
+   * Nothing is written to the store here, and that is the point (rant
+   * 2026-09-30T09:30:16, GUI half): the click is a request, not a state change, and
+   * the tier the chip then shows is the one the daemon's `sandbox_set` frame
+   * reports. A client that moved its own copy first would be right about itself and
+   * wrong about every other client whenever the daemon refused.
+   *
+   * Returns false when there is nothing to ask with — no session, or a build whose
+   * preload predates this API — rather than pretending the tier was set.
+   */
+  async function setSandbox(sid: string | null, mode: string): Promise<boolean> {
+    if (!sid) return false;
+    const sender = emrg.setSandbox;
+    if (typeof sender !== "function") return false;
+    try {
+      await sender({ sessionId: sid, mode });
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Ask the daemon to add, remove or list this session's extra writable roots.
+   *
+   * Nothing is written to the store here, and that is the same point
+   * `setSandbox` makes (rant 2026-10-09T09:43:39, GUI half): the host names a
+   * path, the daemon judges it against the tier in force and answers with a
+   * `sandbox_roots` frame, and that frame is what the list renders. A client that
+   * moved its own copy first would be right about itself and wrong whenever the
+   * daemon refused — and it refuses on rules (a path it cannot read, a protected
+   * file, the workspace itself) no client can restate.
+   *
+   * Returns false when there is nothing to ask with — no session, or a build
+   * whose preload predates this API — rather than pretending the op was sent.
+   */
+  async function setSandboxRoots(
+    sid: string | null,
+    op: "add" | "remove" | "list",
+    path = "",
+  ): Promise<boolean> {
+    if (!sid) return false;
+    const sender = emrg.setSandboxRoots;
+    if (typeof sender !== "function") return false;
+    try {
+      await sender({ sessionId: sid, op, path });
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  return { store, dispose, handleFrame, applyInit, respondApproval, setSandbox, setSandboxRoots };
 }

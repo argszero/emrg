@@ -268,10 +268,12 @@ def _tool_silence_seconds(arguments: object) -> float:
     except (TypeError, ValueError):
         timeout = _TOOL_SILENCE_DEFAULT_SECONDS
     if not (math.isfinite(timeout) and timeout > 0):
-        # Not a bound at all — zero and below make the tool return at once, and
-        # an infinite one would disable the watchdog while the tool waited just
-        # as long. Falling back keeps the rule one sentence long ("a positive
-        # declared value, else the default") and always yields a finite bound.
+        # Not a bound at all — zero and below cannot bound anything (the shell tool
+        # refuses such a value outright, so the call returns at once, and a tool that
+        # accepted one would return just as fast), and an infinite one would disable
+        # the watchdog while the tool waited just as long. Falling back keeps the rule
+        # one sentence long ("a positive declared value, else the default") and always
+        # yields a finite bound.
         timeout = _TOOL_SILENCE_DEFAULT_SECONDS
     return timeout + _TOOL_SILENCE_GRACE_SECONDS
 
@@ -2327,7 +2329,8 @@ class TaskHandler:
         """
         return self._slowdown_active
 
-    async def _request_vibe_check(self, ws, prompt: str, completion_summary: str) -> dict | None:
+    async def _request_vibe_check(self, ws, prompt: str, completion_summary: str,
+                                  cycle_started_at: str = "") -> dict | None:
         """Ask the daemon for a structured vibe check on the SAME connection.
 
         Sends ``task_vibe_check`` and waits for ``vibe_check_result``. Rant
@@ -2355,6 +2358,12 @@ class TaskHandler:
                 "task_name": self.name,
                 "prompt": (prompt or "")[:2000],
                 "completion_summary": (completion_summary or "")[:3000],
+                # The instant this cycle was dispatched — the same value the
+                # `task` frame carries as its `timestamp`, so the daemon can tell
+                # this run's records from the previous run's inside a session
+                # that both share. Without it the summariser reads the shared
+                # session and can describe the neighbour (measured 2026-09-30).
+                "cycle_started_at": cycle_started_at or "",
             }, ensure_ascii=False))
             while True:
                 try:
@@ -2668,6 +2677,7 @@ class TaskHandler:
                 vibe_result = await self._request_vibe_check(
                     ws, prompt=prompt,
                     completion_summary=completion_content[:3000],
+                    cycle_started_at=cycle_time.isoformat(),
                 )
         except Exception as e:
             self._logger.exception("TaskHandler[%s] error", self.name)

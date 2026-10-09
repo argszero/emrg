@@ -186,6 +186,48 @@ def test_a_word_far_from_a_timestamp_is_not_a_citation(snippet):
     assert sites_of(snippet, text) == []
 
 
+@pytest.mark.parametrize("text", [
+    "- x (rant 2026-08-01T10:00:00)\n",
+    "- Host ruling, 2026-10-09T14:34:54: only a rant may change a task prompt.\n",
+    "   Host directive 2026-10-06T10:40:46: an explicit no-slowdown instruction wins.\n",
+    "- Host, 2026-10-06T10:40:46: idle resources go into entering more competitions.\n",
+    "- x (host, 2026-10-02T07:56:20: the blocker rule)\n",
+])
+def test_every_citation_spelling_the_class_uses_opens_a_site(snippet, text):
+    """`rant`, `ruling`, `directive` and bare `host` each introduce a citation.
+
+    The class spells the same reference four ways, and the matcher knew only the
+    first until 2026-10-09 (measured on `94504e5d`: the `rant`-only set read 39 sites
+    and could not see `vibe_check.j2`'s `Host directive 2026-10-06T10:40:46` at all, so
+    its rc 0 was about an inventory that had not moved), then three - the bare form was
+    still invisible, and it is the one `competition_prompt.md` uses for all four of its
+    citations (issue #1989). A spelling the matcher cannot see is a host-local citation
+    that ships with no record and nobody is told.
+
+    Each case also asserts **one** site: the bare `host` alternative must not double a
+    line that already names a `ruling` or a `directive` (`Host ruling, <ts>` matches
+    through `ruling`, because `host` cannot reach the timestamp past ` ruling, `).
+    """
+    sites = sites_of(snippet, text)
+    assert len(sites) == 1
+    found = snippet.problems(sites)
+    assert len(found) == 1 and "public record" in found[0], (
+        "the spelling was recognised but did not demand a record - which is the same "
+        "outcome as not recognising it"
+    )
+
+
+@pytest.mark.parametrize("text", [
+    "- x (PR #1986; ruling 2026-10-09T14:34:54)\n",
+    "- x Host directive 2026-10-06T10:40:46 (PR #1899)\n",
+    "- x host, 2026-10-06T10:40:46, PR #1899: the no-slowdown rule\n",
+    "- Host, 2026-10-07T11:52:53, PR #1891: every competition, every round\n",
+])
+def test_a_record_beside_the_newer_spellings_satisfies_the_rule(snippet, text):
+    """Both directions: the widened word set must not be unsatisfiable."""
+    assert snippet.problems(sites_of(snippet, text)) == []
+
+
 def test_a_wrapped_parenthetical_is_one_site(snippet):
     """The block's parentheses keep it one site - in both directions.
 

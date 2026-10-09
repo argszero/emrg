@@ -19,10 +19,20 @@ from datetime import datetime
 from typing import Optional
 
 
+def new_task_id() -> str:
+    """Mint a request id the client already knows before it sends.
+
+    The same string `TaskRequest` would mint on its own — one site, so a client
+    that must key something by the request (a row it echoed before the daemon
+    answered, say) and the request it sends can never disagree about the id.
+    """
+    return str(uuid.uuid4())
+
+
 @dataclass
 class TaskRequest:
     """Sent from client to server to execute a task."""
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: new_task_id())
     session_id: str = ""
     cwd: str = ""
     prompt: str = ""

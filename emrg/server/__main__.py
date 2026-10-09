@@ -4,8 +4,9 @@ import logging
 import sys
 import traceback
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
+from emrg.config import logs_dir
+from emrg.logfiles import migrate_legacy_logs
 from emrg.server.daemon import DaemonExit, run_server
 from emrg.server.logcontext import session_label
 from emrg.tool_path import ensure_tool_dirs
@@ -42,9 +43,17 @@ _fmt = _TaskColumnFormatter(
 
 
 def _configure_logging() -> None:
-    """Write daemon logs to ~/.emrg/emrgd.log so they survive stderr=DEVNULL."""
-    log_dir = Path.home() / ".emrg"
+    """Write daemon logs to ``~/.emrg/logs/emrgd.log`` so they survive stderr=DEVNULL.
+
+    The directory comes from the one derivation (`emrg.config.logs_dir`, rant
+    2026-10-09T14:20:18). The migration of any log left in the config root runs
+    **here and only here** — before the handler below is constructed, because a
+    `RotatingFileHandler` freezes its path at construction and would recreate the
+    old one (see `emrg/logfiles.py`).
+    """
+    log_dir = logs_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_logs(log_dir)
     log_file = log_dir / "emrgd.log"
     file_handler = RotatingFileHandler(
         str(log_file), maxBytes=10 * 1024 * 1024, backupCount=3,
@@ -75,8 +84,19 @@ def _configure_logging() -> None:
     logging.getLogger("websockets").setLevel(logging.INFO)
 
 
+def _crash_log_path():
+    """Where the daemon's stdout/stderr sink lives (one derivation, rant 2026-10-09T14:20:18).
+
+    A named site rather than an expression inside `_redirect_std_streams`, so the
+    path can be asserted without re-pointing this process's own `sys.stdout` and
+    `sys.stderr` — which is what the writer does and why a test may only call it
+    in a subprocess.
+    """
+    return logs_dir() / "emrgd-crash.log"
+
+
 def _redirect_std_streams() -> None:
-    """Redirect sys.stdout/sys.stderr to ~/.emrg/emrgd-crash.log (rant
+    """Redirect sys.stdout/sys.stderr to ~/.emrg/logs/emrgd-crash.log (rant
     2026-08-25T09:25:32 — daemon silent death).
 
     daemon_manager spawns emrgd with stdout/stderr=DEVNULL, so anything that
@@ -86,8 +106,13 @@ def _redirect_std_streams() -> None:
     faulthandler so even a fatal-signal death (SIGSEGV etc., where no Python
     code runs) leaves a stack dump behind.
     """
-    crash_log = Path.home() / ".emrg" / "emrgd-crash.log"
+    crash_log = _crash_log_path()
     try:
+        # The directory is created here rather than assumed: `_configure_logging`
+        # runs first in `main()` and makes it, but this function is best-effort
+        # and self-sufficient by design — a crash sink that silently vanishes
+        # because a directory was missing is the defect it exists to prevent.
+        crash_log.parent.mkdir(parents=True, exist_ok=True)
         stream = open(str(crash_log), "a", encoding="utf-8", buffering=1)
     except OSError:
         return  # best-effort: keep the original DEVNULL sinks

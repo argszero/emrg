@@ -689,3 +689,96 @@ def test_main_catches_every_failure_its_run_can_produce(mod, monkeypatch, capsys
     assert "no readable output" in captured.err
     assert "Traceback" not in captured.err
 
+
+# --- the write must not report a half-done repair as a finished one ----------
+
+
+def _balanced_doc(tmp_path: Path, renderer: int, gui: int) -> Path:
+    """An Agent.md copy whose two breakdowns *do* sum to their headlines.
+
+    `_doc` above carries parts that never summed (`514: 5 snapshot-store + 9
+    utils`), which is the right fixture for "only the numbers move" but cannot
+    show a write that *broke* a balance. This one starts balanced, as the real
+    `Agent.md` is (its two Node lines are guarded by tests/test_doc_counts.py).
+    """
+    path = tmp_path / "Agent.md"
+    path.write_text(
+        "# Agent.md\n\n"
+        "Python: `uv run pytest tests/ -v` (1307) - import check\n"
+        f"GUI: `cd emrg/gui && npm test` ({gui}: 4 daemon_client + {gui - 4} conn-manager)\n"
+        "Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` "
+        f"({renderer}: 5 snapshot-store + {renderer - 5} utils)\n"
+    )
+    return path
+
+
+def test_write_reports_a_breakdown_it_could_not_keep_consistent(
+    mod, tmp_path, monkeypatch, capsys
+) -> None:
+    """A repair must not hand back a line less consistent than it found it.
+
+    Measured 2026-10-08 (cycle cyc20261008-123717) on the real tree: with
+    `Agent.md` on 601 and its parts summing to 601 while vitest executed 604,
+    `--write` bumped the headline, left the parts summing to 601, printed
+    `Next: uv run --no-sync pytest tests/test_doc_counts.py -q` and exited
+    **0** - and that next step was red twice
+    (`test_gui_breakdown_sums_to_headline` and
+    `test_renderer_breakdown_matches_static_counts`, 2 failed / 71 passed). The
+    tool cannot know *which* part moved (it rewrites the headline only), so the
+    fix is to report the half it could not finish rather than a success.
+    """
+    doc = _balanced_doc(tmp_path, 12, 10)
+    mod.DOC = doc
+    monkeypatch.setattr(mod, "measured_renderer", lambda: 15)
+    monkeypatch.setattr(mod, "measured_gui", lambda: 10)
+
+    assert mod.main(["--write"]) == 1
+    out = capsys.readouterr().out
+    assert "INCOMPLETE" in out, out
+    assert "Renderer line's per-file breakdown still sums to 12" in out, out
+    assert "headline is now 15" in out, out
+    # The headline is still repaired - the write is half a repair, not no repair.
+    assert mod.documented_counts(doc.read_text()) == (15, 10)
+    # ...and the parts it could not derive are left exactly as they were.
+    assert "5 snapshot-store + 7 utils" in doc.read_text()
+
+
+def test_write_stays_silent_when_the_line_was_never_balanced(
+    mod, tmp_path, monkeypatch, capsys
+) -> None:
+    """The rule is "do not break a balance", not "the parts must always sum".
+
+    Both halves are load-bearing. `_doc`'s parts (`5 snapshot-store + 9 utils`)
+    never summed to its 514, and a tool that cried `INCOMPLETE` whenever a sum
+    disagreed with a headline would fire on every fixture, on any doc whose line
+    it cannot derive, and on the transposed-part case the guard already owns -
+    and a message that fires where nothing is wrong is trained away. So the
+    negative arm is a line that was *already* unbalanced: the write repairs the
+    headline and says nothing extra.
+    """
+    doc = _doc(tmp_path, 514, 100)
+    mod.DOC = doc
+    monkeypatch.setattr(mod, "measured_renderer", lambda: 520)
+    monkeypatch.setattr(mod, "measured_gui", lambda: 100)
+
+    assert mod.main(["--write"]) == 0
+    out = capsys.readouterr().out
+    assert "INCOMPLETE" not in out, out
+    assert "updated Agent.md: renderer 514 -> 520, GUI 100 -> 100" in out, out
+    assert mod.documented_counts(doc.read_text()) == (520, 100)
+    assert "5 snapshot-store + 9 utils" in doc.read_text()
+
+
+def test_an_unparseable_breakdown_is_unmeasurable_not_broken(mod, tmp_path) -> None:
+    """`None` is "could not measure", never a zero that reads as balanced.
+
+    The rule above is stated over a line's *shape*: a line the parser cannot
+    read must be skipped, because reporting it as broken would be the same
+    defect in the other direction - a verdict on something this tool did not
+    measure.
+    """
+    text = "Renderer: `x npm test` (12: no digits here)\n"
+    assert mod._count_line_shape(mod.RENDERER_LINE, text) is None
+    # And a genuinely absent line is unmeasurable too, not a zero-sum line.
+    assert mod._count_line_shape(mod.RENDERER_LINE, "nothing to see\n") is None
+

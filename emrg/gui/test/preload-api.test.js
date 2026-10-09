@@ -3,12 +3,12 @@
  * preload-api.test.js — window.emrg preload 桥 API 面守卫测试（React 迁移红线 #1）。
  *
  * 背景（cycle cyc20260826-131007 发现）：React 迁移设计文档 §2.2 声称 preload
- * API 46 个方法，实际 preload.js 已增长到 54 个 invoke 方法 + onEvent 订阅
+ * API 46 个方法，实际 preload.js 已增长到 57 个 invoke 方法 + onEvent 订阅
  * （设计文档口径过时）。此前 build-config.test.js 只抽查 listFiles/readFile 两个
  * API——没有完整 API 面的回归守卫。React 化迁移（Batch 0-5）的红线就是
  * "window.emrg 方法集合原样保留"，本测试把整个契约钉死：
  *
- *   1. 全部 54 个 invoke 方法 + onEvent 必须存在（防误删/改名）
+ *   1. 全部 57 个 invoke 方法 + onEvent 必须存在（防误删/改名）
  *   2. 每个方法必须调用 ipcRenderer.invoke("emrg:<同名频道>")（防频道漂移）
  *   3. onEvent 必须订阅 emrg:event 广播（防事件通道漂移）
  *
@@ -23,7 +23,7 @@ const path = require("node:path");
 
 const PRELOAD = fs.readFileSync(path.join(__dirname, "..", "preload.js"), "utf8");
 
-/** 冻结的期望 API 面：53 invoke 方法（按 preload.js 实际顺序）+ onEvent */
+/** 冻结的期望 API 面：57 invoke 方法（按 preload.js 实际顺序）+ onEvent */
 const EXPECTED_INVOKE_METHODS = [
   "init",
   "sendMessage",
@@ -37,6 +37,8 @@ const EXPECTED_INVOKE_METHODS = [
   "getOpenSessions",
   "renameSession",
   "setModel",
+  "setSandbox",
+  "setSandboxRoots",
   "clearSession",
   "compactSession",
   "respondApproval",
@@ -79,6 +81,7 @@ const EXPECTED_INVOKE_METHODS = [
   "cancel",
   "pickProjectDir",
   "saveImage",
+  "readClipboardImage",
   "log",
 ];
 
@@ -118,8 +121,8 @@ function parseApiBlock(block) {
 
 const api = parseApiBlock(extractApiBlock());
 
-test("window.emrg exposes the full 55-member contract (54 invoke + onEvent)", () => {
-  // 54 invoke 方法全部存在（防误删/改名）
+test("window.emrg exposes the full contract (57 invoke + onEvent)", () => {
+  // 57 invoke 方法全部存在（防误删/改名）
   for (const name of EXPECTED_INVOKE_METHODS) {
     assert.ok(api.invoke.has(name), `缺少 invoke 方法 ${name}`);
   }

@@ -171,19 +171,125 @@ def test_read_with_start_line_byte_offset(temp_file):
 
 
 def test_read_start_line_byte_offset_at_eol(temp_file):
-    """byte_offset beyond line length yields empty first line."""
+    """An offset at or past the line's end shows that line empty, and says so.
+
+    Rewritten 2026-10-08 (`cyc20261008-153534`) after this arm was measured **unable to
+    fail**: it read `line 3` (6 chars) with offset 999 and asserted
+    `"     3\\t" in lines[0] or lines[0].strip().startswith("3")`, and the tool returned
+    the **whole line** — which satisfies both halves, because `"     3\\tline 3"` begins
+    with `"     3\\t"`. So the docstring above said "yields empty first line" while the
+    code did the opposite, and nothing here could tell the two apart. The assertions
+    below are the two outcomes separated: the line is empty, the whole line is absent,
+    and the notice names the offset and the line's real length.
+    """
     tool = ReadTool()
     f, _ = temp_file
+    assert len("line 3") == 6
     result = _run(tool.execute({
         "file_path": str(f),
         "start_line": 3,
         "start_line_byte_offset": 999,
     }))
     assert not result.error
-    # First line (line 3) should be empty or skipped
     lines = result.content.split("\n")
-    # line 3 should be empty (byte offset beyond its length)
-    assert "     3\t" in lines[0] or lines[0].strip().startswith("3")
+    # The numbered first line holds nothing after the tab.
+    assert lines[0] == "     3\t", f"line 3 should be shown empty, got {lines[0]!r}"
+    # The subject is not silently handed back instead: that output is what offset 0
+    # produces, and the caller cannot tell the two apart.
+    assert "line 3" not in lines[0], (
+        "the whole line came back for an offset past its end — byte-identical to offset 0"
+    )
+    # The fact is stated, with both numbers a reader needs.
+    assert "999" in result.content and "6 chars" in result.content, (
+        f"the ignored offset was not reported: {result.content!r}"
+    )
+
+
+def test_read_start_line_byte_offset_exactly_at_the_line_end(temp_file):
+    """An offset *equal* to the line's length is at its end, not inside it.
+
+    The `<` that dropped the offset is an off-by-one, and the arm above cannot see one:
+    with `999` of a 6-character line, flipping the guard to `<=` leaves every assertion
+    there satisfied, because `"line 3"[999:]` and `"line 3"[6:]` are both `""`. Measured
+    2026-10-08 — the `<=` mutant survived the rest of this file, so the defect the issue
+    reports had two spellings, "at" and "past", and only the second one was pinned.
+    """
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({
+        "file_path": str(f),
+        "start_line": 3,
+        "start_line_byte_offset": 6,  # "line 3" is exactly 6 characters
+    }))
+    assert not result.error
+    lines = result.content.split("\n")
+    assert lines[0] == "     3\t", (
+        f"offset 6 of a 6-character line is at its end, so nothing of it is shown, "
+        f"got {lines[0]!r}"
+    )
+    assert "at or past the end of line 3" in result.content, result.content
+    assert "6 chars" in result.content
+    assert "line 4" in result.content  # the rest of the range is untouched
+
+
+def test_read_line_count_truncation_still_asks_for_offset_zero(temp_file):
+    """The tool's own truncation is by *line count*, so its continuation hint keeps
+    `start_line_byte_offset=0`: the offset that resumes a line is not the one that
+    continues a page (issue #1928, acceptance item 4)."""
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({"file_path": str(f), "line_limit": 2}))
+    assert not result.error
+    assert "truncated at start_line=3" in result.content
+    assert "start_line_byte_offset=0" in result.content
+
+
+def test_read_start_line_byte_offset_states_the_remainder(temp_file):
+    """An offset inside the line reports the line's length and how much was shown.
+
+    The other half of the same defect: with the offset applied, the output was a *suffix*
+    printed with its line number and no way to tell it apart from the whole line — so a
+    caller chunking a long line could not know whether more of it followed.
+    """
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({
+        "file_path": str(f),
+        "start_line": 3,
+        "start_line_byte_offset": 2,
+    }))
+    assert not result.error
+    lines = result.content.split("\n")
+    assert lines[0] == "     3\tne 3", f"expected the suffix from character 2, got {lines[0]!r}"
+    assert "6 chars" in result.content and "character 2" in result.content, (
+        f"the partial read was not reported as partial: {result.content!r}"
+    )
+    assert "4 of them" in result.content, (
+        f"the notice does not say how much of the line was shown: {result.content!r}"
+    )
+
+
+def test_read_never_cuts_a_line(temp_file):
+    """The premise `start_line_byte_offset`'s description states, measured.
+
+    A line is returned whole however long it is, so no offset of the tool's own making
+    exists: the offset belongs to a caller chunking a line itself. That is what the
+    schema description now says, and this arm is what makes the sentence falsifiable —
+    a line cap added later (the shape that would make the tool produce offsets) fails
+    here rather than quietly re-defining the parameter.
+    """
+    tool = ReadTool()
+    _, d = temp_file
+    long_line = "x" * 5000 + "END-OF-LINE"
+    big = d / "oneline.txt"
+    big.write_text("short\n" + long_line + "\n")
+    result = _run(tool.execute({"file_path": str(big), "start_line": 2}))
+    assert not result.error
+    shown = result.content.split("\n")[0]
+    assert shown == f"     2\t{long_line}", (
+        f"line 2 is {len(long_line)} chars and came back with {len(shown) - 8} of them — "
+        "a line was cut, which is the offset-producing behaviour the description denies"
+    )
 
 
 def test_read_image_returns_vision_ref(temp_file):
@@ -322,3 +428,94 @@ class TestTheFileIsAsLongAsItsLines:
         assert not result.error
         assert f"truncated at start_line={total}, " in result.content
         assert f"total {total} lines" in result.content
+
+
+# ── the numeric parameters' domains (issue #1935) ─────────────────────────────
+#
+# `{"type": "integer"}` is the whole of the declaration, so the lower bound lived
+# only in the consuming code — and each of these three was read as a *different
+# number* rather than as a caller error. Measured 2026-10-08 (`cyc20261008-175325`):
+# `line_limit=-3` returned lines 1-7 of a 10-line file (a slice from the end) and
+# named a continuation at `start_line=-2`; `line_limit=0` was falsy and read as
+# *absent*, returning the default 1000 lines; a negative byte offset was clamped to
+# 0 (the whole line) with no note. A reading of a range nobody asked for must not
+# happen silently, so the value is refused and the refusal names it.
+
+
+def test_read_refuses_a_line_limit_below_one(temp_file):
+    """0 and a negative are refused — and nothing is read in their place."""
+    tool = ReadTool()
+    f, _ = temp_file
+    for value in (0, -3):
+        result = _run(tool.execute({"file_path": str(f), "line_limit": value}))
+        assert result.error, f"line_limit={value} was accepted"
+        assert "line_limit" in result.content and str(value) in result.content
+        # The defect this replaces: `-3` answered with lines 1-7 of a 10-line file.
+        assert "line 1" not in result.content, (
+            f"line_limit={value} still returned lines of the file: {result.content!r}"
+        )
+        assert "truncated" not in result.content, "a refused call announces no range"
+
+
+def test_read_refuses_a_line_limit_that_is_not_a_number(temp_file):
+    """A value that cannot be read as a count is refused, not silently defaulted.
+
+    Measured before the fix: `int("abc")` raised, the handler set `line_limit = None`,
+    and the call came back as the default 1000-line window — the caller's parameter
+    dropped without a word.
+    """
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({"file_path": str(f), "line_limit": "abc"}))
+    assert result.error
+    assert "line_limit" in result.content and "abc" in result.content
+    assert "line 1" not in result.content
+
+
+def test_read_refuses_a_start_line_below_one(temp_file):
+    """`start_line=0` (or negative) is refused rather than read as line 1."""
+    tool = ReadTool()
+    f, _ = temp_file
+    for value in (0, -5):
+        result = _run(tool.execute({"file_path": str(f), "start_line": value}))
+        assert result.error, f"start_line={value} was accepted"
+        assert "start_line" in result.content and str(value) in result.content
+        assert "line 1" not in result.content
+    # The alias is refused under the spelling the caller used.
+    alias = _run(tool.execute({"file_path": str(f), "offset": 0}))
+    assert alias.error and "offset" in alias.content
+
+
+def test_read_refuses_a_negative_byte_offset(temp_file):
+    """A negative offset is refused — the whole line is not handed back instead.
+
+    This is the third carrier of the same shape in this file: `max(0, offset)`
+    turned `-5` into `0`, which returns the line entire, byte-identical to asking
+    for no offset at all.
+    """
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({
+        "file_path": str(f), "start_line": 3, "start_line_byte_offset": -5,
+    }))
+    assert result.error
+    assert "start_line_byte_offset" in result.content and "-5" in result.content
+    assert "line 3" not in result.content, "the whole line came back for a negative offset"
+
+
+def test_read_still_reads_every_value_inside_its_domain(temp_file):
+    """The control: the refusals above must not have swallowed a legal call.
+
+    Drives the whole domain's useful range in one call — a start line, a limit and a
+    within-line offset together — and asserts the exact slice, so "refused" cannot
+    pass for "handled".
+    """
+    tool = ReadTool()
+    f, _ = temp_file
+    result = _run(tool.execute({
+        "file_path": str(f), "start_line": 3, "line_limit": 1, "start_line_byte_offset": 2,
+    }))
+    assert not result.error
+    lines = result.content.split("\n")
+    assert lines[0] == "     3\tne 3"
+    assert "line 4" not in result.content, "line_limit=1 read more than one line"

@@ -26,7 +26,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 RUNTIME="$DIST/runtime"
-VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.3.8)"
+VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.3.9)"
 PLATFORM="${1:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 
 mkdir -p "$DIST/artifacts"
@@ -207,6 +207,20 @@ EOF
     if [ -n "$APPIMAGE" ]; then
       cp "$APPIMAGE" "$DIST/artifacts/EMRG-$VERSION-$(uname -m).AppImage"
       echo "==> AppImage collected: $(basename "$APPIMAGE")"
+      # 更新信息 + `.zsync`（rant 2026-09-30T11:42:41 要求 2）：electron-builder 产出的
+      # AppImage 里没有更新信息，官方目录的自动检查因此点名第二条告警。修法是上游对
+      # electron-builder 给出的唯一那条路 —— 用 AppImage 自己的 `--appimage-extract`
+      # 解成 AppDir，再用 `appimagetool -u` 重新封装（内嵌与 `.zsync` 是同一次封装的
+      # 两个产物，`.zsync` 必然对应最终字节）。细节与「工具缺席即失败」的理由写在
+      # packaging/make-appimage-updatable.sh 里。
+      #
+      # 刻意**没有**开在收集成功就一定有 AppImage 的那条老路上：`.zsync` 是发布资产，
+      # 而资产清单由 actions/upload-artifact 的 path 列表决定，那里也必须出现 `*.zsync`
+      # （见 .github/workflows/build-release.yml），两处由 tests/test_appimage_update_info.py
+      # 按**执行结果**钉在一起。
+      COLLECTED="$DIST/artifacts/EMRG-$VERSION-$(uname -m).AppImage"
+      bash "$ROOT/packaging/make-appimage-updatable.sh" \
+        "$COLLECTED" "$DIST/artifacts" "$(basename "$COLLECTED")"
     else
       echo "!! AppImage not found in emrg/gui/dist — Linux release 缺 AppImage（有 tar.gz 兜底）" >&2
     fi

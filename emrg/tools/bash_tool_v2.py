@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import locale
+import math
 import logging
 import os
 import re
@@ -627,7 +628,9 @@ class BashToolV2(ToolExecutor):
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default: 30).",
+                        "description": "Timeout in seconds — a positive number "
+                        "(default: 30). Zero, a negative value or a non-number is "
+                        "refused rather than run under a different bound.",
                     },
                     "workdir": {
                         "type": "string",
@@ -665,7 +668,9 @@ class BashToolV2(ToolExecutor):
         command = arguments.get("command", "")
         if not command:
             return ToolResult(name="bash", content="Error: no command provided", error=True)
-        timeout = _as_timeout(arguments.get("timeout"))
+        timeout, refusal = _as_timeout(arguments.get("timeout"))
+        if refusal is not None:
+            return ToolResult(name="bash", content=refusal, error=True)
         workdir = str(
             arguments.get("workspace") or arguments.get("workdir") or os.getcwd()
         )
@@ -673,6 +678,7 @@ class BashToolV2(ToolExecutor):
             mode=arguments.get("sandbox"),
             workspace_root=workdir,
             session_id=arguments.get("session_id"),
+            extra_roots=arguments.get("writable_roots"),
         )
         # The command-text rules a checked tier makes (containment escape, and the
         # host's daemon-lifecycle red line) are read from the text by
@@ -703,17 +709,47 @@ class BashToolV2(ToolExecutor):
         )
 
 
-def _as_timeout(value: object) -> float:
-    """Read the timeout argument, falling back to the default.
+def _as_timeout(value: object) -> tuple[float | None, str | None]:
+    """Read the timeout argument, or hand back the refusal it earns.
+
+    A non-positive timeout was not merely unusable — it was **obeyed**. Measured
+    2026-10-08 (`cyc20261008-175325`), `echo HELLO` under each value:
+
+    ==================  ==========================================================
+    absent              ``HELLO``
+    ``5``               ``HELLO``
+    ``0``               ``(no output)`` / ``[timed out after 0ms]`` / ``[killed by
+                        signal: 9]`` — the command never ran, and the reading calls
+                        it a timeout
+    ``-5``              the same, with ``[timed out after -5000ms]``
+    ``"abc"``           ``HELLO``, silently under the 30s default
+    ==================  ==========================================================
+
+    The daemon's own watchdog already reads this field the other way — ``scheduler.
+    _tool_silence_seconds`` treats "a non-positive timeout" as *unusable* and
+    bounds the call by the default, with a test stating why ("clamping it to the
+    grace alone would fire the watchdog instantly on every such call"). Two readers
+    of one datum with two answers is the defect; this is the tool's half, and it
+    refuses rather than substitutes a number the caller did not send.
 
     :param value: whatever the model sent.
-    :returns: the timeout in seconds (30 when unusable, as the schema documents).
+    :returns: ``(seconds, None)``, or ``(None, refusal)`` for the caller to report
+        as ``ToolResult(..., error=True)``. An absent value is the documented
+        default of 30 seconds, which the schema states.
     """
-    if isinstance(value, bool) or value is None:
-        return 30.0
-    if isinstance(value, (int, float)):
-        return float(value)
+    if value is None:
+        return 30.0, None
+    refusal = (
+        f"timeout must be a positive number of seconds (got {value!r}); this call "
+        "is refused rather than run under a different bound. Omit it to use the "
+        "default of 30 seconds."
+    )
+    if isinstance(value, bool):
+        return None, refusal
     try:
-        return float(str(value))
+        seconds = float(str(value).strip())
     except (TypeError, ValueError):
-        return 30.0
+        return None, refusal
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None, refusal
+    return seconds, None

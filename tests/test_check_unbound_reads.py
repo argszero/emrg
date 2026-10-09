@@ -223,6 +223,49 @@ class TestItsExitCodes:
         first = (proc.stdout or "").splitlines()[0]
         assert first == f"tree: {tree.resolve()}", proc.stdout
 
+    def test_a_root_that_is_not_a_directory_is_unmeasurable_not_clean(self, tmp_path) -> None:
+        """`0` means "measured and clean", so a root nobody could walk is never `0`.
+
+        Measured 2026-10-06 (`cyc20261006-165503`): `--root /nonexistent` printed
+        `tree: /nonexistent` and then the `OK:` line, exit 0 - a pass for a tree the
+        guard had not read a byte from. The `tree:` line is still first, because the
+        refusal is a verdict and the family's rule is that the identity comes before it.
+        """
+        proc = _run(tmp_path / "not-there")
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "could not measure" in proc.stderr, proc.stderr
+        assert "is not a directory" in proc.stderr, (
+            "a path that is not there and a tree that holds no source are two causes "
+            "with two remedies (fix the path, versus check that the sources are "
+            "checked out), so the refusal has to name the one it read instead of "
+            f"answering both with the count's message:\n{proc.stderr}"
+        )
+        assert "OK" not in proc.stdout, proc.stdout
+        assert (proc.stdout or "").splitlines()[0].startswith("tree: "), proc.stdout
+
+    def test_a_tree_with_no_python_file_is_unmeasurable_not_clean(self, tmp_path) -> None:
+        """The second shape of the same reading: a tree that exists and holds nothing.
+
+        `_tree` builds `emrg/` and `scripts/` and writes no file, which is what a root
+        pointed one level too high (or at a directory whose sources were not checked
+        out) looks like. An empty finding list beside an unread tree is not a pass, and
+        neither is an empty one beside a tree with no file to read.
+        """
+        proc = _run(_tree(tmp_path))
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "could not measure" in proc.stderr, proc.stderr
+        assert "OK" not in proc.stdout, proc.stdout
+
+    def test_the_clean_verdict_names_how_many_files_it_read(self, tmp_path) -> None:
+        """The count is what tells "no findings in 300 files" from "no findings in none".
+
+        Without it the two verdicts are the same sentence, which is how the empty root
+        above stayed invisible: a reader has no field to notice is zero.
+        """
+        proc = _run(_tree(tmp_path, good="def g():\n    return 1\n"))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "1 file(s) read" in proc.stdout, proc.stdout
+
 
 class TestTheCheckout:
     def test_no_name_in_this_checkout_is_read_before_its_binding(self) -> None:

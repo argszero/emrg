@@ -101,9 +101,48 @@ export function scrollCompensation(
 }
 
 /**
+ * 「更早的一页还能不能加载」——判定的另一半（vanilla：`hasMore && !loading`）。
+ *
+ * `shouldLoadOlder` 与它分开导出，是因为两个**不同的问题**都要问这一半：
+ * 「滚到顶要不要翻页」还要看滚动位置，而「顶部条此刻是不是可点控件」只看有没有
+ * 可加载的页、以及是不是正在加载。两处各自写一遍 `hasMore && !loading` 就是同一
+ * 条规则的两个副本（rant 2026-10-09T09:25:00 的第三点），所以这里只留一处，
+ * `shouldLoadOlder` 自己也是调它。
+ */
+export function canLoadOlder(hasMore: boolean, loading: boolean): boolean {
+  return hasMore && !loading;
+}
+
+/**
+ * 顶部条这一次该写哪句话 —— 首屏（`loadHistory`）与翻页（`loadOlderHistory`）
+ * 两个写入点共用这一条规则。
+ *
+ * 两处**看起来**是「同一状态、两套答案」：首屏没有更早的页就什么都不写，翻到头却写
+ * 「没有更多历史」。它们问的其实是两个问题——首屏问「有没有更早的页可以取」（答案
+ * 是没有就无可奉告，用户还没问），翻页后问「你刚问的那句，到头了吗」（到没到头都
+ * 得回答）。所以判别式里必须带 `paged`：一条规则，两个问题各得其所。
+ *
+ * 这不是新行为：vanilla `app.js:838-841` 正是这个形状（首屏只有一个 `if (hasMore)`
+ * 分支，else 在 `:867-870`）。React 侧把它抄成了两个散落的 `? :`（`Shell.tsx:431`/`:462`），
+ * 看着像不一致，rant 2026-10-09T09:25:00 因此要求「一并理清」——理清的结果是把它
+ * 写成一条带名字的规则，而不是改掉其中一处。
+ */
+export function loadBarKey(
+  hasMore: boolean,
+  paged: boolean,
+): "app.historyLoadMore" | "app.historyNoMore" | null {
+  if (hasMore) return "app.historyLoadMore";
+  return paged ? "app.historyNoMore" : null;
+}
+
+/**
  * 滚动到顶触发条件（vanilla：`scrollTop <= 2 && hasMore && !loading`，
  * 150ms 防抖由接线层处理）。纯判定，供容器 scroll 监听复用。
+ *
+ * 这条规则曾有两个家：写在这，也重写在 `TranscriptView.tsx` 的 scroll 监听里，
+ * 而**生产路径读的是重写的那份**——于是改这里不会有任何用户可见的效果，改了也
+ * 不知道（rant 2026-10-09T09:25:00；issue #1979 把它收敛回这一处）。
  */
 export function shouldLoadOlder(scrollTop: number, hasMore: boolean, loading: boolean): boolean {
-  return scrollTop <= 2 && hasMore && !loading;
+  return scrollTop <= 2 && canLoadOlder(hasMore, loading);
 }

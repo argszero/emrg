@@ -186,7 +186,7 @@ def _start_daemon_and_report() -> int:
 
     Both halves of the answer already exist in `client/daemon_manager.py`, the
     path the TUI and the GUI use: it redirects the child's own stderr to
-    `~/.emrg/emrgd-start.err` — the only channel a child that dies before
+    `~/.emrg/logs/emrgd-start.err` — the only channel a child that dies before
     installing its logging handler leaves behind (issue #1276) — and it waits for
     the port before calling a start done. This path does not re-implement them, it
     *is* that path. One background start in the product instead of two that drift,

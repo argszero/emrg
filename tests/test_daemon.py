@@ -225,6 +225,82 @@ def test_system_prompt_rant_handling_section(tmp_path):
     assert "/rant" in rendered
 
 
+def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
+    """A task's only channel to its own prompt text is a rant (host ruling
+    2026-10-09T14:34:54; PR #1986).
+
+    The loop this closes, measured on 2026-10-09: the `competition` task wanted rules added
+    to `emrg/server/competition_prompt.md`, and it could do nothing about it from its own
+    workspace. Two copies exist — the repository's, which nothing reads at runtime, and the
+    install tree's, which is the one `_resolve_task_template` returns and which sits outside
+    every task's workspace and is replaced whole by the next upgrade — so a task that writes
+    the file it can reach is writing something no round reads, and a task that writes the one
+    that matters cannot. The host ruled it directly (2026-10-09T14:34:54, session
+    `emrg-evolution-competition-task`): 「你不能直接修改competition_prompt.md，丢宇emrg项目，
+    你只能提rant」.
+
+    Both halves of the citation are asserted, for the reason `check-rant-citations.py` gives:
+    the timestamp is **host-local** — that session exists only on the host that recorded it,
+    so the message does not resolve on a second host (issue #1252 measured 0 of 24) — while
+    `PR #1986` stays resolvable forever. A reader who cannot see the local store still has
+    the anchor, so asserting the timestamp alone would pin a reference half of whose
+    provenance can rot.
+
+    Asserted on the **render**: `system.j2` is the single render site every session receives,
+    so a rule placed here reaches a `competition` or `paper` session that opens no other
+    carrier — the placement reasoning `tests/test_language_policy_reach.py` records for the
+    same shape.
+    """
+    server = _make_server()
+    rendered = server._build_system_prompt()
+    assert "A task cannot change its own prompt text" in rendered, (
+        "the rendered system prompt does not say who owns a task's prompt file — the rule "
+        "is then carried by no artifact a task session receives"
+    )
+    assert "`project: emrg`" in rendered, (
+        "the rule must name the channel (a rant against `emrg`), because 'you may not write "
+        "it' without a route leaves the task with nowhere to go"
+    )
+    assert "install tree" in rendered, (
+        "the reason the write does not work is missing: without it the rule reads as a "
+        "policy preference rather than a description of two copies"
+    )
+    # A rule recorded as the host's is a message that can be pointed at: the quote is
+    # verbatim, the command that re-finds it is right beside it, and the reference carries
+    # the resolvable half too — the timestamp is host-local (issue #1252).
+    assert "2026-10-09T14:34:54" in rendered, (
+        "the host message the rule rests on is gone, so the rule rests on this instance's "
+        "inference instead"
+    )
+    assert "PR #1986" in rendered, (
+        "the citation keeps only its host-local half: a timestamp indexes one machine's "
+        "store, so a reader on a second host has nothing to resolve — the public record "
+        "spelled beside it is the anchor that survives"
+    )
+    # The scope is the half a reader on another host acts on. Without it the paragraph
+    # reads as a command that works everywhere, and a session that runs it and reads
+    # `NOT FOUND` (rc 1) concludes the host never said it — the failure mode this
+    # paragraph exists to close (reviewer finding on #1986, reproduced on two hosts).
+    assert "host-local" in rendered and "NOT FOUND" in rendered, (
+        "the paragraph no longer says the citation is host-local: that reading was taken "
+        "on the machine that recorded the message, and a reader elsewhere can only "
+        "reproduce it as `NOT FOUND` — stated, that is a scope; unstated, it is a "
+        "contradiction the reader cannot resolve"
+    )
+    assert "You cannot modify competition_prompt.md directly" in rendered, (
+        "the quotation from another language ships untranslated, against the Language "
+        "Policy block seven lines below that these paragraphs cite for their placement"
+    )
+    assert "丢宇emrg项目" in rendered, (
+        "the host's own words are not quoted verbatim — the message is re-findable only by "
+        "the exact string, and a paraphrase cannot be looked up"
+    )
+    assert "find-host-message.py --pattern '不能直接修改competition_prompt.md'" in rendered, (
+        "the render does not say how to re-find the message, so the next reader has to "
+        "trust this file"
+    )
+
+
 def test_system_prompt_temp_file_rules_section(tmp_path):
     """Temp File Rules section renders with the session tmp dir (rant
     2026-08-25T18:10:57): throwaway scripts must go under the session
@@ -3745,7 +3821,7 @@ def test_build_user_content_non_vision_degrade():
 
 
 def test_write_exit_record(tmp_path, monkeypatch):
-    """Exit records are durable one-line JSON in ~/.emrg/emrgd-exit.log —
+    """Exit records are durable one-line JSON in ~/.emrg/logs/emrgd-exit.log —
     every daemon stop, normal or abnormal, must be attributable."""
     from emrg.server.daemon import _write_exit_record
 

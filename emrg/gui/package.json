@@ -1,6 +1,6 @@
 {
   "name": "emrg-gui",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "EMRG GUI — Electron client for the EMRG self-evolving AI agent (Phase 3)",
   "main": "main.js",
   "scripts": {
@@ -28,11 +28,7 @@
     "productName": "EMRG",
     "extraResources": [
       {
-        "from": "../dist/runtime",
-        "to": "runtime"
-      },
-      {
-        "from": "../packaging/assets/icon.png",
+        "from": "../../packaging/assets/icon.png",
         "to": "icon.png"
       }
     ],
@@ -88,7 +84,7 @@
       "category": "Development",
       "extraResources": [
         {
-          "from": "../dist/runtime",
+          "from": "../../dist/runtime",
           "to": "runtime"
         }
       ],
@@ -100,7 +96,7 @@
       "perMachine": false
     },
     "directories": {
-      "buildResources": "../packaging/assets"
+      "buildResources": "../../packaging/assets"
     }
   }
 }

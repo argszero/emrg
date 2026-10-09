@@ -1,7 +1,17 @@
 __pycache__/
 *.pyc
-node_modules/
-.venv/
+# No trailing slash on `node_modules` and `.venv`: `<name>/` matches directories only, and
+# the merge gate's own remedy (`scripts/check-merge-plan-suite.py`) tells the operator to
+# *link* both into a worktree (`ln -sfn <main>/emrg/gui/node_modules <worktree>/...`, same
+# for `.venv`). Measured on master `c9d7f4b7` in a scratch repo carrying these rules: with
+# the slashed form a **symlink** or a plain **file** of either name is not ignored,
+# `git status --porcelain` lists it as `??`, and `git add -A` stages it — the link then
+# lands in a commit and the first symptom is an unrelated test reddening (the tracked-file
+# scan reads the link's target and reports `... could not be read as UTF-8 text ([Errno 21]
+# Is a directory`). Same finding, and the same reason, as the `.emrg-*` block below.
+# Verified safe: `git ls-files | grep -cE '(^|/)(node_modules|\.venv)$'` is 0.
+node_modules
+.venv
 .emrg/emrg-client.log
 .emrg/logs/
 .emrg/decisions/

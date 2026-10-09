@@ -1487,6 +1487,17 @@ def test_a_head_with_no_ci_run_cannot_be_judged_so_nothing_is_posted(
     assert "no CI run" in err and "lower bound" in err
     assert "unblock" in err, "the queue's own remedy for this head, not a new one"
     assert "re-trigger" in err, "the refusal names the command, not just the state"
+    # And it names the spelling that runs wherever the reader is. The remedy used to
+    # offer only `bash scripts/re-trigger-ci.sh`; measured 2026-10-05 by a reviewer on a
+    # Windows host (cycle `cyc20261005-054639`) `Get-Command bash` is not found there, so
+    # a refusal that named only that handed a reader a command they could not run. The
+    # portable form is what the script itself runs, and needs only `gh`, which every tool
+    # in this family already uses.
+    assert "gh workflow run test.yml --ref" in err, (
+        "the refusal must name a command that runs on the host reading it")
+    assert err.index("gh workflow run test.yml") < err.index("bash scripts/re-trigger-ci.sh"), (
+        "portable form first: the reader who acts on the first command they see is the "
+        "one this remedy exists for")
 
     # The module docstring is the first carrier a reader meets, and it said the opposite
     # about this very head until now — "left alone rather than judged", a pass — while
@@ -1901,3 +1912,62 @@ def test_a_dry_run_refuses_a_wrong_tree_claim_too(mod, monkeypatch, capsys, body
     assert "dry run" not in capsys.readouterr().out, (
         "the refusal comes before the dry-run line, so the run never reads as a pass"
     )
+
+
+def test_a_malformed_id_in_the_body_is_refused_as_it_is_in_the_flag(
+    mod, monkeypatch, capsys, body_file
+):
+    """One string, one verdict - the flag and the body must agree about it.
+
+    Measured 2026-10-05 (`cyc20261005-234557`): `--cycle cyc20261005-2345571` was
+    always refused as "not a cycle id", while a *body* stating that same string was
+    accepted, because the counter's reader took `cyc20261005-234557` out of the longer
+    run of digits. The vote would then have been attributed to a cycle that did not
+    cast it, and the abstention window - whose whole subject is who pushed a head -
+    would have been that cycle's. This is the body half of the pair; the flag half is
+    `test_a_malformed_cycle_flag_is_refused` above, which reads the same shape through
+    `--cycle`.
+    """
+    counter = FakeCounter(verdict_with())
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file("✅ LGTM\n\n— cycle cyc20261005-2345571")],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert "no cycle id" in err, err
+    assert gh.calls == [], "nothing may be posted for a body that states no cycle id"
+    assert counter.calls == [], "and the count is not worth reading for it"
+
+
+def test_the_boundary_leaves_a_well_formed_body_alone(mod, monkeypatch, capsys, body_file):
+    """The other direction: the id this file is given is still read from the body.
+
+    Said with the id at the *end of a sentence* - `… -- cycle cyc<id>` followed by a
+    newline - because that is the shape every vote body in this repo has, and a
+    boundary that fired there would refuse every real vote.
+    """
+    mine = "cyc20261005-234557"
+    counter = FakeCounter(
+        verdict_with(),
+        verdict_with([vote(cycle=mine)], counted=[True], valid_count=2),
+    )
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        [
+            "1255",
+            "--cycle", mine,
+            "--body-file", body_file(f"✅ LGTM\n\n— cycle {mine}\n"),
+        ],
+    )
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert gh.calls, "a well-formed body is still posted"

@@ -71,9 +71,52 @@ jobs:
           # this step too, never pass it as "nothing to compare".
           python3 scripts/check-release-tag.py "${GITHUB_REF_NAME}"
 
+  # The credential question is asked **before** the build, for the same reason
+  # `verify-tag` above is: a credential Apple will refuse should cost seconds, not
+  # the fifteen minutes the four platforms take. Measured on tag v0.3.8, run
+  # 36956685533: all four legs built, the macOS leg died at "Notarize pkg", and the
+  # `release` job was skipped because of it -- **nothing was published**, and the
+  # host paid a full build round to learn what a one-second exchange at home (or
+  # here) answers first.
+  #
+  # The reading is `scripts/check-notary-credentials.py` -- the same exchange the
+  # notarize step makes, with the same three secrets under the same names -- and its
+  # exit codes are this job's verdict, all of them: 0 Apple accepted the credentials,
+  # 1 Apple refused them, 2 the exchange did not complete (no verdict was reached).
+  # Non-zero fails the job, 2 included: a gate that passes because it could not reach
+  # a verdict is the "unpublished release while green" this workflow's `release`
+  # comment forbids, and a run that cannot notarize cannot publish either.
+  #
+  # Gated on the same three secrets the notarize step is gated on, so a host who never
+  # configured notarization keeps the documented skip instead of gaining a blocker.
+  # `xcrun` is why the job is macOS rather than a second ubuntu job beside `verify-tag`.
+  verify-credentials:
+    runs-on: macos-15
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      # Job-level env first: a secret cannot be read from an `if:` expression directly
+      # (GitHub rejects the workflow at parse time) -- the same shape `build` uses.
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
+      MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: The credentials the release notarizes with must still be accepted
+        if: env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `set -e` is load-bearing: the preflight's exit 2 (not measurable) must fail
+          # this step too, never pass it as "nothing to check".
+          python3 scripts/check-notary-credentials.py || {
+            rc=$?
+            echo "::error::the notarization preflight answered $rc -- 1 means Apple REFUSED these credentials (an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); 2 means the exchange did not complete, so no verdict was reached. Either way this tag cannot publish a macOS product, and the four-platform build would be spent before saying so. Run the same command at home with the same three variables to read Apple's own reply."
+            exit 1
+          }
+
   build:
-    needs: verify-tag
-    # `verify-tag` 在分支派发时是 skipped，而 skipped 的 needs 会 skip 下游 —— 不带
+    needs: [verify-tag, verify-credentials]
+    # 两个 verify job 在分支派发时都是 skipped，而 skipped 的 needs 会 skip 下游 —— 不带
     # 条件的话，`workflow_dispatch` 打在分支上会让整条流水线以 success 结束却什么都
     # 不构建（master 上那条路径是真构建的）。此条件让本 job 在依赖 **成功或跳过** 时
     # 都执行，在依赖 **失败** 时仍然不执行——后半段同样实测过（同一探针里 `needs:
@@ -284,6 +327,18 @@ jobs:
           npm run build
           test -f dist/index.html
 
+      # ── 打包引用自查（cycle cyc20261009-032401）──────────────────────────
+      # electron-builder 把 `from`/`directories.*` 相对 emrg/gui/package.json 解析，源不存在时
+      # **只警告不失败**：run 37723424917（v0.3.9）就带着这两行发布了没有载荷的产物 ——
+      #   • file source doesn't exist  from=.../emrg/emrg/dist/runtime
+      #   • default Electron icon is used  reason=application icon is not set
+      # 后果集中在 Linux：main.js 的 ensureAppImageExtracted 首启复制 resourcesPath/runtime 到
+      # ~/.emrg/install，缺它则装完的 AppImage 没有运行时。这一步在构建读取之前断言引用可解析
+      # （宿主自查同一条命令，见脚本 --help；PR 阶段由 emrg/gui/test/build-config.test.js 钉住）。
+      - name: Assert electron-builder sources resolve (emrg/gui)
+        shell: bash
+        run: python3 scripts/check-gui-package-refs.py
+
       # ── GUI dist（electron-builder；linux extraResources runtime §5 R64）──
       - name: Build GUI (electron-builder)
         working-directory: emrg/gui
@@ -307,6 +362,30 @@ jobs:
         run: bash packaging/bundle-git-gh.sh
 
       # ── 安装器（§10）────────────────────────────────────────
+      # Linux 腿先备好 AppImage 可更新化的两件工具（rant 2026-09-30T11:42:41 要求 2）：
+      # electron-builder 产出的 AppImage 里没有更新信息，修法是上游给的那条唯一的路
+      # ——`appimagetool -u` 重新封装（内嵌 + 生成 `.zsync`），而它需要 `zsyncmake`
+      # 才会写 `.zsync`、需要 `mksquashfs` 才能封装。这里装齐，`make-installer.sh`
+      # 那一步才有工具可按；缺工具时它**失败**而不是降级（一个不内嵌更新信息的
+      # AppImage 正是这条 rant 要修的东西，静默跳过等于把告警留着还让流水线变绿）。
+      - name: AppImage update tooling (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsync squashfs-tools
+          command -v zsyncmake
+          command -v mksquashfs
+          # appimagetool 本身是个 AppImage（Go 静态二进制），CI 里没有 FUSE，
+          # 用 APPIMAGE_EXTRACT_AND_RUN=1 就地解出来跑（同一个变量 make-installer
+          # 调它时也带着）。`--version` 是这条安装步骤的判据：装上了才算备好。
+          curl -fsSL -o /tmp/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage"
+          chmod +x /tmp/appimagetool
+          sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
+          APPIMAGE_EXTRACT_AND_RUN=1 appimagetool --version
+
       - name: Make installer
         shell: bash
         run: bash packaging/make-installer.sh
@@ -341,7 +420,14 @@ jobs:
         shell: bash
         run: |
           PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
-          if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
+          # 不跳过（issue #1913）：这一步的**主语**就是 pkg。缺席时印 "skipping" + exit 0
+          # 等于给一次**没有 macOS 产物**的发布盖章——release 断言按本次构建的产物集比对，
+          # 缺平台在它两侧同时缺席 ⇒ 整轮绿并发布为 Latest。Windows 那一步同款形状：
+          # 点名模式 + exit 1。`if:` 上的降级（Secret 未配）不受影响，那是另一个问题。
+          if [ -z "$PKG" ]; then
+            echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg, and a release missing its macOS product must not be reported as success"
+            exit 1
+          fi
           INSTALLER_ID="${MACOS_INSTALLER_IDENTITY:-}"
           if [ -z "$INSTALLER_ID" ]; then
             INSTALLER_ID="$(security find-identity -v /tmp/ci.keychain | grep 'Developer ID Installer' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -374,7 +460,14 @@ jobs:
         shell: bash
         run: |
           PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
-          if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
+          # 不跳过（issue #1913）：这一步的**主语**就是 pkg。缺席时印 "skipping" + exit 0
+          # 等于给一次**没有 macOS 产物**的发布盖章——release 断言按本次构建的产物集比对，
+          # 缺平台在它两侧同时缺席 ⇒ 整轮绿并发布为 Latest。Windows 那一步同款形状：
+          # 点名模式 + exit 1。`if:` 上的降级（Secret 未配）不受影响，那是另一个问题。
+          if [ -z "$PKG" ]; then
+            echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg, and a release missing its macOS product must not be reported as success"
+            exit 1
+          fi
           NOTARY_RC=0
           NOTARY_OUT="$(xcrun notarytool submit "$PKG" \
             --apple-id "$APPLE_ID" \
@@ -407,7 +500,14 @@ jobs:
         shell: bash
         run: |
           PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
-          if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
+          # 不跳过（issue #1913）：这一步的**主语**就是 pkg。缺席时印 "skipping" + exit 0
+          # 等于给一次**没有 macOS 产物**的发布盖章——release 断言按本次构建的产物集比对，
+          # 缺平台在它两侧同时缺席 ⇒ 整轮绿并发布为 Latest。Windows 那一步同款形状：
+          # 点名模式 + exit 1。`if:` 上的降级（Secret 未配）不受影响，那是另一个问题。
+          if [ -z "$PKG" ]; then
+            echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg, and a release missing its macOS product must not be reported as success"
+            exit 1
+          fi
           xcrun stapler staple "$PKG"
           xcrun stapler validate "$PKG"
           # P3 终验（rant 验收 + 设计文档 §5.1）：spctl 确认 Gatekeeper 接受
@@ -445,6 +545,7 @@ jobs:
             dist/artifacts/*.pkg
             dist/artifacts/*.exe
             dist/artifacts/*.AppImage
+            dist/artifacts/*.zsync
             dist/artifacts/*.tar.gz
             dist/artifacts/*.zip
             dist/artifacts/*.run

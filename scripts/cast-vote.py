@@ -117,7 +117,8 @@ The merge rules say what a vote *is*; until 2026-09-18 nothing said **who may ca
 one** (issue #1408). The clause is *a cycle does not vote on a head it pushed*, and
 the cycle immediately before this one counts as one's own — because every cycle on a
 host is the same instance running again. `review-queue.py` owns that reading, and
-`scripts/review-queue.py --cycle <id>` reports such a head as an `abstain` row.
+`uv run --no-sync python3 scripts/review-queue.py --cycle <id>` reports such a head as an
+`abstain` row.
 
 That instrument answers the question when a cycle asks it. A cycle that does not ask
 spends the vote anyway, and un-spending it is a hand edit of the review body, because
@@ -199,7 +200,12 @@ Exit codes
        tree that can no longer merge (a body naming no tree is not this, and a plan
        that cannot be computed is reported as unmeasurable rather than as a
        mismatch);
-       `gh-failed`: `gh` failed). Fail loud, and never report a posted
+       `gh-failed`: `gh` failed; `tool-failed`: this tool itself failed before it
+       could reach a verdict — an exception left `main` rather than a refusal, and
+       `_entry` reports it as unmeasurable (`2`) instead of letting Python exit `1`,
+       which here means "posted, and the counter never showed it". Nothing was
+       posted in that case, but the code alone cannot say so, which is why the
+       crash has the code that means "nothing was posted"). Fail loud, and never report a posted
        vote for a review that was never sent
 
 `gh` is required, and so is network access to GitHub: the question is about a
@@ -216,9 +222,31 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 REPO = "argszero/emrg"
+
+#: How this file hands a reader the family's tools (`Agent.md`, "Test Commands").
+#: Measured 2026-10-05, every command this tool printed bare in its refusal and
+#: result messages: `scripts/check-vote-count.py 1849` -> **rc 126**, the same for
+#: `scripts/review-queue.py --cycle <id>` and `scripts/check-merge-plan-suite.py <PR>`
+#: (the tools are mode 644, so a bare path is not executable). So a reader who did
+#: what the message said — "re-read it with scripts/check-vote-count.py" — got a
+#: shell error instead of the reading that would have answered the question, at the
+#: moment the tool had just refused to act. The runner goes in front, and a `.sh`
+#: takes `bash` rather than this constant: `uv run --no-sync python3
+#: scripts/re-trigger-ci.sh` hands python a bash file and exits 1 with a
+#: `SyntaxError` (measured 2026-10-04, the defect #1852 records in the sibling).
+#:
+#: `bash` is itself a host dependency, though, and the one command here that used it
+#: as its lead form was not runnable on a host without it — measured 2026-10-05 by a
+#: reviewer on a Windows host (cycle `cyc20261005-054639`): `Get-Command bash` ->
+#: CommandNotFoundException. So the re-trigger remedy leads with
+#: `gh workflow run test.yml --ref <branch>`, which every tool in this family can
+#: already run (they all read GitHub through `gh`) and which is the one command
+#: `scripts/re-trigger-ci.sh` itself runs.
+RUNNER = "uv run --no-sync python3"
 
 # `--body-file -` means stdin, the convention `gh` itself uses for the same flag.
 # Named rather than written as a literal in two places, because the read path and
@@ -240,7 +268,15 @@ _VOTES_NEEDED = 3
 # how the two tools came to disagree (2026-09-17, and again on 2026-09-27 for quoted
 # ids). A helper that accepted a different shape than the counter reads would post
 # bodies that are void by construction, which is the defect it exists to prevent.
-_CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
+#
+# The trailing `(?!\d)` is the token boundary on the right, taken with the pattern
+# rather than decided here: the counter's own comment carries the measurement
+# (2026-10-05, `cyc20261005-234557`) — a body stating `cyc20261005-2345571` used to
+# be attributed to `cyc20261005-234557`, an id it never states, while this file
+# refused that same string as a `--cycle` value. `fullmatch` needs no boundary of its
+# own; it is kept identical so the two copies stay one pattern, which the test below
+# asserts.
+_CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}(?!\d)")
 
 # Every `return 2` declares which of these it is, as `# cause: <slug>` on the
 # return itself, and each slug is named in the exit-code table above. The three
@@ -259,6 +295,7 @@ RC2_CAUSES = (
     "own-head-window",   # the head is this cycle's own, or its window cannot be decided
     "landing-tree",      # the body names a tree that is not the one this merge would land
     "gh-failed",         # `gh pr review` itself failed
+    "tool-failed",       # `main` raised: `_entry` reports it unmeasurable (rc 1 would mean "posted")
 )
 
 _SIBLING = Path(__file__).resolve().parent / "check-vote-count.py"
@@ -278,8 +315,10 @@ def votes_counter():
     global _sibling
     if _sibling is None:
         spec = importlib.util.spec_from_file_location("check_vote_count", _SIBLING)
-        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-            raise RuntimeError(f"could not load {_SIBLING}")
+        # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+        # loader even for a path that does not exist (measured 2026-10-06), so that
+        # branch could never fire. A sibling that is missing or does not compile
+        # raises out of `exec_module`, and `_entry` reports that as `2`.
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -303,8 +342,10 @@ def review_queue():
     global _queue
     if _queue is None:
         spec = importlib.util.spec_from_file_location("review_queue", _QUEUE)
-        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-            raise RuntimeError(f"could not load {_QUEUE}")
+        # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+        # loader even for a path that does not exist (measured 2026-10-06), so that
+        # branch could never fire. A sibling that is missing or does not compile
+        # raises out of `exec_module`, and `_entry` reports that as `2`.
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -329,8 +370,10 @@ def merge_tree_tool():
     global _merge_tree
     if _merge_tree is None:
         spec = importlib.util.spec_from_file_location("merge_tree", _MERGE_TREE)
-        if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-            raise RuntimeError(f"could not load {_MERGE_TREE}")
+        # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+        # loader even for a path that does not exist (measured 2026-10-06), so that
+        # branch could never fire. A sibling that is missing or does not compile
+        # raises out of `exec_module`, and `_entry` reports that as `2`.
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -468,7 +511,7 @@ def tree_claim_refusal(body: str, pr: int, repo: str) -> tuple[str | None, str]:
         "master moves: a reading taken before another PR merged is about a tree "
         "that can no longer land, and the vote counts either way, so nothing else "
         "would ever say so.\n"
-        f"Re-measure (scripts/check-merge-plan-suite.py {pr}) and put the tree it "
+        f"Re-measure ({RUNNER} scripts/check-merge-plan-suite.py {pr}) and put the tree it "
         "reports in the body, or name no tree at all if the vote is not about a "
         "landing tree.",
         "",
@@ -503,8 +546,27 @@ def own_head_window(
     CI run has a push time that is the *commit date*, a lower bound that cannot decide
     the window; the counter already calls such a head blocking for the same missing
     run, and the remedy is the same here — get the run, then ask again.
+
+    **Whose push it is comes before the window.** The clause is about a head *this*
+    instance pushed, and the window is only a proxy for that: a head the peer pushed
+    inside a gap between this host's cycles fell inside the window and was refused
+    (measured 2026-10-06, `cyc20261006-122605`). A `pusher` reading a login **outside
+    the set this instance pushes under** therefore posts, and the note says so; an
+    unknown one keeps the refusal, so this can only ever un-refuse a push that is
+    provably someone else's. The set, rather than one login, because a host holds more
+    than one (the SSH remote's account and the token's) and reading a single one
+    un-refused this instance's own pushes made under its other one — the review on
+    #1900 measured a run whose actor is `argszero` against a token answering
+    `how2how2how2-arch`.
     """
     queue = review_queue()
+    pusher = str(getattr(verdict, "pusher", ""))
+    if pusher and not votes_counter().own_login(pusher):
+        return "", (
+            f"the head was pushed by {pusher}, which is not a login this instance "
+            "pushes under (`gh api user` and `git remote -v`), so the head is another "
+            "instance's work and the abstention clause is not asked of it"
+        )
     if prev_cycle:
         previous, where = prev_cycle, "named by --prev-cycle"
     else:
@@ -543,8 +605,9 @@ def own_head_window(
             "cycle treats as its own. Nothing was posted. The counter already calls "
             "such a head blocking for the same missing run, and the queue gives it the "
             "same remedy (`unblock`, not `abstain`): re-trigger a run for the head "
-            "(`scripts/re-trigger-ci.sh <branch>`), then ask again - "
-            "`scripts/review-queue.py --cycle <id>` reads the same head the same way"
+            "(`gh workflow run test.yml --ref <branch>`, or "
+            "`bash scripts/re-trigger-ci.sh <branch>`), then ask again - "
+            f"`{RUNNER} scripts/review-queue.py --cycle <id>` reads the same head the same way"
         ), note
 
     pushed = queue.instant(push_time)
@@ -562,10 +625,10 @@ def own_head_window(
             "well, because every cycle on a host is the same instance running again. "
             "Nothing was posted. The next vote here has to come from a later cycle "
             "(the same head is an `abstain` row in "
-            "`scripts/review-queue.py --cycle <id>`); if the head is stale and its "
+            f"`{RUNNER} scripts/review-queue.py --cycle <id>`); if the head is stale and its "
             "votes are at risk, measure the tree the merge would land instead of "
             "refreshing it - a push voids the votes it was meant to preserve "
-            "(`scripts/check-merge-plan-suite.py <PR>`)"
+            f"(`{RUNNER} scripts/check-merge-plan-suite.py <PR>`)"
         ), note
 
     return "", note
@@ -918,7 +981,7 @@ def main(argv: list[str] | None = None) -> int:
             f"refusing to post: #{args.pr} is {state}{when} - a finished PR has nothing "
             "to vote on, so this review would count for nothing. The counter reads it "
             f"with no votes at all: re-read it with "
-            f"scripts/check-vote-count.py {args.pr}",
+            f"{RUNNER} scripts/check-vote-count.py {args.pr}",
             file=sys.stderr,
         )
         return 2  # cause: pr-terminal
@@ -991,7 +1054,7 @@ def main(argv: list[str] | None = None) -> int:
             "A veto is not a lost vote: it is on the record and it resets the run, so "
             f"#{args.pr} now needs three consecutive LGTMs from other cycles. "
             "Re-posting contributes nothing - re-read it with "
-            f"scripts/check-vote-count.py {args.pr}."
+            f"{RUNNER} scripts/check-vote-count.py {args.pr}."
         )
         return 0
     if state == "void":
@@ -1008,11 +1071,31 @@ def main(argv: list[str] | None = None) -> int:
         "That is unmeasurable, not a verdict: the review is on GitHub and cannot be "
         "un-posted, and it can register after this tool's bounded retries. Do not "
         "spend it and do not re-post - re-read the counter first "
-        f"(scripts/check-vote-count.py {args.pr}) and act on what it says.",
+        f"({RUNNER} scripts/check-vote-count.py {args.pr}) and act on what it says.",
         file=sys.stderr,
     )
     return 1
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_entry())

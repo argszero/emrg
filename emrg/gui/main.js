@@ -5,7 +5,7 @@
  * 安全：contextIsolation + nodeIntegration:false + sandbox:true（renderer 零网络权限）。
  */
 
-const { app, BrowserWindow, dialog, ipcMain, shell, WebContentsView } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell, WebContentsView } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -92,10 +92,14 @@ function main() {
   // rant 2026-08-11T17:37:03：打包版曾用 Electron 默认图标（蓝色原子球）。
   // package.json build.mac/win/linux.icon 显式指向 packaging/assets 单文件修复主图标；
   // 这里为 Windows/Linux 窗口标题栏提供运行时图标（打包版经 extraResources 落到 resources/icon.png）。
+  // 两个候选都从 emrg/gui/ 出发解析：打包版 main.js 在 resources/app/，`../icon.png` 即
+  // resources/icon.png（extraResources 的 to）；源码版要的是仓库根目录的产物，因此是
+  // `../../packaging/assets/` —— 写少一级会落到不存在的 emrg/packaging/，被下面的
+  // existsSync 静默跳过，窗口一直用默认图标（package.json 的同族引用见 #1958）。
   function windowIconPath() {
     const candidates = [
       path.join(__dirname, "..", "icon.png"), // packaged: resources/icon.png（extraResources）
-      path.join(__dirname, "..", "packaging", "assets", "icon.png"), // source: 仓库 packaging/assets/icon.png
+      path.join(__dirname, "..", "..", "packaging", "assets", "icon.png"), // source: 仓库根 packaging/assets/icon.png
     ];
     return candidates.find((p) => fs.existsSync(p)) || undefined;
   }
@@ -170,7 +174,9 @@ function main() {
   // ── 日志（G84）──────────────────────────────────────────
 
   function createLogger() {
-    const logDir = path.join(os.homedir(), ".emrg");
+    // Rant 2026-10-09T14:20:18: the application log directory, shared with the
+    // daemon and pinned by tests/test_log_dir_pairing.py (JS cannot import Python).
+    const logDir = path.join(os.homedir(), ".emrg", "logs");
     const logPath = path.join(logDir, "emrg-gui.log");
     let fd = null;
     try {
@@ -424,6 +430,40 @@ vision = false
       if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf); // 同名去重
       logger.info(`[gui:saveImage] ${filename} (${buf.length} bytes)`);
       return { path: finalPath, mime: `image/${mm[1].toLowerCase()}` };
+    });
+
+    // rant 2026-09-30T09:35:04 要求 4：「系统给的图不受白名单所限」。
+    //
+    // macOS 把菜单栏、截图工具给的图声明为 `image/tiff`，而 renderer 不能解码 TIFF
+    // （Chromium 只出 png/jpeg/gif/webp/bmp/svg，且 canvas 无 TIFF 解码器）—— 于是
+    // 「系统给的图」在 GUI 只能被拒绝，而 TUI 能收：同一个矛盾。转换必须发生在有
+    // NSImage 的一侧，TUI 的做法是向 macOS 要 `«class PNGf»`
+    // （`emrg/client/app.py::_extract_clipboard_image`），这里是同一个动作 ——
+    // Electron 的 `clipboard.readImage()` 经 NSImage 解码，`toPNG()` 重新编码。
+    // 此后白名单只是「不必转换就能直接收」的快路径，不再是「系统给什么」的边界。
+    //
+    // 读剪贴板失败/为空都返回 null 并留一行日志：renderer 会把它变成输入框旁的可见
+    // 提示（要求 3），所以「剪贴板里没有图」与「读失败」在日志里也分得开。
+    ipcMain.handle("emrg:readClipboardImage", async () => {
+      try {
+        const img = clipboard.readImage();
+        if (!img || img.isEmpty()) {
+          logger.info("[gui:readClipboardImage] empty: the clipboard holds no image");
+          return null;
+        }
+        const buf = img.toPNG();
+        if (!buf || buf.length === 0) {
+          logger.warn("[gui:readClipboardImage] refused: the clipboard image converted to 0 bytes");
+          return null;
+        }
+        const size = img.getSize();
+        logger.info(`[gui:readClipboardImage] ${buf.length} bytes as PNG (${size.width}x${size.height})`);
+        return { data: buf.toString("base64"), mime: "image/png", name: "clipboard.png" };
+      } catch (e) {
+        const why = e && e.message ? e.message : String(e);
+        logger.warn(`[gui:readClipboardImage] refused: ${why}`);
+        throw new Error(`clipboard image unavailable: ${why}`);
+      }
     });
 
     ipcMain.handle("emrg:listSessions", async () => listSessions());
@@ -954,6 +994,56 @@ vision = false
       return { ok: true };
     });
 
+    // The daemon owns the tier vocabulary (`emrg/server/policy.py::SANDBOX_MODES`).
+    // This copy is only the GUI boundary's cheap check before the wire; the daemon
+    // refuses an unknown mode on its own (`_handle_set_sandbox`) and says so.
+    const SANDBOX_MODES = ["read-only", "workspace-write", "danger-full-access"];
+
+    ipcMain.handle("emrg:setSandbox", async (_e, { sessionId, mode }) => {
+      // Rant 2026-09-30T09:30:16 (GUI half): the renderer states the intent and nothing
+      // else. The tier is the *session's*, so it is the daemon that stores and broadcasts
+      // it; the cwd the command must carry is resolved here, with the same helper
+      // `emrg:sendMessage` uses, so no client has to hold a copy of either.
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      if (!SANDBOX_MODES.includes(mode)) throw new Error("invalid sandbox mode");
+      const sessionCwd = resolveSessionCwd(sessionId) || DEFAULT_CWD;
+      let conn = connManager?.get(sessionId);
+      if (!conn || !conn.connected) {
+        // Same defensive open as `emrg:sendMessage`: a click after a reconnect must work
+        // rather than silently doing nothing.
+        conn = await openSession(sessionId, sessionCwd, { resume: false });
+      }
+      conn.sendSetSandbox({ sessionId, cwd: sessionCwd, mode });
+      return { ok: true };
+    });
+
+    // The daemon's own op vocabulary (`_handle_set_sandbox_roots`). The check is
+    // cheap and local; the daemon validates the *path* — against the tier in
+    // force, and by its own rules — and that verdict is the only one that counts.
+    const SANDBOX_ROOT_OPS = ["add", "remove", "list"];
+
+    ipcMain.handle("emrg:setSandboxRoots", async (_e, { sessionId, op, path }) => {
+      // Rant 2026-10-09T09:43:39 (GUI half): the host names a path, the daemon
+      // judges it. Same shape as `emrg:setSandbox` — the renderer states the
+      // intent, this resolves the cwd the command must carry, and no client keeps
+      // a copy of the root list.
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      if (!SANDBOX_ROOT_OPS.includes(op)) throw new Error("invalid sandbox roots op");
+      // An empty path is the daemon's to refuse (`judge_extra_root` answers with
+      // the rule it could not read); the boundary only refuses a non-string so a
+      // malformed IPC payload cannot reach the wire.
+      if (path !== undefined && typeof path !== "string") throw new Error("invalid path");
+      const sessionCwd = resolveSessionCwd(sessionId) || DEFAULT_CWD;
+      let conn = connManager?.get(sessionId);
+      if (!conn || !conn.connected) {
+        // Same defensive open as `emrg:setSandbox`: a click after a reconnect must
+        // work rather than silently doing nothing.
+        conn = await openSession(sessionId, sessionCwd, { resume: false });
+      }
+      conn.sendSetSandboxRoots({ sessionId, cwd: sessionCwd, op, path: path ?? "" });
+      return { ok: true };
+    });
+
     ipcMain.handle("emrg:openFile", async (_e, { filePath }) => {
       // GUI / 指令 WorkBuddy P1：产物面板打开文件（系统默认程序）
       if (typeof filePath !== "string" || !filePath.trim()) throw new Error("invalid file path");
@@ -1025,7 +1115,7 @@ vision = false
       writeConfig(toml);
       // 保存后不需要重启：运行中的 daemon 自己监视该文件，并在原地应用新版本
       // （emrg/server/config_reload.py，2s 轮询读字节+sha256；变更键会写进
-      //  ~/.emrg/emrgd.log 的 "config.toml reloaded: changed=…" 一行）。
+      //  ~/.emrg/logs/emrgd.log 的 "config.toml reloaded: changed=…" 一行）。
       // 旧机制已删除：客户端曾比对 config mtime 并 SIGTERM/SIGKILL 整个 daemon
       // ——一次配置编辑不该杀掉正在跑的调度器（含演化周期）与所有已连客户端。
       if (wasRunning) {

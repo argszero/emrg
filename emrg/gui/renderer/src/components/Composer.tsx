@@ -67,6 +67,15 @@ export interface SaveImageResult {
   path: string;
   mime?: string;
 }
+/**
+ * emrg:readClipboardImage 返回值——剪贴板里的图，已由 main 归一为 PNG（rant
+ * 2026-09-30T09:35:04 要求 4）。`null` = 剪贴板里没有图（不是失败）。
+ */
+export interface ClipboardImage {
+  data: string;
+  mime?: string;
+  name?: string;
+}
 /** 指令路由入参（parseInput 结果；type:"unknown" 无 args——vanilla 走 default 提示） */
 export interface CommandRouting {
   type: "command" | "unknown";
@@ -85,6 +94,13 @@ export interface ComposerProps {
   /** 注入图片落盘函数（默认 window.emrg.saveImage；测试传假实现） */
   saveImage?: (payload: SaveImagePayload) => Promise<SaveImageResult>;
   /**
+   * 注入剪贴板读图函数（默认 window.emrg.readClipboardImage；测试传假实现）。
+   * 只在粘贴路径上、且事件里没有任何**本端能直接收**的图片时使用：macOS 给的
+   * `image/tiff` renderer 解不了，只能请有 NSImage 的 main 归一成 PNG——这正是
+   * TUI 向 macOS 要 `«class PNGf»` 的同一个动作（rant 2026-09-30T09:35:04 要求 4）。
+   */
+  readClipboardImage?: () => Promise<ClipboardImage | null>;
+  /**
    * 注入日志函数（默认 preload 的 window.emrg.log → ~/.emrg/emrg-gui.log）。
    * 图片路径的每一次成功/拒绝都要留痕（rant 2026-09-30T09:35:04 要求 3）：
    * 该功能上线至今 IPC 一次没被走到，而日志里查不出为什么——因为拒绝全被吞了。
@@ -94,6 +110,30 @@ export interface ComposerProps {
   cancel?: (sessionId: string) => Promise<unknown>;
   /** / 指令路由回调（Batch 5 接线：/clear /model /memory …） */
   onCommand?: (routing: CommandRouting) => void;
+  /**
+   * 父级接管档位时传入：点击只上报意图，显示值取自 `sandbox` prop（rant
+   * 2026-09-30T09:30:16，GUI 半边）。档位属于**会话**、由 daemon 落盘并广播，
+   * 所以有它时本组件不再持副本——客户端先改自己那份，一旦 daemon 拒绝
+   * （非法档位、无会话）它就会「对自己正确、对别的客户端错误」。
+   *
+   * 不传 = 维持原样（单挂载/单测）：本地 state 决定了显示与随消息下发的档位。
+   */
+  onSandboxChange?: (mode: string) => void;
+  /**
+   * The session's extra writable roots, as the daemon last reported them, or
+   * null/undefined when it has not said (rant 2026-10-09T09:43:39, GUI half).
+   *
+   * Display only — same authority rule as `sandbox`: the list is the daemon's,
+   * and this component renders it rather than holding one. `null` and `[]` are
+   * deliberately different: `[]` is "this session has no extra roots", `null` is
+   * "nobody has asked", and only the second should read as unknown.
+   */
+  sandboxRoots?: string[] | null;
+  /**
+   * 父级接管「额外可写根」入口时传入：点击只上报意图（打开管理对话框）。
+   * 不传 = 不渲染入口（单挂载/单测），与 `onSandboxChange` 的约定一致。
+   */
+  onManageSandboxRoots?: () => void;
   /** 测试注入：挂载后回填 tiptap Editor 实例（命令驱动测试用） */
   editorRef?: MutableRefObject<Editor | null>;
 }
@@ -108,6 +148,36 @@ const SANDBOX_SET: ReadonlySet<string> = new Set(SANDBOX_TIERS);
 /** 校验 sandbox 值（vanilla setSandbox 同款：非法值忽略 → null → 调用方回落默认） */
 function sanitizeSandbox(v: string | null | undefined): SandboxTier | null {
   return v != null && SANDBOX_SET.has(v) ? (v as SandboxTier) : null;
+}
+
+/**
+ * 本端**不必转换就能直接收**的图片 mime（与 main.js `emrg:saveImage` 的扩展名白名单一致）。
+ *
+ * 它是一条快路径，不是「系统给什么」的边界（rant 2026-09-30T09:35:04 要求 4）：名单外的
+ * 图片不再是静默丢弃，而是先请 main 把剪贴板里的图归一成 PNG，只有那一步也拿不到才拒绝。
+ * 提到模块级是为了让 `attachImages` 与粘贴入口读**同一份**名单——两份名单必然漂移。
+ */
+const SUPPORTED_IMAGE_MIME: ReadonlySet<string> = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+  "image/svg+xml",
+]);
+
+/** 本端能否直接收这个 File（无 type 视为不能）。 */
+function isSupportedImage(f: File): boolean {
+  return !!f.type && SUPPORTED_IMAGE_MIME.has(f.type.toLowerCase());
+}
+
+/** base64 → 字节。剪贴板回图是 base64，包成 File 才能走同一条 attach 路径。 */
+function base64Bytes(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const buf = new ArrayBuffer(bin.length);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < bin.length; i += 1) view[i] = bin.charCodeAt(i);
+  return buf;
 }
 
 /** 格式命令（Stage 2）：以 editor 为参的纯函数——editor 单例闭包经 fmtRef 桥接给按钮/快捷键 */
@@ -144,9 +214,13 @@ export function Composer({
   busy: busyProp,
   sendMessage: send,
   saveImage: saveImageProp,
+  readClipboardImage: readClipboardProp,
   logLine: logLineProp,
   cancel: cancelProp,
   onCommand,
+  onSandboxChange,
+  sandboxRoots = null,
+  onManageSandboxRoots,
   editorRef,
 }: ComposerProps) {
   const { t } = useI18n();
@@ -159,7 +233,17 @@ export function Composer({
   busyRef.current = busy;
   // 沙箱档位（重构回归恢复，rant 2026-08-30T16:34:29）：默认 workspace-write（vanilla 同款），
   // 发送时随消息下发；切换仅允许三档（与 vanilla setSandbox 校验一致）。
-  const [tier, setTier] = useState<SandboxTier>(sanitizeSandbox(sandbox) ?? "workspace-write");
+  // 父级接管后（rant 2026-09-30T09:30:16 GUI 半边）本 state 只是**回落**：档位归
+  // daemon 的会话属性，显示读 `sandbox` prop，点击走 onSandboxChange 上报。
+  const [localTier, setLocalTier] = useState<SandboxTier>(sanitizeSandbox(sandbox) ?? "workspace-write");
+  const parentOwnsTier = typeof onSandboxChange === "function";
+  const tier: SandboxTier = parentOwnsTier
+    ? (sanitizeSandbox(sandbox) ?? "workspace-write")
+    : localTier;
+  const chooseTier = (next: SandboxTier): void => {
+    if (parentOwnsTier) onSandboxChange?.(next);
+    else setLocalTier(next);
+  };
   // ⚠️ (rant 2026-08-28T22:27:01) 链接改用应用内对话框收集 URL（Electron 禁用 window.prompt）
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [linkHref, setLinkHref] = useState("");
@@ -170,6 +254,10 @@ export function Composer({
   const pendingRef = useRef<ImageAttach[]>([]);
   const attachRef = useRef<(files: File[], at?: number | null) => void>(() => {});
   const insertRawRef = useRef<(text: string, at?: number | null) => void>(() => {});
+  /** 隐藏的选图入口（rant 2026-09-30T09:35:04 缺口 1：此前 renderer 里没有任何
+   * `input type="file"`，所以「选择图片插入」这条入口根本不存在）。它不新增落盘
+   * 路径——选中的 File 直接交给 attachRef，与粘贴/拖拽走同一条 attachImages。 */
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // tiptap 选项闭包只创建一次 → 变化值走 ref 桥接（menu/submit/selectCmd/t）
   const menuRef = useRef(menu);
   menuRef.current = menu;
@@ -221,6 +309,16 @@ export function Composer({
         ?.saveImage?.(payload) ?? Promise.reject(new Error("window.emrg.saveImage unavailable")));
   const saveRef = useRef(saveFn);
   saveRef.current = saveFn;
+
+  // 剪贴板读图解析（rant 2026-09-30T09:35:04 要求 4：默认走 preload 桥
+  // emrg:readClipboardImage）。缺桥（jsdom / 旧 preload）→ reject，由调用方变成可见提示。
+  const readClipboardFn =
+    readClipboardProp ??
+    (() =>
+      (window as unknown as { emrg?: { readClipboardImage?: () => Promise<ClipboardImage | null> } }).emrg
+        ?.readClipboardImage?.() ?? Promise.reject(new Error("window.emrg.readClipboardImage unavailable")));
+  const readClipboardRef = useRef(readClipboardFn);
+  readClipboardRef.current = readClipboardFn;
   // 日志桥（rant 2026-09-30T09:35:04 要求 3）：默认 preload 的 window.emrg.log；
   // 缺失时静默降级（jsdom / 预览环境不能因此崩溃）
   const logFn =
@@ -329,13 +427,27 @@ export function Composer({
         setImageNotice(null);
         const imgs = collectImageFiles(cd);
         const types = declaredTypes(cd);
-        if (imgs.length === 0) {
-          if (declaresImageOrFile(types)) refuseImage("composer.imageReasonEmpty", { types: types.join(", ") });
-          return false;
-        }
-        event.preventDefault();
         const text = (cd as unknown as DataTransfer).getData("text/plain");
         const ed = editorBoxRef.current;
+        // 要求 4：事件里没有**本端能直接收**的图，不等于剪贴板里没有图——macOS 给的
+        // TIFF 正是这一种。先请 main 把剪贴板里的图归一成 PNG（有 NSImage 的一侧），
+        // 再走同一条 attach 路径；名单外的图因此不再以「拒绝」收场。
+        //
+        // 只在**一张都收不了**时才走这条：混合粘贴（png + tiff）里 png 已能直接落盘，
+        // 再取一次剪贴板会把同一张图重复附加。
+        if (imgs.filter(isSupportedImage).length === 0 && (imgs.length > 0 || declaresImageOrFile(types))) {
+          event.preventDefault();
+          let at: number | null = null;
+          if (text && ed) {
+            const from = ed.state.selection.from;
+            insertRawRef.current(text, from);
+            at = from + text.length;
+          }
+          clipboardAttachRef.current(types, imgs.map((f) => f.type || "(no type)"), at);
+          return true;
+        }
+        if (imgs.length === 0) return false;
+        event.preventDefault();
         if (text && ed) {
           const from = ed.state.selection.from;
           insertRawRef.current(text, from);
@@ -581,16 +693,6 @@ export function Composer({
     });
   }
 
-  /** 受支持图片 mime（与 main.js emrg:saveImage 的扩展名白名单一致） */
-  const SUPPORTED_IMAGE_MIME: ReadonlySet<string> = new Set([
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/webp",
-    "image/bmp",
-    "image/svg+xml",
-  ]);
-
   /**
    * 逐张「附加图片」：落盘（IPC saveImage，返回绝对路径）→ 光标处插入占位符 →
    * 记 pendingImages（path/label/position 语义同 TUI _pending_images）。
@@ -602,8 +704,8 @@ export function Composer({
       refuseImage("composer.imageReasonNoSession");
       return;
     }
-    const imgs = files.filter((f) => f.type && SUPPORTED_IMAGE_MIME.has(f.type.toLowerCase()));
-    const rejected = files.filter((f) => !f.type || !SUPPORTED_IMAGE_MIME.has(f.type.toLowerCase()));
+    const imgs = files.filter(isSupportedImage);
+    const rejected = files.filter((f) => !isSupportedImage(f));
     if (rejected.length > 0) {
       // 系统给什么就得能看到什么（rant 要求 4）：被白名单拒绝的如实说出类型，
       // 而不是静默丢弃 —— macOS 菜单栏给的 TIFF 正是此前无声消失的那一类
@@ -645,6 +747,54 @@ export function Composer({
   }
   attachRef.current = (files, at) => {
     void attachImages(files, at);
+  };
+
+  /**
+   * 事件里没有**本端能直接收**的图片时，改问 main 要剪贴板里的图（rant 要求 4）。
+   *
+   * macOS 把菜单栏、截图工具给的图声明为 `image/tiff`，renderer 解不了（Chromium 只出
+   * png/jpeg/gif/webp/bmp/svg，canvas 也没有 TIFF 解码器）——同一次粘贴，TUI 收得到、
+   * GUI 只能拒绝。转换发生在有 NSImage 的一侧（main 的 `clipboard.readImage()` →
+   * `toPNG()`），拿回来的 PNG 走**同一条** `attachImages`：同一个落盘 IPC、同一套
+   * 占位符、同一套拒绝。白名单因此只是快路径，不再是「系统给什么」的边界。
+   *
+   * 拿不到就拒绝，且不静默（要求 3）：可见的提示说清**事件里到底给了什么**——
+   * 名单外的文件（`imageReasonClipboard`，报出它的类型）或什么都没取到
+   * （`imageReasonEmpty`，报出事件声明的类型）——而「剪贴板里没有图 / 桥不可用 /
+   * IPC 报错」的具体原因另留一行 warn 日志。
+   */
+  async function attachClipboardImage(types: string[], refused: string[], at: number | null): Promise<void> {
+    const ed = editorBoxRef.current;
+    const sid = sidRef.current;
+    if (!ed || !sid) {
+      refuseImage("composer.imageReasonNoSession");
+      return;
+    }
+    let img: ClipboardImage | null = null;
+    let why = "the clipboard holds no image";
+    try {
+      img = await readClipboardRef.current();
+    } catch (err) {
+      why = String((err as Error)?.message ?? err);
+    }
+    if (!img || !img.data) {
+      // 转换这一路也拿不到：可见的提示说清**事件里给了什么**（要求 3），具体原因
+      // （剪贴板里没有图 / 桥不可用 / IPC 报错）另留一行日志，两者都不静默。
+      logRef.current("warn", `[composer:image] clipboard fallback failed: ${why}`);
+      if (refused.length > 0) refuseImage("composer.imageReasonClipboard", { types: refused.join(", ") });
+      else refuseImage("composer.imageReasonEmpty", { types: types.join(", ") || "(nothing)" });
+      return;
+    }
+    logRef.current(
+      "info",
+      `[composer:image] clipboard fallback: ${refused.join(", ") || "(no file)"} → ${img.mime || "image/png"}`,
+    );
+    const file = new File([base64Bytes(img.data)], img.name || "clipboard.png", { type: img.mime || "image/png" });
+    await attachImages([file], at);
+  }
+  const clipboardAttachRef = useRef<(types: string[], refused: string[], at: number | null) => void>(() => {});
+  clipboardAttachRef.current = (types, refused, at) => {
+    void attachClipboardImage(types, refused, at);
   };
 
   return (
@@ -703,6 +853,34 @@ export function Composer({
             <span className={b.labelClass}>{b.label}</span>
           </button>
         ))}
+        {/* 第三条入口：选择图片（与粘贴、拖拽并列）。按钮只负责打开系统选图，
+            落盘/占位符全交给 attachRef —— 三条入口一条路径，失败提示也共用一套 */}
+        <button
+          type="button"
+          className="fmt-btn"
+          title={t("composer.chooseImage")}
+          aria-label={t("composer.chooseImage")}
+          data-testid="composer-attach-image"
+          onMouseDown={(e) => e.preventDefault()} // 防失焦——与格式按钮同款
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <span className="fmt-label-image">🖼</span>
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          data-testid="composer-image-input"
+          onChange={(e) => {
+            const el = e.currentTarget;
+            const picked = Array.from(el.files ?? []);
+            // 复位：同一张图连续选两次也要再触发 change（不清空则第二次没有事件）
+            el.value = "";
+            if (picked.length > 0) attachRef.current(picked, null);
+          }}
+        />
       </div>
       <div className="mode-switcher" role="group" aria-label={t("composer.sandboxTitle")} data-testid="sandbox-switcher">
         {SANDBOX_TIERS.map((tierKey) => {
@@ -728,12 +906,32 @@ export function Composer({
               aria-label={t(i18nKey)}
               aria-pressed={tier === tierKey}
               data-testid={`sandbox-${tierKey}`}
-              onClick={() => setTier(tierKey)}
+              onClick={() => chooseTier(tierKey)}
             >
               {t(shortKey)}
             </button>
           );
         })}
+        {typeof onManageSandboxRoots === "function" ? (
+          // The entry to the extra writable roots (rant 2026-10-09T09:43:39, GUI
+          // half). It sits inside the tier group because the two are one subject:
+          // a root is the narrower instrument you reach for *instead of* lifting
+          // the tier, and a host looking for either looks here. The count is the
+          // daemon's list, and it is omitted while nobody has asked — a `0` there
+          // would claim a state the daemon never reported.
+          <button
+            type="button"
+            className="mode-btn"
+            title={t("composer.rootsTitle")}
+            aria-label={t("composer.rootsTitle")}
+            data-testid="sandbox-roots-open"
+            onClick={onManageSandboxRoots}
+          >
+            {sandboxRoots === null
+              ? t("composer.rootsShort")
+              : t("composer.rootsShortCount", { n: String(sandboxRoots.length) })}
+          </button>
+        ) : null}
       </div>
       <div className="composer-card">
         <EditorContent editor={editor} className="composer-editor" />

@@ -31,20 +31,52 @@ _ROLE_STYLE: dict[ChatRole, str] = {
 }
 
 
+def format_message_time(timestamp) -> str:
+    """The `HH:MM` a message row shows for the daemon's moment, or "" if unreadable.
+
+    One formatter for every row kind, so a user message and an assistant reply
+    cannot disagree about the format (rant 2026-10-09T09:25:00). The moment is
+    the **daemon's** — read here, never produced: a client that stamped its own
+    clock would make a message's time a property of whoever happened to be
+    watching, and two clients would show the same record two ways.
+
+    An absent or unreadable value renders as **nothing** rather than as an empty
+    pair of brackets or `Invalid Date`: records written before the moment was
+    carried have no time, and a defect visible only in their rendering is what
+    returning "" avoids.
+
+    The date is deliberately not in the row — a chat line carries the clock time,
+    and the full `YYYY-MM-DD HH:MM` is where the whole record is shown
+    (`RewindSelector` prints it for the message it is about to rewind to).
+    """
+    if not timestamp:
+        return ""
+    if isinstance(timestamp, datetime):
+        at = timestamp
+    else:
+        try:
+            at = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return ""
+    return at.strftime("%H:%M")
+
+
 class ChatRow(Widget):
     """A single chat message row.
 
     Args:
         role: Message role (user/assistant/system/tool).
         content: Message text content.
-        timestamp: Optional message timestamp.
+        timestamp: The daemon's moment for this message (ISO string, or a
+            `datetime`); rendered as `HH:MM` on the first line (rant
+            2026-10-09T09:25:00).
     """
 
     def __init__(
         self,
         role: ChatRole = "assistant",
         content: str = "",
-        timestamp: datetime | None = None,
+        timestamp: datetime | str | None = None,
     ) -> None:
         self.role = role
         self.content = content
@@ -76,6 +108,13 @@ class ChatRow(Widget):
                 Span(text=line_text, style=ctx.style),
             ]
             lines.append(Line(spans=spans, style=ctx.style))
+
+        # The moment rides the first line, dim, appended after the text — the
+        # first line is the only one whose width the role prefix already consumes,
+        # and a trailing clock reads as a margin note rather than as content.
+        clock = format_message_time(self.timestamp)
+        if clock and lines:
+            lines[0].spans.append(Span(text=f"  {clock}", style="dim"))
 
         self._dirty = False
         return lines

@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, count_argument
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +67,16 @@ class ReadTool(ToolExecutor):
                         "type": "integer",
                         "description": (
                             "Line number to start reading from (default: 1). "
+                            "1 or more; 0 or less is refused rather than read as the "
+                            "first line. "
                             "Alias: offset."
                         ),
                     },
                     "line_limit": {
                         "type": "integer",
                         "description": (
-                            f"The number of lines to read. "
+                            f"The number of lines to read. At least 1; 0 or less is "
+                            f"refused rather than read as the default. "
                             f"Only provide if the file is too large to read at once "
                             f"(default: {DEFAULT_MAX_LINES}, max: {MAX_LINES} for explicit calls). "
                             f"Alias: limit."
@@ -82,8 +85,18 @@ class ReadTool(ToolExecutor):
                     "start_line_byte_offset": {
                         "type": "integer",
                         "description": (
-                            "Byte offset within the first line to begin reading "
-                            "(default: 0). Use to resume within a truncated line."
+                            "Offset within the first line to begin reading "
+                            "(default: 0; 0 or more — a negative value is refused rather "
+                            "than read as an offset of 0, which would silently return the "
+                            "line whole) — "
+                            "for reading one very long line in pieces. Applied to the "
+                            "decoded text, so it counts characters, not bytes (the two "
+                            "differ only for non-ASCII lines; the note it prints says "
+                            "chars). This tool never cuts a line, so no offset of its own "
+                            "making is ever needed: the offset is the caller's. An offset "
+                            "inside the line reports the line's length and what was shown; "
+                            "one at or past the line's end is reported and shows that line "
+                            "empty, never the whole line."
                         ),
                     },
                     "intent": {
@@ -99,29 +112,33 @@ class ReadTool(ToolExecutor):
     async def execute(self, arguments: dict) -> ToolResult:
         file_path = arguments.get("file_path", "")
 
-        # ── Resolve start_line: support both start_line (new) and offset (legacy alias) ──
-        raw_start = (arguments.get("start_line")
-                     or arguments.get("offset", 0) or 0)
-        try:
-            start_line = max(1, int(raw_start))
-        except (TypeError, ValueError):
-            start_line = 1
-
-        # ── Resolve line_limit: support both line_limit (new) and limit (legacy alias) ──
-        raw_limit = arguments.get("line_limit") or arguments.get("limit")
-        line_limit: int | None = None
-        if raw_limit is not None:
-            try:
-                line_limit = int(raw_limit)
-            except (TypeError, ValueError):
-                line_limit = None
-
-        # ── Resolve start_line_byte_offset ──
-        raw_byte_off = arguments.get("start_line_byte_offset", 0) or 0
-        try:
-            start_line_byte_offset = max(0, int(raw_byte_off))
-        except (TypeError, ValueError):
-            start_line_byte_offset = 0
+        # ── Resolve the three numeric parameters, refusing a value outside its
+        #    domain. `count_argument` carries the measurement: each of these used to
+        #    be read as a different number rather than as a caller error — a negative
+        #    `line_limit` sliced from the *end* of the file and named a continuation
+        #    at a negative line number, `line_limit=0` was falsy and read as absent,
+        #    and a negative byte offset was clamped to 0 (the whole line) with no note.
+        start_line, refusal = count_argument(
+            arguments, "start_line", "offset",
+            minimum=1, default=1,
+            hint="Line numbers are 1-based; omit it to start at the first line",
+        )
+        if refusal is not None:
+            return ToolResult(name="read", content=refusal, error=True)
+        line_limit, refusal = count_argument(
+            arguments, "line_limit", "limit",
+            minimum=1, default=None,
+            hint=f"Omit it to use the default of {DEFAULT_MAX_LINES} lines",
+        )
+        if refusal is not None:
+            return ToolResult(name="read", content=refusal, error=True)
+        start_line_byte_offset, refusal = count_argument(
+            arguments, "start_line_byte_offset",
+            minimum=0, default=0,
+            hint="It counts characters in from the start of the line; omit it to read the line whole",
+        )
+        if refusal is not None:
+            return ToolResult(name="read", content=refusal, error=True)
 
         if not file_path:
             return ToolResult(name="read", content="Error: no file_path provided", error=True)
@@ -234,11 +251,35 @@ class ReadTool(ToolExecutor):
         end = min(start + effective_limit, total_lines)
         selected = all_lines[start:end]
 
-        # Apply start_line_byte_offset to the first selected line
+        # ── Apply start_line_byte_offset to the first selected line ──
+        #
+        # The offset is honoured **literally**, and the result says what it did. Measured
+        # 2026-10-08 (`cyc20261008-153534`): this left a line whose end the offset was
+        # past **whole**, which is byte-identical to asking for offset 0 — so a caller who
+        # resumed a long line from the wrong byte was handed the entire line and could not
+        # tell its offset had been dropped, while `test_read_start_line_byte_offset_at_eol`
+        # (whose own docstring says "yields empty first line") asserted
+        # `"     3\t" in lines[0] or lines[0].strip().startswith("3")`, which the whole-line
+        # outcome satisfies too. A reading that cannot tell "the offset was applied" from
+        # "the offset was ignored" is not a reading, and this is the family the repo fixed
+        # for its guards (issue #1872: an empty subject is not a clean one).
+        offset_note: str | None = None
         if start_line_byte_offset > 0 and selected:
             first_line = selected[0]
+            selected[0] = first_line[start_line_byte_offset:]
             if start_line_byte_offset < len(first_line):
-                selected[0] = first_line[start_line_byte_offset:]
+                offset_note = (
+                    f"\nnote: line {start + 1} is {len(first_line)} chars; shown from "
+                    f"character {start_line_byte_offset}, so {len(selected[0])} of them"
+                )
+            else:
+                # `[n:]` past the end is `""`, which is the honest answer to the question
+                # that was asked; the note is what keeps it from reading like an empty line.
+                offset_note = (
+                    f"\nnote: start_line_byte_offset={start_line_byte_offset} is at or past "
+                    f"the end of line {start + 1} ({len(first_line)} chars), so that line is "
+                    f"shown empty — none of it was read"
+                )
 
         # Format with line numbers
         result_lines: list[str] = []
@@ -250,6 +291,9 @@ class ReadTool(ToolExecutor):
                 name="read",
                 content=f"(empty range: lines {start + 1}-{end} of {total_lines})",
             )
+
+        if offset_note is not None:
+            result_lines.append(offset_note)
 
         truncated = end < total_lines
         if truncated:

@@ -789,6 +789,43 @@ test("rant 2026-09-30T09:47:11：turn_start/turn_end 广播转发（GUI 会话�
   assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
 });
 
+test("rant 2026-10-09T09:43:39：sandbox_roots 帧转发（GUI 的额外可写根，含拒绝帧）", async () => {
+  // 与 turn_start 同一个形状的缝：daemon 广播、渲染层有 case、中间层把它丢进兜底。
+  // 这里多一层理由：拒绝也是这**同一个** type（daemon 对三种 op、两条路径都回
+  // `sandbox_roots`），所以「转发」必须覆盖拒绝帧，否则被拒的路径在 GUI 里无声无息。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ type: "sandbox_roots", session_id: "s1", op: "add", roots: ["/tmp/scratch"], notice: null });
+  send({ type: "sandbox_roots", session_id: "s1", op: "add", roots: [], error: "refusing '/': the filesystem root" });
+  send({ type: "sandbox_roots", session_id: "s1", op: "list", roots: ["/tmp/scratch"] });
+
+  assert.deepStrictEqual(seen.map(([t]) => t), ["sandbox_roots", "sandbox_roots", "sandbox_roots"]);
+  // 负载原样带过去：路径的规范化与裁定是 daemon 的事，中间层不二次解释。
+  assert.deepStrictEqual(seen[0][1].roots, ["/tmp/scratch"]);
+  assert.strictEqual(seen[0][1].op, "add");
+  assert.strictEqual(seen[1][1].error, "refusing '/': the filesystem root");
+  assert.strictEqual(seen[2][1].op, "list");
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
+test("sendSetSandboxRoots：帧形状与 daemon 的 op 词表一致（缺 path 也发空串）", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  client.sendSetSandboxRoots({ sessionId: "s1", cwd: "/w", op: "add", path: "/tmp/a" });
+  assert.deepStrictEqual(JSON.parse(currentMockWs.sent.at(-1)), {
+    type: "set_sandbox_roots", session_id: "s1", cwd: "/w", op: "add", path: "/tmp/a",
+  });
+  client.sendSetSandboxRoots({ sessionId: "s1", cwd: "/w", op: "list" });
+  assert.deepStrictEqual(JSON.parse(currentMockWs.sent.at(-1)), {
+    type: "set_sandbox_roots", session_id: "s1", cwd: "/w", op: "list", path: "",
+  });
+});
+
 test("兜底日志以 type= 开头——下次可 grep 计数，不必从截断 JSON 里抠类型", async () => {
   const warned = [];
   const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
@@ -1146,8 +1183,22 @@ test("P2 ownStream: 断连 → 释放锁", async () => {
 // ⚠️ 本组不 spawn 真实进程、不探测端口、不触碰真实 daemon（MANIFESTO 第四条附则二）：
 // spawn 打桩，isRunning 打桩。测的是纯部件（标记/差值读取/失败描述）＋打桩驱动的等待循环。
 
-/** emrgd.log 的规范位置（HOME/USERPROFILE 已被 beforeEach 重定向到临时目录）。 */
-const logFile = () => path.join(os.homedir(), ".emrg", "emrgd.log");
+/** emrgd.log 的规范位置（HOME/USERPROFILE 已被 beforeEach 重定向到临时目录）。
+ *  Rant 2026-10-09T14:20:18：应用级日志进了 ~/.emrg/logs/，所以这个夹具也必须读
+ *  代码读的那个目录——它写、_readLogTail 读，两边不同的话这些测试就是在测空气。 */
+const logFile = () => {
+  const file = path.join(os.homedir(), ".emrg", "logs", "emrgd.log");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  return file;
+};
+
+/** 子进程 stderr 诊断文件的位置——同样在 logs/ 下，目录一并建好。
+ *  生产代码 `_openStartStderr()` 自己会 mkdir，但夹具是直接写的，所以这里也得建。 */
+const startErrFile = () => {
+  const file = EMRGD_START_ERR();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  return file;
+};
 
 test("#1283 本次没写 → 尾部为空；本次写了 → 只给本次的字节", () => {
   const client = new DaemonClient();
@@ -1527,7 +1578,7 @@ test("#1276 GUI：失败文案报真的等过的窗口，不是敲进去的数",
 
 test("#1276 本次启动的 stderr 文件被截断：报给宿主的只有本次的字节", () => {
   const client = new DaemonClient();
-  const err = EMRGD_START_ERR();
+  const err = startErrFile();
   assert.ok(path.resolve(err).startsWith(path.resolve(tmpHome) + path.sep), "诊断文件必须在临时 HOME 内");
   fs.writeFileSync(err, "previous attempt: ImportError: no such patch\n");
   const fd = client._openStartStderr();
@@ -1545,7 +1596,7 @@ test("#1276 在装日志 handler 之前死掉的子进程：由它自己的 stde
   const client = new DaemonClient();
   fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
   const mark = client._logMark(logFile());
-  fs.writeFileSync(EMRGD_START_ERR(), "Traceback (most recent call last):\nImportError: boom\n");
+  fs.writeFileSync(startErrFile(), "Traceback (most recent call last):\nImportError: boom\n");
   const detail = client._startupFailureDetail(mark, { exitCode: 1 }, undefined, EMRGD_START_ERR());
   assert.ok(detail.includes("ImportError: boom"), "子进程自己的原因就是这一节新增的事实");
   assert.ok(!detail.includes("SIGTERM"), "上一轮的关闭仍不得当作本次的原因");
@@ -1557,7 +1608,7 @@ test("#1276 子进程的遗言排在日志尾巴之前（顺序即论证）", ()
   fs.writeFileSync(logFile(), "previous\n");
   const mark = client._logMark(logFile());
   fs.appendFileSync(logFile(), "this attempt: config.toml is not valid TOML\n");
-  fs.writeFileSync(EMRGD_START_ERR(), "child: ImportError: no module named 'x'\n");
+  fs.writeFileSync(startErrFile(), "child: ImportError: no module named 'x'\n");
   const detail = client._startupFailureDetail(mark, { exitCode: 1 }, undefined, EMRGD_START_ERR());
   assert.ok(detail.includes("ImportError") && detail.includes("config.toml"));
   assert.ok(detail.indexOf("ImportError") < detail.indexOf("config.toml"));
@@ -1594,7 +1645,7 @@ test("#1276 捕获了却真的没写：这一句沉默才成立", () => {
 test("#1276 stderr 的行上限保住 traceback 的结尾，读不到不抛异常", () => {
   const client = new DaemonClient();
   const frames = Array.from({ length: 60 }, (_, i) => `  File "f${i}.py", line ${i}, in <module>`).join("\n");
-  fs.writeFileSync(EMRGD_START_ERR(), `Traceback (most recent call last):\n${frames}\nImportError: the cause\n`);
+  fs.writeFileSync(startErrFile(), `Traceback (most recent call last):\n${frames}\nImportError: the cause\n`);
   const got = client._readStartStderr();
   assert.ok(got.includes("ImportError: the cause"), "最后一行才是说出原因的那一行");
   assert.strictEqual(got.split(/\r?\n/).length, 40, "上限 40 行，且确实生效");

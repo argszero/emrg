@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { act } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { TranscriptView } from "./TranscriptView";
 import { createTranscriptStore, type TranscriptStore } from "../lib/transcript";
 import { I18nProvider } from "../lib/i18n";
@@ -107,10 +107,22 @@ function makeTextDrivenMarked(): { marked: MarkedLike; dompurify: { sanitize(h: 
   };
 }
 
-function setup(store: TranscriptStore, sid?: string | null, renderer?: MarkdownRenderer) {
+function setup(
+  store: TranscriptStore,
+  sid?: string | null,
+  renderer?: MarkdownRenderer,
+  paging?: { hasMore?: boolean; loading?: boolean; onLoadOlder?: () => void },
+) {
   return render(
     <I18nProvider lang="zh">
-      <TranscriptView store={store} sid={sid} renderer={renderer ?? fakeMd} />
+      <TranscriptView
+        store={store}
+        sid={sid}
+        renderer={renderer ?? fakeMd}
+        hasMore={paging?.hasMore}
+        loading={paging?.loading}
+        onLoadOlder={paging?.onLoadOlder}
+      />
     </I18nProvider>,
   );
 }
@@ -128,6 +140,99 @@ describe("TranscriptView", () => {
     expect(userDiv).not.toBeNull();
     expect(userDiv!.textContent).toBe("hello");
     expect(container.querySelector(".history-load-bar")).toHaveTextContent("加载历史中…");
+  });
+
+  it("顶部历史条可加载更早历史时是一个真按钮，点击触发上翻回调（宿主报障 2026-10-08）", () => {
+    // 宿主原话：「另外点击加载更早消息，没有任何效果」。CSS 一直有 `cursor: pointer`、文案一直
+    // 是祈使句，实体却是一个没有 onClick 的 div —— 可点的样子、不可点的实体。
+    const store = createTranscriptStore({ t: (k) => k });
+    store.setLoadBar("↑ 加载更早消息", "s1");
+    const onLoadOlder = vi.fn();
+    setup(store, "s1", undefined, { hasMore: true, onLoadOlder });
+    const bar = screen.getByTestId("history-load-bar");
+    expect(bar.tagName).toBe("BUTTON");
+    fireEvent.click(bar);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("没有更早历史时顶部条退化为状态文字，不再是控件（点击无处可去）", () => {
+    // 「没有更多历史」/ 正在加载 —— 此时它只是状态行：没有 button 角色，点它也不触发回调。
+    const store = createTranscriptStore({ t: (k) => k });
+    store.setLoadBar("没有更多历史", "s1");
+    const onLoadOlder = vi.fn();
+    const { container } = setup(store, "s1", undefined, { hasMore: false, onLoadOlder });
+    const bar = container.querySelector(".history-load-bar")!;
+    expect(bar.tagName).toBe("DIV");
+    expect(screen.queryByRole("button")).toBeNull();
+    fireEvent.click(bar);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
+  it("正在取更早的一页（loading）时顶部条也不再是控件：加载中不可重复触发", () => {
+    // rant 2026-10-09T09:25:00 的验收「加载中不可重复触发」的控件那一半：in-flight 期间
+    // 顶条既不该被滚到顶再次触发（上面那条），也不该仍长成可点的按钮（这条）。
+    const store = createTranscriptStore({ t: (k) => k });
+    store.setLoadBar("↑ 加载更早消息", "s1");
+    const onLoadOlder = vi.fn();
+    const { container } = setup(store, "s1", undefined, { hasMore: true, loading: true, onLoadOlder });
+    const bar = container.querySelector(".history-load-bar")!;
+    expect(bar.tagName).toBe("DIV");
+    fireEvent.click(bar);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 滚到顶的触发判定 —— 断言落在**容器接缝**上（派发真实 scroll 事件，看回调有没有被叫），
+   * 而不是去 grep 源码里有没有出现 `shouldLoadOlder`。这组测试就是 issue #1979 的判别器：
+   * 判定的生产读取点收敛到 `lib/history.ts` 之后，改库里的阈值（`<= 2`）或拆掉 `!loading`
+   * 那一半，这里必须变红；收敛之前生产路径读的是 `TranscriptView` 自己那份副本，改库
+   * **毫无效果**，这组断言在那时是绿的 —— 那正是缺陷本身。
+   */
+  function scrollViewportTo(container: HTMLElement, scrollTop: number) {
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    Object.defineProperty(viewport, "scrollTop", { value: scrollTop, configurable: true, writable: true });
+    Object.defineProperty(viewport, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+  }
+
+  it("滚到顶（scrollTop=0）且还有更早的一页 → 触发上翻回调", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    const onLoadOlder = vi.fn();
+    const { container } = setup(store, "s1", undefined, { hasMore: true, onLoadOlder });
+    scrollViewportTo(container, 0);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // 阈值是闭区间（vanilla `scrollTop <= 2`）：2 也算到顶，3 不算
+    scrollViewportTo(container, 2);
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it("没滚到顶（scrollTop=3）不触发上翻", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    const onLoadOlder = vi.fn();
+    const { container } = setup(store, "s1", undefined, { hasMore: true, onLoadOlder });
+    scrollViewportTo(container, 3);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
+  it("正在取更早的一页（loading）时滚到顶不再触发：in-flight 锁在判定里，不靠调用方自觉", () => {
+    // `loading` 那一半一旦丢，连滚会把同一页请求重复发出去（游标没动），这是收敛后的
+    // 判定式里唯一防重入的地方，所以它必须由接缝测试钉住。
+    const store = createTranscriptStore({ t: (k) => k });
+    const onLoadOlder = vi.fn();
+    const { container } = setup(store, "s1", undefined, { hasMore: true, loading: true, onLoadOlder });
+    scrollViewportTo(container, 0);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
+  it("没有更早的一页（hasMore=false）时滚到顶不触发", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    const onLoadOlder = vi.fn();
+    const { container } = setup(store, "s1", undefined, { hasMore: false, onLoadOlder });
+    scrollViewportTo(container, 0);
+    expect(onLoadOlder).not.toHaveBeenCalled();
   });
 
   it("用户消息 markdown 渲染：富文本不字面显示（rant 2026-08-28T14:07:29 验收）", async () => {
@@ -385,5 +490,54 @@ describe("TranscriptView", () => {
     // 底部 → autoScroll=true；新消息到达 → 自动滚到底
     store.addUserMessage("new", "s1");
     expect(viewport.scrollTop).toBe(1000); // autoScroll 触发 scrollTop=scrollHeight
+  });
+
+  // ── 前插滚差补偿（宿主报障「加载更早消息」的编排层；`Shell.tsx:462` 的注释一直写着
+  //    「整块前插 + 滚差补偿由渲染层处理」，而 `lib/history.ts` 的 `scrollCompensation`
+  //    此前只有单测、零生产调用者）。两条互为反面：前插必须补偿，追加必须不动。 ──
+
+  /** jsdom 无布局：用**已渲染的消息数**折算文档高度，于是高度随 DOM 一起在提交中变化——
+   *  渲染期读到旧值、layout effect 读到新值，与浏览器里插入 DOM 的时序一致（写死一个
+   *  数字只能测「高度差」这一半，测不到「插入前读还是插入后读」）。 */
+  function mockHeightByMessages(viewport: HTMLElement) {
+    Object.defineProperty(viewport, "scrollHeight", {
+      configurable: true,
+      get: () => (viewport.querySelectorAll(".msg").length + 1) * 400,
+    });
+    Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(viewport, "scrollTop", { value: 0, configurable: true, writable: true });
+  }
+
+  it("更早一页前插后按高度差补偿 scrollTop（上翻一页不再跳一屏）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("newest", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    mockHeightByMessages(viewport); // 1 条 → 800
+    // 上翻到顶：scrollTop=0（派发 scroll 让 atBottom 翻转，走一次真实提交）
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+    // 更早一页插到最前 → DOM 变高 400（2 条 → 1200）
+    act(() => {
+      store.prependEntries([{ kind: "user", text: "older" }], "s1");
+    });
+    expect(viewport.scrollTop).toBe(400); // 0 + (1200 - 800)
+  });
+
+  it("追加（非前插）不补偿 scrollTop：文档同样变高，但内容在后面，视口不动", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("newest", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    mockHeightByMessages(viewport);
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+    // 同样长高 400——若补偿只看「高度变了」而不看「是前插」，这里会错误地跳到 400
+    act(() => {
+      store.addUserMessage("newer", "s1");
+    });
+    expect(viewport.scrollTop).toBe(0);
   });
 });

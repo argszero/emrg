@@ -56,6 +56,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -66,6 +67,21 @@ SCRIPT = REPO_ROOT / "scripts" / "check-merge-freshness.py"
 HEAD = "a" * 40
 OTHER = "b" * 40
 BASE = "c" * 40
+# The actions run's own id, as the API reports it - the value a failing remedy hands over
+# so its command is runnable as printed.
+RUN_ID = "37194550758"
+#: The head commit's date, as the fixture's default. Old on purpose: a head whose run
+#: really never existed is a head pushed long ago, and the age is what tells the two
+#: states an empty run lookup is the shape of apart. A test that wants the *young* head
+#: passes its own timestamp (`_just_now`), and one that wants the age to be unreadable
+#: passes `None`.
+HEAD_COMMITTED_AT = "2026-01-01T00:00:00Z"
+
+
+def _just_now(seconds_ago: float = 0.0) -> str:
+    """A commit date `seconds_ago` in the past, so the tool's real clock reads it young."""
+    stamp = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    return stamp.isoformat().replace("+00:00", "Z")
 
 
 def _load_module():
@@ -101,10 +117,25 @@ class FakeGh:
     nothing at all.
     """
 
-    def __init__(self, pr_view: dict, compare: dict, runs: list[dict] | None):
+    def __init__(self, pr_view: dict, compare: dict, runs: list[dict] | None,
+                 jobs: list[dict] | None = None, jobs_unreadable: bool = False,
+                 head_committed_at: str | None = HEAD_COMMITTED_AT):
         self.pr_view = pr_view
         self.compare = compare
         self.runs = runs
+        #: The head commit's date, or `None` for a lookup that could not be read.
+        #: The default is the old head the run-less state describes, so the tests
+        #: that are about a dropped push keep reading `no_run`; a test that wants
+        #: the young head (or the unreadable one) says so.
+        self.head_committed_at = head_committed_at
+        #: The jobs of the newest run, or `None` to mirror that run's own conclusion.
+        #: The default is what a real run looks like: a run concludes `failure` because a
+        #: job did, and that job is the one whose cause a reader can act on. A fixture that
+        #: answered `None` jobs for every failure run would leave the tool's own
+        #: jobs-reading branch (`_run_jobs`) unreachable from every test here - the shape
+        #: this file's sibling suites call a fixture that cannot reach the code.
+        self.jobs = jobs
+        self.jobs_unreadable = jobs_unreadable
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> object:
@@ -115,11 +146,34 @@ class FakeGh:
         if args[:2] == ["pr", "view"]:
             return self.pr_view
         if args[0] == "api":
+            if any("/jobs" in a for a in args):
+                if self.jobs_unreadable:
+                    raise RuntimeError("gh failed (rc=1): the jobs list is not served")
+                if self.jobs is not None:
+                    return {"jobs": self.jobs}
+                return {"jobs": _jobs_mirroring(self.runs)}
             if any("actions/runs" in a for a in args):
                 return {"runs": self.runs if self.runs is not None else []}
+            if any("/commits/" in a for a in args):
+                # The head's age, asked only where an empty run lookup makes it
+                # decide something. `None` is the unreadable case, and the tool has
+                # to keep its pre-existing reading for it rather than call the head
+                # young - so this route is what test_the_age_that_could_not_be_read
+                # is about.
+                if self.head_committed_at is None:
+                    raise RuntimeError("gh failed (rc=1): the commit is not served")
+                return {"committed": self.head_committed_at}
             assert any(a.startswith("repos/") and "/compare/" in a for a in args), args
             return self.compare
         raise AssertionError(f"unexpected gh call: {args}")
+
+
+def _jobs_mirroring(runs: list[dict] | None) -> list[dict]:
+    """One job carrying the newest run's own conclusion - the shape a real run has."""
+    if not runs:
+        return []
+    newest = max(runs, key=lambda r: str(r.get("createdAt") or ""))
+    return [{"name": "test", "conclusion": newest.get("conclusion")}]
 
 
 def _compare(status: str, ahead: int, behind: int, base: str = BASE) -> dict:
@@ -138,13 +192,17 @@ def _view(sha: str = HEAD, branch: str = "feature/x", state: str = "OPEN",
     }
 
 
-def _run_(sha: str = HEAD, conclusion: str = "success", at: str = "2026-09-11T00:00:00Z") -> dict:
+def _run_(sha: str = HEAD, conclusion: str = "success", at: str = "2026-09-11T00:00:00Z",
+          run_id: str = RUN_ID) -> dict:
     """A workflow run, as the actions/runs payload reports it.
 
     `name` is not decoration: the tool pins the verdict to the `Test` workflow, so
-    a fixture without it is a run the tool is right to ignore.
+    a fixture without it is a run the tool is right to ignore. `databaseId` is the id
+    the failing remedy hands over, so a fixture without one would make the printed
+    command a placeholder - the shape this fixture exists to rule out.
     """
-    return {"headSha": sha, "name": "Test", "conclusion": conclusion, "createdAt": at}
+    return {"headSha": sha, "name": "Test", "conclusion": conclusion, "createdAt": at,
+            "databaseId": run_id}
 
 
 def _install(mod, monkeypatch, fake: FakeGh) -> None:
@@ -647,6 +705,108 @@ def test_a_missing_run_is_told_to_re_trigger_rather_than_refresh(mod, monkeypatc
     assert "re-trigger CI on the same head" in err
     assert "keeps the votes" in err
     assert "Re-merge master into the branch" not in err
+    # The re-trigger script is bash, and the file's own `RUNNER` is python: spelled
+    # behind it, the command hands python a bash file (`SyntaxError`, rc 1), which is
+    # what the sibling row in `review-queue.py` was measured doing. Here the cheap
+    # renewal has to name a command that can actually re-fire the run.
+    assert "bash scripts/re-trigger-ci.sh" in err, (
+        "the re-trigger remedy must spell the shell script `bash scripts/re-trigger-ci.sh`"
+    )
+
+
+# --- the empty lookup: two states, one shape -------------------------------
+
+
+def test_the_registration_window_is_not_narrower_than_the_measurement(mod):
+    """The window is derived from a measurement, so it may not be quietly shrunk.
+
+    Two measurements set it, and a later cycle that trims the number has to face
+    them here: the case this file's docstring records for #1585 - head `fb672634`
+    pushed `2026-09-24T12:45:21Z`, its `Test` run created `12:45:38Z`, i.e. 17 s
+    during which an empty lookup was the *same bytes* as a dropped push - and 11
+    push/run pairs measured on this repository on 2026-10-07 at 1, 1, 1, 2, 2, 4,
+    5, 5, 5, 6 s. The window has to cover the largest of them, or the tool asserts
+    the dropped-push reading inside the very window it exists to exclude.
+    """
+    assert mod._REGISTRATION_WINDOW_SECONDS >= 17.0, (
+        "the window is narrower than the measured push-to-run delay (17 s), so an "
+        "empty lookup inside it would be reported as a dropped push"
+    )
+
+
+def test_a_head_pushed_moments_ago_is_parked_not_retriggered(mod, monkeypatch, capsys):
+    """The empty lookup is not evidence while the run may still be arriving.
+
+    Measured 2026-10-07 (`cyc20261007-022540`): seconds after head `338a9a53` was
+    pushed, `gh pr checks` printed "no checks reported" for it while its run
+    existed and was registering - and the same reading reaches a cycle through
+    this tool. A re-trigger here fires a **second** run beside the one arriving
+    (`test.yml` declares no concurrency group, so nothing cancels it), and the
+    reader is told the head has no run when it has one.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [], head_committed_at=_just_now())
+    asked = _votes(mod, monkeypatch, 0)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1, "a head with no verdict is still not fresh"
+    assert asked == [], "no count is read for a state whose remedy ignores it"
+    assert "not evidence of a dropped push" in cap.out
+    assert "there is NO Test run" not in cap.out, (
+        "the sentence claims a fact about GitHub that the head's age says this reading "
+        "cannot know yet"
+    )
+    assert "park it" in cap.err
+    assert "next cycle" in cap.err, "the deferral has to name when the row comes back"
+    # The word appears in the explanation (why the duplicate is not fired), so the
+    # assertion is about the *command*: no re-trigger may be handed over here.
+    assert "gh workflow run" not in cap.err
+    assert "re-trigger-ci.sh" not in cap.err, (
+        "the re-trigger is the duplicate-run remedy, and this is exactly the state it "
+        "must not be handed to"
+    )
+    assert any(any("/commits/" in a for a in c) for c in fake.calls), (
+        "the age is what decides this, so the lookup that reads it has to be made"
+    )
+
+
+def test_the_same_empty_lookup_past_the_window_still_reads_as_no_run(
+    mod, monkeypatch, capsys
+):
+    """The discriminating arm: only the head's age differs, and the verdict must too.
+
+    Same fixture as the test above - a head with no run for it - and the old commit
+    date the fixture defaults to is the *other* state the empty answer is the shape
+    of. If this arm read `no_run_yet` as well, the age would be decoration and the
+    re-trigger (the remedy a dropped push needs) would be unreachable.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [])
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "there is NO Test run" in cap.out
+    assert "past the" in cap.out, (
+        "the reason names the age it was decided on, so a reader can tell the two "
+        "readings apart"
+    )
+    assert "re-trigger CI on the same head" in cap.err
+
+
+def test_an_age_that_could_not_be_read_keeps_the_no_run_reading(mod, monkeypatch, capsys):
+    """`None` is "not measured", and it may not be spent as a refusal.
+
+    The window can only *withhold* the dropped-push sentence, and it withholds it on
+    a measurement. A commit lookup that fails must therefore leave the reading this
+    tool gave before the window existed - the stronger one - rather than turning an
+    unmeasured age into `no_run_yet` and parking a head that may really have lost
+    its run.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [], head_committed_at=None)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "there is NO Test run" in cap.out
+    assert "past the" not in cap.out, "no age was read, so none may be stated"
+    assert "re-trigger CI on the same head" in cap.err
 
 
 def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
@@ -680,6 +840,42 @@ def test_a_failing_run_is_told_to_fix_the_failure_not_to_refresh(mod, monkeypatc
     assert asked == []
     assert "fix the failure" in err
     assert "does not make a failing run pass" in err
+
+
+def test_a_failing_remedy_names_the_reading_that_produces_the_cause(
+    mod, monkeypatch, capsys
+):
+    """`fix the failure` is undirected without a way to read *why* it failed.
+
+    Measured 2026-10-04: `gh run view <id> --log-failed` answers **0 bytes with rc 0**
+    here for every run measured, a red one included, so a remedy that leaves the reader
+    to reach for it hands over a failure to measure in the shape of a pass. The claim is
+    deliberately not a universal - a reviewer on the same host measured one run as
+    answering its whole log - but it covers the case this remedy exists for, where a
+    *red* run's `--log` and `--log-failed` are both empty and exit 0.
+
+    The reading that answers is `scripts/read-run-failure.py <run-id>`, and whose failure
+    it is comes first: a base-level row turns every open PR red, and the plan suite names
+    that. **Both** commands carry the runner: a `scripts/x.py` is mode 644 here, so a bare
+    path exits 126, and this remedy used to spell one command with the runner and the one
+    beside it without (reviewed on #1851).
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [_run_(conclusion="failure")])
+    _votes(mod, monkeypatch, 3)
+    _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert f"{mod.RUNNER} scripts/read-run-failure.py {RUN_ID}" in err, (
+        "the failing remedy must name the reading that produces the cause, with this "
+        "run's id so the command runs as printed"
+    )
+    assert "--log-failed" not in err, (
+        "the remedy offers `gh run view --log-failed`, which answers 0 bytes with "
+        "exit 0 here - a failure to measure wearing the shape of a pass"
+    )
+    assert f"{mod.RUNNER} scripts/check-merge-plan-suite.py 1" in err, (
+        "whose failure it is has to be askable, and askable as printed: a row the base "
+        "fails too is not this head's, and a bare `scripts/x.py` is mode 644 here"
+    )
 
 
 def test_json_carries_the_kind_and_the_count(mod, monkeypatch, capsys):
@@ -1081,3 +1277,91 @@ def test_the_tools_own_document_does_not_offer_a_rebase(mod) -> None:
         "the docstring's own statement of the refresh route must not offer a rebase"
     )
     assert "force-push" in mod.__doc__, "the docstring must name what publishing a rebase costs"
+
+
+# --- a run that stopped is not a run that judged (#1864's neighbour) ---------
+#
+# The workflow run's `conclusion` is an **aggregate** over its jobs, and GitHub counts a
+# *cancelled* job as a failed run. Measured 2026-10-06 (`cyc20261006-065715`), on this host:
+# head `50dea4e8`'s run `37372464666` reads `conclusion=failure`, and its jobs are
+# `test: cancelled` (0 steps, 15 minutes waiting for a runner) and `test-windows: success`.
+# This tool called that "a failing verdict, not a stale one; re-running will not make it
+# fresh", and the remedy its own docstring hands over for that kind
+# (`scripts/read-run-failure.py 37372464666`) answered **"no failed job … nothing to
+# explain"**. A verdict-shaped sentence about a run that reached no verdict, plus a remedy
+# that cannot produce a cause - so the jobs are now asked, and only a job that concluded
+# `failure` makes the run a judgment about the tree.
+#
+# Both directions, because a reading that answered `no_verdict` for every non-success run
+# would lose the cause of a genuinely red one - the reading the failing remedy exists for.
+
+
+def test_a_cancelled_job_is_a_run_that_judged_nothing(mod, monkeypatch, capsys):
+    """The measured shape: the run says `failure`, every job of it says `cancelled`."""
+    fake = FakeGh(
+        _view(),
+        _compare("ahead", 1, 0),
+        [_run_(conclusion="failure")],
+        jobs=[{"name": "test", "conclusion": "cancelled"},
+              {"name": "test-windows", "conclusion": "success"}],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "without judging the tree" in cap.out
+    assert "test: cancelled" in cap.out, (
+        "the row names which job stopped, or the reader cannot tell a cancellation from a "
+        "run that simply has no jobs"
+    )
+    assert "a failing verdict, not a stale one; re-running will not make it fresh" not in cap.out
+    assert "re-trigger CI on the same head" in cap.err, (
+        "a run that judged nothing is cured by re-running, which is the opposite of what "
+        "the failing remedy says"
+    )
+    assert "read-run-failure.py" not in cap.err, (
+        "the failing remedy's reading answers `no failed job … nothing to explain` for this "
+        "run - handing it over is the defect this kind exists to remove"
+    )
+
+
+def test_a_job_that_concluded_failure_is_still_a_judgment(mod, monkeypatch, capsys):
+    """The control: one failing job among cancellations keeps the run a red verdict."""
+    fake = FakeGh(
+        _view(),
+        _compare("ahead", 1, 0),
+        [_run_(conclusion="failure")],
+        jobs=[{"name": "test", "conclusion": "cancelled"},
+              {"name": "test-windows", "conclusion": "failure"}],
+    )
+    _votes(mod, monkeypatch, 3)
+    _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert "a failing verdict, not a stale one" in cap.out
+    assert "test-windows concluded `failure`" in cap.out, (
+        "the row has to name the job that failed: it is the cause the remedy's reading is "
+        "about, and a run can carry cancellations beside it"
+    )
+    assert f"{mod.RUNNER} scripts/read-run-failure.py {RUN_ID}" in cap.err
+    assert "re-trigger CI" not in cap.err
+
+
+def test_an_unreadable_jobs_list_is_reported_as_unmeasured(mod, monkeypatch, capsys):
+    """The third state, kept apart from both: the finer reading could not be made.
+
+    Reported rather than guessed - `no_verdict` for a list nobody could read would be a
+    verdict this tool did not measure, and so would `failing`. The coarse reading (the run's
+    own conclusion) stands, and the reason says which half is missing.
+    """
+    fake = FakeGh(
+        _view(), _compare("ahead", 1, 0), [_run_(conclusion="failure")], jobs_unreadable=True
+    )
+    _votes(mod, monkeypatch, 3)
+    rc = _run(mod, monkeypatch, fake)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "failing verdict, not a stale one" in cap.out
+    assert "jobs could not be read" in cap.out
+    assert "without judging the tree" not in cap.out, (
+        "an unread list answers neither question, so it may not be reported as the one that "
+        "says the run judged nothing"
+    )

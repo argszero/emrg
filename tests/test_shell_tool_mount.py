@@ -140,13 +140,15 @@ def test_a_populated_registry_still_answers_every_other_tool():
 def injected(tmp_path):
     """Call ``_inject_tool_arguments`` with a session cwd and a task tier.
 
-    The session is a stub, not a real one: the rule reads exactly one field
-    (``cwd``), and a real ``Session`` would create directories on disk to prove
-    nothing extra.
+    The session is a stub, not a real one: the rule reads two fields (``cwd`` and
+    ``sandbox_roots`` — the host-named writable roots, rant 2026-10-09T09:43:39),
+    and a real ``Session`` would create directories on disk to prove nothing
+    extra. A stub is kept here rather than a real session because the subject is
+    the injection rule; empty roots is the "nobody named one" case.
     """
 
     def call(tool: str, args: dict, *, sandbox: str | None = None, cwd: Path | None = None):
-        session = SimpleNamespace(cwd=cwd or tmp_path)
+        session = SimpleNamespace(cwd=cwd or tmp_path, sandbox_roots=[])
         EmrgServer._inject_tool_arguments(tool, args, session, TaskRequest(sandbox=sandbox))
         return args
 

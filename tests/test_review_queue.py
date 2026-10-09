@@ -58,6 +58,18 @@ CYCLE = "cyc20260917-221117"
 #: what the abstention window's two ends are pinned against.
 PREV_CYCLE = "cyc20260917-215929"
 
+#: The login this instance votes under, and one it does not. The abstention clause asks
+#: whose push a head was before it asks about the window, so both ends of that
+#: comparison need a name (the same pair `tests/test_check_vote_count.py` uses).
+SELF_LOGIN = "how2how2how2-arch"
+OTHER_LOGIN = "pm25coder"
+#: The **second** login this host pushes under. A host may hold two accounts — a push is
+#: attributed to the one that authenticated, not to the one the reading happened to ask
+#: — and a head pushed under this one is still this instance's own work (the hole the
+#: review on #1900 measured, 2026-10-08: actor `argszero` against a token answering
+#: `how2how2how2-arch`). Distinct from `OTHER_LOGIN`, which is nobody here.
+SECOND_LOGIN = "argszero"
+
 LOCAL = datetime.now().astimezone().tzinfo
 
 
@@ -181,7 +193,9 @@ class FakeVotes:
     def __init__(self, reviews: list[dict] | None = None, mergeable: str = "MERGEABLE",
                  state: str = "CLEAN", head: str = HEAD, valid: int | None = None,
                  push: str | None = None, exact: bool = True,
-                 pr_state: str = "OPEN", merged_at: str = ""):
+                 pr_state: str = "OPEN", merged_at: str = "",
+                 checks: tuple | None = None,
+                 pusher: str = SELF_LOGIN, logins: frozenset[str] | None = None):
         self.reviews = reviews if reviews is not None else []
         self.mergeable = mergeable
         self.state = state
@@ -196,6 +210,18 @@ class FakeVotes:
         #: against. `None` keeps the historical default, far from every window.
         self.push = PUSH_TIME if push is None else push
         self.exact = exact
+        #: Whose CI run fixed `push`, and the logins this instance pushes under. The
+        #: clause asks *whose push* before it asks about the window, and the real counter
+        #: answers the identity half from `gh api user` **and** `git remote -v`; here it
+        #: is a field, so a test can name the pusher and the host's own logins without an
+        #: API. A set, because a host may hold two accounts and comparing one un-abstained
+        #: this instance's own pushes made under the other (the review on #1900).
+        self.pusher = pusher
+        self.logins = logins if logins is not None else frozenset({SELF_LOGIN})
+        #: The head's check-runs, as the counter carries them, and whether the reading
+        #: was taken. `None` means not taken, which is what the counter does for every
+        #: non-`UNSTABLE` head (and what leaves `checks_green` False, the strict side).
+        self.checks = checks
         self.calls: list[tuple[int, int, float]] = []
         #: The real sibling module, attached by `_install` so the fakes can build
         #: its dataclasses instead of a lookalike that would agree with a misreading.
@@ -235,6 +261,7 @@ class FakeVotes:
             head_sha=self.head,
             push_time=self.push,
             push_time_exact=self.exact,
+            pusher=self.pusher,
             mergeable=self.mergeable,
             merge_state=self.state,
             state=self.pr_state,
@@ -243,18 +270,36 @@ class FakeVotes:
             counted=[],
             valid_count=run if self.forced_valid is None else self.forced_valid,
             needed=needed,
+            checks=self.checks or (),
+            checks_read=self.checks is not None,
         )
+
+    def own_login(self, author):
+        """The counter's `own_login`: an author it cannot tell apart keeps the clause.
+
+        The real one reads the logins this host pushes under — the token's and the
+        remotes' — and compares by **membership**; a payload with no author, or no login
+        that can be read, answers `True` - the direction that costs a delay rather than
+        crediting a self-review. Reproduced here rather than imported because this file's
+        fakes are the *second* answer the tool is measured against.
+        """
+        if not author:
+            return True
+        if not self.logins:
+            return True
+        return author in self.logins
 
 
 class FakeFresh:
     """`check-merge-freshness.py`, for both the fresh case and the four stale kinds."""
 
     def __init__(self, stale: bool = False, kind: str = "", behind: int = 0,
-                 reason: str = ""):
+                 reason: str = "", run_id: str = ""):
         self.stale = stale
         self.kind = kind
         self.behind = behind
         self.reason = reason or f"some reason for {kind or 'fresh'}"
+        self.run_id = run_id
         self.calls: list[int] = []
         self.real = None
 
@@ -270,6 +315,7 @@ class FakeFresh:
             behind_by=self.behind,
             run_created_at=None,
             run_conclusion=None,
+            run_id=self.run_id,
             stale=self.stale,
             reason=self.reason,
             stale_kind=self.kind,
@@ -461,7 +507,7 @@ def test_enough_votes_on_a_stale_head_measures_before_merging(mod, monkeypatch, 
 
 def test_a_red_run_is_not_votable_and_names_the_run(mod, monkeypatch, capsys):
     votes = FakeVotes(reviews=[])
-    fresh = FakeFresh(stale=True, kind="failing",
+    fresh = FakeFresh(stale=True, kind="failing", run_id="37194550758",
                       reason="CI concluded 'failure' on head aaaa")
     rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
     out = capsys.readouterr().out
@@ -469,6 +515,28 @@ def test_a_red_run_is_not_votable_and_names_the_run(mod, monkeypatch, capsys):
     assert "ci-red" in out
     assert "gh pr checks 1" in out
     assert "cast-vote.py" not in out
+    # `gh pr checks` names the failing check, not why it failed, and the second half of
+    # step 0.4's duty is "read its failing job's log to a cause". The row has to name the
+    # reading that does, **with this run's id**, so the printed command runs as printed:
+    # an id the reader has to fish out of the link above is one they can get wrong at the
+    # moment they are least able to tell. And the broken path is not repeated as a thing
+    # to try - `gh run view --log-failed` answers 0 bytes with rc 0 on this host (measured
+    # 2026-10-04, a green run included), which is a failure to measure wearing a pass's
+    # shape.
+    assert "read-run-failure.py 37194550758" in out, (
+        "the ci-red row names the failing check but no reading that can produce its "
+        "cause with the run it is about"
+    )
+    assert "--log-failed" not in out, (
+        "the row offers `gh run view --log-failed`, which answers 0 bytes with exit 0 "
+        "here - a failure to measure wearing the shape of a pass"
+    )
+    # A red row is not always the head's: a base-level failure turns every open PR red,
+    # and the reading that separates the two is the plan suite's base comparison.
+    assert "check-merge-plan-suite.py 1" in out, (
+        "without the base comparison the reader cannot tell this head's failure from one "
+        "the base fails too, and fixing the wrong tree is what that costs"
+    )
 
 
 def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsys):
@@ -483,6 +551,37 @@ def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsy
     assert "retrigger-ci" in out
     assert "cast-vote.py" not in out
     assert "git merge FETCH_HEAD" not in out
+    # The command has to run as printed, and this row's did not: `re-trigger-ci.sh` is
+    # a **bash** script, and it was printed behind the python runner, which hands python
+    # a bash file. Measured 2026-10-04: `uv run --no-sync python3 scripts/re-trigger-ci.sh`
+    # exits 1 with `SyntaxError: invalid syntax`. The one row whose whole remedy is
+    # "re-trigger CI" was the one handing over a command that could not re-trigger
+    # anything.
+    #
+    # Carrying `bash` was not the end of it either (#1852, re-opened by cycle
+    # `cyc20261005-054639`): `bash` is on PATH on this host and is not on a Windows one,
+    # so the row now **leads** with the command that needs only `gh` - the tool every
+    # reader of this queue has already run - and keeps the script beneath it. Both halves
+    # are asserted, and by position: a row that puts `bash` first is back to a command
+    # that runs on one host family only.
+    assert "$ gh workflow run test.yml --ref <branch-of-" in out, (
+        "the re-trigger row leads with the host-portable form: `gh workflow run "
+        "test.yml --ref <branch>`, which is what `re-trigger-ci.sh` itself runs"
+    )
+    assert "$ bash scripts/re-trigger-ci.sh" in out, (
+        "the script stays as the alternative under it - it is the shorter spelling "
+        "where `bash` exists"
+    )
+    lead = out.index("$ gh workflow run test.yml")
+    alternative = out.index("$ bash scripts/re-trigger-ci.sh")
+    assert lead < alternative, (
+        "the portable form must come first: the reader who stops at the first line is "
+        "the one this fix is for"
+    )
+    assert "uv run --no-sync python3 scripts/re-trigger-ci.sh" not in out, (
+        "the re-trigger row hands a bash script to python, which exits 1 with a "
+        "SyntaxError - the command cannot run as printed"
+    )
 
 
 def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
@@ -502,6 +601,35 @@ def test_a_run_still_going_is_parked_not_waited_on(mod, monkeypatch, capsys):
     assert "park" in out
     assert "wait" not in out, "a row that is parked must not be told to wait"
     assert "next cycle" in out, "the deferral has to name when the row comes back"
+    assert "cast-vote.py" not in out
+
+
+def test_a_head_whose_run_is_still_arriving_is_parked_not_retriggered(
+    mod, monkeypatch, capsys
+):
+    """The empty lookup has a second shape, and this row is what tells them apart.
+
+    Measured 2026-10-07 (`cyc20261007-022540`): `gh pr checks` printed "no checks
+    reported" for a head pushed seconds earlier, whose run existed and was
+    registering. The `no_run` row reads that state as a dropped push and hands over
+    a re-trigger - which fires a **second** run beside the one arriving, since
+    `test.yml` declares no concurrency group. The freshness tool now separates the
+    two by the head's age, and this row is where the separation has to *land*: a
+    kind the queue has no row for falls through to the merge-state branch below it.
+    """
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh(stale=True, kind="no_run_yet",
+                      reason="no Test run for head aaaa yet, and the head was "
+                             "committed 4 s ago")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "park" in out
+    assert "next cycle" in out, "the deferral has to name when the row comes back"
+    assert "gh workflow run" not in out, (
+        "a re-trigger here starts a second run on a head whose first one is arriving"
+    )
+    assert "re-trigger-ci.sh" not in out
     assert "cast-vote.py" not in out
 
 
@@ -551,7 +679,14 @@ def test_a_conflict_names_the_merge_and_the_classifier(mod, monkeypatch, capsys)
 
 def test_a_conflict_is_not_reported_as_an_ordinary_blocker(mod, monkeypatch, capsys):
     """A non-conflicting state is the branch's to remove, so the row must not hand
-    the reader a merge cascade for a draft."""
+    the reader a merge cascade for a draft.
+
+    The command is pinned too, because it was the one remedy this family printed that
+    answered nothing: `gh pr view --json mergeable,mergeStateStatus` reprints the fact
+    the row has already stated. What answers is the reading that explains the state,
+    which is the counter's own report (it now carries the head's check-runs) — or, for
+    a text conflict, the classifier.
+    """
     votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="DRAFT")
     fresh = FakeFresh()
     rc = _read(mod, monkeypatch, votes, fresh)
@@ -559,6 +694,130 @@ def test_a_conflict_is_not_reported_as_an_ordinary_blocker(mod, monkeypatch, cap
     assert rc == 0
     assert "unblock" in out
     assert "resolve-conflict" not in out
+    assert "gh pr view 1 -R argszero/emrg --json mergeable,mergeStateStatus" not in out, (
+        "the remedy reprints the row's own fact; the reading that answers is the "
+        "counter's report"
+    )
+    assert "check-vote-count.py 1" in out
+
+
+def test_an_unstable_head_whose_checks_passed_is_votable_not_blocked(mod, monkeypatch,
+                                                                    capsys):
+    """The row for the head this reading was rewritten for - measured, #1865.
+
+    `50dea4e8` reads `UNSTABLE` while every newest check-run on it is green (the
+    rollup keeps a superseded run's `cancelled` check-run), and master is already an
+    ancestor of it, so no remedy the branch could perform would publish a new head.
+    The old row said `unblock` — "the branch has to remove it" — for a branch with
+    nothing to remove and no way to move; the fixed reading finds green checks and
+    reaches the row that spends the cycle on the review instead.
+    """
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    # Built after `_install` attaches the real counter, whose `HeadCheck` these are.
+    _install(mod, monkeypatch, votes, FakeFresh())
+    votes.checks = (
+        votes.real.HeadCheck(
+            name="test", conclusion="success", status="completed", run_id="37390520380",
+            started_at="2026-10-05T23:47:56Z", id=4,
+        ),
+        votes.real.HeadCheck(
+            name="test", conclusion="cancelled", status="completed",
+            run_id="37372464666", started_at="2026-10-05T20:52:57Z", id=2,
+        ),
+    )
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" not in out, "a head whose checks passed is not a branch defect"
+    assert " vote " in out or "vote" in out.splitlines()[0]
+
+
+def test_an_unstable_head_whose_newest_check_never_concluded_is_an_unblock(
+    mod, monkeypatch, capsys
+):
+    """The other direction, so the green row cannot be bought by removing the branch.
+
+    A `cancelled` check-run that is the *newest* of its name means the head has no
+    verdict (measured on #1861's `7409741c`, where the newest `test-windows` check-run
+    is cancelled with 0 steps and the older one - whose runner was lost - is not what
+    decides). That head must still be `unblock`, and the reason must name the check.
+    """
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    _install(mod, monkeypatch, votes, FakeFresh())
+    votes.checks = (
+        votes.real.HeadCheck(
+            name="test", conclusion="success", status="completed", run_id="37390520380",
+            started_at="2026-10-05T23:47:56Z", id=4,
+        ),
+        votes.real.HeadCheck(
+            name="test-windows", conclusion="cancelled", status="completed",
+            run_id="37390520380", started_at="2026-10-05T23:56:31Z", id=2,
+        ),
+    )
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" in out
+    assert "test-windows: cancelled" in out, "the check that holds the state must be named"
+
+
+def test_an_unread_check_run_list_keeps_the_state_blocking(mod, monkeypatch, capsys):
+    """No reading is not a pass: an `UNSTABLE` head whose checks were not read blocks.
+
+    The counter asks for the check-runs only on an `UNSTABLE` head, and the fake here
+    answers the list as empty-or-unread - the state that must never be read as "the
+    checks are fine".
+    """
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    _install(mod, monkeypatch, votes, FakeFresh())
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" in out
+    assert "could not be read" in out
+
+
+def test_an_unreadable_ci_half_is_not_a_branch_state(mod, monkeypatch, capsys):
+    """A failure in the *other* half must not fall through to the merge-state row.
+
+    Measured live 2026-10-07 (`cyc20261007-203559`): the same head (`d31870d6`, #1893)
+    read twice a minute apart gave `unblock` and then `park`. The `unblock` was this
+    path - a gh timeout in the compare call left `stale_read` False, so the stale
+    branches could not fire and the merge-state row answered instead, prescribing a
+    remedy for a state (`UNSTABLE`) nothing had read. `Reading.unread` carried the
+    reason, and only the `--json` half printed it, and the exit-code table's "a PR in
+    it could not be read" counted only the *count* half.
+
+    Both directions, so the row cannot be bought by deleting the branch-state row: the
+    same fake behind a readable freshness still reaches `unblock`.
+    """
+    class Boom:
+        """`check-merge-freshness.py` when its `gh` call fails (the live symptom)."""
+
+        def check_pr(self, number):
+            raise RuntimeError("simulated gh timeout reading the compare endpoint")
+
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="UNSTABLE")
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    monkeypatch.setattr(mod, "freshness", lambda: Boom())
+    rc = mod.main(["1", "--prev-cycle", PREV_CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 2, "a PR whose CI half could not be read is a failure to measure"
+    assert "unmeasurable: #1" in out, "the footer must name it, not only the exit code"
+    assert "read-first" in out
+    assert "ancestry unreadable" in out, "the reason belongs on the row, not only in --json"
+    assert "check-merge-freshness.py 1" in out, "the remedy is the re-ask that failed"
+    assert "merge state is UNSTABLE" not in out, (
+        "the branch-state row prescribes a remedy for a state that was never read"
+    )
+
+    # control: the identical reading, with the CI half readable, is the branch-state row
+    monkeypatch.setattr(mod, "freshness", lambda: fresh)
+    assert mod.main(["1", "--prev-cycle", PREV_CYCLE]) == 0
+    control = capsys.readouterr().out
+    assert "unblock" in control
+    assert "unmeasurable" not in control
 
 
 # --- the per-cycle rule ----------------------------------------------------
@@ -898,6 +1157,89 @@ def test_a_head_pushed_by_the_previous_cycle_is_an_abstain(mod, monkeypatch, cap
     out = capsys.readouterr().out
     assert "abstain" in out
     assert PREV_CYCLE in out
+
+
+def test_a_head_another_instance_pushed_is_not_this_cycles_own(mod, monkeypatch, capsys):
+    """The clause is about a head *this* instance pushed; the window only proxies that.
+
+    The proxy misreads the ordinary case: the peer pushes and this host's next cycle
+    starts minutes later, so the head lands inside the window while belonging to work
+    this instance never did (measured 2026-10-06, `cyc20261006-122605`, on #1869's head
+    at 04:07:01Z). The push instant here is the same one
+    `test_a_head_pushed_inside_this_cycle_is_an_abstain` uses, so the two differ in the
+    actor alone - which is the whole claim.
+    """
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30), pusher=OTHER_LOGIN)
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" not in out
+    assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
+
+
+def test_a_head_pushed_under_this_hosts_other_login_is_still_an_abstain(
+    mod, monkeypatch, capsys
+):
+    """The hole the review on #1900 measured: one login is not the whole identity.
+
+    A host can push under more than one account — GitHub attributes a push to the one
+    that authenticated, so a checkout whose remote is `git@github.com:argszero/emrg.git`
+    has its pushes recorded as `argszero` while `gh api user` answers something else
+    (measured 2026-10-08; the numbers are in `check-vote-count.py`'s `remote_owners`).
+    The head below carries the same instant as
+    `test_a_head_another_instance_pushed_is_not_this_cycles_own`, and that test's
+    exemption must not reach it: a push under `SECOND_LOGIN` is this host's own work just
+    as much as one under `SELF_LOGIN`, so voting here is the self-review the clause
+    exists to stop. Without this arm the fake would pass for any predicate that asked
+    about a single login.
+    """
+    votes = FakeVotes(
+        reviews=[],
+        push=_push(2026, 9, 17, 22, 30),
+        pusher=SECOND_LOGIN,
+        logins=frozenset({SELF_LOGIN, SECOND_LOGIN}),
+    )
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" in out
+    # …and the row names the datum that decided, so a reader can tell an abstention an
+    # identity produced from the clock's ordinary one — the two are corrected in
+    # opposite directions.
+    assert SECOND_LOGIN in out
+
+
+def test_a_full_count_at_another_instances_head_is_mergeable(mod, monkeypatch, capsys):
+    """The other half the clause withholds, and the mirror of
+    `test_a_head_this_cycle_pushed_is_not_merged_either`: the same push instant and the
+    same `3/3`, with the peer as the pusher, has to reach the merge command. If only the
+    `abstain` row were fixed the cycle could vote here and then not land it."""
+    votes = FakeVotes(
+        reviews=[_review(cycle=f"cyc20260917-1{n}") for n in range(3)],
+        push=_push(2026, 9, 17, 22, 30),
+        pusher=OTHER_LOGIN,
+    )
+    out = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
+    printed = capsys.readouterr().out
+    assert out == 0
+    assert "abstain" not in printed
+    assert "3/3 valid votes" in printed
+    assert "gh pr merge 1" in printed
+
+
+def test_a_head_with_no_actor_reading_keeps_the_abstain(mod, monkeypatch, capsys):
+    """The fail-safe direction: the exemption is bought only by a positive reading.
+
+    A payload that carried no `actor`, or a login that could not be read, reads as `""`
+    - and `""` must keep the clause, or a self-review could count on a head whose
+    ownership nobody measured. Same push instant as the test above; only the reading
+    differs, and it has to land on the other side.
+    """
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30), pusher="")
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" in out
 
 
 def test_a_push_at_the_previous_cycles_start_is_inside_the_window(mod, monkeypatch, capsys):
@@ -2126,3 +2468,39 @@ def test_a_closed_pull_request_is_not_read_as_a_declaring_issue(monkeypatch):
 
     assert rant.closed_issues == []
     assert "no issue yet" in tool.render_rant(rant)
+
+
+def test_a_run_that_judged_nothing_is_retriggered_not_read_for_a_cause(mod, monkeypatch, capsys):
+    """The row beside `ci-red`, and the difference is the whole point.
+
+    Measured 2026-10-06 (`cyc20261006-065715`): a head whose run concluded `failure` only
+    because a *cancelled* job counts as a failed run was given the `ci-red` row, whose
+    remedies are `read-run-failure.py <run>` and the plan suite. The first answered
+    **"no failed job in run … nothing to explain"** - there is no cause, because no job
+    judged the tree - and neither remedy re-runs anything. So the row said "a failing
+    verdict" about a run that reached no verdict, and offered no way out of it.
+
+    This is the same state `no_run` is in - a head with no verdict - so it takes the same
+    action, and the test asserts the *opposite* of the `ci-red` row's assertions: the
+    cause-reading must be absent, because it cannot produce one.
+    """
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh(
+        stale=True,
+        kind="no_verdict",
+        reason="the Test run for head aaaa concluded 'failure' without judging the tree",
+        run_id="37194550758",
+    )
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "retrigger-ci" in out
+    assert "gh workflow run test.yml --ref <branch-of-" in out, (
+        "the remedy is a re-trigger, which starts a run that can actually judge the tree"
+    )
+    assert "read-run-failure.py 37194550758" not in out, (
+        "the cause-reading answers `no failed job … nothing to explain` for exactly this "
+        "state, so handing it over is the defect this row exists to remove"
+    )
+    assert "ci-red" not in out
+    assert "cast-vote.py" not in out, "a head whose run judged nothing is not votable"

@@ -22,8 +22,15 @@ function setup(
     busy?: boolean;
     cancel?: (sessionId: string) => Promise<unknown>;
     onCommand?: (r: { type: "command" | "unknown"; cmd: string; args?: string[] }) => void;
+    sandbox?: string | null;
+    onSandboxChange?: (mode: string) => void;
+    /** 会话额外可写根（daemon 报的那份）；null = 没人问过（rant 2026-10-09T09:43:39） */
+    sandboxRoots?: string[] | null;
+    /** 父级接管「额外可写根」入口：点击只上报意图（打开管理对话框） */
+    onManageSandboxRoots?: () => void;
     saveImage?: (payload: { sessionId?: string | null; data: string; label: string; mime?: string }) =>
       Promise<{ path: string; mime?: string }>;
+    readClipboardImage?: () => Promise<{ data: string; mime?: string; name?: string } | null>;
     logLine?: (level: string, msg: string) => void;
   } = {},
 ) {
@@ -656,6 +663,71 @@ describe("Composer — 格式栏与快捷键（Stage 2, rant 14:07:29）", () =>
     expect(sent[0].sandbox).toBe("read-only");
   });
 
+  it("沙箱切换器：父级接管时显示 daemon 报的档位，点击只上报、自己不动（rant 2026-09-30T09:30:16 GUI 半边）", async () => {
+    const store = createTranscriptStore();
+    const asked: string[] = [];
+    setup(store, { sandbox: "read-only", onSandboxChange: (m) => asked.push(m) });
+    await waitFor(() => expect(screen.getByTestId("sandbox-switcher")).toBeTruthy());
+    // 显示的是 prop（daemon 说的），不是本组件默认的 workspace-write
+    expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTestId("sandbox-workspace-write").getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(screen.getByTestId("sandbox-danger-full-access"));
+    expect(asked).toEqual(["danger-full-access"]);
+    // 点击不改显示：档位等 daemon 的 sandbox_set 回来（客户端不先改自己那份）
+    expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTestId("sandbox-danger-full-access").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("额外可写根入口：不接线不渲染；接线后显示 daemon 报的条数，点击只上报（rant 2026-10-09T09:43:39 GUI 半边）", async () => {
+    const store = createTranscriptStore();
+    // 未接线（单挂载 / 单测）：入口不渲染——与 onSandboxChange 的约定一致。
+    const first = setup(store);
+    await waitFor(() => expect(screen.getByTestId("sandbox-switcher")).toBeTruthy());
+    expect(screen.queryByTestId("sandbox-roots-open")).toBeNull();
+    first.unmount();
+
+    const opened: number[] = [];
+    setup(store, { sandboxRoots: null, onManageSandboxRoots: () => opened.push(1) });
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toBeTruthy());
+    // 没人问过 → 只报入口，不报条数：`0` 会主张一个 daemon 没报过的状态。
+    expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("额外根");
+    expect(screen.getByTestId("sandbox-roots-open")).not.toHaveTextContent("额外根 0");
+    await userEvent.click(screen.getByTestId("sandbox-roots-open"));
+    expect(opened).toHaveLength(1);
+  });
+
+  it("额外可写根入口：条数就是 daemon 那份列表的长度（空列表也照实报 0）", async () => {
+    const store = createTranscriptStore();
+    setup(store, { sandboxRoots: ["/tmp/a", "/tmp/b"], onManageSandboxRoots: vi.fn() });
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("额外根 2"));
+  });
+
+  it("额外可写根入口：空列表报 0（这是 daemon 说过的状态，与「没人问过」不同）", async () => {
+    const store = createTranscriptStore();
+    setup(store, { sandboxRoots: [], onManageSandboxRoots: vi.fn() });
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("额外根 0"));
+  });
+
+  it("沙箱切换器：父级接管时，随消息下发的档位也是 daemon 报的那个", async () => {
+    const store = createTranscriptStore();
+    const sent: Array<{ sandbox?: string | null }> = [];
+    const s = setup(store, {
+      sandbox: "danger-full-access",
+      onSandboxChange: () => {},
+      sendMessage: async (o) => {
+        sent.push({ sandbox: o.sandbox });
+        return { requestId: o.requestId };
+      },
+    });
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("full access please");
+    });
+    s.press("Enter");
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].sandbox).toBe("danger-full-access");
+  });
+
   it("沙箱切换器：切到 danger-full-access → 发送消息带 danger-full-access sandbox", async () => {
     const store = createTranscriptStore();
     const sent: Array<{ sandbox?: string | null }> = [];
@@ -872,6 +944,140 @@ describe("Composer — 图片粘贴/拖拽（rant 2026-09-30T09:35:04）", () =>
     expect(saveImage).not.toHaveBeenCalled();
   });
 
+  // ── 要求 4：系统给的图不受白名单所限 ────────────────────────────────────────────
+  //
+  // 白名单只是「不必转换就能直接收」的快路径。macOS 把菜单栏/截图给的图声明成
+  // `image/tiff`，renderer 解不了（Chromium 只出 png/jpeg/gif/webp/bmp/svg，canvas
+  // 也没有 TIFF 解码器）——于是同一次粘贴 TUI 收得到、GUI 只能拒绝。转换发生在有
+  // NSImage 的一侧（main 的 `clipboard.readImage()` → `toPNG()`），这正是 TUI 向
+  // macOS 要 `«class PNGf»` 的同一个动作。
+
+  /** main 归一后的 PNG（内容无关——这条路径不解析像素，只搬运字节）。 */
+  const PNG_B64 = btoa("\x89PNG\r\n\x1a\n");
+
+  it("事件里只有名单外的 TIFF 时，先请 main 把剪贴板里的图转成 PNG，再走同一条落盘路径", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/shot.png", mime: "image/png" }));
+    const readClipboardImage = vi.fn(async () => ({ data: PNG_B64, mime: "image/png", name: "clipboard.png" }));
+    const logLine = vi.fn();
+    const s = setup(store, { saveImage, readClipboardImage, logLine });
+    const editor = await waitEditor(s);
+
+    const tiff = new File([new Uint8Array([1, 2])], "shot.tiff", { type: "image/tiff" });
+    await firePaste(editor, makeCarrier({ files: [tiff], items: [fileItem(tiff)], types: ["Files"] }));
+
+    await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
+    expect(readClipboardImage).toHaveBeenCalledTimes(1);
+    // 落盘的必须是转换后的 PNG，不是那张 renderer 解不了的 TIFF
+    expect(saveImage.mock.calls[0][0]).toMatchObject({ sessionId: "s1", mime: "image/png", label: "clipboard" });
+    await waitFor(() => expect(editor.getText()).toContain("[📷 clipboard]"));
+    expect(screen.queryByTestId("composer-image-notice")).toBeNull();
+    expect(logLine).toHaveBeenCalledWith("info", expect.stringContaining("clipboard fallback"));
+  });
+
+  it("剪贴板里也没有可转换的图时，拒绝仍然可见并报出事件里给的类型", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn();
+    const readClipboardImage = vi.fn(async () => null);
+    const logLine = vi.fn();
+    const s = setup(store, { saveImage, readClipboardImage, logLine });
+    const editor = await waitEditor(s);
+
+    const tiff = new File([new Uint8Array([1, 2])], "shot.tiff", { type: "image/tiff" });
+    await firePaste(editor, makeCarrier({ files: [tiff], items: [fileItem(tiff)], types: ["Files"] }));
+
+    const notice = await screen.findByTestId("composer-image-notice");
+    expect(notice.textContent).toContain("image/tiff");
+    expect(saveImage).not.toHaveBeenCalled();
+    expect(logLine).toHaveBeenCalledWith("warn", expect.stringContaining("clipboard fallback failed"));
+  });
+
+  it("读剪贴板这条桥本身失败（旧 preload）时，也不静默：提示可见、原因进日志", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn();
+    const readClipboardImage = vi.fn(async () => {
+      throw new Error("window.emrg.readClipboardImage unavailable");
+    });
+    const logLine = vi.fn();
+    const s = setup(store, { saveImage, readClipboardImage, logLine });
+    const editor = await waitEditor(s);
+
+    const tiff = new File([new Uint8Array([1, 2])], "shot.tiff", { type: "image/tiff" });
+    await firePaste(editor, makeCarrier({ files: [tiff], types: ["Files"] }));
+
+    const notice = await screen.findByTestId("composer-image-notice");
+    expect(notice.textContent).toContain("image/tiff");
+    expect(saveImage).not.toHaveBeenCalled();
+    expect(logLine).toHaveBeenCalledWith(
+      "warn",
+      expect.stringContaining("window.emrg.readClipboardImage unavailable"),
+    );
+  });
+
+  it("声明了 Files 却一个文件都没取到时，也先问一次剪贴板（宿主报障「按了没反应」的那个形态）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/shot.png", mime: "image/png" }));
+    const readClipboardImage = vi.fn(async () => ({ data: PNG_B64, mime: "image/png", name: "clipboard.png" }));
+    const s = setup(store, { saveImage, readClipboardImage });
+    const editor = await waitEditor(s);
+
+    await firePaste(editor, makeCarrier({ files: [], items: [], types: ["Files"] }));
+
+    await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
+    expect(editor.getText()).toContain("[📷 clipboard]");
+    expect(screen.queryByTestId("composer-image-notice")).toBeNull();
+  });
+
+  it("混合粘贴（png + tiff）不重复取剪贴板：能直接收的那张照常落盘，名单外的照常出声", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/mix.png", mime: "image/png" }));
+    const readClipboardImage = vi.fn(async () => ({ data: PNG_B64, mime: "image/png", name: "clipboard.png" }));
+    const s = setup(store, { saveImage, readClipboardImage });
+    const editor = await waitEditor(s);
+
+    const tiff = new File([new Uint8Array([1, 2])], "shot.tiff", { type: "image/tiff" });
+    await firePaste(
+      editor,
+      makeCarrier({ files: [pngFile("mix.png"), tiff], types: ["Files"] }),
+    );
+
+    await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
+    expect(saveImage.mock.calls[0][0]).toMatchObject({ mime: "image/png", label: "mix" });
+    // 剪贴板里那张就是刚粘上来的图 —— 再取一次会把同一张图重复附加
+    expect(readClipboardImage).not.toHaveBeenCalled();
+    const notice = await screen.findByTestId("composer-image-notice");
+    expect(notice.textContent).toContain("image/tiff");
+  });
+
+  it("纯文本粘贴不读剪贴板（没有图就没有这条路）", async () => {
+    const store = createTranscriptStore();
+    const readClipboardImage = vi.fn(async () => ({ data: PNG_B64, mime: "image/png" }));
+    const saveImage = vi.fn();
+    const s = setup(store, { saveImage, readClipboardImage });
+    const editor = await waitEditor(s);
+
+    await firePaste(editor, makeCarrier({ types: ["text/plain"], text: "just text" }));
+
+    expect(readClipboardImage).not.toHaveBeenCalled();
+    expect(saveImage).not.toHaveBeenCalled();
+  });
+
+  it("拖拽名单外的文件不走剪贴板（拖的是 Finder 里的文件，不是剪贴板）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn();
+    const readClipboardImage = vi.fn(async () => ({ data: PNG_B64, mime: "image/png" }));
+    const s = setup(store, { saveImage, readClipboardImage });
+    await waitEditor(s);
+
+    const tiff = new File([new Uint8Array([1, 2])], "dropped.tiff", { type: "image/tiff" });
+    await fireDrop(screen.getByTestId("composer"), makeCarrier({ files: [tiff], types: ["Files"] }));
+
+    const notice = await screen.findByTestId("composer-image-notice");
+    expect(notice.textContent).toContain("image/tiff");
+    expect(readClipboardImage).not.toHaveBeenCalled();
+    expect(saveImage).not.toHaveBeenCalled();
+  });
+
   it("落盘被拒（IPC 报错）时把原因摆到输入框上", async () => {
     const store = createTranscriptStore();
     const saveImage = vi.fn(async (_p: SaveImageArgs) => {
@@ -912,5 +1118,56 @@ describe("Composer — 图片粘贴/拖拽（rant 2026-09-30T09:35:04）", () =>
 
     expect(screen.queryByTestId("composer-image-notice")).toBeNull();
     expect(saveImage).not.toHaveBeenCalled();
+  });
+
+  it("选图入口存在：格式栏的按钮打开一个 image/* 的文件选择器（此前 renderer 里没有任何 input[type=file]）", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    await waitEditor(s);
+
+    const input = screen.getByTestId("composer-image-input") as HTMLInputElement;
+    expect(input.getAttribute("type")).toBe("file");
+    expect(input.getAttribute("accept")).toBe("image/*");
+    expect(input.multiple).toBe(true);
+
+    const clickSpy = vi.spyOn(input, "click");
+    await userEvent.click(screen.getByTestId("composer-attach-image"));
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("选中的文件走同一条 attach 路径：落盘 + 光标处占位符（与粘贴/拖拽一致）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/pick.png", mime: "image/png" }));
+    const logLine = vi.fn();
+    const s = setup(store, { saveImage, logLine });
+    const editor = await waitEditor(s);
+
+    const input = screen.getByTestId("composer-image-input") as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [pngFile("pick.png")], configurable: true });
+    act(() => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(1));
+    expect(saveImage.mock.calls[0][0]).toMatchObject({ sessionId: "s1", mime: "image/png", label: "pick" });
+    expect(editor.getText()).toContain("[📷 pick]");
+    expect(logLine).toHaveBeenCalledWith("info", expect.stringContaining("[composer:image] attach 1 file(s)"));
+  });
+
+  it("选完复位 input.value：同一张图连选两次都触发 change（第二次不再静默）", async () => {
+    const store = createTranscriptStore();
+    const saveImage = vi.fn(async (_p: SaveImageArgs) => ({ path: "/tmp/again.png", mime: "image/png" }));
+    const s = setup(store, { saveImage });
+    await waitEditor(s);
+
+    const input = screen.getByTestId("composer-image-input") as HTMLInputElement;
+    for (let i = 0; i < 2; i += 1) {
+      Object.defineProperty(input, "files", { value: [pngFile("again.png")], configurable: true });
+      act(() => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await waitFor(() => expect(saveImage).toHaveBeenCalledTimes(i + 1));
+      expect(input.value).toBe("");
+    }
   });
 });

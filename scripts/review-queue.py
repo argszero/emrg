@@ -32,7 +32,7 @@ re-implemented here:
 * `check-vote-count.py` owns "how many votes are still about this head?" — the
   count, the per-cycle rule, and the mergeability clause;
 * `check-merge-freshness.py` owns "is the green CI about the tree that would land?"
-  — the ancestry, and the four ways a verdict can fail to be current.
+  — the ancestry, and the six ways a verdict can fail to be current.
 
 So the number printed here is the counter's number and the staleness here is the
 freshness tool's *kind*, not a local re-derivation of either. That matters more than
@@ -42,12 +42,19 @@ question — the freshness tool asks whether master's tip is an *ancestor* of th
 have produced one word. A second implementation of the vote rule would be a second
 answer to "may we merge this", which is the number every decision below turns on.
 
-Two things the output never does
---------------------------------
+Three things the output never does
+----------------------------------
 * **A count it could not read is not a zero.** `0/3 votes` is the line that says
   "vote freely"; printing it without having read it spends votes in the direction
   that cannot be undone. An unreadable count is reported as `?` with the reason, and
   the action becomes "read it first".
+* **A CI half it could not read is not a branch state.** Each PR is two reads - the
+  count and the sibling gate's ancestry/run half - and the row's later branches are
+  decisions about the second one. When that half raises, the row is `read-first` with
+  the reason, not the branch-state row that falls next: measured 2026-10-07
+  (`cyc20261007-203559`), where a gh timeout in the compare call printed `unblock` -
+  a remedy for a state of the branch - for a head that was merely waiting for CI. The
+  reason is carried on the row and by the `--json` half, and the exit code counts it.
 * **Silence is not an answer.** A failed `gh pr list` and an empty queue are
   different facts, so a failed listing exits 2 and says so, where `no open PRs in
   argszero/emrg - nothing to review` is printed only for a queue actually read.
@@ -154,6 +161,7 @@ import os
 import re
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -199,6 +207,23 @@ def rendered_here(project: str, repo: str = REPO) -> bool:
 #: commands carry the runner the docstrings and the docs prescribe — a bare
 #: `scripts/x.py` is not executable on this host, so printing one would hand the
 #: reader a command that fails.
+#:
+#: The rule is **by file type**, and the shell half was got wrong here: a `.py`
+#: tool takes this runner, while a `.sh` tool takes `bash` and must never be given
+#: to python. Measured 2026-10-04: `uv run --no-sync python3 scripts/re-trigger-ci.sh`
+#: exits 1 with `SyntaxError: invalid syntax` on line 11 (`set -euo pipefail`) — the
+#: re-trigger row used to print exactly that, so the one row whose remedy is
+#: "re-trigger CI on the same head" handed over a command that could not run.
+#:
+#: Carrying the right runner is not the whole rule either: `bash` is a **host**
+#: dependency, and the row is printed to whichever host is running the cycle. Measured
+#: 2026-10-05 by a reviewer on a Windows host (cycle `cyc20261005-054639`):
+#: `Get-Command bash` -> CommandNotFoundException, a git-bundled `bash.exe` present but
+#: not on PATH, so `bash scripts/re-trigger-ci.sh` could not run there at all - the same
+#: defect one rung on. `gh` is not optional in this family (every tool here reads GitHub
+#: through it) and `test.yml` declares `workflow_dispatch`, so the re-trigger row now
+#: **leads** with `gh workflow run test.yml --ref <branch>`, which is the single command
+#: `re-trigger-ci.sh` itself runs, and keeps the script as the alternative beneath it.
 RUNNER = "uv run --no-sync python3"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -398,8 +423,10 @@ def _sibling(name: str, module_name: str):
     package), so the file is loaded by path and registered under a plain name.
     """
     spec = importlib.util.spec_from_file_location(module_name, SCRIPTS_DIR / name)
-    if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
-        raise RuntimeError(f"could not load {name}")
+    # No `spec is None` guard: `spec_from_file_location` returns a spec and a
+    # loader even for a path that does not exist (measured 2026-10-06), so that
+    # branch could never fire. A sibling that is missing or does not compile
+    # raises out of `exec_module`, and `_entry` reports that as `2`.
     module = importlib.util.module_from_spec(spec)
     # Registered before exec: these modules declare dataclasses, and dataclasses
     # resolves annotations through sys.modules[cls.__module__] at class-creation
@@ -650,6 +677,10 @@ class Reading:
     #: Carried because the abstention clause is a comparison against this instant.
     head_pushed_at: str = ""
     head_pushed_exact: bool = True
+    #: The login whose CI run fixed `head_pushed_at`, or `""` when there was none to
+    #: ask. The abstention clause is about a head *this* instance pushed, and the
+    #: window is only a proxy for that; empty keeps the clause applied.
+    head_pusher: str = ""
     #: The window the clause was applied over, and what it rests on. `window_start`
     #: empty means the clause could not be applied at all — never "no window needed".
     window_start: str = ""
@@ -658,6 +689,11 @@ class Reading:
     stale: bool = False
     stale_kind: str = ""
     stale_reason: str = ""
+    #: The CI run the stale verdict is about, empty when there is none. The `ci-red`
+    #: row's remedy is built from it: "read why it failed" is runnable as printed only
+    #: if the row has the run, and the alternative - the id in the link `gh pr checks`
+    #: prints - is a command the reader has to assemble by hand.
+    ci_run_id: str = ""
     behind_by: int | None = None
     unread: str = ""
     #: GitHub's lifecycle state for the PR (`OPEN`, `MERGED`, `CLOSED`). Everything
@@ -772,6 +808,7 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
         return out
     out.head_pushed_at = str(verdict.push_time)
     out.head_pushed_exact = bool(verdict.push_time_exact)
+    out.head_pusher = str(getattr(verdict, "pusher", "") or "")
     if window is not None:
         out.window_start = window.window_start_text()
         out.window_source = window.source
@@ -796,6 +833,7 @@ def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
     out.stale = bool(fresh.stale)
     out.stale_kind = str(fresh.stale_kind)
     out.stale_reason = str(fresh.reason)
+    out.ci_run_id = str(getattr(fresh, "run_id", "") or "")
     out.behind_by = int(fresh.behind_by)
     return out
 
@@ -827,6 +865,11 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
       cycle may vote on;
     * a text conflict is next: more review does not fix it, and resolving it
       replaces the head and voids whatever votes exist;
+    * then a CI half that could not be read, because the branches below are decisions
+      about it or about the branch state that stands in for it: a row built there would
+      prescribe a remedy for a reading nobody took (measured 2026-10-07,
+      `cyc20261007-203559` - a gh timeout in the compare call printed the merge-state
+      row `unblock` on a head that was only waiting for CI);
     * then the three CI states the freshness tool distinguishes — red, absent,
       unfinished. None of them is votable, and their remedies differ, which is why
       they are not collapsed into "not fresh": a red run is read, an absent one is
@@ -887,12 +930,59 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                     "&& git merge FETCH_HEAD",
             extra=[f"{RUNNER} scripts/classify-conflict.py --all"],
         )
+    if reading.unread:
+        # The CI half was not read: every branch left is either that half (the run's
+        # state) or the branch state that stands in for it, so a row built down there
+        # prescribes a remedy for something nobody measured. Placed *after* the veto and
+        # conflict rows, which are answered by the counter alone and both move the head
+        # anyway - so neither becomes an unanswerable question by the CI half being
+        # missing. Measured 2026-10-07 (`cyc20261007-203559`): the same head read twice a
+        # minute apart gave `unblock` and then `park`, and the `unblock` was this path - a
+        # gh timeout in the compare call left `stale_read` False and the merge-state row,
+        # whose subject is the state of a branch, answered for a state nothing had read.
+        # The remedy is the same re-ask the unreadable count gets: the reading exists, it
+        # just has not been taken.
+        return Action(
+            kind="read-first",
+            why=reading.unread,
+            command=f"{RUNNER} scripts/check-merge-freshness.py {pr}",
+        )
     if reading.stale_read and reading.stale_kind == "failing":
         return Action(
             kind="ci-red",
             why=reading.stale_reason
             + " - not votable: a vote at this head would be a vote about a tree whose "
-              "CI ran red, and a re-run only helps if the failure was a flake",
+              "CI ran red, and a re-run only helps if the failure was a flake. "
+              "`gh pr checks` names the failing check, not its cause, so read the cause "
+              "with the reading that answers - and before fixing anything, ask whether "
+              "the row is the head's own, because a base-level failure turns every open "
+              "PR red and `check-merge-plan-suite.py` reports the rows the base tree "
+              "fails too",
+            command=f"gh pr checks {pr} -R {repo}",
+            extra=[
+                f"{RUNNER} scripts/read-run-failure.py "
+                f"{reading.ci_run_id or '<run-id from the link above>'}",
+                f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
+            ],
+        )
+    if reading.stale_read and reading.stale_kind == "no_run_yet":
+        # The head is younger than a push-event run takes to appear, so the empty
+        # run lookup is not yet evidence of anything and the row takes `running`'s
+        # verb for the same reason that one does: the head is not votable until a
+        # run concludes, and the re-trigger `no_run` prescribes would fire a
+        # *second* run on a head whose first one is arriving (measured 2026-10-07:
+        # a re-trigger does not cancel it - `test.yml` declares no concurrency
+        # group - so the duplicate runs in parallel). Measured by the row that is
+        # not here: cycle `cyc20261007-022540` read "no checks reported" from
+        # `gh pr checks` seconds after pushing head `338a9a53`, while that head's
+        # run existed and was registering.
+        return Action(
+            kind="park",
+            why=reading.stale_reason
+            + " - parked for this cycle: the head is too young for the empty lookup "
+              "to mean the push was dropped, and a re-trigger here starts a second "
+              "run beside the one arriving. Read this PR again next cycle; a head "
+              "still run-less then is `no_run`, whose row does name the re-trigger",
             command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.stale_read and reading.stale_kind == "no_run":
@@ -901,7 +991,26 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             why=reading.stale_reason
             + " - re-triggering fires a run on the same head, which keeps the votes a "
               "refresh would spend",
-            command=f"{RUNNER} scripts/re-trigger-ci.sh <branch-of-{pr}>",
+            command=f"gh workflow run test.yml --ref <branch-of-{pr}>",
+            extra=[f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>"],
+        )
+    if reading.stale_read and reading.stale_kind == "no_verdict":
+        # A run that stopped without judging the tree is the `ci-red` row's *other* half:
+        # its remedy is `no_run`'s, not "read the failure". Measured 2026-10-06: this row
+        # used to be `ci-red`, and handed over `read-run-failure.py <run>` - whose answer
+        # for a cancelled job is "no failed job … nothing to explain", because there is no
+        # cause to read. The verb stays `park` for the same reason `running` does: the
+        # head is not votable until a run concludes, and the re-trigger starts one.
+        return Action(
+            kind="retrigger-ci",
+            why=reading.stale_reason
+            + " - re-triggering fires a run on the same head, which keeps the votes a "
+              "refresh would spend, and park the PR until that run concludes",
+            command=f"gh workflow run test.yml --ref <branch-of-{pr}>",
+            extra=[
+                f"bash scripts/re-trigger-ci.sh <branch-of-{pr}>",
+                f"gh pr checks {pr} -R {repo}",
+            ],
         )
     if reading.stale_read and reading.stale_kind == "running":
         # The verb is the instruction: "wait" told the reader to block until the run
@@ -918,16 +1027,58 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             command=f"gh pr checks {pr} -R {repo}",
         )
     if reading.blocked:
+        # The row used to end "the branch has to remove it" and to hand the reader
+        # `gh pr view --json mergeable,mergeStateStatus` - a command that reprints the
+        # fact the row has just stated. Both were wrong in the same direction: the
+        # non-clean states do *not* share one cure (a `DRAFT` clears when the PR is
+        # marked ready, a `BLOCKED` with a review, a `BEHIND` by the refresh that moves
+        # the head, and an `UNSTABLE` held by a superseded run's check-run not at all),
+        # and the reading that answers "why is this not clean" is the counter's own
+        # report, which now carries the head's check-runs. Measured 2026-10-06
+        # (`cyc20261006-091811`) on #1865, whose row read `unblock` while its newest
+        # check-runs were green and its head already contained master: there was
+        # nothing for the prescribed remedy to publish.
+        conflict = reading.mergeable == "CONFLICTING" or reading.merge_state == "DIRTY"
+        command = (
+            f"{RUNNER} scripts/classify-conflict.py --all"
+            if conflict
+            else f"{RUNNER} scripts/check-vote-count.py {pr}"
+        )
         return Action(
             kind="unblock",
             why=reading.block_reason
             + " - a state of the branch, not of the review: no vote cast here changes "
-              "it, and the branch has to remove it",
-            command=f"gh pr view {pr} -R {repo} --json mergeable,mergeStateStatus",
+              "it, and which move clears it is the state's own (the reason above names "
+              "it; a refresh is only that move for a state that is about the tree)",
+            command=command,
         )
+    identity_lifted = ""
     if window is not None and window.applied:
         pushed = instant(reading.head_pushed_at)
-        if pushed is not None and pushed >= window.start:
+        # Whose push is it? The window is only a proxy for "this instance pushed it",
+        # and the proxy misreads the ordinary case: a head the peer pushed inside a gap
+        # between this host's cycles lands inside the window and is not this cycle's
+        # work at all (measured 2026-10-06, `cyc20261006-122605`: #1869's head, pushed
+        # by the peer at 04:07:01Z, read `abstain`). A positive reading of a login
+        # *outside the set this instance pushes under* exempts the head; an unknown one
+        # keeps the clause, so the row can only un-abstain on a push that is provably
+        # someone else's. The set rather than one login: a host may hold two (the
+        # remote's account and the token's), and comparing one un-abstained this
+        # instance's own pushes under the other — the review on #1900 measured it on
+        # 2026-10-08 (actor `argszero` against a token answering `how2how2how2-arch`).
+        other_pusher = bool(reading.head_pusher) and not vote_counter().own_login(
+            reading.head_pusher
+        )
+        # Which datum decided, said on the row either way: a reader who cannot see it
+        # cannot tell an abstention the clock produced from one an identity produced,
+        # and those two are corrected in opposite directions.
+        decided = (
+            f"the head's pusher {reading.head_pusher} reads as one of this instance's "
+            "own logins"
+            if reading.head_pusher
+            else "the head carries no pusher reading, so the clause is kept"
+        )
+        if pushed is not None and pushed >= window.start and not other_pusher:
             return Action(
                 kind="abstain",
                 why=f"head pushed {reading.head_pushed_at}, inside the window this cycle "
@@ -935,8 +1086,13 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                     "merges a head it pushed, and the window immediately before this one "
                     "counts as one's own as well, because every cycle on a host is the same "
                     "instance running again; the next vote here (and the merge) has to come "
-                    "from a later cycle",
+                    f"from a later cycle; {decided}",
                 command=f"{RUNNER} scripts/check-vote-count.py {pr}",
+            )
+        if other_pusher and pushed is not None:
+            identity_lifted = (
+                f"; the head was pushed by {reading.head_pusher}, outside this "
+                "instance's login set, so the own-window clause is not asked of it"
             )
     if reading.votes >= reading.needed:
         if reading.stale:
@@ -945,14 +1101,16 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                 why=f"{reading.votes}/{reading.needed} votes, but "
                     + reading.stale_reason
                     + " - measure the landing tree before merging; the head does not "
-                      "move, so the votes that carried it here stay valid",
+                      "move, so the votes that carried it here stay valid"
+                    + identity_lifted,
                 command=f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
                 extra=[f"{RUNNER} scripts/check-merge-tree-health.py"],
             )
         return Action(
             kind="merge",
             why=f"{reading.votes}/{reading.needed} valid votes, none predating the head "
-                "push, and the head's green run is about the tree that would land",
+                "push, and the head's green run is about the tree that would land"
+                + identity_lifted,
             command=f"gh pr merge {pr} -R {repo} --squash",
         )
     if reading.voted_here:
@@ -974,7 +1132,8 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                 + " - measure the tree this merge would land and vote on that reading; "
                   "the head does not move, so the standing votes survive - and read the "
                   "landing diff before voting, because `diff(master, head)` on this head "
-                  "shows the base's own later commits as reversals this PR does not make",
+                  "shows the base's own later commits as reversals this PR does not make"
+                + identity_lifted,
             command=f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
             extra=[
                 f"{RUNNER} scripts/check-merge-landing-diff.py {pr}",
@@ -983,7 +1142,8 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
         )
     return Action(
         kind="vote",
-        why=f"{reading.votes}/{reading.needed} votes, a fresh head, no unanswered veto",
+        why=f"{reading.votes}/{reading.needed} votes, a fresh head, no unanswered veto"
+            + identity_lifted,
         command=vote_cmd,
     )
 
@@ -1347,7 +1507,19 @@ def main(argv: list[str] | None = None) -> int:
         window,
     )
 
-    unread = [reading.pr for reading, _ in readings if reading.votes is None]
+    # Both halves of a PR's reading count as "could not be read": the count (its verdict
+    # carries no votes at all) and the CI half (the ancestry/run call raised, and the
+    # reason sits in `reading.unread`). The exit-code table above says "a PR in it could
+    # not be read" and means the PR, not one of its two reads - measured 2026-10-07
+    # (`cyc20261007-203559`): an ancestry timeout left rc 0 and no `unmeasurable:` line
+    # while the row under it prescribed a remedy for a state nothing had read. A terminal
+    # PR is excluded: its row is the lifecycle state, which was read, and a finished PR
+    # has no ancestry question left to answer.
+    unread = [
+        reading.pr
+        for reading, _ in readings
+        if reading.votes is None or (reading.unread and not reading.terminal)
+    ]
 
     # Read after the PR rows rather than before: an unreadable ledger is reported
     # alongside the PR reading, not instead of it, so a cycle still gets the half that
@@ -1467,5 +1639,25 @@ def main(argv: list[str] | None = None) -> int:
     return 2 if (unread or rants_unread) else 0
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_entry())

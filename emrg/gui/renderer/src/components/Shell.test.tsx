@@ -39,6 +39,8 @@ function mockEmrg() {
   const sendRant = vi.fn().mockResolvedValue({ ok: true, count: 11 });
   const restartDaemon = vi.fn().mockResolvedValue({ ok: true });
   const setModel = vi.fn().mockResolvedValue({ ok: true });
+  const setSandbox = vi.fn().mockResolvedValue({ ok: true });
+  const setSandboxRoots = vi.fn().mockResolvedValue({ ok: true });
   const triggerTask = vi.fn().mockResolvedValue({ ok: true });
   const switchSession = vi.fn().mockResolvedValue({ ok: true });
   (window as unknown as { emrg?: unknown }).emrg = {
@@ -59,6 +61,8 @@ function mockEmrg() {
     sendRant,
     restartDaemon,
     setModel,
+    setSandbox,
+    setSandboxRoots,
     triggerTask,
     switchSession,
   };
@@ -78,6 +82,8 @@ function mockEmrg() {
     sendRant,
     restartDaemon,
     setModel,
+    setSandbox,
+    setSandboxRoots,
     triggerTask,
     switchSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
@@ -111,6 +117,57 @@ async function typeIntoComposer(text: string) {
 }
 
 describe("Shell (Batch 5 slice 3 chat wiring)", () => {
+  it("the session's sandbox tier is the daemon's: a broadcast moves the chip, a click asks (rant 2026-09-30T09:30:16, GUI half)", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    // Nothing has reported a tier yet → the chip shows its own default, which is not
+    // a claim about the daemon (the store key is absent, not "workspace-write").
+    await waitFor(() => expect(screen.getByTestId("sandbox-workspace-write").getAttribute("aria-pressed")).toBe("true"));
+    // A tier set in the TUI arrives as this frame — the chip follows the daemon.
+    m.emit({ type: "sandbox_set", sid: "s1", data: { type: "sandbox_set", session_id: "s1", mode: "read-only" } });
+    await waitFor(() => expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true"));
+    expect(screen.getByTestId("sandbox-workspace-write").getAttribute("aria-pressed")).toBe("false");
+    // Clicking asks the daemon and moves nothing by itself.
+    await userEvent.click(screen.getByTestId("sandbox-danger-full-access"));
+    await waitFor(() => expect(m.setSandbox).toHaveBeenCalledWith({ sessionId: "s1", mode: "danger-full-access" }));
+    expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("the session's extra writable roots are the daemon's too: the frame moves the chip, and the click opens the one surface that can name one (rant 2026-10-09T09:43:39, GUI half)", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    // Nobody has asked yet → the chip is there but claims no count: `0` would be a
+    // state the daemon never reported (same rule as the tier chip above it).
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("Roots"));
+    expect(screen.getByTestId("sandbox-roots-open")).not.toHaveTextContent("Roots 0");
+    // A root added by the TUI (or another GUI) arrives as this frame and the chip follows.
+    m.emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: { type: "sandbox_roots", session_id: "s1", op: "add", roots: ["/tmp/scratch"] },
+    });
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("Roots 1"));
+    // The click sends nothing but the read the dialog needs on open — the whole point
+    // of this test: preload → provider → bridge → dialog is a chain of four names, and
+    // a name missing from any of them ends as a dialog that opens and says nothing.
+    await userEvent.click(screen.getByTestId("sandbox-roots-open"));
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-dialog")).toBeInTheDocument());
+    await waitFor(() => expect(m.setSandboxRoots).toHaveBeenCalledWith({ sessionId: "s1", op: "list", path: "" }));
+    expect(screen.getByTestId("sandbox-roots-row")).toHaveAttribute("data-root", "/tmp/scratch");
+    // Type a path and add it: the op leaves on the same chain, and the list on screen
+    // does **not** move by itself — only the daemon's next frame may move it.
+    await userEvent.type(screen.getByTestId("sandbox-roots-path"), "/tmp/other");
+    await userEvent.click(screen.getByTestId("sandbox-roots-add"));
+    await waitFor(() => expect(m.setSandboxRoots).toHaveBeenCalledWith({ sessionId: "s1", op: "add", path: "/tmp/other" }));
+    expect(screen.getAllByTestId("sandbox-roots-row")).toHaveLength(1);
+  });
+
   afterEach(() => {
     delete (window as unknown as { emrg?: unknown }).emrg;
   });
@@ -242,7 +299,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
     await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(1));
-    // 第一页真的渲染出来（此时 hasMore 已落定 → canLoadOlder 为真），再模拟上翻。
+    // 第一页真的渲染出来（此时 hasMore 已落定 → canLoadOlder(hasMore, loading) 为真），再模拟上翻。
     await waitFor(() => expect(screen.getByText(firstPageText)).toBeInTheDocument());
     const viewport = container.querySelector<HTMLElement>('[data-testid="transcript-view"]');
     expect(viewport).not.toBeNull();
@@ -272,6 +329,28 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByText(older[0].content)).toBeInTheDocument());
   });
 
+  it("clicking the load bar asks for the older page, same cursor as the scroll path (host report 2026-10-08)", async () => {
+    // 宿主报障：「点击加载更早消息，没有任何效果」。断在接缝上：条形件的 onClick → Shell 的
+    // onScrollTop（150ms 防抖）→ loadOlderHistory。滚动那条路一直是好的，两条路必须落到同一个
+    // 游标上——所以这里断言的不是「回调被调用」，而是 daemon 真收到了 beforeIndex=4 那一页。
+    const m = mockEmrg();
+    const { older } = mockTwoHistoryPages(m);
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText("newest-1")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("history-load-bar"));
+
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(2));
+    expect(m.listHistory).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ sessionId: "s1", includeRecords: true, beforeIndex: 4 }),
+    );
+    await waitFor(() => expect(screen.getByText(older[0].content)).toBeInTheDocument());
+  });
+
   it("prepends an older page as one block, keeping record order (rant 2026-09-20T18:58:44)", async () => {
     const m = mockEmrg();
     const { newest, older } = mockTwoHistoryPages(m);
@@ -286,6 +365,67 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(at(older[0].content)).toBeGreaterThanOrEqual(0);
     expect(at(older[2].content)).toBeLessThan(at(newest[0].content));
     expect(at(older[0].content)).toBeLessThan(at(older[2].content));
+  });
+
+  it("the load bar stays silent on the first page when there is no earlier page (rant 2026-10-09T09:25:00)", async () => {
+    // 「没有更早的页」这句话是**回答**，而首屏没人问过：vanilla `app.js:838-841` 首屏
+    // 只有一个 `if (hasMore)` 分支，else 在翻页那条路径上。规则现在只有一处
+    // （`lib/history.ts:loadBarKey`），这条断言钉住它在用户眼前的那一半。
+    const m = mockEmrg();
+    m.listHistory.mockResolvedValue({
+      messages: [{ record_index: 1, kind: "message", role: "user", content: "only-1" }],
+      hasMore: false,
+    });
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByText("only-1")).toBeInTheDocument());
+    expect(screen.queryByTestId("history-load-bar")).toBeNull();
+  });
+
+  it("after paging to the end the bar says so — and is a status line, not a control", async () => {
+    const m = mockEmrg();
+    const { older } = mockTwoHistoryPages(m); // 更早那页 hasMore:false = 翻到头了
+    const { container } = render(wrapper(<Shell />));
+    await openSessionAndScrollToTop(m, container, "newest-1");
+    await waitFor(() => expect(screen.getByText(older[0].content)).toBeInTheDocument());
+    const bar = screen.getByTestId("history-load-bar");
+    expect(bar.tagName).toBe("DIV");
+    expect(bar.textContent).toBe("No more history");
+  });
+
+  it("while an older page is in flight the bar is already not a control (rant 2026-10-09T09:25:00)", async () => {
+    // 钉的是**生产读取点**，不是组件契约：`canLoadOlder(hasMore, loading)` 的 `loading`
+    // 那一半到底会不会被渲染出来。只在每个 loader 的 `finally` 里 publish 时，`loading =
+    // true` 从未到达渲染 —— 翻页途中顶部条仍是可点的 BUTTON，点下去在 `st.loading` 早退处
+    // 什么也不做（宿主报障里「长得像能点、点下去是死的」那一类，换了一个分支）。复查
+    // cyc20261009-151044 的否决就断在这里：把更早那页换成一个**未兑现**的 promise，
+    // 在它还没落定时问 DOM 要标签名。`TranscriptView.test.tsx` 传 prop 看不见这一条。
+    const m = mockEmrg();
+    let release: (v: unknown) => void = () => {};
+    const pending = new Promise((res) => { release = res; });
+    const newest = [{ record_index: 4, kind: "message", role: "user", content: "newest-1" }];
+    const older = [{ record_index: 1, kind: "message", role: "user", content: "older-1" }];
+    m.listHistory.mockImplementation((p: { beforeIndex?: number } = {}) =>
+      p.beforeIndex != null
+        ? (pending as Promise<{ messages: unknown[]; hasMore: boolean }>)
+        : Promise.resolve({ messages: newest, hasMore: true }),
+    );
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText("newest-1")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("history-load-bar"));
+    await waitFor(() => expect(m.listHistory).toHaveBeenCalledTimes(2));
+    // 此刻更早那页还没落定：条形件必须已经退化成状态文字。
+    expect(screen.getByTestId("history-load-bar").tagName).toBe("DIV");
+
+    // 落定之后仍然不是控件（翻到头了），并且更早那页真的进来了。
+    act(() => release({ messages: older, hasMore: false }));
+    await waitFor(() => expect(screen.getByText(older[0].content)).toBeInTheDocument());
+    expect(screen.getByTestId("history-load-bar").tagName).toBe("DIV");
   });
 
   it("shows the connection status + model from the status broadcast", async () => {

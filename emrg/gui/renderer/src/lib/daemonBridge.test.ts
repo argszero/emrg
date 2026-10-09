@@ -18,14 +18,24 @@ function setup() {
   });
   const transcript = createTranscriptStore({ t });
   const sendMessage = vi.fn().mockResolvedValue({ requestId: "req-1" });
+  const setSandbox = vi.fn().mockResolvedValue({ ok: true });
+  const setSandboxRoots = vi.fn().mockResolvedValue({ ok: true });
   let cb: ((evt: DaemonEventFrame) => void) | null = null;
   const disposeCb = vi.fn();
   const onEvent = vi.fn((handler: (evt: DaemonEventFrame) => void) => {
     cb = handler;
     return disposeCb;
   });
-  const bridge = createDaemonBridge({ onEvent, emrg: { sendMessage }, transcript, t });
-  return { bridge, transcript, t, sendMessage, onEvent, disposeCb, emit: (f: DaemonEventFrame) => cb?.(f) };
+  const bridge = createDaemonBridge({
+    onEvent,
+    emrg: { sendMessage, setSandbox, setSandboxRoots },
+    transcript,
+    t,
+  });
+  return {
+    bridge, transcript, t, sendMessage, setSandbox, setSandboxRoots, onEvent, disposeCb,
+    emit: (f: DaemonEventFrame) => cb?.(f),
+  };
 }
 
 function entriesText(store: ReturnType<typeof createTranscriptStore>, sid: string | null = null): string[] {
@@ -438,4 +448,177 @@ describe("createDaemonBridge", () => {
       vi.useRealTimers();
     }
   });
+  // ── 会话 sandbox 档位（rant 2026-09-30T09:30:16，GUI 半边）────────────────────
+  // 三件事各测一边：广播进 store、快照进 store、点击只上报。第二件是广播**不会重放**
+  // 的后果——打开一个早就设过档位的会话，唯一能告诉它的帧就是这份快照。
+
+  it("sandbox_set → 该会话的档位进 store（另一个客户端设的那一份同形）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "sandbox_set", sid: "s1", data: { type: "sandbox_set", session_id: "s1", mode: "read-only" } });
+    expect(bridge.store.get().sandboxBySid["s1"]).toBe("read-only");
+  });
+
+  it("sandbox_set 的拒绝帧（带 error、无 mode）→ 不写档位：拒绝不是一次设置", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "sandbox_set", sid: "s1", data: { type: "sandbox_set", error: "unknown sandbox mode 'nope'" } });
+    expect(bridge.store.get().sandboxBySid["s1"]).toBeUndefined();
+  });
+
+  it("resume_result 的 meta.sandbox → 会话一打开就显示已存档位", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { sandbox: "danger-full-access" } },
+      sid: "s1",
+    } as DaemonEventFrame);
+    expect(bridge.store.get().sandboxBySid["s1"]).toBe("danger-full-access");
+  });
+
+  it("resume_result 没报档位 → 不写：「daemon 没说」不是 workspace-write", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { turn: { running: false, started_at: null } } },
+      sid: "s1",
+    } as DaemonEventFrame);
+    expect(bridge.store.get().sandboxBySid["s1"]).toBeUndefined();
+  });
+
+  it("setSandbox 只上报：store 不动，档位等 daemon 的 sandbox_set 回来", async () => {
+    const { bridge, setSandbox } = setup();
+    await bridge.setSandbox("s1", "read-only");
+    expect(setSandbox).toHaveBeenCalledWith({ sessionId: "s1", mode: "read-only" });
+    // 先改自己那份，就是「对自己正确、对别的客户端错误」的那个缺陷。
+    expect(bridge.store.get().sandboxBySid["s1"]).toBeUndefined();
+  });
+
+  it("setSandbox 没有会话、或这条构建没接线 → false，不假装设上了", async () => {
+    const { bridge } = setup();
+    expect(await bridge.setSandbox(null, "read-only")).toBe(false);
+    const noWire = createDaemonBridge({
+      onEvent: vi.fn(() => vi.fn()),
+      emrg: { sendMessage: vi.fn() },
+      transcript: createTranscriptStore(),
+    });
+    expect(await noWire.setSandbox("s1", "read-only")).toBe(false);
+  });
+
+  // ── 会话额外可写根（rant 2026-10-09T09:43:39，GUI 半边）──────────────────────
+  // 与档位同一套权威规则，但这条线上多一个字段：`notice`。列表与「daemon 说了什么」
+  // 是两件事——一次拒绝带着**完整**的列表回来（被拒的是那个路径，不是已有的根），
+  // 而一次 remove 什么都没改也可能有话要说。所以两者分开存，且分开断言。
+
+  it("sandbox_roots 的写帧 → 列表与 ok 都进 store", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: { type: "sandbox_roots", session_id: "s1", op: "add", roots: ["/tmp/scratch"], notice: null },
+    });
+    expect(bridge.store.get().sandboxRootsBySid["s1"]).toEqual(["/tmp/scratch"]);
+    expect(bridge.store.get().sandboxRootsNoticeBySid["s1"]).toEqual({ kind: "ok", text: "", op: "add" });
+  });
+
+  it("拒绝帧（带 error）→ 列表仍要读：被拒的是那个路径，不是已有的根", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: {
+        type: "sandbox_roots", session_id: "s1", op: "add",
+        roots: ["/tmp/kept"], error: "refusing '/': the filesystem root",
+      },
+    });
+    expect(bridge.store.get().sandboxRootsBySid["s1"]).toEqual(["/tmp/kept"]);
+    expect(bridge.store.get().sandboxRootsNoticeBySid["s1"]).toEqual({
+      kind: "error", text: "refusing '/': the filesystem root", op: "add",
+    });
+  });
+
+  it("notice 帧（什么都没改）→ 单独一类，不冒充成功也不冒充拒绝", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: {
+        type: "sandbox_roots", session_id: "s1", op: "remove", roots: [],
+        notice: "'/tmp/x' was not one of this session's roots — nothing to remove",
+      },
+    });
+    expect(bridge.store.get().sandboxRootsNoticeBySid["s1"]?.kind).toBe("notice");
+  });
+
+  it("list 帧是一句新话：它把上一次的拒绝清掉（旧话不能再主张一个已被反驳的状态）", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: { type: "sandbox_roots", session_id: "s1", op: "add", roots: [], error: "nope" },
+    });
+    expect(bridge.store.get().sandboxRootsNoticeBySid["s1"]?.kind).toBe("error");
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: { type: "sandbox_roots", session_id: "s1", op: "list", roots: ["/tmp/a"] },
+    });
+    expect(bridge.store.get().sandboxRootsBySid["s1"]).toEqual(["/tmp/a"]);
+    expect(bridge.store.get().sandboxRootsNoticeBySid["s1"]).toBeUndefined();
+  });
+
+  it("resume_result 的 meta.sandbox_roots → 后开的会话也能看到清单（[] 是「确实没有」）", () => {
+    const { emit, bridge } = setup();
+    emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s1", meta: { sandbox_roots: ["/tmp/a", "/tmp/b"] } },
+      sid: "s1",
+    } as DaemonEventFrame);
+    expect(bridge.store.get().sandboxRootsBySid["s1"]).toEqual(["/tmp/a", "/tmp/b"]);
+
+    emit({
+      type: "command_result",
+      data: { type: "resume_result", session_id: "s2", meta: { sandbox_roots: [] } },
+      sid: "s2",
+    } as DaemonEventFrame);
+    expect(bridge.store.get().sandboxRootsBySid["s2"]).toEqual([]);
+  });
+
+  it("没有会话、或没接线的构建 → 只上报；store 不动，收到帧才动", async () => {
+    const { bridge, setSandboxRoots } = setup();
+    expect(await bridge.setSandboxRoots("s1", "add", "/tmp/a")).toBe(true);
+    expect(setSandboxRoots).toHaveBeenCalledWith({ sessionId: "s1", op: "add", path: "/tmp/a" });
+    expect(bridge.store.get().sandboxRootsBySid["s1"]).toBeUndefined();
+
+    expect(await bridge.setSandboxRoots(null, "list")).toBe(false);
+    const noWire = createDaemonBridge({
+      onEvent: vi.fn(() => vi.fn()),
+      emrg: { sendMessage: vi.fn() },
+      transcript: createTranscriptStore(),
+    });
+    expect(await noWire.setSandboxRoots("s1", "list")).toBe(false);
+  });
+
+  it("写帧在 transcript 留一行，list 不留：读是刷新，不是事件", () => {
+    const { emit, transcript, bridge } = setup();
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: { type: "sandbox_roots", session_id: "s1", op: "list", roots: ["/tmp/a"] },
+    });
+    expect(entriesText(transcript, "s1")).toHaveLength(0);
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: { type: "sandbox_roots", session_id: "s1", op: "add", roots: ["/tmp/a", "/tmp/b"] },
+    });
+    expect(entriesText(transcript, "s1")).toContain("s:/tmp/b");
+    // 拒绝也要说出来：另一端的失败不能只在对话框里可见。
+    emit({
+      type: "sandbox_roots",
+      sid: "s1",
+      data: { type: "sandbox_roots", session_id: "s1", op: "add", roots: ["/tmp/a"], error: "denied" },
+    });
+    expect(entriesText(transcript, "s1")).toContain("s:denied");
+    expect(bridge.store.get().sandboxRootsBySid["s1"]).toEqual(["/tmp/a"]);
+  });
+
 });

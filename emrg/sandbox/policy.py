@@ -58,6 +58,22 @@ class SandboxPolicy:
     mode: str
     workspace_root: str
     session_id: str | None = None
+    #: Roots the **host** named for this session, alongside the ones the mode
+    #: derives (rant 2026-10-09T09:43:39).  The workspace is not the only place a
+    #: session may legitimately need to write, and the alternative the mode table
+    #: offered was ``danger-full-access`` — the whole filesystem, to reach one
+    #: file outside it.  A host-named root is the middle: this session, these
+    #: paths, named by a person and withdrawable by one.
+    #:
+    #: Two things this field is *not*.  It is not a widening the agent can ask
+    #: for: the daemon overwrites the argument it travels in on every tool call
+    #: (``_inject_tool_arguments``), exactly as it does the tier, so a model that
+    #: invents ``writable_roots`` in a call replaces nothing.  And it is not a
+    #: per-deployment constant — the root host decision D5 deleted was exactly
+    #: that, unnamed by anyone and unremovable; the test that keeps that name
+    #: dead (``tests/test_file_policy_has_one_home.py``) is the boundary between
+    #: the two, and it stays.
+    extra_roots: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # Absolute-path assertion at the POLICY layer, canonicalization at the
@@ -70,6 +86,16 @@ class SandboxPolicy:
                 "sandbox policy: workspace_root must be an absolute execution-world path "
                 f"(got {self.workspace_root!r})"
             )
+        # Same assertion, same reason, for the host-named roots: a relative one
+        # would resolve against whatever cwd the provider happened to run in, so
+        # the path granted and the path judged could differ.  A caller that
+        # cannot spell it absolutely has not decided what it is granting.
+        for root in self.extra_roots:
+            if not os.path.isabs(root):
+                raise ValueError(
+                    "sandbox policy: every extra root must be an absolute execution-world "
+                    f"path (got {root!r})"
+                )
 
 
 def resolve_policy(
@@ -77,6 +103,7 @@ def resolve_policy(
     mode: str | None = None,
     workspace_root: str,
     session_id: str | None = None,
+    extra_roots: "tuple[str, ...] | list[str] | None" = None,
 ) -> SandboxPolicy:
     """Resolve the policy one call runs under.
 
@@ -85,10 +112,15 @@ def resolve_policy(
     :param workspace_root: the session's cwd — the same identity the command
         runs in and the boundary it may write under, one value, not two.
     :param session_id: the calling session, when the caller has one.
+    :param extra_roots: the session's host-named writable roots, as the daemon
+        injected them.  ``None`` means "this call was told of none", which is
+        the same list as an empty one: a caller that supplies nothing grants
+        nothing, and silence never widens a boundary.
     :returns: the fully resolved policy.
     """
     return SandboxPolicy(
         mode=DEFAULT_MODE if mode is None else mode,
         workspace_root=workspace_root,
         session_id=session_id,
+        extra_roots=tuple(extra_roots or ()),
     )

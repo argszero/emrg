@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import ntpath
 import os
 import re
@@ -730,7 +731,9 @@ class PwshToolV2(ToolExecutor):
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default: 30).",
+                        "description": "Timeout in seconds — a positive number "
+                        "(default: 30). Zero, a negative value or a non-number is "
+                        "refused rather than run under a different bound.",
                     },
                     "workdir": {
                         "type": "string",
@@ -768,7 +771,9 @@ class PwshToolV2(ToolExecutor):
         command = arguments.get("command", "")
         if not command:
             return ToolResult(name=TOOL_NAME, content="Error: no command provided", error=True)
-        timeout = _as_timeout(arguments.get("timeout"))
+        timeout, refusal = _as_timeout(arguments.get("timeout"))
+        if refusal is not None:
+            return ToolResult(name=TOOL_NAME, content=refusal, error=True)
         workdir = str(
             arguments.get("workspace") or arguments.get("workdir") or os.getcwd()
         )
@@ -776,6 +781,7 @@ class PwshToolV2(ToolExecutor):
             mode=arguments.get("sandbox"),
             workspace_root=workdir,
             session_id=arguments.get("session_id"),
+            extra_roots=arguments.get("writable_roots"),
         )
         # The command-text rules a checked tier makes (containment escape, and the
         # host's daemon-lifecycle red line) are read from the text by
@@ -810,17 +816,35 @@ class PwshToolV2(ToolExecutor):
         )
 
 
-def _as_timeout(value: object) -> float:
-    """Read the timeout argument, falling back to the default.
+def _as_timeout(value: object) -> tuple[float | None, str | None]:
+    """Read the timeout argument, or hand back the refusal it earns.
+
+    The mirror of `emrg/tools/bash_tool_v2.py::_as_timeout` — one field, one reading,
+    and the measurement that produced it is stated there: a non-positive timeout was
+    obeyed rather than rejected (`0` killed the command and reported ``[timed out
+    after 0ms]``), and a value that is not a number silently ran under the default.
+    The daemon's watchdog reads the same field as "unusable when non-positive"
+    (`scheduler._tool_silence_seconds`), so the tool half now refuses instead of
+    substituting a number the caller did not send.
 
     :param value: whatever the model sent.
-    :returns: the timeout in seconds (30 when unusable, as the schema documents).
+    :returns: ``(seconds, None)``, or ``(None, refusal)`` for the caller to report
+        as ``ToolResult(..., error=True)``. An absent value is the documented
+        default of 30 seconds.
     """
-    if isinstance(value, bool) or value is None:
-        return 30.0
-    if isinstance(value, (int, float)):
-        return float(value)
+    if value is None:
+        return 30.0, None
+    refusal = (
+        f"timeout must be a positive number of seconds (got {value!r}); this call "
+        "is refused rather than run under a different bound. Omit it to use the "
+        "default of 30 seconds."
+    )
+    if isinstance(value, bool):
+        return None, refusal
     try:
-        return float(str(value))
+        seconds = float(str(value).strip())
     except (TypeError, ValueError):
-        return 30.0
+        return None, refusal
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None, refusal
+    return seconds, None

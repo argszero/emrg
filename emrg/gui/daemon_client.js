@@ -31,7 +31,12 @@ const WebSocket = require("ws");
 // 读 ~/.emrg/emrgd.token）。projectDir 参数与 G129 回退逻辑随概念一起清理（#884 后
 // emrgd.token 已是唯一规范位置，回退冗余）。
 const TOKEN_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.token");
-const EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
+// Rant 2026-10-09T14:20:18: the application-level logs live in ~/.emrg/logs, one
+// derivation shared with the Python side (`emrg/config.py` logs_dir()). JS cannot
+// import Python, so the rule is written once per side and pinned equal by
+// tests/test_log_dir_pairing.py — the same treatment EMRGD_PORT below gets.
+const EMRG_LOGS_DIR = () => path.join(os.homedir(), ".emrg", "logs");
+const EMRGD_LOG = () => path.join(EMRG_LOGS_DIR(), "emrgd.log");
 // Issue #1276 item 4：子进程**自己的 stderr** 落到这里。emrgd 的日志 handler 是
 // 子进程内部才装的（`emrg/server/__main__.py:_configure_logging`），所以"还没走到
 // 那一步就死了"的失败（import 失败、补丁语法错、缺模块）在 emrgd.log 里一个字都
@@ -39,7 +44,7 @@ const EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
 // 症状。落**文件**而不是终端：stderr 被丢弃的理由是 daemon 不得写进客户端界面，
 // 落文件保留这个性质，同时给失败一个可读的地方。不会重复写：emrgd 只在
 // `sys.stderr.isatty()` 时加 StreamHandler，stderr 指向文件与 DEVNULL 一样不是 tty。
-const EMRGD_START_ERR = () => path.join(os.homedir(), ".emrg", "emrgd-start.err");
+const EMRGD_START_ERR = () => path.join(EMRG_LOGS_DIR(), "emrgd-start.err");
 // Fixed daemon port (rant 2026-08-19T08:05:21 + 2026-08-20T14:32:52): the
 // daemon always listens on this constant — keep in sync with emrg/connect.py
 // EMRGD_PORT and emrg/_stop_all.py _EMRGD_PORT. The token file no longer
@@ -462,7 +467,7 @@ class DaemonClient {
       const tail = this._readLogTail(15, NO_LOG_MARK);
       throw new Error(
         `daemon failed to start after ${MAX_SPAWN_ATTEMPTS} attempts — ` +
-        `please start it manually ('emrg server') and check emrgd.log` +
+        `please start it manually ('emrg server') and check ~/.emrg/logs/emrgd.log` +
         (tail ? `\n  emrgd.log tail (${EMRGD_LOG()}):\n${tail}` : "")
       );
     }
@@ -837,6 +842,39 @@ class DaemonClient {
     return rid;
   }
 
+  /** Set this session's sandbox tier; the daemon persists it and broadcasts `sandbox_set`.
+   *
+   * Rant 2026-09-30T09:30:16 (GUI half): the tier belongs to the *session*, so a
+   * client keeps none of its own — it asks the daemon and renders the
+   * `sandbox_set` frame that comes back. Fire-and-forget on purpose: the answer
+   * *is* the event (the requester's own reply and every other connection's
+   * broadcast are the same frame shape), and pairing it through `_pending`
+   * would swallow the requester's own reply in `_resolvePending` before the
+   * renderer could see it.
+   */
+  sendSetSandbox({ sessionId, cwd, mode }) {
+    this.sendCommand("set_sandbox", { session_id: sessionId, cwd, mode });
+  }
+
+  /** Add, remove or list this session's host-named writable roots.
+   *
+   * Rant 2026-10-09T09:43:39 (GUI half). The daemon is the only writer: it
+   * validates against the tier in force, persists `meta.json` and answers with a
+   * `sandbox_roots` frame; this client keeps no list of its own. Fire-and-forget
+   * for the same reason as `sendSetSandbox`: the answer *is* the event, and
+   * pairing it through `_pending` would swallow the requester's own reply before
+   * the renderer could see it.
+   *
+   * `op=list` is a read — it answers the asking connection and broadcasts nothing
+   * — so the caller that wants the list must ask for it (the dialog does, on
+   * open).
+   */
+  sendSetSandboxRoots({ sessionId, cwd, op, path = "" }) {
+    this.sendCommand("set_sandbox_roots", {
+      session_id: sessionId, cwd, op, path,
+    });
+  }
+
   sendCommand(type, params = {}) {
     // Wire message type last: a payload field named "type" (e.g. the task type in
     // task CRUD) must never override the wire message type (rant 2026-08-14T21:48:00).
@@ -909,6 +947,40 @@ class DaemonClient {
   _classify(frame) {
     // 命令响应优先（pending 配对）
     if (this._resolvePending(frame)) return;
+
+    if (frame.type === "sandbox_set") {
+      // The session's sandbox tier (rant 2026-09-30T09:30:16, GUI half). One frame
+      // shape covers the requester's own reply and every other connection's
+      // broadcast, because the daemon sends the same payload to both
+      // (`daemon.py::_handle_set_sandbox`). It must be forwarded *here*, ahead of
+      // the `frame.error` catch-all: a refused mode arrives as this same type
+      // carrying `error`, so the refusal belongs to the tier surface rather than
+      // to the generic error stream.
+      //
+      // Before this branch existed the success frame matched nothing below (its
+      // only keys are `type`/`session_id`/`mode`), so it fell to the unknown-frame
+      // log at the bottom of this function and reached no renderer: a tier set in
+      // the TUI was invisible in the GUI, and the GUI could not set one at all.
+      this._emit("sandbox_set", frame);
+      return;
+    }
+
+    if (frame.type === "sandbox_roots") {
+      // The session's host-named extra writable roots (rant 2026-10-09T09:43:39,
+      // GUI half). One frame shape covers all three ops and both paths: the
+      // requester's own reply and every other connection's broadcast carry the
+      // same payload (`daemon.py::_handle_set_sandbox_roots`), and a refusal or a
+      // `notice` arrives as this same type rather than as `command_result` or the
+      // generic error stream — the daemon answers `sandbox_roots` to every one of
+      // them, so the reason belongs to the roots surface and not to the error log.
+      //
+      // Before this branch existed the frame matched nothing below (its keys are
+      // `type`/`session_id`/`op`/`roots`), so it fell to the unknown-frame log at
+      // the bottom of this function: a root added in the TUI was invisible in the
+      // GUI, and the GUI could not name one at all.
+      this._emit("sandbox_roots", frame);
+      return;
+    }
 
     if (frame.type === "approval_request") {
       // The daemon is holding a confined call open until a client answers

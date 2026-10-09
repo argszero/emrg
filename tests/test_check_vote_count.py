@@ -43,6 +43,13 @@ HEAD = "a" * 40
 T0 = "2026-09-11T00:00:00Z"  # the head push time
 BEFORE = "2026-09-10T00:00:00Z"  # any vote before it
 
+#: The login this instance votes under, as `gh api user` answers it. The abstention
+#: window is read from the cycle records of the host that holds the login, so a vote
+#: by this author is the one the own-head clause can be asked of (issue #1856) - and
+#: every fixture review is by this author unless a test says otherwise.
+SELF_LOGIN = "how2how2how2-arch"
+OTHER_LOGIN = "pm25coder"
+
 #: The host's own zone, needed wherever a test moves one end of the fixture timeline:
 #: a cycle id is **local** time and a push arrives as UTC, so a bare `...Z` literal sits
 #: at a different side of a window on every runner. (`tests/test_cast_vote.py` and
@@ -78,6 +85,26 @@ def _load_module():
 @pytest.fixture
 def mod():
     return _load_module()
+
+
+@pytest.fixture(autouse=True)
+def _identity_reads_no_remote(mod, monkeypatch):
+    """Pin the remote half of the identity, for every test in this file.
+
+    `instance_logins` reads the token's login (`gh api user`) **and** the accounts this
+    checkout's `git remote -v` names, because a host may push under more than one and
+    GitHub attributes a push to the account that authenticated — `remote_owners` carries
+    the measurement, and the review on #1900 the two-arm test that pins it. Left live,
+    the second half would answer `pm25coder` on this checkout, so the file's
+    `SELF_LOGIN` / `OTHER_LOGIN` pair would mean different things on different machines
+    and a count would be a verdict about the fixture rather than about the tool.
+
+    Empty here, which is the reading the tool had before it could see a remote at all.
+    A test that wants the second login sets this itself; a second copy of the counter
+    (the one `cast-vote.py` loads) is patched where it is used, because it is a different
+    module object and this fixture reaches only `mod`.
+    """
+    monkeypatch.setattr(mod, "_git_remote_listing", lambda: "")
 
 
 @pytest.fixture(autouse=True)
@@ -127,14 +154,37 @@ class FakeGh:
         merge_state: str = "CLEAN",
         state: str = "OPEN",
         merged_at: str = "",
+        checks: list[dict] | None = None,
+        checks_total: int | None = None,
+        pusher: str = SELF_LOGIN,
     ):
         self.reviews = reviews
         self.push_time = push_time
         self.exact = exact
+        #: The `actor.login` of the run that answers `actions/runs` — whose push the
+        #: head was, as the abstention clause reads it. Defaults to this instance, so
+        #: every fixture written before the clause asked the question still describes
+        #: a head this instance pushed (the case the clause is applied to).
+        self.pusher = pusher
         self.mergeable = mergeable
         self.merge_state = merge_state
         self.state = state
         self.merged_at = merged_at
+        #: The head's check-runs, asked by the tool **only** when the merge state is
+        #: `UNSTABLE` (that state's cause is not in the state). Required for an
+        #: `UNSTABLE` fixture: a default here would be a silent answer to the question
+        #: the test exists to ask - the same trap as a fixture that answers "no jobs"
+        #: for every failing run, which leaves the branch it is about unreachable from
+        #: every test in the file (measured in `test_check_merge_freshness.py`).
+        self.checks = checks
+        #: GitHub's `total_count`, when a test needs it to exceed the list returned
+        #: (the truncated-page case). `None` means "the whole list came back".
+        self.checks_total = checks_total
+        #: The login `gh api user` answers with — the instance whose cycle records
+        #: the abstention window is read from (issue #1856). A run only asks when a
+        #: vote would otherwise be voided inside a window, which is why this is an
+        #: answer to a call rather than a constant the tool holds.
+        self.login: str = SELF_LOGIN
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> object:
@@ -152,10 +202,34 @@ class FakeGh:
             }
         if args[0] == "api":
             joined = " ".join(args)
+            # Before the `/commits/` route below, not after: the check-runs endpoint is
+            # `repos/…/commits/<sha>/check-runs`, so the broader match would answer it
+            # with the push-time payload and the reading would die on its own assertion.
+            if "check-runs" in joined:
+                assert self.checks is not None, (
+                    "an UNSTABLE fixture must say what the head's check-runs are: the "
+                    "state no longer decides the verdict on its own, so a test that "
+                    "sets merge_state='UNSTABLE' without `checks=` would be asserting "
+                    "against a default rather than against the shape it means"
+                )
+                return {
+                    "total": (
+                        self.checks_total
+                        if self.checks_total is not None
+                        else len(self.checks)
+                    ),
+                    "checks": self.checks,
+                }
             if "actions/runs" in joined:
-                return {"t": self.push_time if self.exact else ""}
+                return {
+                    "runs": (
+                        [{"t": self.push_time, "a": self.pusher}] if self.exact else []
+                    )
+                }
             if "/commits/" in joined:
                 return {"t": self.push_time}
+            if joined.startswith("api user"):
+                return {"login": self.login}
         raise AssertionError(f"unexpected gh call: {args}")
 
     def paginated(self, args: list[str]) -> list:
@@ -165,22 +239,62 @@ class FakeGh:
         return self.reviews
 
 
-def _review(at: str, body: str) -> dict:
-    return {"at": at, "body": body}
+def _review(at: str, body: str, author: str = SELF_LOGIN) -> dict:
+    return {"at": at, "body": body, "author": author}
 
 
-def _approve(cycle: str, at: str) -> dict:
-    return _review(at, f"\u2705 LGTM - cycle `{cycle}`")
+def _approve(cycle: str, at: str, author: str = SELF_LOGIN) -> dict:
+    return _review(at, f"\u2705 LGTM - cycle `{cycle}`", author)
 
 
-def _veto(cycle: str, at: str) -> dict:
-    return _review(at, f"\u274c Needs fix - cycle `{cycle}`")
+def _veto(cycle: str, at: str, author: str = SELF_LOGIN) -> dict:
+    return _review(at, f"\u274c Needs fix - cycle `{cycle}`", author)
+
+
+def _check(
+    name: str,
+    conclusion: str,
+    *,
+    status: str = "completed",
+    run: str = "1",
+    started: str = "2026-09-11T00:00:00Z",
+    id: int = 1,
+) -> dict:
+    """One check-run as GitHub's `commits/<sha>/check-runs` endpoint reports it."""
+    return {
+        "name": name,
+        "conclusion": conclusion,
+        "status": status,
+        "startedAt": started,
+        "id": id,
+        "url": (
+            f"https://github.com/argszero/emrg/actions/runs/{run}/job/{id}"
+            if run
+            else ""
+        ),
+    }
+
+
+def _green_checks(name: str = "test") -> list[dict]:
+    return [_check(name, "success")]
 
 
 def _run(mod, monkeypatch, fake: FakeGh, argv: list[str] | None = None) -> int:
     monkeypatch.setattr(mod, "_gh_json", fake)
     monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
     return mod.main(argv if argv is not None else ["1"])
+
+
+def _identity(mod, monkeypatch, listing: str = "") -> None:
+    """Point the remote half of the identity at `listing`, and drop the cache.
+
+    The login set is computed once per run (`instance_logins`) and cached, so an arm
+    that changes *whose* logins this host has must clear it, or it is answered by the
+    arm before it — the same trap `test_an_undecided_voter_keeps_the_clause` names for
+    the unreadable-login reading, and the reason that test resets the cache too.
+    """
+    monkeypatch.setattr(mod, "_git_remote_listing", lambda: listing)
+    mod._own_logins = mod._UNSET
 
 
 # --- classification: the mark, however it is decorated ---------------------
@@ -424,7 +538,12 @@ def test_a_pr_that_is_both_short_and_conflicting_is_reported_as_blocked(mod, mon
     captured = capsys.readouterr()
     assert rc == 1
     assert "BLOCKED 1/3" in captured.out, "the conflict is the blocking fact, not the vote deficit"
-    assert "voids them" in captured.err
+    # The short-votes addendum is now *conditional*, because the states do not share
+    # one cure: a `DRAFT` clears when the PR is marked ready and a `BLOCKED` clears
+    # with a review, neither of which publishes a commit, so an unconditional "resolving
+    # the block voids them" was false for most of the states it was printed for.
+    assert "where clearing this state means publishing a new head" in captured.err
+    assert "voids every vote standing here" in captured.err
 
 
 def test_a_mergeable_pr_with_three_votes_is_ready(mod, monkeypatch, capsys):
@@ -597,21 +716,31 @@ def test_every_non_clean_merge_state_blocks_with_enough_votes(mod, monkeypatch, 
     A single test asserting that one non-clean state blocks would have passed on the
     old code (it handled `DIRTY`) while the other four stayed broken - which is
     exactly how this shipped.
+
+    `UNSTABLE` carries a check-runs answer because it is the one state whose verdict
+    is not decided by the state: the shape pinned here is the one that must still
+    block (a check-run that concluded red), and the green shape is pinned separately.
     """
-    for state, why in [
-        ("DIRTY", "conflicts"),
-        ("UNSTABLE", "checks are failing"),
-        ("BEHIND", "behind the base"),
-        ("BLOCKED", "protected"),
-        ("DRAFT", "a draft"),
+    for state, why, checks in [
+        ("DIRTY", "conflicts", None),
+        ("UNSTABLE", "checks", [_check("test", "failure")]),
+        ("BEHIND", "behind the base", None),
+        ("BLOCKED", "protection rules", None),
+        ("DRAFT", "a draft", None),
     ]:
-        fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state=state)
+        fake = FakeGh(
+            _three_votes(),
+            mergeable="MERGEABLE",
+            merge_state=state,
+            checks=checks,
+        )
         rc = _run(mod, monkeypatch, fake)
         captured = capsys.readouterr()
         assert rc == 1, f"MERGEABLE/{state} must block, not exit 0"
         assert "READY" not in captured.out, f"MERGEABLE/{state} rendered READY"
         assert "BLOCKED" in captured.out, f"MERGEABLE/{state} should read BLOCKED"
         assert state in captured.err, f"the reason must name {state}"
+        assert why in captured.err, f"the reason for {state} should say {why}"
 
 
 def test_a_draft_pull_request_is_never_reported_as_ready(mod, monkeypatch, capsys):
@@ -629,23 +758,170 @@ def test_a_draft_pull_request_is_never_reported_as_ready(mod, monkeypatch, capsy
     assert "DRAFT" in out
 
 
-def test_unstable_is_named_as_the_ci_conjunct(mod, monkeypatch, capsys):
-    """`UNSTABLE` is "checks failing or unfinished" - i.e. CI is not green.
+def test_unstable_with_a_red_check_names_the_check_not_a_conflict(mod, monkeypatch, capsys):
+    """`UNSTABLE` with a check-run that concluded red is the CI conjunct, named.
 
-    The tool's own docstring says the CI conjunct is a sibling's question; that is
-    true of *whether the verdict is stale*, but not of *whether checks pass*, and
-    GitHub already answers the latter here. So this is pinned as a blocked state,
-    with the reason saying checks, not "conflict" - the old single-reason message
-    would have told the reader to resolve a conflict that does not exist.
+    The old reason for this state read "checks are failing or have not finished" - a
+    gloss about checks the state does not carry. Now the read is the head's own
+    check-runs, so the sentence names the check and its own word, and the reader is
+    not sent after a conflict that does not exist.
     """
-    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="UNSTABLE")
-    _run(mod, monkeypatch, fake)
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[_check("test", "failure"), _check("test-windows", "success")],
+    )
+    rc = _run(mod, monkeypatch, fake)
     err = capsys.readouterr().err
-    assert "checks" in err
+    assert rc == 1
+    assert "test: failure" in err, "the check that holds the state must be named"
     assert "conflict" not in err.lower(), (
         "UNSTABLE is a CI problem; telling the reader to resolve a conflict sends "
         "them after something that is not there"
     )
+
+
+def test_a_cancelled_check_is_not_a_green_one(mod, monkeypatch, capsys):
+    """A check that never concluded is not a pass - measured on #1861's head.
+
+    `7409741c`: the newest `test-windows` check-run is `cancelled` with 0 steps, after
+    the runner carrying the older one was lost. Nothing failed, and nothing passed
+    either, so the head has no verdict and blocking is the right answer - the reason
+    says which check and which word.
+    """
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[
+            _check("test", "success", started="2026-09-11T01:00:00Z", id=3),
+            _check("test-windows", "cancelled", started="2026-09-11T00:30:00Z", id=2),
+        ],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "BLOCKED" in captured.out
+    assert "test-windows: cancelled" in captured.err
+
+
+def test_a_superseded_cancelled_check_does_not_block_a_head_whose_checks_passed(
+    mod, monkeypatch, capsys
+):
+    """The measured defect: #1865 (`50dea4e8`), live on 2026-10-06.
+
+    That head reads `MERGEABLE`/`UNSTABLE` while the newest `test` and `test-windows`
+    check-runs on it both concluded `success`. What holds the state down is the
+    `cancelled` `test` check-run of the 20:52 run: the 23:47 run on the same commit
+    passed both jobs, and GitHub's rollup kept the older check-run anyway. Master was
+    already an ancestor of that head, so the remedy the old reading implied ("fix the
+    failure", or a refresh) was either about a failure that was not there or a no-op
+    that publishes no new head - the PR could not have been merged by this process at
+    all, and nothing in the output said why.
+
+    So the state is reported and is not a block, and the note names the superseded
+    check-run and the run it came from, which is the fact the state cannot carry.
+    """
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[
+            _check("test", "success", run="37390520380", started="2026-10-05T23:47:56Z", id=4),
+            _check("test-windows", "success", run="37390520380", started="2026-10-05T23:47:57Z", id=5),
+            _check("test", "cancelled", run="37372464666", started="2026-10-05T20:52:57Z", id=2),
+            _check("test-windows", "success", run="37372464666", started="2026-10-05T20:53:10Z", id=3),
+        ],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    captured = capsys.readouterr()
+    assert rc == 0, "a head whose newest check-runs all passed is not blocked"
+    assert "READY 3/3" in captured.out
+    assert "UNSTABLE" in captured.out, "the state is still reported, just not as a block"
+    note = captured.out
+    assert "superseded run's check-run" in note
+    assert "test: cancelled (run 37372464666)" in note, (
+        "the note must name the superseded check-run and its run, so the reader can "
+        "go and look at it"
+    )
+    assert "BLOCKED" not in captured.out
+
+
+def test_a_check_that_has_not_concluded_is_not_read_as_green(mod, monkeypatch, capsys):
+    """`UNSTABLE` because a check is still running - the case the clause was added for.
+
+    `cyc20260912-190602` fixed a `READY` printed for `UNSTABLE`; that must not come
+    back, and the run has not concluded, so it is not green either.
+    """
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[
+            _check("test", "success"),
+            _check("test-windows", "", status="in_progress"),
+        ],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "READY" not in captured.out
+    assert "test-windows: in_progress" in captured.err
+
+
+def test_the_check_runs_are_asked_only_where_the_state_cannot_answer(mod, monkeypatch,
+                                                                    capsys):
+    """A `CLEAN` head pays nothing for a reading only `UNSTABLE` needs.
+
+    The queue reads this tool for every open PR, so an unconditional extra `gh` call
+    would be a per-PR cost on the commonest case - and the case it buys nothing for,
+    because a `CLEAN` head's checks passed by GitHub's own reading.
+    """
+    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="CLEAN")
+    _run(mod, monkeypatch, fake)
+    assert not [c for c in fake.calls if "check-runs" in " ".join(c)], (
+        "the check-runs reading is asked of an UNSTABLE head only"
+    )
+
+
+def test_a_check_runs_read_that_fails_is_a_could_not_check(mod, monkeypatch, capsys):
+    """An unreadable list is not a pass and not a verdict: exit 2, naming the failure.
+
+    Measured shape: a `gh` call that fails raises out of the reader. Catching it here
+    would report a block whose reason the tool invented, which is the same misreading
+    this reading was added to remove - one level down.
+    """
+    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="UNSTABLE",
+                  checks=None)
+    monkeypatch.setattr(mod, "_gh_json", fake)
+
+    def boom(args):
+        raise RuntimeError("gh failed (rc=1): gh api repos/... /check-runs")
+
+    monkeypatch.setattr(mod, "_head_check_runs", boom)
+    rc = mod.main(["1"])
+    captured = capsys.readouterr()
+    assert rc == 2, "a reading that could not be taken is not a verdict"
+    assert "could not be read" not in captured.out
+    assert "READY" not in captured.out
+    assert "gh failed" in captured.err
+
+
+def test_a_truncated_check_run_list_is_reported_not_silently_used(mod, monkeypatch,
+                                                                  capsys):
+    """A cut list can lose the newest check-run of a name - the one that decides it."""
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[_check("test", "success")],
+        checks_total=250,
+    )
+    _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert "more than 100 check-runs" in out
+    assert "may not be in the list that was read" in out
 
 
 def test_an_unknown_merge_state_fails_loud_rather_than_passing(mod, monkeypatch, capsys):
@@ -1260,7 +1536,7 @@ def test_an_empty_run_answer_is_re_asked_before_it_is_reported_as_no_run(mod, mo
             asked.append("runs")
             if len(asked) == 1:
                 base.calls.append(list(args))
-                return {"t": ""}  # the stale answer, verbatim shape
+                return {"runs": []}  # the stale answer, verbatim shape
         return base(args)
 
     monkeypatch.setattr(mod, "_gh_json", flaky)
@@ -1706,12 +1982,13 @@ def _cast_vote():
 
 
 class _Head:
-    """The three fields the posting side reads off a verdict, and nothing else."""
+    """The four fields the posting side reads off a verdict, and nothing else."""
 
-    def __init__(self, pushed: str, exact: bool = True, sha: str = HEAD):
+    def __init__(self, pushed: str, exact: bool = True, sha: str = HEAD, pusher: str = ""):
         self.head_sha = sha
         self.push_time = pushed
         self.push_time_exact = exact
+        self.pusher = pusher
 
 
 def test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count(
@@ -1742,6 +2019,141 @@ def test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count(
     assert rc == 0, out
     assert "READY 1/1" in out, out
     assert "inside the window" not in out, out
+
+
+def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
+    mod, monkeypatch, capsys
+):
+    """The mirror half of #1856: another instance's *push* is not this host's own work.
+
+    The clause says a cycle does not vote on a head **it** pushed, and the window is
+    only a proxy for "it". The proxy misreads the ordinary case - the peer pushes, this
+    host's next cycle starts minutes later, and the head lands inside the window while
+    belonging to work this instance never did (measured 2026-10-06,
+    `cyc20261006-122605`: #1869's head, pushed by the peer at 04:07:01Z).
+
+    The fixture is the one from
+    `test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count`, and the voter
+    is this instance in every arm - so #1857's exemption, which asks about the *author*,
+    cannot reach any of them. The arms differ in the pusher, and in (d)/(e) in which
+    logins the host is read as having.
+    """
+    pushed = _push(2026, 9, 11, 9, 0)
+    vote_at = _push(2026, 9, 11, 10, 0)
+    cycle = "cyc20260911-080000"
+
+    # (a) the control: this instance pushed the head, so the window applies
+    mine = FakeGh([_approve(cycle, vote_at)], push_time=pushed)
+    rc = _run(mod, monkeypatch, mine)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"VOID {cycle} - cast inside the window" in out, out
+
+    # (b) the peer pushed it: the same instant is not this instance's own work
+    theirs = FakeGh([_approve(cycle, vote_at)], push_time=pushed, pusher=OTHER_LOGIN)
+    rc = _run(mod, monkeypatch, theirs, ["1", "--min-votes", "1"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "READY 1/1" in out, out
+    assert "inside the window" not in out, out
+    # …and the line says *which* datum decided, because a reader who cannot see it
+    # cannot tell an exemption the identity produced from the clock's ordinary answer,
+    # and those two are corrected in opposite directions (the review on #1900 asked for
+    # the reading on the row either way).
+    assert f"pushed by {OTHER_LOGIN}" in out, out
+
+    # (c) the fail-safe arm: with no actor reading the clause stays applied, so the
+    # exemption can only be bought by a positive identification of someone else
+    unknown = FakeGh([_approve(cycle, vote_at)], push_time=pushed, pusher="")
+    rc = _run(mod, monkeypatch, unknown)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"VOID {cycle} - cast inside the window" in out, out
+
+    # (d) **this host's other login** - the hole the review on #1900 measured, on
+    # 2026-10-08. A host can push under more than one account: GitHub attributes a push
+    # to the account that authenticated, so a checkout whose remote is
+    # `git@github.com:argszero/emrg.git` has its pushes recorded as `argszero` while
+    # `gh api user` answers something else (that host's, `how2how2how2-arch`; the numbers
+    # are in `remote_owners`). Comparing against the one login un-refused this instance's
+    # *own* pushes made under the other one, which is a self-review - and the arm is
+    # indistinguishable from (a) except through the identity reading, so nothing else in
+    # the fixture can be what makes it pass.
+    second_login = "argszero"
+    assert second_login != SELF_LOGIN
+    other_mine = FakeGh([_approve(cycle, vote_at)], push_time=pushed, pusher=second_login)
+    _identity(mod, monkeypatch, "origin\tgit@github.com:argszero/emrg.git (push)")
+    rc = _run(mod, monkeypatch, other_mine)
+    out = capsys.readouterr().out
+    assert rc == 1, f"arm (d), this host's second login: {out}"
+    assert f"VOID {cycle} - cast inside the window" in out, out
+
+    # (e) …and the same login stops being this host's once the remote names someone
+    # else, which is the direction the exemption exists for. One input changes between
+    # (d) and (e) - the remote listing - so (d) cannot pass for a tool that kept the
+    # clause on every head, nor (e) for one that exempted every pusher.
+    _identity(mod, monkeypatch, "origin\tgit@github.com:someone-else/emrg.git (push)")
+    rc = _run(mod, monkeypatch, other_mine, ["1", "--min-votes", "1"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"arm (e), a stranger's remote: {out}"
+    assert "READY 1/1" in out, out
+    assert "inside the window" not in out, out
+
+
+def test_a_remote_url_names_its_account_in_every_form_it_is_written(mod):
+    """`remote_owners` reads the account out of both shapes a GitHub remote takes.
+
+    The second half of the identity is a parsing step with no network in it, so it is
+    pinned directly rather than through a run: the scp-like `git@host:owner/repo.git`
+    (what an SSH checkout writes) and the URL forms. A local-path remote — this
+    checkout's own `origin` is a directory — must name nobody: read as an account it
+    would invent a login, and an invented login is one the clause treats as this
+    instance's own, wrongly abstaining on another instance's head. Duplicated rows (a
+    remote lists itself once for fetch and once for push) are one account.
+    """
+    listing = "\n".join(
+        [
+            "origin\tgit@github.com:argszero/emrg.git (fetch)",
+            "origin\tgit@github.com:argszero/emrg.git (push)",
+            "fork\thttps://github.com/pm25coder/emrg.git (fetch)",
+            "tunnel\tssh://git@github.com:22/Someone-Else/emrg.git (push)",
+            "local\tC:/Users/Administrator/.emrg/evolution/emrg/ (push)",
+            "empty\t (fetch)",
+        ]
+    )
+    assert mod.remote_owners(listing) == frozenset(
+        {"argszero", "pm25coder", "Someone-Else"}
+    )
+
+
+def test_the_login_set_is_the_token_and_the_remotes(mod, monkeypatch):
+    """`instance_logins` is a **set**: the token's login plus the remotes' accounts.
+
+    Both halves are this host's, so the reading has to be the union — reading only the
+    first is the defect the review on #1900 measured, and reading only the second would
+    lose a host whose remotes are all local (this one's `origin` is a directory) while
+    its token answers a login. Each arm re-reads through `_identity`, which clears the
+    cache the arm before it left.
+    """
+    monkeypatch.setattr(mod, "_gh_json", lambda args: {"login": "pm25coder"})
+    _identity(mod, monkeypatch, "origin\tgit@github.com:argszero/emrg.git (push)")
+    assert mod.instance_logins() == frozenset({"pm25coder", "argszero"})
+    assert mod.own_login("argszero") is True
+    assert mod.own_login("a-stranger") is False
+
+    # (b) the token alone, when no remote names anybody
+    _identity(mod, monkeypatch, "local\tC:/Users/Administrator/emrg/ (push)")
+    assert mod.instance_logins() == frozenset({"pm25coder"})
+
+    # (c) nothing readable at all: the empty set keeps the clause applied, which is the
+    # direction that cannot credit a self-review
+    def _down(args):
+        raise RuntimeError("gh failed (rc=1): gh api user")
+
+    monkeypatch.setattr(mod, "_gh_json", _down)
+    _identity(mod, monkeypatch, "")
+    assert mod.instance_logins() == frozenset()
+    assert mod.own_login("pm25coder") is True
 
 
 def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_path):
@@ -1777,6 +2189,105 @@ def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_pa
     out = capsys.readouterr().out
     assert "1/3 valid votes" in out, out
     assert "inside the window" not in out, out
+
+
+def test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window(
+    mod, monkeypatch, capsys
+):
+    """The own-head clause is a self-review guard, so it is asked only of our own votes.
+
+    Measured 2026-10-05 on #1851, the repo's only open PR (issue #1856): two ✅ LGTMs
+    cast after the head push, each naming one cycle id, read
+
+        VOID … - cast inside the window this vote's cycle treats as its own - the head
+        was pushed …, at or after 2026-10-05T08:07:17+08:00 (previous cycle
+        cyc20261005-080717)
+
+    and `gh api repos/argszero/emrg/pulls/1851/reviews` attributes both to `pm25coder`,
+    whose cycle measures its host as Windows - the cycles of another instance, on a
+    host whose records are not the ones this counter reads. The window is drawn from
+    *this* host's cycle records, so a vote by another author cannot be inside it, and
+    the count is what a cycle reads before it merges: `0/3` with two approvals standing
+    is the error direction that strands work, since it reads as "not ready yet".
+
+    The pair below differs in the author and in nothing else - same vote, same instant,
+    same window - so a clause that stopped being asked at all fails the first half, and
+    one still asked of everyone fails the second.
+    """
+    pushed = _push(2026, 9, 11, 9, 0)
+    vote_at = _push(2026, 9, 11, 10, 0)
+    # The voting cycle started an hour before the push, so its own window covers it.
+    cycle = "cyc20260911-080000"
+
+    mine = FakeGh([_approve(cycle, vote_at)], push_time=pushed)
+    rc = _run(mod, monkeypatch, mine)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"VOID {cycle} - cast inside the window" in out, out
+
+    theirs = FakeGh(
+        [_approve(cycle, vote_at, author=OTHER_LOGIN)], push_time=pushed
+    )
+    rc = _run(mod, monkeypatch, theirs, ["1", "--min-votes", "1"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "READY 1/1" in out, out
+    assert "inside the window" not in out, (
+        "a vote by another instance is not this host's self-review, so the clause its "
+        "window carries is not asked of it"
+    )
+    assert f"cast by {OTHER_LOGIN}, not this instance" in out, (
+        "the count has to say why a vote inside the window was not voided - silence "
+        "would read as the clause never having been asked"
+    )
+    # The login is asked for the first public question that needed it, and then not
+    # again: one ask per process rather than per vote, so the run with nothing inside
+    # a window keeps the three calls it always made (pinned by the ready-count test).
+    asked = [
+        c for c in mine.calls + theirs.calls if "api user" in " ".join(c)
+    ]
+    assert len(asked) == 1, asked
+
+
+def test_an_undecided_voter_keeps_the_clause(mod, monkeypatch, capsys):
+    """Neither input can credit a self-review, so both keep today's verdict.
+
+    Two ways the question is unanswerable: the payload does not carry the author (a
+    projection that did not apply - the failure this file already hit once with `at`),
+    and the login cannot be read (no `gh`, no network, a token without `user`). The
+    direction that costs a delay is preferred to the one that counts a vote nobody can
+    attribute, which is the clause's own rule.
+    """
+    pushed = _push(2026, 9, 11, 9, 0)
+    vote_at = _push(2026, 9, 11, 10, 0)
+    cycle = "cyc20260911-080000"
+
+    # (a) the review payload has no author at all
+    anonymous = _approve(cycle, vote_at)
+    anonymous.pop("author")
+    fake = FakeGh([anonymous], push_time=pushed)
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"VOID {cycle}" in out, out
+
+    # (b) the author is there and our own login cannot be read
+    #
+    # The cache is cleared first, and that is part of the fixture rather than tidying:
+    # (a) above already asked the identity, because the pusher clause reads it for every
+    # head inside a window. Left warm, the answer here would come from that earlier ask
+    # and the arm would stop describing "the login cannot be read" - it would describe
+    # "the login could not be read earlier in the same run", which the tool deliberately
+    # never re-asks. Reset, `unreadable.login = ""` is the first ask of the run.
+    mod._own_logins = mod._UNSET
+    unreadable = FakeGh([_approve(cycle, vote_at, author=OTHER_LOGIN)], push_time=pushed)
+    unreadable.login = ""
+    rc = _run(mod, monkeypatch, unreadable)
+    out = capsys.readouterr().out
+    assert "VOID" in out, (
+        "an unreadable login is not a licence: with nothing to compare against, the "
+        "vote keeps the clause rather than being credited"
+    )
 
 
 def test_a_cycle_id_that_names_no_instant_is_not_passed(mod, monkeypatch, capsys):
@@ -1818,7 +2329,29 @@ def test_a_head_with_no_ci_run_leaves_the_clause_unapplied(mod, monkeypatch, cap
     assert "inside the window" not in out, out
 
 
-def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_path):
+def test_the_pusher_is_the_actor_of_the_run_whose_time_was_read(mod, monkeypatch):
+    """The login must come from the run the timestamp did, not from any run of the head.
+
+    A head carries at least a `push` run and a `pull_request` run, and they need not
+    have the same actor. The clause asks one thing - *whose push* the instant describes -
+    so pairing the earliest time with another run's actor would name a pusher for an
+    instant they did not create. The earliest entry is deliberately neither the first
+    nor the last, and the last carries the empty actor a projection that did not apply
+    would produce, so a reading of `[0]`, of the tail, or of the first *non-empty* actor
+    fails here.
+    """
+    payload = {
+        "runs": [
+            {"t": "2026-09-11T05:00:00Z", "a": OTHER_LOGIN},
+            {"t": "2026-09-11T01:00:00Z", "a": SELF_LOGIN},
+            {"t": "2026-09-11T09:00:00Z", "a": ""},
+        ]
+    }
+    monkeypatch.setattr(mod, "_gh_json", lambda args: payload)
+    assert mod._earliest_run(HEAD) == ("2026-09-11T01:00:00Z", SELF_LOGIN)
+
+
+def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, monkeypatch, tmp_path):
     """The two halves of one clause, asserted against each other rather than assumed.
 
     Sharing the machinery is not the claim; sharing the *verdict* is. If a later change
@@ -1833,6 +2366,14 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_
     (corpus / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
     log = str(corpus)
     counter, cast_vote = mod, _cast_vote()
+    # The identity half is asked through `gh api user`, and neither end is driven through
+    # a fake here - both are called directly - so it is pinned instead of stubbed. Two
+    # module objects hold the cache, because `cast-vote.py` loads the counter as its own
+    # sibling, and a pin on one of them would leave the other reading the real login.
+    # With both pinned, the arms below turn on the pusher alone: this instance is
+    # `SELF_LOGIN`, and `OTHER_LOGIN` is a login it is not.
+    for owner in (counter, cast_vote.votes_counter()):
+        monkeypatch.setattr(owner, "_own_logins", frozenset({SELF_LOGIN}))
 
     cases = (
         # (push instant, inside the window?)
@@ -1855,6 +2396,43 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_
         assert bool(refused) is inside, (pushed, refused)
         assert counted is inside, (pushed, why)
 
+    # The input that was missing: *whose* push it is. Inside the window, a pusher that
+    # reads as another login has to reach the same verdict at both ends - nothing
+    # refused, nothing voided - or the row and the gate disagree about the head
+    # (measured 2026-10-06, `cyc20261006-122605`: #1869's head, pushed by the peer at
+    # 04:07:01Z, read `abstain` in the queue and `own-head-window` at the gate).
+    for pushed, inside in cases:
+        if not inside:
+            continue
+        refused, _ = cast_vote.own_head_window(
+            "cyc20260911-100000", _Head(pushed, pusher=OTHER_LOGIN), cycles_log=log
+        )
+        counted, why = counter.own_head_window(
+            "cyc20260911-100000",
+            push_time=pushed,
+            push_time_exact=True,
+            pusher=OTHER_LOGIN,
+            cycles_log=log,
+        )
+        assert not refused, (pushed, refused)
+        assert not counted, (pushed, why)
+
+    # …and the fail-safe arm: an unreadable pusher keeps the clause at both ends, since
+    # an exemption nobody measured is the direction that credits a self-review.
+    for pushed, inside in cases:
+        refused, _ = cast_vote.own_head_window(
+            "cyc20260911-100000", _Head(pushed, pusher=""), cycles_log=log
+        )
+        counted, why = counter.own_head_window(
+            "cyc20260911-100000",
+            push_time=pushed,
+            push_time_exact=True,
+            pusher="",
+            cycles_log=log,
+        )
+        assert bool(refused) is inside, (pushed, refused)
+        assert counted is inside, (pushed, why)
+
     # The one difference, and it is about wording rather than about the merge: with no CI
     # run neither tool can read the window. The poster refuses, so nothing is posted; the
     # counter leaves the votes as they read and reports the PR BLOCKED for the same
@@ -1870,3 +2448,39 @@ def test_the_counter_voids_exactly_the_votes_cast_vote_refuses_to_post(mod, tmp_
         cycles_log=log,
     )
     assert not counted and why == ""
+
+
+def test_an_id_extended_by_a_digit_is_not_read_as_its_prefix(mod):
+    """An id truncated by what follows it is an id the body did not write.
+
+    Measured 2026-10-05 (`cyc20261005-234557`): a body stating `cyc20261005-2345571`
+    was read as `['cyc20261005-234557']` — the search took the shorter id out of a
+    longer run of digits — while `cast-vote.py` refused that same string as a
+    `--cycle` value, so the family held two verdicts for one string. Everything
+    downstream of the reading is then made about a cycle that did not cast the vote:
+    the abstention window (whose whole subject is *who* pushed a head) and the
+    distinctness rule ("3 consecutive ✅ from different cycles").
+
+    Both directions, because a boundary that fires on too much is the other way this
+    breaks: a period after the id is a real token boundary, not a truncation, and a
+    body naming two well-formed ids still names two candidates.
+    """
+    own = "cyc20261005-234557"
+
+    # The defect: a trailing digit means the *id written* is not the one read.
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle {own}1\n") == [], (
+        "an id extended by a digit must state no cycle at all, not the prefix"
+    )
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle {own}1-fix\n") == []
+
+    # The id itself is untouched, in both the shapes this repo writes.
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle {own}\n") == [own]
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle `{own}`\n") == [own], "backticks"
+
+    # A period is a boundary: `…-234557.1` states the id, then a version.
+    assert mod.distinct_cycle_ids(f"\u2705 LGTM\n\n— cycle {own}.1\n") == [own]
+
+    # And two well-formed ids are still two candidates, which is what voids a vote.
+    assert mod.distinct_cycle_ids(
+        f"\u2705 LGTM\n\n— cycle {own}\n\nas measured by cyc20261005-234558\n"
+    ) == [own, "cyc20261005-234558"]

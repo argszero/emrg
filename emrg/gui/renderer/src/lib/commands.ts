@@ -3,7 +3,8 @@ import type { TranslateFn } from "./utils";
 /**
  * commands.ts — / 指令注册表与解析器（vanilla renderer/js/commands.js 迁移，Batch 1）。
  * 纯逻辑、不绑 DOM：React 组件与测试均可直接 import。
- * 契约与 vanilla 版完全一致（COMMANDS 16 条 / parseInput 三态 / getCompletions 前缀过滤）。
+ * 契约与 vanilla 版基本一致（COMMANDS 条数在 commands.test.ts 里钉住 / parseInput 三态 /
+ * getCompletions 前缀过滤）；`/sandbox` 是后来加的（rant 2026-10-09T09:43:39）。
  */
 export interface CommandMeta {
   hint: string;
@@ -28,6 +29,11 @@ export const COMMANDS: Record<string, CommandMeta> = {
   "/skills": { hint: "cmd.skills.hint", phase: 3 },
   "/rant": { hint: "cmd.rant.hint", phase: 4 },
   "/trigger": { hint: "cmd.trigger.hint", phase: 4 },
+  // The GUI's `/sandbox` (rant 2026-10-09T09:43:39, GUI half). It is the same
+  // command the TUI gained in Part 1, and the same three sub-ops — the daemon
+  // judges the path either way, so the two front ends differ only in where the
+  // answer is rendered (TUI: a chat line; GUI: the dialog and its list).
+  "/sandbox": { hint: "cmd.sandbox.hint", phase: 4 },
 };
 
 export type ParseResult =

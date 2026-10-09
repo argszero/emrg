@@ -24,6 +24,7 @@ from typing import Iterable
 
 from emrg.memory import SessionMemoryStore
 from emrg.sandbox.policy import SANDBOX_MODES
+from emrg.sandbox.roots import canonical_path
 from emrg.sessions_index import remove_session_index, upsert_session_index
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,61 @@ def generate_session_id(cwd: Path) -> str:
     # Fallback: same 4-byte entropy (loop exhaustion is astronomically rare)
     suffix = secrets.token_hex(4)
     return prefix + suffix
+
+
+def _parse_instant(value: object) -> datetime | None:
+    """An ISO-8601 instant from a stored timestamp, or `None` if unreadable.
+
+    `None` is "could not measure", never "epoch": the caller keeps the record
+    when this returns `None`, because excluding evidence is the direction that
+    cannot be noticed.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def records_since(records: list[dict], since: str) -> list[dict]:
+    """The records from `since` (an ISO-8601 instant) onward — the run's own.
+
+    A task session is **one session for every run of that task**: `emrg-evolution-<name>`
+    is reused cycle after cycle, so its history holds all of them. Anything reading
+    "the recent history" as evidence about *this* run therefore reads the previous
+    run's work as if it were this one's, unless it knows where the run began. This
+    function is that knowledge, applied: `since` is the instant the run was dispatched,
+    and it is carried in the `task` frame the scheduler already sends, so no clock is
+    consulted and no state is kept.
+
+    Fail-open in both directions, deliberately:
+
+    * an empty or unparseable `since` returns the list **unchanged** — a window whose
+      start is unknown is the window the session always had, and guessing a boundary
+      would be worse than not having one;
+    * a record whose own timestamp is missing or unreadable is **kept** — dropping it
+      would delete evidence silently, and a summary that read one record too many is
+      the smaller error than one that cannot see a tool call at all.
+
+    Comparing a naive timestamp with an aware one raises, and a stored timestamp is
+    naive local time (`datetime.now().isoformat()`), so exactly one side being aware
+    is treated as unmeasurable rather than as an order.
+    """
+    if not since:
+        return list(records)
+    cutoff = _parse_instant(since)
+    if cutoff is None:
+        return list(records)
+    kept: list[dict] = []
+    for record in records:
+        at = _parse_instant(record.get("timestamp"))
+        if at is None or (at.tzinfo is None) != (cutoff.tzinfo is None):
+            kept.append(record)
+            continue
+        if at >= cutoff:
+            kept.append(record)
+    return kept
 
 
 def records_to_messages(records: list[dict]) -> list[dict]:
@@ -205,6 +261,13 @@ class Session:
         # session's silence keeps meaning "unconfined" (`policy.DEFAULT_MODE`),
         # and a property that answered the default would erase that difference.
         self._sandbox: str | None = None
+        # The roots the host named for this session on top of the tier, in the
+        # order they were added (rant 2026-10-09T09:43:39). Empty is the honest
+        # default: a session nobody has named a root for grants exactly what its
+        # tier derives, which is what every session did before this existed.
+        # Canonical spellings only — the writer canonicalizes before storing, so
+        # a reader never has to wonder which spelling was meant.
+        self._sandbox_roots: list[str] = []
 
         # Lazy-initialized memory store
         self._memory_store = None
@@ -293,6 +356,9 @@ class Session:
             session._updated_at = meta.get("updated_at", "")
             session._last_compact_at = meta.get("last_compact_at")
             session._sandbox = meta.get("sandbox")
+            stored_roots = meta.get("sandbox_roots")
+            if isinstance(stored_roots, list):
+                session._sandbox_roots = [r for r in stored_roots if isinstance(r, str)]
         logger.info("session loaded: %s (%d messages)", session_id, session._message_count)
         return session
 
@@ -364,6 +430,35 @@ class Session:
         self._sandbox = mode
         self._save_meta()
         logger.info("session sandbox tier set: %s -> %s", self.session_id, mode)
+
+    @property
+    def sandbox_roots(self) -> list[str]:
+        """The host-named writable roots this session carries, in added order.
+
+        A copy, so a reader cannot mutate the session's list by accident — the
+        daemon injects this value into every tool call, and an injected list a
+        tool could edit in place would be a second writer of a fact the daemon
+        owns.
+        """
+        return list(self._sandbox_roots)
+
+    def set_sandbox_roots(self, roots: "list[str] | tuple[str, ...]") -> None:
+        """Replace this session's host-named writable roots and persist them.
+
+        The **only** writer of the key, and it does not validate the paths: the
+        refusals (``/``, the home directory, a root covering a protected daemon
+        file) belong to the daemon's command, which is where a person is waiting
+        for an answer and where a refusal can name the reason.  This method is
+        storage.  Its one precondition is the shape the reader depends on —
+        absolute, canonical spellings — and it canonicalizes rather than
+        trusting the caller, so a symlink handed in here is stored as the path
+        the enforcement layer will actually compare against.
+        """
+        self._sandbox_roots = [canonical_path(str(r)) for r in roots]
+        self._save_meta()
+        logger.info(
+            "session sandbox roots set: %s -> %d root(s)", self.session_id, len(self._sandbox_roots)
+        )
 
     # ── Message persistence ───────────────────────────────────
 
@@ -465,7 +560,7 @@ class Session:
                         logger.warning("corrupt line in history.jsonl, skipping")
         return records
 
-    def get_messages_for_llm(self) -> list[dict]:
+    def get_messages_for_llm(self, since: str = "") -> list[dict]:
         """This session's history, converted to OpenAI-compatible messages.
 
         The conversion itself is :func:`records_to_messages`, which is a function
@@ -474,8 +569,13 @@ class Session:
         *candidate* record list it has not written anywhere, and asking with a
         different conversion than the live request uses would be asking a
         different question than the refusal answered.
+
+        `since` narrows the records first, through :func:`records_since`: a task
+        session is reused by every run of its task, so a reader that wants *this*
+        run's work has to say where it began. The default is the whole history,
+        which is what this method always returned.
         """
-        return records_to_messages(self._read_history())
+        return records_to_messages(records_since(self._read_history(), since))
 
 
     # ── Compact ───────────────────────────────────────────────
@@ -587,6 +687,8 @@ class Session:
         # session's path from a client turn's (rant 2026-09-30T09:30:16).
         if self._sandbox:
             meta["sandbox"] = self._sandbox
+        if self._sandbox_roots:
+            meta["sandbox_roots"] = list(self._sandbox_roots)
         if title is not None:
             meta["title"] = title
         else:

@@ -39,6 +39,7 @@ from emrg._win import win32_no_window_kwargs
 from emrg.config import (
     LlmConfig,
     config_dir,
+    logs_dir,
     find_model_entry,
     load_sandbox_config,
     load_update_config,
@@ -73,7 +74,8 @@ from emrg.server.git_utils import (
 )
 from emrg.sandbox import escalation
 from emrg.sandbox.policy import DEFAULT_MODE as DEFAULT_SANDBOX_MODE
-from emrg.sandbox.policy import SANDBOX_MODES
+from emrg.sandbox.policy import SANDBOX_MODES, resolve_policy
+from emrg.sandbox.roots import judge_extra_root, judge_root_removal
 from emrg.server import content_risk_probe
 from emrg.server.tool_types import ToolResult
 from emrg.memory import (
@@ -204,6 +206,15 @@ from emrg.server.scheduler import TaskScheduler
 from emrg.server import logcontext
 
 logger = logging.getLogger(__name__)
+
+#: The tools a **host-named writable root** reaches (rant 2026-10-09T09:43:39).
+#:
+#: The same set the tier is injected into, and it must stay that set: a root a
+#: spawned command can write but ``write`` cannot (or the reverse) is exactly the
+#: asymmetry ``emrg/sandbox/roots.py`` exists to make impossible. Written once
+#: here because the injection site reads it twice — for the tier and for the
+#: roots — and two hand-written unions would be two chances to drift apart.
+_ROOT_CONSUMING_TOOLS = SHELL_TOOL_NAMES | {"write", "edit"}
 
 # ── Jinja2 template environment for system prompt ──
 _jinja_env = None
@@ -1350,6 +1361,34 @@ class EmrgServer:
                         # 订阅记录该连接的 cwd——广播按 (session, cwd) 过滤（rant 17:38:56 根因 3）
                         self._session_subscribers.setdefault(new_sid, {})[ws] = data.get("cwd") or last_cwd or ""
                         last_session_id = new_sid
+                    elif data.get("cwd"):
+                        # A message that names the session **again**, carrying a cwd, is
+                        # the client saying where it now stands — and it must be believed.
+                        #
+                        # The record written above is the *ask's* cwd, which for a resume
+                        # is the client's own, not the session's (app.py: the comment on
+                        # `resolve_session_cwd` says so). The messages that follow —
+                        # `resume_session`, then `task` — carry the canonical cwd and were
+                        # ignored, because the session id had not changed. `_broadcast`
+                        # filters by `_session_task_cwds[sid]`, written from `session.cwd`
+                        # at turn start, so the client stayed a subscriber in the dict and
+                        # was not a target on the wire: it received no `turn_start`, no
+                        # stream, no `done` (a TUI that never finishes its turn), and
+                        # `request_approval` asked its question to nobody while its own
+                        # fail-closed guard read a non-empty subscriber set.
+                        #
+                        # Measured 2026-10-08 (`cyc20261008-170402`): the exact TUI
+                        # sequence, A (the ask carries the client's cwd) → frames NONE,
+                        # approval frames NONE; B (the ask carries the project's cwd) →
+                        # `turn_start`, stream, `turn_end`, `approval_request` +
+                        # `approval_resolved`. Only the ask's cwd differed.
+                        #
+                        # Guarded on `data.get("cwd")` rather than `last_cwd`: a message
+                        # with no cwd of its own must not clobber the record with one it
+                        # never claimed. This does not re-open the ghost hole — a ghost's
+                        # claimed cwd receives frames only when it equals the running
+                        # task's cwd, and that is the sender's own.
+                        self._session_subscribers.setdefault(new_sid, {})[ws] = data["cwd"]
                 if data.get("cwd"):
                     last_cwd = data["cwd"]
                     self._touch_project(last_cwd)
@@ -2096,7 +2135,8 @@ class EmrgServer:
                 pass
 
     async def _task_vibe_check(self, task_name: str, session_id: str, cwd: str,
-                               prompt: str = "", completion_summary: str = "") -> dict:
+                               prompt: str = "", completion_summary: str = "",
+                               cycle_started_at: str = "") -> dict:
         """Structured LLM ask (Ask mode, no tools) about a finished task cycle.
 
         The agent must answer in strict JSON (rant 2026-08-20T10:58:55,
@@ -2138,10 +2178,20 @@ class EmrgServer:
         # Rant 2026-08-19T10:15:43: load the task's own session history by its
         # fixed session_id (session files are organized by cwd). Recent N
         # messages only — the whole session may be very long.
+        #
+        # `cycle_started_at` is the boundary this slice was missing: the session
+        # is reused by every run of this task, so "the last 100 messages" is
+        # mostly *previous* runs whenever this one was light on narrative. The
+        # summariser then describes the neighbour — measured 2026-09-30 on two
+        # consecutive `emrg-task` records whose `work` strings name the same
+        # merge, the second cycle's own findings absent — and `recommend_slowdown`
+        # rides the same call, so a mis-read run can also mis-cadence itself.
+        # The instant is the `task` frame's own `timestamp`, so no clock is read
+        # here; an absent value keeps the old behaviour (`records_since`).
         if session_id and cwd:
             try:
                 session = Session.load(session_id, Path(cwd))
-                history = session.get_messages_for_llm()
+                history = session.get_messages_for_llm(since=cycle_started_at)
                 if history:
                     # Rant 2026-08-19T19:25:56 (root cause): slicing the
                     # validated list can orphan a leading role:"tool" message
@@ -2984,6 +3034,15 @@ class EmrgServer:
                 ws,
             )
 
+        elif msg_type == "set_sandbox_roots":
+            await self._handle_set_sandbox_roots(
+                msg.get("session_id", ""),
+                msg.get("cwd", ""),
+                msg.get("op", ""),
+                msg.get("path", ""),
+                ws,
+            )
+
         elif msg_type == "list_projects":
             await self._handle_list_projects(ws)
 
@@ -3305,9 +3364,13 @@ class EmrgServer:
             cwd = msg.get("cwd", "")
             prompt = msg.get("prompt", "")
             summary = msg.get("completion_summary", "")
+            # The instant this run was dispatched (the scheduler's `cycle_time`,
+            # which is also the run's id). Absent from an older scheduler, in
+            # which case the evidence is the whole session exactly as before.
+            cycle_started_at = msg.get("cycle_started_at", "")
             try:
                 result = await self._task_vibe_check(
-                    task_name, session_id, cwd, prompt, summary,
+                    task_name, session_id, cwd, prompt, summary, cycle_started_at,
                 )
                 await self._send(ws, {
                     "type": "vibe_check_result",
@@ -3476,7 +3539,18 @@ class EmrgServer:
                 preq.prompt, preq.images, self.llm.config.vision
             )
             messages.append({"role": "user", "content": pcontent})
-            record: dict = {"type": "message", "role": "user", "content": preq.prompt}
+            # Stamped here, once, and carried on the frame below — the same
+            # contract the fresh-turn path keeps (rant 2026-10-09T09:25:00). A
+            # user record has **two** producers, and this is the second: the
+            # record was always stamped by `append_message`, but `steer_committed`
+            # said nothing about when, so a message typed while the turn was
+            # running showed no clock until the session was reopened — the
+            # divergence the rant's acceptance names, on the path it names
+            # (measured 2026-10-09 on head `79d54818`: the record held a moment,
+            # no frame carried one).
+            steer_stamp = datetime.now().isoformat()
+            record: dict = {"type": "message", "role": "user", "content": preq.prompt,
+                            "timestamp": steer_stamp}
             if preq.images:
                 record["images"] = preq.images
             session.append_message(record)
@@ -3484,6 +3558,8 @@ class EmrgServer:
                 "type": "steer_committed",
                 "request_id": preq.id,
                 "session_id": sid,
+                # The moment the record was written, not a client's receipt time.
+                "timestamp": steer_stamp,
             })
         return len(pending), ask_injected
 
@@ -3692,6 +3768,20 @@ class EmrgServer:
         if tc_name in SHELL_TOOL_NAMES | {"write", "edit"} and req.sandbox:
             args["sandbox"] = req.sandbox
             args["workspace"] = cwd
+        if tc_name in _ROOT_CONSUMING_TOOLS:
+            # The session's host-named writable roots, injected for the same
+            # reason the tier is and with one deliberate difference: this write
+            # is **unconditional**, so a value the model put in the call is
+            # replaced rather than honoured (rant 2026-10-09T09:43:39 §4 — only
+            # the host names a root).  The tier's injection is guarded by
+            # `req.sandbox` because a call carrying no tier is a host session
+            # that keeps its unconfined default; silence there cannot widen
+            # anything, since it resolves to `danger-full-access`.  A list of
+            # roots has no such neutral value — an honoured model-supplied list
+            # would be a sandbox whose boundary the sandboxed decided — so the
+            # safe form is the unconditional one: whatever the session holds,
+            # including nothing, is what the call runs with.
+            args["writable_roots"] = session.sandbox_roots
 
     async def _apply_escalation(
         self, tc_name: str, args: dict, session, req: TaskRequest,
@@ -3777,15 +3867,28 @@ class EmrgServer:
         system_prompt = self._build_system_prompt(session)
         history_messages = session.get_messages_for_llm()
 
-        # Persist user message (with image references if present)
+        # Persist user message (with image references if present). The moment is
+        # stamped here, once, and then travels to the clients in the frame below —
+        # the *same string* the record holds, so the row a client shows live and
+        # the row a reopen replays can never disagree about a message's time
+        # (rant 2026-10-09T09:25:00). Stamping in the client instead would make
+        # each client's clock the source, which is the divergence this replaces.
+        user_stamp = datetime.now().isoformat()
         user_record: dict = {
             "type": "message",
             "role": "user",
             "content": req.prompt,
+            "timestamp": user_stamp,
         }
         if req.images:
             user_record["images"] = req.images
         session.append_message(user_record)
+        await self._broadcast(session.session_id, {
+            "type": "user_message",
+            "request_id": req.id,
+            "session_id": session.session_id,
+            "timestamp": user_stamp,
+        })
 
         user_content = self._build_user_content(req.prompt, req.images, self.llm.config.vision)
         messages: list[dict] = [
@@ -4244,11 +4347,15 @@ class EmrgServer:
                     })
                     return
 
-                # Persist assistant message
+                # Persist assistant message. Stamped once here and sent on in the
+                # frame below, so the live row's clock is the value a reopen reads
+                # out of the record (rant 2026-10-09T09:25:00).
+                assistant_stamp = datetime.now().isoformat()
                 session.append_message({
                     "type": "message",
                     "role": "assistant",
                     "content": full_content,
+                    "timestamp": assistant_stamp,
                 })
 
                 # Append the assistant reply to the local messages so the
@@ -4271,6 +4378,9 @@ class EmrgServer:
                     "done": True,
                     "delta": False,
                     "session_id": session.session_id,
+                    # The reply's own moment, the same string the record holds
+                    # (rant 2026-10-09T09:25:00).
+                    "timestamp": assistant_stamp,
                     # rant 21:52:18: authoritative current-context message count.
                     "context_messages": len(messages),
                 })
@@ -4446,10 +4556,16 @@ class EmrgServer:
                 reasoning=full_reasoning,
             )
 
+            # Persisted and framed from one stamp: the live row's time and the
+            # time a reopen reads out of the record are the same string, by
+            # construction rather than by two clocks agreeing (rant
+            # 2026-10-09T09:25:00).
+            assistant_stamp = datetime.now().isoformat()
             session.append_message({
                 "type": "message",
                 "role": "assistant",
                 "content": full_content,
+                "timestamp": assistant_stamp,
             })
 
             # Append the assistant reply to the local messages so the LLM
@@ -4471,6 +4587,10 @@ class EmrgServer:
                 "done": True,
                 "delta": False,
                 "session_id": session.session_id,
+                # The moment the record was written, not a client's receipt time:
+                # a client that reopens the session must show this same value
+                # (rant 2026-10-09T09:25:00).
+                "timestamp": assistant_stamp,
                 # rant 21:52:18: current LLM context size (system + history +
                 # user + all tool results + assistant replies) — authoritative
                 # for the TUI status bar message count.
@@ -4567,7 +4687,41 @@ class EmrgServer:
             if (time.time() * 1000 - last_ts) < interval_ms:
                 text = last_text  # within refresh window — keep frozen snapshot
         self._context_snapshots[session.session_id] = (text, time.time() * 1000)
+        boundary = self._writable_boundary_line(session)
+        if boundary:
+            text = f"{text}\n{boundary}"
         return {"role": "user", "content": text}
+
+    @staticmethod
+    def _writable_boundary_line(session: Session) -> str:
+        """The session's host-named writable roots as one context line.
+
+        Rant 2026-10-09T09:43:39 §8. Until this existed, the model's only channel
+        to the writable boundary was the denial text it read *after* a refused
+        write — so a session whose host had named a root learned about it by
+        failing. The line closes that.
+
+        Two choices are deliberate. It is appended **outside** the frozen
+        snapshot above: the freeze exists so consecutive requests within
+        ``context_refresh_interval_ms`` send byte-identical context for the prompt
+        cache's sake, and a host who names a root mid-window must not have to wait
+        for the window to expire before the boundary moves — the freeze is about
+        the clock, not about the boundary. And it is silent when the session
+        carries no extra roots: the tier's own boundary is the workspace plus the
+        temp areas, which the prompt already places by naming the cwd, so a line
+        restating it would be noise in every session that never used this feature.
+
+        :param session: the session whose turn is being built.
+        :returns: the context line, or ``""`` when the session names no root.
+        """
+        roots = session.sandbox_roots
+        if not roots:
+            return ""
+        listed = ", ".join(repr(root) for root in roots)
+        return (
+            "[context] This session may also write (host-named, equal to the "
+            f"workspace for writing): {listed} — you cannot add to or widen these."
+        )
 
     def _inject_context_message(self, session: Session, messages: list[dict]) -> None:
         """Insert the dynamic-context message before the user prompt.
@@ -5884,6 +6038,126 @@ class EmrgServer:
         # in the other client's status line without a reload.
         await self._broadcast_all(frame, exclude=ws)
 
+    async def _handle_set_sandbox_roots(
+        self, session_id: str, cwd: str, op: str, path: str, ws
+    ) -> None:
+        """Add, remove or list a session's host-named writable roots.
+
+        Rant 2026-10-09T09:43:39. The middle tier the mode table was missing: a
+        ``workspace-write`` session could reach a file outside its workspace only
+        by lifting *every* boundary (``danger-full-access``), and
+        ``escalation.hops_from`` lists exactly that one hop. These roots are the
+        host's narrower instrument — named per session, visible, removable.
+
+        Three properties this handler inherits from ``_handle_set_sandbox`` and
+        keeps deliberately:
+
+        * **the daemon is the only writer** — the session's ``meta.json`` is
+          persisted here and nowhere else, and the frame is broadcast so the
+          other client shows the same list without a reload;
+        * **refusals happen before the write**, so a path this handler rejects is
+          never stored and never inherited by a later turn;
+        * **the model has no route to it** — this is a client message, not a tool,
+          so the only way a root is named is a person typing the command. The
+          model's own route out of the tier stays the approval-gated one-hop
+          escalation (requirement 4).
+
+        ``op=list`` is a read: it answers the asking connection and announces
+        nothing, because a display refresh is not a state change. The two writing
+        ops reply to the requester *and* broadcast, excluded from the echo, so the
+        frame's shape is the same on both paths and a client renders one thing.
+
+        **``remove`` is judged by its own rules.** ``add`` answers "may this path
+        become writable" and applies six granting rules; a withdrawal is not
+        asking that, so it applies only the two that read a path — see
+        ``judge_root_removal``. A refusal is a path the handler could not read,
+        never a policy verdict, and nothing about a removal depends on the tier.
+        """
+        if not session_id or not cwd:
+            await self._send(ws, {
+                "type": "sandbox_roots",
+                "error": "set_sandbox_roots requires session_id and cwd",
+            })
+            return
+        if op not in ("add", "remove", "list"):
+            await self._send(ws, {
+                "type": "sandbox_roots",
+                "session_id": session_id,
+                "error": f"unknown op {op!r} (expected one of add, remove, list)",
+            })
+            return
+        session = self._get_or_create_session(session_id, Path(cwd))
+        if op == "list":
+            await self._send(ws, {
+                "type": "sandbox_roots",
+                "session_id": session_id,
+                "op": "list",
+                "roots": session.sandbox_roots,
+            })
+            return
+        # The policy the *session* is under, so "already covered" is judged
+        # against the tier in force and against the roots already stored — naming
+        # the workspace, a temp area, or a root added a moment ago is reported
+        # rather than repeated (requirement 5).
+        policy = resolve_policy(
+            mode=resolve_client_tier(session),
+            workspace_root=cwd,
+            session_id=session_id,
+            extra_roots=session.sandbox_roots,
+        )
+        # The op's own judge. They are two functions because they answer two
+        # questions: `add` applies the six granting rules (is this a path the
+        # policy may open), `remove` applies only the two that read a path. One
+        # judge for both let the existence rule run on removals, which made a
+        # root whose path was deleted impossible to withdraw (measured
+        # 2026-10-09 on head `4eb69bab`).
+        verdict = (
+            judge_root_removal(path, policy) if op == "remove"
+            else judge_extra_root(path, policy)
+        )
+        if verdict.refusal:
+            await self._send(ws, {
+                "type": "sandbox_roots",
+                "session_id": session_id,
+                "op": op,
+                "roots": session.sandbox_roots,
+                "error": verdict.refusal,
+            })
+            return
+        roots = session.sandbox_roots
+        if op == "remove":
+            # Removal is idempotent and never a policy refusal: a path that is not
+            # in the list is answered with the list as it stands, which is the
+            # state the host asked for. (A path that cannot be *read* is refused
+            # above, and that is the judge's rule rather than this one's.) The
+            # comparison is on the canonical spelling, so a path removed with a
+            # different spelling than it was added with still comes out.
+            remaining = [r for r in roots if r != verdict.canonical]
+            notice = None if len(remaining) != len(roots) else (
+                f"{verdict.canonical!r} was not one of this session's roots — "
+                "nothing to remove"
+            )
+            if len(remaining) != len(roots):
+                session.set_sandbox_roots(remaining)
+        else:
+            # `store` is the judge's decision, not something inferred from a
+            # notice: a root already covered is not stored, while one named at
+            # `read-only` is stored *and* carries a notice. Reading a notice as
+            # "do not store" kept nothing in that second case while the sentence
+            # told the host it had (measured 2026-10-09 on head `4eb69bab`).
+            notice = verdict.notice
+            if verdict.store:
+                session.set_sandbox_roots([*roots, verdict.canonical])
+        frame = {
+            "type": "sandbox_roots",
+            "session_id": session_id,
+            "op": op,
+            "roots": session.sandbox_roots,
+            "notice": notice,
+        }
+        await self._send(ws, frame)
+        await self._broadcast_all(frame, exclude=ws)
+
     def _apply_model_switch(self, model_name: str) -> dict:
         """The state change behind `/model`, as one reusable step.
 
@@ -6014,6 +6288,12 @@ class EmrgServer:
                 # a client opening a session must be able to show the state another
                 # client set, and `sandbox_set` is a broadcast that is never replayed.
                 "sandbox": resolve_client_tier(session),
+                # The host-named writable roots ride the same snapshot, for the
+                # same reason (rant 2026-10-09T09:43:39 §1): they are session
+                # state the daemon owns, `sandbox_roots` is a broadcast that is
+                # never replayed, so this is the only frame a client opening a
+                # session later can learn them from.
+                "sandbox_roots": session.sandbox_roots,
                 # A client opening a session learns the session's live state
                 # here, because `turn_start`/`turn_end` are broadcasts — they
                 # are addressed to whoever is subscribed at the time and are
@@ -6158,7 +6438,54 @@ class EmrgServer:
         Returns {"type": "file_content", path, content, truncated?, binary?,
         error?}. Binary files report binary=True with empty content (image
         preview is rendered via file:// URL in the renderer, no base64).
+
+        The two window parameters are counts, so they are read against the domain
+        they have — an integer `>= 1` — and an out-of-domain value is refused
+        rather than answered with a *different* window. Measured on master
+        `92f6b093`, 2026-10-08 (issue #1939): `line_limit=-3` came back as
+        **seven** lines of a ten-line file (`all_lines[start-1 : start-1+limit]`
+        slices from the *end*) with `truncated` still computed from the negative
+        value; `line_limit=0` returned an empty `content` with `truncated: true`,
+        which a panel reads as "this file is empty and there is more of it";
+        `line_limit="abc"` raised inside `int()`, was dropped to `None`, and `None`
+        means "no window", so the whole file came back; and `start_line` of `0` or
+        `-5` was clamped to 1 by `max(1, …)` — a different window, silently.
+
+        The wording is the tool layer's, which refuses the same two names the
+        same way (`emrg/tools/read_tool.py`); the rule is spelled here rather than
+        imported because this is the *client protocol* face of it and the tool
+        layer's helper is still in flight (PR #1936): a partial copy of its lines
+        conflicts in either merge order, and a verbatim carry would leave that PR
+        with nothing to merge if this one landed first (both measured with
+        `git merge-tree --write-tree`, 2026-10-08).
         """
+        window: dict[str, int] = {}
+        for name, value in (("start_line", start_line), ("line_limit", line_limit)):
+            if value is None:
+                continue  # absent: the default below speaks for it
+            number = None
+            if not isinstance(value, bool):  # `True` is an `int`, but not a count
+                try:
+                    number = int(value)
+                except (TypeError, ValueError, OverflowError):
+                    # `int()` refuses "abc", NaN and a float with no integer value
+                    # (`OverflowError` is the last of those: JSON `1e999` parses to
+                    # `inf`), and every one of them is out of domain.
+                    number = None
+                if isinstance(value, float) and number != value:
+                    number = None  # a fractional count is not a count
+            if number is None or number < 1:
+                await self._send(ws, {
+                    "type": "file_content",
+                    "error": (
+                        f"{name} must be an integer >= 1 (got {value!r}); this request "
+                        "is refused rather than answered with a different window."
+                    ),
+                })
+                return
+            window[name] = number
+        start = window.get("start_line", 1)
+        limit = window.get("line_limit")
         raw = Path(path_str).expanduser()
         if not raw.is_absolute():
             await self._send(ws, {
@@ -6219,14 +6546,6 @@ class EmrgServer:
         if all_lines and all_lines[-1] == "":
             all_lines.pop()
         total = len(all_lines)
-        try:
-            start = max(1, int(start_line or 1))
-        except (TypeError, ValueError):
-            start = 1
-        try:
-            limit = int(line_limit) if line_limit is not None else None
-        except (TypeError, ValueError):
-            limit = None
         if limit is not None:
             limit = min(limit, self._MAX_READ_LINES)
             selected = all_lines[start - 1 : start - 1 + limit]
@@ -6603,7 +6922,7 @@ class EmrgServer:
         asyncio.create_task(_reflect())
 
 
-_EXIT_RECORD_PATH = Path.home() / ".emrg" / "emrgd-exit.log"
+_EXIT_RECORD_PATH = logs_dir() / "emrgd-exit.log"
 
 
 class DaemonExit:
@@ -6626,7 +6945,7 @@ class DaemonExit:
 
 
 def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) -> None:
-    """Append a one-line JSON exit record to ~/.emrg/emrgd-exit.log and mirror
+    """Append a one-line JSON exit record to ~/.emrg/logs/emrgd-exit.log and mirror
     it into emrgd.log (rant 2026-08-25T09:25:32 — daemon silent death).
 
     The dedicated file is append-only and survives emrgd.log rotation

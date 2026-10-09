@@ -109,7 +109,7 @@ vision = true
 
 **A `config.toml` edit never restarts the daemon.** The client used to compare this file's mtime against the running server's start time and SIGTERM→SIGKILL it when the file looked newer — which killed the running scheduler handlers (a live evolution cycle among them) and dropped every connected client, to apply an edit the daemon now applies itself. That branch is gone; a **source** change is the only thing that still restarts the daemon. Both sections are live: `[llm]` as described above, and `[update]` (`enabled`, `delay_minutes`) — the daemon's upgrade manager holds the same object the reloader writes to, so a change lands on its next 5-minute check. The upgrade *interval* stays hard-coded and is not a field of that section.
 
-Verify from the daemon log (`~/.emrg/emrgd.log`): every accepted edit logs one line naming the keys that moved —
+Verify from the daemon log (`~/.emrg/logs/emrgd.log`): every accepted edit logs one line naming the keys that moved —
 
 ```
 config.toml reloaded: changed=max_tokens,temperature
@@ -228,10 +228,23 @@ is three-valued rather than pass/fail — `KILLED`
 (the target failed on the `--expect` text), `SURVIVED` (it still passed), `UNJUDGEABLE` (the run
 separates neither; the reason is named and the assertion lines the run really echoed are printed, so the
 retry is one step). Exit `0`/`1`/`2` are those three; `3` TARGET-BROKEN (the target did not collect or
-pass *before* the mutation), `4` NO-MUTATION (the anchor does not occur exactly once), `5`
+pass *before* the mutation — the report names which cause it read: a target that does not resolve, an
+interpreter that cannot import pytest, or another module the run could not import, named from the run's
+own `No module named <name>` line — because that sentence names a missing *plugin* as readily as a
+missing pytest, and reading it as pytest made the report assert a cause nobody measured — and it also
+prints the nodes the pre-flight failed on, because those names settle the cause before the node id does:
+a list naming files other than the target's own is a tree that was already red before the arm ran, and
+the node-id remedy is then wrong — so withholding them left the reader with a remedy aimed at a cause
+that was not the cause), `4`
+NO-MUTATION (the anchor does not occur exactly once), `5`
 RESTORE-MISMATCH. It snapshots the file, pre-flights the target unmutated, pins `HOME`/`TMPDIR` for the
 child only, and restores **byte for byte** on every path, including its own failure — so an arm cannot
-leave a mutated tree behind. `--expect` is the failing assertion's own source line, not the test's
+leave a mutated tree behind. The interpreter the arm is judged under is resolved the same way
+`check-merge-plan-suite.py` resolves the suite's — the invoking interpreter, or the checkout's own
+`.venv` when that one cannot import pytest at all — and the report prints it, so the evidence names its
+environment instead of implying it. A gate that will not load is UNJUDGEABLE as well (exit `2`), naming
+the gate rather than raising a traceback: an arm whose interpreter could not be resolved has measured
+nothing, and a crash's exit code would be read as one of the verdicts it never reached. `--expect` is the failing assertion's own source line, not the test's
 message: pytest echoes that line, and a fragment copied from a message can be missed when an earlier
 assertion in the same test fires first.
 
@@ -273,7 +286,7 @@ APPLE_ID=<id> MACOS_NOTARY_APP_PASSWORD=<app-specific-password> \
 #   uv run --no-sync python3 scripts/check-notary-credentials.py --env-file ~/.emrg/notary.env
 ```
 
-Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's own reply is printed (usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); `2` = the exchange did not complete, so **no verdict was reached — never a pass**, and CI must fail on it too. After fixing, resume the run that failed with `gh run rerun <run-id> --failed`: a tag already pushed is not re-pushed.
+Exit `0` = Apple accepted the credentials; `1` = Apple refused them, and Apple's own reply is printed (usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); `2` = the exchange did not complete — **or the `--env-file` named could not be read**, a typo or a file not created yet; the message says which, and in both cases **no verdict was reached — never a pass**, and CI must fail on it too. After fixing, resume the run that failed with `gh run rerun <run-id> --failed`: a tag already pushed is not re-pushed.
 
 The step's two failure modes are told apart by **duration**, not by the exit code: a refused *submission* dies in seconds, while a notarization *verdict* takes minutes, exits 0 and reports `status=Invalid` (the step parses that status and fetches Apple's rejection log for it). `Notarize pkg` names the preflight in its own `::error::` when the submission is refused, so the remedy arrives with the failure.
 
@@ -303,6 +316,44 @@ gives you; the releases page has the pinned build). CI remains authoritative: th
 the same tool at the same version over the same files, not a second implementation of its
 rules.
 
+**The host-side counterpart of the install step.** The daemon renders a built-in task
+template from its own `__file__`, and on a running install that is
+`~/.emrg/install/source/` — a directory the installer wrote, which an upgrade replaces
+**whole**. It is not a git clone, so a file edited there lives in no commit: the edit looks
+like it took effect (it is what renders) and the next install destroys it silently. Ask
+before an upgrade, or whenever a prompt edit seems not to stick:
+
+```bash
+uv run --no-sync python3 scripts/check-install-drift.py
+# a different install tree or checkout:
+#   uv run --no-sync python3 scripts/check-install-drift.py --install-dir <tree> --root <checkout>
+```
+
+It asks one question per file the two trees share — is this content *anywhere* in the
+checkout's history? — and reads no version file at all, because membership is the whole
+question and the release an install happens to be never has to be established. The id it
+compares is `git hash-object --path=<repo-relative path>`'s, i.e. git's own convention:
+line-ending cleaning (`core.autocrlf`, and this repository's `*.cmd`/`*.bat`/`*.ps1
+text eol=crlf` rule) is applied on both sides, so a line-ending-only difference is not
+reported as an edit. Exit `0` =
+every shared file's content is in history; `1` = at least one is not, printed with its path
+and byte count and with what happens to it; `2` = could not measure (no install tree, no
+git checkout, `git` failed, or the two trees share no path at all) — **never a pass**. The
+`1` remedy is the point of the reading: move the change into the checkout and ship it, or
+it is lost.
+
+Measured 2026-10-07 on this host: exactly one shared file is flagged, and it is
+`emrg/server/competition_prompt.md` — the install copy is the `v0.3.7` bytes **plus** a
+hand-appended block that no ref of the repository carries (every other prompt file in the
+tree is byte-identical to `v0.3.7`, so the tree is that release with one hand-edit). The
+block records a host mandate, and the tag the release chain is part-way through (`v0.3.8`)
+contains none of it — so upgrading does not merely fail to ship that rule, it deletes it.
+The competition task hit the same wall from the other side on 2026-10-07: its rants record
+prompt edits refused by its sandbox (the install tree is outside the competition
+workspace), with the correct but incomplete conclusion that "the install tree copy is the
+one that takes effect" — true, and the reason such an edit has to reach the source
+checkout and ship.
+
 **The readable path to a failed run's cause.** `gh run view <id> --log` and `--log-failed` answer
 **0 bytes with exit 0** on a current host for every run, green or red (measured 2026-10-04 on `gh`
 2.58.0: v0.3.8's failed build `36956685533`, v0.3.7's green build `36658495939`, and a recent `Test`
@@ -322,12 +373,65 @@ above, which bury the cause). Exit `0` = a cause was printed; `1` = the run has 
 the question could not be answered (bad id, `gh` failed, no jobs listed, or a failed job's log came
 back empty) — **never a pass**.
 
+**"Failing" means a *job* concluded `failure`, not the run.** A workflow run's own `conclusion` is an
+aggregate over its jobs, and GitHub counts a **cancelled** job as a failed run — so a run that never
+got a runner (a job that sits 15 minutes with 0 steps and is cancelled) reports `failure` while no job
+of it ever judged the tree. `check-merge-freshness.py` therefore asks the run's jobs when a run is
+non-success, and reports the state it finds: a job concluding `failure` is the red verdict (and the
+cause-reading documented above can name its cause), while a run whose non-success jobs are all
+cancellations is
+reported as a **missing verdict** whose remedy is a re-trigger — the same action a head with no run
+gets. Measured 2026-10-06: without that split, the row said "a failing verdict, not a stale one;
+re-running will not make it fresh" about a cancelled run, and the reading its own remedy handed over
+answered "no failed job … nothing to explain" (exit 1) — a verdict-shaped sentence about a run that
+reached no verdict, with a remedy that could not produce a cause. When the jobs list itself cannot be
+read, the coarse reading stands and the report says that half is unmeasured, never which of the two it
+would have been.
+
 **It works without a GitHub token too**, which matters because `gh` refuses *every* call when it is
 unauthenticated ("please run: gh auth login") while the same paths answer anonymously: the tool falls
 back to `api.github.com` with no credentials, prints which channel answered, and reads the runner's
 annotations from the job's check run — so a tokenless host still gets the failed job and the failed
 step. The job **log** is the one part GitHub will not serve anonymously (`403`), and the report says
 so per job instead of reporting no cause.
+
+**A crash is a measurement error, not a verdict.** A tool that dies on an unhandled exception exits
+**`1`**, and `1` is a *verdict* in these tools' own tables — `check-merge-freshness.py` reads it as
+**STALE** (whose documented remedy is a re-merge and a push that voids every standing vote),
+`run-mutation-arm.py` as `EXIT_SURVIVED` ("the target still passed with the mutation in place"), and
+`review-queue.py` does not define `1` at all. Measured 2026-10-06 with a sibling left unparsable: those
+three exited `1` with no verdict-shaped line, so a caller reading the code read a verdict that was never
+reached. So a crash has to leave as the tool's own "could not measure" answer, and the family pinned by
+`tests/test_a_crash_is_a_measurement_error.py` — **the gates that load a sibling by file path**, plus
+`run-mutation-arm.py`, which asks a gate as a subprocess and whose crash class is the same one — does it
+in one place: each ends its `__main__` block in `_entry()`, which runs `main()` and, if it raises, prints
+the traceback with a `<tool>: could not measure - <Type>: <message>` line and answers **`2`**. A gate
+that loads no sibling reaches the same rule by its own route and says so where it does —
+`check-merge-tree-health.py:_merged_tree_sha` raises `MeasurementError` "because an unhandled exception
+leaves this tool as exit 1 - the code that means 'a clean merge landed an unhealthy tree'". The load
+sites no longer carry a `if spec is None or spec.loader is None` guard either:
+`importlib.util.spec_from_file_location` returns a spec *and* a loader for a path that does not exist,
+so that branch could never fire — `tests/test_a_crash_is_a_measurement_error.py` pins both halves,
+pins the entry point identical across the family (one rule, not a copy per tool free to drift apart), and
+derives the family from the source (a `spec_from_file_location` call in code), so a gate that loads a
+sibling and is not in that list fails the module instead of sitting silently outside it.
+
+**The reading that reports a stacked head.** `check-stacked-prs.py` asks whether an open PR would
+land another open PR's commits — the state a reviewer found by hand on #1879, where the branch had
+been cut from #1877's branch and the head carried its commits under a declaration naming neither.
+The tool landed 2026-10-06 (PR #1885) and was then named in **no tracked document**: its own
+docstring, its test, and the private `.emrg/` records were its only carriers, so the reviewer it
+exists for had no way to learn it exists — and it is the reading whose absence is *why it exists*.
+Its list would be `Agent.md`'s merge gates, and that file is **at its prompt cap** (the cap is
+`PROJECT_CONTEXT_MAX_CHARS`, imported and measured by `tests/test_check_stacked_prs.py`, not written
+here), so naming it there needs space freed from something else first: a content decision, not a
+line to squeeze in. This paragraph is therefore its home until that decision is made, and the test
+named above fails the day the cap stops blocking it, so the temporary home cannot outlive its
+reason:
+
+```bash
+uv run --no-sync python3 scripts/check-stacked-prs.py   # 0 clean · 1 a head carrying another open PR's commits · 2 the queue could not be read
+```
 
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
@@ -575,7 +679,7 @@ Whichever entry point you started spawns the daemon and waits for it to accept
 connections. When that wait runs out, the error carries what is known about the
 attempt: whether the child is still running, its exit code if it is not, the
 daemon log lines **this** attempt appended, and the contents of
-`~/.emrg/emrgd-start.err` (the child's own stderr, which is where a failure
+`~/.emrg/logs/emrgd-start.err` (the child's own stderr, which is where a failure
 before logging starts can be read at all).
 
 **Both entry points read the same variable**, `EMRG_START_TIMEOUT`, in seconds:

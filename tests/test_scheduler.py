@@ -977,7 +977,7 @@ def test_open_source_template_renders_with_context():
         task={"role": "committer", "project": "aitokenpool"},
         project={}, git_path="git", gh_path="gh",
     )
-    assert "0.5 Rant scan" in out, "rant-scan 0.5 节应渲染"
+    assert "The rant queue" in out, "rant-scan 0.5 节应渲染"
     assert "rants.jsonl" in out, "rant 扫描命令应渲染"
     assert "config.project" in out, "project 匹配过滤应渲染"
     # Rant 2026-08-17T14:17:03: rant project matching is the SINGLE value
@@ -987,7 +987,7 @@ def test_open_source_template_renders_with_context():
     # the unmatched-rant hint may still mention the owner/repo form for
     # detecting rants the host should fix — that is a hint, not a match rule
     assert "Unmatched-rant hint" in out, "未匹配疑似 rant 提示应渲染"
-    assert "B.1b Rant-driven mode" in out, "rant 驱动模式应渲染"
+    assert "Rant-driven mode" in out, "rant 驱动模式应渲染"
     assert "ROLE LOCK" in out, "既有 ROLE LOCK 应保留"
     # Rant 2026-08-18T16:42:52: `submit_rant` is the only writer of rants.jsonl.
     # This assertion used to require the opposite — that the rendered section state
@@ -1127,7 +1127,7 @@ def test_open_source_template_full_code_study_b2b():
         project={}, git_path="git", gh_path="gh",
     )
     # 1) the new section exists (positive discrimination: absent section → red)
-    assert "B.2b Read the full codebase" in out, "B.2b 全代码研读节应渲染"
+    assert "Read the full codebase" in out, "B.2b 全代码研读节应渲染"
     # 2) must read the complete codebase, not just the target file
     assert "(not just the target files)" in out, "读完整代码要求应渲染"
     # 3) must always re-read the latest code before each contribution
@@ -1158,7 +1158,7 @@ def test_open_source_template_parallel_recon_c15():
         project={}, git_path="git", gh_path="gh",
     )
     # 1) the new section exists
-    assert "C.1.5 Parallel Recon" in out, "C.1.5 并行 Recon 节应渲染"
+    assert "The healthy rule" in out, "C.1.5 并行 Recon 节应渲染"
     assert "not maintenance-only" in out, "Tracking 非纯维护说明应渲染"
     # 2) healthy = MERGEABLE + CI green + no unaddressed feedback + no rebase due
     assert "MERGEABLE" in out, "健康判定含 MERGEABLE"

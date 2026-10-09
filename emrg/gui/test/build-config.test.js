@@ -21,6 +21,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const GUI_ROOT = path.join(__dirname, "..");
+// electron-builder 的一切相对路径都以 **GUI_ROOT**（package.json 所在目录）为基准；
+// 产物（dist/runtime、packaging/assets）在仓库根 —— 少一层 `..` 即静默错位。
+const REPO_ROOT = path.resolve(GUI_ROOT, "..", "..");
 const PKG = JSON.parse(fs.readFileSync(path.join(GUI_ROOT, "package.json"), "utf-8"));
 const VENDOR_DIR = path.join(GUI_ROOT, "vendor");
 
@@ -117,6 +120,30 @@ test("preload exposes workspace-panel APIs (listFiles/readFile)", () => {
   }
 });
 
+test("the clipboard-image wire exists end to end (rant 2026-09-30T09:35:04, requirement 4)", () => {
+  // 「系统给的图不受白名单所限」需要一条 renderer 到 main 的线：renderer 解不了的
+  // 格式（macOS 的 image/tiff）只能由有 NSImage 的 main 转成 PNG。renderer 那半在
+  // Composer.test.tsx 里注入假桥测试——注入式测试**看不见线断没断**，所以这条线
+  // 的两端在这里按源码钉住：preload 暴露 `readClipboardImage` → `emrg:readClipboardImage`，
+  // main 注册同一个频道。少任何一端，renderer 的调用在生产里会永远 reject。
+  const preload = fs.readFileSync(path.join(GUI_ROOT, "preload.js"), "utf-8");
+  assert.match(
+    preload,
+    /readClipboardImage: \(\) => ipcRenderer\.invoke\("emrg:readClipboardImage"/,
+    "preload.js must expose readClipboardImage → emrg:readClipboardImage"
+  );
+  const main = fs.readFileSync(path.join(GUI_ROOT, "main.js"), "utf-8");
+  assert.match(
+    main,
+    /ipcMain\.handle\("emrg:readClipboardImage"/,
+    "main.js must handle emrg:readClipboardImage"
+  );
+  // 转换发生在哪一侧是这条线的全部意义：`clipboard.readImage()` 经 NSImage 解码，
+  // `toPNG()` 重新编码。main.js 里没有它，这条线就只是一次拒绝。
+  assert.match(main, /clipboard\.readImage\(\)/, "main.js must read the pasteboard image");
+  assert.match(main, /\.toPNG\(\)/, "main.js must re-encode it as PNG");
+});
+
 
 // ── rant 2026-08-18T12:45:47 (v0.2.47 Build Release) ──
 // #836 把 buildResources 放在 electron-builder config 根级 → schema 校验失败
@@ -131,16 +158,79 @@ test("electron-builder config: buildResources lives under directories (schema gu
       `(v0.2.47 Build Release 4/4 failure). Place it under directories.buildResources. ` +
       `Actual root keys: ${JSON.stringify(Object.keys(build))}`
   );
+  // 断言的是**解析结果**，不是字符串字面量：`directories.*` 与 extraResources 一样，由
+  // electron-builder 相对工程目录（本目录）解析。旧断言把字面量 "../packaging/assets" 钉死，
+  // 而它从 emrg/gui 解析到 emrg/packaging/assets（不存在）——一个错值被钉成了"已守卫"。
+  const assetsDir = path.join(REPO_ROOT, "packaging", "assets");
   assert.strictEqual(
-    build.directories && build.directories.buildResources,
-    "../packaging/assets",
-    "directories.buildResources must point at ../packaging/assets (icon.icns/ico/png sources)"
+    path.resolve(GUI_ROOT, (build.directories && build.directories.buildResources) || ""),
+    assetsDir,
+    "directories.buildResources must resolve to <repo-root>/packaging/assets (icon.icns/ico/png sources)"
   );
   // icon.icns/ico/png are gen-assets products (gitignored, generated at build time from
   // icon.svg by packaging/gen-assets.sh) — only the committed design source must exist in CI.
-  const assetsDir = path.join(GUI_ROOT, "..", "..", "packaging", "assets");
   assert.ok(
     fs.existsSync(path.join(assetsDir, "icon.svg")),
     `buildResources dir missing design source icon.svg (committed) — gen-assets can't render icons`
   );
+});
+
+// ── 打包引用解析守卫（cycle cyc20261009-032401）──────────────────────────────
+// electron-builder 把 extraResources 的 `from` 与 directories.buildResources 都相对**工程目录**
+// （emrg/gui/package.json 所在处）解析，源不存在时**只警告不失败**。实测证据（build-release.yml
+// run 37723424917，v0.3.9 tag job 113136083119）：
+//     • file source doesn't exist  from=/home/runner/work/emrg/emrg/emrg/dist/runtime
+//     • file source doesn't exist  from=/home/runner/work/emrg/emrg/emrg/packaging/assets/icon.png
+//     • default Electron icon is used  reason=application icon is not set
+// 构建全绿、产物照发，包里却没有载荷：AppImage 缺 resources/runtime，而 main.js 的
+// ensureAppImageExtracted 首启就复制 process.resourcesPath/runtime 到 ~/.emrg/install ——
+// Linux 用户装完的 GUI 没有运行时。根因是相对路径少一层（落在 emrg/ 内，产物在仓库根）。
+// 本用例钉住**解析结果**：每个 from 必须落到仓库根的那两个产物上，任一退回 "../…" 即红。
+test("electron-builder extraResources resolve to the repo-root build products", () => {
+  const build = PKG.build || {};
+  const PRODUCTS = [path.join(REPO_ROOT, "dist", "runtime"), path.join(REPO_ROOT, "packaging", "assets", "icon.png")];
+  const refs = [];
+  for (const entry of build.extraResources || []) refs.push(["app", entry.from]);
+  for (const p of ["mac", "win", "linux"]) {
+    for (const entry of (build[p] || {}).extraResources || []) refs.push([p, entry.from]);
+  }
+  assert.ok(refs.length > 0, "no extraResources found — the scan is broken");
+  const unresolved = refs
+    .map(([block, from]) => ({ block, from, resolved: path.resolve(GUI_ROOT, from) }))
+    .filter((r) => !PRODUCTS.includes(r.resolved));
+  assert.deepStrictEqual(
+    unresolved.map((r) => `${r.block}: ${r.from} → ${r.resolved}`),
+    [],
+    `extraResources resolve outside the repo-root build products ` +
+      `(${PRODUCTS.map((p) => path.relative(REPO_ROOT, p)).join(", ")}). electron-builder only WARNS ` +
+      `("file source doesn't exist") and ships an artifact without the payload — assert the resolved ` +
+      `path, and remember it is relative to package.json's own directory (emrg/gui), not the repo root.`
+  );
+  // 唯一读 resourcesPath/runtime 的是 Linux AppImage 的首启自解压 —— 少了这条，绿也说明不了问题
+  assert.ok(
+    refs.some(([block, from]) => block === "linux" && path.resolve(GUI_ROOT, from) === path.join(REPO_ROOT, "dist", "runtime")),
+    "the linux block must carry the runtime: main.js ensureAppImageExtracted copies " +
+      "process.resourcesPath/runtime into ~/.emrg/install on first launch (no other platform reads it)"
+  );
+});
+
+test("the extra-writable-roots wire exists end to end (rant 2026-10-09T09:43:39, GUI half)", () => {
+  // 与 clipboard-image 那条同一个理由：renderer 那半用注入的假窗测试，**看不见线断没断**。
+  // 这条线是 preload 暴露 `setSandboxRoots` → `emrg:setSandboxRoots`，main 注册同一个频道，
+  // 再交给 `conn.sendSetSandboxRoots` 发上 wire。少任何一端，界面会打开、会接受输入，
+  // 然后什么也不发生（#1764 与审批通道都栽在这道缝上）。
+  const preload = fs.readFileSync(path.join(GUI_ROOT, "preload.js"), "utf-8");
+  assert.match(
+    preload,
+    /setSandboxRoots: \(payload\) => ipcRenderer\.invoke\("emrg:setSandboxRoots"/,
+    "preload.js must expose setSandboxRoots → emrg:setSandboxRoots"
+  );
+  const main = fs.readFileSync(path.join(GUI_ROOT, "main.js"), "utf-8");
+  assert.match(main, /ipcMain\.handle\("emrg:setSandboxRoots"/, "main.js must handle emrg:setSandboxRoots");
+  // 意图只走一条路：renderer 给 op + 路径，cwd 由 main 解析（与 emrg:setSandbox 同款），
+  // 路径的裁定留给 daemon —— main 里出现第二套路径规则就是「两处各说各话」。
+  assert.match(main, /conn\.sendSetSandboxRoots\(\{ sessionId, cwd: sessionCwd, op, path/, "main.js must hand the op to the client");
+  const client = fs.readFileSync(path.join(GUI_ROOT, "daemon_client.js"), "utf-8");
+  assert.match(client, /sendCommand\("set_sandbox_roots"/, "daemon_client.js must send set_sandbox_roots");
+  assert.match(client, /frame\.type === "sandbox_roots"/, "daemon_client.js must forward the sandbox_roots frame");
 });

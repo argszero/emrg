@@ -332,6 +332,78 @@ class TestWSVibeCheck:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_vibe_check_frame_carries_the_run_boundary_into_the_evidence(self):
+        """`cycle_started_at` on the frame must reach the evidence the judge sees.
+
+        A task session is reused by every run of its task, so the daemon's
+        "recent history" slice is mostly the *previous* run whenever this one was
+        light on narrative — measured 2026-09-30 on two consecutive `emrg-task`
+        records whose `work` strings describe the same merge. The scheduler fixes
+        that by sending the instant the run was dispatched; this asserts the
+        receiving half at the real wire, because the two halves of a hand-over bug
+        fail independently — the sender can be correct while the handler drops the
+        field, and every unit test of the summariser still passes.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                sess_dir = tmp / ".emrg" / "sessions" / "emrg-evolution-two-runs-task"
+                sess_dir.mkdir(parents=True, exist_ok=True)
+                (sess_dir / "history.jsonl").write_text(
+                    json.dumps({"type": "message", "role": "user",
+                                "content": "previous run prompt",
+                                "timestamp": "2026-10-08T09:00:05"}) + "\n" +
+                    json.dumps({"type": "message", "role": "assistant",
+                                "content": "the previous run merged PR #1760",
+                                "timestamp": "2026-10-08T09:20:00"}) + "\n" +
+                    json.dumps({"type": "message", "role": "user",
+                                "content": "this run prompt",
+                                "timestamp": "2026-10-08T13:08:26"}) + "\n" +
+                    json.dumps({"type": "message", "role": "assistant",
+                                "content": "this run voted and wrote the record",
+                                "timestamp": "2026-10-08T13:30:00"}) + "\n",
+                    encoding="utf-8",
+                )
+
+                server, _, cleanup = await _boot_server(tmp)
+                try:
+                    seen = {}
+
+                    async def fake_chat(messages, tools=None):
+                        seen["messages"] = messages
+                        return {"content": '{"work": "voted", '
+                                           '"recommend_slowdown": false, "slowdown_reason": ""}'}
+                    server.llm.chat = fake_chat
+
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "task_vibe_check",
+                            "session_id": "emrg-evolution-two-runs-task",
+                            "cwd": str(tmp),
+                            "task_name": "two-runs-task",
+                            "prompt": "run cycle",
+                            "completion_summary": "auxiliary",
+                            "cycle_started_at": "2026-10-08T13:08:25",
+                        }, ensure_ascii=False))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                        assert json.loads(frame).get("ok") is True
+
+                        contents = "\n".join(
+                            str(m.get("content", "")) for m in seen.get("messages", [])
+                        )
+                        assert "this run voted" in contents, contents
+                        assert "the previous run merged" not in contents, (
+                            "the frame's cycle_started_at did not reach the evidence — "
+                            "the handler dropped the boundary and the judge read the "
+                            "previous run's work as this run's"
+                        )
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_vibe_check_long_session_window_leading_tool_stripped(self):
         """Rant 2026-08-19T19:25:56 (root cause): slicing a validated session
         history to the last 100 messages can orphan a leading role:'tool'
@@ -2268,6 +2340,83 @@ class TestWSWorkspacePanel:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_read_file_refuses_an_out_of_domain_window(self):
+        """The panel's read reads a count, and a count has a domain.
+
+        Issue #1939, measured on master `92f6b093`: `_handle_read_file` read
+        `start_line` / `line_limit` with no domain check, so an out-of-domain
+        value was answered with a **different window** — `line_limit=-3` returned
+        seven lines of a ten-line file (the slice ran off the end), `line_limit=0`
+        returned empty content with `truncated: true`, `"abc"` fell back to "no
+        window" and returned the whole file, and a `start_line` of `0` was
+        clamped to 1. Both directions are pinned here: every out-of-domain value
+        is refused by a frame naming the parameter, the value and the domain and
+        carrying no `content` and no `truncated`; the in-domain controls still
+        return exactly what they did.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                f = work / "doc.txt"
+                f.write_text("\n".join(f"line{i}" for i in range(1, 11)), encoding="utf-8")
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        async def read(**window):
+                            return await self._cmd(
+                                ws, {"type": "read_file", "path": str(f), **window})
+
+                        # ── in domain: the controls ────────────────────────────
+                        whole = await read()
+                        assert whole["content"].split("\n") == [
+                            f"line{i}" for i in range(1, 11)]
+                        assert whole["truncated"] is False
+                        page = await read(start_line=3, line_limit=2)
+                        assert page["content"].split("\n") == ["line3", "line4"]
+                        assert page["truncated"] is True
+                        # A window covering the whole file leaves nothing over.
+                        assert (await read(line_limit=10))["truncated"] is False
+                        # A quoted number and an integral float name the numbers they
+                        # say, and both were read that way before this refusal existed
+                        # — a fix may not swallow a legal call. The tool layer reads
+                        # them the same way (a model that quotes a number means it).
+                        assert (await read(start_line="3", line_limit="2"))["content"] == (
+                            "line3\nline4")
+                        assert (await read(start_line=3.0, line_limit=2.0))["content"] == (
+                            "line3\nline4")
+
+                        # ── out of domain: refused, parameter and value named ──
+                        rows = (
+                            ({"line_limit": -3}, "line_limit", "-3", "integer >= 1"),
+                            ({"line_limit": 0}, "line_limit", "0", "integer >= 1"),
+                            ({"line_limit": "abc"}, "line_limit", "'abc'", "integer >= 1"),
+                            ({"line_limit": 2.5}, "line_limit", "2.5", "integer >= 1"),
+                            ({"line_limit": True}, "line_limit", "True", "integer >= 1"),
+                            ({"line_limit": "2.5"}, "line_limit", "'2.5'", "integer >= 1"),
+                            ({"start_line": 0}, "start_line", "0", "integer >= 1"),
+                            ({"start_line": -5}, "start_line", "-5", "integer >= 1"),
+                            ({"start_line": "abc"}, "start_line", "'abc'", "integer >= 1"),
+                            ({"start_line": 3, "line_limit": -1},
+                             "line_limit", "-1", "integer >= 1"),
+                        )
+                        for kwargs, named, value, domain in rows:
+                            resp = await read(**kwargs)
+                            assert resp["type"] == "file_content", (kwargs, resp)
+                            assert "error" in resp, (kwargs, resp)
+                            assert named in resp["error"], (kwargs, resp)
+                            assert f"(got {value})" in resp["error"], (kwargs, resp)
+                            assert domain in resp["error"], (kwargs, resp)
+                            assert "content" not in resp, (kwargs, resp)
+                            assert "truncated" not in resp, (kwargs, resp)
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_read_file_binary_and_large(self):
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
@@ -2955,6 +3104,98 @@ class TestWSResolveSessionCwd:
                     resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
                     assert resp.get("type") == "session_cwd_result"
                     assert "error" in resp
+                finally:
+                    await ws.close()
+            finally:
+                await cleanup()
+        asyncio.run(_test())
+
+    def test_a_session_opened_from_another_project_receives_its_live_frames(self, tmp_path):
+        """The second half of requirement 6: the frames, not only the answer.
+
+        The three tests above guard the *answer*. This one guards the delivery,
+        which is what the requirement is actually about — and it was the half
+        that stayed broken: PR #1748 made the TUI ask first, but the ask carries
+        the *asker's* cwd (app.py says so at its own call site), so the
+        subscription record written from it named project A. The two messages
+        that follow — `resume_session`, then `task` — name project B, the
+        session's real home, and the read loop ignored them: it writes the
+        record only when the session id **changes**, which it did not.
+
+        `_broadcast` filters by the running turn's cwd, so the client stayed a
+        subscriber in the dict and was no target on the wire — measured
+        2026-10-08 (`cyc20261008-170402`): with the ask carrying the asker's
+        cwd, frames NONE and approval frames NONE; with the ask carrying the
+        project's cwd (that is, with the record correct), `turn_start`, the
+        stream, `turn_end`, and `approval_request` + `approval_resolved`. Only
+        the ask's cwd differed. A TUI in that state never finishes its turn,
+        and `request_approval` asks its question to nobody while its own
+        fail-closed guard reads a non-empty subscriber set.
+
+        Without the fix this test fails at `turn_start`: nothing arrives.
+        """
+        async def _test():
+            import emrg.session as session_mod
+
+            project_a = tmp_path / "project_a"
+            project_b = tmp_path / "project_b"
+            for root, sid, text in (
+                (project_a, "s_own", "hello from a"),
+                (project_b, "s_cross", "a scheduled task's cycle"),
+            ):
+                root.mkdir(parents=True, exist_ok=True)
+                sess = session_mod.Session.create_with_id(sid, root)
+                sess.append_message({"type": "message", "role": "user", "content": text,
+                                     "id": "m1", "session_id": sid})
+
+            server, _, cleanup = await _boot_server(tmp_path)
+            try:
+                self._write_index(
+                    {"s_cross": str(project_b / ".emrg" / "sessions" / "s_cross")}
+                )
+                ws = await connect_to_server()
+                try:
+                    # 1. the asker's own session first, so `last_session_id`
+                    #    is not s_cross when the ask below arrives.
+                    await ws.send(json.dumps({"type": "list_history",
+                                              "session_id": "s_own",
+                                              "cwd": str(project_a)}))
+                    await _recv_until(ws, lambda f: f.get("type") == "history_list",
+                                      what="history_list for s_own")
+
+                    # 2. the ask — carrying the ASKER's cwd, as the TUI sends it.
+                    await ws.send(json.dumps({"type": "resolve_session_cwd",
+                                              "session_id": "s_cross",
+                                              "cwd": str(project_a)}))
+                    answered = await _recv_until(
+                        ws, lambda f: f.get("type") == "session_cwd_result",
+                        what="session_cwd_result")
+                    assert answered["cwd"] == str(project_b), answered
+
+                    # 3./4. resume, then type a prompt — both naming s_cross's
+                    #       real home, and both re-naming a session the connection
+                    #       is already subscribed to.
+                    await ws.send(json.dumps({"type": "resume_session",
+                                              "session_id": "s_cross",
+                                              "cwd": str(project_b)}))
+                    await ws.send(json.dumps({"type": "task", "id": "r1",
+                                              "session_id": "s_cross",
+                                              "cwd": str(project_b), "prompt": "hi",
+                                              "timestamp": "2026-10-08T00:00:00Z",
+                                              "images": None,
+                                              "sandbox": "workspace-write"}))
+                    await _recv_until(ws, lambda f: f.get("type") == "turn_start",
+                                      what="turn_start")
+                    await _recv_until(ws, lambda f: f.get("type") == "turn_end",
+                                      what="turn_end")
+
+                    recorded = sorted({cwd for cwd in
+                                       server._session_subscribers.get("s_cross", {}).values()})
+                    assert recorded == [str(project_b)], (
+                        "the subscription record still names the asker's cwd, so the "
+                        "next broadcast will be addressed to nobody again: "
+                        f"{recorded}"
+                    )
                 finally:
                     await ws.close()
             finally:

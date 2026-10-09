@@ -79,11 +79,17 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-09-30 由 `tool.detailName/-Input/-Output`（工具详情三段，rant 2026-09-30T09:17:54 → #1787）从 403 改为 406。
   // 2026-09-30 由 `composer.imageReason.*`（图片拒绝必须可见，rant 2026-09-30T09:35:04）从 403 改为 408。
   // 两个改动各加各的 key，互不重叠：合并后是 403 + 3 + 5 = 411（既不是 406 也不是 408）。
-  it("zh/en 各 411 个 key 且完全对齐", () => {
+  // 2026-10-08 由 `composer.chooseImage`（选图入口，rant 2026-09-30T09:35:04 缺口 1）从 411 改为 412。
+  // 2026-10-08 由 `composer.imageReasonClipboard`（系统给的图不受白名单所限，同 rant 要求 4）
+  // 从 412 改为 413。
+  // 2026-10-09 由 `composer.roots*`（3 条）+ `cmd.sandbox.hint`（1 条）+
+  // `sandboxRoots.*`（12 条）——会话额外可写根的 GUI 入口与对话框，rant
+  // 2026-10-09T09:43:39 Part 2(a)——从 413 改为 429。
+  it("zh/en 各 429 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(411);
-    expect(enKeys.length).toBe(411);
+    expect(zhKeys.length).toBe(429);
+    expect(enKeys.length).toBe(429);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

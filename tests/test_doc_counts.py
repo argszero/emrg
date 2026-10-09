@@ -30,8 +30,34 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
-    """Extract (label, headline, parts) for every documented GUI count."""
+def _breakdown_parts(breakdown: str) -> list[int] | None:
+    """The counts in a `+`-separated breakdown, or `None` if a part carries none.
+
+    `None` means "this breakdown cannot be read", never a shorter list. The filter that
+    used to skip an unreadable part made the sum below a claim about **the parts that
+    happened to parse**: measured 2026-10-08 (cycle `cyc20261008-130733`), a line naming
+    three parts — `(100: 40 alpha + beta + 60 gamma)` — sums to its headline from the two
+    readable counts and passed, with the third part never read. `_renderer_doc_breakdown`
+    below has always refused such a part (`assert pm, f"could not parse …"`); this is the
+    same rule for the line whose sum the guard checks.
+    """
+    parts: list[int] = []
+    for part in breakdown.split("+"):
+        # each part starts with its count ("22 daemon_client + ..."); the first number per
+        # part is taken, which avoids false digits inside names like i18n
+        m = re.match(r"\s*(\d+)", part)
+        if m is None:
+            return None
+        parts.append(int(m.group(1)))
+    return parts
+
+
+def _gui_breakdowns() -> list[tuple[str, int, list[int] | None]]:
+    """Extract (label, headline, parts) for every documented GUI count.
+
+    `parts` is `None` for a line whose breakdown could not be read - the reader is what
+    decides, and `_gui_breakdown_offences` is where that decision becomes a verdict.
+    """
     found = []
     for doc in ("README.md", "README.cn.md", "Agent.md"):
         text = (REPO_ROOT / doc).read_text(encoding="utf-8")
@@ -44,16 +70,33 @@ def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
             m = re.search(r"\((\d+): ([^)]+)\)", line)
             if not m:
                 continue
-            headline = int(m.group(1))
-            # each breakdown part starts with its count ("22 daemon_client + ...");
-            # take the first number per part (avoids false digits inside names like i18n)
-            parts = [
-                int(re.match(r"\s*(\d+)", part).group(1))
-                for part in m.group(2).split("+")
-                if re.match(r"\s*\d+", part)
-            ]
-            found.append((f"{doc}: {line.strip()[:70]}", headline, parts))
+            found.append(
+                (f"{doc}: {line.strip()[:70]}", int(m.group(1)), _breakdown_parts(m.group(2)))
+            )
     return found
+
+
+def _gui_breakdown_offences(breakdowns: list[tuple[str, int, list[int] | None]]) -> list[str]:
+    """The documented GUI counts that are wrong or unreadable. Pure, so it is testable.
+
+    Two faults, and they answer different questions: a breakdown that does not sum to its
+    headline is *wrong*, and one that could not be read is *unmeasured* - and an unmeasured
+    line must not be reported as a balanced one, which is what skipping the part did.
+    """
+    offences: list[str] = []
+    for label, headline, parts in breakdowns:
+        if parts is None:
+            offences.append(
+                f"{label}: a breakdown part does not start with its count, so the breakdown "
+                f"cannot be summed and headline {headline} is unverifiable - dropping the "
+                "part would make this check a claim about the parts that happened to parse"
+            )
+            continue
+        if sum(parts) != headline:
+            offences.append(
+                f"{label}: breakdown {parts} sums to {sum(parts)} but headline says {headline}"
+            )
+    return offences
 
 
 # --- the Python total is measured, never stored -------------------------------
@@ -251,10 +294,66 @@ def test_the_guard_holds_no_second_copy_of_the_claim_pattern() -> None:
 def test_gui_breakdown_sums_to_headline() -> None:
     breakdowns = _gui_breakdowns()
     assert breakdowns, "no GUI test breakdowns found in README.md/Agent.md"
-    for label, headline, parts in breakdowns:
-        assert sum(parts) == headline, (
-            f"{label}: breakdown {parts} sums to {sum(parts)} but headline says {headline}"
-        )
+    offences = _gui_breakdown_offences(breakdowns)
+    assert not offences, "\n  ".join(offences)
+
+
+# ── An unreadable part is refused, not skipped ────────────────────────────────
+
+
+def _docs_with(monkeypatch, mod, tmp_path, lines: dict[str, str]) -> None:
+    """Point the guard reader `mod` at a scratch tree holding `lines` as its docs.
+
+    Every doc the reader walks is created (empty unless `lines` gives it text): a reader
+    that finds a *missing* doc raises, and this arm is about what it does with an
+    unreadable *line*.
+    """
+    docs = {name: "" for name in ("README.md", "README.cn.md", "Agent.md")}
+    docs.update(lines)
+    for doc, text in docs.items():
+        (tmp_path / doc).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+
+def test_an_unreadable_breakdown_part_is_a_fault_not_a_shorter_sum(tmp_path, monkeypatch) -> None:
+    """The measured shape: three parts, two of them readable, summing to the headline.
+
+    Before 2026-10-08 (cycle `cyc20261008-130733`) the reader dropped `beta` and the check
+    compared `40 + 60` with `100` - green, for a line whose breakdown it had not read. The
+    guard's own `_renderer_doc_breakdown` refuses a part like that; this pins the same rule
+    for the line this check sums. The values are chosen so the *skipping* reader passed: a
+    mutation restoring the drop turns this arm red, which is the point.
+    """
+    mod = _loaded_guard_module()
+    _docs_with(
+        monkeypatch, mod, tmp_path,
+        {"README.md": "GUI: `cd emrg/gui && npm test` (100: 40 alpha + beta + 60 gamma)\n"},
+    )
+    found = mod._gui_breakdowns()
+    assert found, "the scratch doc's count line was not picked up, so nothing was measured"
+    _label, headline, parts = found[0]
+    assert headline == 100
+    assert parts is None, (
+        f"the reader returned {parts!r} for a breakdown whose second part carries no count "
+        "- a shorter list is read as a sum that balanced, which is the defect"
+    )
+    offences = mod._gui_breakdown_offences(found)
+    assert offences and "does not start with its count" in offences[0], (
+        f"an unreadable breakdown produced no fault: offences={offences!r}"
+    )
+
+
+def test_a_readable_breakdown_still_passes(tmp_path, monkeypatch) -> None:
+    """The control: a refusal that fires on a good line would just be a broken guard."""
+    mod = _loaded_guard_module()
+    _docs_with(
+        monkeypatch, mod, tmp_path,
+        {"README.md": "GUI: `cd emrg/gui && npm test` (100: 40 alpha + 60 gamma)\n"},
+    )
+    found = mod._gui_breakdowns()
+    assert found, "the scratch doc's count line was not picked up, so nothing was measured"
+    assert found[0][2] == [40, 60]
+    assert mod._gui_breakdown_offences(found) == []
 
 
 # The canonical test-command lines in Agent.md. Each is a *kind* that may appear
@@ -588,12 +687,91 @@ _MIDLINE_DEFINITION_FORM = re.compile(
 )
 
 # The eighth escape's span finder (see _commented_out_definitions below).
-# Non-greedy so adjacent comments cannot merge into one span, and `S` for
-# multi-line blocks. What the comment *contains* is judged by the counter's own
-# pattern (`_would_be_counted`), not by a lookalike of it: an earlier version used
+#
+# This used to be `re.compile(r"/\*.*?\*/", re.S)` - non-greedy so adjacent
+# comments could not merge, `S` for multi-line blocks. It is a scanner now,
+# because that regex cannot tell an opener from the same two characters **inside
+# a string literal**. Measured 2026-10-09 (cycle cyc20261009-010332): in a file
+# holding `const GLOBS = ["renderer/**"];` ahead of any one block comment, the
+# first span opened *inside the string* and ran to that comment's terminator, so
+# every live `it(`/`test(` definition between the two was reported as commented
+# out - a guard reddening a file with nothing to repair, prescribing a repair
+# (delete or restore) its author cannot perform, which is how a guard gets
+# trained away. The shape is ordinary here: this repo spells glob patterns
+# `"dir/**"` throughout its build and nav tests. Measured on `4f14cc55`,
+# 2026-10-09 (cycle cyc20261009-010332): the two finders agree on all 56 of this
+# finder's own subjects, so the trap is latent today rather than firing - it
+# fires on an ordinary addition, which is what the tests below pin. Appending a
+# glob string, a doc block and one live `it(...)` to
+# `emrg/gui/test/build-config.test.js` makes the regex report `['/**")) {']`
+# where the scanner reports nothing (and the regex is not merely noisy: on the
+# two files of its own suite that spell the pattern out in prose it reads 14
+# spans where 2 exist, 4 where 0 - re-measured 2026-10-09, `cyc20261009-022334`:
+# 14 on the copy that preceded this file's own rewrite, 21 on the copy carrying
+# it because its new comments add spans, and 2 for the scanner on both, so the
+# number is re-measured rather than quoted).
+#
+# What the comment *contains* is still judged by the counter's own pattern
+# (`_would_be_counted`), not by a lookalike of it: an earlier version used
 # a separate `_BLOCK_COMMENT_DEFINITION` regex and fired on inline comments the
 # counter had never counted, advising a repair for drift that did not exist.
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+def _skip_string_literal(text: str, start: int) -> int:
+    """The index just past the string literal whose quote sits at `start`.
+
+    A quote that reaches a line end without closing is not a string - JavaScript
+    allows no bare newline inside one - so that one is skipped alone. It is what
+    keeps an apostrophe in prose (`// don't`) from swallowing the rest of the
+    file.
+    """
+    quote = text[start]
+    i = start + 1
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == quote:
+            return i + 1
+        if ch == "\n" and quote != "`":
+            return start + 1
+        i += 1
+    return len(text)
+
+
+def _block_comment_spans(text: str) -> list[tuple[int, int]]:
+    """`(start, end)` for every block comment in JS/TS source, in order.
+
+    A left-to-right scan over the four contexts that decide it - line comment,
+    block comment, string literal, code - so the two characters `/*` open a span
+    where the language puts them and not inside a string. A regex literal is not
+    modelled (one containing `//` or a quote can still mislead the scan): that is
+    a smaller gap than the one this replaces, and on the 56 files this finder is
+    actually run over (`renderer/src/**/*.test.ts(x)`, `emrg/gui/test/**/*.test.js`)
+    the regex and the scanner agree on all of them - measured 2026-10-09 on
+    `4f14cc55`, so this is a trap closed, not a live false red repaired. An
+    unterminated `/*` runs to the end of the file, which is how a compiler reads
+    it.
+    """
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        two = text[i : i + 2]
+        if two == "//":
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            i = newline + 1
+        elif two == "/*":
+            close = text.find("*/", i + 2)
+            spans.append((i, n if close == -1 else close + 2))
+            if close == -1:
+                break
+            i = close + 2
+        elif text[i] in "\"'`":
+            i = _skip_string_literal(text, i)
+        else:
+            i += 1
+    return spans
 # The detector's predicate is the **counter's own pattern**, not a lookalike.
 #
 # A reference implementation on the real runner (pm25coder, 2026-09-10, on this
@@ -687,11 +865,13 @@ def _commented_out_definitions(text: str) -> list[str]:
 
     The predicate is `_would_be_counted` (the counter's own pattern) rather than
     the lookalike `_BLOCK_COMMENT_DEFINITION`, so the detector fires only where
-    there is real drift - see the measurement above `_would_be_counted`.
+    there is real drift - see the measurement above `_would_be_counted`. The
+    spans come from `_block_comment_spans`, which reads strings and line
+    comments first, so an opener spelled inside a string literal is not one.
     """
     found: list[str] = []
-    for block in _BLOCK_COMMENT.finditer(text):
-        body = block.group(0)
+    for start, end in _block_comment_spans(text):
+        body = text[start:end]
         if _would_be_counted(body):
             found.append(body.splitlines()[0].strip())
     return found
@@ -1891,6 +2071,201 @@ def test_the_detector_does_not_fire_where_the_counter_never_counted() -> None:
             f"{label}: the counter and the runner agree here, so the detector must "
             "stay silent - firing would red a file with nothing to repair"
         )
+
+
+def test_an_opener_spelled_inside_a_string_literal_is_not_a_comment() -> None:
+    """A string holding `/*` must not open a span (measured 2026-10-09).
+
+    The shape is ordinary in this repo's own tests - a glob written `"dir/**"` -
+    and the regex this replaced could not tell a string from code: it opened a
+    span *inside* the string and ran it to the next terminator, so every live
+    definition between the two was reported as commented out. Asserted on the
+    span text as well as on the verdict, because a span that merely *exists* is
+    what the old finder produced too - it was in the wrong place.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        '"use strict";\n'
+        'const { test } = require("node:test");\n'
+        'const GLOBS = ["renderer/**", "vendor/**"];\n'
+        "\n"
+        'test("one", () => {});\n'
+        'test("two", () => {});\n'
+        "\n"
+        "/** helper docs */\n"
+        "function whitelistCovers(rel, list) { return true; }\n"
+    )
+    assert len(guard._DEFINITION_FORM.findall(body)) == 2, (
+        "premise: both live definitions are ones the counter counted, so a report "
+        "here would be about code the runner executes"
+    )
+    assert [body[s:e] for s, e in guard._block_comment_spans(body)] == ["/** helper docs */"], (
+        "the only block comment in this file is the trailing doc block; a span that "
+        "starts inside the string is the defect this finder replaced"
+    )
+    assert not guard._commented_out_definitions(body), (
+        "no definition sits inside a block comment here, so the detector must be silent"
+    )
+
+
+def test_the_detector_still_fires_with_an_opener_bearing_string_above_it() -> None:
+    """The positive half, string included: real drift is still reported.
+
+    Silencing the false red must not silence the tripwire - this is the shape the
+    eighth escape exists for, with the string-bearing line in front of it.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        'const GLOBS = ["renderer/**"];\n'
+        "/**\n"
+        'it("disabled", () => {});\n'
+        "*/\n"
+        'it("live", () => {});\n'
+    )
+    assert len(guard._DEFINITION_FORM.findall(body)) == 2, (
+        "premise: the counter counted the commented definition too, which is the "
+        "over-count this tripwire reports"
+    )
+    assert guard._commented_out_definitions(body), (
+        "a commented-out definition must still be reported when a string above it "
+        "carries the two characters `/*`"
+    )
+
+
+def test_the_span_finder_reads_line_comments_before_strings() -> None:
+    """An apostrophe in prose is not an unterminated string.
+
+    Without the line-comment context a `'` in a comment would look like a string
+    opener and could hide a real block comment below it - trading a false red for
+    the false green this tripwire exists to prevent.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        "// don't rewrite the block below by hand\n"
+        "/*\n"
+        'it("disabled", () => {});\n'
+        "*/\n"
+        'it("live", () => {});\n'
+    )
+    assert guard._commented_out_definitions(body), (
+        "the commented-out definition below the apostrophe-bearing comment must "
+        "still be found"
+    )
+
+
+def test_an_escaped_quote_does_not_end_the_string_it_is_inside() -> None:
+    """A `\\"` inside a string is not its end, so the `/*` after it is not code.
+
+    `_skip_string_literal`'s third clause - the escape skip - is load-bearing and,
+    like the newline clause #1949 pinned, reached by no row: measured 2026-10-09
+    (cycle `cyc20261009-023556`), deleting it leaves this file green (79 passed).
+    Without it the walk closes the string at the escaped quote and resumes inside
+    it, so a `/* ... */` run in the string's own text is reported as a block
+    comment that is not there.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        'const s = "a\\"/* not a comment */";\n'
+        "/** helper docs */\n"
+        'it("live", () => {});\n'
+    )
+    assert '\\"' in body, "premise: the string carries an escaped quote"
+    assert [body[a:b] for a, b in guard._block_comment_spans(body)] == ["/** helper docs */"], (
+        "the `/*` inside the string must not open a span - with the escape skip "
+        "removed the scan closes the string at the escaped quote and resumes inside "
+        "it, reporting a comment that is not there"
+    )
+
+
+def test_a_quote_in_code_position_does_not_swallow_the_block_below() -> None:
+    """The clause that skips an unclosed quote is load-bearing, so it is pinned.
+
+    A quote in **code** position - the apostrophe of a regex literal, the one
+    shape `_block_comment_spans` declares it cannot model - never closes on its
+    line, so the skip is what keeps the walk alive: without it the literal is
+    read as an unterminated string, the walk runs to the end of the file, and the
+    block comment below is never seen. That silent return is the false green this
+    tripwire exists to prevent. Measured 2026-10-09 (`cyc20261009-022334`):
+    removing the clause leaves the whole file green, so this is the row that
+    reaches it; the neighbouring apostrophe row does not, because the
+    line-comment branch answers its input first.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        "const re = /don't/;\n"
+        "/**\n"
+        'it("disabled", () => {});\n'
+        "*/\n"
+        'it("live", () => {});\n'
+    )
+    assert len(guard._DEFINITION_FORM.findall(body)) == 2, (
+        "premise: the counter counted the commented definition too, which is the "
+        "over-count this tripwire reports"
+    )
+    assert guard._commented_out_definitions(body) == ["/**"], (
+        "the one block comment in this body must still be reported - a quote in "
+        "code position is skipped alone, and without that skip the walk runs to "
+        "the end of the file and the block below is never seen"
+    )
+
+
+def test_a_template_literal_crossing_a_line_hides_no_comment_inside_it() -> None:
+    """A `` ` `` quotes a string that legally spans lines, so a newline does not end it.
+
+    `_skip_string_literal`'s newline clause carries one exception - `quote != "`"` -
+    and no row reached it, the same way the clause itself (#1949) and the escape skip
+    beside it (#1955) had none: measured 2026-10-09 (cycle `cyc20261009-071031`),
+    dropping the condition leaves this file green (**80 passed**). It is load-bearing:
+    without it the walk stops at the first newline **inside** the template and resumes
+    there, so a `/* ... */` run in the template's own text is reported as a block
+    comment that is not there - a span that then judges every definition below it, the
+    false red this file's history is made of. The shape is not exotic: 22 of the 56
+    files this finder runs over already carry a multi-line backtick literal (measured
+    the same way); only a `/*` run inside one is absent today, which is why this is a
+    trap closed rather than a live false red repaired.
+    """
+    guard = _loaded_guard_module()
+    body = (
+        "const sql = `\n"
+        "/* not a comment */\n"
+        "`;\n"
+        'it("live", () => {});\n'
+    )
+    assert "`" in body and "/*" in body, (
+        "premise: the template spans a line and carries a comment-like run"
+    )
+    assert [body[a:b] for a, b in guard._block_comment_spans(body)] == [], (
+        "the `/*` inside the template literal must not open a span - with the "
+        "backtick exception dropped the walk stops at the first newline inside the "
+        "template, resumes inside it, and reports a comment that is not there"
+    )
+
+
+def test_an_unterminated_opener_runs_to_the_end_of_the_file() -> None:
+    """An unclosed `/*` is a comment to EOF, which is how a compiler reads it.
+
+    The `close == -1` half of `_block_comment_spans` has no row either: measured
+    2026-10-09 (cycle `cyc20261009-071031`), replacing `n if close == -1 else close + 2`
+    with `close + 2` leaves this file green (**80 passed**), and the same holds for the
+    `break` that stops the walk. It is load-bearing, and what it decides is the
+    detector's verdict rather than the span alone: everything below the opener is
+    inside the comment, so a definition down there really is commented out and the
+    tripwire must report it. Left unpinned, the paragraph in the scanner's docstring
+    that states this ("An unterminated `/*` runs to the end of the file") is prose
+    nothing measures.
+    """
+    guard = _loaded_guard_module()
+    body = 'const a = 1;\n/* not closed\nit("swallowed", () => {});\n'
+    assert len(guard._DEFINITION_FORM.findall(body)) == 1, (
+        "premise: the counter counted the definition the unterminated comment swallows"
+    )
+    assert [body[a:b] for a, b in guard._block_comment_spans(body)] == [body[body.index("/*") :]], (
+        "an unterminated `/*` runs to the end of the file, so the span is the whole "
+        "tail - not a two-character span, which is what `close + 2` would store"
+    )
+    assert guard._commented_out_definitions(body) == ["/* not closed"], (
+        "the swallowed definition must be reported: it is inside the comment"
+    )
 
 
 def test_the_detector_and_the_counter_share_one_definition_of_counted() -> None:

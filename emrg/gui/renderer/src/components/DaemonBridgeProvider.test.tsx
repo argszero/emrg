@@ -6,7 +6,7 @@ import { DaemonBridgeProvider, useDaemonBridge } from "./DaemonBridgeProvider";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { I18nProvider } from "../lib/i18n";
 import { useSnapshotStore } from "../hooks/useSnapshotStore";
-import type { DaemonEventFrame } from "../lib/daemonBridge";
+import type { DaemonBridge, DaemonEventFrame } from "../lib/daemonBridge";
 
 /**
  * DaemonBridgeProvider.test.tsx — Batch 5 slice 2：AppProviders daemon-event
@@ -34,12 +34,22 @@ function mockEmrg() {
     open_sessions: [{ sid: "s1", projectName: "p" }],
     active_sid: "s1",
   });
-  (window as unknown as { emrg?: unknown }).emrg = { onEvent, sendMessage, init };
+  const setSandbox = vi.fn().mockResolvedValue(undefined);
+  const respondApproval = vi.fn().mockResolvedValue({ ok: true });
+  (window as unknown as { emrg?: unknown }).emrg = {
+    onEvent,
+    sendMessage,
+    init,
+    setSandbox,
+    respondApproval,
+  };
   return {
     listeners,
     onEvent,
     sendMessage,
     init,
+    setSandbox,
+    respondApproval,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -148,5 +158,63 @@ describe("DaemonBridgeProvider (Batch 5 slice 2)", () => {
     expect(m.listeners.size).toBe(1);
     unmount();
     expect(m.listeners.size).toBe(0);
+  });
+
+  /**
+   * The seam this test exists for (measured 2026-10-08): `emrg:setSandbox` and
+   * `emrg:respondApproval` both existed in main.js and preload.js, and the bridge
+   * declared both — but the deps literal *here* handed neither over, so the click
+   * reached `emrg.setSandbox === undefined` and the bridge answered `false`
+   * (fail-closed, silently). A test that injects a fake bridge cannot see this: it
+   * replaces the very object the provider failed to fill in. So drive the real
+   * provider against a fake `window.emrg` and assert the call that crosses the seam.
+   * Both directions are checked for each channel: handed over when present, and
+   * still `false` (not a throw) when the preload predates the API.
+   */
+  it("把 setSandbox / respondApproval 交给桥（存在但未交接 = 静默失效）", async () => {
+    const m = mockEmrg();
+    let api: DaemonBridge | null = null;
+    function Probe() {
+      api = useDaemonBridge().bridge;
+      return <div />;
+    }
+    render(wrapper(<Probe />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api).not.toBeNull());
+
+    // 通道 1：setSandbox —— 点击 chip 的路径
+    await expect(api!.setSandbox("s1", "read-only")).resolves.toBe(true);
+    expect(m.setSandbox).toHaveBeenCalledWith({ sessionId: "s1", mode: "read-only" });
+
+    // 通道 2：respondApproval —— 先要有一封待答的提问，答案才有对象可回
+    m.emit({
+      type: "approval_request",
+      data: { request_id: "rq-1", question: "allow?", timeout_seconds: 120 },
+      sid: "s1",
+    });
+    await waitFor(() => expect(api!.store.get().pendingApproval).not.toBeNull());
+    await expect(api!.respondApproval(true)).resolves.toBe(true);
+    expect(m.respondApproval).toHaveBeenCalledWith({
+      sessionId: "s1",
+      requestId: "rq-1",
+      approved: true,
+    });
+  });
+
+  it("preload 缺这两个通道时返回 false 而非抛错（旧 preload 降级）", async () => {
+    const m = mockEmrg();
+    const emrg = (window as unknown as { emrg: Record<string, unknown> }).emrg;
+    delete emrg.setSandbox;
+    delete emrg.respondApproval;
+    let api: DaemonBridge | null = null;
+    function Probe() {
+      api = useDaemonBridge().bridge;
+      return <div />;
+    }
+    render(wrapper(<Probe />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api).not.toBeNull());
+    await expect(api!.setSandbox("s1", "read-only")).resolves.toBe(false);
+    await expect(api!.respondApproval(true)).resolves.toBe(false);
   });
 });

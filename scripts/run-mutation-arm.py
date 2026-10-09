@@ -75,6 +75,13 @@ earlier assertion on the same test fires first (it echoed `assert 1 < 0`; that f
 killed the arm in one step). The block is printed for this verdict only - for KILLED the
 expectation already matched, and for the refusals there is nothing to search for.
 
+A refused pre-flight prints the nodes that failed *before* the mutation, capped at
+`_PREFLIGHT_FAILURES_PRINTED`, under the `preflight:` line. Same reasoning one state
+earlier: the refusal's remedy has to name a cause, and "check the node id" is one of
+three - a node-id cause and a tree that was already red both reach it. The failing nodes
+are the datum that tells them apart, pytest prints them unasked, and measured
+2026-10-09 (`cyc20261009-133913`) a refusal with twenty failures printed none of them.
+
 What it does, in order
 ----------------------
 1. snapshot the named file and resolve the mutation anchor (exactly one occurrence);
@@ -82,7 +89,10 @@ What it does, in order
    is the escape hatch for an arm whose target is already red, and says so in the
    verdict, because the attribution is then the reader's);
 3. apply the replacement and assert the file really changed;
-4. run the target: `HOME`/`TMPDIR`/`TMP`/`TEMP` are pinned to a fresh temporary
+4. run the target, under the interpreter `_pytest_interpreter` resolves once for both
+   runs (the invoking one, or the checkout's own `.venv` when that one cannot import
+   pytest - the rule is asked of `scripts/check-merge-plan-suite.py`, which owns it):
+   `HOME`/`TMPDIR`/`TMP`/`TEMP` are pinned to a fresh temporary
    directory **for the child only** (`emrg/server/evolution_prompt.md` states the
    rule: a temp-root home is itself a writable zone, so a *process-wide* pinned `HOME`
    turns a sandbox test red - a false red, not a regression), bytecode writing is
@@ -126,12 +136,14 @@ The file is restored on every path, including a failure inside this tool.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import traceback
 import tempfile
 from pathlib import Path
 
@@ -162,6 +174,36 @@ EXIT_RESTORE_MISMATCH = 5
 #: `1 passed in 0.02s`, `3 passed, 1 warning in 0.10s` - the count pytest prints.
 _PASSED = re.compile(r"(\d+) passed")
 
+#: pytest's own words when the interpreter the target was run with cannot import it.
+#: Both spellings, because the two ways that happens print differently: `-m pytest` with
+#: the module absent prints `<python>: No module named pytest` (measured 2026-10-05 on
+#: this host's python3.13), and an ImportError raised while collecting prints the quoted
+#: `ModuleNotFoundError: No module named 'pytest'`. A matcher for one of the two would
+#: miss half the readings it exists for, which is what the `identity imported` /
+#: `3 identities imported` lesson in `emrg/server/evolution_prompt.md` §1.1 records.
+#:
+#: The module is **captured and compared**, not spelled into the pattern, because this
+#: sentence names every module a run could not import: `No module named 'pytest_asyncio'`
+#: is a missing *plugin* - pytest imports and a plugin does not - and a literal `pytest`
+#: with no right boundary read it as "the interpreter cannot import pytest", which is a
+#: cause nobody measured (veto, measured 2026-10-06 by `cyc20261006-131455`; the three
+#: plugin names it listed all fired). Reading the name out is what makes the third cause
+#: separable at all - `_missing_module` is the reader, and its callers decide what the
+#: name means.
+_NO_MODULE = re.compile(r"No module named '?([A-Za-z_][\w.]*)'?")
+
+
+def _missing_module(out: str) -> str:
+    """The module this run's output says it could not import, or `""` if it named none.
+
+    A trailing `.` is stripped: `No module named pytest.` is the same reading as
+    `No module named pytest` (the period belongs to the sentence around it, not to the
+    name), while `pytest.core` keeps its dot and is therefore *not* pytest itself - the
+    distinction the veto turned on, where an unanchored matcher could not tell them apart.
+    """
+    match = _NO_MODULE.search(out)
+    return match.group(1).rstrip(".") if match else ""
+
 #: pytest's two echoed forms of the assertion that failed: the source line it writes
 #: with `>`, and its explanation, written with `E` - which carries the values
 #: substituted (`E   assert 0 == 1`). Both are text the run really printed, so either
@@ -184,6 +226,12 @@ _ECHOED_ASSERTION = re.compile(r"^[>E]\s+(?P<text>.*\bassert\b.*)$")
 _ASSERTION_CANDIDATES = 5
 _ASSERTION_MAX_CHARS = 200
 
+#: How many of a refused pre-flight's failing nodes the report prints by name. Capped for
+#: the same reason as the candidates above, and the count it leaves out is printed rather
+#: than dropped: a reader who has to know whether the list named one file or twenty can
+#: see it, and the names are the evidence the verdict turns on.
+_PREFLIGHT_FAILURES_PRINTED = 5
+
 
 def _purge_bytecode(target: Path) -> list[str]:
     """Delete the bytecode caches that could answer for the mutated file.
@@ -202,8 +250,17 @@ def _purge_bytecode(target: Path) -> list[str]:
     return removed
 
 
-def _run_target(node: list[str], cwd: Path, home: Path) -> subprocess.CompletedProcess[str]:
+def _run_target(
+    node: list[str], cwd: Path, home: Path, python: str
+) -> subprocess.CompletedProcess[str]:
     """Run the named pytest target, with the child-only environment pinning.
+
+    `python` is the interpreter the arm is judged under, resolved by
+    `_pytest_interpreter` - not `sys.executable` unconditionally. The two differ only
+    when the interpreter this tool was invoked with cannot import pytest at all, which
+    is never a deliberate choice: an arm cannot be judged by an interpreter that has no
+    runner, so that case is a refusal today and is the wrong answer to the question the
+    caller asked (see `_pytest_interpreter` for the measurement).
 
     `HOME`/`TMPDIR`/`TMP`/`TEMP` are the *arm's* temp root and are passed to this child
     only - pinning them for the whole tool (or worse, for the whole suite) is the
@@ -218,7 +275,7 @@ def _run_target(node: list[str], cwd: Path, home: Path) -> subprocess.CompletedP
         PYTHONDONTWRITEBYTECODE="1",
     )
     return subprocess.run(
-        [sys.executable, "-m", "pytest", *node, "-q", "-p", "no:cacheprovider"],
+        [python, "-m", "pytest", *node, "-q", "-p", "no:cacheprovider"],
         cwd=str(cwd),
         capture_output=True,
         text=True,
@@ -232,13 +289,28 @@ def _combined(proc: subprocess.CompletedProcess[str]) -> str:
     return (proc.stdout or "") + (proc.stderr or "")
 
 
-def _failed_node(out: str) -> str:
-    """The first `FAILED <node>` line pytest printed, or empty - evidence, not a count."""
+def _failed_nodes(out: str) -> list[str]:
+    """Every `FAILED <node>` line pytest printed, in order - evidence, not a count.
+
+    All of them rather than the first, because which nodes failed is the datum that
+    separates the two situations one verdict covers: a target that is wrong fails on
+    its own nodes, while a tree that was already red fails on files the arm never
+    touched. Measured 2026-10-09 (`cyc20261009-133913`): a refused pre-flight on a
+    tree whose every failure was in another file printed `failed node: -`, and the
+    remedy sent the reader to the node id - which was not wrong.
+    """
+    found: list[str] = []
     for line in out.splitlines():
         stripped = line.strip()
         if stripped.startswith("FAILED "):
-            return stripped[len("FAILED ") :].split(" - ")[0].strip()
-    return ""
+            found.append(stripped[len("FAILED ") :].split(" - ")[0].strip())
+    return found
+
+
+def _failed_node(out: str) -> str:
+    """The first `FAILED <node>` line pytest printed, or empty - evidence, not a count."""
+    nodes = _failed_nodes(out)
+    return nodes[0] if nodes else ""
 
 
 def _passed_count(out: str) -> int:
@@ -335,6 +407,168 @@ def _apply(text: str, old: str, new: str) -> str | None:
     return text.replace(old, new, 1)
 
 
+#: The gate that already owns the answer to *which interpreter runs pytest here*.
+#: Loaded from its file rather than copied, the same way `check-merge-plan-suite.py`
+#: loads `check-merge-sequence.py` and both load `merge_tree.py`: a rule with two
+#: implementations is a rule free to drift apart, and this one has already been answered
+#: twice on one host. Measured 2026-10-05 (`cyc20261005-212445`), under a bare `python3`
+#: (this host's resolves to the *installed* interpreter, which has no pytest):
+#:
+#:     check-merge-plan-suite._suite_interpreter() -> <checkout>/.venv/bin/python
+#:     run-mutation-arm: TARGET-BROKEN, "check the node id"
+#:
+#: One question, two answers - the gate resolved an interpreter that can run the thing it
+#: measures, and this tool refused the arm while naming a cause that was not the cause.
+_GATE = Path(__file__).resolve().parent / "check-merge-plan-suite.py"
+
+
+#: The answer, once loaded: the gate is asked per run, and re-executing its module on
+#: every call would be both wasteful and wrong for a reader who needs to see that this
+#: tool has one source for the rule (`_pytest_interpreter`'s callers include the tests
+#: that pin the delegation).
+_GATE_MODULE: object | None = None
+
+
+def _load_gate():
+    """The gate module, loaded from its file once and kept.
+
+    No failure is handled *here*, on purpose: a gate that is missing, unreadable or will
+    not compile raises out of `exec_module`, and `main` turns that into the UNJUDGEABLE
+    verdict (`_why_no_interpreter`) rather than a traceback. The `if spec is None or
+    spec.loader is None` guard that used to sit here was **unreachable for exactly that
+    case**, which made it a refusal that could never fire: `spec_from_file_location`
+    returns a spec *and* a `SourceFileLoader` for a path that does not exist (measured
+    2026-10-06, `cyc20261006-020931`: `ModuleSpec(name='x', loader=<SourceFileLoader …>,
+    origin='/definitely/not/here.py')`), so the `RuntimeError` was dead code and the live
+    path was an uncaught `FileNotFoundError`.
+    """
+    global _GATE_MODULE
+    if _GATE_MODULE is not None:
+        return _GATE_MODULE
+    spec = importlib.util.spec_from_file_location("check_merge_plan_suite", _GATE)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _GATE_MODULE = module
+    return module
+
+
+def _pytest_interpreter(own: str | None = None, root: Path | None = None) -> str:
+    """The interpreter the arm is judged under: the caller's, or one that can import pytest.
+
+    Asked of the gate, never re-implemented here. The gate's rule is "this interpreter if
+    it can import pytest, else the checkout's own `.venv`", and it is the right rule for an
+    arm for the same reason it is right for the suite: an arm judged by an interpreter with
+    no runner has measured nothing, and refusing is not more honest than using the
+    interpreter the checkout ships. The resolved path is reported, so the evidence names
+    the environment it came from rather than leaving it implied.
+    """
+    return _load_gate()._suite_interpreter(own, root)
+
+
+def _why_no_interpreter(exc: BaseException) -> str:
+    """Why the arm could not be judged at all, because the rule could not be asked.
+
+    The interpreter is not resolved here: it is *asked of* `_GATE`, a file beside this
+    tool (`_pytest_interpreter`). A gate that is missing, unreadable or will not compile
+    therefore leaves the question unanswered - and an arm whose interpreter is unknown has
+    measured nothing, which is what this verdict means rather than a refusal about the
+    target. Nothing has been run and nothing has been written when this is printed.
+
+    This exists because the alternative was measured, not imagined (2026-10-06,
+    `cyc20261006-020931`): with the gate unloadable the tool exited **1** - which this file
+    defines as `EXIT_SURVIVED` - after a traceback and with no `verdict:` line, so a caller
+    reading the exit code read "the target still passed with the mutation in place" out of
+    a run that never started.
+    """
+    return (
+        f"the interpreter to judge the arm under could not be resolved: "
+        f"{type(exc).__name__}: {exc}. This tool asks {_GATE.name}, beside it, for the rule, "
+        "so that gate has to be present and loadable; nothing has been run and nothing has "
+        "been mutated. An arm whose interpreter could not be resolved has measured nothing, "
+        "which is what this verdict means - check the gate first "
+        "(uv run --no-sync python3 scripts/check-merge-plan-suite.py --help)"
+    )
+
+
+def _names_the_failing_nodes(out: str) -> str:
+    """One sentence for the refusal whose pre-flight failed on named nodes, or "".
+
+    Present only when the run named some, because the sentence points at evidence that
+    is then in the report: the node-id reading is one of three causes and it is the one
+    that is wrong whenever the failures are in files this arm never touched. Measured
+    2026-10-09 (`cyc20261009-133913`): a full-suite arm on PR #1978's head was refused
+    with 20 failures, every one of them in an unrelated file, and the verdict sent the
+    reader to the node id and the interpreter instead of showing them.
+    """
+    if not _failed_nodes(out):
+        return ""
+    return (
+        " The nodes that failed before any mutation are named under the pre-flight line, "
+        "and their names settle the cause before the node id does: a list naming files "
+        "other than the target's own is a tree that was already red before this arm ran, "
+        "and then no node id was wrong"
+    )
+
+
+def _why_target_broken(rc: int, passed: int, out: str, interpreter: str) -> str:
+    """Why the pre-flight refused, read from the run's own output.
+
+    Three causes reach this refusal with different remedies, so the reason is read rather
+    than assumed. Measured 2026-10-05 (`cyc20261005-191637`), on this host: running this
+    tool with an interpreter that cannot import pytest - a bare `python3` here resolves
+    to the *installed* interpreter, not the checkout's - gave `rc=1, 0 passed`, and the
+    message sent the caller to re-check a node id that the same tool, under the
+    checkout's runner, runs green (`uv run --no-sync pytest <node>` -> `1 passed`). The
+    output said which of the two it was all along, and this function reads it.
+
+    The third is the same sentence naming a different module, and it was the veto's
+    subject (2026-10-06, `cyc20261006-131455`): a run whose output says
+    `No module named 'pytest_asyncio'` had measurable pytest and one missing plugin, and
+    the two-cause reader called it "the interpreter cannot import pytest". A report that
+    names a cause has to have read it, so the module is named and only `pytest` itself
+    takes the interpreter branch.
+
+    `interpreter` is the one the run *actually used*, so the message is about the thing
+    that ran: it must not name `sys.executable` when the resolver substituted a different
+    one. Every branch names it, so the causes stay separable from the report even when the
+    detector does not fire.
+    """
+    missing = _missing_module(out)
+    if missing == "pytest":
+        line = next(text for text in out.splitlines() if _NO_MODULE.search(text)).strip()
+        return (
+            f"before any mutation the target exited {rc} with {passed} passed, because "
+            f"the interpreter this tool ran it with cannot import pytest: {line}. This "
+            f"tool runs the target with the interpreter it resolved ({interpreter}), so "
+            "the node id is not the cause - and because the resolver already fell back to "
+            "the checkout's own `.venv`, more than one interpreter has been tried: "
+            "install pytest (`uv sync`) or run the arm through the checkout's runner "
+            "(uv run --no-sync python3)"
+        )
+    if missing:
+        line = next(text for text in out.splitlines() if _NO_MODULE.search(text)).strip()
+        return (
+            f"before any mutation the target exited {rc} with {passed} passed, because "
+            f"the run could not import a module: {line}. The target never collected, so "
+            f"the node id is not the cause; the module named there is, and it is not "
+            f"pytest itself - the run named {missing!r}, which is read apart from "
+            f"pytest because a module that will not import is not an interpreter that "
+            f"lacks pytest. Install it in the environment this tool runs with "
+            f"({interpreter}), or run the arm through the checkout's runner "
+            "(uv run --no-sync python3)"
+        )
+    return (
+        f"before any mutation the target exited {rc} with {passed} passed. An arm can "
+        "only attribute a failure to its mutation if the target collected and passed "
+        "first - check the node id (a class method needs its class: "
+        "tests/test_x.py::TestC::test_y). The run was made with the interpreter this "
+        f"tool resolved ({interpreter}); if that is not the one you meant, run the arm "
+        "through the checkout's runner(s) rather than a bare python3, which can resolve "
+        f"to the installed interpreter.{_names_the_failing_nodes(out)}"
+    )
+
+
 class Arm:
     """One arm's state, so the verdict is computed before anything is printed."""
 
@@ -345,6 +579,13 @@ class Arm:
         self.original = original
         self.preflight = "skipped" if args.no_preflight else "pending"
         self.failed_node = ""
+        #: the nodes the *pre-flight* failed on, in pytest's own order. Printed on a
+        #: refusal because their names are the only datum that separates "this arm's
+        #: target is wrong" from "this tree was already red before the arm ran" - and
+        #: the verdict's prose names the node id either way. Measured 2026-10-09
+        #: (`cyc20261009-133913`): a refusal whose 20 failures were all in files the
+        #: arm never touched printed `failed node: -`.
+        self.preflight_failures: list[str] = []
         self.restored: bool | None = None
         self.verdict = ""
         self.why = ""
@@ -362,6 +603,11 @@ class Arm:
         #: verdict never has to infer the cause from an exit code that means two
         #: different things depending on how the target was named.
         self.syntax_error = ""
+        #: the interpreter both runs used, resolved before either of them. Printed
+        #: because the resolver can substitute the checkout's `.venv` for the caller's
+        #: interpreter, and evidence that does not name its environment is evidence a
+        #: reader has to guess about.
+        self.interpreter = ""
 
     def decide(self, verdict: str, why: str, code: int) -> None:
         self.verdict, self.why, self.code = verdict, why, code
@@ -373,7 +619,9 @@ class Arm:
             "label": self.args.label,
             "node": list(self.args.node),
             "expect": self.args.expect,
+            "interpreter": self.interpreter,
             "preflight": self.preflight,
+            "preflight_failures": list(self.preflight_failures),
             "failed_node": self.failed_node,
             "mutated_rc": self.mutated_rc,
             "mutated_passed": self.mutated_passed,
@@ -397,7 +645,20 @@ def _report(arm: Arm, as_json: bool) -> None:
     print(f"tree: {arm.cwd}")
     print(f"file: {arm.target}")
     print(f"target: {', '.join(arm.args.node)}")
+    print(f"interpreter: {arm.interpreter or '(not resolved - the arm stopped first)'}")
     print(f"preflight: {arm.preflight}")
+    if arm.verdict == TARGET_BROKEN and arm.preflight_failures:
+        # The refusal's own evidence, and the reason it is here rather than in the
+        # verdict's prose: which nodes failed is what tells the reader whether the arm's
+        # target is wrong or the whole tree was already red, and both shapes reach this
+        # verdict. Measured 2026-10-09 (`cyc20261009-133913`), where that list was the
+        # only thing separating a broken full-suite arm from a broken tree.
+        print("the pre-flight failed before any mutation, on:")
+        for node in arm.preflight_failures[:_PREFLIGHT_FAILURES_PRINTED]:
+            print(f"  {node}")
+        hidden = len(arm.preflight_failures) - _PREFLIGHT_FAILURES_PRINTED
+        if hidden > 0:
+            print(f"  ... and {hidden} more")
     print(f"mutated run: rc={arm.mutated_rc} passed={arm.mutated_passed}")
     print(f"failed node: {arm.failed_node or '-'}")
     print(f"restored byte-for-byte: {arm.restored}")
@@ -491,22 +752,43 @@ def main(argv: list[str] | None = None) -> int:
 
     home = Path(tempfile.mkdtemp(prefix="emrg-arm-"))
     mutated_on_disk = False
+    # Resolved once, before either run, so the pre-flight and the judged run cannot be
+    # about two different interpreters - and reported, because the evidence has to name
+    # the environment it came from when the resolver substitutes one.
+    #
+    # A resolver that cannot answer is a **verdict**, not a traceback. The gate is a file
+    # loaded from disk, so it can be missing, unreadable or not compiling - a parallel
+    # cycle mid-edit on it is enough - and an uncaught exception here exits 1, which this
+    # file defines as `EXIT_SURVIVED` (measured 2026-10-06, `cyc20261006-020931`: a gate
+    # with one broken line appended, and a tool standing alone without one, each exited 1
+    # with no `verdict:` line). Every other outcome in this tool leaves through `_report`;
+    # so does this one, and the verdict is UNJUDGEABLE because an arm whose interpreter is
+    # unknown has measured nothing.
+    try:
+        python = _pytest_interpreter()
+    except Exception as exc:  # noqa: BLE001 - the cause is named, not swallowed
+        arm.decide(UNJUDGEABLE, _why_no_interpreter(exc), EXIT_UNJUDGEABLE)
+        shutil.rmtree(home, ignore_errors=True)
+        _report(arm, args.json)
+        return arm.code
+    arm.interpreter = python
     try:
         if not args.no_preflight:
-            proc = _run_target(args.node, cwd, home)
+            proc = _run_target(args.node, cwd, home, python)
             passed = _passed_count(_combined(proc))
             if proc.returncode != PYTEST_OK or passed < 1:
                 # A refusal is a verdict like any other, so it goes through the same
                 # report path: an unattributed non-zero exit is the failure this tool
-                # exists to prevent, and that includes this tool's own.
+                # exists to prevent, and that includes this tool's own. Which of the
+                # causes it was is read from the output, not assumed - see
+                # `_why_target_broken`.
                 arm.preflight = f"refused (rc={proc.returncode}, {passed} passed)"
+                arm.preflight_failures = _failed_nodes(_combined(proc))
                 arm.decide(
                     TARGET_BROKEN,
-                    f"before any mutation the target exited {proc.returncode} with "
-                    f"{passed} passed. An arm can only attribute a failure to its "
-                    "mutation if the target collected and passed first - check the node "
-                    "id (a class method needs its class: "
-                    "tests/test_x.py::TestC::test_y)",
+                    _why_target_broken(
+                        proc.returncode, passed, _combined(proc), python
+                    ),
                     EXIT_TARGET_BROKEN,
                 )
             else:
@@ -517,7 +799,7 @@ def main(argv: list[str] | None = None) -> int:
                 target.write_text(mutated, encoding="utf-8")
                 mutated_on_disk = True
                 _purge_bytecode(target)
-                proc = _run_target(args.node, cwd, home)
+                proc = _run_target(args.node, cwd, home, python)
                 out = _combined(proc)
                 arm.mutated_rc = proc.returncode
                 arm.mutated_passed = _passed_count(out)
@@ -564,5 +846,25 @@ def main(argv: list[str] | None = None) -> int:
     return arm.code
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_entry())

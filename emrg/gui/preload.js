@@ -11,6 +11,9 @@ const api = {
   sendMessage: (payload) => ipcRenderer.invoke("emrg:sendMessage", payload),
   // rant 2026-09-02T15:23:53：图片落盘（粘贴/拖拽 → base64 → main 写 <cwd>/.emrg/sessions/<sid>/images/）
   saveImage: (payload) => ipcRenderer.invoke("emrg:saveImage", payload),
+  // rant 2026-09-30T09:35:04 要求 4：系统给的图不受白名单所限——粘贴收到的是 renderer
+  // 解不了的格式（macOS 的 TIFF）时，向 main 要剪贴板里的图（NSImage 解码 → PNG）。
+  readClipboardImage: () => ipcRenderer.invoke("emrg:readClipboardImage"),
   listSessions: () => ipcRenderer.invoke("emrg:listSessions"),
   restartDaemon: () => ipcRenderer.invoke("emrg:restartDaemon"),
   relaunchGui: () => ipcRenderer.invoke("emrg:relaunchGui"),
@@ -21,6 +24,12 @@ const api = {
   getOpenSessions: () => ipcRenderer.invoke("emrg:getOpenSessions"),
   renameSession: (payload) => ipcRenderer.invoke("emrg:renameSession", payload),
   setModel: (payload) => ipcRenderer.invoke("emrg:setModel", payload),
+  // rant 2026-09-30T09:30:16（GUI 半边）：会话 sandbox 档位——客户端只发意图，
+  // daemon 落盘并广播 `sandbox_set`（自己那份回执与其他客户端收到的广播同形）。
+  setSandbox: (payload) => ipcRenderer.invoke("emrg:setSandbox", payload),
+  // rant 2026-10-09T09:43:39（GUI 半边）：会话的额外可写根——宿主点名一个路径、
+  // daemon 按当前档位的规则裁定并落盘，回帧是唯一的列表来源（客户端不自己记）。
+  setSandboxRoots: (payload) => ipcRenderer.invoke("emrg:setSandboxRoots", payload),
   clearSession: (payload) => ipcRenderer.invoke("emrg:clearSession", payload),
   compactSession: (payload) => ipcRenderer.invoke("emrg:compactSession", payload),
   // Approval channel (rant 2026-09-29T15:52:38.987951+08:00, requirement 1):

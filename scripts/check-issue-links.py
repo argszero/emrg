@@ -133,10 +133,33 @@ a queue where nobody declares one costs no file read, and a host without a ledge
 have a linked queue turned into exit 2 by a check nobody asked for.
 
 What the resolution cannot decide, stated rather than implied: `submit_rant cleanup` keeps all
-pending and in-progress rants plus the **ten most recent completed** ones, so an origin whose
-rant completed and was pruned reads `origin-unresolved` exactly like one never written. The
-row says so, because the reader's next move differs (worth the ledger's absence or not) and a
-row that hid the difference would be asking for a timestamp no file holds.
+pending and in-progress rants plus the **ten most recent completed** ones, so an origin can be
+absent either because the record was pruned or because it was never written. That difference is
+not guessed — it is computed from the ledger the reading already holds: an instant with fewer
+than ten completed rants **at or after** it cannot be a pruned record (an entry at that instant
+would have been kept whatever its status, since completion follows submission — a premise
+`emrg/server/rants.py::update_rant` now *enforces* rather than leaves to prose, refusing a
+completion stamp that does not follow the row's own submission instant, because a row that
+broke it would rank below an instant it was submitted after and be reported here as never
+held), while one with
+ten or more above it may be.
+
+A **third** case belongs to the same paragraph, because it changes the reader's move: a rant
+timestamp is host-local, indexing the ledger of the machine that wrote it
+(`check-rant-citations.py` records a reporter measuring 0 of 24 citations resolving on a second
+host — issue #1252), so an issue opened elsewhere names a handle that exists, in a store this
+process never reads. That is not guessed either: the row names the newest instant this ledger
+ranks a record by — the same `completed or timestamp` key the retention rule sorts by — and says
+whether the citation is newer than it. A citation newer than every record is one no prune could
+have displaced *and* one the store had not received by its last write, so the row is about a
+chain that cannot be walked from here; one that is not leaves the question where the retention
+arithmetic left it. The resolution stays a file read and never becomes a network call, so a row
+may say the handle can only be walked where it was opened — a different statement from a copy
+that could be restored.
+
+The row prints the case it measured, because the reader's next move
+differs — and because the remedy the other case suggests, *write it verbatim*, is available in
+neither: a ledger that does not hold the timestamp holds nothing to copy.
 
 Exit codes
 ----------
@@ -618,10 +641,13 @@ def load_rants(path: Path) -> set[str]:
     The set view of `load_rant_rows` — this is the question "does this handle resolve",
     which wants membership and nothing else.
     """
+    return _ledger_timestamps(load_rant_rows(path))
+
+
+def _ledger_timestamps(rows: list[dict]) -> set[str]:
+    """Every timestamp these rows hold — `load_rants` for rows already in hand."""
     return {
-        row["timestamp"]
-        for row in load_rant_rows(path)
-        if isinstance(row.get("timestamp"), str)
+        row["timestamp"] for row in rows if isinstance(row.get("timestamp"), str)
     }
 
 
@@ -675,18 +701,199 @@ def _same_instant_spelling(stored: str, cited: str) -> bool:
     )
 
 
+#: How many completed rants the store keeps. `emrg/server/rants.py::cleanup_rants` defaults to
+#: this and `submit_rant`'s cleanup action calls it with no `keep`, so the shipped number is
+#: this one; `tests/test_check_issue_links.py` measures the two against each other rather than
+#: trusting this comment, because the classification below is only as good as that number.
+_RETENTION_KEEP = 10
+
+
+def _parse_instant(text: str) -> dt.datetime | None:
+    """`text` as an instant, or `None` when it is not one (never a silent zero)."""
+    try:
+        return dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _retention_key(row: dict) -> str | None:
+    """The key the retention rule ranks a **completed** row by, or `None` for any other row.
+
+    ``cleanup_rants`` keeps every pending and in-progress rant and the ``keep`` most recent
+    completed ones *by completed timestamp, falling back to the submission one* — so a row's
+    rank is decided by ``completed or timestamp``. Reading the same key here matters: ranking by
+    the submission instant would count a record the retention rule would have kept.
+    """
+    if row.get("status") != "completed":
+        return None
+    key = row.get("completed") or row.get("timestamp")
+    return key if isinstance(key, str) and key else None
+
+
+def _completed_at_or_after(rows: list[dict], cited: str) -> int | None:
+    """How many completed rants the ledger still holds at or after the instant `cited`.
+
+    `None` when the two cannot be ordered — a citation that dropped its offset
+    (`2026-09-30T10:27:20`) and a stored instant that kept one are not comparable, and the
+    caller must then say so. Reading an unorderable pair as "nothing at or after it" would make
+    the loudest claim this reading can make ("the ledger never held this record") out of a
+    comparison that was never made, which is the direction this family always refuses.
+    """
+    want = _parse_instant(cited)
+    count = 0
+    for row in rows:
+        key = _retention_key(row)
+        if key is None:
+            continue
+        held = _parse_instant(key)
+        if want is None or held is None:
+            return None
+        if (want.tzinfo is None) != (held.tzinfo is None):
+            return None
+        if held >= want:
+            count += 1
+    return count
+
+
+def _newest_record_key(rows: list[dict], cited: str) -> str | None:
+    """The newest instant the ledger ranks *any* row by, or `None` when none is comparable.
+
+    Every row is measured by the key the retention rule and this reading both use —
+    ``completed or timestamp`` — and not by its submission instant alone: a completed row ranks
+    by when it *completed*, so a submission-only reading of "the ledger's newest record" can name
+    an instant the store itself ranks lower, in a sentence a reader is meant to act on.
+
+    Compared by parsed instant rather than by the string, because the store is sorted by the
+    string and a ledger whose rows mix offsets does not sort the way it reads. Rows whose instant
+    is not comparable with the citation (one aware, one naive) are left out rather than ordered
+    against it: an unorderable pair answers nothing (see `_completed_at_or_after`). `None` means
+    the question could not be measured here — never that the ledger is empty, and never that its
+    newest record is older than the citation.
+    """
+    want = _parse_instant(cited)
+    newest: str | None = None
+    newest_instant: dt.datetime | None = None
+    for row in rows:
+        key = row.get("completed") or row.get("timestamp")
+        if not isinstance(key, str) or not key:
+            continue
+        held = _parse_instant(key)
+        if want is None or held is None or (want.tzinfo is None) != (held.tzinfo is None):
+            continue
+        if newest_instant is None or held > newest_instant:
+            newest, newest_instant = key, held
+    return newest
+
+
+def _absent_origin_reading(rows: list[dict], cited: str) -> str:
+    """Why the ledger does not hold `cited`, computed from the ledger's own retention rule.
+
+    The two histories the old wording called indistinguishable are distinguishable from the
+    ledger in hand, and the arithmetic is short enough to check on the row itself:
+
+    * a record **completed** after the citation was submitted ranks above every completed record
+      dated at or after that instant, so if fewer than `_RETENTION_KEEP` of those are held, the
+      record would have been inside the kept window and is not missing by pruning — it is missing
+      because the ledger never held it. A pending or in-progress record is kept by rule in any
+      case, so this covers every status at once;
+    * with the cap reached above the cited instant, a prune is a live explanation and the reading
+      says that instead.
+
+    The first branch turns on one premise: **a completed row's key is at or after its own
+    submission instant** (a stamp equal to the submission is in order — the key is a rank, not
+    an interval). It is a contract with the writer, not a fact about the arithmetic, so it is
+    named here and enforced there: `emrg/server/rants.py::update_rant` refuses a completion
+    stamp that does not follow the row's timestamp, and
+    `tests/test_check_issue_links.py::test_the_premise_the_count_rests_on_is_enforced_by_the_writer`
+    drives that refusal from this side. A row that broke the premise anyway — one written before
+    the writer checked, or edited by hand — ranks *below* an instant it was submitted after, and
+    the branch below then reports a record the store really pruned as one that never existed:
+    the strongest sentence this reading can print, from a premise nothing here can re-check.
+
+    **The other half of the scope, and the reason the remedy is what it is.** A handle this
+    reading cannot resolve is not necessarily a defect in the issue: a rant timestamp is
+    host-local, indexing the ledger of the machine that *wrote* it (`check-rant-citations.py`
+    records a reporter measuring 0 of 24 citations resolving on a second host — issue #1252), so
+    an issue opened elsewhere names a record that exists, in a store this reading never sees.
+    The reader's move therefore depends on a fact the ledger carries, and the row measures it
+    rather than assuming it: **is the citation newer than every record this ledger ranks?** If it
+    is, nothing here ranked above the handle, the retention rule cannot have displaced it, and
+    the store had not received it by its own last write — the row is about a chain that cannot be
+    walked from here. If it is not, the store has received records at least as recent, and the
+    question stays where the retention arithmetic left it.
+
+    Neither branch offers "write the rant's own timestamp verbatim": there is nothing in a ledger
+    that does not hold the timestamp to copy from, and a row whose remedy cannot be performed
+    sends its reader to a file for a value that is not there. For the same reason neither sends
+    a reader looking for the submitting session *on this host* without saying that the session
+    may not have run here at all.
+    """
+    count = _completed_at_or_after(rows, cited)
+    if count is None:
+        return (
+            "the citation and the ledger's completed rants cannot be ordered (one of them "
+            "carries no offset), so whether the retention rule could have removed it is not "
+            "measurable here - and the ledger holds nothing to copy, so this line can only be "
+            "corrected against whatever submitted the rant, on whatever machine that was"
+        )
+    newest = _newest_record_key(rows, cited)
+    want = _parse_instant(cited)
+    held = _parse_instant(newest) if newest else None
+    if held is not None and want is not None and held < want:
+        store = (
+            f"this ledger's own newest record is `{newest}`, older than the citation, so nothing "
+            "here ranked above the handle and the ledger had not received it by its last write"
+        )
+    elif held is not None:
+        store = (
+            f"this ledger's own newest record is `{newest}`, at or after the citation, so the "
+            "store has received records at least as recent as this handle"
+        )
+    else:
+        store = (
+            "every handle of this kind indexes the ledger of the machine that wrote it, and this "
+            "store holds nothing comparable to date it against"
+        )
+    if count < _RETENTION_KEEP:
+        return (
+            f"the ledger holds {count} completed rant(s) at or after this instant, fewer than "
+            f"the {_RETENTION_KEEP} `submit_rant cleanup` keeps, so a rant dated at this instant "
+            f"would still be in the ledger whatever its status - the retention rule cannot "
+            f"explain the absence, and {store}. So either the handle was written on another "
+            "machine, where a rant timestamp resolves against that machine's own ledger and this "
+            "row says nothing about the chain, or nothing wrote it at all: an origin written "
+            "here can only be corrected against whatever submitted the rant (the session or "
+            "command that did), and one written elsewhere can only be walked where it was opened"
+        )
+    return (
+        f"the ledger holds {count} completed rant(s) at or after this instant, so the retention "
+        f"rule - all pending and in-progress rants plus the {_RETENTION_KEEP} most recent "
+        f"completed ones - may have removed it before this reading ran, and no copy remains here; "
+        f"{store}. A citation written on another machine reads the same way, so clear this row "
+        "where the rant lives before treating it as work"
+    )
+
+
 def judge_origins(
-    issues: list[dict], store: set[str], where: str
+    issues: list[dict], rows: list[dict], where: str
 ) -> dict[int, tuple[str, str]]:
     """Issue number -> `(state, detail)` for every origin fault; a clean origin is absent.
+
+    The ledger arrives as its **rows**, not as a set of timestamps: resolving a handle wants
+    membership, and classifying an *absent* one wants the retention rule's own key and status
+    (see `_absent_origin_reading`), which a set of timestamps has thrown away.
 
     Two faults, and they are different questions:
 
     * `origin-unresolved` — the issue names a rant origin the ledger does not hold, so the
       first joint of the chain `rant -> issue -> PR` is broken and a reader cannot reach
-      the requirement the issue exists to carry. The detail names the ledger it read and,
-      when a stored timestamp differs from the citation only by the precision a writer
-      dropped, names that stored spelling — a remedy a writer can follow.
+      the requirement the issue exists to carry. The detail names the ledger it read and then
+      says which of the two histories it measured: when a stored timestamp differs from the
+      citation only by the precision a writer dropped, it names that stored spelling — a remedy
+      a writer can follow — and otherwise it reports whether the retention rule could have
+      pruned the record at all, and whether the citation is newer than every record the ledger
+      ranks: the fact that decides whether this store could have held the handle, or whether it
+      was written on the machine that owns the ledger it resolves against.
     * `origin-duplicate` — two or more **open** issues declare the same rant and at least
       one of them carries no `Part: n/N`. R5's default is one rant, one issue; the split is
       legitimate only when every part says which part it is, so an unlabelled one makes the
@@ -704,15 +911,18 @@ def judge_origins(
       what makes its `len` the issue count the threshold means.
 
     The pruned-store limit, stated rather than implied: `submit_rant cleanup` keeps all
-    pending and in-progress rants plus the ten most recent completed ones, so an issue
-    whose rant completed and was then pruned reads `origin-unresolved` exactly like one
-    whose origin was never written. That is the right direction here — an open issue whose
-    rant is gone is a chain a reader cannot walk either way — and the detail says so, which
-    is what keeps the row actionable.
+    pending and in-progress rants plus the ten most recent completed ones, so an origin can be
+    absent for two different reasons. The row distinguishes them from the ledger it is already
+    holding instead of asserting one: `_absent_origin_reading` computes whether the retention
+    rule *could* have removed a record at that instant, and says which case it measured. That is
+    the whole point of the sentence — an open issue whose rant is gone is a chain a reader
+    cannot walk either way, but "the ledger never held it" is a fact about the writer, and
+    "a prune removed it" is a fact about the store.
     """
     faults: dict[int, tuple[str, str]] = {}
     by_ts: dict[str, set[int]] = {}
     labelled: dict[int, bool] = {}
+    store = _ledger_timestamps(rows)
     for issue in issues:
         number = int(issue["number"])
         body = issue.get("body") or ""
@@ -722,18 +932,15 @@ def judge_origins(
             if ts in store:
                 continue
             near = sorted(t for t in store if _same_instant_spelling(t, ts))
-            remedy = (
-                f"the ledger holds `{near[0]}` - write it verbatim"
+            why = (
+                f"the ledger holds `{near[0]}` for that instant - write it verbatim"
                 if near
-                else "write the rant's own timestamp verbatim (the ledger is the only "
-                "place it is spelled)"
+                else _absent_origin_reading(rows, ts)
             )
             faults[number] = (
                 "origin-unresolved",
-                f"the origin line names rant `{ts}`, which {where} does not hold - {remedy}. "
-                "The ledger keeps every pending and in-progress rant and only the ten most "
-                "recent completed ones, so a pruned origin reads the same as one never "
-                "written: an open issue whose rant is gone is a chain no reader can walk",
+                f"the origin line names rant `{ts}`, which {where} does not hold - {why}. "
+                "An open issue whose rant is gone is a chain no reader can walk",
             )
     for ts, numbers in by_ts.items():
         if len(numbers) < 2:
@@ -1365,11 +1572,11 @@ def main(argv: list[str] | None = None) -> int:
     if declared:
         path = rants_path(args.rants)
         try:
-            store = load_rants(path)
+            ledger_rows = load_rant_rows(path)
         except RuntimeError as exc:
             print(f"cannot determine the issue/PR links: {exc}", file=sys.stderr)
             return 2
-        apply_origins(rows, judge_origins(queue.issues, store, f"the rant ledger ({path})"))
+        apply_origins(rows, judge_origins(queue.issues, ledger_rows, f"the rant ledger ({path})"))
 
     bad = [row for row in rows if not row.clean]
 
