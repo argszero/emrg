@@ -678,6 +678,7 @@ class BashToolV2(ToolExecutor):
             mode=arguments.get("sandbox"),
             workspace_root=workdir,
             session_id=arguments.get("session_id"),
+            extra_roots=arguments.get("writable_roots"),
         )
         # The command-text rules a checked tier makes (containment escape, and the
         # host's daemon-lifecycle red line) are read from the text by

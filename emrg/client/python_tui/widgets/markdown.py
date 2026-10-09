@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from rich.markdown import Markdown as RichMarkdown
 
 from emrg.client.python_tui.widgets.base import Line, RenderContext, Widget
+from emrg.client.python_tui.widgets.chat_row import format_message_time
 
 
 class Markdown(Widget):
@@ -65,6 +66,14 @@ class UserMarkdown(Markdown):
     _ROLE_PREFIX = "> "
     _ROLE_STYLE = "bold cyan"
 
+    def __init__(self, text: str = "", timestamp=None) -> None:
+        super().__init__(text)
+        # The daemon's moment for this message, set when its `user_message` frame
+        # arrives — a client cannot know it at the instant it echoes the text,
+        # and a local clock here would make the same record read two ways in two
+        # clients (rant 2026-10-09T09:25:00).
+        self.timestamp = timestamp
+
     def render(self, ctx: RenderContext) -> list[Line]:
         from rich.style import Style
 
@@ -84,6 +93,13 @@ class UserMarkdown(Markdown):
             line.spans.insert(0, Span(text=lead, style=role_style))
             line.style = ctx.style
             lines.append(line)
+
+        # Same placement and format as `ChatRow`, from the one formatter, so the
+        # two halves of a conversation read alike (rant 2026-10-09T09:25:00).
+        clock = format_message_time(self.timestamp)
+        if clock and lines:
+            lines[0].spans.append(Span(text=f"  {clock}", style="dim"))
+
         self._dirty = False
         return lines
 
@@ -133,6 +149,11 @@ class StreamingMarkdown(Widget):
     _dirty: bool = True
     code_theme: str = "monokai"
     _last_rendered: list[Line] = field(default_factory=list)
+    #: The daemon's moment for this reply. Empty while a turn is streaming — the
+    #: value does not exist until the record is written — and set from the `done`
+    #: frame, so the finished row shows the same `HH:MM` a reopen will
+    #: (rant 2026-10-09T09:25:00).
+    timestamp: str = ""
 
     @property
     def dirty(self) -> bool:
@@ -175,6 +196,12 @@ class StreamingMarkdown(Widget):
         lines = rich_renderable_to_lines(md, ctx.width)
         for line in lines:
             line.style = ctx.style
+
+        clock = format_message_time(self.timestamp)
+        if clock and lines:
+            from emrg.client.python_tui.widgets.base import Span
+
+            lines[0].spans.append(Span(text=f"  {clock}", style="dim"))
 
         self._last_rendered = lines
         self._dirty = False
