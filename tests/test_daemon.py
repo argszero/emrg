@@ -226,7 +226,8 @@ def test_system_prompt_rant_handling_section(tmp_path):
 
 
 def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
-    """A task's only channel to its own prompt text is a rant (rant 2026-10-09T14:35:15).
+    """A task's only channel to its own prompt text is a rant (host ruling
+    2026-10-09T14:34:54; PR #1986).
 
     The loop this closes, measured on 2026-10-09: the `competition` task wanted rules added
     to `emrg/server/competition_prompt.md`, and it could do nothing about it from its own
@@ -237,6 +238,13 @@ def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
     that matters cannot. The host ruled it directly (2026-10-09T14:34:54, session
     `emrg-evolution-competition-task`): 「你不能直接修改competition_prompt.md，丢宇emrg项目，
     你只能提rant」.
+
+    Both halves of the citation are asserted, for the reason `check-rant-citations.py` gives:
+    the timestamp is **host-local** — that session exists only on the host that recorded it,
+    so the message does not resolve on a second host (issue #1252 measured 0 of 24) — while
+    `PR #1986` stays resolvable forever. A reader who cannot see the local store still has
+    the anchor, so asserting the timestamp alone would pin a reference half of whose
+    provenance can rot.
 
     Asserted on the **render**: `system.j2` is the single render site every session receives,
     so a rule placed here reaches a `competition` or `paper` session that opens no other
@@ -257,11 +265,17 @@ def test_system_prompt_says_a_task_cannot_write_its_own_prompt():
         "the reason the write does not work is missing: without it the rule reads as a "
         "policy preference rather than a description of two copies"
     )
-    # R7: a rule recorded as the host's is a message that can be pointed at, so the quote
-    # is verbatim and the command that re-finds it is right beside it.
+    # A rule recorded as the host's is a message that can be pointed at: the quote is
+    # verbatim, the command that re-finds it is right beside it, and the reference carries
+    # the resolvable half too — the timestamp is host-local (issue #1252).
     assert "2026-10-09T14:34:54" in rendered, (
         "the host message the rule rests on is gone, so the rule rests on this instance's "
         "inference instead"
+    )
+    assert "PR #1986" in rendered, (
+        "the citation keeps only its host-local half: a timestamp indexes one machine's "
+        "store, so a reader on a second host has nothing to resolve — the public record "
+        "spelled beside it is the anchor that survives"
     )
     assert "丢宇emrg项目" in rendered, (
         "the host's own words are not quoted verbatim — the message is re-findable only by "
