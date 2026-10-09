@@ -26,6 +26,7 @@ real exit-code contract (`0` holds, `1` violated, `2` unmeasurable).
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -373,6 +374,65 @@ def test_the_two_templates_the_class_was_missing_are_listed(mod):
     """The membership the reading above is about, named rather than implied."""
     assert "emrg/server/competition_prompt.md" in mod.INSTRUCTION_FILES
     assert "emrg/server/prompts/memory_compaction.j2" in mod.INSTRUCTION_FILES
+
+
+def test_the_newly_listed_file_sites_name_the_prs_that_landed_them(mod):
+    """Membership is a claim until the file's own sites are scanned - and the records
+    have to name *the* PR that landed each citation, not merely a merged one.
+
+    The guard cannot tell those apart: its docstring rules that it "checks that a record
+    is **spelled**, not that it **resolves**", so `PR #999999` passes it. That edge is
+    deliberate, and it is why the claim is pinned here instead: `#1899` and `#1891` are
+    both real merged PRs, and an earlier draft of this change credited `#1899` on lines
+    13 and 15 - a PR whose diff does not contain the citation (it changed only
+    `vibe_check.j2`). The cause is worth stating, because it is the same host message
+    landed by two different PRs in two different files: `2026-10-06T10:40:46` reached
+    `vibe_check.j2` through `#1899` and `competition_prompt.md` through `#1891`, so a
+    record copied across files reads as right and is not.
+    """
+    sites, missing = mod.scan_tree(REPO_ROOT)
+    assert missing == []
+    comp = [s for s in sites if s.path.endswith("competition_prompt.md")]
+    assert len(comp) == 4, [s.key for s in comp]
+    assert all(s.has_record for s in comp), [s.key for s in comp if not s.has_record]
+    text = "\n".join(s.text for s in comp)
+    assert text.count("PR #1891") == 3, (
+        "the three citations the host gave on 2026-10-06/07 were landed by #1891 - the "
+        "commit that added them to this file - and not by #1899, which never touched it"
+    )
+    assert text.count("PR #1822") == 1
+    assert "PR #1899" not in text, (
+        "a record was carried across files: the same host message reached "
+        "`vibe_check.j2` through #1899 and this file through #1891"
+    )
+    # `problems` refuses a verdict over a subset, so ask it about the whole class.
+    assert not [p for p in mod.problems(sites) if "competition_prompt.md" in p]
+
+
+def test_the_two_omissions_compound_and_the_file_list_alone_moves_nothing(mod, monkeypatch):
+    """Measured: admitting the file without the word, and the word without the file,
+    each leave the same four citations invisible.
+
+    Listing `competition_prompt.md` while `CITATION` cannot see its bare `host, <ts>`
+    spelling reads the class at exactly the count it had with the file left out, so the
+    file-list reading (`missing_templates`) cannot find this on its own - which is why
+    both halves are one change. The delta is pinned rather than described, so narrowing
+    either half later is not mistaken for an unrelated count change.
+    """
+    sites, _ = mod.scan_tree(REPO_ROOT)
+    monkeypatch.setattr(
+        mod, "CITATION",
+        re.compile(r"\b(?P<word>[Rr]ants?|[Rr]ulings?|[Dd]irectives?)\b[^0-9\n]{0,3}"
+                   r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)"),
+    )
+    without_host_word, _ = mod.scan_tree(REPO_ROOT)
+    assert len(without_host_word) == len(sites) - 4
+    hidden = {(s.path, tuple(s.timestamps)) for s in without_host_word}
+    assert all(
+        s.path.endswith("competition_prompt.md")
+        for s in sites
+        if (s.path, tuple(s.timestamps)) not in hidden
+    ), "the four sites the bare spelling hides do not all live in the newly-listed file"
 
 
 def test_a_template_outside_the_class_is_reported(mod, tmp_path):
