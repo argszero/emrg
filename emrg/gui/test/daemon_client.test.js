@@ -789,6 +789,43 @@ test("rant 2026-09-30T09:47:11：turn_start/turn_end 广播转发（GUI 会话�
   assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
 });
 
+test("rant 2026-10-09T09:43:39：sandbox_roots 帧转发（GUI 的额外可写根，含拒绝帧）", async () => {
+  // 与 turn_start 同一个形状的缝：daemon 广播、渲染层有 case、中间层把它丢进兜底。
+  // 这里多一层理由：拒绝也是这**同一个** type（daemon 对三种 op、两条路径都回
+  // `sandbox_roots`），所以「转发」必须覆盖拒绝帧，否则被拒的路径在 GUI 里无声无息。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ type: "sandbox_roots", session_id: "s1", op: "add", roots: ["/tmp/scratch"], notice: null });
+  send({ type: "sandbox_roots", session_id: "s1", op: "add", roots: [], error: "refusing '/': the filesystem root" });
+  send({ type: "sandbox_roots", session_id: "s1", op: "list", roots: ["/tmp/scratch"] });
+
+  assert.deepStrictEqual(seen.map(([t]) => t), ["sandbox_roots", "sandbox_roots", "sandbox_roots"]);
+  // 负载原样带过去：路径的规范化与裁定是 daemon 的事，中间层不二次解释。
+  assert.deepStrictEqual(seen[0][1].roots, ["/tmp/scratch"]);
+  assert.strictEqual(seen[0][1].op, "add");
+  assert.strictEqual(seen[1][1].error, "refusing '/': the filesystem root");
+  assert.strictEqual(seen[2][1].op, "list");
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
+test("sendSetSandboxRoots：帧形状与 daemon 的 op 词表一致（缺 path 也发空串）", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  client.sendSetSandboxRoots({ sessionId: "s1", cwd: "/w", op: "add", path: "/tmp/a" });
+  assert.deepStrictEqual(JSON.parse(currentMockWs.sent.at(-1)), {
+    type: "set_sandbox_roots", session_id: "s1", cwd: "/w", op: "add", path: "/tmp/a",
+  });
+  client.sendSetSandboxRoots({ sessionId: "s1", cwd: "/w", op: "list" });
+  assert.deepStrictEqual(JSON.parse(currentMockWs.sent.at(-1)), {
+    type: "set_sandbox_roots", session_id: "s1", cwd: "/w", op: "list", path: "",
+  });
+});
+
 test("兜底日志以 type= 开头——下次可 grep 计数，不必从截断 JSON 里抠类型", async () => {
   const warned = [];
   const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });

@@ -9,12 +9,12 @@ describe("commands registry", () => {
   it("contains all 15 TUI commands + /open (rant 19:44 acceptance + P5 extension)", () => {
     const expected = [
       "/clear", "/compact", "/delete", "/help", "/image", "/memory", "/model",
-      "/open", "/rant", "/rename", "/resume", "/rewind", "/sessions", "/skills", "/trigger", "/version",
+      "/open", "/rant", "/rename", "/resume", "/rewind", "/sandbox", "/sessions", "/skills", "/trigger", "/version",
     ];
     for (const cmd of expected) {
       expect(COMMANDS[cmd]).toBeDefined();
     }
-    expect(Object.keys(COMMANDS).length).toBe(16);
+    expect(Object.keys(COMMANDS).length).toBe(17);
     // 每条指令都有 hint + phase 1-4
     for (const [cmd, meta] of Object.entries(COMMANDS)) {
       expect(meta.hint.length).toBeGreaterThan(0);
@@ -44,8 +44,8 @@ describe("parseInput", () => {
 });
 
 describe("getCompletions", () => {
-  it("empty prefix returns all 16", () => {
-    expect(getCompletions("", fakeT).length).toBe(16);
+  it("empty prefix returns all 17", () => {
+    expect(getCompletions("", fakeT).length).toBe(17);
   });
   it("/r prefix filters to /rant /rename /resume /rewind", () => {
     const cmds = getCompletions("/r", fakeT).map((i) => i.cmd).sort();

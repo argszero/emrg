@@ -82,11 +82,14 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-10-08 由 `composer.chooseImage`（选图入口，rant 2026-09-30T09:35:04 缺口 1）从 411 改为 412。
   // 2026-10-08 由 `composer.imageReasonClipboard`（系统给的图不受白名单所限，同 rant 要求 4）
   // 从 412 改为 413。
-  it("zh/en 各 413 个 key 且完全对齐", () => {
+  // 2026-10-09 由 `composer.roots*`（3 条）+ `cmd.sandbox.hint`（1 条）+
+  // `sandboxRoots.*`（12 条）——会话额外可写根的 GUI 入口与对话框，rant
+  // 2026-10-09T09:43:39 Part 2(a)——从 413 改为 429。
+  it("zh/en 各 429 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(413);
-    expect(enKeys.length).toBe(413);
+    expect(zhKeys.length).toBe(429);
+    expect(enKeys.length).toBe(429);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

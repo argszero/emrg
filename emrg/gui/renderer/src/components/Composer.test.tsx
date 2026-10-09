@@ -24,6 +24,10 @@ function setup(
     onCommand?: (r: { type: "command" | "unknown"; cmd: string; args?: string[] }) => void;
     sandbox?: string | null;
     onSandboxChange?: (mode: string) => void;
+    /** 会话额外可写根（daemon 报的那份）；null = 没人问过（rant 2026-10-09T09:43:39） */
+    sandboxRoots?: string[] | null;
+    /** 父级接管「额外可写根」入口：点击只上报意图（打开管理对话框） */
+    onManageSandboxRoots?: () => void;
     saveImage?: (payload: { sessionId?: string | null; data: string; label: string; mime?: string }) =>
       Promise<{ path: string; mime?: string }>;
     readClipboardImage?: () => Promise<{ data: string; mime?: string; name?: string } | null>;
@@ -672,6 +676,36 @@ describe("Composer — 格式栏与快捷键（Stage 2, rant 14:07:29）", () =>
     // 点击不改显示：档位等 daemon 的 sandbox_set 回来（客户端不先改自己那份）
     expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByTestId("sandbox-danger-full-access").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("额外可写根入口：不接线不渲染；接线后显示 daemon 报的条数，点击只上报（rant 2026-10-09T09:43:39 GUI 半边）", async () => {
+    const store = createTranscriptStore();
+    // 未接线（单挂载 / 单测）：入口不渲染——与 onSandboxChange 的约定一致。
+    const first = setup(store);
+    await waitFor(() => expect(screen.getByTestId("sandbox-switcher")).toBeTruthy());
+    expect(screen.queryByTestId("sandbox-roots-open")).toBeNull();
+    first.unmount();
+
+    const opened: number[] = [];
+    setup(store, { sandboxRoots: null, onManageSandboxRoots: () => opened.push(1) });
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toBeTruthy());
+    // 没人问过 → 只报入口，不报条数：`0` 会主张一个 daemon 没报过的状态。
+    expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("额外根");
+    expect(screen.getByTestId("sandbox-roots-open")).not.toHaveTextContent("额外根 0");
+    await userEvent.click(screen.getByTestId("sandbox-roots-open"));
+    expect(opened).toHaveLength(1);
+  });
+
+  it("额外可写根入口：条数就是 daemon 那份列表的长度（空列表也照实报 0）", async () => {
+    const store = createTranscriptStore();
+    setup(store, { sandboxRoots: ["/tmp/a", "/tmp/b"], onManageSandboxRoots: vi.fn() });
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("额外根 2"));
+  });
+
+  it("额外可写根入口：空列表报 0（这是 daemon 说过的状态，与「没人问过」不同）", async () => {
+    const store = createTranscriptStore();
+    setup(store, { sandboxRoots: [], onManageSandboxRoots: vi.fn() });
+    await waitFor(() => expect(screen.getByTestId("sandbox-roots-open")).toHaveTextContent("额外根 0"));
   });
 
   it("沙箱切换器：父级接管时，随消息下发的档位也是 daemon 报的那个", async () => {

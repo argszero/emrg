@@ -538,6 +538,11 @@ export function Shell() {
       case "/skills":
         h.openSkills();
         break;
+      // rant 2026-10-09T09:43:39（GUI 半边）：额外可写根的入口也是 /sandbox（与 TUI
+      // 同名同子命令），因为宿主 2026-10-09 已拍板「并入现有的 /sandbox」。
+      case "/sandbox":
+        h.openSandbox(routing.args ?? []);
+        break;
       case "/rewind":
         h.openRewind();
         break;
@@ -780,6 +785,12 @@ export function Shell() {
                 // its own default rather than pretending to know.
                 sandbox={activeSid ? (appState.sandboxBySid[activeSid] ?? null) : null}
                 onSandboxChange={(mode) => void bridge.setSandbox(activeSid, mode)}
+                // 会话的额外可写根（rant 2026-10-09T09:43:39, GUI half）：同一个
+                // 权威规则——列表是 daemon 的，`sandbox_roots` 帧写它，
+                // `resume_result.meta.sandbox_roots` 是后开会话唯一的来源；这里只显示，
+                // 并在有人问过之前保持 `null`（= 未知，不是 0）。
+                sandboxRoots={activeSid ? (appState.sandboxRootsBySid[activeSid] ?? null) : null}
+                onManageSandboxRoots={() => dialogHost.current?.openSandbox([])}
               />
             </>
           )}
@@ -792,6 +803,7 @@ export function Shell() {
           transcript={transcript}
           appState={appState}
           onSwitchSession={selectSession}
+          onSandboxRootsOp={(op, path) => void bridge.setSandboxRoots(activeSid, op, path)}
         />
         <ConfirmDialog request={dialogState.confirm} onDismiss={() => dispatch({ type: "close-confirm" })} />
         {/*
