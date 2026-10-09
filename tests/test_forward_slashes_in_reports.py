@@ -30,7 +30,10 @@ detector is an AST walk rather than a text match, so a call split across lines, 
 built by implicit concatenation and a rendering written in a nested expression are all seen;
 and it keys on the **rendering**, not on the binding, which is what keeps
 `check-doc-count.py`'s shape (``relative = path.relative_to(REPO_ROOT)`` read for
-``relative.parts`` and ``relative.as_posix()``) clean.
+``relative.parts`` and ``relative.as_posix()``) clean. "A name bound to the call" is every
+binding shape a renderer uses -- a plain assignment, an annotated one, a tuple target and a
+walrus -- because a rule that said "bound" and recognised one spelling of it would be silent
+about the other three while the sentence here promised otherwise.
 
 The controls below drive the detector in both directions on synthetic sources, so a detector
 that has silently stopped matching cannot pass this file by returning an empty list -- the
@@ -98,6 +101,48 @@ def rendered_expressions(tree: ast.Module) -> list[ast.AST]:
     return out
 
 
+def _bound_to_relative_to(tree: ast.Module) -> dict[str, int]:
+    """Every name this module binds to a ``.relative_to(...)`` call, at any binding shape.
+
+    The shapes a renderer actually writes: a plain assignment (``rel = p.relative_to(root)``),
+    an annotated one (``relative: Path = p.relative_to(root)``), a tuple target, where the
+    name is the element *paired with* the call (``rel, rest = p.relative_to(root), other``),
+    and a walrus. The first cut recognised only ``ast.Assign`` with a plain ``Name`` target,
+    so a renderer written in any of the other three was reported by nothing -- while the
+    module docstring promised "a name bound to the call", and ``f"{relative}"`` after
+    ``relative: Path = p.relative_to(root)`` came back clean (measured 2026-10-10).
+
+    :param tree: the parsed module.
+    :returns: name -> the statement's line, first binding wins.
+    """
+    bound: dict[str, int] = {}
+
+    def note(target: ast.AST, value: ast.AST | None) -> None:
+        if isinstance(target, ast.Name) and _is_relative_to_call(value):
+            bound.setdefault(target.id, target.lineno)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            # A tuple target is paired with a tuple value element by element, so only the
+            # position holding the call is bound to it -- `other` is not.
+            elements = node.value.elts if isinstance(node.value, (ast.Tuple, ast.List)) else None
+            for target in node.targets:
+                if (
+                    isinstance(target, (ast.Tuple, ast.List))
+                    and elements is not None
+                    and len(target.elts) == len(elements)
+                ):
+                    for element, value in zip(target.elts, elements):
+                        note(element, value)
+                else:
+                    note(target, node.value)
+        elif isinstance(node, ast.AnnAssign):
+            note(node.target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            note(node.target, node.value)
+    return bound
+
+
 def offenders(source: str) -> list[int]:
     """Line numbers where `source` renders a `.relative_to(...)` without `.as_posix()`.
 
@@ -105,14 +150,13 @@ def offenders(source: str) -> list[int]:
     :returns: the sorted line numbers, one per offending rendering.
     """
     tree = ast.parse(source)
-    bound: dict[str, int] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and _is_relative_to_call(node.value):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    bound[target.id] = node.value.lineno
+    bound = _bound_to_relative_to(tree)
     found: list[int] = []
     for expression in rendered_expressions(tree):
+        # A walrus rendered in place *is* the call it binds: `f"{(rel := p.relative_to(r))}"`
+        # reaches the same text as the two-line spelling, so it is read the same way.
+        if isinstance(expression, ast.NamedExpr):
+            expression = expression.value
         if _is_relative_to_call(expression):
             found.append(expression.lineno)
         elif isinstance(expression, ast.Name) and expression.id in bound:
@@ -132,6 +176,33 @@ class TestTheDetector:
 
     def test_a_name_bound_to_it_and_rendered_is_reported(self) -> None:
         assert offenders('rel = p.relative_to(root)\nprint(f"{rel}:{n}")\n') == [1]
+
+    def test_an_annotated_binding_is_reported(self) -> None:
+        """`relative: Path = p.relative_to(root)` binds the value the plain spelling binds.
+
+        This is the shape that made the rule's own sentence false: it is a name bound to the
+        call and rendered later, and the detector's `ast.Assign`-only binding map did not see
+        it (measured 2026-10-10 -- this source came back `[]`).
+        """
+        assert offenders('relative: Path = p.relative_to(root)\nprint(f"{relative}:{n}")\n') == [1]
+
+    def test_a_tuple_binding_reports_only_the_element_paired_with_the_call(self) -> None:
+        """The tuple value is paired element by element; the other name is bound to something else."""
+        assert offenders('rel, other = p.relative_to(root), compute()\nprint(f"{rel}")\n') == [1]
+        assert offenders('other, rel = compute(), p.relative_to(root)\nprint(f"{rel}")\n') == [1]
+
+    def test_a_walrus_rendered_in_place_is_reported(self) -> None:
+        assert offenders('print(f"{(rel := p.relative_to(root))}")\n') == [1]
+
+    def test_a_name_bound_to_something_else_is_silent(self) -> None:
+        """The other direction: the widened binding map must not report a name it is not bound to.
+
+        Each case is one of the shapes above with the call replaced, so a detector that
+        reported the whole binding rather than which value it holds would fail here.
+        """
+        assert offenders('relative: Path = compute()\nprint(f"{relative}")\n') == []
+        assert offenders('rel, other = compute(), also_compute()\nprint(f"{rel}")\n') == []
+        assert offenders('print(f"{(rel := compute())}")\n') == []
 
     def test_the_as_posix_spelling_is_silent(self) -> None:
         assert offenders('f"{p.relative_to(root).as_posix()}"\n') == []
