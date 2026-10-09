@@ -192,7 +192,16 @@ def test_the_ignoring_rule_is_read_from_the_repository_and_not_from_the_machine(
     excludes = tmp_path / "global-ignore"
     excludes.write_text("*.orig\n", encoding="utf-8")
     machine_config = tmp_path / "gitconfig"
-    machine_config.write_text(f"[core]\n\texcludesFile = {excludes}\n", encoding="utf-8")
+    #: Written by `git config --file`, never by hand. A config file's value goes through git's
+    #: own parser, and a hand-written **Windows** path is a syntax error for it — `\U` and `\A`
+    #: are escapes — so git exits 128 with `fatal: bad config line 2`, the injected excludes
+    #: file never takes effect, and the premise assertion below reddens. Measured on this test's
+    #: own `test-windows` leg (run 37870491979, head `26719a7f`) and reproduced locally: the
+    #: hand-written form exits 128, while `git config --file` writes
+    #: `core.excludesFile = C:\\Users\\…` — the escaping that survives its own parser — and reads
+    #: back the original value with rc 0. The sibling `tests/test_dependency_dirs_are_gitignored.py`
+    #: was fixed the same way for the same reason.
+    _git("config", "--file", str(machine_config), "core.excludesFile", str(excludes))
     env = {**os.environ, "GIT_CONFIG_GLOBAL": str(machine_config), "GIT_CONFIG_NOSYSTEM": "1"}
     _git("add", "unrelated.txt", repo=repo, env=env)
 
