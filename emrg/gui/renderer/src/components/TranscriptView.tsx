@@ -10,6 +10,7 @@ import {
   type TranscriptStore,
 } from "../lib/transcript";
 import { createMarkdownRenderer, type MarkdownRenderer, type StreamState } from "../lib/markdown";
+import { scrollCompensation } from "../lib/history";
 import { toolPhrases } from "../lib/copywriting";
 import { useI18n, type TranslateFn } from "../lib/i18n";
 import { MarkdownText } from "./MarkdownText";
@@ -106,6 +107,54 @@ export function TranscriptView({ store, sid = null, renderer, canLoadOlder = fal
     autoScrollRef.current = true;
     setAtBottom(true);
   };
+
+  // ── 前插的滚差补偿（宿主报障 2026-10-08 的第二半：上翻一页后视觉位置跳掉一屏） ──
+  // vanilla `app.js` 的 historyPages 在**插入更早一页之前**读 `scrollTop`/`scrollHeight`，
+  // 插入之后 `scrollTop = prevScrollTop + (scrollHeight - prevHeight)`——`lib/history.ts`
+  // 的模块注释逐字记着这个式子。React 迁移只搬走了那个**纯函数**：`scrollCompensation`
+  // 至今只有单测、零生产调用者，而 `Shell.tsx` 的 `loadOlderHistory` 注释一直声称
+  // 「整块前插 + 滚差补偿由渲染层处理」。这里就是那个渲染层。
+  //
+  // 「插入前的度量」只能在 **render 期**读。React 在 render 返回之后才改 DOM，所以渲染期
+  // 读到的还是上一屏；`useLayoutEffect` 里读到的 `scrollHeight` 已经是插入后的，差值恒为 0。
+  // 也不能用「上一次提交时记下的 scrollTop」代替：用户上翻浏览**不产生 store 提交**
+  // （滚动只翻 atBottom 这一个 state，且只在真假翻转时才重渲染），那个值可能停在几分钟前
+  // 的底部位置上，据此补偿会把用户直接甩回底部 —— 比不补偿更糟。
+  //
+  // 为什么必须用 layout effect：补偿要在「DOM 已插入更早一页、浏览器还没绘制」之间完成，
+  // 晚一帧就是用户看见的一次跳动。
+  //
+  // 补偿后重算 autoScroll：补偿把视口从底部移开时，紧随其后的追加若仍按 autoScroll=true
+  // 落到 `scrollHeight`，刚加载出来的一页会被立刻甩到底部——补偿白做。「回到底部」按钮
+  // 的显隐由同一个判断驱动，所以两者始终一致。
+  const prepends = store.getPrepends(sid);
+  const sidKey = sid ?? "";
+  const lastSidRef = useRef(sidKey);
+  const lastPrependRef = useRef(prepends);
+  const preCommitRef = useRef<{ scrollTop: number; scrollHeight: number } | null>(null);
+  const viewportEl = viewportRef.current;
+  if (viewportEl) {
+    // 渲染期只读 DOM（不写），写的是自己的 ref：这就是 React 对 getSnapshotBeforeUpdate 的替代
+    preCommitRef.current = { scrollTop: viewportEl.scrollTop, scrollHeight: viewportEl.scrollHeight };
+  }
+
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    if (lastSidRef.current !== sidKey) {
+      // 切会话：另一个桶的计数与本桶无关，重置而不是当成一次前插。
+      lastSidRef.current = sidKey;
+      lastPrependRef.current = prepends;
+    } else if (prepends !== lastPrependRef.current) {
+      lastPrependRef.current = prepends;
+      const prev = preCommitRef.current;
+      if (prev) {
+        const next = scrollCompensation(prev.scrollTop, prev.scrollHeight, el.scrollHeight);
+        if (next !== el.scrollTop) el.scrollTop = next;
+        updateAutoScroll(el);
+      }
+    }
+  }, [version, prepends, sidKey, updateAutoScroll]);
 
   return (
     <div className="transcript-view" data-testid="transcript-view" ref={viewportRef}>

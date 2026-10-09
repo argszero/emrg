@@ -386,4 +386,53 @@ describe("TranscriptView", () => {
     store.addUserMessage("new", "s1");
     expect(viewport.scrollTop).toBe(1000); // autoScroll 触发 scrollTop=scrollHeight
   });
+
+  // ── 前插滚差补偿（宿主报障「加载更早消息」的编排层；`Shell.tsx:462` 的注释一直写着
+  //    「整块前插 + 滚差补偿由渲染层处理」，而 `lib/history.ts` 的 `scrollCompensation`
+  //    此前只有单测、零生产调用者）。两条互为反面：前插必须补偿，追加必须不动。 ──
+
+  /** jsdom 无布局：用**已渲染的消息数**折算文档高度，于是高度随 DOM 一起在提交中变化——
+   *  渲染期读到旧值、layout effect 读到新值，与浏览器里插入 DOM 的时序一致（写死一个
+   *  数字只能测「高度差」这一半，测不到「插入前读还是插入后读」）。 */
+  function mockHeightByMessages(viewport: HTMLElement) {
+    Object.defineProperty(viewport, "scrollHeight", {
+      configurable: true,
+      get: () => (viewport.querySelectorAll(".msg").length + 1) * 400,
+    });
+    Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(viewport, "scrollTop", { value: 0, configurable: true, writable: true });
+  }
+
+  it("更早一页前插后按高度差补偿 scrollTop（上翻一页不再跳一屏）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("newest", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    mockHeightByMessages(viewport); // 1 条 → 800
+    // 上翻到顶：scrollTop=0（派发 scroll 让 atBottom 翻转，走一次真实提交）
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+    // 更早一页插到最前 → DOM 变高 400（2 条 → 1200）
+    act(() => {
+      store.prependEntries([{ kind: "user", text: "older" }], "s1");
+    });
+    expect(viewport.scrollTop).toBe(400); // 0 + (1200 - 800)
+  });
+
+  it("追加（非前插）不补偿 scrollTop：文档同样变高，但内容在后面，视口不动", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("newest", "s1");
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    mockHeightByMessages(viewport);
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+    // 同样长高 400——若补偿只看「高度变了」而不看「是前插」，这里会错误地跳到 400
+    act(() => {
+      store.addUserMessage("newer", "s1");
+    });
+    expect(viewport.scrollTop).toBe(0);
+  });
 });
