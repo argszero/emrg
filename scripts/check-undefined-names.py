@@ -371,6 +371,7 @@ def _unbound_by_scope(
     module_bound: set[str],
     read_before_write: set[str],
     does_not_bind: set[str],
+    reads_by_scope: dict[tuple[str, ...], dict[str, list[int]]],
 ) -> dict[tuple[str, ...], set[str]]:
     """Names each scope reads and nothing visible binds, keyed by the scope's path.
 
@@ -392,6 +393,19 @@ def _unbound_by_scope(
       so it earns no relaxation of the gate: a name nothing reads stays silent, which
       is what keeps a class-body field out of the findings.
 
+    The gate has a **second authority**, and it is the AST: `reads_by_scope` is where
+    a scope's own reads are recorded (the same walk that names the finding's line), so
+    a name it shows this scope reads is let through even when `symtable` says
+    otherwise. `is_referenced()` alone is not enough, because it is blind in one more
+    place than `read_before_write` covers -- a read *inside an inlined comprehension*.
+    PEP 709 inlines a list/set/dict comprehension into the enclosing frame, so the
+    element expression's `Load` never reaches the enclosing symbol's `is_referenced()`
+    (measured 2026-10-10 on issue #2009's head: a bare `x: int` read only by
+    `[x for _ in range(3)]` was reported by neither gate arm, while the same read in a
+    generator expression -- a real child scope -- was). The relaxation is safe for the
+    reason the other one is: a class-body field is read by nothing, so no AST read
+    exists to let it through.
+
     Every other exemption still applies to those names, a parameter or a `global`
     among them.
     """
@@ -400,10 +414,15 @@ def _unbound_by_scope(
         names: set[str] = set()
         for symbol in table.get_symbols():
             name = symbol.get_name()
-            # `symtable` does not flag an augmented-assignment target as referenced --
-            # it reports `is_assigned` and nothing else -- so `read_before_write` names
-            # are let through this gate, having been shown by the AST to read the name.
-            if not symbol.is_referenced() and name not in read_before_write:
+            # Two things make `symtable` report a name as unreferenced while the AST
+            # shows this scope reading it: `x += 1`/`del x` (whose target it calls
+            # assigned-and-only-assigned), and a read inside an inlined comprehension.
+            # `read_before_write` covers the first, `reads_by_scope` the second.
+            if (
+                not symbol.is_referenced()
+                and name not in read_before_write
+                and name not in reads_by_scope.get(path, {})
+            ):
                 continue
             if (
                 (symbol.is_assigned() and name not in does_not_bind)
@@ -484,10 +503,14 @@ def check_file(path: Path) -> tuple[list[Finding], bool]:
     top = symtable.symtable(source, str(path), "exec")
     read_before_write = _read_before_write_names(tree)
     does_not_bind = read_before_write | _declaration_only_names(tree)
-    unbound = _unbound_by_scope(
-        top, _module_bindings(top) - does_not_bind, read_before_write, does_not_bind
-    )
     per_scope, everywhere = _load_lines(tree)
+    unbound = _unbound_by_scope(
+        top,
+        _module_bindings(top) - does_not_bind,
+        read_before_write,
+        does_not_bind,
+        per_scope,
+    )
     findings: list[Finding] = []
     for scope_path, names in sorted(unbound.items()):
         lines_by_name = per_scope.get(scope_path, {})

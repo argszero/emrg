@@ -236,6 +236,33 @@ class TestItFires:
         assert "emrg/bad.py:3" in _reported(proc)
         assert "y" in proc.stdout
 
+    def test_an_annotation_read_inside_an_inlined_comprehension_is_reported(
+        self, tmp_path
+    ) -> None:
+        """A comprehension's read is a read, and `symtable` does not say so.
+
+        PEP 709 inlines a list/set/dict comprehension into the enclosing frame, so the
+        element expression's `Load` never reaches that symbol's `is_referenced()` -- the
+        read gate answered "nothing reads this" from a line that does read it, and the
+        bare annotation was reported by no arm (measured 2026-10-10). The AST is the
+        authority the walk already names the finding's line from, so the gate trusts it
+        too. A generator expression, being a real child scope, was already reported;
+        the two spellings of the same read must not answer differently.
+        """
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            _cache: dict
+            tables = [_cache for _ in range(3)]
+            """,
+        )
+
+        proc = _run(tree)
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "emrg/bad.py:2" in _reported(proc)
+        assert "_cache" in proc.stdout
+
 
 class TestItStaysSilent:
     def test_a_module_level_binding_covers_every_read(self, tmp_path) -> None:
@@ -383,6 +410,33 @@ class TestItStaysSilent:
         # ... and nothing was reported without a line: the failure mode above is a
         # finding whose `:0` names no read, which a return code alone cannot tell apart
         # from a clean tree.
+        assert ":0" not in _reported(proc), proc.stdout
+
+    def test_a_comprehension_does_not_drag_a_class_field_into_the_findings(
+        self, tmp_path
+    ) -> None:
+        """The gate's new authority reopens nothing: it is per scope, like the walk.
+
+        Only a name the AST shows *this* scope reading is let through, so a class-body
+        field -- read by nothing -- stays out however many comprehensions surround it.
+        This is the shape the 69-findings prototype died on, and the reason the
+        relaxation is granted to the read rather than to the annotation.
+        """
+        tree = _tree(
+            tmp_path,
+            good="""\
+            from typing import NamedTuple
+
+            class Message(NamedTuple):
+                session: str
+
+            labels = [str(i) for i in range(3)]
+            """,
+        )
+
+        proc = _run(tree)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
         assert ":0" not in _reported(proc), proc.stdout
 
     def test_a_valued_annotation_is_a_binding(self, tmp_path) -> None:
