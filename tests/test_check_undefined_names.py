@@ -130,38 +130,6 @@ class TestItFires:
         assert "emrg/bad.py:4, 5" in _reported(proc)
 
 
-class TestItStaysSilent:
-    def test_a_module_level_binding_covers_every_read(self, tmp_path) -> None:
-        tree = _tree(
-            tmp_path,
-            good="""\
-            LIMIT = 3
-
-
-            def f():
-                return LIMIT
-            """,
-        )
-
-        assert _run(tree).returncode == 0
-
-    def test_an_enclosing_functions_binding_is_visible_to_a_nested_one(self, tmp_path) -> None:
-        """A closure variable is a binding, and `symtable` says so."""
-        tree = _tree(
-            tmp_path,
-            good="""\
-            def outer():
-                factor = 2
-
-                def inner():
-                    return factor
-
-                return inner
-            """,
-        )
-
-        assert _run(tree).returncode == 0
-
     def test_an_augmented_assignment_with_nothing_else_binding_it_is_reported(
         self, tmp_path
     ) -> None:
@@ -213,6 +181,55 @@ class TestItStaysSilent:
         assert "emrg/bad.py:2" in _reported(proc)
         assert "undefined_name" in proc.stdout
 
+    def test_a_name_read_only_before_a_binding_is_still_reported(self, tmp_path) -> None:
+        """The reopened gates must not silence an ordinary unbound read.
+
+        `is_referenced` and `is_assigned` are consulted for every symbol, so a guard
+        that let the `read_before_write` set widen the gate for names outside it
+        would stop seeing the incident shape entirely.
+        """
+        tree = _tree(
+            tmp_path,
+            bad="""\
+            def f():
+                return undefined_plain_read
+            """,
+        )
+
+        assert _run(tree).returncode == 1
+
+class TestItStaysSilent:
+    def test_a_module_level_binding_covers_every_read(self, tmp_path) -> None:
+        tree = _tree(
+            tmp_path,
+            good="""\
+            LIMIT = 3
+
+
+            def f():
+                return LIMIT
+            """,
+        )
+
+        assert _run(tree).returncode == 0
+
+    def test_an_enclosing_functions_binding_is_visible_to_a_nested_one(self, tmp_path) -> None:
+        """A closure variable is a binding, and `symtable` says so."""
+        tree = _tree(
+            tmp_path,
+            good="""\
+            def outer():
+                factor = 2
+
+                def inner():
+                    return factor
+
+                return inner
+            """,
+        )
+
+        assert _run(tree).returncode == 0
+
     @pytest.mark.parametrize(
         "source",
         [
@@ -253,23 +270,6 @@ class TestItStaysSilent:
         tree = _tree(tmp_path, good=source)
 
         assert _run(tree).returncode == 0, source
-
-    def test_a_name_read_only_before_a_binding_is_still_reported(self, tmp_path) -> None:
-        """The reopened gates must not silence an ordinary unbound read.
-
-        `is_referenced` and `is_assigned` are consulted for every symbol, so a guard
-        that let the `read_before_write` set widen the gate for names outside it
-        would stop seeing the incident shape entirely.
-        """
-        tree = _tree(
-            tmp_path,
-            bad="""\
-            def f():
-                return undefined_plain_read
-            """,
-        )
-
-        assert _run(tree).returncode == 1
 
     def test_parameters_locals_imports_and_builtins_are_bindings(self, tmp_path) -> None:
         tree = _tree(
