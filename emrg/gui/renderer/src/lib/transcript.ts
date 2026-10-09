@@ -108,6 +108,16 @@ export interface SessionTranscript {
   /** callId → { entry: 条目下标, row: 组内行号（独立行 = null） } */
   toolRowIndex: Map<string, { entry: number; row: number | null }>;
   doneRids: Set<string>;
+  /**
+   * `prependEntries` 的单调计数（每会话）。渲染层靠它区分「更早一页前插」与「新内容追加」：
+   * 只有前插会改变**已有内容在文档中的位置**，因而只有前插需要滚差补偿（`lib/history.ts`
+   * 的 `scrollCompensation`）。
+   *
+   * 为什么不看 `entries.length`：追加流式文本不增加条目数；而一页若整页都是重叠记录
+   * （游标被压缩夹回时的去重），前插的条目数是 0 —— 两种情况下条数变化都不代表
+   * 「有内容插到了前面」。
+   */
+  prepends: number;
 }
 
 /* ── 事件入参（与 main/daemon 协议字段对齐，仅取 chat.js 用到的） ── */
@@ -150,6 +160,12 @@ export interface TranscriptStore {
   st(sid?: string | null): SessionTranscript;
   getEntries(sid?: string | null): TranscriptEntry[];
   getLoadBar(sid?: string | null): string | null;
+  /**
+   * 该会话发生过多少次前插（单调递增，见 `SessionTranscript.prepends`）。渲染层用它触发
+   * 滚差补偿：前插把已有内容整体下移，补偿必须发生在**同一次提交内**，所以需要一个能被
+   * `useSyncExternalStore` 读到的、与 entries 分开的信号。
+   */
+  getPrepends(sid?: string | null): number;
   handleDelta(chunks: DeltaChunk[], sid?: string | null): void;
   handleDone(data: DoneData, sid?: string | null): void;
   handleToolStart(data: ToolStartData, sid?: string | null): void;
@@ -282,6 +298,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         groupIndex: new Map(),
         toolRowIndex: new Map(),
         doneRids: new Set(),
+        prepends: 0,
       };
       sessions.set(k, s);
     }
@@ -506,6 +523,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     st,
     getEntries: (sid) => st(sid).entries,
     getLoadBar: (sid) => st(sid).loadBar,
+    getPrepends: (sid) => st(sid).prepends,
     getComposerDraft: (sid) => st(sid).draft,
     handleDelta,
     handleDone,
@@ -527,6 +545,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       mutate(() => {
         const s = st(sid);
         if (!entries.length) return;
+        s.prepends++;
         shiftIndexes(s, entries.length);
         s.entries.unshift(...entries);
       });
