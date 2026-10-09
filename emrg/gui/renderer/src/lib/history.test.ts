@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   HISTORY_PAGE,
   applyHistoryPage,
+  canLoadOlder,
   createHistoryPages,
   historyPageState,
+  loadBarKey,
   scrollCompensation,
   shouldLoadOlder,
   unloadedRecords,
@@ -153,5 +155,40 @@ describe("shouldLoadOlder", () => {
 
   it("does not trigger while loading (in-flight lock)", () => {
     expect(shouldLoadOlder(0, true, true)).toBe(false);
+  });
+
+  it("is the scroll position AND the shared half — the half is canLoadOlder, not a second copy", () => {
+    // issue #1979：`hasMore && !loading` 曾经在这里写一遍、在 `TranscriptView.tsx:82`
+    // 再写一遍，生产读的是后者。现在它只有一处（`canLoadOlder`），`shouldLoadOlder`
+    // 自己也是调它 —— 所以两者的答案必须逐格一致，否则又是一份会漂移的副本。
+    for (const hasMore of [true, false]) {
+      for (const loading of [true, false]) {
+        expect(shouldLoadOlder(0, hasMore, loading)).toBe(canLoadOlder(hasMore, loading));
+        expect(shouldLoadOlder(2, hasMore, loading)).toBe(canLoadOlder(hasMore, loading));
+      }
+    }
+  });
+});
+
+describe("canLoadOlder", () => {
+  it("is true only with more pages and not loading", () => {
+    expect(canLoadOlder(true, false)).toBe(true);
+    expect(canLoadOlder(true, true)).toBe(false);
+    expect(canLoadOlder(false, false)).toBe(false);
+    expect(canLoadOlder(false, true)).toBe(false);
+  });
+});
+
+describe("loadBarKey", () => {
+  it("asks the imperative sentence whenever an older page exists", () => {
+    expect(loadBarKey(true, false)).toBe("app.historyLoadMore");
+    expect(loadBarKey(true, true)).toBe("app.historyLoadMore");
+  });
+
+  it("answers 'no more history' only for a page the user asked for", () => {
+    // 首屏且没有更早的页 = 用户还没问过，什么都不写；翻到头 = 回答刚问的那句。
+    // 这不是两套答案，是同一个判别式带上 `paged`（rant 2026-10-09T09:25:00「需一并理清」）。
+    expect(loadBarKey(false, true)).toBe("app.historyNoMore");
+    expect(loadBarKey(false, false)).toBeNull();
   });
 });

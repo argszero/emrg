@@ -21,6 +21,7 @@ import {
   applyHistoryPage,
   createHistoryPages,
   historyPageState,
+  loadBarKey,
   unloadedRecords,
 } from "../lib/history";
 import { replayHistoryRecords, replayHistoryRecordsPrepend, type HistoryRecord } from "../lib/historyReplay";
@@ -415,6 +416,24 @@ export function Shell() {
   const historyLoadedRef = useRef<Set<string>>(new Set());
   const historyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  /**
+   * 分页状态住在 ref 的 Map 里（游标与去重集合也住在那里，它是**唯一真源**）。Shell 在
+   * 渲染时读它，于是**每落定一页就必须重渲染一次** —— 否则 `hasMore`/`loading` 会停在
+   * 上一页的取值上：翻到头之后顶部条仍旧是「可点的按钮」（点下去 `loadOlderHistory`
+   * 因为 `!st.hasMore` 立刻 return），正是宿主报障里「长得像能点、点下去是死的」那一类。
+   * 这里只做「叫一次重渲染」，不把那两个事实再抄进 state —— 第二个家就是下一份会漂移的副本。
+   */
+  const [, publishPaging] = useReducer((n: number) => n + 1, 0);
+
+  /**
+   * 顶部条文案：规则在 `lib/history.ts:loadBarKey` 一处，两个写入点都走这里。
+   * `paged` = 这是一次翻页的结果（首屏那次传 false —— 问的问题不同，见该函数的注释）。
+   */
+  function loadBarText(hasMore: boolean, paged: boolean): string | null {
+    const key = loadBarKey(hasMore, paged);
+    return key ? t(key) : null;
+  }
+
   /** 切会话：加载最近一页历史（回放进 transcript）。 */
   async function loadHistory(sid: string) {
     if (historyLoadedRef.current.has(sid)) return;
@@ -428,7 +447,7 @@ export function Shell() {
       const page = res.messages || [];
       replayHistoryRecords(unloadedRecords(st, page), sid, transcript);
       applyHistoryPage(st, page, !!res.hasMore);
-      transcript.setLoadBar(st.hasMore ? t("app.historyLoadMore") : null, sid);
+      transcript.setLoadBar(loadBarText(st.hasMore, false), sid);
       historyLoadedRef.current.add(sid);
     } catch (e) {
       transcript.addSystemMessage(
@@ -437,6 +456,7 @@ export function Shell() {
       );
     } finally {
       st.loading = false;
+      publishPaging();
     }
   }
 
@@ -459,7 +479,7 @@ export function Shell() {
       // 更早一页整体插到最前（回放在独立缓冲里跑同一套 handler，落点由 prependEntries 决定）
       replayHistoryRecordsPrepend(unloadedRecords(st, page), sid, transcript);
       applyHistoryPage(st, page, !!res.hasMore);
-      transcript.setLoadBar(st.hasMore ? t("app.historyLoadMore") : t("app.historyNoMore"), sid);
+      transcript.setLoadBar(loadBarText(st.hasMore, true), sid);
     } catch (e) {
       transcript.addSystemMessage(
         t("app.historyFailed", { msg: (e as Error)?.message ?? String(e) }),
@@ -467,6 +487,7 @@ export function Shell() {
       );
     } finally {
       st.loading = false;
+      publishPaging();
     }
   }
 
@@ -475,6 +496,10 @@ export function Shell() {
     if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
     historyTimerRef.current = setTimeout(() => void loadOlderHistory(activeSid), 150);
   }
+
+  // 分页状态 → 判定的两条事实。此前这里先把两者合成一个 `canLoadOlder` 布尔再传下去，
+  // 容器从此分不清「没有更早的页」与「正在取」——而判定本可以只有一处（issue #1979）。
+  const activePaging = activeSid ? historyPageState(historyPagesRef.current, activeSid) : null;
 
   const isPanelView = activeView !== "sessions";
   // 生产 markdown 渲染器（真实 vendor marked/DOMPurify/hljs，Batch 5 承诺项）——
@@ -721,14 +746,8 @@ export function Shell() {
                 store={transcript}
                 sid={activeSid}
                 renderer={mdRenderer}
-                canLoadOlder={
-                  activeSid
-                    ? (() => {
-                        const hs = historyPageState(historyPagesRef.current, activeSid);
-                        return hs.hasMore && !hs.loading;
-                      })()
-                    : false
-                }
+                hasMore={activePaging?.hasMore ?? false}
+                loading={activePaging?.loading ?? false}
                 onLoadOlder={onScrollTop}
               />
               <Composer
