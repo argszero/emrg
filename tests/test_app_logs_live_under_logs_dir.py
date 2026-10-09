@@ -44,7 +44,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from emrg.client import daemon_manager as dm  # noqa: E402
 from emrg.config import logs_dir  # noqa: E402
-from emrg.logfiles import APP_LOG_FILES, legacy_log_names, migrate_legacy_logs  # noqa: E402
+from emrg.logfiles import (  # noqa: E402
+    APP_LOG_FILES,
+    _ASIDE_SUFFIXES,
+    legacy_log_names,
+    migrate_legacy_logs,
+)
 from emrg.server import daemon as srv  # noqa: E402
 from emrg.server import __main__ as server_main  # noqa: E402
 
@@ -210,7 +215,17 @@ def test_the_migration_is_idempotent(tmp_path, monkeypatch):
 
 
 def test_the_migration_never_overwrites_a_log_that_is_already_there(tmp_path, monkeypatch):
-    """The destination wins: it is the newer file, and a migration may not lose data."""
+    """The destination wins — and the leftover is renamed aside, never left, never deleted.
+
+    The first half was always true; the second half is the fix (review
+    cyc20261009-154611). Leaving the leftover in place is not a corner case: it is
+    the ordinary one, because both clients open `logs/emrgd-start.err` and the GUI
+    opens `logs/emrg-gui.log` **before** the daemon runs the migration — so on the
+    first start after an upgrade those two destinations already exist and the
+    leftovers stayed in the root for good, which is the state the host complained
+    about. The requirement authorises discarding or renaming (「丢弃或改名，不得覆盖
+    新日志」); deleting is what this test forbids.
+    """
     _stub_home(monkeypatch, tmp_path)
     root = _legacy_root(tmp_path)
     (root / "emrgd.log").write_text("stale copy\n", encoding="utf-8")
@@ -218,11 +233,72 @@ def test_the_migration_never_overwrites_a_log_that_is_already_there(tmp_path, mo
 
     moved = migrate_legacy_logs()
 
-    assert moved == []
-    assert (root / "logs" / "emrgd.log").read_text(encoding="utf-8") == "the live log\n"
-    assert (root / "emrgd.log").read_text(encoding="utf-8") == "stale copy\n", (
-        "the leftover must be left where it is, never deleted"
+    assert moved == ["emrgd.log"], "the leftover still has to leave the root"
+    assert (root / "logs" / "emrgd.log").read_text(encoding="utf-8") == "the live log\n", (
+        "the live log must keep its own content"
     )
+    assert not (root / "emrgd.log").exists(), (
+        "the leftover must not stay in the config root — that is the whole point"
+    )
+    assert (root / "logs" / "emrgd.log.legacy").read_text(encoding="utf-8") == "stale copy\n", (
+        "the old content must survive under the aside name — renamed, never deleted"
+    )
+
+
+def test_the_migration_clears_the_root_in_the_ordering_an_upgrade_actually_has(
+    tmp_path, monkeypatch
+):
+    """The two names whose destination exists first, in the order a start really creates them.
+
+    Measured on the head before the fix (2026-10-09): with the root holding
+    `emrgd.log`, `emrg-gui.log` and `emrgd-start.err`, and `logs/` already holding
+    the two files its clients open at spawn, the migration answered
+    `moved: ['emrgd.log']` and left `<root>/emrg-gui.log` and
+    `<root>/emrgd-start.err` behind — the 15 MB GUI log among them.
+    """
+    _stub_home(monkeypatch, tmp_path)
+    root = _legacy_root(tmp_path)
+    for name, text in (
+        ("emrgd.log", "old daemon log\n"),
+        ("emrg-gui.log", "old gui log\n"),
+        ("emrgd-start.err", "old start err\n"),
+    ):
+        (root / name).write_text(text, encoding="utf-8")
+    # what the clients create before the daemon starts
+    (root / "logs" / "emrg-gui.log").write_text("live gui log\n", encoding="utf-8")
+    (root / "logs" / "emrgd-start.err").write_text("live start err\n", encoding="utf-8")
+
+    moved = migrate_legacy_logs()
+
+    assert sorted(moved) == ["emrg-gui.log", "emrgd-start.err", "emrgd.log"]
+    assert [p.name for p in sorted(root.iterdir())] == ["logs"], (
+        f"the config root still holds {sorted(p.name for p in root.iterdir())!r}; after this "
+        "migration it may hold nothing but the logs directory and the host's own data"
+    )
+    assert (root / "logs" / "emrg-gui.log").read_text(encoding="utf-8") == "live gui log\n"
+    assert (root / "logs" / "emrgd-start.err").read_text(encoding="utf-8") == "live start err\n"
+    assert (root / "logs" / "emrg-gui.log.legacy").read_text(encoding="utf-8") == "old gui log\n"
+    assert (root / "logs" / "emrgd-start.err.legacy").read_text(encoding="utf-8") == "old start err\n"
+
+
+def test_the_migration_reports_a_leftover_it_cannot_place(tmp_path, monkeypatch):
+    """Every aside name taken: report and keep the file, never overwrite, never delete.
+
+    The bounded suffix list is what stops a start from spinning on a name hunt; the
+    cost of running out is that a leftover stays — which must be *said*, because a
+    silent version of this is how "the root still has a log in it" becomes
+    undiagnosable.
+    """
+    _stub_home(monkeypatch, tmp_path)
+    root = _legacy_root(tmp_path)
+    (root / "emrgd.log").write_text("stale copy\n", encoding="utf-8")
+    (root / "logs" / "emrgd.log").write_text("the live log\n", encoding="utf-8")
+    for suffix in _ASIDE_SUFFIXES:
+        (root / "logs" / f"emrgd.log{suffix}").write_text("taken\n", encoding="utf-8")
+
+    assert migrate_legacy_logs() == []
+    assert (root / "emrgd.log").read_text(encoding="utf-8") == "stale copy\n"
+    assert (root / "logs" / "emrgd.log").read_text(encoding="utf-8") == "the live log\n"
 
 
 # ── the static guard ───────────────────────────────────────────────────────

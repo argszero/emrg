@@ -64,6 +64,27 @@ def legacy_log_names() -> tuple[str, ...]:
     return tuple(names)
 
 
+#: Suffixes tried, in order, when a leftover's own name is already taken in the log
+#: directory. The taken name is a **live** log and must never be written over, but
+#: the leftover must not stay in the config root either (rant 2026-10-09T14:20:18
+#: requirement 3: 「先到者胜，丢弃或改名，不得覆盖新日志」 — this is the 改名).
+#: Bounded rather than unbounded: a start may not spin, and running out is reported.
+_ASIDE_SUFFIXES = (".legacy", ".legacy.2", ".legacy.3", ".legacy.4", ".legacy.5")
+
+
+def _free_aside_path(destination: Path) -> Path | None:
+    """The first free ``<destination><suffix>`` name, or ``None`` if all are taken.
+
+    Returns a name rather than moving anything, so the caller's single ``rename``
+    stays the only mutation and a failed one leaves nothing half-done.
+    """
+    for suffix in _ASIDE_SUFFIXES:
+        candidate = destination.with_name(destination.name + suffix)
+        if not candidate.exists():
+            return candidate
+    return None
+
+
 def migrate_legacy_logs(log_dir: Path | None = None) -> list[str]:
     """Rename the log files left in the config root into ``log_dir``.
 
@@ -78,8 +99,19 @@ def migrate_legacy_logs(log_dir: Path | None = None) -> list[str]:
     early "tidy up" hook.
 
     Idempotent, and never overwriting: a destination that already exists wins (it
-    is the newer log), and the leftover is left where it is with a warning rather
-    than deleted — a migration must not be able to destroy the host's data.
+    is the newer log). The leftover is then **renamed aside** beside it
+    (:data:`_ASIDE_SUFFIXES`) rather than left where it is — because leaving it is
+    not a corner case, it is the ordinary one. Both clients open
+    ``logs/emrgd-start.err`` (`daemon_manager._truncate_start_stderr`, the GUI's
+    `_openStartStderr`) and the GUI opens ``logs/emrg-gui.log`` at its own startup,
+    all **before** the daemon runs this migration, so those two destinations exist
+    on the very first run after an upgrade and the leftovers would otherwise stay
+    in the config root for good — which is the complaint this module exists to
+    answer (measured 2026-10-09: `moved: ['emrgd.log']` with two names left).
+
+    Nothing is ever deleted: the old content survives under the aside name, which
+    is what the rant authorises (「丢弃或改名，不得覆盖新日志」) and what keeps a
+    migration from being able to destroy the host's data.
 
     :param log_dir: where the logs belong; defaults to :func:`emrg.config.logs_dir`.
     :returns: the names actually moved, for the log line and for the tests.
@@ -93,10 +125,15 @@ def migrate_legacy_logs(log_dir: Path | None = None) -> list[str]:
             continue
         destination = target / name
         if destination.exists():
-            logger.warning(
-                "legacy log %s left in place: %s already exists", source, destination
-            )
-            continue
+            aside = _free_aside_path(destination)
+            if aside is None:
+                logger.warning(
+                    "legacy log %s left in place: %s has no free name beside it",
+                    source,
+                    destination,
+                )
+                continue
+            destination = aside
         try:
             source.rename(destination)
         except OSError as exc:  # best-effort: a log must never fail a start
