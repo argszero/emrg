@@ -1,4 +1,4 @@
-"""Guard: a `patch` backup must be ignored by git, and never tracked.
+r"""Guard: a `patch` backup must be ignored by git, and never tracked.
 
 The exposure, measured in this repository
 -----------------------------------------
@@ -23,6 +23,42 @@ Both halves of the rule, deliberately different in kind
    can only catch a backup that got in; half 2 is what stops `git add -A` from
    putting one in.
 
+Half 2 reads *which* rule ignores the name, not only whether one does
+-----------------------------------------------------------------------
+`git check-ignore` answers from three sources at once: the repository's own
+`.gitignore` files, the clone's `$GIT_DIR/info/exclude`, and the **machine's**
+`core.excludesFile` (a global excludes file is a common setup). Only the first is
+this guard's subject — the rule has to hold on every clone, and CI runs on a
+machine with none of the other two.
+
+Measured 2026-10-09 on master `3cdb5613`, in a detached worktree of that commit so
+the working tree was never touched: with `*.orig`/`*.rej`/`*.bak` removed from the
+**worktree's** copy of `.gitignore`, this file read `1 failed, 2 passed`; the same
+broken tree with a global excludes file listing those three suffixes, injected
+through `GIT_CONFIG_GLOBAL` naming a temp file, read **`3 passed`** — the defect
+this file exists for, reported as a pass. `git check-ignore -v` names the rule that
+decided, and it is the whole difference: `/tmp/…/global-ignore:1:*.orig` unpinned,
+`.gitignore:55:*.orig` where the rules belong.
+
+So `_ignoring_rule` asks for the source and the assertion requires it to be a file
+**this repository tracks**: a machine-global or `info/exclude` match is then
+reported as the failure it is, and a nested `sub/.gitignore` — the repository's own
+rules too — still passes. The same read in the two sibling carriers
+(`tests/test_scratch_roots_are_gitignored.py::_unignored`, and
+`tests/test_local_exclude.py`, where a machine-global `.emrg/` reddens 5 of its
+tests against a healthy tree) is issue #1973's measured boundary, not fixed here.
+
+Both halves read git's **machine-readable** output, and that is deliberate: the plain
+forms C-quote any path git has to quote — a backslash, a double quote, or a byte above
+ASCII — and an absolute path on Windows always carries backslashes, so `check-ignore -v`
+named the source `"C:\\Users\\…\\global-ignore"` and the name taken from it was
+`global-ignore"`. `--stdin -z` / `ls-files -z` remove the question: verbatim fields,
+NUL-separated, and no second implementation of `quote_c_style` in a test file. This is
+the same defect as writing a Windows path into a config file by hand — a value another
+program must parse comes back shaped by the platform — and the class this file's own
+fixture has already been reddened by once
+(`test_the_ignoring_rule_is_read_from_the_repository_and_not_from_the_machine`).
+
 A comment cannot enforce either half, which is why the rule is a test: the
 `.gitignore` entry states the intent, and this file is the mechanic that keeps a
 new site — a new suffix, or a reverted ignore rule — from reintroducing it.
@@ -30,6 +66,7 @@ new site — a new suffix, or a reverted ignore rule — from reintroducing it.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -51,17 +88,85 @@ def looks_like_a_patch_backup(path: str) -> bool:
     return path.endswith(PATCH_BACKUP_SUFFIXES)
 
 
-def _git(*args: str) -> subprocess.CompletedProcess[str]:
-    # `encoding=` is pinned: the child emits UTF-8 whatever the host locale is,
-    # and the locale codec cannot decode it (the class
-    # `tests/test_script_decode_is_locale_independent.py` keeps out of `scripts/`).
+def _git(
+    *args: str,
+    repo: Path = REPO_ROOT,
+    env: dict[str, str] | None = None,
+    stdin_data: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run git in `repo` — this checkout by default, a scratch repository when a test passes one.
+
+    `env=` replaces the child's environment whole, so a caller that redirects git's
+    configuration has to hand over `os.environ` with the change applied.
+
+    `encoding=` is pinned: the child emits UTF-8 whatever the host locale is, and the
+    locale codec cannot decode it (the class
+    `tests/test_script_decode_is_locale_independent.py` keeps out of `scripts/`).
+    """
     return subprocess.run(
         ["git", *args],
-        cwd=REPO_ROOT,
+        cwd=repo,
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=env,
+        input=stdin_data,
     )
+
+
+def _tracked_paths(repo: Path = REPO_ROOT) -> list[str]:
+    r"""The index's paths: what a rule has to belong to before it is this repository's own.
+
+    Half 1 reads the same list, and its emptiness is asserted there rather than here,
+    because a scan over nothing is the failure this file reports and not a helper's.
+
+    `-z`, for the reason `_ignoring_rule` gives: the plain form C-quotes every path git
+    has to quote, and a quoted path ends `.orig"` rather than `.orig` — so half 1's scan
+    would pass over the very backup it exists to catch, and the two halves would compare
+    a verbatim source against a quoted list. Measured 2026-10-09: a tracked
+    `subé/.gitignore` reads `"sub\303\251/.gitignore"` without `-z`, `subé/.gitignore`
+    with it. This is the convention the other index-derived scans already follow
+    (`tests/test_conflict_markers.py`, `tests/test_the_index_derived_scans_reach_new_files.py`).
+    """
+    result = _git("ls-files", "-z", repo=repo)
+    assert result.returncode == 0, result.stderr
+    return [path for path in result.stdout.split("\0") if path]
+
+
+def _ignoring_rule(repo: Path, name: str, env: dict[str, str] | None = None) -> str | None:
+    r"""The file whose rule ignores `name`, or `None` when no rule does.
+
+    `git check-ignore -q` answers only yes/no, and yes is also what a machine-global
+    excludes file (`core.excludesFile`) or a clone's `$GIT_DIR/info/exclude` says —
+    neither is this guard's subject. `-v` names the rule that decided, and `--stdin -z`
+    is what makes its answer readable: the fields arrive NUL-separated with the
+    **source verbatim**, so this reads one field and interprets nothing.
+
+    Without `-z` the source is C-quoted whenever the path needs it — a backslash, a
+    double quote, or any byte above ASCII — and an absolute path on Windows always
+    carries backslashes, so the source arrived as `"C:\\Users\\…\\global-ignore"`,
+    `Path(source).name` read `global-ignore"`, and the premise assertion reddened.
+    Measured on this PR's own `test-windows` leg (run 37871887687,
+    `assert 'global-ignore"' == 'global-ignore'`) and reproduced here, where a
+    non-ASCII directory name is the same trigger and exists on every platform:
+    `-v` prints `"sub\303\251/.gitignore":1:*.orig`, `--stdin -z` prints
+    `subé/.gitignore` NUL `1` NUL `*.orig` NUL `subé/x.py.orig` — source and pathname
+    both verbatim. Asking git for its machine-readable format also retires the colon
+    ambiguity a Windows drive letter introduces, which the plain form had to split around.
+    """
+    result = _git(
+        "check-ignore",
+        "-v",
+        "--no-index",
+        "--stdin",
+        "-z",
+        repo=repo,
+        env=env,
+        stdin_data=name + "\0",
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.split("\0", 1)[0]
 
 
 def test_the_scan_recognises_the_shape_it_exists_for() -> None:
@@ -74,9 +179,7 @@ def test_the_scan_recognises_the_shape_it_exists_for() -> None:
 
 def test_no_tracked_path_is_a_patch_backup() -> None:
     """The index carries no `patch` backup — the state CI can actually check."""
-    result = _git("ls-files")
-    assert result.returncode == 0, result.stderr
-    tracked = result.stdout.splitlines()
+    tracked = _tracked_paths()
     assert tracked, "`git ls-files` returned nothing: this scan measured nothing"
     offenders = sorted(p for p in tracked if looks_like_a_patch_backup(p))
     assert offenders == [], (
@@ -87,14 +190,130 @@ def test_no_tracked_path_is_a_patch_backup() -> None:
 
 
 def test_git_ignores_a_new_patch_backup() -> None:
-    """`git add -A` must not be able to stage one of these names."""
+    """`git add -A` must not be able to stage one of these names — and the rule that stops it
+    has to be one **this repository** carries, not one this machine's git configuration supplies.
+    """
+    owned = set(_tracked_paths())
+    assert owned, "`git ls-files` returned nothing: this scan measured nothing"
     for name in (
         MEASURED_OFFENDER,
         "tests/some_module.py.rej",
         "emrg/tools/bash_tool.py.bak",
     ):
-        result = _git("check-ignore", "-q", "--no-index", name)
-        assert result.returncode == 0, (
+        rule = _ignoring_rule(REPO_ROOT, name)
+        assert rule is not None, (
             f"{name} is not ignored, so `git add -A` would stage it: "
             "add the suffix to `.gitignore`"
         )
+        assert rule in owned, (
+            f"{name} is ignored by {rule}, which this repository does not track — only its own "
+            "rules count here. A machine-global excludes file (`core.excludesFile`, a common "
+            "setup) or this clone's `.git/info/exclude` answers the same question for the same "
+            "name, so a `.gitignore` that has lost the rule reads green here and on another "
+            "clone `git add -A` stages the backup. The measurement behind this is in the module "
+            "docstring."
+        )
+
+
+def test_the_ignoring_rule_is_read_from_the_repository_and_not_from_the_machine(
+    tmp_path: Path,
+) -> None:
+    """The `-v` source is load-bearing: a machine-global rule must not read as the repository's.
+
+    Driven against a scratch repository, so this checkout's rules are untouched, and with git's
+    configuration redirected by environment variable to files under `tmp_path` — no host file is
+    read or written. Both halves of the assertion above are exercised: the same name, ignored by
+    the machine's rule alone and then by the repository's, so the second half also shows what
+    `rule in owned` needs in order to be satisfiable at all.
+    """
+    repo = tmp_path / "scratch"
+    repo.mkdir()
+    _git("init", "-q", ".", repo=repo)
+    # A tracked file that is not an ignore rule, so the machine rule below is rejected for what
+    # it is rather than because this repository happens to track nothing.
+    (repo / "unrelated.txt").write_text("", encoding="utf-8")
+
+    excludes = tmp_path / "global-ignore"
+    excludes.write_text("*.orig\n", encoding="utf-8")
+    machine_config = tmp_path / "gitconfig"
+    #: Written by `git config --file`, never by hand. A config file's value goes through git's
+    #: own parser, and a hand-written **Windows** path is a syntax error for it — `\U` and `\A`
+    #: are escapes — so git exits 128 with `fatal: bad config line 2`, the injected excludes
+    #: file never takes effect, and the premise assertion below reddens. Measured on this test's
+    #: own `test-windows` leg (run 37870491979, head `26719a7f`) and reproduced locally: the
+    #: hand-written form exits 128, while `git config --file` writes
+    #: `core.excludesFile = C:\\Users\\…` — the escaping that survives its own parser — and reads
+    #: back the original value with rc 0. The sibling `tests/test_dependency_dirs_are_gitignored.py`
+    #: was fixed the same way for the same reason.
+    _git("config", "--file", str(machine_config), "core.excludesFile", str(excludes))
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(machine_config), "GIT_CONFIG_NOSYSTEM": "1"}
+    _git("add", "unrelated.txt", repo=repo, env=env)
+
+    machine_rule = _ignoring_rule(repo, "some_module.py.orig", env=env)
+    assert machine_rule is not None, "the injected excludes file did not take effect"
+    assert Path(machine_rule).name == "global-ignore", machine_rule
+    assert machine_rule not in _tracked_paths(repo), (
+        "a machine-global rule reads as this repository's own, which is the defect this file "
+        "pins"
+    )
+
+    # The same name, now carrying the repository's rule — which outranks the machine's, so the
+    # probe names it and the acceptance above is met.
+    (repo / ".gitignore").write_text("*.orig\n", encoding="utf-8")
+    _git("add", ".gitignore", repo=repo, env=env)
+    repository_rule = _ignoring_rule(repo, "some_module.py.orig", env=env)
+    assert repository_rule is not None, "the repository's own rule stopped matching"
+    assert Path(repository_rule).name == ".gitignore", repository_rule
+    assert repository_rule in _tracked_paths(repo), (
+        f"{repository_rule} is not among the tracked paths, so the assertion above could not be "
+        "satisfied by any rule"
+    )
+
+
+def test_a_source_git_would_quote_is_read_verbatim(tmp_path: Path) -> None:
+    r"""The Windows shape, on every platform: a path git C-quotes still names a real file.
+
+    `check-ignore -v` quotes the source when the path carries a byte it has to escape — a
+    backslash above all, and an absolute Windows path is all backslashes — which is why
+    this file's first `test-windows` leg read `assert 'global-ignore"' == 'global-ignore'`.
+    A non-ASCII directory name is the same trigger and exists on every platform, so the
+    defect is reproducible here instead of only on the leg that found it: `é` arrives as
+    `\303\251` and the whole field is wrapped in quotes.
+
+    Both readings are asserted, because the fix depends on their agreeing: the source
+    `_ignoring_rule` returns must be the tracked path `_tracked_paths` lists, and neither
+    may be the quoted form. Compared as `Path`s: the two subcommands are free to spell the
+    same relative path with a different separator, and that difference is not this test's
+    subject. Driven against a scratch repository under `tmp_path` — a nested `.gitignore`
+    is the repository's own rule, so no git configuration is redirected and no host file is
+    read or written.
+    """
+    nested_name = "sub\u00e9"
+    repo = tmp_path / "scratch"
+    repo.mkdir()
+    _git("init", "-q", ".", repo=repo)
+    nested = repo / nested_name
+    nested.mkdir()
+    (nested / ".gitignore").write_text("*.orig\n", encoding="utf-8")
+    _git("add", ".", repo=repo)
+
+    expected = Path(nested_name) / ".gitignore"
+    tracked = _tracked_paths(repo)
+    assert any(Path(path) == expected for path in tracked), (
+        f"the nested rule is not among the tracked paths ({tracked}), so this test would pass "
+        "without measuring the reading it exists for"
+    )
+
+    rule = _ignoring_rule(repo, f"{nested_name}/some_module.py.orig")
+    assert rule is not None, "the nested rule stopped matching"
+    assert Path(rule) == expected, (
+        f"the source arrived as {rule!r} rather than as the path itself — a quoted field wraps "
+        "the whole path and carries the closing quote into its name, which is the shape "
+        "`test-windows` reported"
+    )
+    assert Path(rule).name == ".gitignore", rule
+    assert any(Path(path) == Path(rule) for path in tracked), (
+        f"{rule!r} is not the tracked spelling of the same file ({tracked}): the two readings "
+        "disagree about quoting"
+    )
+
