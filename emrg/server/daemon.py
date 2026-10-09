@@ -3519,7 +3519,18 @@ class EmrgServer:
                 preq.prompt, preq.images, self.llm.config.vision
             )
             messages.append({"role": "user", "content": pcontent})
-            record: dict = {"type": "message", "role": "user", "content": preq.prompt}
+            # Stamped here, once, and carried on the frame below — the same
+            # contract the fresh-turn path keeps (rant 2026-10-09T09:25:00). A
+            # user record has **two** producers, and this is the second: the
+            # record was always stamped by `append_message`, but `steer_committed`
+            # said nothing about when, so a message typed while the turn was
+            # running showed no clock until the session was reopened — the
+            # divergence the rant's acceptance names, on the path it names
+            # (measured 2026-10-09 on head `79d54818`: the record held a moment,
+            # no frame carried one).
+            steer_stamp = datetime.now().isoformat()
+            record: dict = {"type": "message", "role": "user", "content": preq.prompt,
+                            "timestamp": steer_stamp}
             if preq.images:
                 record["images"] = preq.images
             session.append_message(record)
@@ -3527,6 +3538,8 @@ class EmrgServer:
                 "type": "steer_committed",
                 "request_id": preq.id,
                 "session_id": sid,
+                # The moment the record was written, not a client's receipt time.
+                "timestamp": steer_stamp,
             })
         return len(pending), ask_injected
 

@@ -14,6 +14,7 @@ from pathlib import Path, PurePath
 from emrg._win import win32_no_window_kwargs
 from emrg.client import daemon_manager
 from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Terminal, ToolCard
+from emrg.client.python_tui.pending_rows import ParkedUserRows
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
 from emrg.client.widgets import (
     InputWidget, RewindSelector, SessionSelector, ProjectSelector,
@@ -22,7 +23,7 @@ from emrg.client.widgets import (
     ToolSelector,
 )
 from websockets.exceptions import ConnectionClosed
-from emrg.protocol import TaskResponse, ToolEnd, ToolStart
+from emrg.protocol import TaskResponse, ToolEnd, ToolStart, new_task_id
 from emrg.sandbox.escalation import APPROVAL_TIMEOUT_SECONDS
 from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.session import generate_session_id
@@ -930,14 +931,16 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         """Format left status: version + session title + short ID + model."""
         return _format_status_left(title, sid, model, vision, sandbox)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
-    # The row this client echoed locally for its own user message, and the id of
-    # the request it belongs to. The moment that message was written does not
-    # exist in this client — only the daemon knows it, and it arrives in a
-    # `user_message` frame — so the row is parked here until that frame lands, and
-    # matched by **request id** so a peer client's turn, or a scheduled task's,
-    # cannot stamp a row it did not cause (rant 2026-10-09T09:25:00).
-    pending_user_row = None
-    pending_user_rid = ""
+    # The rows this client echoed locally for its own user messages, and the ids
+    # of the requests they belong to. The moment a message was written does not
+    # exist in this client — only the daemon knows it, and it arrives in a frame
+    # that names the request — so rows are parked here until that frame lands.
+    # Keyed by request id, never "the last one": the frame is a broadcast, so a
+    # peer client's turn (or a scheduled task's) reaches this client too, and
+    # more than one row can be in flight while a turn is queued behind another
+    # (rant 2026-10-09T09:25:00; the keyed shape is the fix for the finding on
+    # #1978, where one slot let a second submit orphan the first row).
+    parked_user_rows = ParkedUserRows()
     # Set from a `done` frame whose `cancelled` field is true, so a receipt that
     # arrives after the ending still finds a turn this client is showing (rant
     # 2026-09-20T12:50:13; both frame orders are measured and named in
@@ -1126,7 +1129,6 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, _welcomed
         nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, current_vision, current_sandbox
-        nonlocal pending_user_row, pending_user_rid
         nonlocal _last_center, _elapsed_task, conn
         nonlocal _request_start, turn_running
         # /task-session: the daemon's verdict on a task's session decides whether
@@ -1220,9 +1222,18 @@ async def interactive(init_auto_evolve: bool = False, console=None):
 
                 if data.get("type") == "steer_committed":
                     # Injected into the running turn — no longer needs requeue.
+                    # This is also the frame that carries the moment for a
+                    # message typed while the turn was running: its record has
+                    # two producers and this is the second one, so the live row
+                    # needs the same fill the `user_message` branch does
+                    # (finding on #1978). Without it the clock appeared only
+                    # after a reopen, which is the divergence the rant names.
                     rid = data.get("request_id", "")
                     if rid:
                         _queued_sends[:] = [q for q in _queued_sends if q.get("id") != rid]
+                        if parked_user_rows.fill(rid, str(data.get("timestamp") or "")):
+                            chat.dirty = True
+                            _render_throttled()
                     continue
 
                 if data.get("type") == "queued_requeue":
@@ -1369,18 +1380,17 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # here, from the daemon's value, which is why a reopen shows
                     # the same one.
                     #
-                    # Matched by request id, never by "the last user row": the
-                    # frame is a broadcast, so a peer client's turn (or a
-                    # scheduled task's) reaches this client too, and position
-                    # would let it stamp a row belonging to someone else's
-                    # message.
-                    if (pending_user_row is not None
-                            and str(data.get("request_id") or "") == pending_user_rid):
-                        pending_user_row.timestamp = str(data.get("timestamp") or "")
-                        pending_user_row.dirty = True
+                    # Matched by request id inside `parked_user_rows`, never by
+                    # "the last user row": the frame is a broadcast, so a peer
+                    # client's turn (or a scheduled task's) reaches this client
+                    # too, and position would let it stamp a row belonging to
+                    # someone else's message. More than one row can be parked at
+                    # once, which is why the match is a lookup and not a
+                    # comparison against one stored id.
+                    if parked_user_rows.fill(
+                            str(data.get("request_id") or ""),
+                            str(data.get("timestamp") or "")):
                         chat.dirty = True
-                        pending_user_row = None
-                        pending_user_rid = ""
                         _render_throttled()
                     continue
 
@@ -1520,6 +1530,10 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     else:
                         # Clear the TUI chat display
                         chat.rows.clear()
+                        # The rows parked for this session's unsent moments go
+                        # with it: their frames named a transcript that no longer
+                        # exists (rant 2026-10-09T09:25:00).
+                        parked_user_rows.clear()
                         chat.dirty = True
                         chat.add("system", "Session cleared — starting fresh.")
                         msg_count = 0
@@ -2108,6 +2122,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # "Resumed session" line lands after the rows it summarises
                     # rather than above them.
                     chat.rows.clear()
+                    # Same reason as the clear path: these rows belong to the
+                    # session being replaced, and the frame that would have filled
+                    # one is the other session's business now (rant
+                    # 2026-10-09T09:25:00).
+                    parked_user_rows.clear()
                     chat.dirty = True
                     _replay_pending = (session_id, meta)
                     await conn.send_command(
@@ -2304,7 +2323,6 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task, _pending_images
         nonlocal turn_running
-        nonlocal pending_user_row, pending_user_rid
         nonlocal _skills_confirm
         # The daemon is holding a tool call open on this answer; `handle_key`
         # consumes it at the "next line is the answer" branch below. Declared
@@ -2826,7 +2844,15 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         f"confirmation if needed, then call submit_rant "
                         f"(project: {_rant_project})]\n{text}"
                     )
-                    chat.add("user", f"/rant @{_rant_project} {text}")
+                    # This path echoes its own user row too, so it parks it the
+                    # same way the ordinary submit does — the id is minted here,
+                    # before the send, and handed to `send_task` so the frame
+                    # that answers this request fills this row (rant
+                    # 2026-10-09T09:25:00; every echoed row, not just the main
+                    # submit's).
+                    rid = new_task_id()
+                    parked_user_rows.park(
+                        rid, chat.add("user", f"/rant @{_rant_project} {text}"))
                     chat.add("assistant", "")
                     msg_count += 1; _update_left_extra()
                     _last_center = "thinking..."
@@ -2840,7 +2866,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     # on every Enter (issue #1759).
                     was_busy = busy
                     rid = await conn.send_task(session_id=session_id, cwd=cwd,
-                                               prompt=hint)
+                                               prompt=hint, id=rid)
                     if was_busy:
                         _queued_sends.append({"id": rid, "prompt": hint, "images": None})
                     _rant_project = None
@@ -3183,7 +3209,13 @@ Streaming
                         f"confirmation if needed, then call submit_rant "
                         f"(project: {project if project else 'emrg'})]\n{message}"
                     )
-                    chat.add("user", f"/rant{target} {message}")
+                    # Parked before the send, under an id minted here — the other
+                    # `/rant` shape does the same, so an echoed row on either path
+                    # can be filled by the frame that answers it (rant
+                    # 2026-10-09T09:25:00).
+                    rid = new_task_id()
+                    parked_user_rows.park(
+                        rid, chat.add("user", f"/rant{target} {message}"))
                     chat.add("assistant", "")
                     msg_count += 1; _update_left_extra()
                     _last_center = "thinking..."
@@ -3194,7 +3226,7 @@ Streaming
                     # preceding binding (issue #1759).
                     was_busy = busy
                     rid = await conn.send_task(session_id=session_id, cwd=cwd,
-                                               prompt=hint)
+                                               prompt=hint, id=rid)
                     if was_busy:
                         _queued_sends.append({"id": rid, "prompt": hint, "images": None})
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -3323,8 +3355,8 @@ Streaming
                 # Echoed at once so typing stays instant, and parked: the clock on
                 # it can only come from the daemon, which writes the record and
                 # answers with `user_message` (rant 2026-10-09T09:25:00).
-                pending_user_row = chat.add("user", inp.text)
-                pending_user_rid = ""  # set once the daemon names the request
+                rid = new_task_id()
+                parked_user_rows.park(rid, chat.add("user", inp.text))
                 history.append(text); stream_buffer = ""
                 history_index = -1  # reset history navigation on submit
                 chat.add("assistant", "")
@@ -3349,8 +3381,7 @@ Streaming
                         await conn.send_command("rename_session", session_id=session_id,
                                                 cwd=cwd, title=auto_title)
                 rid = await conn.send_task(session_id=session_id, cwd=cwd, prompt=text,
-                                           images=images)
-                pending_user_rid = rid
+                                           images=images, id=rid)
                 if was_busy:
                     _queued_sends.append({"id": rid, "prompt": text, "images": images})
                 logger.info("task sent, prompt_len=%d chars", len(text))
