@@ -788,8 +788,8 @@ def test_a_config_failure_at_startup_reaches_emrgd_log(monkeypatch, caplog):
     from emrg.server import __main__ as server_main
 
     monkeypatch.setattr(server_main, "ensure_tool_dirs", lambda: [])
-    # Stubbed because their real bodies open the host's `~/.emrg/emrgd.log` and
-    # `~/.emrg/emrgd-crash.log`: the *log call* is what this test is about, and
+    # Stubbed because their real bodies open the host's `~/.emrg/logs/emrgd.log` and
+    # `~/.emrg/logs/emrgd-crash.log`: the *log call* is what this test is about, and
     # `caplog` captures it without either file existing.
     monkeypatch.setattr(server_main, "_configure_logging", lambda: None)
     monkeypatch.setattr(server_main, "_redirect_std_streams", lambda: None)

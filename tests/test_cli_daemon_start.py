@@ -148,7 +148,7 @@ def test_the_announcement_comes_from_the_real_client_start_path(
     # host's: that channel is what names a cause when the child dies early.
     _args, kwargs = dm.asyncio.create_subprocess_exec.await_args
     assert kwargs["stderr"] is not subprocess.DEVNULL
-    err = home / ".emrg" / "emrgd-start.err"
+    err = home / ".emrg" / "logs" / "emrgd-start.err"
     assert err.exists(), "the captured stderr lives where the diagnostic reads it"
 
 

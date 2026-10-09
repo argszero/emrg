@@ -33,7 +33,7 @@ and failed on Windows for that reason alone. `tool_path.path_flavour` is the
 fix, and `test_a_named_platform_spells_its_own_paths` is the guard that keeps it.
 
 ⚠️ Nothing here starts, stops or restarts a daemon (MANIFESTO 第四条附则二), and
-nothing opens `~/.emrg/config.toml` or `~/.emrg/emrgd.log`: the two entry tests
+nothing opens `~/.emrg/config.toml` or `~/.emrg/logs/emrgd.log`: the two entry tests
 stub the logging setup, the config load and the server itself, so no process is
 spawned and no host file is written. The directories that must exist on disk are
 made under `tmp_path` and `Path.home` is pointed at them for the duration.

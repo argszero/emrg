@@ -178,6 +178,25 @@ def config_dir() -> Path:
     return Path.home() / ".emrg"
 
 
+def logs_dir() -> Path:
+    """Returns the directory holding EMRG's application-level log files.
+
+    **The one derivation of that directory** (rant 2026-10-09T14:20:18): every
+    writer, reader and tail-reader of `emrgd.log`, `emrgd-crash.log`,
+    `emrgd-exit.log`, `emrgd-start.err` and `emrg-gui.log` takes it from here
+    rather than spelling `Path.home() / ".emrg"` again — the root had collected
+    nine log files before this, which is what the host asked to stop. The names
+    themselves and the migration of the legacy leftovers live in
+    `emrg/logfiles.py`.
+
+    The JS side (`emrg/gui/daemon_client.js`, `emrg/gui/main.js`) cannot import
+    this, so it carries its own named constant and
+    `tests/test_log_dir_pairing.py` pins the two sides to the same path — the
+    treatment `EMRGD_PORT` already gets.
+    """
+    return config_dir() / "logs"
+
+
 def config_path() -> Path:
     """Returns the config file path."""
     home = Path.home()

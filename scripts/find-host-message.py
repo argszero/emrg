@@ -71,9 +71,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from emrg.config import logs_dir  # noqa: E402
+
 #: Where the daemon writes its received-message record, and where it keeps the index
-#: of session directories that the second source is read from.
-DEFAULT_LOG_DIR = Path.home() / ".emrg"
+#: of session directories that the second source is read from. The log directory is
+#: read from its one derivation (rant 2026-10-09T14:20:18) rather than spelled here,
+#: so this reader moved with the writers instead of being left pointing at the old
+#: root — which is the failure mode the rant names for every tail-reader.
+DEFAULT_LOG_DIR = logs_dir()
 DEFAULT_INDEX = Path.home() / ".emrg" / "sessions_index.json"
 
 #: The daemon's line for one received message. The prompt is quoted and may be

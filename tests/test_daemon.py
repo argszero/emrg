@@ -3745,7 +3745,7 @@ def test_build_user_content_non_vision_degrade():
 
 
 def test_write_exit_record(tmp_path, monkeypatch):
-    """Exit records are durable one-line JSON in ~/.emrg/emrgd-exit.log —
+    """Exit records are durable one-line JSON in ~/.emrg/logs/emrgd-exit.log —
     every daemon stop, normal or abnormal, must be attributable."""
     from emrg.server.daemon import _write_exit_record
 
