@@ -34,6 +34,9 @@ runs — the mac icons are generated on macOS alone (`iconutil` is macOS-only in
 an unconditional check would report a fault on the two legs that never read them.
 
 Exit codes: 0 every reference resolves / 1 at least one does not / 2 could not measure.
+The first line is `tree: <project dir>`, printed before **any** verdict — the family's
+convention for a guard that reads a working tree, so that the same report is not true of
+this checkout, of a worktree and of a directory a test built.
 """
 
 from __future__ import annotations
@@ -70,16 +73,25 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     root = Path(args.root).resolve()
+    # The tree line first, on **every** path -- including the two refusals below. This is a
+    # guard that reads a working tree, and the family's convention (stated in
+    # `test_a_tree_reading_guard_names_its_tree.py`, and the reason `check-citation-resolves.py`
+    # was fixed on 2026-09-25) is that it says which tree answered before it says anything
+    # else. Printed further down, past the two early returns, both refusals answered about a
+    # tree they never named -- measured 2026-10-10: `--root <any unreadable dir>` printed
+    # `UNMEASURABLE: ...` as its first line, while this guard's own classification entry
+    # claims a test pins that naming for **each** of its exit codes.
+    print(f"tree: {root} (platform block: {args.platform})")
     manifest = root / "package.json"
     try:
         build = json.loads(manifest.read_text(encoding="utf-8"))["build"]
     except (OSError, ValueError, KeyError) as exc:
-        print(f"UNMEASURABLE: {manifest} - {exc}")
+        print(f"could not measure: {manifest} - {exc}")
         return 2
 
     relative = (build.get("directories") or {}).get("buildResources")
     if not relative:
-        print(f"UNMEASURABLE: {manifest} declares no directories.buildResources")
+        print(f"could not measure: {manifest} declares no directories.buildResources")
         return 2
     build_resources = (root / relative).resolve()
 
@@ -95,7 +107,6 @@ def main(argv: list[str] | None = None) -> int:
         if icon:
             wanted.append((f"{prefix}icon ({relative})", (build_resources / icon).resolve()))
 
-    print(f"tree: {root} (platform block: {args.platform})")
     missing = []
     for label, path in wanted:
         if path.exists():

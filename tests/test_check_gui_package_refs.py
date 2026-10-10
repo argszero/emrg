@@ -93,4 +93,27 @@ def test_an_unreadable_manifest_is_not_a_pass(tmp_path: Path) -> None:
     (gui / "package.json").write_text("{ not json", encoding="utf-8")
     done = _run(gui)
     assert done.returncode == 2, done.stdout + done.stderr
-    assert "UNMEASURABLE" in done.stdout
+    # ... and the tree line comes first on **this** path too. A refusal that does not say
+    # which tree it read is the defect that fixed `check-citation-resolves.py` on
+    # 2026-09-25, and `test_a_tree_reading_guard_names_its_tree.py`'s entry for this guard
+    # claims this test pins that naming for each of its exit codes — measured 2026-10-10,
+    # it did not: the guard printed `UNMEASURABLE: ...` as its first line here.
+    assert done.stdout.splitlines()[0].startswith(f"tree: {gui.resolve()}"), done.stdout
+    assert "could not measure: " in done.stdout, done.stdout
+
+
+def test_a_manifest_without_build_resources_is_not_a_pass(tmp_path: Path) -> None:
+    """The other refusal: the block electron-builder resolves every icon against is absent.
+
+    Uncovered until 2026-10-10 — the second of the guard's two unmeasurable paths, with no
+    test reading it.
+    """
+    gui = _gui_project(tmp_path)
+    manifest = json.loads((gui / "package.json").read_text(encoding="utf-8"))
+    del manifest["build"]["directories"]["buildResources"]
+    (gui / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
+    done = _run(gui)
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert done.stdout.splitlines()[0].startswith(f"tree: {gui.resolve()}"), done.stdout
+    assert "could not measure: " in done.stdout, done.stdout
+    assert "buildResources" in done.stdout, done.stdout
