@@ -621,10 +621,64 @@ def test_the_scanned_tree_is_named_in_the_output(mod, monkeypatch, tmp_path, cap
     fake = _fake_checkout(tmp_path / "checkout", 1307)
     monkeypatch.chdir(fake)
     monkeypatch.setattr(mod, "REPO_ROOT", mod._resolve_root())
-    monkeypatch.setattr(mod, "scanned_files", lambda: [])
+    # A stub that read *something*: an empty scan is its own refusal now
+    # (`test_an_empty_scan_is_a_refusal_not_a_clean_tree` below), and this test is
+    # about which tree gets named, so it must not be driven through that branch.
+    monkeypatch.setattr(mod, "scan", lambda: (["Agent.md"], [], []))
     assert mod.main([]) == 0
     out = capsys.readouterr().out
     assert f"tree: {fake.resolve()}" in out, out
+
+
+def test_an_empty_scan_is_a_refusal_not_a_clean_tree(mod, monkeypatch, tmp_path, capsys):
+    """A tree this rule read no file from is not a tree it found nothing wrong in.
+
+    The sibling test above (`test_unlistable_files_fail_loud`) already states the
+    rule - "an empty scan and a clean tree are indistinguishable in the output" -
+    and only the *listing failure* had a branch for it. An empty listing is the
+    same defect one step later: every file under `tests/`/`scripts/`, or an export
+    holding none of them, printed a green verdict over a subject of nothing, and
+    `0` is the code that means *measured and clean*.
+
+    Both directions: empty refuses and names the tree, non-empty still passes -
+    a refusal that fired on a real tree would make the tool unusable.
+    """
+    fake = _fake_checkout(tmp_path / "checkout", 1307)
+    monkeypatch.chdir(fake)
+    monkeypatch.setattr(mod, "REPO_ROOT", mod._resolve_root())
+    monkeypatch.setattr(mod, "scan", lambda: ([], [], []))
+    assert mod.main([]) == 2
+    captured = capsys.readouterr()
+    assert "could not measure" in captured.err, captured.err
+    assert f"tree: {fake.resolve()}" in captured.out, captured.out
+    # The refusal says which directories the scope is, so the reader can tell a
+    # tree that is genuinely out of scope from one whose listing broke.
+    assert "tests/" in captured.err and "scripts/" in captured.err, captured.err
+
+    monkeypatch.setattr(mod, "scan", lambda: (["Agent.md", "emrg/x.py"], [], []))
+    assert mod.main([]) == 0
+    assert "OK: no tracked file states the Python test count" in capsys.readouterr().out
+
+
+def test_the_clean_verdict_names_how_much_it_read(mod, monkeypatch, tmp_path, capsys):
+    """`no claim in the whole scope` and `no claim in none` must not be one sentence.
+
+    The number is the point: a reader who cannot see the coverage cannot tell a
+    narrowed scan from a clean tree, which is the defect the sibling `.md` witness
+    guards on the other side (`test_the_scan_scope_covers_every_tracked_doc`).
+    A skipped file is stated too, so a partial read is not read as a whole one.
+    """
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "scan", lambda: (["Agent.md", "emrg/x.py"], [], []))
+    assert mod.main([]) == 0
+    out = capsys.readouterr().out
+    assert "2 file(s) read" in out, out
+
+    monkeypatch.setattr(mod, "scan", lambda: (["Agent.md"], ["img.png"], []))
+    assert mod.main([]) == 0
+    out = capsys.readouterr().out
+    assert "1 file(s) read" in out, out
+    assert "1 unreadable file(s) skipped" in out, out
 
 
 def _git_stdout(*argv: str) -> str:
