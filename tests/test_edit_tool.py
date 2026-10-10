@@ -1,6 +1,7 @@
 """Tests for the edit tool."""
 
 import asyncio
+import os
 import tempfile
 from pathlib import Path
 
@@ -374,3 +375,27 @@ class TestTheFileKeepsItsOwnLineEndings:
         assert f.read_bytes() == b"first\r\nsecond\r\nthird\r\n", (
             "a refused edit must not rewrite the file"
         )
+
+
+# ── the subject has to be a regular file (see the read tool's twin) ──
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_edit_refuses_a_named_pipe_instead_of_blocking(tmp_path):
+    """The check used to name a directory alone; a FIFO reached `open` and never returned."""
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    result = _run(EditTool().execute(
+        {"file_path": str(fifo), "old_string": "a", "new_string": "b"}
+    ))
+    assert result.error, "a FIFO cannot be edited and must not be opened"
+    assert "a FIFO (named pipe)" in result.content, result.content
+
+
+def test_edit_still_refuses_a_directory(tmp_path):
+    """The directory refusal survives, with its own wording, now stated as a kind."""
+    result = _run(EditTool().execute(
+        {"file_path": str(tmp_path), "old_string": "a", "new_string": "b"}
+    ))
+    assert result.error
+    assert "is a directory" in result.content, result.content

@@ -1,6 +1,7 @@
 """Tests for the read tool."""
 
 import asyncio
+import os
 import tempfile
 from pathlib import Path
 
@@ -519,3 +520,35 @@ def test_read_still_reads_every_value_inside_its_domain(temp_file):
     lines = result.content.split("\n")
     assert lines[0] == "     3\tne 3"
     assert "line 4" not in result.content, "line_limit=1 read more than one line"
+
+
+# ── the subject has to be a regular file ──
+#
+# Every file tool opens its subject, and an open is not a read: on a named pipe it blocks
+# until the other end appears. Nothing here asked what it was opening, so a FIFO decided
+# whether the call returned — and because `daemon._run_tool_loop` awaits `tool.execute`
+# *on the event loop*, a call that never returns is the daemon never returning. The test
+# cannot bound a hang it is meant to catch, so it is the guard: it fails the moment the
+# refusal stops being made, by never finishing.
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_read_refuses_a_named_pipe_instead_of_blocking(tmp_path):
+    """`read` on a FIFO is refused, naming the kind — not entered and never returned."""
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    result = _run(ReadTool().execute({"file_path": str(fifo)}))
+    assert result.error, "a FIFO is not readable and must not be read"
+    assert "a FIFO (named pipe)" in result.content, result.content
+    assert "not a regular file" in result.content, result.content
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_read_still_reads_a_regular_file_beside_a_pipe(tmp_path):
+    """The control: the refusal is about the kind, not about the directory holding it."""
+    os.mkfifo(tmp_path / "pipe")
+    regular = tmp_path / "notes.txt"
+    regular.write_text("hello\n")
+    result = _run(ReadTool().execute({"file_path": str(regular)}))
+    assert not result.error, result.content
+    assert "hello" in result.content

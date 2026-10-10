@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, count_argument
+from emrg.tools.base import ToolExecutor, count_argument, special_file_kind, special_file_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,22 @@ class ReadTool(ToolExecutor):
                 lines.append(f"  {e.name}{suffix}")
             return ToolResult(name="read", content="\n".join(lines))
 
-        file_size = path.stat().st_size
+        # ── Only a regular file has lines to read ──
+        #
+        # `exists()` is true for a FIFO, a socket and a device node, and `is_dir()` is
+        # false for all three, so every one of them fell through to `read_text()` —
+        # which on a FIFO blocks until a writer appears, forever when none does.
+        # Measured 2026-10-10 (`cyc20261010-215146`): `read` on a `mkfifo` named pipe
+        # did not return in 10 s, in its own process, while the same call against a
+        # regular file returned immediately. `special_file_kind` carries the class.
+        info = path.stat()
+        special = special_file_kind(info.st_mode)
+        if special is not None:
+            return ToolResult(
+                name="read", content=special_file_refusal(path, special), error=True
+            )
+
+        file_size = info.st_size
         user_specified_range = (line_limit is not None
                                 or start_line > 1
                                 or start_line_byte_offset > 0)
