@@ -133,7 +133,7 @@ def boolean_argument(
 
 
 def brace_alternation(pattern: str) -> bool:
-    """True when a glob carries `{a,b}` alternation.
+    """True when a glob carries `{a,b}` alternation — a comma inside braces.
 
     The file-finding tools walk with `Path.glob`/`Path.rglob`, whose pattern
     language has no brace expansion: `*.{py,rs}` is not two patterns, it is one
@@ -148,12 +148,39 @@ def brace_alternation(pattern: str) -> bool:
         glob='*.py'       -> Found 9 matches ... (searched 15 files)
         glob='*.{py,rs}'  -> No matches ... (searched 0 files)
 
-    `grep`'s description advertised exactly that pattern as an example, so a
-    model following it got the false negative. Shared here rather than spelled in
-    each tool because both are held to the same rule: a pattern this walk cannot
-    expand is refused with the reason, never searched to an empty answer.
+    **The comma is the whole predicate, and a bare brace is not one.** This
+    function first answered `"{" in pattern or "}" in pattern`, and that refused
+    patterns the walk reads correctly: `Path.glob` gives `{` no special meaning,
+    so `a{b}.py` is the exact name of a real file. Measured 2026-10-10
+    (`cyc20261011-001130`) on a tree holding a file literally named `a{b}.py`:
+    `glob` and `grep` both answered `Found 1 matches … a{b}.py` on master and both
+    **refused** it on the branch, with a message asserting `{a,b}` alternation the
+    input does not carry. That is the over-block this repository named once
+    already (`emrg/tools/command_scan.py`, the #1513 lesson: `echo sh "patch …"`
+    was a bug, not a safe over-block). Alternation needs two alternatives, so the
+    subject is a brace group holding a comma - `{b}` has nothing to alternate
+    between.
+
+    What a caller does with this is the caller's half: both tools **also** require
+    that the pattern selected nothing before they refuse, so a comma-bearing
+    pattern that selects files (`a{,b}.py`, a literal name) is searched normally.
+    :func:`emrg.tools.glob_tool.GlobTool.execute` and
+    :meth:`emrg.tools.grep_tool.GrepTool.execute` each say so where they check.
+
+    :param pattern: the glob pattern as the caller passed it.
+    :returns: True when the pattern is alternation-shaped.
     """
-    return "{" in pattern or "}" in pattern
+    depth = 0
+    for char in pattern:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        elif char == "," and depth:
+            return True
+    return False
+
+
 def special_file_kind(mode: int) -> str | None:
     """Name a file subject's kind from its ``st_mode`` — ``None`` when it is a regular file.
 

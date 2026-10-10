@@ -182,24 +182,6 @@ class GrepTool(ToolExecutor):
                 name="grep", content=f"Error: path not found: {root}", error=True
             )
 
-        # A pattern this filter cannot expand is refused rather than searched: the
-        # walk would match nothing and the answer would read `No matches` - a
-        # false negative indistinguishable from a real absence. See
-        # `brace_alternation` for the measurement and the example that advertised it.
-        if file_glob and brace_alternation(file_glob):
-            return ToolResult(
-                name="grep",
-                content=(
-                    f"Error: the glob filter {file_glob!r} uses `{{a,b}}` brace "
-                    "alternation, which this filter does not expand - it walks with "
-                    "`Path.rglob`, so the whole pattern is one literal string and would "
-                    "select nothing, reporting `No matches` for a search it never ran. "
-                    "Pass one pattern per call ('*.py', then '*.rs'), or omit the filter "
-                    "and search the tree."
-                ),
-                error=True,
-            )
-
         logger.debug(
             "grep: pattern=%r path=%s glob=%s ignore_case=%s",
             pattern, root, file_glob, ignore_case,
@@ -217,6 +199,39 @@ class GrepTool(ToolExecutor):
                 excluded_named_file = True
         else:
             files = self._collect_files(root, file_glob)
+
+        # A filter this walk cannot expand is refused rather than searched: it selects
+        # nothing and the answer reads `No matches` - a false negative indistinguishable
+        # from a real absence. See `brace_alternation` for the measurement and the example
+        # that advertised it.
+        #
+        # The check sits *after* the collection, on `files`, because the refusal has to be
+        # a measurement rather than a prediction. `brace_alternation` alone fires on the
+        # shape of the pattern, and `Path.rglob` gives `{` no special meaning, so a literal
+        # name like `a{b}.py` selects its file and must not be refused (measured 2026-10-10,
+        # `cyc20261011-001130`: refusing it was this branch's own over-block). A filter that
+        # selected nothing is the case the refusal is about, and there its two claims -
+        # alternation is not expanded, and nothing was selected - are both readings rather
+        # than guesses.
+        #
+        # The named-file branch is inside this, not carved out of it: `_selects` matches with
+        # `fnmatch`, which does not expand braces either, so `glob='*.{py,rs}'` pointed at
+        # one file excludes it for the same reason the walk selects nothing - and the remedy
+        # is the pattern, not the file. Naming that cause is worth more than naming the
+        # exclusion it produced.
+        if not files and file_glob and brace_alternation(file_glob):
+            return ToolResult(
+                name="grep",
+                content=(
+                    f"Error: the glob filter {file_glob!r} uses `{{a,b}}` brace "
+                    "alternation, which this filter does not expand - it walks with "
+                    "`Path.rglob`, so the whole pattern is one literal string. It selected "
+                    "nothing, and `No matches` is the sentence a real absence produces, so "
+                    "this answer would not be distinguishable from one. Pass one pattern "
+                    "per call ('*.py', then '*.rs'), or omit the filter and search the tree."
+                ),
+                error=True,
+            )
 
         # Search
         results: list[str] = []

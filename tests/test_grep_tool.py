@@ -730,3 +730,90 @@ def test_every_glob_example_the_description_advertises_selects_files(tmp_path):
             f"the description advertises {glob_example!r}, which selects no file at all — "
             f"the caller would read 'No matches' as a fact about the tree: {result.content}"
         )
+
+
+def test_a_literal_brace_name_in_the_filter_selects_its_file(tmp_path):
+    """The filter's brace refusal must not fire on a name the walk can read literally.
+
+    The refusal added for `*.{py,rs}` first fired on `"{" in filter or "}" in filter`, and
+    that refused filters `Path.rglob` reads correctly: on a tree holding a file named
+    `a{b}.py`, master's directory branch selected it and the branch refused the call, with a
+    message asserting `{a,b}` alternation the input does not carry. Measured 2026-10-10
+    (`cyc20261011-001130`) in this checkout. This repository named that class once already
+    (`emrg/tools/command_scan.py`, the #1513 lesson: `echo sh "patch …"` was a bug, not a
+    safe over-block).
+
+    Alternation needs two alternatives, so the trigger is a comma inside the braces — and
+    the tool additionally requires that the filter selected nothing, which is what makes the
+    refusal a reading rather than a prediction. Both halves are asserted, because each alone
+    is satisfied by a wrong rule: dropping the refusal passes the literal half, and the
+    over-block passed the alternation half.
+    """
+    tool = GrepTool()
+    literal = tmp_path / "a{b}.py"
+    literal.write_text("needle here\n")
+    comma = tmp_path / "a{b,c}.py"
+    comma.write_text("needle here\n")
+
+    through_the_directory = _run(tool.execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "a{b}.py",
+    }))
+    assert not through_the_directory.error, (
+        "the directory branch reads `a{b}.py` literally and selects the file that holds "
+        f"it; refusing it blocks a filter that works: {through_the_directory.content}"
+    )
+    assert "Found 1 matches" in through_the_directory.content, through_the_directory.content
+    assert "searched 1 files" in through_the_directory.content, through_the_directory.content
+
+    through_the_named_file = _run(tool.execute({
+        "pattern": "needle", "path": str(literal), "glob": "a{b}.py",
+    }))
+    assert not through_the_named_file.error, through_the_named_file.content
+    assert "Found 1 matches" in through_the_named_file.content, through_the_named_file.content
+
+    # The other half of the discriminator: a comma between the braces is alternation, it
+    # selected nothing, and it is still refused rather than searched to `No matches`.
+    alternation = _run(tool.execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "*.{py,rs}",
+    }))
+    assert alternation.error, (
+        "`*.{py,rs}` is the pattern the description used to advertise, and it selects "
+        f"nothing — the answer has to be the refusal: {alternation.content}"
+    )
+    assert "brace" in alternation.content, alternation.content
+
+    comma_but_selecting = _run(tool.execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "a{b,c}.py",
+    }))
+    assert not comma_but_selecting.error, (
+        "a comma-bearing filter that selects the named file is answered, not refused: the "
+        f"refusal is gated on the filter having selected nothing: {comma_but_selecting.content}"
+    )
+    assert "Found 1 matches" in comma_but_selecting.content, comma_but_selecting.content
+
+    # And a literal brace name that is simply *absent* gets the empty answer, not the
+    # refusal: `{b}` alternates between nothing, so refusing it asserts alternation the
+    # pattern does not carry. This is the reading that tells the comma predicate apart from
+    # "any brace" — with the wide predicate the gate alone still refuses this call whenever
+    # no file matches, and the files above cannot separate the two.
+    missing = _run(tool.execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "zz{b}.py",
+    }))
+    assert not missing.error, (
+        "no file matches `zz{b}.py`, and that is the true answer — `{b}` alternates "
+        f"between nothing, so this is not alternation: {missing.content}"
+    )
+    assert "No matches" in missing.content, missing.content
+
+    # A named file with an unreadable filter is refused for the filter's reason, not told
+    # that it merely failed to match: `_selects` matches with `fnmatch`, which does not
+    # expand braces either, so the exclusion and the empty walk have one cause — the pattern
+    # — and the remedy is to change it, not to look at the file.
+    named_unreadable = _run(tool.execute({
+        "pattern": "needle", "path": str(literal), "glob": "*.{py,rs}",
+    }))
+    assert named_unreadable.error, (
+        "the filter cannot be read at all, so this is the refusal and not a match "
+        f"failure the caller would fix by looking at the file: {named_unreadable.content}"
+    )
+    assert "brace" in named_unreadable.content, named_unreadable.content

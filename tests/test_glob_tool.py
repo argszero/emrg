@@ -237,3 +237,72 @@ def test_a_brace_pattern_is_refused_rather_than_answered_with_no_files_matched(t
             f"{pattern} has to keep matching {expected}, or 'refused' is "
             f"indistinguishable from 'handled': {control.content}"
         )
+
+
+def test_a_literal_brace_name_is_searched_not_refused(temp_cwd):
+    """A brace is a literal character to this walk, so a name holding one is a real name.
+
+    The refusal added for `**/*.{py,md}` first fired on `"{" in pattern or "}" in pattern`,
+    and that refused patterns `Path.glob` reads correctly: on a tree holding a file named
+    `a{b}.py`, master answered `Found 1 matches … a{b}.py` and the branch refused it, with a
+    message asserting `{a,b}` alternation the input does not carry. Measured 2026-10-10
+    (`cyc20261011-001130`) in this checkout. This repository named that class once already
+    (`emrg/tools/command_scan.py`, the #1513 lesson: `echo sh "patch …"` was a bug, not a
+    safe over-block).
+
+    Alternation needs two alternatives, so the trigger is a comma inside the braces — and
+    the tool additionally requires that the pattern selected nothing, which is what makes
+    the refusal a reading rather than a prediction. Both halves are asserted here, because
+    each alone is satisfied by a wrong rule: dropping the refusal entirely passes the first
+    half, and the over-block passed the second.
+    """
+    tool = GlobTool()
+    literal = temp_cwd / "a{b}.py"
+    literal.write_text("")
+    comma = temp_cwd / "a{b,c}.py"
+    comma.write_text("")
+
+    named = _run(tool.execute({"pattern": "a{b}.py", "workdir": str(temp_cwd)}))
+    assert not named.error, (
+        "`Path.glob` gives `{` no special meaning, so this pattern is the exact name of a "
+        f"file that exists — refusing it blocks a pattern that works: {named.content}"
+    )
+    assert "a{b}.py" in named.content, named.content
+    assert "Found 1 matches" in named.content, named.content
+
+    # The literal name reached through a wildcard is the same reading.
+    wildcard = _run(tool.execute({"pattern": "a{b}*", "workdir": str(temp_cwd)}))
+    assert not wildcard.error, wildcard.content
+    assert "a{b}.py" in wildcard.content, wildcard.content
+
+    # The other half of the discriminator: a comma between the braces is alternation, it
+    # selected nothing, and it is still refused rather than answered `No files matched`.
+    alternation = _run(tool.execute({"pattern": "*.{py,rs}", "workdir": str(temp_cwd)}))
+    assert alternation.error, (
+        "`*.{py,rs}` is alternation this walk cannot expand, and it selected nothing — the "
+        f"answer has to be the refusal, not an empty reading: {alternation.content}"
+    )
+    assert "brace" in alternation.content, alternation.content
+
+    # And a comma-bearing pattern that **selects** the file whose name carries the comma is
+    # answered: `Path.glob` reads that name literally, so this is the reading that pins the
+    # "selected nothing" half of the rule — without it, gating on the pattern's shape alone
+    # passes every call above.
+    comma_named = _run(tool.execute({"pattern": "a{b,c}.py", "workdir": str(temp_cwd)}))
+    assert not comma_named.error, (
+        "a file is named `a{b,c}.py` and `Path.glob` matches that literal name, so the "
+        f"pattern selects it and must be answered: {comma_named.content}"
+    )
+    assert "Found 1 matches" in comma_named.content, comma_named.content
+
+    # And a literal brace name that is simply *absent* gets the empty answer, not the
+    # refusal: `{b}` alternates between nothing, so refusing it asserts alternation the
+    # pattern does not carry. This is the reading that tells the comma predicate apart from
+    # "any brace" — with the wide predicate the gate alone still refuses this call whenever
+    # the file is missing, and the file's presence above cannot separate the two.
+    missing = _run(tool.execute({"pattern": "zz{b}.py", "workdir": str(temp_cwd)}))
+    assert not missing.error, (
+        "no file is named `zz{b}.py`, and that is the true answer — `{b}` alternates "
+        f"between nothing, so this is not alternation: {missing.content}"
+    )
+    assert "No files matched" in missing.content, missing.content
