@@ -1,12 +1,13 @@
 """Tests for the read tool."""
 
 import asyncio
+import os
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from emrg.tools.read_tool import ReadTool
+from emrg.tools.read_tool import DEFAULT_MAX_LINES, ReadTool
 
 
 @pytest.fixture
@@ -94,6 +95,146 @@ def test_read_directory(temp_file):
     assert "test.txt" in result.content
 
 
+class TestAReadIsBoundedWhicheverSubjectItHas:
+    """A listing is a read, so the limits bind it too (issue #2059).
+
+    Measured 2026-10-10 (`cyc20261010-211559`): the directory branch returned every
+    entry whatever the caller passed — `line_limit=1` on a 6,000-entry directory
+    produced a byte-identical 108,112-character result to a read with no arguments,
+    while `DEFAULT_MAX_LINES` stopped a 6,000-line *file* at 1,000 lines and named the
+    continuation. A limit that binds one subject and is dropped for the other is the
+    "identical output whether or not you bounded it" defect, and the caller could not
+    tell that its bound had been ignored.
+    """
+
+    @staticmethod
+    def _dir(tmp_path, count):
+        d = tmp_path / "listing"
+        d.mkdir()
+        for i in range(count):
+            (d / f"entry-{i:05d}.txt").write_text("")
+        return d
+
+    @staticmethod
+    def _entries(content):
+        return [line for line in content.splitlines() if line.startswith("  ")]
+
+    def test_a_listing_honours_an_explicit_limit(self, tmp_path):
+        d = self._dir(tmp_path, 40)
+        tool = ReadTool()
+        whole = _run(tool.execute({"file_path": str(d)}))
+        limited = _run(tool.execute({"file_path": str(d), "line_limit": 2}))
+        assert len(limited.content) < len(whole.content), (
+            "the limit did not shrink the listing, so a caller who bounded the read "
+            "cannot tell whether its bound was applied"
+        )
+        assert len(self._entries(limited.content)) == 2, limited.content
+
+    def test_a_listing_is_capped_by_default_and_names_its_size(self, tmp_path):
+        d = self._dir(tmp_path, DEFAULT_MAX_LINES + 10)
+        tool = ReadTool()
+        result = _run(tool.execute({"file_path": str(d)}))
+        assert len(self._entries(result.content)) == DEFAULT_MAX_LINES, (
+            "the default cap must bind a listing exactly as it binds a file"
+        )
+        assert f"total {DEFAULT_MAX_LINES + 10} entries" in result.content, result.content
+
+    def test_a_listing_says_where_to_continue(self, tmp_path):
+        d = self._dir(tmp_path, 30)
+        tool = ReadTool()
+        result = _run(tool.execute({"file_path": str(d), "line_limit": 10}))
+        assert "truncated at start_line=11, start_line_byte_offset=0" in result.content, (
+            result.content
+        )
+        assert "total 30 entries" in result.content, result.content
+
+    def test_a_start_line_selects_the_entry_to_start_from(self, tmp_path):
+        d = self._dir(tmp_path, 30)
+        tool = ReadTool()
+        result = _run(tool.execute({"file_path": str(d), "start_line": 29, "line_limit": 5}))
+        entries = self._entries(result.content)
+        assert entries == ["  entry-00028.txt", "  entry-00029.txt"], entries
+
+    def test_the_offset_is_reported_as_not_applied_to_a_listing(self, tmp_path):
+        """Reported, not accepted in silence — the defect this branch is fixing.
+
+        `start_line_byte_offset` names a position inside a *line* and exists for resuming
+        one very long line. A listing's lines hold one entry name each, so there is
+        nothing here to resume; dropping it without a word is what the branch used to do
+        to all three parameters.
+        """
+        d = self._dir(tmp_path, 3)
+        tool = ReadTool()
+        result = _run(tool.execute({
+            "file_path": str(d), "line_limit": 1, "start_line_byte_offset": 2,
+        }))
+        assert "start_line_byte_offset=2 is not applied" in result.content, result.content
+
+    def test_a_start_line_past_the_end_is_reported(self, tmp_path):
+        d = self._dir(tmp_path, 3)
+        tool = ReadTool()
+        result = _run(tool.execute({"file_path": str(d), "start_line": 9}))
+        assert "no entries" in result.content, result.content
+        assert "which has 3 entries" in result.content, result.content
+
+    def test_an_empty_directory_is_not_a_clean_reading(self, tmp_path):
+        """The header alone read as a broken listing rather than an empty one."""
+        d = tmp_path / "nothing"
+        d.mkdir()
+        tool = ReadTool()
+        result = _run(tool.execute({"file_path": str(d)}))
+        assert result.content == f"(empty directory: {d})", result.content
+
+    def test_a_one_entry_listing_past_the_end_is_counted_in_the_singular(self, tmp_path):
+        """The singular half of the message above, which no test reached.
+
+        `f"entr{'y' if total_entries == 1 else 'ies'}"` is a branch, and a branch needs a
+        reading: the plural side is covered by `test_a_start_line_past_the_end_is_reported`,
+        and replacing the whole spelling with the bare plural left every test in this file
+        green (measured 2026-10-10) — so the sentence a one-entry listing really produces
+        was pinned by nothing, and a later edit could have made it say "1 entries" without
+        a red anywhere.
+        """
+        d = self._dir(tmp_path, 1)
+        result = _run(ReadTool().execute({"file_path": str(d), "start_line": 2}))
+        assert "which has 1 entry" in result.content, result.content
+        assert "1 entries" not in result.content, result.content
+
+    def test_the_sentence_about_a_listing_is_the_one_the_tool_keeps(self, tmp_path):
+        """The description sentence this class arrived with, read against its behaviour.
+
+        A sentence in a tool description is a claim about behaviour, so it is pinned
+        against the behaviour it claims rather than against its own words —
+        `tests/test_glob_tool.py` states the lesson (*"a promise in a tool description
+        that no test holds is how the universal claim above survived review"*) and
+        `tests/test_read_tool.py::test_read_never_cuts_a_line` is this file's precedent
+        for the same shape, added because a cap introduced later would quietly re-define
+        what its sentence said.
+
+        Measured 2026-10-10: the sentence was **new here and read by nothing** — dropping
+        its promise ("and a cut listing says so") left all 42 tests green, and so did
+        naming a number other than the constant, because the number is interpolated and
+        nothing asked whether the interpolation was still there. The two description
+        assertions below are the ones no other test makes; the two behaviour assertions
+        are the sentence's own claim, in the same reading, so neither half can drift
+        alone.
+        """
+        description = ReadTool().definition().description
+        assert f"{DEFAULT_MAX_LINES} entries" in description, description
+        assert "a cut listing says so" in description, description
+
+        d = self._dir(tmp_path, DEFAULT_MAX_LINES + 5)
+        content = _run(ReadTool().execute({"file_path": str(d)})).content
+        assert len(self._entries(content)) == DEFAULT_MAX_LINES, (
+            "the number the description names is not the number the tool caps at: "
+            f"{content[-200:]!r}"
+        )
+        assert "truncated at" in content, (
+            "'a cut listing says so' must be a sentence the renderer keeps: "
+            f"{content[-200:]!r}"
+        )
+
+
 def test_read_binary_fails(temp_file):
     tool = ReadTool()
     _, d = temp_file
@@ -107,11 +248,40 @@ def test_read_binary_fails(temp_file):
 
 
 def test_read_start_line_beyond_eof(temp_file):
+    """The message names the request and the subject's size — and is not a range.
+
+    The branch is reached exactly when `start_line` is past the last line, so the
+    `lines {start + 1}-{end}` it used to print was always descending (measured 2026-10-10,
+    `cyc20261010-204628`: a 10-line file answered `start_line=50` with `lines 50-10 of
+    10`). This test asserted the substring `empty range`, which that descending range
+    satisfies — a wording pinned by the presence of its words rather than by what they
+    say. Both numbers the message holds are asserted now, and the descending shape is
+    refused, so a message naming the wrong start line or the wrong file size fails here.
+    """
     tool = ReadTool()
     f, _ = temp_file
-    # 6 lines (5 + trailing newline), start_line=100 is way beyond
+    # 5 lines (the fixture writes 5, and the trailing newline is not a line)
     result = _run(tool.execute({"file_path": str(f), "start_line": 100}))
-    assert "(empty range" in result.content or "empty range" in result.content
+    assert "start_line=100" in result.content, result.content
+    assert "5 lines" in result.content, result.content
+    assert "100-5" not in result.content, result.content
+    assert "lines 100" not in result.content, result.content
+
+
+def test_a_one_line_file_past_its_end_is_counted_in_the_singular(tmp_path):
+    """The singular half of the message above, which no test reached.
+
+    `plural = "" if total_lines == 1 else "s"` is a branch, and a branch needs a reading:
+    measured 2026-10-10, replacing it with the bare `"s"` left every test in this file
+    green, so a one-line file read past its end could have been made to say `1 lines`
+    with no red anywhere. It is reachable — `start_line=2` on a one-line file goes
+    through this branch — and the plural side above does not reach it.
+    """
+    f = tmp_path / "one.txt"
+    f.write_text("only\n")
+    result = _run(ReadTool().execute({"file_path": str(f), "start_line": 2}))
+    assert "which has 1 line" in result.content, result.content
+    assert "1 lines" not in result.content, result.content
 
 
 def test_read_truncation_message(temp_file):
@@ -519,3 +689,35 @@ def test_read_still_reads_every_value_inside_its_domain(temp_file):
     lines = result.content.split("\n")
     assert lines[0] == "     3\tne 3"
     assert "line 4" not in result.content, "line_limit=1 read more than one line"
+
+
+# ── the subject has to be a regular file ──
+#
+# Every file tool opens its subject, and an open is not a read: on a named pipe it blocks
+# until the other end appears. Nothing here asked what it was opening, so a FIFO decided
+# whether the call returned — and because `daemon._run_tool_loop` awaits `tool.execute`
+# *on the event loop*, a call that never returns is the daemon never returning. The test
+# cannot bound a hang it is meant to catch, so it is the guard: it fails the moment the
+# refusal stops being made, by never finishing.
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_read_refuses_a_named_pipe_instead_of_blocking(tmp_path):
+    """`read` on a FIFO is refused, naming the kind — not entered and never returned."""
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    result = _run(ReadTool().execute({"file_path": str(fifo)}))
+    assert result.error, "a FIFO is not readable and must not be read"
+    assert "a FIFO (named pipe)" in result.content, result.content
+    assert "not a regular file" in result.content, result.content
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_read_still_reads_a_regular_file_beside_a_pipe(tmp_path):
+    """The control: the refusal is about the kind, not about the directory holding it."""
+    os.mkfifo(tmp_path / "pipe")
+    regular = tmp_path / "notes.txt"
+    regular.write_text("hello\n")
+    result = _run(ReadTool().execute({"file_path": str(regular)}))
+    assert not result.error, result.content
+    assert "hello" in result.content
