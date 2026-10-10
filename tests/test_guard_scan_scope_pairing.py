@@ -175,15 +175,31 @@ def _one_value(read: dict[str, object]):
 #: reading an echo -- a member dropping `packaging` would shrink the sweep with it and the
 #: reading would stay green. It coincides with the family's roots today, and #2028's measurement
 #: (2026-10-10, `428cc330`) is why it can be stated independently: every top-level directory this
-#: checkout holds Python in is one of these four.
+#: checkout **tracks** Python in is one of these four.
+#:
+#: "Tracks" is the claim and not a softening of it, because the two subjects answer differently:
+#: a walk of the *disk* also reaches Python under a gitignored tree -- a session's `tmp/`, build
+#: output, an environment or a `node_modules` a toolchain created -- and which of those a checkout
+#: holds, and how much, is a function of what some cycle happens to be doing. Measured 2026-10-10
+#: (`100fffbb`): a fresh worktree of this repo holds disk Python in exactly these four, the
+#: checkout the cycles write in holds it in more, and a sentence naming one reading is false of
+#: the other. The index side is the one the readings below are about -- the files this repo
+#: publishes -- so it is the side a sentence here may name.
 FIRST_PARTY_TREE = ("emrg", "scripts", "tests", "packaging")
 
 #: What a search of that tree must not descend into. A search-scope detail, **not** the family's
 #: skip set: the three that can appear inside those roots. Held by the vendored case in
 #: `test_the_membership_reading_is_driven_in_both_directions` -- until that case existed, blanking
-#: this set left every target green (measured 2026-10-10) while the tree really does hold twelve
-#: vendored `.py` files under the roots (`emrg/gui/node_modules/...`), each of them a file the
-#: sweep would otherwise read as a declaration.
+#: this set left every target green (measured 2026-10-10), while a vendored tree under the roots
+#: does hold `.py` files the sweep would otherwise read as a declaration.
+#:
+#: **How many is deliberately not written.** A vendored tree exists only where a toolchain created
+#: one -- `emrg/gui/` holds `node_modules` where someone ran `npm install`, and holds no Python at
+#: all where they did not -- so the count is a property of the host rather than of this repo, and
+#: the number that stood here was the one the checkout it was written on happened to have, which
+#: makes it a derived count of exactly the class this repository forbids in prose. Measured
+#: 2026-10-10 on `100fffbb`: this checkout holds none, and the case below builds its own, which is
+#: what makes this set's reading a function of the tree rather than of the disk.
 SEARCH_SKIP = {".venv", "__pycache__", "node_modules"}
 
 
