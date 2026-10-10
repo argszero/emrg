@@ -273,3 +273,78 @@ def test_edit_still_replaces_all_when_asked(tmp_path):
         }))
         assert not result.error, result.content
         assert f.read_text() == "X\nX\n"
+
+
+# ── the description that states this domain, held against the reader ──────────
+#
+# The `DOMAINS` table above reads every one of these descriptions — but it asks one
+# narrow question, "does the description *state* a domain?", and a description can state
+# a domain correctly and contradict its reader in the next clause. `edit.replace_all`'s
+# did: `ce1f053c` wrote the description and `boolean_argument` in the same commit, the
+# text promised the strings 'true'/'false' were **refused** while the reader honours them,
+# and the row requiring the phrase "true or false" passed the whole time. The behaviour is
+# pinned by three tests; the *claim about the reader* was pinned by none.
+
+
+def _replace_all_description() -> str:
+    """The `replace_all` parameter's description, read out of the schema.
+
+    From the schema rather than from a literal in this file: the description is the
+    string the model receives, so a `ToolDefinition` that stops emitting it has to red
+    this reading rather than leave it comparing two copies of the same sentence.
+    """
+    param = edit_tool.EditTool().definition().parameters["properties"]["replace_all"]
+    return param["description"]
+
+
+def test_the_replace_all_description_states_the_domain_the_reader_enforces():
+    """The description and the reader must say the same thing, in both directions.
+
+    The false half is the sharp one: a caller told that `"false"` is *refused* cannot
+    tell from the text that it is the spelling that works, and the flag it would then
+    reach for (`1`, `0`, `"no"`) is the one that really is refused.
+    """
+    desc = _replace_all_description()
+
+    # The reader's two answers, taken at its one implementation rather than restated:
+    # if `boolean_argument`'s domain moves, these move with it and the assertions below
+    # are re-judged against the new one.
+    assert boolean_argument({"replace_all": "false"}, "replace_all") == (False, None)
+    assert boolean_argument({"replace_all": "true"}, "replace_all") == (True, None)
+    refused, refusal = boolean_argument({"replace_all": "no"}, "replace_all")
+    assert refused is None and refusal, "the refusal half moved; re-read this test"
+
+    # The claim the reader contradicts must be gone...
+    assert "included) is refused" not in desc, (
+        "the description says the two string spellings are refused, and the reader "
+        f"honours them (measured: 'false' -> False): {desc}"
+    )
+    # ...the spellings it does honour must be named, or a caller cannot know the string
+    # form is legal...
+    assert "'true'/'false'" in desc, f"the honoured spellings are not named: {desc}"
+    # ...what the reader *does* with them must be stated in that same breath, which is
+    # the load-bearing half: the phrase assertion above only catches the defect coming
+    # back in its canonical wording, while this one fails for any description that names
+    # the spellings and leaves their status unsaid...
+    assert "read as the value they name" in desc, (
+        "the description names the spellings but not what the reader does with them, so "
+        f"a caller still cannot tell the string form is legal: {desc}"
+    )
+    # ...and the refusal it does give must be stated, or the other half is unpinned.
+    assert "refused" in desc, f"the description no longer states the refusal: {desc}"
+
+
+def test_a_description_claim_nothing_reads_is_the_class_this_file_closes():
+    """The negative control: the reader really does contradict the *old* sentence.
+
+    Stated as a test so the fix above cannot be read as cosmetic. The old text and the
+    reader disagree, and this is the disagreement, measured rather than asserted from the
+    commit message -- it is what makes the description, not the reader, the wrong half.
+    """
+    old = (
+        "A value that is not true or false (the strings 'true'/'false' included) is "
+        "refused rather than read as its opposite."
+    )
+    value, _ = boolean_argument({"replace_all": "false"}, "replace_all")
+    assert value is False, "the old sentence claims this call is refused; it is not"
+    assert "included) is refused" in old, "the fixture must carry the claim it names"

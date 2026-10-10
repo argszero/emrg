@@ -60,9 +60,13 @@ class EditTool(ToolExecutor):
                         "type": "boolean",
                         "description": (
                             "If true, replace all occurrences of old_string. "
-                            "If false (default), old_string must be unique. A value "
-                            "that is not true or false (the strings 'true'/'false' "
-                            "included) is refused rather than read as its opposite."
+                            "If false (default), old_string must be unique. The "
+                            "value must be true or false; the two string spellings "
+                            "'true'/'false' (any case, surrounding spaces allowed) "
+                            "are read as the value they name, and any other value - "
+                            "a bare number, 'yes'/'no', '' - is refused rather than "
+                            "coerced, because this flag decides how many places the "
+                            "edit writes to."
                         ),
                     },
                     "intent": {
