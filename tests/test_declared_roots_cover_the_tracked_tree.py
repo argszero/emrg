@@ -4,10 +4,12 @@ Why this file exists
 --------------------
 Two guards declare, by hand, the top-level roots they sweep -- `FIRST_PARTY_TREE` in
 `tests/test_guard_scan_scope_pairing.py` (the scope tables' members) and `SWEPT` in
-`tests/test_walk_skips_read_their_root.py` (the tree a walk-skip reading covers). Both justify
-their four with the same sentence -- *every top-level directory this checkout holds Python in is
-one of these four* -- and neither holds it: a fifth package arrives swept by nobody, and both
-sweeps stay green while no reading covers it.
+`tests/test_walk_skips_read_their_root.py` (the tree a walk-skip reading covers). Each justified
+its four with the same sentence -- *every top-level directory this checkout holds Python in is
+one of these four* -- and **neither held it**: a fifth package arrives swept by nobody, and both
+sweeps stayed green while no reading covered it. The sentence is written here in the form it had;
+both files now say **tracks** instead, which is the claim this reading can hold (see below), and
+quoting the old wording is the only place it still appears.
 
 The claim's subject is the **index**, not the disk. A disk walk would be red on a clean checkout: a
 gitignored tree holds throwaway Python -- a session's `tmp/`, build output -- that the index does
