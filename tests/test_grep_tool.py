@@ -973,3 +973,121 @@ def test_the_path_description_names_the_spelling_the_reader_accepts():
     """A description is read as the domain its reader enforces, so it names the alias."""
     description = GrepTool().definition().parameters["properties"]["path"]["description"]
     assert "`workdir`" in description, description
+
+
+# --- the named-file branch answers what the walk answers ---------------------------
+
+
+def test_a_leading_dot_slash_is_the_directory_the_walk_is_already_in(tmp_path):
+    """`./*.py` selects the same file `*.py` does, and the two branches must say so.
+
+    The named-file branch is the walk rooted at the file's own directory, and `rglob`
+    prepends `**/`: `root.rglob(p)` is `root.glob("**/" + p)`, and a leading `./` names
+    that same root. The rule that reads the pattern as `segment` strings dropped the `**`
+    but not the `.`, so `./*.py` became "a directory component a bare name cannot carry"
+    and the file was excluded with a sentence the tool's own walk contradicted — for a
+    spelling the walk reads exactly as `*.py`. Measured 2026-10-11 (`cyc20261011-064130`)
+    on master `12bb54db`, `sub/deep.py`:
+
+        (sub).rglob('./*.py')  -> sub/deep.py        the file IS selected
+        grep path=<that file> glob='./*.py'  ->  No matches … (searched 0 files) …
+                                                  offers only its own name to the filter
+
+    Both spellings in one test, because a rule that only ever sees `./` cannot tell
+    "normalised" from "the filter was dropped": the miss on the same file has to still be
+    a miss.
+    """
+    tool = GrepTool()
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    named = nested / "deep.py"
+    named.write_text("needle here\n")
+
+    for spelling in ("./*.py", "*.py"):
+        answered = _run(tool.execute({
+            "pattern": "needle", "path": str(named), "glob": spelling,
+        }))
+        assert not answered.error, answered.content
+        assert "Found 1 matches" in answered.content, (
+            f"`{spelling}` selects this file in the walk, so the named-file branch has "
+            f"to search it: {answered.content}"
+        )
+        assert "searched 1 files" in answered.content, answered.content
+
+    # The discriminating half: the *filter* is still applied to the name.
+    missing = _run(tool.execute({
+        "pattern": "needle", "path": str(named), "glob": "./*.nomatch",
+    }))
+    assert "searched 0 files" in missing.content, (
+        f"`./` is not a licence to ignore the filter: {missing.content}"
+    )
+    assert "Found" not in missing.content, missing.content
+
+    # And a directory component after the `./` is still one, which is the other half of
+    # the same rule: `./sub/*.py` names a path a bare name cannot carry.
+    by_directory_component = _run(tool.execute({
+        "pattern": "needle", "path": str(named), "glob": "./sub/*.py",
+    }))
+    assert "searched 0 files" in by_directory_component.content, by_directory_component.content
+    assert "offers only its own name" in by_directory_component.content, (
+        f"a filter that names a directory keeps that sentence: {by_directory_component.content}"
+    )
+
+
+def test_the_current_directory_alone_selects_every_file_the_walk_selects(tmp_path):
+    """`glob='.'` is a reading the walk accepts, so the branch may not invent a cause.
+
+    `Path(dir).rglob('.')` selects the entries under it — measured, same fixture — and the
+    directory branch searches them. The named-file branch excluded the file and said it
+    "does not match the glob filter", a cause the walk contradicts. The rule is the same
+    one as `./`: `.` names the directory the walk is already in, so no component is left
+    and every file satisfies it.
+    """
+    tool = GrepTool()
+    named = tmp_path / "main.py"
+    named.write_text("needle here\n")
+
+    by_directory = _run(tool.execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": ".",
+    }))
+    assert "Found 1 matches" in by_directory.content, by_directory.content
+    assert "searched 1 files" in by_directory.content, by_directory.content
+
+    by_file = _run(tool.execute({
+        "pattern": "needle", "path": str(named), "glob": ".",
+    }))
+    assert not by_file.error, by_file.content
+    assert "searched 1 files" in by_file.content, (
+        "the walk selects this file for `.`, so excluding it states a cause the walk "
+        f"contradicts — the two branches answer one question: {by_file.content}"
+    )
+    assert "Found 1 matches" in by_file.content, by_file.content
+
+
+def test_the_exclusion_note_and_the_predicate_are_complements():
+    """The two shapes the note chooses between must not be able to contradict.
+
+    `_named_file_exclusion_note` picks its sentence with `_names_a_directory`, and
+    `_selects` decides whether to call it with `_walk_selects_name`. If a filter could be
+    "naming a directory" *and* select a bare name, the note would announce a cause for an
+    exclusion that never happened — which is the shape both reviews of #2064 landed on,
+    one rule further in. Measured over the sweep below: a filter `_names_a_directory`
+    reports never selects a bare name, and the two helpers agree on every spelling the
+    walk reads, including the two that name the walk's own directory (`**`, `.`).
+    """
+    from emrg.tools.grep_tool import _names_a_directory, _walk_selects_name
+
+    filters = (
+        "*.py", "**/*.py", "**", "**/", "*", ".", "./*.py", "./sub/*.py", "..",
+        "sub/*.py", "src/**/*.ts", "a{b}.py", "a{b,c}.py", "*.nomatch", "./**/x.py",
+    )
+    names = ("main.py", "deep.ts", "a{b}.py", "no_ext")
+    for glob in filters:
+        if not _names_a_directory(glob):
+            continue
+        for name in names:
+            assert not _walk_selects_name(name, glob), (
+                f"{glob!r} is reported as naming a directory a bare name cannot carry, "
+                f"and yet it selects {name!r} — the exclusion note would state a cause "
+                f"the predicate itself contradicts"
+            )

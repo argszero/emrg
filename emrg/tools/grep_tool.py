@@ -51,29 +51,54 @@ def _selects(path: Path, file_glob: str | None) -> bool:
     return _walk_selects_name(path.name, file_glob)
 
 
+def _segments_after_the_current_directory(file_glob: str) -> list[str]:
+    """The filter's segments, with a leading `./` and `**` dropped.
+
+    Both name the directory the walk is already in, so neither adds a component a bare
+    file name could fail to carry: `rglob` prepends `**/` (`root.rglob(p)` is
+    `root.glob("**/" + p)`), and `.` is the root itself. Measured 2026-10-11
+    (`cyc20261011-064130`) on master `12bb54db`, `sub/deep.py` against
+    `Path("sub").rglob(...)`:
+
+        './*.py'   selects `sub/deep.py`     a rule reading `./` as a component excluded it
+        '.'        selects every entry       the same rule excluded the file
+
+    Those two are why this is one helper rather than the leading-`**` loop written twice:
+    `_walk_selects_name` asks it whether the walk selects, `_names_a_directory` asks it
+    whether the filter names a path a name cannot carry, and the two answers have to be
+    complements of each other or the exclusion note contradicts the predicate.
+    """
+    segments = file_glob.split("/")
+    while segments and segments[0] in ("**", "."):
+        segments.pop(0)
+    return segments
+
+
 def _walk_selects_name(name: str, file_glob: str) -> bool:
     """Would the walk select the file whose relative path is `name`?
 
-    ``name`` is one path component: a file name carries no separator, so after
-    the leading `**` segments are dropped a pattern with anything left over
-    names directories this path does not have.
+    ``name`` is one path component: a file name carries no separator, so after the
+    segments naming the walk's own directory are dropped, a pattern with anything left
+    over names directories this path does not have.
     """
-    segments = file_glob.split("/")
-    while segments and segments[0] == "**":
-        segments.pop(0)
+    segments = _segments_after_the_current_directory(file_glob)
     if not segments:
-        return True  # `**` alone: the walk selects every file
+        return True  # `**` or `.` alone: the walk selects every file
     if len(segments) != 1:
         return False  # a directory component a bare name cannot carry
     return fnmatch.fnmatch(name, segments[0])
 
 
 def _names_a_directory(file_glob: str) -> bool:
-    """Does the filter carry a directory component, once `**` is discounted?"""
-    segments = file_glob.split("/")
-    while segments and segments[0] == "**":
-        segments.pop(0)
-    return len(segments) != 1
+    """Does the filter name a component a bare file name cannot carry?
+
+    `> 1`, not `!= 1`, so this is the exact complement of `_walk_selects_name`'s
+    exclusion: no segments left means the filter names only the directory the walk is
+    already in (`**`, `.`), which every file satisfies, and one segment is matched
+    against the name. A filter this reports True therefore never selects a bare name —
+    the invariant `_named_file_exclusion_note` rests on.
+    """
+    return len(_segments_after_the_current_directory(file_glob)) > 1
 
 
 def _named_file_exclusion_note(name: str, file_glob: str) -> str:
