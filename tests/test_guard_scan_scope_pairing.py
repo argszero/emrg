@@ -185,6 +185,13 @@ def _one_value(read: dict[str, object]):
 #: checkout the cycles write in holds it in more, and a sentence naming one reading is false of
 #: the other. The index side is the one the readings below are about -- the files this repo
 #: publishes -- so it is the side a sentence here may name.
+#:
+#: Stating it independently is safe because it is **measured**, not asserted:
+#: `tests/test_declared_roots_cover_the_tracked_tree.py` reads this constant against
+#: `git ls-files '*.py'` and reds when a top-level package this repo tracks is in neither list,
+#: so the sentence is held by a reading rather than by itself. (That guard arrived with #2034,
+#: which aligned the same sentence in `tests/test_walk_skips_read_their_root.py` and left this
+#: file alone only because #2032 held it at the time.)
 FIRST_PARTY_TREE = ("emrg", "scripts", "tests", "packaging")
 
 #: What a search of that tree must not descend into. A search-scope detail, **not** the family's
