@@ -354,10 +354,18 @@ def _truncate_stderr(stderr: str) -> str:
 def _truncate_stdout(stdout: str, remaining: int) -> str:
     """Bound stdout to ``remaining``, keeping head and tail.
 
+    The notice is charged against the budget rather than appended on top, so the
+    result stays inside ``remaining`` — a bound the caller can then rely on.
+    When too little is left to keep both ends, the tail is dropped and the notice
+    says so, because a cut stream that reads as a short one is the failure this
+    whole path exists to avoid.
+
     :param stdout: the collected stdout.
     :param remaining: the characters left in the budget.
     :returns: stdout within that budget.
     """
+    if len(stdout) <= remaining:
+        return stdout
     head_chars = int(remaining * _HEAD_TAIL_RATIO)
     tail_chars = remaining - head_chars - 200
     if tail_chars < 500:
