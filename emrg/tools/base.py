@@ -7,6 +7,7 @@ Follows the Codex ToolExecutor pattern: a tool defines its spec
 from __future__ import annotations
 
 import math
+import os
 import stat
 from abc import ABC, abstractmethod
 
@@ -169,6 +170,26 @@ def special_file_kind(mode: int) -> str | None:
     if stat.S_ISBLK(mode):
         return "a block device"
     return "not a regular file"
+
+
+def non_regular_kind(path: str | os.PathLike[str]) -> str | None:
+    """Name a path's kind when it is not a regular file — :func:`special_file_kind` at a path.
+
+    ``special_file_kind`` reads a ``st_mode`` its caller already has, which is the shape a
+    *tool* wants: it stats its own subject to describe it to the caller. A reader that was
+    handed a **path** has no mode, and two of those exist outside the tool layer — the
+    daemon's own readers (`#2073`) and the memory store's (`from_file`). Both need the same
+    whitelist, so it is stated once and reached two ways rather than restated per layer.
+
+    ``os.stat`` follows a symlink, so a link to a pipe is a pipe: what the caller is about
+    to open is what is judged, not how it was spelled.
+
+    :param path: the path a reader was handed.
+    :returns: the noun phrase for a non-regular subject, or ``None`` when it is a regular
+        file. A missing path raises ``FileNotFoundError`` from the ``stat`` — the answer
+        callers of a missing file already handle.
+    """
+    return special_file_kind(os.stat(path).st_mode)
 
 
 def special_file_refusal(path: object, kind: str) -> str:

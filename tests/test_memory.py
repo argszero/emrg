@@ -1,5 +1,6 @@
 """Tests for the EMRG memory module."""
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from emrg.memory import (
     INDEX_TITLE_MAX_CHARS,
     MemoryFile,
     MemoryIndex,
+    NotARegularFile,
     ProjectMemoryStore,
     SessionMemoryStore,
     generate_id,
@@ -769,3 +771,95 @@ class TestTwoMemoriesWithTheSameTitle:
         reloaded = MemoryFile.from_file(project_store.directory / mem.filename)
         assert reloaded._filename == mem.filename
         assert reloaded.to_markdown() == text, "a load → save rewrote the file"
+
+
+# ── the subject has to be a regular file ──────────────────────────
+#
+# An open is not a read: on a FIFO a read blocks until a writer appears, on a socket
+# until a connection does, and a device never ends. The three file tools ask
+# `special_file_kind` before opening (#2062) and the daemon's own readers took the same
+# guard (#2073). This is the third layer, and it is the memory module's single reader:
+# fourteen call sites, of which `list_memories` and `read_memory` are the two client
+# frames — and the directory they walk is `<session cwd>/.emrg/memory`, inside the
+# agent's own workspace, so anything running there can put a pipe in it.
+#
+# Each test is written so that removing the guard makes it **hang** rather than pass:
+# the condition is a call that never returns, and no assertion can bound that (the shape
+# `tests/test_read_tool.py` states for the same class). Windows has no `mkfifo`, so the
+# family skips there.
+
+
+def _needs_mkfifo(func):
+    return pytest.mark.skipif(
+        not hasattr(os, "mkfifo"), reason="this platform has no FIFOs"
+    )(func)
+
+
+@_needs_mkfifo
+def test_the_reader_refuses_a_named_pipe_instead_of_blocking(tmp_path):
+    """`from_file` names the kind rather than opening the subject."""
+    fifo = tmp_path / "notes.md"
+    os.mkfifo(fifo)
+
+    with pytest.raises(NotARegularFile) as excinfo:
+        MemoryFile.from_file(fifo)
+
+    assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
+    assert "not a regular file" in str(excinfo.value), str(excinfo.value)
+
+
+@_needs_mkfifo
+def test_the_reader_still_reads_a_regular_file_beside_a_pipe(tmp_path):
+    """The control: the refusal is about the kind, not about the directory holding it."""
+    os.mkfifo(tmp_path / "pipe.md")
+    regular = tmp_path / "notes.md"
+    regular.write_text(
+        "---\nid: aaaa1111\ntype: reference\nscope: project\nstatus: active\n"
+        "title: A note\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    assert MemoryFile.from_file(regular).id == "aaaa1111"
+
+
+@_needs_mkfifo
+def test_the_store_lists_the_memories_beside_a_pipe(temp_cwd):
+    """The measured route: `list_memories` walks every `*.md`, so a pipe in the
+    directory is a client frame that never gets its answer.
+
+    Asserted through `ProjectMemoryStore.list()` rather than through `from_file`,
+    because the walk's `except (OSError, ValueError)` is what turns the refusal into a
+    skipped file — a width the reader alone does not decide.
+    """
+    directory = temp_cwd / ".emrg" / "memory"
+    directory.mkdir(parents=True)
+    (directory / "MEMORY.md").write_text("# Memory Index\n", encoding="utf-8")
+    os.mkfifo(directory / "pipe.md")
+    store = ProjectMemoryStore(temp_cwd)
+    store.create("reference", "A note", "body")
+
+    assert [m.title for m in store.list()] == ["A note"], (
+        "the pipe is not a memory and the readable sibling still is"
+    )
+
+
+@_needs_mkfifo
+def test_the_scan_names_the_pipe_as_a_reason_rather_than_never_answering(temp_cwd):
+    """`read_memory`'s route: `_scan` walks the same directory to match an id.
+
+    An id that is not there must still come back as an answer, and the pipe must be
+    reported as the reason the walk could not finish — "not found" would be a claim this
+    walk did not measure.
+    """
+    directory = temp_cwd / ".emrg" / "memory"
+    directory.mkdir(parents=True)
+    os.mkfifo(directory / "pipe.md")
+    store = ProjectMemoryStore(temp_cwd)
+
+    mem, reason = store.get_with_reason("aaaa1111")
+
+    assert mem is None
+    assert "pipe.md" in reason, reason
+    assert "NotARegularFile" in reason, (
+        "the reason must name the kind's verdict — `OSError` there would name nothing"
+    )

@@ -4310,3 +4310,60 @@ def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkey
         "a genuinely completed round no longer stamps the marker the #1114 alarm "
         "measures — the empty-answer guard must not have swallowed it"
     )
+
+
+# ── a memory subject that is not a regular file ────────────────────
+#
+# The sibling of the section above, one layer down: `list_memories` and `read_memory`
+# walk `<cwd>/.emrg/memory` through `MemoryStore`, whose single reader used to open
+# whatever it was handed. A pipe there is not a slow request — `open` on a FIFO never
+# returns, the walk is synchronous inside the handler, and the handler is awaited on
+# the event loop, so the frame that never gets its answer is the daemon that never
+# serves another (issue #2075). The guard is `emrg.memory.MemoryFile.from_file`.
+#
+# Driving the dispatch rather than the store is the point: the store tolerates one
+# unreadable file by design, and what has to be proved is that the *frame* arrives.
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_a_memory_that_is_a_named_pipe_costs_the_row_not_the_listing(tmp_path):
+    """A pipe in the memory directory is skipped; the readable rows still arrive."""
+    server = _make_server()
+    directory = _memory_project(tmp_path, b"# Memory Index\n")
+    os.mkfifo(directory / "pipe.md")
+    (directory / "note.md").write_text(
+        "---\nid: aaaa1111\ntype: reference\nscope: project\nstatus: active\n"
+        "title: A note\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    frames = _drive(server, {"type": "list_memories", "scope": "project", "cwd": str(tmp_path)})
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    frame = frames[0]
+    assert frame["type"] == "memories_list"
+    assert [m["id"] for m in frame["memories"]] == ["aaaa1111"], (
+        "the pipe is not a memory, and it must not cost the memory beside it"
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_a_read_memory_through_a_pipe_directory_answers_rather_than_hangs(tmp_path):
+    """`read_memory` walks the same directory to match an id; the answer must come back.
+
+    The reason names the file and its kind, because "Memory not found" would be a claim
+    this walk never measured — the pipe is a file the walk could not finish looking at.
+    """
+    server = _make_server()
+    directory = _memory_project(tmp_path, b"# Memory Index\n")
+    os.mkfifo(directory / "pipe.md")
+
+    frames = _drive(
+        server,
+        {"type": "read_memory", "scope": "project", "memory_id": "aaaa1111", "cwd": str(tmp_path)},
+    )
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert "error" in frames[0], frames[0]
+    assert "pipe.md" in frames[0]["error"], frames[0]["error"]
+    assert "NotARegularFile" in frames[0]["error"], frames[0]["error"]
