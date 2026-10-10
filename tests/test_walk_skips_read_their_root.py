@@ -28,8 +28,10 @@ What is asserted
 `.parts` read from a name a walk produced must go through `.relative_to(...)`. "A name a walk
 produced" is every shape a walk result reaches a predicate by **binding a name in the scope that
 reads it**: a `for` target, a comprehension target, and a name assigned from a walk expression --
-to a small fixpoint, so `found = sorted(root.rglob(...))` followed by `for p in found` is covered
-rather than left as the one spelling that escapes. The binding is **scoped**, so a walk bound in
+the statement spellings (`found = ...`, `found: list = ...`) and the expression one
+(`if (found := ...):`), both of which are assignments -- to a small fixpoint, so
+`found = sorted(root.rglob(...))` followed by `for p in found` is covered rather than left as the
+one spelling that escapes. The binding is **scoped**, so a walk bound in
 one function says nothing about a name reused in another, and a module-level or closure variable
 is still visible to the function that reads it. The read is an **AST walk** rather than a text
 match, so a predicate split across lines, written as a comprehension filter, or reached through
@@ -202,6 +204,13 @@ def walk_names(
     inside a nested function binds its name there, not here. `inherited` carries the names the
     enclosing scopes bound, so a module-level walk is still a walk inside the function that
     consumes it -- narrowing past that would turn a real site into a silent one.
+
+    A walrus target is an assignment target like any other (`:=` is the assignment-expression
+    operator), so `if (found := sorted(root.rglob(...))):` binds a walk name the same way
+    `found = ...` does. Reading only `ast.Assign`/`ast.AnnAssign` left every walrus form silent
+    while the rule above promised "a name assigned from a walk expression" -- measured
+    2026-10-10 on the pre-walrus detector: four shapes (`if (found := ...)`, a call argument, an
+    in-place rendering, an immediate index) all returned `[]`, beside `found = ...` reported.
     """
     nodes = [node for node in ast.walk(scope) if chains[id(node)][-1] is scope]
     names: set[str] = set(inherited)
@@ -220,13 +229,15 @@ def walk_names(
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                     for target in targets:
                         names.update(_names_bound(target))
+            elif isinstance(node, ast.NamedExpr) and _spreads_a_walk(node.value, names):
+                names.update(_names_bound(node.target))
         if len(names) == before:
             break
     return names
 
 
 def _parts_of_a_walk_name(node: ast.AST, names: set[str]) -> str | None:
-    """The name this `.parts` belongs to, if it is a walk result -- `p`, or `Path(p)`."""
+    """The name this `.parts` belongs to, if it is a walk result -- `p`, `Path(p)` or `(p := ...)`."""
     if not isinstance(node, ast.Attribute) or node.attr != "parts":
         return None
     value = node.value
@@ -238,6 +249,11 @@ def _parts_of_a_walk_name(node: ast.AST, names: set[str]) -> str | None:
         and not value.keywords
     ):
         value = value.args[0]
+    # `(p := root.rglob("*")).parts` renders the walrus in place rather than binding a name
+    # for a later line, so it is the same read as the two-line spelling and is unwrapped here
+    # for the same reason `walk_names` binds the target.
+    if isinstance(value, ast.NamedExpr):
+        value = value.target
     if isinstance(value, ast.Name) and value.id in names:
         return value.id
     return None
@@ -325,6 +341,52 @@ class TestTheDetector:
             "def other(paths):\n"
             "    for p in paths:\n"
             "        print(p.parts)\n"
+        )
+
+        assert offenders(source) == []
+
+    def test_the_walrus_spellings_are_reported(self) -> None:
+        """`:=` is an assignment, so its target is a walk name like any other.
+
+        The rule's own enumeration promises "a name assigned from a walk expression", and the
+        detector read only `ast.Assign`/`ast.AnnAssign` -- so every walrus form was silent while
+        the statement spelling beside it was reported (measured 2026-10-10: each of the three
+        walrus shapes below returned `[]`, the statement control `[(3, 'p')]`). They are one read
+        reached three ways, plus the in-place rendering that needs no later line at all.
+        """
+        by_statement = (
+            "def f(root):\n"
+            '    found = sorted(root.rglob("*.py"))\n'
+            "    return [p.parts for p in found]\n"
+        )
+        in_condition = (
+            "def f(root):\n"
+            '    if (found := sorted(root.rglob("*.py"))):\n'
+            "        return [p.parts for p in found]\n"
+        )
+        in_argument = (
+            "def f(root):\n"
+            '    use(found := sorted(root.rglob("*.py")))\n'
+            "    return [p.parts for p in found]\n"
+        )
+        rendered_in_place = 'def f(root):\n    return (p := root.rglob("*.py")).parts\n'
+
+        assert [line for line, _ in offenders(by_statement)] == [3]
+        assert [line for line, _ in offenders(in_condition)] == [3]
+        assert [line for line, _ in offenders(in_argument)] == [3]
+        assert [line for line, _ in offenders(rendered_in_place)] == [2]
+
+    def test_a_walrus_over_something_that_is_not_a_walk_is_silent(self) -> None:
+        """The other direction: binding a walrus must not report a name that holds no walk.
+
+        Widening the binding shapes is only safe while `_spreads_a_walk` still decides *what* is
+        bound -- a walrus over a computed value is not a walk, and a `.parts` read of it is
+        legitimate (it is `git ls-files`' shape, not a tree walk).
+        """
+        source = (
+            "def f(names):\n"
+            "    if (found := sorted(names)):\n"
+            "        return [p.parts for p in found]\n"
         )
 
         assert offenders(source) == []
