@@ -642,6 +642,106 @@ def test_the_glob_filter_applies_to_a_named_file_too(tmp_path):
     assert "main.py" in excluded.content, excluded.content
 
 
+def test_a_named_file_is_matched_the_way_the_walk_matches_it(tmp_path):
+    """`**/` matches zero directories, so `**/*.py` selects a top-level file.
+
+    Vetoed in `cyc20261011-022427`. Measured 2026-10-10 on the then head `6819efa2`:
+    one directory holding `main.py` and `sub/deep.py`, one filter, two call shapes —
+    `path=<dir>, glob='**/*.py'` found both files, `path=<dir>/main.py` answered
+    `No matches ... (searched 0 files) ... does not match the glob filter`. The filter
+    selected that file in one branch and excluded it in the other, and the reason printed
+    was one the tool's own walk contradicted: `root.rglob(p)` is `root.glob("**/" + p)`,
+    so `**/*.py` and `*.py` select the same top-level `main.py`. `**/*.py` is *glob*'s
+    first advertised example, so a caller following the description reaches this.
+
+    The predicate is now the walk's own answer for the one relative path a named file
+    offers — its own name — which is the whole of what this test pins.
+    """
+    tool = GrepTool()
+    named = tmp_path / "main.py"
+    named.write_text("import os\n\ndef main():\n    return 1\n")
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (nested / "deep.py").write_text("def other():\n    return 2\n")
+
+    by_directory = _run(tool.execute({
+        "pattern": "def ", "path": str(tmp_path), "glob": "**/*.py",
+    }))
+    assert "Found 2 matches" in by_directory.content, by_directory.content
+
+    # The discriminating assertion first: `Found` below is also satisfied by a *wrong*
+    # reading that searched the file anyway, so an arm that reverts the predicate to
+    # the name alone has to die on the file the walk selects and `fnmatch` refuses.
+    assert "main.py" in by_directory.content, by_directory.content
+
+    by_file = _run(tool.execute({
+        "pattern": "def ", "path": str(named), "glob": "**/*.py",
+    }))
+    assert "searched 1 files" in by_file.content, (
+        "`**/` matches zero directories, so the walk selects a top-level file and the "
+        f"named-file branch has to agree: {by_file.content}"
+    )
+    assert "Found 1 matches" in by_file.content, by_file.content
+
+    # The exclusion half, so this test discriminates against master as well as against a
+    # name-only predicate: master ignored the filter for a named file outright, and would
+    # pass everything above for the wrong reason (it searches the file whatever the filter
+    # says). One name-shaped miss on the same file separates "the walk's answer" from
+    # "no filter at all".
+    excluded = _run(tool.execute({
+        "pattern": "def ", "path": str(named), "glob": "**/*.nomatch",
+    }))
+    assert "searched 0 files" in excluded.content, (
+        f"a filter the walk would not select must still exclude the file: {excluded.content}"
+    )
+    assert "Found" not in excluded.content, excluded.content
+
+
+def test_a_filter_naming_a_directory_states_that_domain_not_the_file(tmp_path):
+    """`src/**/*.ts` cannot select a named file, and the reading says why.
+
+    What a named file offers the matcher is one relative path — its name — so a pattern
+    that still names a directory after its leading `**` segments are dropped has no path
+    to match: `deep.ts` is not under a `src` relative to itself, and the walk rooted at
+    the file's own directory selects nothing either. The directory branch's root is
+    somewhere else — the directory the caller passed — so the two branches answer the
+    same question only for name-shaped patterns, and the veto `cyc20261011-022427` asked
+    for that to be stated rather than asserted (`_selects` claimed "the two branches
+    answer the same question", which nothing measured).
+
+    Both halves are pinned: the sentence names the domain, and it is **not** the
+    `does not match the glob filter` sentence, which for this shape is a cause the tool's
+    own walk contradicts once the caller passes the directory.
+    """
+    tool = GrepTool()
+    src = tmp_path / "src"
+    src.mkdir()
+    named = src / "deep.ts"
+    named.write_text("const x = 1;\n")
+
+    by_directory = _run(tool.execute({
+        "pattern": "const", "path": str(tmp_path), "glob": "src/**/*.ts",
+    }))
+    assert "Found 1 matches" in by_directory.content, by_directory.content
+    assert "src/deep.ts" in by_directory.content, by_directory.content
+
+    by_file = _run(tool.execute({
+        "pattern": "const", "path": str(named), "glob": "src/**/*.ts",
+    }))
+    assert "searched 0 files" in by_file.content, by_file.content
+    assert "offers only its own name" in by_file.content, by_file.content
+    assert "does not match the glob filter" not in by_file.content, (
+        "the exclusion reason has to name *this* cause — a directory component — because "
+        f"the walk from the directory the caller could have passed does select it: {by_file.content}"
+    )
+    # A name-shaped pattern keeps the other sentence: there the walk agrees with the
+    # exclusion, so `does not match` is a reading and not a contradiction.
+    name_shaped = _run(tool.execute({
+        "pattern": "const", "path": str(named), "glob": "*.nomatch",
+    }))
+    assert "does not match the glob filter" in name_shaped.content, name_shaped.content
+
+
 def test_a_brace_glob_is_refused_rather_than_searched_to_an_empty_answer(tmp_path):
     """`*.{py,rs}` is the pattern the description advertised, and this walk cannot read it.
 
