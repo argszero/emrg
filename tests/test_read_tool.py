@@ -184,6 +184,55 @@ class TestAReadIsBoundedWhicheverSubjectItHas:
         result = _run(tool.execute({"file_path": str(d)}))
         assert result.content == f"(empty directory: {d})", result.content
 
+    def test_a_one_entry_listing_past_the_end_is_counted_in_the_singular(self, tmp_path):
+        """The singular half of the message above, which no test reached.
+
+        `f"entr{'y' if total_entries == 1 else 'ies'}"` is a branch, and a branch needs a
+        reading: the plural side is covered by `test_a_start_line_past_the_end_is_reported`,
+        and replacing the whole spelling with the bare plural left every test in this file
+        green (measured 2026-10-10) — so the sentence a one-entry listing really produces
+        was pinned by nothing, and a later edit could have made it say "1 entries" without
+        a red anywhere.
+        """
+        d = self._dir(tmp_path, 1)
+        result = _run(ReadTool().execute({"file_path": str(d), "start_line": 2}))
+        assert "which has 1 entry" in result.content, result.content
+        assert "1 entries" not in result.content, result.content
+
+    def test_the_sentence_about_a_listing_is_the_one_the_tool_keeps(self, tmp_path):
+        """The description sentence this class arrived with, read against its behaviour.
+
+        A sentence in a tool description is a claim about behaviour, so it is pinned
+        against the behaviour it claims rather than against its own words —
+        `tests/test_glob_tool.py` states the lesson (*"a promise in a tool description
+        that no test holds is how the universal claim above survived review"*) and
+        `tests/test_read_tool.py::test_read_never_cuts_a_line` is this file's precedent
+        for the same shape, added because a cap introduced later would quietly re-define
+        what its sentence said.
+
+        Measured 2026-10-10: the sentence was **new here and read by nothing** — dropping
+        its promise ("and a cut listing says so") left all 42 tests green, and so did
+        naming a number other than the constant, because the number is interpolated and
+        nothing asked whether the interpolation was still there. The two description
+        assertions below are the ones no other test makes; the two behaviour assertions
+        are the sentence's own claim, in the same reading, so neither half can drift
+        alone.
+        """
+        description = ReadTool().definition().description
+        assert f"{DEFAULT_MAX_LINES} entries" in description, description
+        assert "a cut listing says so" in description, description
+
+        d = self._dir(tmp_path, DEFAULT_MAX_LINES + 5)
+        content = _run(ReadTool().execute({"file_path": str(d)})).content
+        assert len(self._entries(content)) == DEFAULT_MAX_LINES, (
+            "the number the description names is not the number the tool caps at: "
+            f"{content[-200:]!r}"
+        )
+        assert "truncated at" in content, (
+            "'a cut listing says so' must be a sentence the renderer keeps: "
+            f"{content[-200:]!r}"
+        )
+
 
 def test_read_binary_fails(temp_file):
     tool = ReadTool()
