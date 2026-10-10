@@ -9,7 +9,7 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, special_file_kind, special_file_refusal
 from emrg.tools.file_policy import resolve_file_target
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,17 @@ class WriteTool(ToolExecutor):
             return ToolResult(name="write", content=f"Error creating directory: {e}", error=True)
 
         existed = path.exists()
+        if existed:
+            # An existing subject has a kind, and only a regular file can be written:
+            # `write_text` on a FIFO blocks at the open until a reader appears (measured
+            # 2026-10-10, `cyc20261010-215146`: no return within 10 s in its own
+            # process, while the same call against a regular file returned). A path that
+            # does not exist yet has no kind to judge, and creating it is the call's job.
+            special = special_file_kind(path.stat().st_mode)
+            if special is not None:
+                return ToolResult(
+                    name="write", content=special_file_refusal(path, special), error=True
+                )
         try:
             path.write_text(content, encoding="utf-8")
         except OSError as e:

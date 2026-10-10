@@ -9,7 +9,12 @@ from pathlib import Path
 from emrg.sandbox.fence import file_refusal
 from emrg.sandbox.policy import resolve_policy
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, boolean_argument
+from emrg.tools.base import (
+    ToolExecutor,
+    boolean_argument,
+    special_file_kind,
+    special_file_refusal,
+)
 from emrg.tools.file_policy import resolve_file_target
 
 logger = logging.getLogger(__name__)
@@ -111,9 +116,16 @@ class EditTool(ToolExecutor):
             return ToolResult(
                 name="edit", content=f"Error: file not found: {path}", error=True
             )
-        if path.is_dir():
+        # A directory is one kind of subject `edit` cannot act on; a FIFO, a socket and a
+        # device node are the others, and all of them *block* rather than fail — `open`
+        # for read waits for a writer, `open` for write for a reader. The check used to
+        # name the directory alone, so the rest reached `open` and never returned
+        # (measured 2026-10-10, `cyc20261010-215146`: `edit` on a `mkfifo` named pipe did
+        # not return within 10 s, in its own process, while a regular file's edit did).
+        special = special_file_kind(path.stat().st_mode)
+        if special is not None:
             return ToolResult(
-                name="edit", content=f"Error: {path} is a directory", error=True
+                name="edit", content=special_file_refusal(path, special), error=True
             )
 
         logger.debug("edit: %s (replace_all=%s)", path, replace_all)

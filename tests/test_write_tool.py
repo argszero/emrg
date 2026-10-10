@@ -1,6 +1,7 @@
 """Tests for the write tool."""
 
 import asyncio
+import os
 import tempfile
 from pathlib import Path
 
@@ -321,3 +322,26 @@ def test_write_workspace_write_blocks_a_protected_daemon_file(tmp_path, monkeypa
     assert result.error
     assert "protected daemon file" in result.content
     assert target.read_text() == "sentinel = true\n"
+
+
+# ── the subject has to be a regular file (see the read tool's twin) ──
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_write_refuses_a_named_pipe_instead_of_blocking(tmp_path):
+    """`write_text` on a FIFO blocks at the open until a reader appears — so refuse it."""
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    result = _run(WriteTool().execute({"file_path": str(fifo), "content": "x"}))
+    assert result.error, "a FIFO is not writable and must not be opened for writing"
+    assert "a FIFO (named pipe)" in result.content, result.content
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_write_still_creates_a_file_beside_a_pipe(tmp_path):
+    """The control: a path that does not exist has no kind to judge, and is created."""
+    os.mkfifo(tmp_path / "pipe")
+    target = tmp_path / "new.txt"
+    result = _run(WriteTool().execute({"file_path": str(target), "content": "ok"}))
+    assert not result.error, result.content
+    assert target.read_text() == "ok"

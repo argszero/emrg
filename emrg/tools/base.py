@@ -7,6 +7,7 @@ Follows the Codex ToolExecutor pattern: a tool defines its spec
 from __future__ import annotations
 
 import math
+import stat
 from abc import ABC, abstractmethod
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
@@ -128,6 +129,62 @@ def boolean_argument(
     return None, (
         f"{spelled} must be true or false (got {raw!r}); this call is refused rather "
         f"than run with a value read as its opposite."
+    )
+
+
+def special_file_kind(mode: int) -> str | None:
+    """Name a file subject's kind from its ``st_mode`` — ``None`` when it is a regular file.
+
+    Every file tool here opens its subject directly (``write_text`` / ``open``), and an
+    **open is not a read**: on a FIFO it blocks until the other end appears, on a socket
+    until a connection does, and a character device has no end of file at all. Nothing in
+    these tools asked what it was opening, so the subject's *kind* decided whether the call
+    returned. Measured 2026-10-10 (``cyc20261010-215146``) on a ``mkfifo`` named pipe, each
+    call in its own process under a 10 s cap: ``read``, ``write`` and ``edit`` all **failed
+    to return**, while the same three calls against a regular file returned normally.
+
+    That is not a slow tool. ``daemon._run_tool_loop`` awaits ``tool.execute(args)`` **on
+    the event loop** (``daemon.py:4504``, ``6931``) with no timeout, so the block is the
+    whole daemon — every session, the scheduler and the evolution loop with it — and the
+    only recovery is a restart, which belongs to the host alone.
+
+    ``S_ISREG`` is the only kind those tools can act on, so the predicate is a whitelist:
+    everything else is named and refused. Naming it is the point — a caller who pointed at
+    a socket is told their path *is* a socket, instead of watching a call that never ends.
+
+    :param mode: ``stat_result.st_mode`` of the resolved subject.
+    :returns: a noun phrase for a non-regular subject (``"a directory"``, ``"a FIFO (named
+        pipe)"``, …), or ``None`` when the subject is a regular file.
+    """
+    if stat.S_ISREG(mode):
+        return None
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISFIFO(mode):
+        return "a FIFO (named pipe)"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    return "not a regular file"
+
+
+def special_file_refusal(path: object, kind: str) -> str:
+    """The one refusal the file tools give a subject that is not a regular file.
+
+    Shared rather than written three times: the three tools refuse for the same reason,
+    and three copies of the reason drift into three different explanations of one
+    boundary. ``kind`` comes from :func:`special_file_kind`, so the caller is told what
+    its path is before it is told what to do instead.
+    """
+    return (
+        f"Error: {path} is {kind}, not a regular file. This tool opens its subject "
+        f"directly, and opening this one blocks until a peer appears — a FIFO waits for "
+        f"a writer, a socket for a connection, a device never ends — so the call would "
+        f"never return, and neither would the daemon, which awaits tools on its event "
+        f"loop. Use the bash tool if you need to touch it."
     )
 
 
