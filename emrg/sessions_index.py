@@ -24,6 +24,11 @@ from pathlib import Path
 
 from emrg.config import config_dir
 
+# The "is this path a regular file" rule is the tool layer's, reached at a path. Imported
+# rather than restated, for the reason `emrg/memory.py` gives at the same import: the
+# boundary is one fact, and a second spelling of it is a second boundary that can drift.
+from emrg.tools.base import non_regular_kind
+
 logger = logging.getLogger(__name__)
 
 _INDEX_FILENAME = "sessions_index.json"
@@ -101,8 +106,30 @@ def remove_session_index(session_id: str) -> None:
 
 
 def _read_meta_session_id(meta_path: Path) -> str | None:
-    """Return the session_id from a meta.json, or None if missing/corrupt."""
+    """Return the session_id from a meta.json, or None if missing/corrupt.
+
+    The subject's **kind** is asked before it is opened, because opening it is what decides
+    whether this call returns at all: `read_text` on a FIFO blocks at the *open* until a
+    writer appears, so the `except OSError` below cannot bound the consequence — nothing is
+    raised and the walk simply never ends. Measured 2026-10-11 (`cyc20261011-070311`): a
+    `mkfifo` at `<project>/.emrg/sessions/s1/meta.json` made `_iter_project_sessions` **not
+    return in 8 s**. Both walkers call through here (`_iter_project_sessions`,
+    `_iter_nested_sessions`), and the path is under the *workspace*, which is the agent's
+    own write surface — the argument `#2076` made for `.emrg/memory/`.
+
+    Skipped rather than raised, for this function's own reason: it already answers a
+    missing or unparseable `meta.json` with `None` so the walk keeps going, and a session
+    directory can legitimately hold anything. A special file is one more entry the index
+    cannot describe, and the kind is named in the log so the omission is diagnosable.
+    """
     try:
+        kind = non_regular_kind(meta_path)
+        if kind:
+            logger.debug(
+                "sessions index: skipping %s — it is %s, not a regular file",
+                meta_path, kind,
+            )
+            return None
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
