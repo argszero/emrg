@@ -89,6 +89,7 @@ member's code was re-measured there before this leg was rewritten.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -148,14 +149,39 @@ TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
 #: classification rather than against `RUN_HERE` alone (it was added 2026-10-06,
 #: `cyc20261006-214703`: the table was one merge old and already one member short, while
 #: `check-workflows.py` refused both shapes correctly — rc 2 with
-#: `not measurable: no workflow file under …`). A guard that gains a root argument has to
-#: be added here, and this table is a claim like any other: nothing measures it against
-#: the argv each guard really accepts.
+#: `not measurable: no workflow file under …`).
+#:
+#: The membership rule is **"`<guard> <flag> <tree>` is an invocation that guard accepts"**,
+#: not "the guard has a root argument": the leg's only shape is that one, so a guard whose
+#: tree argument comes with a required positional cannot be in the table however pointable
+#: it is at a tree. `check-release-tag.py` is that guard, and
+#: `ROOT_FLAG_BUT_NOT_POINTABLE` below is where naming it is a decision rather than an
+#: omission. Two members joined 2026-10-10 (`cyc20261010-132458`), found by the reading
+#: `test_every_guard_advertising_a_root_flag_is_accounted_for` — before it, the rule above
+#: was prose the table itself already broke: `check-gui-package-refs.py` AND
+#: `check-install-drift.py` both advertised `--root` and neither was listed, so nothing
+#: pointed either at a tree.
 POINTABLE_AT_A_TREE = {
     "check-citation-resolves.py": (),
     "check_unbound_reads.py": ("--root",),
     "check-undefined-names.py": ("--root",),
     "check-workflows.py": ("--root",),
+    "check-gui-package-refs.py": ("--root",),
+    "check-install-drift.py": ("--root",),
+}
+
+#: Guards that advertise `--root` in their own `--help` and are deliberately **not** in the
+#: table above, with the reason. The reading below fails on a root-advertising guard that is
+#: in neither table, so an exemption is written down here or it is a defect; and the two
+#: tables are disjoint, so a name in both is a contradiction the same reading catches.
+ROOT_FLAG_BUT_NOT_POINTABLE = {
+    "check-release-tag.py": (
+        "`tag` is a required positional, so `<guard> --root <tree>` is an argparse usage "
+        "error (rc 2 with the usage text, which would read as a refusal without a reason) "
+        "rather than a run this leg can ask about, and the tag only exists once the host "
+        "cuts a release. Its naming is pinned against `tmp_path` trees by "
+        "`tests/test_check_release_tag.py` instead"
+    ),
 }
 
 #: The spellings the family's refusals really use. The first two are what this leg's own
@@ -364,6 +390,51 @@ def _named_root(proc: subprocess.CompletedProcess) -> str:
         if line.startswith("tree: "):
             return line[len("tree: ") :].strip()
     return ""
+
+
+def test_every_guard_advertising_a_root_flag_is_accounted_for() -> None:
+    """The reading `POINTABLE_AT_A_TREE`'s own docstring said was missing.
+
+    The table is hand-written, and until this leg the rule it states — a guard with a root
+    argument belongs in it — was prose, by the table's own admission: "nothing measures it
+    against the argv each guard really accepts". So a guard that gained `--root` and was
+    never added here would simply never be pointed at a tree by the leg below, in silence.
+    Measured 2026-10-10 (`cyc20261010-132458`) on this checkout: six guards advertised
+    `--root` and the table named three of them.
+
+    **`--help` is the subject, not the source.** The flag set argparse accepts is not the
+    flag set the module text shows — a parent parser, `parse_known_args`, or an
+    abbreviation all differ from the literal — so the reading asks each guard what it
+    accepts, which is also what the empty-tree leg really needs to know. Matching `--root`
+    with a lookahead so a longer flag (`--root-dir`) is a different spelling rather than a
+    hit: a name matched by prefix is how a reader reports a flag nobody declared.
+    """
+    advertised = sorted(
+        name
+        for name in _guards_on_disk()
+        if re.search(r"--root(?![-\w])", _run([str(SCRIPTS_DIR / name), "--help"], cwd=REPO_ROOT).stdout or "")
+    )
+    assert advertised, (
+        "no guard on this checkout advertises `--root`, so this reading has no subject — "
+        "either every guard was renamed or `--help` is no longer the argv surface, and "
+        "either way a green run here would mean nothing"
+    )
+    for name in advertised:
+        assert name in POINTABLE_AT_A_TREE or name in ROOT_FLAG_BUT_NOT_POINTABLE, (
+            f"{name} advertises `--root` in its own --help and is in neither "
+            "POINTABLE_AT_A_TREE nor ROOT_FLAG_BUT_NOT_POINTABLE — a guard the leg below "
+            "never points at a tree is one the family's refusal rule is never asked of. "
+            "Add it to the table (with the flag that points it at a tree) or to the "
+            "exemption map with the reason that invocation cannot be used."
+        )
+        assert not (name in POINTABLE_AT_A_TREE and name in ROOT_FLAG_BUT_NOT_POINTABLE), (
+            f"{name} is both pointable and exempt, so one of the two entries is wrong"
+        )
+    assert set(ROOT_FLAG_BUT_NOT_POINTABLE) <= _guards_on_disk(), (
+        f"ROOT_FLAG_BUT_NOT_POINTABLE names guard(s) that do not exist: "
+        f"{sorted(set(ROOT_FLAG_BUT_NOT_POINTABLE) - _guards_on_disk())} — a stale "
+        "exemption is how a check comes to look narrower than the rule"
+    )
 
 
 def test_every_guard_in_the_family_is_classified() -> None:
