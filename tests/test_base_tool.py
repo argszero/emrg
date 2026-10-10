@@ -4,7 +4,7 @@ import stat
 
 import pytest
 
-from emrg.tools.base import ToolExecutor, special_file_kind
+from emrg.tools.base import ToolExecutor, special_file_kind, special_file_refusal
 
 
 def test_tool_executor_is_abstract():
@@ -72,3 +72,43 @@ def test_special_file_kind_ignores_permission_bits():
     """Only the type bits decide; a read-only or world-writable regular file is regular."""
     for perms in (0o000, 0o400, 0o444, 0o777):
         assert special_file_kind(stat.S_IFREG | perms) is None
+
+
+# ── `special_file_refusal`: the reason matches the failure the subject gives ──
+#
+# The refusal used to hand every non-regular subject the FIFO/socket/device sentence
+# ("opening this one blocks … so the call would never return"), which is false for a
+# directory: `open()` on a directory raises at once rather than waiting for a peer. That
+# is the regression #2062 introduced, fixed here — and pinned in **both** directions,
+# because the old assertion (`"is a directory" in content`) passed against the wrong
+# wording too, so it did not discriminate the fix from the defect.
+
+
+def test_special_file_refusal_gives_a_directory_an_immediate_failure():
+    """A directory fails at once, so it must not be told the call would hang."""
+    message = special_file_refusal("/tmp/adir", special_file_kind(stat.S_IFDIR | 0o755))
+    assert "is a directory, not a regular file" in message, message
+    assert "would never return" not in message, message
+    assert "blocks until a peer appears" not in message, message
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        stat.S_IFIFO | 0o644,
+        stat.S_IFSOCK | 0o644,
+        stat.S_IFCHR | 0o666,
+        stat.S_IFBLK | 0o660,
+    ],
+)
+def test_special_file_refusal_keeps_the_blocking_reason_for_a_blocking_kind(mode):
+    """A FIFO, socket and device node genuinely block — the reason stays."""
+    message = special_file_refusal("/tmp/aspecial", special_file_kind(mode))
+    assert "would never return" in message, message
+
+
+def test_special_file_refusal_gives_two_kinds_two_different_reasons():
+    """The directory and the blocking kinds must not share one sentence."""
+    directory = special_file_refusal("/tmp/adir", special_file_kind(stat.S_IFDIR | 0o755))
+    pipe = special_file_refusal("/tmp/apipe", special_file_kind(stat.S_IFIFO | 0o644))
+    assert directory != pipe

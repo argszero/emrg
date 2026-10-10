@@ -393,9 +393,15 @@ def test_edit_refuses_a_named_pipe_instead_of_blocking(tmp_path):
 
 
 def test_edit_still_refuses_a_directory(tmp_path):
-    """The directory refusal survives, with its own wording, now stated as a kind."""
+    """The directory refusal survives, and must not claim the call would hang.
+
+    A directory fails at once (`open` raises), so the FIFO/socket/device sentence
+    ("would never return") is false for it — that absence is the discriminating
+    assertion, since the pre-#2062 wording also satisfied `"is a directory"`.
+    """
     result = _run(EditTool().execute(
         {"file_path": str(tmp_path), "old_string": "a", "new_string": "b"}
     ))
     assert result.error
     assert "is a directory" in result.content, result.content
+    assert "would never return" not in result.content, result.content

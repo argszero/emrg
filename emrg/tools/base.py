@@ -132,16 +132,24 @@ def boolean_argument(
     )
 
 
+# The one non-regular kind that fails *immediately* instead of blocking: `open()` on a
+# directory raises (`IsADirectoryError` / `PermissionError`) on every platform rather than
+# waiting for a peer, so the FIFO/socket/device sentence does not describe it. Named once
+# and read by both producers — `special_file_kind` returns it and `special_file_refusal`
+# recognises it — so the two cannot drift into disagreeing about which kind this is.
+_DIRECTORY_KIND = "a directory"
+
+
 def special_file_kind(mode: int) -> str | None:
     """Name a file subject's kind from its ``st_mode`` — ``None`` when it is a regular file.
 
     Every file tool here opens its subject directly (``write_text`` / ``open``), and an
-    **open is not a read**: on a FIFO it blocks until the other end appears, on a socket
-    until a connection does, and a character device has no end of file at all. Nothing in
-    these tools asked what it was opening, so the subject's *kind* decided whether the call
-    returned. Measured 2026-10-10 (``cyc20261010-215146``) on a ``mkfifo`` named pipe, each
-    call in its own process under a 10 s cap: ``read``, ``write`` and ``edit`` all **failed
-    to return**, while the same three calls against a regular file returned normally.
+    **open is not a read**: on a FIFO it blocks until the other end appears — the one kind
+    measured here, so the only one this docstring speaks for. Nothing in these tools asked
+    what it was opening, so the subject's *kind* decided whether the call returned. Measured
+    2026-10-10 (``cyc20261010-215146``) on a ``mkfifo`` named pipe, each call in its own
+    process under a 10 s cap: ``read``, ``write`` and ``edit`` all **failed to return**,
+    while the same three calls against a regular file returned normally.
 
     That is not a slow tool. ``daemon._run_tool_loop`` awaits ``tool.execute(args)`` **on
     the event loop** (``daemon.py:4504``, ``6931``) with no timeout, so the block is the
@@ -159,7 +167,7 @@ def special_file_kind(mode: int) -> str | None:
     if stat.S_ISREG(mode):
         return None
     if stat.S_ISDIR(mode):
-        return "a directory"
+        return _DIRECTORY_KIND
     if stat.S_ISFIFO(mode):
         return "a FIFO (named pipe)"
     if stat.S_ISSOCK(mode):
@@ -178,7 +186,22 @@ def special_file_refusal(path: object, kind: str) -> str:
     and three copies of the reason drift into three different explanations of one
     boundary. ``kind`` comes from :func:`special_file_kind`, so the caller is told what
     its path is before it is told what to do instead.
+
+    Two failures live behind this one boundary, and the reason must match the one the
+    subject actually produces. A **directory** fails at once — ``open`` raises rather
+    than waits — while a FIFO, a socket and a device node *block*, and a block is the
+    whole daemon (measured 2026-10-10, ``cyc20261010-215146``: ``read``/``write``/``edit``
+    on a ``mkfifo`` did not return in 10 s). Telling a caller its directory "would never
+    return" is false about the subject just named: the sentence was written for the kind
+    that blocks and shown for both (the regression #2062 introduced, fixed here).
     """
+    if kind == _DIRECTORY_KIND:
+        return (
+            f"Error: {path} is a directory, not a regular file. This tool opens its "
+            f"subject directly, and a directory cannot be opened as a file — the call "
+            f"fails at once rather than returning any bytes. Use the bash tool if you "
+            f"need to touch it."
+        )
     return (
         f"Error: {path} is {kind}, not a regular file. This tool opens its subject "
         f"directly, and opening this one blocks until a peer appears — a FIFO waits for "
