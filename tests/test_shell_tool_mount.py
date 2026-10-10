@@ -197,6 +197,105 @@ def test_grep_receives_the_cwd_only_as_a_default(injected, tmp_path):
     assert injected("grep", {"pattern": "x", "path": "/elsewhere"})["path"] == "/elsewhere"
 
 
+def test_the_discovery_tools_take_the_cwd_as_a_default_too(injected, tmp_path):
+    """``glob``'s directory is a preference, exactly as ``grep``'s is.
+
+    Both schemas say "default: project root"; neither tool runs a command or
+    writes a file, so neither directory decides a boundary.  ``glob`` shared the
+    shell branch by adjacency — when the guard was dropped from the one line the
+    two shared (``8246b691``, whose subject is bash and not glob) it lost the
+    ``and "workdir" not in args`` it had alongside ``bash``, and a caller that
+    scoped a search with ``workdir="src"`` was answered about the session root
+    instead, in the shape of a real answer.  Diagnosed on 2026-10-02 and never
+    merged (the branch ``feature/a-glob-keeps-the-directory-it-was-given`` had no
+    PR); measured again 2026-10-11 (``cyc20261011-023918``) on this tree.
+    """
+    assert injected("glob", {"pattern": "*.py", "workdir": "/elsewhere"})["workdir"] == "/elsewhere"
+
+
+def test_a_discovery_tool_reads_either_dialect_as_the_caller_naming_a_directory(injected, tmp_path):
+    """The sibling spelling is a directory the caller named, not an absent one.
+
+    ``glob`` declares ``workdir`` and ``grep`` declares ``path`` for the same
+    parameter, and both tools now read the other's name (PR #2072).  The
+    injection had to learn the same thing: it checked only the **declared** key,
+    so the default it wrote there was the key the tool reads first and the
+    caller's sibling-spelled directory was silently replaced — the alias was dead
+    in the daemon path, on every call, while the tool-level tests (which call the
+    tool directly) stayed green.
+    """
+    glob_args = injected("glob", {"pattern": "*.py", "path": "/elsewhere"})
+    assert glob_args.get("workdir") is None, (
+        "the caller named the directory with the sibling spelling; the default must not land in "
+        f"the key the tool reads first — got {glob_args!r}"
+    )
+    assert glob_args["path"] == "/elsewhere"
+
+    grep_args = injected("grep", {"pattern": "x", "workdir": "/elsewhere"})
+    assert grep_args.get("path") is None, (
+        f"the caller named the directory with the sibling spelling — got {grep_args!r}"
+    )
+    assert grep_args["workdir"] == "/elsewhere"
+
+
+def test_the_pinned_class_is_the_tools_that_run_a_command(injected, tmp_path):
+    """What separates the two classes is what the value decides, not which tool it is.
+
+    A shell tool's ``workdir`` is the directory it runs in and may write under, so
+    the model cannot name it.  A discovery tool's is a preference, in either
+    dialect.  Stated as one assertion over both groups so a future tool cannot be
+    added to either by adjacency — which is exactly how ``glob`` lost the default.
+    """
+    for tool in sorted(SHELL_TOOL_NAMES):
+        assert injected(tool, {"command": "ls", "workdir": "/named"})["workdir"] == str(tmp_path), (
+            f"{tool} runs a command, so its workdir is pinned"
+        )
+    for tool, declared, sibling in (("glob", "workdir", "path"), ("grep", "path", "workdir")):
+        assert injected(tool, {declared: "/named"})[declared] == "/named", (
+            f"{tool} reads only, so the directory it was given stands"
+        )
+        assert not injected(tool, {sibling: "/named"}).get(declared), (
+            f"{tool} reads only, and it reads {sibling} too, so the default must not overwrite it"
+        )
+
+
+def test_a_discovery_tool_searches_the_tree_the_caller_named(injected, tmp_path):
+    """The seam, driven end to end: injection, then the tool, then where it searched.
+
+    Asserting the argument dict alone cannot see this class of defect — the dict
+    looked right while the tool read another key first — and calling the tool
+    directly cannot see it either, because the injection is not in that path.
+    This is the pair of them, which is where the defect lived.
+    """
+    import asyncio
+
+    from emrg.tools.glob_tool import GlobTool
+    from emrg.tools.grep_tool import GrepTool
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "found.py").write_text("needle\n")
+
+    session_cwd = tmp_path / "session"
+    session_cwd.mkdir()
+    (session_cwd / "other.py").write_text("needle\n")
+
+    def run(tool_name: str, args: dict) -> str:
+        injected(tool_name, args, cwd=session_cwd)
+        tool = GlobTool() if tool_name == "glob" else GrepTool()
+        return asyncio.run(tool.execute(args)).content
+
+    for tool_name, args in (
+        ("glob", {"pattern": "*.py", "workdir": str(elsewhere)}),
+        ("glob", {"pattern": "*.py", "path": str(elsewhere)}),
+        ("grep", {"pattern": "needle", "path": str(elsewhere)}),
+        ("grep", {"pattern": "needle", "workdir": str(elsewhere)}),
+    ):
+        content = run(tool_name, args)
+        assert "found.py" in content, f"{tool_name} {args} searched the wrong tree: {content}"
+        assert "other.py" not in content, f"{tool_name} {args} searched the session cwd: {content}"
+
+
 def test_the_tier_comes_from_the_task_and_carries_the_boundary_with_it(injected, tmp_path):
     """``workspace`` is what v2 reads as its authorization root; the model cannot set it."""
     args = injected("bash", {"command": "ls", "sandbox": "danger-full-access", "workspace": "/"}, sandbox="read-only")
