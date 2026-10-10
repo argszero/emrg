@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from emrg.tools.read_tool import DEFAULT_MAX_LINES, ReadTool
+from emrg.tools.read_tool import DEFAULT_MAX_LINES, MAX_LINES, ReadTool
 
 
 @pytest.fixture
@@ -721,3 +721,115 @@ def test_read_still_reads_a_regular_file_beside_a_pipe(tmp_path):
     result = _run(ReadTool().execute({"file_path": str(regular)}))
     assert not result.error, result.content
     assert "hello" in result.content
+
+
+class TestALimitAboveTheCeilingSaysSo:
+    """The cap's ceiling is a bound, and a reading that hits it must name it (issue #2077).
+
+    `line_limit`'s description declares both ends of its domain in one sentence, and the
+    reader enforced them in two different ways: ``0 or less is refused rather than read as
+    the default`` (loud, with the value in the reason) while ``max: 2000 for explicit
+    calls`` was applied as ``min(line_limit, MAX_LINES)`` and never named — so
+    ``2000``/``2001``/``5000``/``100000`` all answered **one byte-identical reading**
+    (measured 2026-10-11, `cyc20261011-044528`, on a 3,000-line file and a 3,000-entry
+    directory), and a caller could not tell a bound it got from a bound it asked for.
+
+    The cap itself is deliberate and pinned (`test_read_explicit_limit_capped_at_max`);
+    what these tests hold is the sentence the reading owes, at both subjects that share
+    one ``effective_limit``.
+    """
+
+    @staticmethod
+    def _dir(tmp_path, count):
+        d = tmp_path / "listing"
+        d.mkdir()
+        for i in range(count):
+            (d / f"entry-{i:05d}.txt").write_text("")
+        return d
+
+    @staticmethod
+    def _file(tmp_path, count):
+        f = tmp_path / "big.txt"
+        f.write_text("".join(f"line {i}\n" for i in range(1, count + 1)))
+        return f
+
+    @pytest.mark.parametrize("requested", [MAX_LINES + 1, MAX_LINES * 3, 100_000])
+    def test_a_file_read_above_the_ceiling_names_the_bound(self, tmp_path, requested):
+        big = self._file(tmp_path, MAX_LINES + 1000)
+        result = _run(ReadTool().execute({"file_path": str(big), "line_limit": requested}))
+        assert not result.error, result.content
+        assert f"note: line_limit={requested}" in result.content, (
+            "the reading does not name the value the caller sent, so the caller cannot "
+            f"tell its bound was capped: {result.content[-260:]!r}"
+        )
+        assert f"maximum of {MAX_LINES}" in result.content, result.content[-260:]
+
+    def test_two_bounds_the_tool_reads_as_one_no_longer_read_as_one(self, tmp_path):
+        """The measurement itself, as an assertion: the collapse is what was wrong.
+
+        Four requests answered one byte-identical result. The cap still answers with
+        ``MAX_LINES`` lines, but the reading now says which limit was applied, so the
+        caller can tell ``line_limit=2000`` from ``line_limit=5000``.
+        """
+        big = self._file(tmp_path, MAX_LINES + 1000)
+        tool = ReadTool()
+        at_the_cap = _run(tool.execute({"file_path": str(big), "line_limit": MAX_LINES}))
+        above = _run(tool.execute({"file_path": str(big), "line_limit": MAX_LINES * 5}))
+        assert at_the_cap.content != above.content, (
+            "an over-ceiling request still answers the same bytes as one exactly at the "
+            "ceiling, which is the defect"
+        )
+        # The cap still binds identically — this is a sentence added, not a window moved.
+        assert at_the_cap.content.split("\ntruncated at ")[0] == above.content.split("\ntruncated at ")[0]
+        assert f"total {MAX_LINES + 1000} lines" in above.content
+
+    def test_a_listing_read_above_the_ceiling_names_the_bound(self, tmp_path):
+        """Both subjects share one `effective_limit`, so both owe the same sentence."""
+        d = self._dir(tmp_path, MAX_LINES + 1000)
+        result = _run(ReadTool().execute({"file_path": str(d), "line_limit": MAX_LINES * 4}))
+        assert not result.error, result.content
+        assert f"note: line_limit={MAX_LINES * 4}" in result.content, result.content[-260:]
+        assert f"maximum of {MAX_LINES}" in result.content, result.content[-260:]
+        assert f"total {MAX_LINES + 1000} entries" in result.content
+
+    @pytest.mark.parametrize("requested", [None, 1, MAX_LINES - 1, MAX_LINES])
+    def test_the_note_means_the_cap_bound_not_merely_that_a_limit_was_passed(self, tmp_path, requested):
+        """The control, in both directions: a limit at or under the ceiling stays quiet.
+
+        Without this, a note that fired on every explicit limit would pass the tests
+        above while telling a caller at ``line_limit=2000`` that its bound had been
+        capped — a claim about its call that is false.
+        """
+        big = self._file(tmp_path, MAX_LINES + 1000)
+        args = {"file_path": str(big)}
+        if requested is not None:
+            args["line_limit"] = requested
+        content = _run(ReadTool().execute(args)).content
+        assert "note: line_limit=" not in content, (
+            f"line_limit={requested}: the cap did not bind this read, so no note about "
+            f"it belongs in the reading: {content[-260:]!r}"
+        )
+
+    def test_the_description_promises_the_sentence_the_reading_gives(self, tmp_path):
+        """The description's clause about the ceiling, held against the reading.
+
+        Same shape as this file's `a cut listing says so` pin: the sentence is read out
+        of the schema, then the reading is asked to keep it. Two halves, so neither can
+        drift alone — a description that stops promising it, and a renderer that stops
+        printing it, each go red where the other would stay green.
+        """
+        param = ReadTool().definition().parameters["properties"]["line_limit"]
+        description = param["description"]
+        assert f"is read as {MAX_LINES} and the reading says so" in description, (
+            f"the description no longer states the consequence of passing a value above "
+            f"the {MAX_LINES}-line maximum: {description!r}"
+        )
+
+        big = self._file(tmp_path, MAX_LINES + 1000)
+        content = _run(ReadTool().execute({
+            "file_path": str(big), "line_limit": MAX_LINES * 2,
+        })).content
+        assert f"so the limit applied was {MAX_LINES}" in content, (
+            "'and the reading says so' must be a sentence the renderer keeps: "
+            f"{content[-260:]!r}"
+        )
