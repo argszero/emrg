@@ -57,6 +57,21 @@ export with no `.git`. There the two paths agree by construction (an export hold
 only tracked content); in a checkout the tracked path always wins, so a broken
 repository fails loud rather than quietly scanning something else.
 
+The verdict states its coverage, and a scan that read nothing is a refusal. `OK`
+names how many files were read (and how many were skipped as unreadable), so *no
+claim in the whole scope* and *no claim in none* stop being the same sentence; a
+tree this rule read no file from - every file under `tests/` or `scripts/`, or an
+export holding none of them - exits `2` with `could not measure`, because `0`
+means *measured and clean* and "I could not check" reported as healthy is how a
+broken tree reaches master.
+
+Exit codes
+----------
+    0  no stored count in the tree it read (the count is named in the output)
+    1  `FAIL` - a tracked file states the count; delete it and name the command
+    2  `could not measure` - no file was read at all, the file listing failed, or
+       `--measure` could not collect a count (a missing pytest counts here)
+
 Run it with the project interpreter: `--measure` shells out to pytest, so a bare
 `python3` that cannot import pytest fails loud with that reason rather than
 reporting a bogus count.
@@ -376,8 +391,17 @@ def scanned_files() -> list[str]:
     return _exported_files()
 
 
-def offenders() -> list[tuple[str, int, str, str]]:
-    """(file, line number, shape, line) for every stored count in the tree."""
+def scan() -> tuple[list[str], list[str], list[tuple[str, int, str, str]]]:
+    """(files read, files skipped as unreadable, stored counts found).
+
+    The coverage is returned beside the findings because a rule that reports
+    "nothing wrong" owes the reader the size of what it looked at: *no claim in
+    415 files* and *no claim in none* are the same sentence otherwise, and this
+    module's own Scope paragraph says "which files did you scan" is the one thing
+    it must not answer vaguely.
+    """
+    read: list[str] = []
+    skipped: list[str] = []
     found: list[tuple[str, int, str, str]] = []
     for name in scanned_files():
         try:
@@ -385,11 +409,24 @@ def offenders() -> list[tuple[str, int, str, str]]:
         except (OSError, UnicodeDecodeError):
             # Binary or unreadable: a claim cannot live in a file this rule
             # cannot read, and failing the whole scan over, say, a PNG would
-            # make the guard unusable rather than strict.
+            # make the guard unusable rather than strict. Skipped, not hidden:
+            # the count goes in the verdict below.
+            skipped.append(name)
             continue
+        read.append(name)
         for lineno, shape, line in claims_in(text):
             found.append((name, lineno, shape, line))
-    return found
+    return read, skipped, found
+
+
+def offenders() -> list[tuple[str, int, str, str]]:
+    """(file, line number, shape, line) for every stored count in the tree.
+
+    The findings alone, for callers that want only those (the pytest guard loads
+    this module and asks for them). The scan's own coverage - how many files were
+    read and how many skipped - comes from `scan()`.
+    """
+    return scan()[2]
 
 
 def resolve_conflict(text: str) -> str:
@@ -551,15 +588,33 @@ def main(argv: list[str] | None = None) -> int:
         return _resolve_conflict_mode()
 
     try:
-        found = offenders()
+        read, skipped, found = scan()
     except DocCountError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    if not read:
+        # The same defect as a failed listing, one step later: an empty scan and a
+        # clean tree printed the same sentence (the test beside this rule already
+        # names that as the thing not to allow). A tree this rule read nothing
+        # from is one it cannot judge, and `0` means *measured and clean*.
+        print(
+            f"could not measure: no file was read under {REPO_ROOT}, so this tree "
+            "carries nothing to judge. The rule scans every tracked file except "
+            f"{', '.join(EXCLUDED_PREFIXES)}, so a tree whose files are all in "
+            "those two directories (or an export holding none of them) is an empty "
+            "subject, and a clean verdict here would be a reading of nothing.",
+            file=sys.stderr,
+        )
+        return 2
+
     if not found:
+        coverage = f"{len(read)} file(s) read"
+        if skipped:
+            coverage += f", {len(skipped)} unreadable file(s) skipped"
         print(
             "OK: no tracked file states the Python test count "
-            "(it is measured, not stored)"
+            f"({coverage}; it is measured, not stored)"
         )
         return 0
 
