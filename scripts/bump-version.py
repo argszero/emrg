@@ -290,6 +290,17 @@ def bump(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # This tool says which tree answered, so the promise is about the order a
+    # reader gets. stdout is block-buffered when it is a pipe (how a cycle reads
+    # a report: `2>&1 | tail`) while stderr is not, so without this the verdict
+    # overtakes the `tree:` line - measured 2026-10-10: `--check v0.3.9 2>&1 |
+    # cat -n` printed the semver error first. Behaviour and pin:
+    # tests/test_guard_report.py, which sweeps for this call by shape.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(
         description="Bump every EMRG version source (8 declarations in 8 files).",
         formatter_class=argparse.RawDescriptionHelpFormatter,

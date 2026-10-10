@@ -1410,6 +1410,17 @@ def _as_json(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The family's convention is claimed below ("names it before it gives a
+    # verdict"), and this call is what makes it hold under a pipe: stdout is
+    # block-buffered when it is not a tty while stderr is not, so the
+    # `unmeasurable: the rant ledger could not be read` line would otherwise be
+    # read *above* the `tree:` line - measured 2026-10-10 on this script.
+    # Behaviour and pin: tests/test_guard_report.py.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(
         prog="review-queue.py",
         description="For every open PR: its counted votes, and the next action for a cycle.",
