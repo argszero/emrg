@@ -6,17 +6,98 @@ returns matching lines with filename:line_number prefixes.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, count_argument
+from emrg.tools.base import ToolExecutor, brace_alternation, count_argument
 
 logger = logging.getLogger(__name__)
 
 MAX_RESULTS = 200  # Cap matches to prevent excessive result volume
 MAX_FILE_SIZE = 512 * 1024  # 512KB — skip files larger than this
+
+
+def _selects(path: Path, file_glob: str | None) -> bool:
+    """Does the glob filter select this one named file?
+
+    The caller named a *file*, so there is no tree to walk and the filter is
+    applied here instead. Without this, `glob` was read by the directory branch
+    and ignored by the file branch - and the summary still printed
+    `matching '<glob>'`, so the output claimed a filter nothing had applied
+    (measured 2026-10-10: `path=read_tool.py, glob='*.nomatch'` returned the same
+    1 match as no filter at all).
+
+    **The domain is the name, and it is stated here rather than assumed.** What a
+    named file offers the matcher is one relative path - its own name, the path
+    it would have relative to itself - so a pattern that still carries a
+    directory component *after* its leading `**` segments are dropped cannot
+    select one. That is the walk's own answer for the root such a file implies,
+    its own directory: `<dir>/src`.rglob('src/**/*.ts') selects nothing. It is
+    **not** the directory branch's answer, whose root is the directory the caller
+    passed, so the two branches answer the same question only for name-shaped
+    patterns. Claiming otherwise was this function's own unmeasured sentence
+    (vetoed in `cyc20261011-022427`: `path=<dir>/main.py, glob='**/*.py'`
+    excluded a file the directory branch had just found).
+
+    `**` matches zero directories, so dropping the leading ones is the walk's
+    behaviour, not a shortcut: `root.rglob(p)` is `root.glob("**/" + p)`, and
+    `**/*.py` selects a top-level `main.py` exactly as `*.py` does.
+    """
+    if not file_glob:
+        return True
+    return _walk_selects_name(path.name, file_glob)
+
+
+def _walk_selects_name(name: str, file_glob: str) -> bool:
+    """Would the walk select the file whose relative path is `name`?
+
+    ``name`` is one path component: a file name carries no separator, so after
+    the leading `**` segments are dropped a pattern with anything left over
+    names directories this path does not have.
+    """
+    segments = file_glob.split("/")
+    while segments and segments[0] == "**":
+        segments.pop(0)
+    if not segments:
+        return True  # `**` alone: the walk selects every file
+    if len(segments) != 1:
+        return False  # a directory component a bare name cannot carry
+    return fnmatch.fnmatch(name, segments[0])
+
+
+def _names_a_directory(file_glob: str) -> bool:
+    """Does the filter carry a directory component, once `**` is discounted?"""
+    segments = file_glob.split("/")
+    while segments and segments[0] == "**":
+        segments.pop(0)
+    return len(segments) != 1
+
+
+def _named_file_exclusion_note(name: str, file_glob: str) -> str:
+    """Why the filter excluded `name` — the sentence, and the remedy it implies.
+
+    Two shapes, two remedies, so they are not one sentence. A pattern carrying a
+    directory component names a path a bare file name cannot be (`src/**/*.ts`
+    against `deep.ts`), and the remedy is to pass the directory instead of the
+    file; a name-shaped pattern simply did not match (`*.nomatch`), and there the
+    remedy is the pattern. Before this, both printed the second sentence — and for
+    the first shape it was a claim the tool's own walk contradicted when the
+    caller passed the directory, which is the veto `cyc20261011-022427` names.
+    """
+    if _names_a_directory(file_glob):
+        return (
+            f" - the named file {name!r} offers only its own name to the filter, "
+            f"and {file_glob!r} names a directory, so a named file cannot match "
+            f"it; pass the containing directory with this pattern to search the "
+            f"tree, or a name-shaped pattern to filter this file"
+        )
+    return (
+        f" - the named file {name!r} does not match the glob filter, "
+        "so nothing was searched"
+    )
 
 
 class GrepTool(ToolExecutor):
@@ -64,8 +145,17 @@ class GrepTool(ToolExecutor):
                         "type": "string",
                         "description": (
                             "Only search files matching this glob pattern. "
-                            "Examples: '*.py', '*.{py,rs}', 'src/**/*.ts'. "
-                            "Default: all text files."
+                            "Examples: '*.py', '*.md', 'src/**/*.ts'. "
+                            "Default: all text files. The pattern is matched by "
+                            "`Path.rglob`, which does not expand `{a,b}` brace "
+                            "alternation (`*.{py,rs}` selects nothing) - pass one "
+                            "pattern per call, or a regex-ish alternation is not "
+                            "available here. A named file is filtered too: if the "
+                            "path is one file and it does not match, nothing is "
+                            "searched and the summary says so. A brace-alternation "
+                            "filter that selects nothing is refused with that reason "
+                            "rather than searched to `No matches` - which is why the "
+                            "refusal names the pattern, not the tree."
                         ),
                     },
                     "ignore_case": {
@@ -175,11 +265,54 @@ class GrepTool(ToolExecutor):
             pattern, root, file_glob, ignore_case,
         )
 
-        # Collect files
+        # Collect files. The named-file branch is filtered too: `glob` means
+        # "only search files matching this pattern", and a file the caller named
+        # is still a file the filter can exclude.
+        #: Why the filter excluded the file the caller named, when it did. The
+        #: reason is chosen by the pattern's shape, because the two shapes have
+        #: different remedies — see `_named_file_exclusion_note`.
+        excluded_named_file: str | None = None
         if root.is_file():
-            files = [root]
+            if _selects(root, file_glob):
+                files = [root]
+            else:
+                files = []
+                excluded_named_file = _named_file_exclusion_note(root.name, file_glob)
         else:
             files = self._collect_files(root, file_glob)
+
+        # A filter this walk cannot expand is refused rather than searched: it selects
+        # nothing and the answer reads `No matches` - a false negative indistinguishable
+        # from a real absence. See `brace_alternation` for the measurement and the example
+        # that advertised it.
+        #
+        # The check sits *after* the collection, on `files`, because the refusal has to be
+        # a measurement rather than a prediction. `brace_alternation` alone fires on the
+        # shape of the pattern, and `Path.rglob` gives `{` no special meaning, so a literal
+        # name like `a{b}.py` selects its file and must not be refused (measured 2026-10-10,
+        # `cyc20261011-001130`: refusing it was this branch's own over-block). A filter that
+        # selected nothing is the case the refusal is about, and there its two claims -
+        # alternation is not expanded, and nothing was selected - are both readings rather
+        # than guesses.
+        #
+        # The named-file branch is inside this, not carved out of it: `_selects` matches the
+        # file's name with `fnmatch`, which does not expand braces either, so `glob='*.{py,rs}'`
+        # pointed at one file excludes it for the same reason the walk selects nothing - and the
+        # remedy is the pattern, not the file. Naming that cause is worth more than naming the
+        # exclusion it produced.
+        if not files and file_glob and brace_alternation(file_glob):
+            return ToolResult(
+                name="grep",
+                content=(
+                    f"Error: the glob filter {file_glob!r} uses `{{a,b}}` brace "
+                    "alternation, which this filter does not expand - it walks with "
+                    "`Path.rglob`, so the whole pattern is one literal string. It selected "
+                    "nothing, and `No matches` is the sentence a real absence produces, so "
+                    "this answer would not be distinguishable from one. Pass one pattern "
+                    "per call ('*.py', then '*.rs'), or omit the filter and search the tree."
+                ),
+                error=True,
+            )
 
         # Search
         results: list[str] = []
@@ -285,12 +418,18 @@ class GrepTool(ToolExecutor):
             skipped = f"; {oversize + undecodable} skipped: " + ", ".join(parts)
 
         if not results:
+            # `matching '<glob>'` is appended only when the filter really ran, and
+            # `excluded_named_file` names the case where it ran and excluded the
+            # one file the caller pointed at - the two readings have different
+            # remedies (drop the filter / fix the pattern), so they are not the
+            # same sentence.
             return ToolResult(
                 name="grep",
                 content=(
                     f"No matches for '{pattern}' in {root} "
                     f"(searched {files_read} files{skipped})"
                     + (f" matching '{file_glob}'" if file_glob else "")
+                    + (excluded_named_file or "")
                 ),
             )
 
