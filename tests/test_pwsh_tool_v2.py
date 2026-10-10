@@ -629,6 +629,147 @@ def test_the_two_twins_cut_a_long_stderr_the_same_way():
     assert "head+tail kept" in ours, "and the notice says which end the reader got"
 
 
+#: One run each, in the vocabulary both modules' ``ShellRunResult`` share.  Every
+#: branch of the renderer is represented: the empty body, a non-zero exit, a run
+#: that never settled, both timeout shapes, a denial, and — in
+#: :data:`_RENDER_MODES` — the escalating composition that adds the hint line.
+_RENDER_RUNS = {
+    "stdout only, exit 0": dict(stdout="hi\n", exit_code=0),
+    "silent success": dict(exit_code=0),
+    "stderr only, exit 0": dict(stderr="boom\n", exit_code=0),
+    "stdout without a trailing newline": dict(stdout="hi", exit_code=0),
+    "stdout and stderr, exit 0": dict(stdout="hi", stderr="boom\n", exit_code=0),
+    "stdout and stderr, no trailing newline": dict(stdout="out", stderr="err", exit_code=0),
+    "stdout, exit 3": dict(stdout="hi\n", exit_code=3),
+    "stdout, exit None": dict(stdout="hi\n", exit_code=None),
+    "stderr, exit None": dict(stderr="boom\n", exit_code=None),
+    "signal and exit": dict(stdout="hi\n", exit_code=137, signal=9),
+    "timeout, signal 9": dict(signal=9, timed_out=True, timeout_ms=1000),
+    "timeout, no code": dict(timed_out=True, timeout_ms=1000),
+    "exit 0, unconfined sandbox": dict(exit_code=0, sandbox={"mode": "danger-full-access", "denied": False}),
+    "denied, exit 1": dict(
+        exit_code=1,
+        sandbox={"mode": "workspace-write", "denied": True, "enforcement": "full"},
+    ),
+    "denied, timeout and signal": dict(
+        signal=9,
+        timed_out=True,
+        timeout_ms=1000,
+        sandbox={"mode": "read-only", "denied": True, "enforcement": "full"},
+    ),
+}
+
+#: The escalation axis: a tier with a hop advertises it, a tier with nowhere
+#: wider to go passes none (design §1.5 A5).  The denial hint is the only branch
+#: this moves, so it is compared on both.
+_RENDER_MODES = {"nothing advertised": (), "escalation advertised": ("workspace-write",)}
+
+
+def test_the_two_twins_render_one_run_identically():
+    """One finished run, two renderers, one reading — measured, not restated.
+
+    Issue #2039: ``render_result`` is where a finished confined run becomes the
+    text the model reads, the two dialects restate it rather than share it, and
+    nothing compared them — so on ``b0d83c2f`` the same ten runs differed in all
+    ten.  Four branches had drifted: the empty body lost its placeholder, a
+    denial appended the marker twice (once raw, once through
+    ``with_retry_hint``), the signal marker was dropped whenever the run had
+    timed out, and the exit marker was written unconditionally — so a successful
+    Windows run read a spurious ``[exit code: 0]`` the tool's own description
+    never promised, and the body/marker join emitted a blank line the bash twin
+    does not.
+
+    The constants above are pinned by name; this is the half that no constant can
+    carry, and the reading is the one the drift would have been caught by:
+    **drive the same run through both and assert the text is equal**.  Equality
+    alone is not enough — two renderers drifting together in the same direction
+    still agree — so the contract the tool description states is asserted on the
+    text too, in
+    :func:`test_the_rendered_contract_is_the_one_the_description_states`.
+    """
+    from emrg.tools import bash_tool_v2 as bash
+    from emrg.tools import pwsh_tool_v2 as pwsh
+
+    differ = []
+    for label, kwargs in _RENDER_RUNS.items():
+        for modes_label, modes in _RENDER_MODES.items():
+            theirs = bash.render_result(bash.ShellRunResult(**kwargs), escalation_modes=modes)
+            ours = pwsh.render_result(pwsh.ShellRunResult(**kwargs), escalation_modes=modes)
+            if theirs != ours:
+                differ.append(f"{label} / {modes_label}:\n  bash={theirs!r}\n  pwsh={ours!r}")
+
+    assert not differ, "the two dialects disagree on the model-facing text:\n" + "\n".join(differ)
+
+
+def test_the_rendered_contract_is_the_one_the_description_states():
+    """What the text must say, whichever renderer produced it.
+
+    Agreement is the twin's property; this is the *contract*'s, and it is
+    asserted on the text so that a future edit which moves both renderers the
+    same way has to argue with the description rather than with a copy of
+    itself.  Each assertion names a sentence the model is promised:
+
+    * ``[exit code: N]`` is reported for **non-zero** exits only (both tool
+      descriptions say so) — never ``[exit code: 0]``, and never
+      ``[exit code: None]`` for a run that has no code to report;
+    * an empty body is announced as ``(no output)`` rather than rendered as
+      nothing, because blank text and "the command was never reached" must not
+      read alike;
+    * the markers come in the blueprint's order and the exit marker is **last**,
+      because it is the anchor a reader greps for;
+    * a denial is one line, not two.
+    """
+    from emrg.tools import bash_tool_v2 as bash
+    from emrg.tools import pwsh_tool_v2 as pwsh
+
+    for module in (bash, pwsh):
+        run = module.ShellRunResult
+        render = module.render_result
+
+        assert render(run(stdout="hi\n", exit_code=0)) == "hi\n", "no status on success"
+        assert render(run(exit_code=0)) == "(no output)"
+        assert render(run(stdout="hi\n", exit_code=None)) == "hi\n", "no code, no line"
+        assert render(run(stderr="boom\n", exit_code=None)) == "[stderr]\nboom\n"
+
+        text = render(run(stdout="hi\n", exit_code=3))
+        assert text == "hi\n[exit code: 3]"
+        assert text.rstrip().endswith("[exit code: 3]"), "the exit marker is last"
+
+        text = render(run(signal=9, timed_out=True, timeout_ms=1000))
+        assert text == "(no output)\n[timed out after 1000ms]\n[killed by signal: 9]"
+
+        text = render(run(stdout="hi\n", exit_code=137, signal=9))
+        assert text == "hi\n[killed by signal: 9]", "the signal is the status, not the code"
+
+        # The control for the denial assertions below: a run that was not denied
+        # carries no denial at all, so counting the marker is a reading of the
+        # denial path rather than of every text.
+        assert "[sandbox:" not in render(run(stdout="ok\n", exit_code=0))
+
+        text = render(run(timed_out=True, timeout_ms=1000))
+        assert text == "(no output)\n[timed out after 1000ms]", "nothing to report as an exit"
+
+        text = render(
+            run(
+                exit_code=1,
+                sandbox={"mode": "workspace-write", "denied": True, "enforcement": "full"},
+            )
+        )
+        assert text.count("[sandbox: file access denied under workspace-write mode]") == 1
+        assert text.rstrip().endswith("[exit code: 1]")
+
+        # The advertised-hop axis: the hint rides the same denial, not a second one.
+        text = render(
+            run(
+                exit_code=1,
+                sandbox={"mode": "read-only", "denied": True, "enforcement": "full"},
+            ),
+            escalation_modes=("workspace-write",),
+        )
+        assert text.count("[sandbox: file access denied under read-only mode]") == 1
+        assert "[hint]" in text
+
+
 def test_the_pwsh_module_does_not_import_the_bash_executor():
     """The peers are peers: layering one dialect on the other is the shape rejected.
 
