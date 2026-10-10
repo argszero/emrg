@@ -6,6 +6,7 @@ import sys
 import pytest
 from pathlib import Path
 
+from tests.bounded_read import DEADLINE_SECONDS, within
 from emrg.skills.loader import (
     Skill,
     _parse_frontmatter,
@@ -267,7 +268,7 @@ class TestASkillDirectoryWalkedByKind:
         hang caused one step earlier.
         """
         project = self._project(tmp_path, fifo=True)
-        skills = load_skills(project_dir=project)
+        skills = within(DEADLINE_SECONDS, lambda: load_skills(project_dir=project))
         names = [s.name for s in skills]
         assert "good" in names, f"the usable skill was lost: {names}"
         assert "wedged" not in names, f"a FIFO was loaded as a skill: {names}"
@@ -289,4 +290,4 @@ class TestASkillDirectoryWalkedByKind:
         """
         fifo = tmp_path / "wedged.md"
         os.mkfifo(fifo)
-        assert _parse_skill_file(fifo, "project") is None
+        assert within(DEADLINE_SECONDS, lambda: _parse_skill_file(fifo, "project")) is None

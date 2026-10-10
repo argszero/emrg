@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.bounded_read import DEADLINE_SECONDS, within
 from emrg.session import Session
 from emrg.sessions_index import (
     _iter_project_sessions,
@@ -248,7 +249,7 @@ class TestAWalkByKindRatherThanByOpening:
         wedged.mkdir()
         os.mkfifo(wedged / "meta.json")
 
-        rows = list(_iter_project_sessions(tmp_path))
+        rows = within(DEADLINE_SECONDS, lambda: list(_iter_project_sessions(tmp_path)))
         assert [sid for sid, _ in rows] == ["s_real"], rows
 
     def test_the_control_without_the_fifo(self, tmp_path):
@@ -263,7 +264,7 @@ class TestAWalkByKindRatherThanByOpening:
         """At the one open site: `None` — the answer this function already gives a bad meta."""
         fifo = tmp_path / "meta.json"
         os.mkfifo(fifo)
-        assert _read_meta_session_id(fifo) is None
+        assert within(DEADLINE_SECONDS, lambda: _read_meta_session_id(fifo)) is None
 
     def test_a_missing_meta_is_still_none(self, tmp_path):
         """The contract the kind check must not narrow: a missing path is `None`, not a raise."""
