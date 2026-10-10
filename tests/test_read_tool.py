@@ -127,6 +127,22 @@ def test_read_start_line_beyond_eof(temp_file):
     assert "lines 100" not in result.content, result.content
 
 
+def test_a_one_line_file_past_its_end_is_counted_in_the_singular(tmp_path):
+    """The singular half of the message above, which no test reached.
+
+    `plural = "" if total_lines == 1 else "s"` is a branch, and a branch needs a reading:
+    measured 2026-10-10, replacing it with the bare `"s"` left every test in this file
+    green, so a one-line file read past its end could have been made to say `1 lines`
+    with no red anywhere. It is reachable — `start_line=2` on a one-line file goes
+    through this branch — and the plural side above does not reach it.
+    """
+    f = tmp_path / "one.txt"
+    f.write_text("only\n")
+    result = _run(ReadTool().execute({"file_path": str(f), "start_line": 2}))
+    assert "which has 1 line" in result.content, result.content
+    assert "1 lines" not in result.content, result.content
+
+
 def test_read_truncation_message(temp_file):
     """When a file exceeds the default max lines limit and no limit is specified,
     the result should be truncated and include an exact truncation message."""
