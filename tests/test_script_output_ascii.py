@@ -386,3 +386,91 @@ def test_script_help_survives_a_non_utf8_stdout(codec: str) -> None:
         f"`--help` must survive PYTHONIOENCODING={codec}; failures:\n  "
         + "\n  ".join(failures)
     )
+
+
+# --------------------------------------------------------------------------
+# behavioural: the help must not change because the tree moved
+# --------------------------------------------------------------------------
+
+#: A directory name the machine can hold and a console codec cannot: the fixture's whole
+#: point is a tree whose *location* is outside ASCII.
+NON_ASCII_DIR = "空 白 dir"
+
+
+def _lone_copy(script: Path, into: Path) -> Path:
+    """`script` copied alone into `<into>/scripts/`, so `into` is its tree.
+
+    Every script resolves the tree from `__file__`, so one file is enough for the ones whose
+    `--help` needs nothing else — and it is the whole price of putting the tree somewhere
+    else.
+    """
+    target = into / "scripts" / script.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(script, target)
+    return target
+
+
+@pytest.mark.parametrize("codec", ["ascii", "gbk"])
+def test_help_does_not_depend_on_where_the_tree_sits(codec: str, tmp_path: Path) -> None:
+    """A script's `--help` is ASCII wherever the checkout lives, not only under `/home/...`.
+
+    The gap this closes is the guard's own blind spot rather than a new rule: the sibling
+    test above runs `--help` from `REPO_ROOT`, and CI checks out under an ASCII path, so a
+    script that renders *the tree's own path* into its help passes there and fails for the
+    host. Measured 2026-10-10 on master `82844d62`: with the checkout under a directory
+    named `空 白 dir`, `review-queue.py --help` exited **2** with a `UnicodeEncodeError`
+    traceback under `PYTHONIOENCODING=ascii` (rc=0 but non-ASCII under `gbk`), because its
+    `--cycles-log` default was interpolated as an absolute path — while thirty-nine sibling
+    scripts answered `--help` fine from the same place. The check runs the tree's own copy,
+    so it keeps testing what CI runs; only the *location* moves.
+
+    A script that needs more than its own file fails the ASCII-path **control** and is
+    passed over, so a missing sibling package is never reported as a codec defect. `judged`
+    is asserted non-trivial so a control that stopped matching cannot make this vacuous.
+    """
+    plain = tmp_path / "plain"
+    moved = tmp_path / NON_ASCII_DIR
+    failures: list[str] = []
+    judged = 0
+
+    for script in _argparse_scripts():
+        control = _lone_copy(script, plain)
+        settles = subprocess.run(
+            [sys.executable, str(control), "--help"],
+            cwd=tmp_path,
+            env=dict(os.environ, PYTHONIOENCODING="ascii"),
+            capture_output=True,
+            check=False,
+        )
+        if settles.returncode != 0:
+            continue  # needs more than its own file: not this rule's subject
+        judged += 1
+
+        relocated = _lone_copy(script, moved)
+        proc = subprocess.run(
+            [sys.executable, str(relocated), "--help"],
+            cwd=tmp_path,
+            env=dict(os.environ, PYTHONIOENCODING=codec),
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0 or b"Traceback" in proc.stderr:
+            tail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+            failures.append(
+                f"{script.name}: rc={proc.returncode} from a tree under "
+                f"{NON_ASCII_DIR!r} ({tail[-1] if tail else '(no stderr)'})"
+            )
+        elif not proc.stdout.isascii():
+            failures.append(
+                f"{script.name}: --help output carries non-ASCII when the tree is under "
+                f"{NON_ASCII_DIR!r}, so the script renders the tree's own path"
+            )
+
+    assert judged > 20, (
+        f"only {judged} script(s) were judged from a relocated tree: a reading over a set "
+        "that stopped matching is a clean verdict about nothing"
+    )
+    assert not failures, (
+        f"`--help` must not depend on where the tree sits (PYTHONIOENCODING={codec}):\n  "
+        + "\n  ".join(failures)
+    )

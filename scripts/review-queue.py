@@ -265,6 +265,37 @@ DEFAULT_CYCLES_LOGS: tuple[Path, ...] = (
 )
 
 
+def describe_cycle_logs(roots: tuple[Path, ...] = DEFAULT_CYCLES_LOGS) -> str:
+    """`roots` named for `--help`: relative to this tree, `/`-separated, never absolute.
+
+    `--help` is output, and this repository requires a script's output to survive any
+    console codec (`tests/test_script_output_ascii.py`). A default spelled **absolutely**
+    carries the machine's own directory names, so a checkout under a non-ASCII directory
+    made this script's `--help` print non-ASCII - and under `PYTHONIOENCODING=ascii` that
+    is not mojibake but a `UnicodeEncodeError` and rc=2 on the one command a reader runs to
+    learn how to call the tool. Measured 2026-10-10 on a checkout under a directory named
+    `空 白 dir`: this script exited 2 with a traceback, while the thirty-nine sibling
+    scripts that pass the same lone-copy control answered `--help` fine from there.
+
+    Naming them relative to this tree is arithmetic on the tree rather than on where the
+    machine put it, and it is this repository's own convention for a path rendered into
+    text. A root outside the tree falls back to its bare directory name, which is still not
+    a machine path.
+
+    :param roots: the directories to name; the tree's own defaults unless a caller says
+        otherwise.
+    :returns: the `os.pathsep`-joined descriptions, for `--help`.
+    """
+    tree = SCRIPTS_DIR.parent
+    named: list[str] = []
+    for root in roots:
+        try:
+            named.append(root.relative_to(tree).as_posix())
+        except ValueError:
+            named.append(root.name)
+    return os.pathsep.join(named)
+
+
 def resolve_cycle_logs(override: str | None = None) -> tuple[Path, ...]:
     """The cycle-record directories to search: the override, else the default.
 
@@ -1439,9 +1470,9 @@ def main(argv: list[str] | None = None) -> int:
         "--cycles-log",
         default=None,
         help="directory of `cycle-<id>.md` records, used to find the previous cycle "
-             "when --prev-cycle is not given (default: $EMRG_CYCLES_LOG, else both "
-             f"{os.pathsep}-joined directories the template may name: "
-             f"{os.pathsep.join(str(d) for d in DEFAULT_CYCLES_LOGS)})",
+             "when --prev-cycle is not given (default: $EMRG_CYCLES_LOG, else the "
+             "directories this tree's template names, relative to it: "
+             f"{describe_cycle_logs()})",
     )
     parser.add_argument(
         "--min-votes",
