@@ -4331,6 +4331,7 @@ _needs_mkfifo = pytest.mark.skipif(
     not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
 
 
+@_needs_mkfifo
 def test_cap_memory_index_raises_on_a_named_pipe(tmp_path):
     """The index reader names the kind instead of opening it."""
     server = _make_server()
@@ -4344,6 +4345,7 @@ def test_cap_memory_index_raises_on_a_named_pipe(tmp_path):
     assert "not a regular file" in str(excinfo.value), str(excinfo.value)
 
 
+@_needs_mkfifo
 def test_an_index_that_is_a_named_pipe_is_a_notice_not_a_hang(tmp_path):
     """The prompt carrier answers it exactly as it answers an undecodable index."""
     server = _make_server()
@@ -4357,6 +4359,7 @@ def test_an_index_that_is_a_named_pipe_is_a_notice_not_a_hang(tmp_path):
     assert "could not be read" in text, text
 
 
+@_needs_mkfifo
 def test_a_named_pipe_index_in_the_listing_is_a_notice_too(tmp_path):
     """The `memories_list` frame's carrier, the third reader of the same file."""
     server = _make_server()
@@ -4369,6 +4372,7 @@ def test_a_named_pipe_index_in_the_listing_is_a_notice_too(tmp_path):
     assert "a FIFO (named pipe)" in text, text
 
 
+@_needs_mkfifo
 def test_collect_project_context_skips_a_named_pipe_beside_a_real_file(tmp_path):
     """A subject with no end to read carries no context — and its neighbour still does."""
     server = _make_server()
@@ -4382,6 +4386,7 @@ def test_collect_project_context_skips_a_named_pipe_beside_a_real_file(tmp_path)
     assert "Keep it simple" in result[0]["content"]
 
 
+@_needs_mkfifo
 def test_the_compaction_note_skips_a_named_pipe_and_still_reads_its_neighbour(tmp_path):
     """One call, both subjects: the pipe is not opened, the over-cap index still fires."""
     fifo = tmp_path / "MEMORY.md"
@@ -4393,3 +4398,64 @@ def test_the_compaction_note_skips_a_named_pipe_and_still_reads_its_neighbour(tm
 
     assert str(big) in note, "the reader stopped reading the index it should"
     assert str(fifo) not in note, "a subject that was not opened is not a subject read"
+
+
+# ── the same condition on the two vision readers ───────────────────
+#
+# Found reviewing this change (`cyc20261011-032448`): the class is "a path the agent or
+# the client names", and it had two more members. `_build_user_content` reads a path out
+# of `TaskRequest.images` — **the client's**, unchecked, in the request handler — and
+# `_tool_content_for_llm` reads the `read` tool's image ref. Both opened it directly, in
+# a method the daemon awaits on its event loop, so a named pipe named as an image would
+# never return. The refusal takes the branch each already had for an image it cannot read.
+
+
+@_needs_mkfifo
+def test_a_client_named_image_that_is_a_named_pipe_is_unavailable_not_a_hang(tmp_path):
+    """The client's path, refused by its kind before it is opened.
+
+    The control is in the same test: a real file with the same shape still becomes an
+    image block, so the assertion is about the kind rather than about images being
+    refused here.
+    """
+    fifo = tmp_path / "pasted.png"
+    os.mkfifo(fifo)
+    real = tmp_path / "real.png"
+    real.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+
+    content = EmrgServer._build_user_content(
+        "",
+        [
+            {"path": str(fifo), "label": "paste-1"},
+            {"path": str(real), "label": "paste-2"},
+        ],
+        vision=True,
+    )
+
+    texts = [c["text"] for c in content if c["type"] == "text"]
+    assert any("a FIFO (named pipe)" in t for t in texts), texts
+    assert any("not a regular file" in t for t in texts), texts
+    assert any("paste-1" in t for t in texts), "the refusal must name which image"
+    urls = [c["image_url"]["url"] for c in content if c["type"] == "image_url"]
+    assert len(urls) == 1 and urls[0].startswith("data:image/png;base64,"), urls
+
+
+@_needs_mkfifo
+def test_a_read_tool_image_ref_at_a_named_pipe_is_unavailable_not_a_hang(tmp_path):
+    """The agent's path, through the ref the `read` tool hands over."""
+    fifo = tmp_path / "shot.png"
+    os.mkfifo(fifo)
+    real = tmp_path / "real.png"
+    real.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    server = _make_server()
+    server.llm.config.vision = True
+    ref = '{"type": "image", "path": "%s", "mime": "image/png"}'
+
+    refused = server._tool_content_for_llm(ref % fifo)
+    assert isinstance(refused, str), refused
+    assert "a FIFO (named pipe)" in refused, refused
+    assert "not a regular file" in refused, refused
+
+    accepted = server._tool_content_for_llm(ref % real)
+    assert isinstance(accepted, list), accepted
+    assert accepted[1]["image_url"]["url"].startswith("data:image/png;base64,"), accepted

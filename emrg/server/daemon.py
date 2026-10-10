@@ -3488,6 +3488,13 @@ class EmrgServer:
         For vision-capable models this becomes a data-URL image block; for
         non-vision models it degrades to a text placeholder. Non-image tool
         results pass through unchanged (rant 2026-08-24T14:36:01).
+
+        The subject's **kind** is asked before it is opened, like every other reader of a
+        path the agent or the client names (`_non_regular_kind`): the `read` tool already
+        refuses a non-regular subject (#2062), so the ref cannot normally carry one — but
+        the ref travels through a session record and a tool result before it arrives here,
+        and this read is synchronous inside `_run_tool_loop` on the event loop, where a
+        FIFO would never return.
         """
         if not isinstance(content, str) or not content.startswith("{"):
             return content
@@ -3501,6 +3508,10 @@ class EmrgServer:
         mime = ref.get("mime", "image/png")
         if not self.llm.config.vision:
             return f"[Image: {path} — current model does not support image understanding; use the bash tool to inspect it]"
+        kind = _non_regular_kind(Path(path))
+        if kind is not None:
+            logger.warning("refusing to read image %s: it is %s", path, kind)
+            return f"[Image unavailable: {path} — it is {kind}, not a regular file]"
         try:
             b64 = base64.b64encode(Path(path).read_bytes()).decode()
         except (OSError, FileNotFoundError) as e:
@@ -3517,6 +3528,13 @@ class EmrgServer:
         
         Returns plain str if no images, list[dict] for vision format.
         If vision=False, images are degraded to text placeholders.
+
+        Each image's subject is checked for its **kind** before it is opened, like every
+        other reader of a path the client names (`_non_regular_kind`). This one is the
+        most exposed of them: the `path` comes straight from `TaskRequest.images`, which a
+        client fills in, and the read is synchronous inside the request handler on the
+        event loop — so a named pipe named as an image would never return. The refusal
+        takes the branch this method already has for an image it cannot read.
         """
         if not images:
             return text
@@ -3537,9 +3555,21 @@ class EmrgServer:
             # Encode image (rant 2026-09-02T15:23:53: GUI drag-in JPEG was
             # previously hardcoded to image/png → wrong mime; mime metadata now
             # drives the data URL, defaulting to png for TUI/history records)
+            src = Path(img.get("path", ""))
+            kind = _non_regular_kind(src)
+            if kind is not None:
+                logger.warning("refusing to read image %s: it is %s", src, kind)
+                content.append({
+                    "type": "text",
+                    "text": (
+                        f"[Image unavailable: {img.get('label', '?')} — {src} is {kind}, "
+                        f"not a regular file]"
+                    ),
+                })
+                continue
             try:
                 mime = img.get("mime") or "image/png"
-                b64 = base64.b64encode(Path(img["path"]).read_bytes()).decode()
+                b64 = base64.b64encode(src.read_bytes()).decode()
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:{mime};base64,{b64}"},
