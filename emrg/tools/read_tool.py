@@ -50,7 +50,10 @@ class ReadTool(ToolExecutor):
                 "Read a file from the filesystem. Returns content with "
                 "line numbers prefixing each line (format: '  LINE_NUMBER\\tCONTENT'). "
                 "Supports start_line and line_limit for reading large files in chunks. "
-                "Can read text files. For images (.png/.jpg/.jpeg/.gif/.webp), "
+                "Can read text files. A directory is listed rather than read, and the "
+                "listing is held to the same limits — the default cap is "
+                f"{DEFAULT_MAX_LINES} entries and a cut listing says so. "
+                "For images (.png/.jpg/.jpeg/.gif/.webp), "
                 "returns a vision-format image block so the model can see the picture "
                 "(requires a vision-capable model; otherwise a text placeholder is "
                 "returned). For PDFs and notebooks, use the bash tool with appropriate "
@@ -153,13 +156,77 @@ class ReadTool(ToolExecutor):
                 error=True,
             )
 
+        # Compute effective limit — two tiers:
+        #   Default (no limit specified): capped at DEFAULT_MAX_LINES to
+        #     prevent excessive token consumption from unknown file sizes.
+        #   Explicit limit: honored up to MAX_LINES (LLM knows what it asked for).
+        # Resolved here rather than beside the file branch it used to sit next to,
+        # because the directory branch below is a read too and is held to the same
+        # two tiers: a limit that binds a file and is dropped for a listing is the
+        # "identical output whether or not you bounded it" defect this branch fixed
+        # (issue #2059, measured 2026-10-10 in `cyc20261010-211559`: a 6,000-entry
+        # directory answered `line_limit=1` with the same 108,112 characters and
+        # 6,001 lines as a read with no arguments at all).
+        if line_limit is not None:
+            effective_limit = min(line_limit, MAX_LINES)
+        else:
+            effective_limit = DEFAULT_MAX_LINES
+
         if path.is_dir():
-            # Directory listing
+            # ── A listing is a read, and is read under the same limits (#2059) ──
+            #
+            # It used to return every entry whatever the caller passed, so the three
+            # numeric parameters were accepted and silently ignored and the output was
+            # unbounded: `DEFAULT_MAX_LINES` stopped a 6,000-line *file* at 1,000 lines
+            # with a continuation note, and the same call on a *directory* returned all
+            # 6,000 entries with nothing said. The module's own promise — "Default
+            # limits prevent oversized tool results" — held for one and not the other.
             entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
+            total_entries = len(entries)
+
+            if total_entries == 0:
+                # An empty subject is not a clean one (issue #1872), and the header
+                # alone read as a broken listing rather than an empty directory. This
+                # is the file branch's `(empty file: {path})`, at the branch that was
+                # missing it.
+                return ToolResult(name="read", content=f"(empty directory: {path})")
+
+            start = start_line - 1
+            end = min(start + effective_limit, total_entries)
+            selected = entries[start:end]
+
+            if not selected:
+                return ToolResult(
+                    name="read",
+                    content=(
+                        f"(no entries: start_line={start_line} is past the end of the "
+                        f"listing, which has {total_entries} "
+                        f"entr{'y' if total_entries == 1 else 'ies'})"
+                    ),
+                )
+
             lines: list[str] = [f"Directory listing for {path}/:", ""]
-            for e in entries:
+            for e in selected:
                 suffix = "/" if e.is_dir() else ""
                 lines.append(f"  {e.name}{suffix}")
+
+            if start_line_byte_offset > 0:
+                # Reported rather than accepted in silence. The offset names a position
+                # *inside a line* and exists for resuming one very long line; a listing's
+                # lines hold one entry name each, so there is nothing here to resume —
+                # and dropping it without a word is the defect this branch is fixing.
+                lines.append(
+                    f"\nnote: start_line_byte_offset={start_line_byte_offset} is not "
+                    "applied to a directory listing — it names a position inside a line, "
+                    "and each line of a listing holds one entry name"
+                )
+
+            if end < total_entries:
+                lines.append(
+                    f"\ntruncated at start_line={end + 1}, "
+                    f"start_line_byte_offset=0 — "
+                    f"total {total_entries} entries"
+                )
             return ToolResult(name="read", content="\n".join(lines))
 
         file_size = path.stat().st_size
@@ -237,15 +304,6 @@ class ReadTool(ToolExecutor):
 
         if total_lines == 0:
             return ToolResult(name="read", content=f"(empty file: {path})")
-
-        # Compute effective limit — two tiers:
-        #   Default (no limit specified): capped at DEFAULT_MAX_LINES to
-        #     prevent excessive token consumption from unknown file sizes.
-        #   Explicit limit: honored up to MAX_LINES (LLM knows what it asked for).
-        if line_limit is not None:
-            effective_limit = min(line_limit, MAX_LINES)
-        else:
-            effective_limit = DEFAULT_MAX_LINES
 
         start = start_line - 1
         end = min(start + effective_limit, total_lines)
