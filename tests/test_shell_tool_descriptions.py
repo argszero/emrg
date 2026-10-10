@@ -16,6 +16,14 @@ would be refused, neither named the line it would see, and ``sandbox_denial_mark
 for *both* enforcing families. Descriptions are prompt surface, so this file is where such a sentence
 belongs: the two dialects describe one behaviour, and a fact true of both may not be stated by one.
 
+A third is the other failure of the same channel, and it is a **regression** rather than an omission
+(found 2026-10-10, R8's class 3). ``pwsh_tool_v2`` said *"stderr to its head, stdout head and tail"*,
+which its own renderer contradicts: `#1594` aligned the twins' stderr cut to **head+tail** and left the
+sentence as it was written, so for as long as nothing read it the description promised the model an end
+the renderer keeps. ``bash_tool_v2`` said nothing about truncation at all. Both dialects now state the
+contract that holds — each stream keeps both ends — and, as above, the sentence is read against the
+renderer rather than against itself.
+
 Each promise is read against the renderer it promises about, because a sentence in a tool description
 is a declaration about behaviour. Pinning the sentence alone would leave a description free to
 promise a marker no renderer writes; pinning the renderer alone is what left the two dialects
@@ -47,6 +55,15 @@ FRESH_PROCESS_SENTENCE = (
 #: what the reading below matches, and `sandbox_denial_marker` is the one function that writes it —
 #: *"one vocabulary for both enforcing families"*, the bash family's refused file effect included.
 DENIAL_MARKER = "[sandbox: file access denied under <mode> mode]"
+
+#: The truncation contract, in the words both dialects must share. Its predecessor promised **head
+#: only** for stderr; `#1594` made that false when it aligned the twins' stderr cut to head+tail, and
+#: nothing read the sentence, so it stood until 2026-10-10 — a promise the renderer contradicts is
+#: worse than no promise, because the model acts on it.
+TRUNCATION_SENTENCE = (
+    "Long output is truncated, and each cut says so: stderr to its own cap and stdout to what "
+    "the budget leaves, both keeping head and tail."
+)
 
 #: ``(the module that renders, the tool that describes)`` — the pair a promise is made between.
 DIALECTS = (
@@ -136,3 +153,45 @@ def test_the_denial_marker_each_description_names_is_the_one_a_denied_run_render
     # The fixed half of the description's marker is a prefix of the line the model reads, so the
     # description is not naming a differently-punctuated marker.
     assert DENIAL_MARKER.split("<mode>")[0] in text, text
+
+
+@pytest.mark.parametrize("module,tool", DIALECTS)
+def test_each_dialect_tells_the_model_how_long_output_is_cut(module, tool):
+    """The truncation contract, stated by both: a cut stream that reads as a short one is the failure
+    every one of these sentences exists to prevent, and the bash dialect is the one more calls go
+    through, so a `pwsh`-only sentence tells most calls nothing."""
+    assert TRUNCATION_SENTENCE in tool.definition().description
+
+
+@pytest.mark.parametrize("module,tool", DIALECTS)
+def test_the_truncation_each_description_states_is_the_one_its_renderer_does(module, tool):
+    """Read against behaviour, as the two markers above are — and this is the reading that was missing.
+
+    The sentence's predecessor said stderr is cut **to its head**. `#1594` gave the twins one stderr
+    cut, head+tail, and the sentence was not revisited; nothing read it against the renderer, so it
+    promised the model an end that is in fact kept, and a model told its error output is head-only
+    reads a truncated stderr as if the tail — where a failing build puts the line that matters — were
+    gone. The same reading covers the other half for free: a promise of head+tail that the renderer
+    drops would be caught here too.
+
+    Driven through `render_result`, so the subject is what the model actually sees rather than a helper
+    the model never calls.
+    """
+    head_out, tail_out = "OUT-HEAD", "OUT-TAIL"
+    head_err, tail_err = "ERR-HEAD", "ERR-TAIL"
+    stdout = head_out + "\n" + "\n".join(f"out {i}" for i in range(40_000)) + "\n" + tail_out + "\n"
+    stderr = head_err + "\n" + "\n".join(f"err {i}" for i in range(40_000)) + "\n" + tail_err + "\n"
+    assert len(stdout) > module.MAX_OUTPUT_CHARS, len(stdout)
+    assert len(stderr) > module._ERR_MAX, len(stderr)
+
+    run = module.ShellRunResult
+    text = module.render_result(run(stdout=stdout, stderr=stderr, exit_code=1))
+
+    for line in (head_out, tail_out, head_err, tail_err):
+        assert line in text, (
+            f"{line} did not survive the cut, so the description's 'both keeping head and tail' is "
+            f"not what this renderer does: {text[:120]!r} … {text[-120:]!r}"
+        )
+    assert "truncated" in text, (
+        "and every cut says so: without a notice, a cut stream reads as a short one"
+    )

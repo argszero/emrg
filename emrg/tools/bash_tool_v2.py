@@ -630,7 +630,10 @@ class BashToolV2(ToolExecutor):
                 "area) are refused whatever language or subprocess attempts "
                 "them, and the run is reported as a sandbox denial "
                 "(`[sandbox: file access denied under <mode> mode]`) — the "
-                "policy, not a bug in the command, so do not retry another way."
+                "policy, not a bug in the command, so do not retry another way. "
+                "Long output is truncated, and each cut says so: stderr to its "
+                "own cap and stdout to what the budget leaves, both keeping head "
+                "and tail."
             ),
             parameters={
                 "type": "object",
