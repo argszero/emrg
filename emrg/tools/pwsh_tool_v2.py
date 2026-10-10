@@ -203,8 +203,10 @@ def resolve_pwsh_path(
 
 #: Same budget and framing as ``bash_tool_v2``: keep stderr intact (errors are
 #: critical) and truncate stdout head+tail, so build/test failures at the tail
-#: survive.  ``_HEAD_TAIL_RATIO`` of the *end* is kept.  A test pins the equality
-#: rather than leaving two copies to drift.
+#: survive.  ``_HEAD_TAIL_RATIO`` of the *end* is kept.  Both halves of that
+#: equality are pinned by test — one feeds the same input through both modules,
+#: one compares the three helper bodies as code — rather than leaving two copies
+#: to drift (they had: #1594 cured stderr, #2043 cured stdout).
 MAX_OUTPUT_CHARS = 200_000
 _ERR_MAX = 30_000
 _HEAD_TAIL_RATIO = 0.6
@@ -409,15 +411,33 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
 
 
 def _fit_streams(stdout: str, stderr: str) -> tuple[str, str]:
-    """Fit both streams into the output budget, stderr first.
+    """Bound both streams to one budget, keeping stderr whole when it can.
 
-    :param stdout: the raw stdout text.
-    :param stderr: the raw stderr text.
-    :returns: the two texts, each fitted.
+    The policy is the bash twin's and the body is deliberately the same code
+    (the dialects are peers — design §14.5 item 1 — so the framing is copied,
+    not shared): stderr is critical, so it keeps its own cap and stdout absorbs
+    what is left; if stderr leaves stdout almost nothing, stderr is cut back
+    rather than starving it, and every cut says so in the text.  ``_truncate_stdout``
+    and ``_truncate_stderr`` carry the same body as their bash counterparts, and
+    the two copies are held together by measurement rather than prose.
+
+    :param stdout: the collected stdout.
+    :param stderr: the collected stderr.
+    :returns: the two streams, bounded.
     """
     stderr = _truncate_stderr(stderr)
-    remaining = MAX_OUTPUT_CHARS - len(stderr) - len(_STDERR_SEPARATOR)
-    return _truncate_stdout(stdout, max(remaining, 0)), stderr
+    separator = len(_STDERR_SEPARATOR) if (stdout and stderr) else 0
+    remaining = MAX_OUTPUT_CHARS - len(stderr) - separator
+    if remaining < 2000 and stderr:
+        remaining = MAX_OUTPUT_CHARS // 2
+        stderr = (
+            stderr[:remaining]
+            + "\n\n... [stderr truncated to make room for stdout: "
+            "only the head is kept, the tail is dropped]"
+        )
+    if len(stdout) > remaining:
+        stdout = _truncate_stdout(stdout, remaining)
+    return stdout, stderr
 
 
 def _truncate_stderr(stderr: str) -> str:
@@ -443,23 +463,29 @@ def _truncate_stderr(stderr: str) -> str:
 
 
 def _truncate_stdout(stdout: str, remaining: int) -> str:
-    """Cut stdout head+tail so a build's failing tail survives.
+    """Bound stdout to ``remaining``, keeping head and tail.
 
-    :param stdout: the raw stdout text.
+    The notice is charged against the budget rather than appended on top, so the
+    result stays inside ``remaining``; when too little is left to keep both ends,
+    the tail is dropped and the notice says so.  Same body as the bash twin's —
+    it was a head+tail cut that overshot the budget and kept a different end
+    (#2043) — and the copies are compared as code rather than trusted to stay
+    faithful.
+
+    :param stdout: the collected stdout.
     :param remaining: the characters left in the budget.
-    :returns: the text, unchanged when it fits.
+    :returns: stdout within that budget.
     """
     if len(stdout) <= remaining:
         return stdout
-    if remaining <= 0:
-        return f"... [stdout truncated, {len(stdout)} chars total]"
-    head = int(remaining * _HEAD_TAIL_RATIO)
-    tail = remaining - head
-    omitted = len(stdout) - head - tail
+    head_chars = int(remaining * _HEAD_TAIL_RATIO)
+    tail_chars = remaining - head_chars - 200
+    if tail_chars < 500:
+        return stdout[: remaining - 50] + f"\n\n... [stdout truncated: {len(stdout)} → {remaining} chars]"
     return (
-        stdout[:head]
-        + f"\n... [{omitted} chars omitted] ...\n"
-        + stdout[len(stdout) - tail:]
+        f"{stdout[:head_chars]}\n\n"
+        f"... [{len(stdout) - remaining} chars omitted] ..."
+        f"\n\n{stdout[-tail_chars:]}"
     )
 
 

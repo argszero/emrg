@@ -629,6 +629,98 @@ def test_the_two_twins_cut_a_long_stderr_the_same_way():
     assert "head+tail kept" in ours, "and the notice says which end the reader got"
 
 
+def test_the_two_twins_fit_an_over_cap_stdout_the_same_way():
+    """The stdout half of the framing contract, measured through both modules.
+
+    The stderr test above is this reading for stderr; stdout had none, and the two
+    helpers had drifted (issue #2043): pwsh kept ``head + tail = remaining`` and
+    appended the omission notice **on top**, so what it returned was longer than
+    the budget it was handed — 200 032 characters against ``MAX_OUTPUT_CHARS``
+    (200 000) — and where bash drops the tail when too little is left to keep both
+    ends, pwsh kept it, in the one regime where the reader cannot tell.  One input
+    through both helpers is the reading that shows either.
+    """
+    from emrg.tools import bash_tool_v2 as bash
+
+    stdout = "".join(f"{i:06d} line of a build's stdout\n" for i in range(12_000))
+    assert len(stdout) > bash.MAX_OUTPUT_CHARS
+
+    big_stderr = "".join(f"{i:06d} stderr line\n" for i in range(9_000))
+    assert len(big_stderr) > bash._ERR_MAX
+
+    # stdout alone, then with a short stderr and one at its cap beside it: the
+    # last is the shape that spends the budget down to the stdout cut.
+    for stderr in ("", "one error line\n", big_stderr):
+        theirs = bash._fit_streams(stdout, stderr)
+        ours = pwsh._fit_streams(stdout, stderr)
+        assert ours == theirs, f"stderr={len(stderr)} chars"
+
+        out, err = ours
+        assert len(out) + len(err) + len(pwsh._STDERR_SEPARATOR) <= pwsh.MAX_OUTPUT_CHARS
+        assert "chars omitted" in out
+        assert out.endswith(stdout[-1_000:]), "the tail survives: that is where a failure is"
+
+
+def test_the_two_twins_cut_a_stdout_that_cannot_be_split_the_same_way():
+    """Too little budget to keep both ends: the arm the shipped constants hide.
+
+    ``_fit_streams`` never asks for less than half the budget (its starvation
+    rescue sets ``remaining`` to ``MAX_OUTPUT_CHARS // 2``), so this arm is reached
+    by calling the helper with a small budget, the way the bash half's own boundary
+    test reaches its stderr re-cut.  It keeps the head and the notice says the tail
+    is gone; pwsh answered differently here, which is one of the three divergences
+    #2043 was opened for.
+    """
+    from emrg.tools import bash_tool_v2 as bash
+
+    stdout = "".join(f"{i:06d} line of a build's stdout\n" for i in range(12_000))
+
+    for remaining in (100_000, 1_000, 700):
+        ours = pwsh._truncate_stdout(stdout, remaining)
+        assert ours == bash._truncate_stdout(stdout, remaining), f"remaining={remaining}"
+        assert len(ours) <= remaining, "the notice is charged against the budget, not added to it"
+        assert ours.startswith(stdout[:500]), "the head is what the reader gets"
+
+    # A stdout that already fits is returned untouched by both.
+    assert bash._truncate_stdout("short", 1_000) == "short"
+    assert pwsh._truncate_stdout("short", 1_000) == "short"
+
+
+def test_the_twins_framing_helpers_are_the_same_code():
+    """The copies are compared as code, not only on the inputs a test feeds them.
+
+    A behavioural reading covers the branches its inputs happen to reach; this
+    reads the two definitions, so a body that has drifted is named rather than
+    waiting for an input that exposes it.  Docstrings are excluded — each dialect
+    explains its own copy in its own words — and everything else has to match
+    statement for statement.  This is what makes the duplication deliberate instead
+    of merely repeated: the copies are allowed, an unfaithful one is not.
+    """
+    import ast
+
+    helpers = {"_fit_streams", "_truncate_stdout", "_truncate_stderr"}
+
+    def bodies(path: Path) -> dict[str, str]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        found: dict[str, str] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef) or node.name not in helpers:
+                continue
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                body = body[1:]  # drop the docstring: the prose is each copy's own
+            found[node.name] = ast.dump(ast.Module(body=body, type_ignores=[]))
+        return found
+
+    theirs = bodies(REPO_ROOT / "emrg/tools/bash_tool_v2.py")
+    ours = bodies(REPO_ROOT / "emrg/tools/pwsh_tool_v2.py")
+
+    assert set(theirs) == helpers, "every framing helper is still defined in the bash twin"
+    assert set(ours) == helpers, "every framing helper is still defined in the pwsh twin"
+    for name in sorted(ours):
+        assert ours[name] == theirs[name], f"{name} has drifted from the bash twin"
+
+
 def test_the_pwsh_module_does_not_import_the_bash_executor():
     """The peers are peers: layering one dialect on the other is the shape rejected.
 
