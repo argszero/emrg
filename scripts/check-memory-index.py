@@ -137,7 +137,12 @@ What the resolution reading does not cover
   2026-10-01: the row that documents this shape was reported as naming a missing file.
 * **A row that carries no link at all.** An index whose rows name their files in prose -
   the table shape `is_index_row` also reads - has no subject for this reading, and the
-  report says so rather than printing a count that reads as a pass.
+  report says so rather than printing a count that reads as a pass. The **summary line
+  carries the same statement**, because it is the line a `| tail` shows: with no link read
+  anywhere it names that and says the verdict is about the three numbers only, instead of
+  closing with a sentence about links it did not look at (measured 2026-10-10: both indexes
+  this host's cycles write are prose tables, so `0 row link(s) read, none resolving to a
+  missing file` was the whole of what a reader took).
 * A target with a URL-escape spelling (`%20`) is resolved as written: this tool
   does not guess a second spelling of a name the author wrote, and
   `check-citation-resolves.py`'s own limit section is the precedent for saying so
@@ -153,7 +158,9 @@ derived from that root, so the two lines answer about one tree.
 Exit codes
 ----------
 ``0``  every index read is within every number of the rule, and every row link
-       resolves.
+       resolves. The summary line names how many links were **read**, so an index whose
+       rows carry none is a clean verdict about the three numbers and says so, rather
+       than a claim about links nothing looked at.
 ``1``  at least one index is over a number the rule names (the line cap, the embed
        budget, or a row past the bound), or carries a row link that resolves to no
        file; each finding is printed with the line it is on.
@@ -572,12 +579,35 @@ def main(argv: Optional[list[str]] = None) -> int:
     ]
     if not findings:
         links_read = sum(len(reading.row_targets) for reading in readings)
-        print(
+        # The summary carries the coverage for the same reason the per-index report does.
+        # Measured 2026-10-10 on this host: both indexes this instance writes name their
+        # detail files in prose, so `links_read` is 0 on both - and the summary still read
+        # "{0} row link(s) read, none resolving to a missing file", a claim about a set with
+        # no members, printed one line under a per-index report that correctly says the
+        # reading had no subject. A reader who takes the tail takes the pass.
+        summary = (
             f"OK: {len(readings)} index(es) within the three numbers the rule names "
             f"({MEMORY_INDEX_ROW_CAP} lines, {INDEX_SIZE_WARN} chars, "
-            f"{INDEX_TITLE_MAX_CHARS} chars per row); {links_read} row link(s) read, "
-            "none resolving to a missing file"
+            f"{INDEX_TITLE_MAX_CHARS} chars per row); "
         )
+        if not links_read:
+            summary += (
+                "row links read: 0 - not one index read carries a ](target) link, so the "
+                "resolution reading had no subject anywhere here; this is a clean verdict "
+                "about the three numbers only, and is not a statement that every row link "
+                "resolves"
+            )
+        else:
+            summary += (
+                f"{links_read} row link(s) read, none resolving to a missing file"
+            )
+            silent = [reading for reading in readings if not reading.row_targets]
+            if silent:
+                summary += (
+                    f"; {len(silent)} of {len(readings)} index(es) carry no ](target) link "
+                    "at all, so the resolution reading had no subject there"
+                )
+        print(summary)
         return 0
 
     print(

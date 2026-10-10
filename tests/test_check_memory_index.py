@@ -574,7 +574,50 @@ def test_an_index_whose_rows_carry_no_link_says_so(mod, tmp_path, capsys) -> Non
     out = capsys.readouterr().out
     assert "row links 0, unresolved: 0" in out
     assert "the resolution reading had no subject here" in out, out
-    assert "0 row link(s) read" in out, out
+    # asked before the wording below, so the arm that restores the false pass fails on its own
+    # line rather than on the count: the sentence "none resolving to a missing file" is a claim
+    # about a set with no members and must not appear when nothing was read (measured 2026-10-10
+    # on this host, where both indexes the cycles write are prose tables and that sentence was
+    # the whole of the tail).
+    assert "none resolving to a missing file" not in out, out
+    assert "is not a statement that every row link resolves" in out, out
+    assert "row links read: 0" in out, out
+
+
+def test_the_summary_names_which_indexes_had_no_link_to_read(
+    mod, tmp_path, capsys
+) -> None:
+    """A mixed subject: some links read, and one index with no subject at all.
+
+    The other half of the summary's coverage. With links read the resolution verdict is a
+    statement about them and may be printed - but the index that contributed nothing must be
+    named, or a two-index reading certifies a dimension it read on one of them.
+    """
+    _detail(tmp_path, "detail.md")
+    linked = _index(
+        tmp_path,
+        "linked.md",
+        [
+            "# Memory Index",
+            "",
+            "- [a](detail.md)",
+        ],
+    )
+    silent = _index(
+        tmp_path,
+        "silent.md",
+        [
+            "# Memory Index",
+            "",
+            "| id | note |",
+            "| --- | --- |",
+            "| a1 | see detail.md |",
+        ],
+    )
+    assert mod.main([str(linked), str(silent)]) == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "1 row link(s) read, none resolving to a missing file" in out, out
+    assert "1 of 2 index(es) carry no ](target) link at all" in out, out
 
 
 # ── the embed budget, both directions ─────────────────────────────────────────
