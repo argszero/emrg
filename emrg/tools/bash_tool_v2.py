@@ -613,10 +613,11 @@ class BashToolV2(ToolExecutor):
                 "Execute a shell command and return stdout and stderr. "
                 "Use for running tests, git commands, listing files, "
                 "installing packages, and other shell operations. The command "
-                "runs under `bash -c`, and the kernel confines it to the "
-                "session's working directory: writes outside it (and outside "
-                "the OS temp area) are refused whatever language or subprocess "
-                "attempts them."
+                "runs under `bash -c`. Non-zero exits are reported as "
+                "`[exit code: N]`. The kernel confines it to the session's "
+                "working directory: writes outside it (and outside the OS temp "
+                "area) are refused whatever language or subprocess attempts "
+                "them."
             ),
             parameters={
                 "type": "object",
