@@ -49,10 +49,14 @@ This test is the rule, in three parts
   **shape**, not a name: it used to glob `check*.py`, which is how three tools that
   claim the convention in their own comments went unnoticed (`review-queue.py`,
   `bump-version.py`, `run-mutation-arm.py` - issue #2049). The sweep also holds a
-  baseline of the tools known to have the shape and asserts it has not *shrunk*, so a
-  `tree: ` line that quietly disappears is visible; it deliberately allows the set to
-  grow, because a tool that gains the shape *and* the remedy has followed the rule and
-  should not be failed for it (`#1631` adds one).
+  hand-written baseline of the tools known to have the shape, and asserts that the
+  baseline and the class name the **same** tools - so a `tree: ` line that quietly
+  disappears is visible, and a tool that joins without being held is not silent
+  either. The class is derived (the AST shape) and the baseline is typed by a person,
+  so only an equality keeps the second honest about the first: measured 2026-10-10
+  (issue #2055), the subset then standing here named **7 of 14** members, leaving seven
+  tools free to lose a half with nothing reading it. `tests/test_declared_roots_cover_the_tracked_tree.py`
+  mechanises the same shape for the guards' root lists.
 
 What is deliberately out of scope
 ---------------------------------
@@ -79,19 +83,27 @@ SCRIPTS = REPO_ROOT / "scripts"
 # call, and two spellings of it would be one spelling too many.
 REMEDY = "sys.stdout.reconfigure(line_buffering=True)"
 
-# Measured 2026-09-26 by the sweep in the last test of this file, and 2026-10-10
-# against the whole of `scripts/` (#2049): the tools that print the family's identity
-# line to stdout *and* write a verdict to stderr. Held as a baseline the sweep must
-# still cover - a tool losing either half leaves this set and is caught there. It is
-# not an upper bound: a tool that gains both halves and carries the remedy is correct
-# and passes without editing this. The three below are here because they were outside
-# the sweep when its class was the `check*` prefix, which is the defect #2049 fixes.
+# Measured 2026-09-26 by the sweep in the last test of this file, and re-read against the
+# whole of `scripts/` on 2026-10-10 (#2049, #2055): every tool that prints the family's
+# identity line to stdout *and* writes a verdict to stderr. Held as the class's
+# **membership**, not a subset of it - the sweep derives its class from the AST and this
+# list is typed by a person, so an equality is the only form that keeps the two honest
+# (issue #2055: the subset standing here named 7 of the 14, leaving seven tools free to
+# lose a half with nothing reading it). A tool that joins the family names itself here;
+# a member that leaves either half reds, and the message says which direction broke.
 SWEPT = {
     "bump-version.py",
     "check-citation-resolves.py",
     "check-doc-count.py",
+    "check-install-drift.py",
+    "check-memory-index.py",
+    "check-merge-landed.py",
     "check-node-test-count.py",
     "check-rant-citations.py",
+    "check-undefined-names.py",
+    "check-workflows.py",
+    "check_nonlocal.py",
+    "check_unbound_reads.py",
     "review-queue.py",
     "run-mutation-arm.py",
 }
@@ -251,21 +263,27 @@ def test_every_gate_with_a_tree_line_and_a_verdict_buffers_its_stdout() -> None:
         f"{missing} print a `tree:` line and also write to stderr, so a piped reader "
         f"can see the verdict first; add `{REMEDY}` at the top of `main()`"
     )
-    # The rule above is unconditional; this half is about *scope*, and it is a
-    # one-way check on purpose. A gate that loses its tree line (or its stderr
-    # write) drops out of the swept set silently, so the baseline must not shrink
-    # without someone noticing - that is the drift worth catching.
+    # The rule above is unconditional. These two are about *scope*, and they are two
+    # assertions rather than one equality because the faults point opposite ways and a
+    # single message could not say which one broke.
     #
-    # Growth is deliberately not a failure. A new gate that prints a tree line and
-    # writes a verdict is a *good* change, and if it carries the remedy it has
-    # followed the rule; failing it here would send CI red for whoever made it,
-    # over a test they had no reason to know about. A new gate that skips the
-    # remedy is already caught by the assertion above, with a message that says
-    # what to add. An equality here would also have failed on this PR's own
-    # reviewer feedback: #1631 adds a tree line to `check-merge-landed.py`, and
-    # with the remedy its arrival is correct rather than a red master.
-    assert SWEPT <= needs, (
+    # Leaving: a tool in the baseline that no longer has both halves is the shrink the
+    # baseline exists to catch - it prints, and now nobody would read it.
+    left = sorted(SWEPT - needs)
+    assert not left, (
         f"a gate in the baseline no longer prints a `tree: ` line together with a "
         f"verdict: baseline {sorted(SWEPT)}, measured {sorted(needs)}; if that was "
         "deliberate, say so in this test's docstring and drop it from the baseline"
+    )
+    # Joining: a tool that has both halves and is not in the baseline is *unheld* - the
+    # next change to it may drop a half with nothing reading it, which is what issue
+    # #2055 measured (7 of the class's 14 members stood outside the baseline). The
+    # arrival itself is not the fault and is not failed for anything the tool does; the
+    # one edit it asks for is naming itself here.
+    joined = sorted(needs - SWEPT)
+    assert not joined, (
+        f"{joined} print a `tree: ` line and write a verdict to stderr, so they are in "
+        "this sweep's class, but the baseline does not name them - until it does, such a "
+        "tool can lose either half in silence. Add each to `SWEPT`: that is the only "
+        "change this asks for, and the tool's arrival is otherwise correct."
     )
