@@ -10,6 +10,17 @@ has a corresponding `nonlocal` declaration.  Catches bugs where a developer adds
 a new state variable in interactive but forgets to declare it nonlocal in
 handle_key — exactly the class of bug that the SelectorState refactoring (#124)
 is designed to prevent.
+
+Exit codes: `0` every declaration checked is complete / `1` a name is read and written
+without being declared / `2` nothing could be measured. `2` covers three absences, since
+this check is a reading over the inner functions it names: no `app.py` at the resolved
+tree, no `interactive` in it, and — the third, added 2026-10-10 (`cyc20261010-173239`) —
+an `interactive` holding **none** of the four guarded inner functions
+(`handle_key`, `read_server`, `_on_sigwinch`, `_run_elapsed_timer`). That last state
+printed `OK: nonlocal integrity check passed` and exited 0 while checking nothing, which
+is the family's "an empty tree is not a clean reading" (issue #1872). The `OK` line also
+names which of the four were checked, so a rename that moves one of them out of
+`interactive` shrinks this check visibly instead of silently.
 """
 
 from __future__ import annotations
@@ -172,6 +183,23 @@ def check_nonlocal(app_path: str) -> int:
     if _run_elapsed_timer:
         inner_fns.append(("_run_elapsed_timer", _run_elapsed_timer))
 
+    if not inner_fns:
+        # None of the four functions this check guards is here, so there is nothing to
+        # verify and `OK` would say the declarations were checked when none was. The
+        # sibling case — `interactive` itself renamed away — already refuses above; this
+        # is the same absence one level in, and it was silent. Measured 2026-10-10
+        # (`cyc20261010-173239`): an `interactive` holding only `x = 1` printed
+        # `OK: nonlocal integrity check passed` and exited 0. Same rule as the family's
+        # "an empty tree is not a clean reading" (issue #1872).
+        print(
+            "ERROR: found `interactive` in app.py but none of the inner functions this "
+            "check guards (handle_key, read_server, _on_sigwinch, _run_elapsed_timer), so "
+            "there was nothing for it to verify - `0` says the nonlocal declarations were "
+            "checked, and none was",
+            file=sys.stderr,
+        )
+        return 2
+
     exit_code = 0
     for fn_name, fn_node in inner_fns:
         nonlocal_names: set[str] = set()
@@ -209,7 +237,15 @@ def check_nonlocal(app_path: str) -> int:
             exit_code = 1
 
     if exit_code == 0:
-        print("OK: nonlocal integrity check passed")
+        # Name what was read, not just the verdict: the count of guarded inner functions
+        # is 4 today and the line was silent about it, so a rename that moved one of them
+        # out of `interactive` shrank this check's coverage while the output stayed
+        # byte-identical. Measured 2026-10-10 (`cyc20261010-173239`): all four are found in
+        # this checkout, and the OK line said none of them.
+        print(
+            "OK: nonlocal integrity check passed "
+            f"(inner functions checked: {', '.join(name for name, _ in inner_fns)})"
+        )
 
     return exit_code
 
