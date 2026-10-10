@@ -787,8 +787,47 @@ class MemoryIndex:
         out[end:end] = lines
 
     def save(self, path: Path) -> None:
-        """Write the index to disk."""
+        """Write the index to disk, refusing a subject that is not a regular file.
+
+        The reader's guard, one direction over: **an open is not a read, and a write is an
+        open too**. A write to a FIFO blocks on `open` for writing until a reader appears,
+        a socket until a connection does — so this call would never return, exactly as
+        `from_file` never returned, and the pair is why `#2075` left both halves for one
+        issue: guarding the reader alone only moved the hang here.
+
+        Measured 2026-10-11 on `#2076`'s head `b831a745` (since landed as master `123d0abc`),
+        one fixture, each call in its own process under a parent's 25 s cap:
+
+            MemoryIndex.from_file(<fifo>)   -> DID NOT RETURN within 25s
+            MemoryIndex().save(<fifo>)      -> DID NOT RETURN within 25s
+            both, with a regular file       -> RETURNED  (0.0s)
+            both, with the path absent      -> RETURNED  (0.0s)
+
+        The **refusal is raised** rather than the write being skipped, and the reason is
+        that both answers are partial: `MemoryStore.create` writes its memory file first
+        and indexes it second, so a skip would return success with a file on disk that no
+        index row names — the store reporting an agreement it does not have, which is the
+        class this module keeps closing elsewhere (`get_with_reason`'s two absences). An
+        `OSError` names the subject and the kind, and it is what the module already raises
+        one kind over (a *directory* at this path is `IsADirectoryError`; see the class
+        docstring of `NotARegularFile`).
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Only an existing path has a kind to judge — the same rule the `write` tool
+        # states for its own subject, and the reason this guard is not `non_regular_kind`
+        # unconditionally (which raises `FileNotFoundError` for a path the writer is
+        # about to create).
+        if path.exists():
+            kind = non_regular_kind(path)
+            if kind:
+                raise NotARegularFile(
+                    f"{path} is {kind}, not a regular file. This writer opens its "
+                    f"subject directly, and opening this one blocks until a peer appears "
+                    f"— a write to a FIFO waits for a reader, a socket for a connection, "
+                    f"a device never ends — so the call would never return, and the store "
+                    f"methods that reach it (`create`, `update`, `rebuild_index`, "
+                    f"`promote_to_project`) would not either."
+                )
         old_size = path.stat().st_size if path.exists() else 0
         content = self.to_markdown()
         path.write_text(content, encoding="utf-8")
@@ -802,9 +841,28 @@ class MemoryIndex:
 
     @classmethod
     def from_file(cls, path: Path) -> MemoryIndex:
-        """Parse an existing MEMORY.md file (returns empty index if missing)."""
+        """Parse an existing MEMORY.md file (returns empty index if missing).
+
+        The subject's **kind** is asked before it is opened, for the reason
+        `MemoryFile.from_file` states one class up and `#2076` measured: on a FIFO the
+        open blocks until a writer appears and raises nothing, so a reader that never asks
+        does not fail — it never returns. `MEMORY.md` is *written* as well as read, which
+        is why this pair travels with `save` rather than alone (`#2075`'s "Not taken").
+        Reachability is weaker than `MemoryFile`'s and is stated as such in issue `#2078`:
+        no daemon frame reads the index today, so what reaches this is the store's own API
+        (`create`, `update`, `merge`, `rebuild_index`, `delete`, `promote_to_project`).
+        """
         if not path.exists():
             return cls()
+        kind = non_regular_kind(path)
+        if kind:
+            raise NotARegularFile(
+                f"{path} is {kind}, not a regular file. This reader opens its subject "
+                f"directly, and opening this one blocks until a peer appears — a FIFO "
+                f"waits for a writer, a socket for a connection, a device never ends — so "
+                f"the call would never return, and neither would the store methods that "
+                f"reach it on the daemon's event loop."
+            )
         return cls.from_text(path.read_text(encoding="utf-8"))
 
     @classmethod

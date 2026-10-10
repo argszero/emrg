@@ -863,3 +863,91 @@ def test_the_scan_names_the_pipe_as_a_reason_rather_than_never_answering(temp_cw
     assert "NotARegularFile" in reason, (
         "the reason must name the kind's verdict — `OSError` there would name nothing"
     )
+
+
+# ── The index pair: MEMORY.md is written as well as read (issue #2078) ──────
+#
+# `#2076` guarded the memory *files*, and `#2075`'s "Not taken" section named this pair
+# and the reason it was left whole: `MEMORY.md` is written as well as read, and **a write
+# to a FIFO blocks on `open` for writing too**, so guarding the reader alone would only
+# move the hang. Both halves are here, and each test is written so that removing the
+# guard makes it **hang** rather than pass — the same shape as the block above.
+
+
+@_needs_mkfifo
+def test_the_index_reader_refuses_a_named_pipe_instead_of_blocking(tmp_path):
+    """`MemoryIndex.from_file` names the kind rather than opening the subject."""
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+
+    with pytest.raises(NotARegularFile) as excinfo:
+        MemoryIndex.from_file(fifo)
+
+    assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
+    assert "not a regular file" in str(excinfo.value), str(excinfo.value)
+
+
+@_needs_mkfifo
+def test_the_index_writer_refuses_a_named_pipe_instead_of_blocking(tmp_path):
+    """The other half, and the one whose absence would leave the hang standing.
+
+    A write to a FIFO waits for a reader, so this call has no bound either — measured
+    2026-10-11 (`cyc20261011-044528`) on `#2076`'s head: both arms did not return within
+    25 s, while a regular file and an absent path returned in 0.0 s.
+    """
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+
+    with pytest.raises(NotARegularFile) as excinfo:
+        MemoryIndex().save(fifo)
+
+    assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
+    assert "write" in str(excinfo.value), (
+        "the writer's refusal should say which direction it is: " + str(excinfo.value)
+    )
+
+
+@_needs_mkfifo
+def test_the_index_pair_still_reads_and_writes_beside_a_pipe(tmp_path):
+    """The control: the refusal is about the kind at this path, not about the directory.
+
+    A pipe *beside* the index changes nothing — and an absent index is still the empty
+    index the reader has always returned, which is the case a guard that asked
+    `non_regular_kind` unconditionally would turn into a `FileNotFoundError`.
+    """
+    os.mkfifo(tmp_path / "pipe.md")
+    index_path = tmp_path / "MEMORY.md"
+    index_path.write_text("# Memory Index\n", encoding="utf-8")
+
+    assert MemoryIndex.from_file(index_path).entries == []
+
+    written = MemoryIndex()
+    written.save(index_path)
+    assert index_path.read_text(encoding="utf-8").strip().startswith("# Memory Index")
+
+    absent = tmp_path / "nested" / "MEMORY.md"
+    assert MemoryIndex.from_file(absent).entries == []
+    MemoryIndex().save(absent)  # creates the parent, as it always did
+    assert absent.exists()
+
+
+@_needs_mkfifo
+def test_the_store_route_refuses_rather_than_never_answering(temp_cwd):
+    """`create()` reaches both halves, and the answer is a refusal — not a silent skip.
+
+    The issue left this half to decide rather than copy: `_save_index`'s callers return
+    normally today, so a skipped write would let `create()` report success while its own
+    index does not name the memory it just wrote — an agreement the store does not have,
+    which is the class `get_with_reason` closes for the other absence. Refusing names the
+    subject and the kind instead, and it is an `OSError`, which is what this module
+    already raises one kind over at this path (`IsADirectoryError`).
+    """
+    directory = temp_cwd / ".emrg" / "memory"
+    directory.mkdir(parents=True)
+    os.mkfifo(directory / "MEMORY.md")
+    store = ProjectMemoryStore(temp_cwd)
+
+    with pytest.raises(NotARegularFile) as excinfo:
+        store.create("reference", "A note", "body")
+
+    assert "MEMORY.md" in str(excinfo.value), str(excinfo.value)
