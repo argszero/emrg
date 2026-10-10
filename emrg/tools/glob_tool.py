@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, brace_alternation
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,23 @@ class GlobTool(ToolExecutor):
             return ToolResult(
                 name="glob",
                 content=f"Error: workdir not found or not a directory: {workdir}",
+                error=True,
+            )
+
+        # A pattern this walk cannot expand is refused rather than searched: it
+        # matches nothing, and `No files matched` is the same sentence a real
+        # absence produces - a false negative about a question never asked. See
+        # `brace_alternation` in `emrg/tools/base.py` for the measurement.
+        if brace_alternation(pattern):
+            return ToolResult(
+                name="glob",
+                content=(
+                    f"Error: the pattern {pattern!r} uses `{{a,b}}` brace alternation, "
+                    "which this tool does not expand - it walks with `Path.glob`, so the "
+                    "whole pattern is one literal string and would match nothing, "
+                    "reporting `No files matched` for a search it never ran. Pass one "
+                    "pattern per call ('**/*.py', then '**/*.rs')."
+                ),
                 error=True,
             )
 

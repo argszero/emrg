@@ -590,3 +590,143 @@ def test_grep_context_inside_its_domain_still_renders_the_block(tmp_path):
     for line in ("beta", ">GAMMA", "delta"):
         assert line in result.content
     assert "result budget" not in result.content, "a complete search is not a cut one"
+
+
+# --- the glob filter: applied to every subject, and never to a pattern it cannot read ---
+
+
+def test_the_glob_filter_applies_to_a_named_file_too(tmp_path):
+    """`glob` was read by the directory branch and **ignored** by the file branch.
+
+    Measured 2026-10-10 (`cyc20261010-220909`) on `emrg/tools/read_tool.py`: with
+    `glob='*.nomatch'` the call returned the same one match as no filter at all, and the
+    summary still printed `matching '*.nomatch'` — the output claimed a filter that had
+    never run. The description says "Only search files matching this glob pattern", and a
+    named file is still a file the filter can exclude.
+
+    Both directions, because a filter that excludes everything would pass the
+    exclusion half alone.
+    """
+    tool = GrepTool()
+    named = tmp_path / "main.py"
+    named.write_text("import os\n\ndef main():\n    return 1\n")
+
+    unfiltered = _run(tool.execute({"pattern": "def main", "path": str(named)}))
+    assert not unfiltered.error
+    assert "Found 1 matches" in unfiltered.content, unfiltered.content
+    assert "searched 1 files" in unfiltered.content
+
+    matching = _run(tool.execute({
+        "pattern": "def main", "path": str(named), "glob": "*.py",
+    }))
+    assert not matching.error
+    assert "Found 1 matches" in matching.content, matching.content
+    assert "searched 1 files" in matching.content
+
+    excluded = _run(tool.execute({
+        "pattern": "def main", "path": str(named), "glob": "*.nomatch",
+    }))
+    assert not excluded.error
+    # The discriminating assertion first: `Found` below is also satisfied by a *wrong*
+    # match, so an arm that drops the filter has to die on the line that says nothing was
+    # searched (the arm runner reports a kill on a later line as UNJUDGEABLE).
+    assert "searched 0 files" in excluded.content, (
+        "a file path plus a non-matching glob must search nothing — the filter was "
+        f"ignored here before this cycle: {excluded.content}"
+    )
+    assert "Found" not in excluded.content, excluded.content
+    # The reading has to say *why*, or `searched 0 files matching '*.nomatch'` reads as
+    # "that tree holds none" rather than "the filter you passed excluded the one file you
+    # pointed at". The two have different remedies.
+    assert "does not match the glob filter" in excluded.content, excluded.content
+    assert "main.py" in excluded.content, excluded.content
+
+
+def test_a_brace_glob_is_refused_rather_than_searched_to_an_empty_answer(tmp_path):
+    """`*.{py,rs}` is the pattern the description advertised, and this walk cannot read it.
+
+    `Path.rglob` has no brace expansion, so the whole pattern is one literal string that
+    matches no file whose name contains a brace. Measured 2026-10-10 (`cyc20261010-220909`)
+    over `emrg/tools/`: `glob='*.py'` -> `Found 9 matches ... (searched 15 files)`,
+    `glob='*.{py,rs}'` -> `No matches ... (searched 0 files)`. The second sentence is the
+    one a real absence produces, so a model following the description's own example was
+    told "nothing here" about a question the tool never asked.
+
+    Refusing is the reading this repository uses for a request it cannot answer (the
+    `count_argument` family): the alternative is an empty answer that is indistinguishable
+    from a true one.
+    """
+    tool = GrepTool()
+    f = tmp_path / "main.py"
+    f.write_text("import os\n")
+
+    brace = _run(tool.execute({
+        "pattern": "import", "path": str(tmp_path), "glob": "*.{py,rs}",
+    }))
+    assert brace.error, brace.content
+    assert brace.content.startswith("Error:"), (
+        "the refusal has to be an error, not an empty reading with an explanation "
+        f"beside it: {brace.content}"
+    )
+    assert "brace" in brace.content, brace.content
+    assert "does not expand" in brace.content, brace.content
+
+    # The control: the same search, spelled the way the filter can read.
+    control = _run(tool.execute({
+        "pattern": "import", "path": str(tmp_path), "glob": "*.py",
+    }))
+    assert not control.error, control.content
+    assert "Found 1 matches" in control.content, (
+        "the pattern the brace example meant has to keep working, or 'refused' is "
+        f"indistinguishable from 'handled': {control.content}"
+    )
+
+
+def _advertised_globs() -> list[str]:
+    """Every glob example the `glob` parameter's description holds.
+
+    Read from the schema rather than restated: the description is the contract the model
+    reads, so an example in it is a promise, and a promise nothing measures is how
+    `*.{py,rs}` survived in that list while selecting nothing.
+    """
+    param = GrepTool().definition().parameters["properties"]["glob"]["description"]
+    assert "Examples:" in param, (
+        f"the glob parameter states no examples, so this reader has no subject: {param}"
+    )
+    # Split on the two markers rather than on a period: the examples themselves contain
+    # periods (`'*.py'`), and a non-greedy match up to the first one parses an unterminated
+    # quote and returns nothing — the shape this reader had before it was fixed to read the
+    # same description its author wrote.
+    section = param.split("Examples:", 1)[1].split("Default:", 1)[0]
+    return re.findall(r"'([^']+)'", section)
+
+
+def test_every_glob_example_the_description_advertises_selects_files(tmp_path):
+    """Each advertised example is run, against a tree holding the file it names.
+
+    An example that selects nothing is worse than a missing one: the caller reads
+    `No matches` and concludes the pattern is absent from the tree. That is the defect
+    this cycle fixed for one entry of this very list — so the list is held to it, and a
+    later edit that reintroduces an unreadable form goes red here rather than in a
+    model's answer.
+    """
+    globs = _advertised_globs()
+    assert globs, "no examples parsed out of the description"
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("import os\n")
+    (tmp_path / "src" / "app.ts").write_text("import x\n")
+    (tmp_path / "README.md").write_text("# Project\n")
+
+    for glob_example in globs:
+        result = _run(GrepTool().execute({
+            "pattern": ".", "path": str(tmp_path), "glob": glob_example,
+        }))
+        assert not result.error, (
+            f"the description advertises {glob_example!r}, but the tool refuses it: "
+            f"{result.content}"
+        )
+        assert "searched 0 files" not in result.content, (
+            f"the description advertises {glob_example!r}, which selects no file at all — "
+            f"the caller would read 'No matches' as a fact about the tree: {result.content}"
+        )

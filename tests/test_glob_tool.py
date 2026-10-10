@@ -205,3 +205,35 @@ def test_glob_invalid_workdir():
     result = _run(tool.execute({"pattern": "**/*.py", "workdir": "/nonexistent"}))
     assert result.error
     assert "not found" in result.content.lower()
+
+
+def test_a_brace_pattern_is_refused_rather_than_answered_with_no_files_matched(temp_cwd):
+    """`**/*.{py,md}` is not a pattern this walk can read, and it did not say so.
+
+    `Path.glob` has no brace expansion, so the whole pattern is one literal string that
+    matches nothing — and the answer was `No files matched pattern '**/*.{py,md}'`, the
+    same sentence a genuinely empty tree produces. Measured on this checkout 2026-10-10
+    (`cyc20261010-220909`): `**/*.py` -> `Found N matches`, `**/*.{py,md}` -> `No files
+    matched`, and the tree plainly holds both kinds of file.
+
+    `glob`'s own description does not advertise braces, so this is not a broken promise —
+    it is the other half: an answer that cannot be told apart from a true one. Refused
+    with the reason instead, through the same rule `grep` fails to apply
+    (`emrg/tools/base.py::brace_alternation`), so the two tools give one answer.
+    """
+    tool = GlobTool()
+
+    brace = _run(tool.execute({"pattern": "**/*.{py,md}", "workdir": str(temp_cwd)}))
+    assert brace.error, brace.content
+    assert brace.content.startswith("Error:"), brace.content
+    assert "brace" in brace.content, brace.content
+    assert "does not expand" in brace.content, brace.content
+
+    # The control: the two patterns the brace form meant, each still answered.
+    for pattern, expected in (("**/*.py", "main.py"), ("**/*.md", "README.md")):
+        control = _run(tool.execute({"pattern": pattern, "workdir": str(temp_cwd)}))
+        assert not control.error, control.content
+        assert expected in control.content, (
+            f"{pattern} has to keep matching {expected}, or 'refused' is "
+            f"indistinguishable from 'handled': {control.content}"
+        )

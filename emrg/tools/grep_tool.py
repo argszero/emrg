@@ -6,17 +6,35 @@ returns matching lines with filename:line_number prefixes.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, count_argument
+from emrg.tools.base import ToolExecutor, brace_alternation, count_argument
 
 logger = logging.getLogger(__name__)
 
 MAX_RESULTS = 200  # Cap matches to prevent excessive result volume
 MAX_FILE_SIZE = 512 * 1024  # 512KB — skip files larger than this
+
+
+def _selects(path: Path, file_glob: str | None) -> bool:
+    """Does the glob filter select this one named file?
+
+    The directory branch filters by walking `root.rglob(pattern)`, which matches
+    the pattern against each path *relative to that root*; a named file has one
+    such path, its own name, so that is what is matched here and the two
+    branches answer the same question. Without this, `glob` was read by the
+    directory branch and ignored by the file branch - and the summary still
+    printed `matching '<glob>'`, so the output claimed a filter nothing had
+    applied (measured 2026-10-10: `path=read_tool.py, glob='*.nomatch'` returned
+    the same 1 match as no filter at all).
+    """
+    if not file_glob:
+        return True
+    return fnmatch.fnmatch(path.name, file_glob)
 
 
 class GrepTool(ToolExecutor):
@@ -61,8 +79,14 @@ class GrepTool(ToolExecutor):
                         "type": "string",
                         "description": (
                             "Only search files matching this glob pattern. "
-                            "Examples: '*.py', '*.{py,rs}', 'src/**/*.ts'. "
-                            "Default: all text files."
+                            "Examples: '*.py', '*.md', 'src/**/*.ts'. "
+                            "Default: all text files. The pattern is matched by "
+                            "`Path.rglob`, which does not expand `{a,b}` brace "
+                            "alternation (`*.{py,rs}` selects nothing) - pass one "
+                            "pattern per call, or a regex-ish alternation is not "
+                            "available here. A named file is filtered too: if the "
+                            "path is one file and it does not match, nothing is "
+                            "searched and the summary says so."
                         ),
                     },
                     "ignore_case": {
@@ -158,14 +182,39 @@ class GrepTool(ToolExecutor):
                 name="grep", content=f"Error: path not found: {root}", error=True
             )
 
+        # A pattern this filter cannot expand is refused rather than searched: the
+        # walk would match nothing and the answer would read `No matches` - a
+        # false negative indistinguishable from a real absence. See
+        # `brace_alternation` for the measurement and the example that advertised it.
+        if file_glob and brace_alternation(file_glob):
+            return ToolResult(
+                name="grep",
+                content=(
+                    f"Error: the glob filter {file_glob!r} uses `{{a,b}}` brace "
+                    "alternation, which this filter does not expand - it walks with "
+                    "`Path.rglob`, so the whole pattern is one literal string and would "
+                    "select nothing, reporting `No matches` for a search it never ran. "
+                    "Pass one pattern per call ('*.py', then '*.rs'), or omit the filter "
+                    "and search the tree."
+                ),
+                error=True,
+            )
+
         logger.debug(
             "grep: pattern=%r path=%s glob=%s ignore_case=%s",
             pattern, root, file_glob, ignore_case,
         )
 
-        # Collect files
+        # Collect files. The named-file branch is filtered too: `glob` means
+        # "only search files matching this pattern", and a file the caller named
+        # is still a file the filter can exclude.
+        excluded_named_file = False
         if root.is_file():
-            files = [root]
+            if _selects(root, file_glob):
+                files = [root]
+            else:
+                files = []
+                excluded_named_file = True
         else:
             files = self._collect_files(root, file_glob)
 
@@ -273,12 +322,23 @@ class GrepTool(ToolExecutor):
             skipped = f"; {oversize + undecodable} skipped: " + ", ".join(parts)
 
         if not results:
+            # `matching '<glob>'` is appended only when the filter really ran, and
+            # `excluded_named_file` names the case where it ran and excluded the
+            # one file the caller pointed at - the two readings have different
+            # remedies (drop the filter / fix the pattern), so they are not the
+            # same sentence.
             return ToolResult(
                 name="grep",
                 content=(
                     f"No matches for '{pattern}' in {root} "
                     f"(searched {files_read} files{skipped})"
                     + (f" matching '{file_glob}'" if file_glob else "")
+                    + (
+                        f" - the named file {root.name!r} does not match the glob "
+                        "filter, so nothing was searched"
+                        if excluded_named_file
+                        else ""
+                    )
                 ),
             )
 

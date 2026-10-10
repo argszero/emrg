@@ -131,6 +131,30 @@ def boolean_argument(
     )
 
 
+def brace_alternation(pattern: str) -> bool:
+    """True when a glob carries `{a,b}` alternation.
+
+    The file-finding tools walk with `Path.glob`/`Path.rglob`, whose pattern
+    language has no brace expansion: `*.{py,rs}` is not two patterns, it is one
+    literal string that matches no file whose name contains a brace. The failure
+    is silent and it is a **false negative** - `No matches` / `No files matched`,
+    the same sentence a real absence produces - so the tool answers "nothing
+    here" about a question it never asked.
+
+    Measured 2026-10-10 (`cyc20261010-220909`) in this checkout, `grep` over
+    `emrg/tools/`:
+
+        glob='*.py'       -> Found 9 matches ... (searched 15 files)
+        glob='*.{py,rs}'  -> No matches ... (searched 0 files)
+
+    `grep`'s description advertised exactly that pattern as an example, so a
+    model following it got the false negative. Shared here rather than spelled in
+    each tool because both are held to the same rule: a pattern this walk cannot
+    expand is refused with the reason, never searched to an empty answer.
+    """
+    return "{" in pattern or "}" in pattern
+
+
 class ToolExecutor(ABC):
     """Interface for all tools in the EMRG micro-kernel.
 
