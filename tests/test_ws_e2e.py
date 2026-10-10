@@ -11,6 +11,7 @@ Tests use asyncio.run() directly since pytest-asyncio is not installed.
 
 import asyncio
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -2411,6 +2412,47 @@ class TestWSWorkspacePanel:
                             assert domain in resp["error"], (kwargs, resp)
                             assert "content" not in resp, (kwargs, resp)
                             assert "truncated" not in resp, (kwargs, resp)
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_read_file_refuses_a_named_pipe_instead_of_blocking(self):
+        """The panel's viewer asks what it is opening, like the `read` tool does.
+
+        The client names this path, and `list_files` types every entry that is not a
+        directory as `"file"` — so a named pipe in a workspace is offered in the file
+        tree, and the click that follows used to enter it. The read is synchronous on
+        the daemon's event loop, so the call that never returns is the daemon that
+        never returns (issue #2073; the same condition `#2062` fixed at the tools).
+
+        The control is asserted in the same test: the refusal is about the kind of the
+        subject, not about the directory holding it.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                fifo = work / "pipe"
+                os.mkfifo(fifo)
+                (work / "notes.txt").write_text("hello\n", encoding="utf-8")
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {"type": "read_file", "path": str(fifo)})
+                        assert resp["type"] == "file_content", resp
+                        assert "a FIFO (named pipe)" in resp.get("error", ""), resp
+                        assert "not a regular file" in resp["error"], resp
+                        assert "content" not in resp, resp
+                        assert "truncated" not in resp, resp
+
+                        ok = await self._cmd(
+                            ws, {"type": "read_file", "path": str(work / "notes.txt")})
+                        assert ok.get("content") == "hello", ok
                     finally:
                         await ws.close()
                 finally:
