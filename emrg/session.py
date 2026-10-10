@@ -22,10 +22,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from emrg.memory import SessionMemoryStore
+from emrg.memory import NotARegularFile, SessionMemoryStore
 from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.sandbox.roots import canonical_path
 from emrg.sessions_index import remove_session_index, upsert_session_index
+from emrg.tools.base import non_regular_kind
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +229,59 @@ def records_to_messages(records: list[dict]) -> list[dict]:
 
     return _validate_tool_messages(messages)
 
+
+def _refuse_a_non_regular_subject(path: Path) -> None:
+    """Raise when ``path`` is not a regular file — an open on it would never return.
+
+    Every file this module opens lives in the session's own directory
+    (``<cwd>/.emrg/sessions/<id>/``), and that directory is **inside the project the
+    agent works in**: the workspace fence grants the project root, so the subject of
+    these opens can be any kind of thing. Measured 2026-10-11 (``cyc20261011-071202``) on
+    master ``3386f239``, one call per child process under this parent's 8 s cap, with only
+    the file that call reads made non-regular:
+
+        call                        regular        directory          FIFO
+        Session.load                returns        raises at once     no return, 8 s
+        Session(...).title          returns title  returns the id     no return, 8 s
+        Session(...)._read_history  returns        raises at once     no return, 8 s
+        append_message              returns        raises at once     no return, 8 s
+
+    An **open is not a read**: on a FIFO it waits at the open until a writer appears and
+    raises nothing, so no ``except (OSError, …)`` around these call sites can bound the
+    consequence — and the daemon runs every session read and write on its event loop, so
+    the block is every session, the scheduler and the evolution loop, with a restart as
+    the only recovery (which belongs to the host). The kind one over already answers:
+    a *directory* at the same path raises at once, or degrades where the caller handles it
+    (``title`` falls back to the session id). So this adds no new answer — it gives the
+    kind that used to be answered by blocking the answer the rest of the family already
+    has.
+
+    The rule is the tool layer's, read from there rather than restated
+    (:func:`emrg.tools.base.non_regular_kind` — the path-taking reader `#2062`, `#2076`
+    and `#2083` share), and the refusal is this codebase's existing spelling of it
+    (:class:`emrg.memory.NotARegularFile`, an ``OSError`` that names the kind, which is
+    what the callers' handlers and the daemon's error frames already read).
+
+    An absent path is not a refusal: every call site here is about to create or open
+    one, and the ``stat`` this check itself makes is what answers it — one syscall, with
+    no gap between a check and a read for the path to change in.
+
+    :param path: the session file about to be opened.
+    """
+    try:
+        kind = non_regular_kind(path)
+    except FileNotFoundError:
+        return
+    if kind:
+        raise NotARegularFile(
+            f"{path} is {kind}, not a regular file. This session opens its own files "
+            f"(history, meta, llm) directly, and opening this one blocks until a peer "
+            f"appears — a FIFO waits for a writer, a socket for a connection, a device "
+            f"never ends — so the call would never return, and neither would the "
+            f"daemon, which runs every session read and write on its event loop."
+        )
+
+
 class Session:
     """Manages a single conversation session on disk."""
 
@@ -349,6 +403,7 @@ class Session:
         """Load an existing session from disk."""
         session = cls(session_id, cwd)
         if session._meta_path.exists():
+            _refuse_a_non_regular_subject(session._meta_path)
             meta = json.loads(session._meta_path.read_text(encoding="utf-8"))
             session._message_count = meta.get("message_count", 0)
             session._compact_count = meta.get("compact_count", 0)
@@ -393,6 +448,11 @@ class Session:
         meta = {}
         if self._meta_path.exists():
             try:
+                # Inside the `try`, because an unreadable meta already falls back to
+                # the session id here — a directory at this path does exactly that
+                # today (`IsADirectoryError` is an `OSError`), and a named pipe must
+                # not answer differently from the kind one over.
+                _refuse_a_non_regular_subject(self._meta_path)
                 meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 pass
@@ -483,11 +543,14 @@ class Session:
         line = json.dumps(entry, ensure_ascii=False) + "\n"
 
         # Write to main history
+        _refuse_a_non_regular_subject(self._history_path)
         with open(self._history_path, "a", encoding="utf-8") as f:
             f.write(line)
 
         # Write to daily history
-        with open(self._daily_history_path(), "a", encoding="utf-8") as f:
+        daily_path = self._daily_history_path()
+        _refuse_a_non_regular_subject(daily_path)
+        with open(daily_path, "a", encoding="utf-8") as f:
             f.write(line)
 
         # message_count counts message-type records only — tool_result / summary
@@ -516,6 +579,7 @@ class Session:
         # Rotate if file exceeds max size
         self._rotate_llm_log()
 
+        _refuse_a_non_regular_subject(self._llm_path)
         with open(self._llm_path, "a", encoding="utf-8") as f:
             f.write(line)
 
@@ -549,6 +613,7 @@ class Session:
         """Read all records from history.jsonl."""
         if not self._history_path.exists():
             return []
+        _refuse_a_non_regular_subject(self._history_path)
         records = []
         with open(self._history_path, encoding="utf-8") as f:
             for line in f:
@@ -754,6 +819,7 @@ class Session:
 
     def _write_history(self, records: list[dict]) -> None:
         """Overwrite history.jsonl with new records."""
+        _refuse_a_non_regular_subject(self._history_path)
         with open(self._history_path, "w", encoding="utf-8") as f:
             for r in records:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -786,11 +852,13 @@ class Session:
             # Preserve existing title if present
             if self._meta_path.exists():
                 try:
+                    _refuse_a_non_regular_subject(self._meta_path)
                     old = json.loads(self._meta_path.read_text(encoding="utf-8"))
                     if "title" in old:
                         meta["title"] = old["title"]
                 except (json.JSONDecodeError, OSError):
                     pass
+        _refuse_a_non_regular_subject(self._meta_path)
         self._meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         # Global cross-project index (rant 2026-08-13T16:42:22): record this
         # session so other projects can locate it. Idempotent (no-op when the
@@ -866,6 +934,7 @@ class Session:
             if not meta_path.exists():
                 continue
             try:
+                _refuse_a_non_regular_subject(meta_path)
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 results.append(meta)
             except (json.JSONDecodeError, OSError):
