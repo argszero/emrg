@@ -73,13 +73,17 @@ number, the four spellings this family writes. The argument is the discriminator
 what keeps the clause off prose: "update `VERSION_SOURCES` in `scripts/bump-version.py`"
 ends at the file name and is not a thing to run, while `scripts/check-vote-count.py <PR>` is.
 
-What the clause reads on this tree, measured 2026-10-07: **39** command-shaped mentions, in
-eight tools - `bump-version.py` 2, `cast-vote.py` 8, `check-merge-freshness.py` 8,
+What the clause reads on this tree, measured 2026-10-11: **40** command-shaped mentions, in
+nine tools - `bump-version.py` 2, `cast-vote.py` 8, `check-merge-freshness.py` 8,
 `check-merge-sequence.py` 1, `check-release-published.py` 1, `check-stacked-prs.py` 1,
-`review-queue.py` 17, `run-mutation-arm.py` 1. The newest is `review-queue.py`'s row for a PR
+`check-vote-count.py` 1, `review-queue.py` 17, `run-mutation-arm.py` 1. The newest arrived the
+way the three before it did - through a *remedy*: `check-vote-count.py`'s cure for a head with no
+CI run names the re-trigger in `check-merge-freshness.py`'s own spelling
+(`bash scripts/re-trigger-ci.sh <branch>`), added the same day as the per-cause cures above it
+(cycle `cyc20261011-002826`). Before that the newest was `review-queue.py`'s row for a PR
 whose CI half could not be read (cycle `cyc20261007-203559`), which names the re-ask that failed
-(`uv run --no-sync python3 scripts/check-merge-freshness.py <PR>`). Before it the newest was
-`check-stacked-prs.py`, and it arrived the same way as the two before it: through a *remedy*. Its
+(`uv run --no-sync python3 scripts/check-merge-freshness.py <PR>`), and before it
+`check-stacked-prs.py`, which arrived the same way as the two before it: through a *remedy*. Its
 row for a PR that would
 land another open PR's work ends by naming the instrument that prices what that merge changes
 (`uv run --no-sync python3 scripts/check-merge-landing-diff.py <PR>`), and naming a reading is

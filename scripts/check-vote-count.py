@@ -361,6 +361,33 @@ _NON_CLEAN_STATES = {
     "DRAFT": "the pull request is a draft",
 }
 
+# What clears each of those states, in the reader's terms. Separate from the map above
+# because the two answer different questions - that one says *why* the state holds the
+# merge back, this says *what to do about it* - and because the answers differ in the
+# one way a voter needs: `DRAFT` and `BLOCKED` clear without publishing a commit, so
+# they leave every vote standing on the head valid, while a conflict and a `BEHIND`
+# refresh both publish one and void them. `DIRTY` is here and is also what a
+# `mergeable == CONFLICTING` head gets, because that is the same fact: two spellings of
+# "git cannot merge the text" land on one sentence rather than two.
+_NON_CLEAN_CURES = {
+    "DIRTY": (
+        "git cannot merge the text, so the branch has to be resolved against the base "
+        "and pushed; that publishes a new head and voids every vote standing on this one"
+    ),
+    "BEHIND": (
+        "the head is behind the base branch and has to be refreshed; that publishes a "
+        "new head and voids every vote standing on this one"
+    ),
+    "BLOCKED": (
+        "GitHub reports the merge blocked by protection rules or required reviews, so "
+        "what clears it is a review - that publishes no commit"
+    ),
+    "DRAFT": (
+        "the pull request is a draft: mark it ready for review, which publishes no "
+        "commit"
+    ),
+}
+
 # Every `MergeStateStatus` this version knows how to read, so the fail-loud branch
 # below still refuses a state GitHub adds later. `UNSTABLE` is here and not in the map
 # above: dropping it from the vocabulary would make the one state whose reading changed
@@ -1390,6 +1417,23 @@ class Verdict:
         return bool(newest) and all(check.green for check in newest)
 
     @property
+    def checks_pending(self) -> bool:
+        """A newest check-run on this head has not concluded yet.
+
+        `queued`/`in_progress`: the head has no verdict because the run has not
+        finished, which is exactly the shape for which `review-queue.py` prescribes a
+        park. It is asked before any other cause because it is the one blocking shape
+        whose remedy is *nothing to do* - and the sentence a blocked row used to be
+        given ("the branch or the pull request has to be made mergeable first") reads
+        as an instruction to push, which would publish a new head and void every vote
+        standing on it.
+
+        False without a reading, because `newest_checks` is empty then - and that case
+        is not pending but unread, which `block_cure` says in its own words.
+        """
+        return any(check.status != "completed" for check in self.newest_checks)
+
+    @property
     def checks_reason(self) -> str:
         """Why the checks are not green, naming each check that is not (or "")."""
         bad = [c for c in self.newest_checks if not c.green]
@@ -1470,6 +1514,67 @@ class Verdict:
                 "a head that ran nothing still reads CLEAN)"
             )
         return ""
+
+    @property
+    def block_cure(self) -> str:
+        """What actually clears this block, and whether that publishes a new head.
+
+        Read in the same order as `block_reason` so the two always describe one cause,
+        and kept per cause rather than as one sentence for every blocked row because
+        the remedies differ in the way a voter cares about: a `DRAFT` clears by being
+        marked ready, a review-required `BLOCKED` by a review, and a head held by an
+        unconcluded check by the run finishing - none of which publishes a commit, so
+        all three leave the votes standing on the head intact, while resolving a
+        conflict, refreshing a `BEHIND` head or fixing a red check does publish one.
+
+        A single universal sentence was printed here before, and it is false for most
+        of those shapes: "More review does not fix this - the branch or the pull
+        request has to be made mergeable first". On the shape measured 2026-10-11
+        (`cyc20261011-002826`) - a queue whose two rows were both `UNSTABLE` with both
+        check-runs still `pending` - it inverted the remedy outright, telling the
+        reader to produce a mergeable head where the answer is to wait, and the push
+        that would follow voids every vote standing on the head. The last sentence of
+        the same paragraph warned about that exact push, so the output contradicted
+        itself.
+        """
+        if self.mergeable == _CONFLICTING:
+            return _NON_CLEAN_CURES["DIRTY"]
+        cure = _NON_CLEAN_CURES.get(self.merge_state)
+        if cure:
+            return cure
+        if self.merge_state == _UNSTABLE and not self.checks_green:
+            if self.checks_pending:
+                return (
+                    "a check on this head has not concluded, so this clears when that "
+                    "run finishes - it needs no new commit, and a push would void every "
+                    "vote standing on this one"
+                )
+            if not [c for c in self.newest_checks if not c.green]:
+                # No check-run to name as the cause, so the list came back with nothing
+                # in it. (A reading that *failed* is a different path: it exits 2 and
+                # never reaches a render.) Re-reading is the only cure that can settle
+                # this, and it needs no new commit.
+                return (
+                    "the head's check-runs list came back empty, so no check can be "
+                    "named as holding this head back - read them again, which publishes "
+                    "no commit, rather than pushing, which voids every vote standing on "
+                    "this one"
+                )
+            return (
+                "a check on this head concluded red or was cancelled, so clear it by "
+                "re-running the workflow for this head (a re-run publishes no commit; a "
+                "push would void every vote standing on this one)"
+            )
+        if not self.push_time_exact:
+            return (
+                "no CI run exists for the head commit - the push event was dropped, so "
+                "re-trigger CI on the same head (`gh workflow run test.yml --ref "
+                "<branch>`, or `bash scripts/re-trigger-ci.sh <branch>`), which keeps "
+                "the votes"
+            )
+        # Not reached by any blocking conjunct above; kept so a conjunct added later
+        # cannot print an empty cure, which would read as "no remedy".
+        return "the branch or the pull request has to be made mergeable first"
 
     @property
     def ok(self) -> bool:
@@ -2160,19 +2265,31 @@ def main(argv: list[str] | None = None) -> int:
         # binding check-run belongs to a superseded run does not clear at all, and a
         # `BEHIND` one clears by a refresh that *does* move the head. What the reader
         # needs is which of those they are in, and `block_reason` already says.
-        also_short = (
-            " (their votes are short too - where clearing this state means publishing "
-            "a new head, that voids every vote standing here)"
-        )
         reasons = "; ".join(
             f"#{v.pr}: {v.block_reason}" for v in blocked
         )
-        print(
-            f"\n{reasons}. More review does not fix this - the branch or the pull "
-            "request has to be made mergeable first."
-            + (also_short if any(v.short for v in blocked) else ""),
-            file=sys.stderr,
-        )
+        print(f"\n{reasons}.", file=sys.stderr)
+        # The *remedy* is printed per cause too, and that half was still one sentence
+        # for every row ("the branch or the pull request has to be made mergeable
+        # first") - true for a conflict, and for a head whose check-runs have not
+        # concluded it inverts the remedy: the answer there is to wait, and the push
+        # the sentence invites voids every vote standing on the head, which the
+        # sentence immediately after it warns about. Measured 2026-10-11
+        # (`cyc20261011-002826`) on a queue whose two open rows were both `UNSTABLE`
+        # with both checks still running. Grouped, so PRs sharing a cause are named
+        # once rather than repeated per row.
+        cures: dict[str, list[int]] = {}
+        for v in blocked:
+            cures.setdefault(v.block_cure, []).append(v.pr)
+        for cure, prs in cures.items():
+            naming = ", ".join(f"#{p}" for p in prs)
+            print(f"{naming}: {cure}.", file=sys.stderr)
+        if any(v.short for v in blocked):
+            print(
+                "Their votes are short too - where clearing this state means "
+                "publishing a new head, that voids every vote standing here.",
+                file=sys.stderr,
+            )
     if short:
         print(
             f"\nNot enough votes yet (need {args.min_votes} consecutive, from different "
