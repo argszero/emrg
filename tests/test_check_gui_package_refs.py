@@ -117,3 +117,38 @@ def test_a_manifest_without_build_resources_is_not_a_pass(tmp_path: Path) -> Non
     assert done.stdout.splitlines()[0].startswith(f"tree: {gui.resolve()}"), done.stdout
     assert "could not measure: " in done.stdout, done.stdout
     assert "buildResources" in done.stdout, done.stdout
+
+
+def test_a_manifest_declaring_nothing_to_resolve_is_not_a_pass(tmp_path: Path) -> None:
+    """`OK: 0 reference(s) resolve` is a clean line about an empty set, so it must refuse.
+
+    The third unmeasurable path, uncovered until 2026-10-10 (`cyc20261010-152002`) — measured
+    before the branch: rc 0, `OK: 0 reference(s) resolve.` The guard's own advertised use is
+    `--root <GUIPROJ>`, so a manifest declaring no `extraResources` and no icon is an input it
+    is meant to be pointed at; and the way *this* guard's fault arrives is a **declaration**
+    going missing, which leaves the artifact without its payload. The rule is the family's —
+    `check-citation-resolves.py` refuses the same way with "no test module was read under
+    <root>" — and the control is the second half: declare one resolvable reference and the
+    reading flips to the pass it should be.
+    """
+    repo = tmp_path / "repo"
+    gui = repo / "emrg" / "gui"
+    (gui / "assets").mkdir(parents=True)
+    (repo / "dist" / "runtime").mkdir(parents=True)
+    manifest = {"name": "emrg-gui", "build": {"directories": {"buildResources": "assets"}}}
+
+    def declare() -> None:
+        (gui / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    declare()
+    empty = _run(gui)
+    assert empty.returncode == 2, empty.stdout + empty.stderr
+    assert empty.stdout.splitlines()[0].startswith(f"tree: {gui.resolve()}"), empty.stdout
+    assert "could not measure: " in empty.stdout, empty.stdout
+    assert "OK:" not in empty.stdout, empty.stdout
+
+    manifest["build"]["extraResources"] = [{"from": "../../dist/runtime", "to": "runtime"}]
+    declare()
+    declared = _run(gui)
+    assert declared.returncode == 0, declared.stdout + declared.stderr
+    assert "OK: 1 reference(s) resolve." in declared.stdout, declared.stdout
