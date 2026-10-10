@@ -183,12 +183,20 @@ class Finding:
         self.name = name
 
     def render(self, root: Path) -> str:
+        """The finding as one line, with the file named `/`-separated.
+
+        `.as_posix()` is not a style choice: `str(Path.relative_to(...))` renders with the
+        platform's separator, so a report read by a host, by a CI log, or by a sibling guard
+        -- and every assertion written against it -- would answer differently on Windows for
+        no reason of its own. Measured 2026-10-09 (run 37923398190): the POSIX spelling of an
+        assertion passed here and failed `test-windows`.
+        """
         where = "at module level" if self.scope == MODULE_TABLE_NAME else f"in {self.scope}()"
         named = ", ".join(str(line) for line in self.lines[:MAX_LINES_NAMED])
         if len(self.lines) > MAX_LINES_NAMED:
             named += f" (and {len(self.lines) - MAX_LINES_NAMED} more)"
         return (
-            f"{self.path.relative_to(root)}:{named}  {where}  reads {self.name!r} - "
+            f"{self.path.relative_to(root).as_posix()}:{named}  {where}  reads {self.name!r} - "
             f"nothing in this module binds it"
         )
 

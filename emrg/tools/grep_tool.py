@@ -232,7 +232,12 @@ class GrepTool(ToolExecutor):
             if lines and lines[-1] == "":
                 lines.pop()
 
-            rel = str(filepath.relative_to(root.parent if root.is_file() else root))
+            # `.as_posix()`: `str(Path.relative_to(...))` renders with the platform's
+            # separator, so a match under a directory would be printed `src\main.py:12` on
+            # Windows -- a path the reader then has to translate, and one this rule's own
+            # test could not assert without skipping the Windows leg
+            # (measured: `test_grep_simple`, skipped there for exactly this reason).
+            rel = filepath.relative_to(root.parent if root.is_file() else root).as_posix()
 
             for i, line in enumerate(lines):
                 if stop:

@@ -228,7 +228,12 @@ def scan(root: Path) -> tuple[list[Finding], list[str], int]:
             if methods.get(name):
                 findings.append(
                     Finding(
-                        site=str(site.relative_to(root)),
+                        # `.as_posix()`: `str(Path.relative_to(...))` renders with the
+                        # platform's separator, so a citation in a subdirectory would be
+                        # named `tests\helper.py:12` on Windows and every assertion on the
+                        # POSIX spelling would pass here and fail `test-windows`
+                        # (measured 2026-10-09, run 37923398190, on a sibling guard).
+                        site=site.relative_to(root).as_posix(),
                         line=text.count("\n", 0, match.start()) + 1,
                         cited=f"{cited_path}::{name}",
                         needed=_needed(cited_path, name, methods),

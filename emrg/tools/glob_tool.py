@@ -120,7 +120,12 @@ class GlobTool(ToolExecutor):
         # Format results
         lines: list[str] = []
         for p in matches[:MAX_RESULTS]:
-            rel = str(p.relative_to(cwd))
+            # `.as_posix()`: `str(Path.relative_to(...))` renders with the platform's
+            # separator, so a nested match would be listed `src\main.py` on Windows while
+            # every other path this tool is pointed at is written with `/` -- and a test
+            # asserting the POSIX spelling would have to skip the Windows leg
+            # (measured on the sibling `grep` tool: `test_grep_simple` is skipped there).
+            rel = p.relative_to(cwd).as_posix()
             suffix = "/" if p.is_dir() else ""
             lines.append(f"  {rel}{suffix}")
 
