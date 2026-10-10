@@ -70,24 +70,73 @@ SKIP_DECLARATIONS = {
 }
 
 
+#: The constructors whose result is exactly the elements they are handed, so `X = tuple(a)` and
+#: `X = a` declare the same scope. **Named, not "any call"**: `X = make_roots(a)` is not a
+#: declaration of `a`, and reading it as one attributes a value the file never wrote -- silently,
+#: on the member side, where two tuples that need not be equal would then read as agreement
+#: (measured 2026-10-10: the unwrap was `value.args[0]` for *any* call). A call outside this set is
+#: not read even when it would preserve its argument (`sorted(a)`), because the reading decides by
+#: the name a declaration spells, not by what a function does at runtime -- the same reason
+#: `tests/test_no_dead_string_statement.py`'s smaller skip set is left unpinned rather than guessed.
+_COLLECTION_BUILDERS = frozenset({"frozenset", "set", "tuple", "list"})
+
+
+def _declared_names(node: ast.AST) -> list[tuple[str, ast.expr]]:
+    """`(name, value)` for every module-level declaration `node` makes, in source order.
+
+    One place decides **what a declaration is**, so the two readers below cannot drift on it: the
+    class is data a third reading can check, which is the same reason the scope tables are read out
+    of the files rather than restated. A tuple target (`A, B = ...`) declares no single name.
+
+    The class is `Assign`, deliberately: the annotated spelling (`TREE: tuple = (...)`) is a
+    **different** blindness of this extractor -- and a loud one, since a declaration it cannot
+    read comes back as "moved or renamed" and fails the scan-roots pairing below rather than
+    certifying a scope -- so it is left to its own change rather than folded in here.
+    """
+    if not isinstance(node, ast.Assign):
+        return []
+    return [(target.id, node.value) for target in node.targets if isinstance(target, ast.Name)]
+
+
+def _declared_collection(node: ast.expr):
+    """The collection a declaration's value spells, or None when it spells none.
+
+    The one normalisation both readers use: a call of a named collection builder is unwrapped to
+    its argument, a tuple/list/set/frozenset literal is itself, and anything else -- a name, an
+    f-string, a comprehension, a call to something else, a literal that is not a collection -- is
+    None rather than a guess. Every one of those raises inside `ast.literal_eval`, so the `try` is
+    what keeps a readable sentence where a traceback would otherwise be: before it, a declaration
+    of `X = OTHER_NAME` reached the caller as an uncaught `ValueError`.
+    """
+    if isinstance(node, ast.Call):
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id in _COLLECTION_BUILDERS and node.args):
+            return None
+        node = node.args[0]
+    try:
+        literal = ast.literal_eval(node)
+    except (ValueError, TypeError):
+        return None
+    return literal if isinstance(literal, (tuple, list, set, frozenset)) else None
+
+
 def _declared_literal(path: Path, name: str):
     """The literal a module-level `name = ...` binds in `path`, or None if it binds none.
 
-    Handles the two spellings these files use: a tuple literal, and `frozenset({...})`, whose
-    literal is the call's argument. Returning None for a name that is not there is what lets
-    the callers below tell "the declaration moved or was renamed" from "the declaration
-    changed" -- a file that stops declaring the name must not read as agreement.
+    Handles the spellings these files use: a tuple literal, `frozenset({...})` / `set({...})`, and
+    the same wrapped in a collection builder (`_COLLECTION_BUILDERS`).
+    Returning None -- for a name that is not there, and for a declaration this reading cannot
+    reduce to a collection -- is what lets the callers below tell "the declaration moved or was
+    renamed" from "the declaration changed": a file that stops declaring the name, or declares it
+    in a form this cannot read, must not read as agreement.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == name:
-                value = node.value
-                if isinstance(value, ast.Call) and value.args:
-                    value = value.args[0]  # `frozenset({...})` / `set({...})`
-                literal = ast.literal_eval(value)
+        for declared, value in _declared_names(node):
+            if declared == name:
+                literal = _declared_collection(value)
+                if literal is None:
+                    return None
                 return frozenset(literal) if isinstance(literal, (set, frozenset)) else tuple(literal)
     return None
 
@@ -128,11 +177,12 @@ SEARCH_SKIP = {".venv", "__pycache__", "node_modules"}
 
 
 def _module_literals(path: Path) -> dict[str, object]:
-    """Every module-level `name = <literal of strings>` in `path`, by name.
+    """Every module-level `name = <collection of strings>` in `path`, by name.
 
-    The same normalisation `_declared_literal` uses -- a `frozenset({...})` / `set({...})`
-    argument, or a tuple/list literal -- so the two readings compare equal. A literal that is not
-    a collection of strings is left out rather than guessed at.
+    The same two helpers `_declared_literal` uses -- the statement kinds in `_declared_names` and
+    the normalisation in `_declared_collection` -- so the two readings compare equal by
+    construction rather than by two copies happening to agree. A value that is not a collection of
+    strings is left out rather than guessed at.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -140,23 +190,11 @@ def _module_literals(path: Path) -> dict[str, object]:
         return {}
     out: dict[str, object] = {}
     for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if not isinstance(target, ast.Name):
+        for declared, value in _declared_names(node):
+            literal = _declared_collection(value)
+            if literal is None or not all(isinstance(element, str) for element in literal):
                 continue
-            value = node.value
-            if isinstance(value, ast.Call) and value.args:
-                value = value.args[0]
-            try:
-                literal = ast.literal_eval(value)
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(literal, (tuple, list, set, frozenset)):
-                continue
-            if not all(isinstance(element, str) for element in literal):
-                continue
-            out[target.id] = literal
+            out[declared] = literal
     return out
 
 
@@ -206,6 +244,41 @@ def test_the_extractor_reads_the_files_own_value(tmp_path):
 
     # a name the file does not bind is None, never an empty reading that compares equal
     assert _declared_literal(sample, "NOT_DECLARED_HERE") is None
+
+
+def test_the_extractor_refuses_what_it_cannot_reduce_to_a_collection(tmp_path):
+    """The soundness control: the reading is a reduction of the declaration, not a guess at it.
+
+    Each case below is a value the extractor must **refuse** rather than resolve, because a value
+    it guesses is a value it certifies -- the defect this test was added with: the unwrap was
+    `value.args[0]` for *any* call, so `TREE = make_roots((...))` came back as the literal inside
+    it, exactly as if the file had written that literal, and the member side of the pairing
+    silently agreed with a scope nobody declared (measured 2026-10-10, `0600c1aa`).
+    """
+    sample = tmp_path / "sample.py"
+
+    # `make_roots` may return anything, so its argument is not this declaration's value
+    sample.write_text('TREE = make_roots(("alpha", "beta"))\n', encoding="utf-8")
+    assert _declared_literal(sample, "TREE") is None
+
+    # a value that is a name is not a literal at all -- and must come back None, not raise:
+    # `ast.literal_eval` raised an uncaught `ValueError` here before this test existed
+    sample.write_text("TREE = SOME_OTHER_NAME\n", encoding="utf-8")
+    assert _declared_literal(sample, "TREE") is None
+
+    # a literal that is not a collection is not the family's scope, so it is not read as one
+    sample.write_text("TREE = 3\n", encoding="utf-8")
+    assert _declared_literal(sample, "TREE") is None
+
+    # ... and the other direction, so the refusals above are not a reading that returns None for
+    # everything: the constructors whose result *is* their argument stay readable
+    for spelling, expected in (
+        ('TREE = set({"alpha", "beta"})\n', frozenset({"alpha", "beta"})),
+        ('TREE = tuple(["alpha", "beta"])\n', ("alpha", "beta")),
+        ('TREE = ("alpha", "beta")\n', ("alpha", "beta")),
+    ):
+        sample.write_text(spelling, encoding="utf-8")
+        assert _declared_literal(sample, "TREE") == expected
 
 
 def test_one_value_refuses_a_disagreement(tmp_path):
@@ -331,6 +404,13 @@ def test_the_membership_reading_is_driven_in_both_directions(tmp_path):
     )
     (package / "declares_a_non_literal.py").write_text(
         "TREE = tuple(sorted({'emrg', 'scripts'}))\n", encoding="utf-8"
+    )
+    # ... and its twin, which the old extractor *did* resolve: an arbitrary callee handed the
+    # family's own value. Unwrapping `make_roots(...)` would put this file in `found`, so the
+    # equality below is what holds the "named builders only" rule on the sweep's own side
+    # (measured 2026-10-10: `value.args[0]` was read for *any* call).
+    (package / "declares_it_through_a_callee.py").write_text(
+        f"TREE = make_roots({family!r})\n", encoding="utf-8"
     )
     # ... and a declaration of the same value the sweep must not reach, because it sits under a
     # skipped directory. This case is the only reading that holds `SEARCH_SKIP`: without it,
