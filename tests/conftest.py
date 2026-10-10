@@ -141,10 +141,12 @@ def _redirect_the_config_path(monkeypatch, tmp_path):
 def _ensure_git_on_path(monkeypatch):
     """Make bare ``git`` subprocess calls work on hosts without PATH git.
 
-    Three tests shell out to bare ``git`` (test_cmd_crlf.py ``git ls-files``,
-    test_git_utils.py ``git rev-parse`` / ``git init``) while the product
-    code resolves git through git_utils.resolve_git_gh() (install-info cache
-    → bundled ~/.emrg/install → PATH). On packaged installs git is NOT on
+    Tests shell out to bare ``git`` (``git ls-files``, ``git rev-parse``,
+    ``git init``, ``git clone``, ...) while the product code resolves git
+    through git_utils.resolve_git_gh() (install-info cache → bundled
+    ~/.emrg/install → PATH). Named by that rule rather than by a list of
+    callers: the "Three tests" that stood here had already fallen behind them,
+    which is what a count in prose does. On packaged installs git is NOT on
     PATH, so those tests raise FileNotFoundError even though the daemon works
     (2026-08-24: 3/972 failures on a PATH-less host). When PATH has no git,
     prepend the directory of the same resolved git binary the product would
