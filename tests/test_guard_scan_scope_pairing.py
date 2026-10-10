@@ -47,13 +47,18 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: Files that declare the **roots** they walk, and the module-level name each uses. The
-#: names differ (`SCANNED_DIRS` / `SCANNED_ROOTS`), which is exactly why the pairing has to
-#: be read out of the files rather than assumed from a shared spelling.
+#: names differ (`SCANNED_DIRS` / `SCANNED_ROOTS` / `SWEPT` / `FIRST_PARTY_TREE`), which is
+#: exactly why the pairing has to be read out of the files rather than assumed from a shared
+#: spelling. Two entries arrived by this file's own membership reading rather than by hand:
+#: `tests/test_walk_skips_read_their_root.py` (found on `428cc330`) and this file's own
+#: `FIRST_PARTY_TREE`, which the reading caught as soon as it was written.
 ROOT_DECLARATIONS = {
     "scripts/check_unbound_reads.py": "SCANNED_DIRS",
     "scripts/check-undefined-names.py": "SCANNED_ROOTS",
     "tests/test_annotation_names_resolve.py": "SCANNED_ROOTS",
+    "tests/test_guard_scan_scope_pairing.py": "FIRST_PARTY_TREE",
     "tests/test_no_dead_string_statement.py": "SCANNED_DIRS",
+    "tests/test_walk_skips_read_their_root.py": "SWEPT",
 }
 
 #: Guards that declare the directories they **skip**, and the name each uses.
@@ -102,6 +107,83 @@ def _one_value(read: dict[str, object]):
         return None
     first = values[0]
     return first if all(value == first for value in values) else None
+
+
+#: Where first-party Python lives, for the two membership readings below. **Deliberately not
+#: read from `ROOT_DECLARATIONS`**: the sweep scope is the input to the question "is every
+#: declaration of the family's value a member?", so deriving it from the members would make the
+#: reading an echo -- a member dropping `packaging` would shrink the sweep with it and the
+#: reading would stay green. It coincides with the family's roots today, and #2028's measurement
+#: (2026-10-10, `428cc330`) is why it can be stated independently: every top-level directory this
+#: checkout holds Python in is one of these four.
+FIRST_PARTY_TREE = ("emrg", "scripts", "tests", "packaging")
+
+#: What a search of that tree must not descend into. A search-scope detail, **not** the family's
+#: skip set: the three that can appear inside those roots. Held by the vendored case in
+#: `test_the_membership_reading_is_driven_in_both_directions` -- until that case existed, blanking
+#: this set left every target green (measured 2026-10-10) while the tree really does hold twelve
+#: vendored `.py` files under the roots (`emrg/gui/node_modules/...`), each of them a file the
+#: sweep would otherwise read as a declaration.
+SEARCH_SKIP = {".venv", "__pycache__", "node_modules"}
+
+
+def _module_literals(path: Path) -> dict[str, object]:
+    """Every module-level `name = <literal of strings>` in `path`, by name.
+
+    The same normalisation `_declared_literal` uses -- a `frozenset({...})` / `set({...})`
+    argument, or a tuple/list literal -- so the two readings compare equal. A literal that is not
+    a collection of strings is left out rather than guessed at.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return {}
+    out: dict[str, object] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            value = node.value
+            if isinstance(value, ast.Call) and value.args:
+                value = value.args[0]
+            try:
+                literal = ast.literal_eval(value)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(literal, (tuple, list, set, frozenset)):
+                continue
+            if not all(isinstance(element, str) for element in literal):
+                continue
+            out[target.id] = literal
+    return out
+
+
+def _declaring_the_family_value(root: Path, value) -> list[str]:
+    """`file:name` for every module-level declaration under `root` equal to `value`.
+
+    The reading the membership tests below are: a guard declares its scope as one module-level
+    literal, so the declarations are compared **by value** rather than by the name they use --
+    which is the whole reason the tables are read out of the files. Element-wise comparison, so
+    a tuple, list, set or frozenset spelling all count as the same declaration.
+
+    A function of its root, so the same predicate can be driven on a tree a test builds.
+    """
+    wanted = set(value)
+    found: list[str] = []
+    for name in FIRST_PARTY_TREE:
+        base = root / name
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            if SEARCH_SKIP & set(path.relative_to(root).parts):
+                continue
+            relative = path.relative_to(root).as_posix()
+            for declared, literal in _module_literals(path).items():
+                if set(literal) == wanted:
+                    found.append(f"{relative}:{declared}")
+    return sorted(found)
 
 
 def test_the_extractor_reads_the_files_own_value(tmp_path):
@@ -161,4 +243,116 @@ def test_the_tree_reading_guards_declare_the_same_skipped_directories():
     assert _one_value(read) is not None, (
         "the scripts no longer skip the same directories: "
         + "; ".join(f"{name} -> {sorted(value)}" for name, value in read.items())
+    )
+
+
+def _membership_delta(table: dict[str, str], found: list[str]) -> tuple[list[str], list[str]]:
+    """`(joined unread, listed but not declaring it)` for a table against a tree reading."""
+    expected = {f"{relative}:{name}" for relative, name in table.items()}
+    present = set(found)
+    return sorted(present - expected), sorted(expected - present)
+
+
+def test_every_declaration_of_the_family_roots_is_a_member():
+    """The tree is read back, so a guard that joins the family cannot do it unread.
+
+    The tables above are hand-written, and the premise they encode -- a root added to one guard
+    and missed by another silences a file every existing test still passes -- holds one level up
+    if nothing reads the tree: a guard declaring the family's roots without being listed is
+    exactly that divergence, one guard later. Measured 2026-10-10 (`428cc330`), five modules
+    declared the family's roots and the table named four; the fifth was
+    `tests/test_walk_skips_read_their_root.py`, landed the day before.
+
+    The family's value is read out of the members rather than restated, so there is no second
+    copy of it free to disagree.
+    """
+    family = _one_value(_read_all(ROOT_DECLARATIONS))
+    assert family is not None, "the members disagree on their roots, so this reading has no subject"
+
+    unread, absent = _membership_delta(
+        ROOT_DECLARATIONS, _declaring_the_family_value(REPO_ROOT, family)
+    )
+    assert not unread, (
+        f"these module-level declaration(s) hold the family's own roots {family} but are not in "
+        f"ROOT_DECLARATIONS: {unread}. A guard that declares the family's scope is a member of "
+        "the pairing, or the first root added to one of them diverges here in silence -- admit "
+        "it to the table (the constant's name is part of the entry, so a differently-named "
+        "declaration is listed by its own name)."
+    )
+    assert not absent, (
+        f"ROOT_DECLARATIONS lists declaration(s) that no longer hold the family's roots: {absent}. "
+        "Either the constant moved or it was renamed: the reading follows the value."
+    )
+
+
+def test_every_declaration_of_the_family_skip_set_is_a_member():
+    """The same reading for the skip sets, which legitimately differ between guards.
+
+    This is *not* "every scan skips these directories" -- `test_no_dead_string_statement.py`'s
+    smaller set is deliberately unpinned (issue #1999) and is not asked to join. It is the weaker
+    but decidable claim: a module that skips exactly what the family skips, and declares it, is a
+    member. Consistent on this checkout today (measured 2026-10-10: four declarations, four
+    members), and the control below drives the predicate so it is not decoration.
+    """
+    family = _one_value(_read_all(SKIP_DECLARATIONS))
+    assert family is not None, "the members disagree on their skip set, so this has no subject"
+
+    unread, absent = _membership_delta(
+        SKIP_DECLARATIONS, _declaring_the_family_value(REPO_ROOT, family)
+    )
+    assert not unread, (
+        f"these module-level declaration(s) hold the family's own skip set but are not in "
+        f"SKIP_DECLARATIONS: {unread}"
+    )
+    assert not absent, (
+        f"SKIP_DECLARATIONS lists declaration(s) that no longer hold the family's skip set: "
+        f"{absent}"
+    )
+
+
+def test_the_membership_reading_is_driven_in_both_directions(tmp_path):
+    """The controls: the predicate is shown finding, and shown staying silent.
+
+    The tree is built here, so the reading is a function of the root it is pointed at rather than
+    of this checkout -- a sweep that returned the table back would pass the two tests above and
+    fail every case below.
+    """
+    family = ("emrg", "scripts", "tests", "packaging")
+    package = tmp_path / "tests"
+    package.mkdir()
+    (package / "declares_it_freshly.py").write_text(
+        f'TREE = {family!r}\n', encoding="utf-8"
+    )
+    (package / "declares_another_set.py").write_text(
+        'TREE = ("emrg", "scripts")\n', encoding="utf-8"
+    )
+    (package / "declares_it_inside_a_function.py").write_text(
+        f"def build():\n    TREE = {family!r}\n    return TREE\n", encoding="utf-8"
+    )
+    (package / "declares_a_non_literal.py").write_text(
+        "TREE = tuple(sorted({'emrg', 'scripts'}))\n", encoding="utf-8"
+    )
+    # ... and a declaration of the same value the sweep must not reach, because it sits under a
+    # skipped directory. This case is the only reading that holds `SEARCH_SKIP`: without it,
+    # blanking that set left every target green (measured 2026-10-10) while the vendored `.py`
+    # files already under the roots were being read.
+    vendored = package / "node_modules" / "vendored.py"
+    vendored.parent.mkdir()
+    vendored.write_text(f"TREE = {family!r}\n", encoding="utf-8")
+
+    found = _declaring_the_family_value(tmp_path, family)
+    # asked before the equality below, so the case that blanks `SEARCH_SKIP` fails on its own line
+    # rather than on the general one -- two arms, two assertions, each naming its own defect
+    skipped = [entry for entry in found if entry.startswith("tests/node_modules/")]
+    assert not skipped, f"the sweep read a file under a skipped directory: {skipped}"
+    assert found == ["tests/declares_it_freshly.py:TREE"], found
+
+    # ... and the other direction: a different value is not this value, so nothing is found.
+    assert _declaring_the_family_value(tmp_path, ("emrg", "scripts")) == [
+        "tests/declares_another_set.py:TREE"
+    ]
+
+    # the skip side of the same predicate, on the same tree
+    assert _declaring_the_family_value(tmp_path, family) != _declaring_the_family_value(
+        tmp_path, ("emrg",)
     )
