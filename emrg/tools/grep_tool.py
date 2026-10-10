@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, brace_alternation, count_argument
+from emrg.tools.base import ToolExecutor, brace_alternation, count_argument, relative_pattern_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +259,17 @@ class GrepTool(ToolExecutor):
             return ToolResult(
                 name="grep", content=f"Error: path not found: {root}", error=True
             )
+
+        # A filter with a root of its own is not something the walk can read at all, and
+        # the named-file branch must not answer it with a sentence whose remedy is that
+        # same unreadable walk - measured 2026-10-11 (`cyc20261011-064130`): the directory
+        # branch raised `NotImplementedError` out of the tool while the named-file branch
+        # said "pass the containing directory with this pattern", which raises too. The
+        # refusal is one sentence for both branches; see `relative_pattern_refusal`.
+        if file_glob:
+            refusal = relative_pattern_refusal("grep", file_glob)
+            if refusal is not None:
+                return refusal
 
         logger.debug(
             "grep: pattern=%r path=%s glob=%s ignore_case=%s",

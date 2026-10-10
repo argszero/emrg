@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, brace_alternation
+from emrg.tools.base import ToolExecutor, brace_alternation, relative_pattern_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,14 @@ class GlobTool(ToolExecutor):
 
         if not pattern:
             return ToolResult(name="glob", content="Error: no pattern provided", error=True)
+
+        # A pattern with a root of its own is not something this walk can read at
+        # all: pathlib refuses it before searching. Asked here, before `cwd` is even
+        # resolved, because the refusal is about the pattern rather than about the
+        # tree - the same answer for every workdir. See `relative_pattern_refusal`.
+        refusal = relative_pattern_refusal("glob", pattern)
+        if refusal is not None:
+            return refusal
 
         cwd = Path(workdir).expanduser().resolve()
         if not cwd.is_dir():

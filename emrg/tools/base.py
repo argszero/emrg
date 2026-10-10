@@ -10,8 +10,63 @@ import math
 import os
 import stat
 from abc import ABC, abstractmethod
+from pathlib import PurePath
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
+
+
+def relative_pattern_refusal(tool: str, pattern: str) -> ToolResult | None:
+    """`tool`'s answer for a pattern pathlib will not walk, or None to proceed.
+
+    pathlib's glob engine takes **relative** patterns: it parses the pattern
+    against the directory it searches and raises
+    ``NotImplementedError("Non-relative patterns are unsupported")`` when the
+    pattern carries its own root or drive. Measured 2026-10-11
+    (`cyc20261011-064130`) on master `12bb54db`, one fixture, in this checkout:
+
+        glob  pattern='/abs/*.py'                 -> NotImplementedError (out of the tool)
+        grep  path=<dir>  glob='/abs/*.py'        -> NotImplementedError (out of the tool)
+        grep  path=<file> glob='/abs/*.py'        -> answered: "… offers only its own name
+                                                     to the filter, and '/abs/*.py' names a
+                                                     directory … pass the containing
+                                                     directory with this pattern"
+
+    The third line is why this is one rule and not two: the named-file branch answers
+    with a **remedy that raises**, because the walk it points the caller at is the one
+    pathlib refuses. A caller who follows it gets
+    ``Tool execution error: Non-relative patterns are unsupported`` — the exception's
+    own string, from `daemon._run_tool_loop`'s generic handler, which names neither
+    what to write instead nor which tool refused it.
+
+    `glob` has a branch written for exactly this class — ``Error: invalid pattern`` —
+    but it catches ``(OSError, ValueError)``, and the shape those cover is ``'.'``
+    (``ValueError: Unacceptable pattern``). The case that branch is named for is the
+    one that escapes it; `grep`'s collector has no guard at all and now has two
+    branches with two different answers.
+
+    A refusal rather than a re-raise, because what the caller needs is the spelling
+    that works. The predicate is pathlib's own — the drive and root its parser looks
+    for before it refuses — and `tests/test_a_pattern_is_relative.py` pins it against
+    the engine's real behaviour in both directions, so a pattern this allows but
+    pathlib refuses (or the reverse) fails there rather than in a tool's answer.
+
+    :param tool: the tool name, which the refusal states rather than the daemon doing it.
+    :param pattern: the pattern as the caller passed it.
+    :returns: the refusal to return, or ``None`` when the pattern is relative.
+    """
+    parsed = PurePath(pattern)
+    if not (parsed.drive or parsed.root):
+        return None
+    return ToolResult(
+        name=tool,
+        content=(
+            f"Error: {pattern!r} is not a relative pattern - {tool} walks the "
+            f"directory it is given, so the pattern is parsed against that "
+            f"directory and cannot carry a root of its own. Write it relative to "
+            f"the tree being searched: '**/*.py', or 'emrg/tools/*.py'."
+        ),
+        error=True,
+    )
 
 
 def count_argument(
