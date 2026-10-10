@@ -81,7 +81,9 @@ class ReadTool(ToolExecutor):
                             f"The number of lines to read. At least 1; 0 or less is "
                             f"refused rather than read as the default. "
                             f"Only provide if the file is too large to read at once "
-                            f"(default: {DEFAULT_MAX_LINES}, max: {MAX_LINES} for explicit calls). "
+                            f"(default: {DEFAULT_MAX_LINES}, max: {MAX_LINES} for explicit "
+                            f"calls; a larger value is read as {MAX_LINES} and the reading "
+                            f"says so). "
                             f"Alias: limit."
                         ),
                     },
@@ -167,8 +169,26 @@ class ReadTool(ToolExecutor):
         # (issue #2059, measured 2026-10-10 in `cyc20261010-211559`: a 6,000-entry
         # directory answered `line_limit=1` with the same 108,112 characters and
         # 6,001 lines as a read with no arguments at all).
+        #
+        # The cap's *ceiling* is the second bound of the same declared domain, and it
+        # was the silent one: `line_limit=2001` and `line_limit=100000` were accepted
+        # and read as `MAX_LINES`, and the reading never named the value the caller
+        # sent — so 2000/2001/5000/100000 answered one byte-identical result (measured
+        # 2026-10-11, `cyc20261011-044528`, on a 3,000-line file and a 3,000-entry
+        # directory; issue #2077). This is `count_argument`'s floor rule at the
+        # ceiling: a value outside the declared domain is not answered as a different
+        # value in silence. The cap itself stays — the caller wants more content, and
+        # refusing a window larger than the tool can serve is the hostile half — so
+        # what is added is the sentence saying which limit was applied.
+        cap_note: str | None = None
         if line_limit is not None:
             effective_limit = min(line_limit, MAX_LINES)
+            if line_limit > MAX_LINES:
+                cap_note = (
+                    f"\nnote: line_limit={line_limit} is above the maximum of "
+                    f"{MAX_LINES} lines for an explicit call, so the limit applied "
+                    f"was {MAX_LINES}, not {line_limit}"
+                )
         else:
             effective_limit = DEFAULT_MAX_LINES
 
@@ -227,6 +247,8 @@ class ReadTool(ToolExecutor):
                     f"start_line_byte_offset=0 — "
                     f"total {total_entries} entries"
                 )
+            if cap_note is not None:
+                lines.append(cap_note)
             return ToolResult(name="read", content="\n".join(lines))
 
         # ── Only a regular file has lines to read ──
@@ -389,5 +411,8 @@ class ReadTool(ToolExecutor):
                 f"start_line_byte_offset=0 — "
                 f"total {total_lines} lines"
             )
+
+        if cap_note is not None:
+            result_lines.append(cap_note)
 
         return ToolResult(name="read", content="\n".join(result_lines))
