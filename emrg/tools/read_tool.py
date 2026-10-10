@@ -359,10 +359,23 @@ class ReadTool(ToolExecutor):
         for i, line in enumerate(selected):
             result_lines.append(f"{start + i + 1:6d}\t{line}")
 
+        # Reached exactly when `start_line` is past the last line: `start >= end` forces
+        # `end == total_lines`, so the `lines {start + 1}-{end}` this used to print was
+        # **always descending** — a range that cannot be a range, offered where the caller
+        # asked why nothing came back. Measured 2026-10-10 (`cyc20261010-204628`) on a
+        # 10-line file: `start_line=50` answered `(empty range: lines 50-10 of 10)` and
+        # `start_line=11` answered `(empty range: lines 11-10 of 10)`. The test that pinned
+        # it (`test_read_start_line_beyond_eof`) asserted only that the substring
+        # `empty range` appeared, so the descending range satisfied it. This branch names
+        # the condition and the two numbers it holds — the request, and the subject's size.
         if not result_lines:
+            plural = "" if total_lines == 1 else "s"
             return ToolResult(
                 name="read",
-                content=f"(empty range: lines {start + 1}-{end} of {total_lines})",
+                content=(
+                    f"(no lines: start_line={start_line} is past the end of the file, "
+                    f"which has {total_lines} line{plural})"
+                ),
             )
 
         if offset_note is not None:
