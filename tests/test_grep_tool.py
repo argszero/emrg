@@ -848,3 +848,28 @@ def test_the_glob_description_states_the_refusal_the_tool_gives(tmp_path):
     assert refused.content.startswith("Error:"), refused.content
     assert not refused.content.startswith("No matches"), refused.content
     assert "brace" in refused.content, refused.content
+def test_the_siblings_spelling_of_path_selects_the_same_tree(temp_cwd):
+    """`glob` names this parameter `workdir`; `grep` reads that spelling too (issue #2071).
+
+    Measured 2026-10-11 (`cyc20261011-015723`) on master `63ee3a54`: `grep
+    workdir=<a two-file tempdir>` searched this checkout instead and answered
+    `Found 79 matches … (searched 4796 files)` — a whole-repo scan shaped exactly like
+    an answer to the caller's question.
+
+    The fixture's own file is asserted **before** the comparison, because two readings
+    that both fell back to the cwd would compare equal as well; an equality that holds
+    for the wrong reason is not evidence that the alias works.
+    """
+    tool = GrepTool()
+    declared = _run(tool.execute({"pattern": "import", "path": str(temp_cwd)}))
+    sibling = _run(tool.execute({"pattern": "import", "workdir": str(temp_cwd)}))
+
+    assert "src/main.py" in declared.content, declared.content
+    assert not sibling.error
+    assert sibling.content == declared.content
+
+
+def test_the_path_description_names_the_spelling_the_reader_accepts():
+    """A description is read as the domain its reader enforces, so it names the alias."""
+    description = GrepTool().definition().parameters["properties"]["path"]["description"]
+    assert "`workdir`" in description, description

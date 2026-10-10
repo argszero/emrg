@@ -2741,3 +2741,94 @@ def test_the_roll_call_names_the_guard_the_gate_it_maps_actually_runs(mod) -> No
         "claims a family that does not run. A marked quotation of retired wording would be "
         "the one legitimate exception, and there is none here"
     )
+
+
+def test_the_base_re_check_answers_same_moved_and_unmeasurable(
+    mod, tmp_path: Path, monkeypatch
+) -> None:
+    """Three answers, and only one of them is "unchanged".
+
+    Pinned in both directions (#455): the arm below is the one that discriminates (a
+    helper that always returned `""` would pass a same-commit assertion alone), and the
+    third answer is pinned because it is the one a reader would most easily mistake for
+    the first - a re-fetch that fails is *unmeasured*, never "did not move".
+    """
+    repo = tmp_path / "r"
+    _init_repo(repo)
+    _write(repo, "README.md", "a\n")
+    first = _commit(repo, "one")
+    # The helper resolves refs the way the tool does - through `git` in the process cwd -
+    # so the arm has to *be* in the fixture repo, or `refs/heads/master` names this
+    # checkout's master and the first assertion fails against a repo the test never made.
+    monkeypatch.chdir(repo)
+
+    assert mod._base_moved_since("refs/heads/master", first) == ""
+
+    _write(repo, "README.md", "b\n")
+    second = _commit(repo, "two")
+    note = mod._base_moved_since("refs/heads/master", first)
+    assert "base moved during the run" in note
+    assert first[:8] in note and second[:8] in note
+
+    unmeasured = mod._base_moved_since("refs/heads/no-such-branch", first)
+    assert "could not measure" in unmeasured
+    assert "base moved during the run" not in unmeasured
+
+
+def test_a_base_that_moves_while_the_suite_runs_is_named_at_the_verdict(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """The measured defect (`cyc20261010-232808`), reproduced through `main`.
+
+    A plan run is minutes long (`--steps` is one suite per step), and a parallel cycle
+    can land one of the *planned* PRs inside it - which is what happened when a
+    three-PR plan on `2673769b` printed three healthy steps and master became
+    `029a9dd3` while it ran. The trees a `_steps` run printed were no longer what a
+    merge would produce, and nothing in the output said so.
+
+    The suite is stubbed: its own cost is not the subject here, the *interval* it
+    occupies is, and a real suite would spend minutes establishing nothing this test is
+    about. That the call reaches the re-check is what the assertion below is for - the
+    helper's own three answers are pinned by the test above.
+    """
+    repo, origin = queue
+    _branch_with(
+        repo, "feature", {"tests/test_feature.py": "def test_feature():\n    assert True\n"}
+    )
+    _publish(repo, origin, 1, "feature")
+    monkeypatch.chdir(repo)
+
+    def _stub(move: bool):
+        def fake(commit, root, keep=None):
+            if move:
+                # another cycle lands a commit on the base while the suite runs
+                _git(repo, "commit", "-q", "--allow-empty", "-m", "a sibling landed")
+            return True, "1 passed", _git(repo, "rev-parse", f"{commit}^{{tree}}"), []
+
+        return fake
+
+    # Control: the base does not move, so the verdict stands alone.
+    monkeypatch.setattr(mod, "_suite_verdict", _stub(move=False))
+    rc = mod.main(["--base", "master", "1"])
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    assert "suite OK: 1 passed" in out.out
+    assert "base moved" not in out.err and "could not measure" not in out.err
+
+    # The direction that matters: moved during the run, and the suite's rc still stands.
+    monkeypatch.setattr(mod, "_suite_verdict", _stub(move=True))
+    rc = mod.main(["--base", "master", "1"])
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    assert "base moved during the run" in out.err
+    assert "re-measure" in out.err
+
+    # And the `--steps` path, which is the shape the defect was measured on: the notice
+    # has to reach the exit of *that* path too, or the longer run is the unguarded one.
+    _git(repo, "checkout", "-q", "master")
+    monkeypatch.setattr(mod, "_suite_verdict", _stub(move=True))
+    rc = mod.main(["--base", "master", "1", "--steps"])
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    assert "every step healthy" in out.out
+    assert "base moved during the run" in out.err

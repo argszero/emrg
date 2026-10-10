@@ -341,3 +341,27 @@ def test_the_pattern_description_states_what_a_brace_pattern_gets(temp_cwd):
         f"the description says this is a literal name and is searched: {answered.content}"
     )
     assert "a{b}.py" in answered.content, answered.content
+def test_the_siblings_spelling_of_workdir_selects_the_same_tree(temp_cwd):
+    """`grep` names this parameter `path`; `glob` reads that spelling too (issue #2071).
+
+    Measured 2026-10-11 (`cyc20261011-015723`) on master `63ee3a54`: `glob
+    path=<a two-file tempdir>` fell back to the cwd and answered `No files matched
+    pattern '*.py' in <this checkout>` — the tree the caller named was never searched.
+
+    The fixture's own file is asserted **before** the comparison, because two readings
+    that both fell back to the cwd would compare equal as well; an equality that holds
+    for the wrong reason is not evidence that the alias works.
+    """
+    tool = GlobTool()
+    declared = _run(tool.execute({"pattern": "**/*.py", "workdir": str(temp_cwd)}))
+    sibling = _run(tool.execute({"pattern": "**/*.py", "path": str(temp_cwd)}))
+
+    assert "test_main.py" in declared.content, declared.content
+    assert not sibling.error
+    assert sibling.content == declared.content
+
+
+def test_the_workdir_description_names_the_spelling_the_reader_accepts():
+    """A description is read as the domain its reader enforces, so it names the alias."""
+    description = GlobTool().definition().parameters["properties"]["workdir"]["description"]
+    assert "`path`" in description, description

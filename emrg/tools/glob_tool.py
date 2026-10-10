@@ -58,7 +58,9 @@ class GlobTool(ToolExecutor):
                             "Working directory for the pattern (default: project root). "
                             "The hidden/noise skipping is relative to it, so point it at "
                             "the directory you mean to search — that is how to read "
-                            "inside a skipped one."
+                            "inside a skipped one. `grep` names this same parameter "
+                            "`path`; this tool reads that spelling too, so a call "
+                            "naming either one searches the tree it named."
                         ),
                     },
                     "intent": {
@@ -73,7 +75,15 @@ class GlobTool(ToolExecutor):
 
     async def execute(self, arguments: dict) -> ToolResult:
         pattern = arguments.get("pattern", "")
-        workdir = arguments.get("workdir") or "."
+        # `workdir` is this tool's declared spelling; `path` is the name the sibling
+        # `grep` uses for the same parameter, and a caller who has just used one tool
+        # reaches for the other's name. Neither used to read the other's, so the call
+        # fell back to the cwd and answered about a tree the caller never named —
+        # measured 2026-10-11 (`cyc20261011-015723`) on master `63ee3a54`, where
+        # `glob path=<tmpdir>` reported `No files matched pattern '*.py' in <this
+        # checkout>`. The alias convention is `count_argument`'s — `read` reads
+        # `line_limit` and `limit`.
+        workdir = arguments.get("workdir") or arguments.get("path") or "."
 
         if not pattern:
             return ToolResult(name="glob", content="Error: no pattern provided", error=True)

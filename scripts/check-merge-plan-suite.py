@@ -519,6 +519,48 @@ def _tree_of(commit: str, what: str) -> str:
     return proc.stdout.strip()
 
 
+def _base_moved_since(base_ref: str, base: str) -> str:
+    """Re-read the base after the suites have run; "" when it is still the same commit.
+
+    A plan is measured *onto* a base, and this tool named that base once, at the start.
+    The measurement is not cheap - one suite run for the final tree, one per step with
+    `--steps` (~4-5 minutes each, measured on this repo) - so the base can move *inside*
+    the run, and the verdict line that follows ("every step healthy") then describes a
+    base that no longer exists. Measured 2026-10-10 (`cyc20261010-232808`): a three-PR
+    `--steps` plan on `2673769b` printed three healthy steps over ~14 minutes, and a
+    parallel cycle landed one of the *planned* PRs while it ran (master became
+    `029a9dd3`). The first signal a reader got was a **downstream** refusal - the vote
+    instrument declined a body naming step 1's tree, because the merge would have landed
+    a different one - which is the reading this re-check gives at the point the verdict
+    is printed instead.
+
+    The question is asked of the ref, not of the SHA: only a remote-tracking ref can
+    have moved (a SHA is immutable by construction), so this re-fetches through the
+    sibling that owns that rule and resolves the name again - the same two calls `main`
+    makes at the start, for the same reason.
+
+    Three answers, and they are distinct: the same commit (no line at all), a different
+    commit (the notice below), and *could not measure* - a re-fetch that fails must not
+    be rendered as "unchanged", because that is exactly the claim nobody checked.
+    """
+    try:
+        seq._refresh_base(base_ref)
+        now = _rev_parse(base_ref)
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasured, never as unchanged
+        return (
+            f"base re-check: could not measure whether {base_ref} moved during the run "
+            f"({exc}) - the reading above is about {base[:8]}, as it stood when the run "
+            "started"
+        )
+    if now == base:
+        return ""
+    return (
+        f"base moved during the run: {base_ref} is now {now[:8]}, not the {base[:8]} the "
+        "tree(s) above were built on - those trees are no longer what a merge would "
+        "produce, so re-measure before voting on or landing any step"
+    )
+
+
 def _open_pr_numbers(repo: str) -> list[int]:
     """The open PR numbers, ascending - the default subject of the check."""
     proc = _run(
@@ -1446,6 +1488,19 @@ def main(argv: list[str] | None = None) -> int:
         # not master is how the wrong-tree defect stays invisible.
         print(f"base {base[:8]} ({base_ref}), {len(numbers)} PR(s) planned")
 
+        def _verdict(rc: int) -> int:
+            """A suite verdict leaves through here, after the base it was measured on is re-read.
+
+            One exit for every path that has run a suite, so the re-check cannot be
+            forgotten on one of them: the notice goes to stderr, beside the verdict, and
+            does not move `rc` - the trees above were really measured, and it is their
+            *applicability* that moved. See `_base_moved_since` for the measurement.
+            """
+            note = _base_moved_since(base_ref, base)
+            if note:
+                print(note, file=sys.stderr)
+            return rc
+
         try:
             tip = build_plan_tip(base, heads)
         except PlanConflict as exc:
@@ -1463,7 +1518,7 @@ def main(argv: list[str] | None = None) -> int:
 
         print("plan: " + " -> ".join(f"#{number}" for number, _ in heads))
         if args.steps:
-            return _judge_every_step(base, heads)
+            return _verdict(_judge_every_step(base, heads))
         # Both are filled only when the final tree is red, and both are read only on that
         # path: a green run has no ownership question to answer.
         base_tree = ""
@@ -1498,7 +1553,7 @@ def main(argv: list[str] | None = None) -> int:
             _kept_note(keep, tree_sha)
         if passed:
             print(f"suite OK: {summary}")
-            return 0
+            return _verdict(0)
         print(f"suite FAILED: {summary}")
         if not failing:
             print(
@@ -1507,13 +1562,13 @@ def main(argv: list[str] | None = None) -> int:
                 "suite verbosely (-v) to get the row, or compare the two trees by hand.",
                 file=sys.stderr,
             )
-            return 1
+            return _verdict(1)
         plan_text, base_text = _ownership_lines(base_tree, failing, inherited)
         if plan_text:
             print(plan_text, file=sys.stderr)
         if base_text:
             print(base_text, file=sys.stderr)
-        return 1
+        return _verdict(1)
     except MeasurementError as exc:
         # Reached by everything that can fail before the suite does - the base, the
         # open-PR listing, and any fetch. The inner `except` clauses keep their own

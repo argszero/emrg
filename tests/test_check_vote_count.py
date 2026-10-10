@@ -521,6 +521,119 @@ def test_the_blocked_reason_names_the_conflict_and_not_more_review(mod, monkeypa
     )
 
 
+def test_a_head_held_by_a_check_still_running_is_told_to_wait_not_to_push(
+    mod, monkeypatch, capsys
+):
+    """The measured defect: the remedy printed for *every* blocked row inverted this one.
+
+    Measured 2026-10-11 (`cyc20261011-002826`) on the live repo: both open PRs read
+    `MERGEABLE`/`UNSTABLE` with every check-run still `pending`, which is R4's `park`
+    shape - nothing to do but read the row again next cycle. The report ended both rows
+    with "the branch or the pull request has to be made mergeable first", which reads
+    as an instruction to push, and the push it invites publishes a new head and voids
+    every vote standing on it - the sentence printed directly after that one warns
+    about exactly that push, so the output contradicted itself.
+
+    Asserted in both directions: the run-that-has-not-finished cure names waiting, and
+    the universal sentence is gone from this shape.
+    """
+    fake = FakeGh(
+        _three_votes(),
+        mergeable="MERGEABLE",
+        merge_state="UNSTABLE",
+        checks=[
+            _check("test", "", status="in_progress"),
+            _check("test-windows", "", status="queued"),
+        ],
+    )
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "has not concluded" in err, "the cure must name the run that has not finished"
+    assert "push would void every vote standing on this one" in err
+    assert "made mergeable first" not in err, (
+        "waiting for a run needs no mergeable branch, and the sentence reads as an "
+        "instruction to push"
+    )
+
+
+def test_a_draft_is_not_told_that_the_branch_has_to_be_made_mergeable(
+    mod, monkeypatch, capsys
+):
+    """The other direction, on a state that also clears without publishing a commit.
+
+    A draft is not a mergeability question: no vote can merge it and no push helps, so
+    the cure names marking it ready. Pinned so a per-cause table that collapsed every
+    state back onto the old sentence would be caught even if the pending-check case
+    stayed fixed.
+    """
+    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="DRAFT")
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "mark it ready" in err
+    assert "made mergeable first" not in err
+    assert "voids every vote" not in err, (
+        "marking a draft ready publishes no commit, so no vote is at risk"
+    )
+
+
+def test_every_blocking_shape_prints_a_cure_that_names_its_own_remedy(
+    mod, monkeypatch, capsys
+):
+    """The invariant behind the per-cause table: no blocking row without a remedy.
+
+    Looped over the shapes `blocked` can be true from, because the defect was never a
+    wrong state - it was one sentence printed for states that do not share a cure. A
+    shape added to `blocked` later without one here prints the fallback, which says
+    "made mergeable first" and is therefore a sentence a reader can notice is missing
+    its own case. Each iteration also asserts the reason, so a cause whose reading
+    broke cannot pass by way of the cure.
+    """
+    cases = [
+        ("conflict", dict(mergeable="CONFLICTING", merge_state="DIRTY"), "resolve"),
+        ("behind", dict(mergeable="MERGEABLE", merge_state="BEHIND"), "refreshed"),
+        ("review required", dict(mergeable="MERGEABLE", merge_state="BLOCKED"), "review"),
+        ("draft", dict(mergeable="MERGEABLE", merge_state="DRAFT"), "ready"),
+        (
+            "check running",
+            dict(
+                mergeable="MERGEABLE",
+                merge_state="UNSTABLE",
+                checks=[_check("test", "", status="in_progress")],
+            ),
+            "run finishes",
+        ),
+        (
+            "check red",
+            dict(
+                mergeable="MERGEABLE",
+                merge_state="UNSTABLE",
+                checks=[_check("test", "failure")],
+            ),
+            "re-running the workflow",
+        ),
+        (
+            # The list was read and held nothing, so no check-run can be named as the
+            # cause: the cure must not invent one ("a check concluded red") and must
+            # not fall through to the push sentence.
+            "no check-run listed",
+            dict(mergeable="MERGEABLE", merge_state="UNSTABLE", checks=[]),
+            "came back empty",
+        ),
+        ("no ci run", dict(mergeable="MERGEABLE", merge_state="CLEAN", exact=False), "re-trigger"),
+    ]
+    for name, kwargs, remedy in cases:
+        fake = FakeGh(_three_votes(), **kwargs)
+        rc = _run(mod, monkeypatch, fake)
+        err = capsys.readouterr().err
+        assert rc == 1, f"{name} must block"
+        assert remedy in err, f"the cure for {name} must name {remedy}"
+        assert "has to be made mergeable first" not in err, (
+            f"{name} must not fall through to the universal sentence"
+        )
+
+
 def test_a_pr_that_is_both_short_and_conflicting_is_reported_as_blocked(mod, monkeypatch, capsys):
     """Blocked wins the headline, and the output says why the votes do not matter yet.
 
