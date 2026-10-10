@@ -621,11 +621,16 @@ class BashToolV2(ToolExecutor):
                 "Execute a shell command and return stdout and stderr. "
                 "Use for running tests, git commands, listing files, "
                 "installing packages, and other shell operations. The command "
-                "runs under `bash -c`. Non-zero exits are reported as "
+                "runs under `bash -c`. Each call is a fresh process — no "
+                "state (working directory, variables, functions) persists "
+                "between calls, so pass `workdir` instead of using `cd`. "
+                "Non-zero exits are reported as "
                 "`[exit code: N]`. The kernel confines it to the session's "
                 "working directory: writes outside it (and outside the OS temp "
                 "area) are refused whatever language or subprocess attempts "
-                "them."
+                "them, and the run is reported as a sandbox denial "
+                "(`[sandbox: file access denied under <mode> mode]`) — the "
+                "policy, not a bug in the command, so do not retry another way."
             ),
             parameters={
                 "type": "object",
