@@ -9,13 +9,16 @@ their four with the same sentence -- *every top-level directory this checkout ho
 one of these four* -- and neither holds it: a fifth package arrives swept by nobody, and both
 sweeps stay green while no reading covers it.
 
-The claim's subject is the **index**, not the disk, and that is measured rather than assumed. On
-this checkout the disk holds Python in six top-level directories: the four, plus `.emrg/` (39
-throwaway scripts under a session's `tmp/`) and `dist/` (build output). Both are gitignored, so a
-reading built on a directory walk reports packages this repo does not have and reds on a working
-tree that is clean. `git ls-files` names exactly the four, and a fifth package arrives *tracked*
--- the same reasoning `tests/test_documented_scripts_exist.py` gives for reading the index rather
-than the tree.
+The claim's subject is the **index**, not the disk. A disk walk would be red on a clean checkout: a
+gitignored tree holds throwaway Python -- a session's `tmp/`, build output -- that the index does
+not, and both *whether* such a tree exists and how much it holds are functions of what some cycle
+happens to be doing. So this paragraph names the rule and leaves the enumeration to the control
+below, which builds both cases and asserts them: `git ls-files` names exactly the four, and a fifth
+package arrives *tracked* -- the same reasoning `tests/test_documented_scripts_exist.py` gives for
+reading the index rather than the tree. (The counts that stood here -- a directory total and a
+throwaway-script tally -- were the class this repository forbids: *a derived number is never written
+where a guard can measure it*. Measured 2026-10-10, they were already false, and differently on each
+host that read them, which is the rot such a sentence is guaranteed to suffer.)
 
 The reading is driven in both directions below: the control builds a scratch repo where a
 gitignored directory holds Python (which must not be counted) and a fifth tracked package holds
