@@ -30,6 +30,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Optional
 
+# The "is this path a regular file" rule is the tool layer's (`special_file_kind`, a
+# whitelist of `S_ISREG`), reached at a path rather than at a mode. Imported rather than
+# restated: the boundary is one fact, and a second spelling of it is a second boundary
+# that can drift. `emrg.tools.base` imports only `emrg.server.tool_types`, so this adds
+# no cycle — measured by importing this module from a fresh interpreter.
+from emrg.tools.base import non_regular_kind
+
 logger = logging.getLogger(__name__)
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -242,6 +249,24 @@ def is_index_row(line: str) -> bool:
 # accepts any `## <valid type>` heading; this only decides where new rows file.
 INDEX_TYPE_ORDER = ("user", "feedback", "project", "reference", "decision", "task")
 
+
+class NotARegularFile(OSError):
+    """A memory path whose kind rules out reading it, raised instead of opened.
+
+    An **open is not a read**: on a FIFO it blocks until a writer appears, on a socket
+    until a connection does, and a device never ends. ``from_file`` opened its subject
+    without asking, and its callers' ``except (OSError, ValueError)`` cannot bound the
+    consequence — nothing is raised, the call simply never returns, and it runs inside a
+    coroutine the daemon awaits on its event loop, so the block is the whole daemon.
+
+    An ``OSError`` on purpose: that is what every caller of ``from_file`` already handles,
+    and it is what a *directory* already produced here (``IsADirectoryError``), which is
+    the same answer one kind over. Naming the kind in the class rather than only in the
+    message matters because `_scan` renders ``type(exc).__name__`` beside the file, and
+    ``OSError`` there would name nothing.
+    """
+
+
 # ── MemoryFile ─────────────────────────────────────────────────────
 
 
@@ -300,9 +325,32 @@ class MemoryFile:
 
     @classmethod
     def from_file(cls, path: Path) -> MemoryFile:
-        """Parse a memory file from disk."""
+        """Parse a memory file from disk.
+
+        The subject's **kind** is asked before it is opened, because opening it is what
+        decides whether this call returns at all (`NotARegularFile`). Measured
+        2026-10-11 on master `63ee3a54`, one fixture (a named pipe beside a regular
+        memory), each call in its own process under a parent's 8 s cap:
+        ``ProjectMemoryStore.list()`` **did not return**, while the same fixture without
+        the pipe returned in 0.00 s. Two client frames walk this reader — `list_memories`
+        and `read_memory` — and the directory is the agent's own workspace, so anything
+        running there can put a pipe in it.
+
+        Every reader in this module comes through here, which is why the guard is one
+        site rather than one per walker: `_scan`, `list`, `_rebuild_index`, `update`,
+        `merge`, `promote_to_project`, `get_by_filename`, `_resolve_filename`.
+        """
         if not path.exists():
             raise FileNotFoundError(f"Memory file not found: {path}")
+        kind = non_regular_kind(path)
+        if kind:
+            raise NotARegularFile(
+                f"{path} is {kind}, not a regular file. This reader opens its subject "
+                f"directly, and opening this one blocks until a peer appears — a FIFO "
+                f"waits for a writer, a socket for a connection, a device never ends — "
+                f"so the call would never return, and neither would the daemon, which "
+                f"runs its readers on its event loop."
+            )
         content = path.read_text(encoding="utf-8")
         return cls.from_text(content, _filename=path.name)
 

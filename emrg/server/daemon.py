@@ -3813,20 +3813,45 @@ class EmrgServer:
     def _inject_tool_arguments(tc_name: str, args: dict, session, req: TaskRequest) -> None:
         """Inject the parts of a tool call the model must not choose.
 
-        Two rules, and both exist because the value decides a boundary rather
-        than a preference:
+        Three rules. The first two are one fact — the session's cwd is where a
+        filesystem tool works — split by what the value decides for that tool: a
+        boundary (pinned) or a preference (a default). The third is the tier.
 
-        * **the session's cwd is where a filesystem tool works.** Injected
-          unconditionally, exactly as ``write``/``edit`` receive ``workspace``,
-          so the value a command runs in and the value it may write under are one
-          identity rather than two (host ruling 2026-09-21 16:46). It used to be
-          injected only when the model had not supplied ``workdir`` — and with
-          that ``and "workdir" not in args`` the model could name the root it was
+        * **the session's cwd is where a filesystem tool works — for the tools
+          that run a command.** Injected unconditionally into the shell tools,
+          exactly as ``write``/``edit`` receive ``workspace``, so the value a
+          command runs in and the value it may write under are one identity rather
+          than two (host ruling 2026-09-21 16:46). It used to be injected only
+          when the model had not supplied ``workdir`` — and with that
+          ``and "workdir" not in args`` the model could name the root it was
           trusted in: measured, ``workdir=/Users/<host>`` plus a write to
           ``.zshrc`` was allowed, because the whole home directory became "the
           workspace" (design §2.4). A sandbox that takes its authorization root
           from the agent is not a sandbox, so this is one ``and`` fixing the root
           cause rather than a new concept.
+        * **the read-only discovery tools take it as a default.** Neither runs a
+          command nor writes a file, so their directory decides a preference
+          rather than a boundary — and both schemas say so ("default: project
+          root"). ``grep`` has been written that way from the start; ``glob`` was
+          not, and its pinning was never decided: it shared the shell branch by
+          adjacency, so when the guard above was dropped from that one shared line
+          ``glob`` lost the ``and "workdir" not in args`` it had alongside
+          ``bash`` (measured 2026-10-11, ``cyc20261011-023918``: a caller that
+          scoped a glob with ``workdir=<dir>`` was answered about the session
+          root, in the shape of a real answer — the file names and the "no files
+          matched" summary both read as true of the wrong tree).
+          **The caller naming the directory is read in either dialect**, because
+          the two tools name that one parameter differently — ``glob`` declares
+          ``workdir``, ``grep`` declares ``path`` — and a caller who has just used
+          one reaches for the other's name. With only the declared spelling
+          checked here, this default silently overwrote the sibling's: measured
+          the same cycle, ``grep workdir=<dir>`` was answered about the session
+          cwd on 12 matches where the caller's two-file directory holds 2, and
+          ``glob path=<dir>`` likewise. The tools accept either spelling
+          (``_selects``'s sibling, PR #2072), so this rule has to as well, or the
+          alias is dead in the daemon path — the shape ``tests/
+          test_shell_tool_mount.py`` now pins by driving this method and then the
+          tool rather than asserting the argument dict alone.
         * **the sandbox tier is the task's, not the agent's** (rant
           2026-08-20T15:46:50). ``write``/``edit`` also receive it, together with
           the workspace boundary, so that under read-only they cannot clobber the
@@ -3851,9 +3876,21 @@ class EmrgServer:
         :param req: the request carrying the task's configured tier.
         """
         cwd = str(session.cwd)
-        if tc_name in SHELL_TOOL_NAMES or tc_name == "glob":
+        # Two classes, and what separates them is what the value decides. A shell
+        # tool runs in this directory and may write under it, so the model cannot
+        # name it; a read-only discovery tool does neither, so its directory is a
+        # preference the caller may set and this is only the default.
+        #
+        # "The caller set it" is read in **either dialect**: `glob` declares
+        # `workdir` and `grep` declares `path`, and the tools accept either
+        # spelling (PR #2072). Checking only the declared key here re-created the
+        # defect the alias exists to fix — the default landed in the key the tool
+        # reads first and the caller's sibling-spelled directory was ignored.
+        if tc_name in SHELL_TOOL_NAMES:
             args["workdir"] = cwd
-        elif tc_name == "grep" and "path" not in args:
+        elif tc_name == "glob" and "workdir" not in args and "path" not in args:
+            args["workdir"] = cwd
+        elif tc_name == "grep" and "path" not in args and "workdir" not in args:
             args["path"] = cwd
         if tc_name in SHELL_TOOL_NAMES | {"write", "edit"} and req.sandbox:
             args["sandbox"] = req.sandbox

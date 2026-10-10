@@ -1,10 +1,11 @@
 """Tests for the tool base class."""
 
+import os
 import stat
 
 import pytest
 
-from emrg.tools.base import ToolExecutor, special_file_kind
+from emrg.tools.base import ToolExecutor, non_regular_kind, special_file_kind
 
 
 def test_tool_executor_is_abstract():
@@ -72,3 +73,45 @@ def test_special_file_kind_ignores_permission_bits():
     """Only the type bits decide; a read-only or world-writable regular file is regular."""
     for perms in (0o000, 0o400, 0o444, 0o777):
         assert special_file_kind(stat.S_IFREG | perms) is None
+
+
+# ── `non_regular_kind`: the same rule, at a path ──
+#
+# A tool holds its subject's mode already; a *reader* handed a path does not. The memory
+# store's reader (issue #2075) and the daemon's (`#2073`) are both readers, so the
+# whitelist is reached at a path rather than restated per layer. These pin the stat's
+# fields of view — what it follows, and what it raises for a path that is not there.
+
+
+def test_non_regular_kind_is_none_for_a_regular_file(tmp_path):
+    """The ordinary subject: the caller opens it, and `None` is the licence to."""
+    regular = tmp_path / "notes.md"
+    regular.write_text("hello\n", encoding="utf-8")
+    assert non_regular_kind(regular) is None
+
+
+def test_non_regular_kind_names_a_directory(tmp_path):
+    """A mode built from `S_IF*` is not needed here — a real directory carries one."""
+    assert non_regular_kind(tmp_path) == "a directory"
+
+
+def test_non_regular_kind_raises_for_a_path_that_is_not_there(tmp_path):
+    """Missing is the callers' other answer, and it stays an exception rather than a noun."""
+    with pytest.raises(FileNotFoundError):
+        non_regular_kind(tmp_path / "absent.md")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_non_regular_kind_judges_a_symlink_by_what_will_be_opened(tmp_path):
+    """`os.stat` follows the link, so a link to a pipe is a pipe.
+
+    Stated because the decision is the stat's and not the spelling's: opening the link
+    opens the pipe, so a predicate that judged the link itself would license the open it
+    exists to refuse.
+    """
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    link = tmp_path / "link.md"
+    link.symlink_to(fifo)
+    assert non_regular_kind(link) == "a FIFO (named pipe)"
+    assert non_regular_kind(fifo) == "a FIFO (named pipe)"
