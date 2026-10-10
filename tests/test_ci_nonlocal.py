@@ -241,6 +241,102 @@ class TestEndToEnd:
         assert rc == 0
 
 
+GUARDED = ("handle_key", "read_server", "_on_sigwinch", "_run_elapsed_timer")
+
+
+def _run_in_process(app_py: Path, capsys) -> tuple[int, str, str]:
+    """`check_nonlocal()` on a file, with its two streams captured - rc in, text out."""
+    rc = check_nonlocal.check_nonlocal(str(app_py))
+    captured = capsys.readouterr()
+    return rc, captured.out, captured.err
+
+
+def _named_in_coverage(out: str) -> list[str]:
+    """The functions the `OK` line says were checked, in order.
+
+    Compared as the **whole payload** rather than by membership: a line that names a
+    function it did not check is the same defect as one that omits the functions it did,
+    and a membership assertion passes on both (found by a mutation arm, cycle
+    `cyc20261010-173239`: prefixing the payload was green until this read it exactly).
+    """
+    assert "inner functions checked:" in out, f"the OK line names no coverage at all:\n{out}"
+    payload = out.split("inner functions checked:", 1)[1].strip()
+    assert payload.endswith(")"), f"the coverage payload is not closed:\n{out}"
+    return [name.strip() for name in payload[:-1].split(",") if name.strip()]
+
+
+class TestTheReadingNamesWhatItChecked:
+    """Issue #2047 (cycle `cyc20261010-173239`).
+
+    This check is a reading **over the inner functions of `interactive`**, and it held two
+    silences about them: it refused when `interactive` itself was renamed away (the
+    2026-09-11 worktree defect) but printed a clean `OK: nonlocal integrity check passed`
+    when *none* of the four functions it guards was there — a reading over an empty set, the
+    family's "an empty tree is not a clean reading" (issue #1872) — and its `OK` line named
+    none of them, so a rename that moved one out of `interactive` shrank the coverage while
+    the output stayed byte-identical.
+    """
+
+    def test_an_interactive_with_none_of_the_guarded_functions_is_not_a_pass(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The empty subject: `interactive` present, all four guarded functions gone."""
+        app_py = tmp_path / "app.py"
+        app_py.write_text(
+            "async def interactive():\n    x = 1\n    return x\n", encoding="utf-8"
+        )
+        rc, out, err = _run_in_process(app_py, capsys)
+        assert rc == 2, f"rc={rc}\nstdout: {out}\nstderr: {err}"
+        assert "OK:" not in out, out
+        # the refusal names all four, so a reader knows what it looked for and did not find
+        for name in GUARDED:
+            assert name in err, f"{name} not named in the refusal:\n{err}"
+        assert "checked" in err and "none was" in err, err
+
+    def test_adding_one_guarded_function_back_flips_the_reading(self, tmp_path: Path, capsys) -> None:
+        """The control: the refusal is about the subject, not an unconditional rc 2.
+
+        The same file with `handle_key` restored must pass **and** name exactly that one —
+        the second half is what makes the coverage line a reading rather than a constant.
+        """
+        app_py = tmp_path / "app.py"
+        app_py.write_text(textwrap.dedent("""\
+            async def interactive():
+                state_var = False
+
+                async def handle_key(data):
+                    nonlocal state_var
+                    state_var = True
+        """), encoding="utf-8")
+        rc, out, err = _run_in_process(app_py, capsys)
+        assert rc == 0, f"rc={rc}\nstdout: {out}\nstderr: {err}"
+        assert _named_in_coverage(out) == ["handle_key"], out
+
+    def test_the_ok_line_names_the_guarded_functions_this_tree_really_has(self, capsys) -> None:
+        """On the live tree: the named set is derived from the AST, not from the code path.
+
+        Read back from `emrg/client/app.py` itself — the inner functions of `interactive`
+        that are in the guarded set — so the assertion fails on a constant, on an unguarded
+        helper being named, and on a name being added that the guard did not check.
+        """
+        tree = ast.parse((check_nonlocal.REPO_ROOT / check_nonlocal.TARGET).read_text(encoding="utf-8"))
+        interactive = check_nonlocal._find_interactive_body(tree)
+        assert interactive is not None, "no `interactive` in the live app.py"
+        present = {n.name for n in interactive.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        expected = [name for name in GUARDED if name in present]
+        assert expected, (
+            "the live app.py holds none of the guarded inner functions, so this reading has "
+            "no subject — and the guard's own new branch should be refusing it"
+        )
+
+        rc, out, err = _run_in_process(check_nonlocal.REPO_ROOT / check_nonlocal.TARGET, capsys)
+        assert rc == 0, f"rc={rc}\nstdout: {out}\nstderr: {err}"
+        assert _named_in_coverage(out) == expected, (
+            f"the OK line's coverage is not this tree's reading "
+            f"(expected {expected}):\n{out}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Which tree does the check inspect?
 #
