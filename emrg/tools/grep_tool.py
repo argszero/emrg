@@ -86,7 +86,10 @@ class GrepTool(ToolExecutor):
                             "pattern per call, or a regex-ish alternation is not "
                             "available here. A named file is filtered too: if the "
                             "path is one file and it does not match, nothing is "
-                            "searched and the summary says so."
+                            "searched and the summary says so. A brace-alternation "
+                            "filter that selects nothing is refused with that reason "
+                            "rather than searched to `No matches` - which is why the "
+                            "refusal names the pattern, not the tree."
                         ),
                     },
                     "ignore_case": {

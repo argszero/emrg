@@ -306,3 +306,38 @@ def test_a_literal_brace_name_is_searched_not_refused(temp_cwd):
         f"between nothing, so this is not alternation: {missing.content}"
     )
     assert "No files matched" in missing.content, missing.content
+
+
+def test_the_pattern_description_states_what_a_brace_pattern_gets(temp_cwd):
+    """`glob`'s description now describes two behaviors, so both are read from it.
+
+    A description is the behaviour's second home, and the pair drifts in both directions: a
+    description that promises a refusal an unread pattern never gets, and a refusal whose
+    description does not mention it, are one defect seen from two sides. Both clauses are
+    asserted here — the refusal, and the literal name that keeps being searched — because
+    each alone is satisfied by a description that is wrong about the other.
+    """
+    param = GlobTool().definition().parameters["properties"]["pattern"]["description"]
+    assert "refused with that reason" in param, (
+        f"the description no longer says what an unreadable pattern gets: {param}"
+    )
+    assert "still searched" in param, (
+        f"the description no longer says a literal brace name is a real name: {param}"
+    )
+
+    refused = _run(GlobTool().execute({"pattern": "*.{py,rs}", "workdir": str(temp_cwd)}))
+    assert refused.error, refused.content
+    assert refused.content.startswith("Error:"), refused.content
+    assert not refused.content.startswith("No files matched"), refused.content
+    # "with that reason" is a clause of the description, so the reason is read too: a
+    # refusal that does not name the pattern would leave the caller with an error and no
+    # remedy, which is the promise the rest of the sentence makes.
+    assert "brace" in refused.content, refused.content
+
+    literal = temp_cwd / "a{b}.py"
+    literal.write_text("")
+    answered = _run(GlobTool().execute({"pattern": "a{b}.py", "workdir": str(temp_cwd)}))
+    assert not answered.error, (
+        f"the description says this is a literal name and is searched: {answered.content}"
+    )
+    assert "a{b}.py" in answered.content, answered.content

@@ -44,7 +44,12 @@ class GlobTool(ToolExecutor):
                         "description": (
                             "Glob pattern relative to the project root. "
                             "Examples: '**/*.py', 'src/**/*.rs', '**/*test*.py', "
-                            "'*.md', 'emrg/tools/*.py'"
+                            "'*.md', 'emrg/tools/*.py'. The walk does not expand "
+                            "`{a,b}` brace alternation, and a pattern that carries one "
+                            "and selects nothing is refused with that reason rather "
+                            "than answered `No files matched` - pass one pattern per "
+                            "call. A name that really contains a brace is a literal "
+                            "name here and is still searched."
                         ),
                     },
                     "workdir": {

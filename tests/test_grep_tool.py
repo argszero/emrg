@@ -817,3 +817,34 @@ def test_a_literal_brace_name_in_the_filter_selects_its_file(tmp_path):
         f"failure the caller would fix by looking at the file: {named_unreadable.content}"
     )
     assert "brace" in named_unreadable.content, named_unreadable.content
+
+
+def test_the_glob_description_states_the_refusal_the_tool_gives(tmp_path):
+    """The description is the behaviour's second home, so a refusal it does not mention
+    is a surprise the caller could have been spared.
+
+    Both halves in one test, because either alone is satisfied by a wrong rule: a
+    description that promises a refusal an unread filter never gives, and a refusal whose
+    description says nothing about it, are the two ways this pair drifts apart. The
+    repository's own shape for that is `test_read_never_cuts_a_line` — a promise in a tool
+    description that no test holds is how a claim survives review.
+    """
+    param = GrepTool().definition().parameters["properties"]["glob"]["description"]
+    assert "brace-alternation" in param and "refused with that reason" in param, (
+        f"the description no longer says what an unreadable filter gets: {param}"
+    )
+
+    (tmp_path / "main.py").write_text("needle\n")
+    refused = _run(GrepTool().execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "*.{py,rs}",
+    }))
+    assert refused.error, (
+        f"the description says this is refused, and it was searched instead: {refused.content}"
+    )
+    # The description's second clause — "rather than searched to `No matches`" — is the
+    # half that matters on its own: an empty reading beside an explanation is what this
+    # whole PR exists to remove. The refusal *quotes* that sentence while refusing it, so
+    # the reading is the answer's own opening, not a substring.
+    assert refused.content.startswith("Error:"), refused.content
+    assert not refused.content.startswith("No matches"), refused.content
+    assert "brace" in refused.content, refused.content
