@@ -88,14 +88,25 @@ def _declared_names(node: ast.AST) -> list[tuple[str, ast.expr]]:
     class is data a third reading can check, which is the same reason the scope tables are read out
     of the files rather than restated. A tuple target (`A, B = ...`) declares no single name.
 
-    The class is `Assign`, deliberately: the annotated spelling (`TREE: tuple = (...)`) is a
-    **different** blindness of this extractor -- and a loud one, since a declaration it cannot
-    read comes back as "moved or renamed" and fails the scan-roots pairing below rather than
-    certifying a scope -- so it is left to its own change rather than folded in here.
+    Both assignment kinds are read -- `Assign` and the annotated `AnnAssign` -- because a
+    declaration's *kind* does not change what it declares: `TREE: tuple = (...)` binds the same
+    value `TREE = (...)` does. A target that is not a plain name (an attribute or a subscript)
+    declares no module-level constant of this class and is not read.
+
+    The annotated spelling was once excluded, on the reading that a declaration this extractor
+    cannot read at least fails **loudly** (the name comes back as "moved or renamed" and the
+    scan-roots pairing refuses). Measured 2026-10-10 on `cde96007`: that is true of exactly **one**
+    of the two readers. `_declared_literal` returns None for it, which the pairing reports as a
+    missing member -- loud. But `_module_literals` **omits** it, so the membership sweep does not
+    see the file at all and certifies silence: a guard that joins the family with
+    `SCANNED_ROOTS: tuple = (...)` and is not in the table was found by nothing, which is the same
+    defect #2030 added that sweep to catch, one spelling later. Both sides now read it.
     """
-    if not isinstance(node, ast.Assign):
-        return []
-    return [(target.id, node.value) for target in node.targets if isinstance(target, ast.Name)]
+    if isinstance(node, ast.Assign):
+        return [(target.id, node.value) for target in node.targets if isinstance(target, ast.Name)]
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
+        return [(node.target.id, node.value)]
+    return []
 
 
 def _declared_collection(node: ast.expr):
@@ -244,6 +255,12 @@ def test_the_extractor_reads_the_files_own_value(tmp_path):
 
     # a name the file does not bind is None, never an empty reading that compares equal
     assert _declared_literal(sample, "NOT_DECLARED_HERE") is None
+
+    # ... and the annotated spelling declares the same value: the annotation is a type on the
+    # binding, not part of it. Read by neither reader before this, which made the membership
+    # sweep miss such a file entirely (measured 2026-10-10 on `cde96007`).
+    sample.write_text('SCANNED_ROOTS: tuple = ("emrg", "scripts")\n', encoding="utf-8")
+    assert _declared_literal(sample, "SCANNED_ROOTS") == ("emrg", "scripts")
 
 
 def test_the_extractor_refuses_what_it_cannot_reduce_to_a_collection(tmp_path):
@@ -405,6 +422,14 @@ def test_the_membership_reading_is_driven_in_both_directions(tmp_path):
     (package / "declares_a_non_literal.py").write_text(
         "TREE = tuple(sorted({'emrg', 'scripts'}))\n", encoding="utf-8"
     )
+    # ... and the same declaration written with its type annotated. This is the shape the sweep
+    # used to miss in silence: `_declared_names` read `ast.Assign` only, and the membership side
+    # omits what it cannot read rather than failing, so a guard joining the family this way was
+    # found by nothing (measured 2026-10-10 on `cde96007`, where this file was absent from
+    # `found`). It is asserted by name below so the failure is this case rather than the equality.
+    (package / "declares_it_annotated.py").write_text(
+        f"TREE: tuple = {family!r}\n", encoding="utf-8"
+    )
     # ... and its twin, which the old extractor *did* resolve: an arbitrary callee handed the
     # family's own value. Unwrapping `make_roots(...)` would put this file in `found`, so the
     # equality below is what holds the "named builders only" rule on the sweep's own side
@@ -425,7 +450,16 @@ def test_the_membership_reading_is_driven_in_both_directions(tmp_path):
     # rather than on the general one -- two arms, two assertions, each naming its own defect
     skipped = [entry for entry in found if entry.startswith("tests/node_modules/")]
     assert not skipped, f"the sweep read a file under a skipped directory: {skipped}"
-    assert found == ["tests/declares_it_freshly.py:TREE"], found
+    # the annotated spelling is a declaration like any other, and it is asked in its own assertion
+    # so an extractor that stops reading it fails here by name rather than on the general equality
+    annotated = [entry for entry in found if entry == "tests/declares_it_annotated.py:TREE"]
+    assert annotated, (
+        f"the sweep missed a declaration written with its type annotated: {found}. The two "
+        "readers share `_declared_names`, so a declaration kind it does not read is silently "
+        "absent from the membership reading -- a guard joining the family this way is found by "
+        "nothing."
+    )
+    assert found == ["tests/declares_it_annotated.py:TREE", "tests/declares_it_freshly.py:TREE"], found
 
     # ... and the other direction: a different value is not this value, so nothing is found.
     assert _declaring_the_family_value(tmp_path, ("emrg", "scripts")) == [
