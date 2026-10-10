@@ -54,7 +54,10 @@ class GrepTool(ToolExecutor):
                         "type": "string",
                         "description": (
                             "File or directory to search. If a directory, searches "
-                            "recursively. Default: current project root."
+                            "recursively. Default: current project root. `glob` names "
+                            "this same parameter `workdir`; this tool reads that "
+                            "spelling too, so a call naming either one searches the "
+                            "tree it named."
                         ),
                     },
                     "glob": {
@@ -105,7 +108,16 @@ class GrepTool(ToolExecutor):
 
     async def execute(self, arguments: dict) -> ToolResult:
         pattern = arguments.get("pattern", "")
-        search_path = arguments.get("path") or "."
+        # The declared spelling first, then the sibling's: `glob` names this same
+        # parameter `workdir`, and a caller who has just used one tool reaches for the
+        # other's name. Neither used to read the other's, so the call fell back to the
+        # cwd and answered about a tree the caller never named — measured 2026-10-11
+        # (`cyc20261011-015723`) on master `63ee3a54`, where `grep workdir=<tmpdir>`
+        # over a two-file fixture returned `Found 79 matches … in <this checkout>
+        # (searched 4796 files)`: a whole-repo scan shaped exactly like an answer. The
+        # alias convention is `count_argument`'s — `read` reads `line_limit` and
+        # `limit`.
+        search_path = arguments.get("path") or arguments.get("workdir") or "."
         file_glob = arguments.get("glob")
         ignore_case = arguments.get("ignore_case", False)
 
