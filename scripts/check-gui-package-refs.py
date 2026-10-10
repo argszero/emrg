@@ -34,6 +34,17 @@ runs — the mac icons are generated on macOS alone (`iconutil` is macOS-only in
 an unconditional check would report a fault on the two legs that never read them.
 
 Exit codes: 0 every reference resolves / 1 at least one does not / 2 could not measure.
+`2` covers **three** shapes, and the third is the one that reads as a pass when it is not a
+refusal: an unreadable manifest, a manifest declaring no `buildResources`, and a manifest
+declaring **nothing to resolve** — no `extraResources` entry and no icon in the blocks this
+run reads. `OK: 0 reference(s) resolve` is a clean line about an empty set: it says the
+references were checked, and none was. Measured 2026-10-10 (`cyc20261010-152002`) against a
+manifest holding only `build.directories.buildResources`: rc 0, `OK: 0 reference(s) resolve.`
+— the same reading-over-an-empty-set shape `check-citation-resolves.py` refuses with "no test
+module was read under <root>". It matters more here than for a citation, because the way this
+guard's own fault arrives is a **declaration** going missing (`extraResources` dropped from
+`package.json`), which leaves the artifact without its payload and was reported as clean.
+
 The first line is `tree: <project dir>`, printed before **any** verdict — the family's
 convention for a guard that reads a working tree, so that the same report is not true of
 this checkout, of a worktree and of a directory a test built.
@@ -106,6 +117,20 @@ def main(argv: list[str] | None = None) -> int:
         icon = _block(build, block).get("icon")
         if icon:
             wanted.append((f"{prefix}icon ({relative})", (build_resources / icon).resolve()))
+
+    if not wanted:
+        # A reading over an empty set is not a pass, and here the empty set is the fault's
+        # own shape: what this guard catches is a *declaration* going missing, so a
+        # `package.json` that resolves nothing must refuse rather than print `OK: 0`.
+        # The spelling and the reason follow `check-citation-resolves.py`'s `modules == 0`
+        # branch, which is this family's other reading over an empty set (issue #1872).
+        print(
+            f"could not measure: {manifest} declares nothing to resolve - no extraResources "
+            f"entry and no icon in the app block or the block(s) this run reads "
+            f"({args.platform}), so `0 reference(s) resolve` would say the references were "
+            "checked, and none was"
+        )
+        return 2
 
     missing = []
     for label, path in wanted:
