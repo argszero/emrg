@@ -63,8 +63,14 @@ Named limits
 * the sweep covers the first-party trees. A walk in `emrg/gui/` reads a different toolchain and
   is not swept. Measured 2026-10-10: `emrg/gui/` holds **no Python at all** (`emrg/gui/**/*.py`
   matches nothing), so this exclusion conceals no site, and `SWEPT` is the whole first-party
-  `.py` surface -- every top-level directory this checkout holds Python in is one of the four,
-  with none outside them.
+  `.py` surface -- every top-level directory this checkout **tracks** Python in is one of the
+  four, with none outside them. "Tracks" is exact rather than loose: a *walk of the disk* would
+  pick up Python under a gitignored tree -- a session's `tmp/`, build output -- which this repo
+  does not track, so the claim is about the index and not about a directory walk (naming the
+  kinds rather than the directories, because which of them exist and how much they hold is a
+  function of what some cycle happens to be doing). And
+  `tests/test_declared_roots_cover_the_tracked_tree.py` now holds it,
+  reading this constant against the tree rather than trusting this sentence.
 """
 
 from __future__ import annotations
