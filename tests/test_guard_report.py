@@ -2,7 +2,7 @@
 
 The rule
 --------
-Every guard in the `scripts/check-*.py` family names the tree it read before it
+Every tool in the `scripts/` report family names the tree it read before it
 states a verdict, and the family says so in as many words: `check-citation-resolves.py`
 records that it "prints `tree: <resolved root>` before any verdict", and
 `check-merge-sequence.py` refuses another guard's report outright unless it names
@@ -43,13 +43,16 @@ This test is the rule, in three parts
   about something else that happens to be true;
 * one real gate end-to-end, in a synthetic tree it cannot damage (the copy's
   `REPO_ROOT` is that tree, and `--resolve-conflict` refuses before writing anything);
-* an AST sweep over `scripts/check-*.py`: every gate that prints a `tree: ` line to
-  stdout *and* writes to stderr must carry the call - unconditionally, so a gate that
-  gains the shape without the remedy is caught wherever it came from. The sweep also
-  holds a baseline of the gates known to have the shape and asserts it has not *shrunk*,
-  so a `tree: ` line that quietly disappears is visible; it deliberately allows the set
-  to grow, because a gate that gains the shape *and* the remedy has followed the rule
-  and should not be failed for it (`#1631` adds one).
+* an AST sweep over **every** `scripts/*.py`: a tool that prints a `tree: ` line to
+  stdout *and* writes to stderr must carry the call - unconditionally, so a tool that
+  gains the shape without the remedy is caught wherever it came from. The class is the
+  **shape**, not a name: it used to glob `check*.py`, which is how three tools that
+  claim the convention in their own comments went unnoticed (`review-queue.py`,
+  `bump-version.py`, `run-mutation-arm.py` - issue #2049). The sweep also holds a
+  baseline of the tools known to have the shape and asserts it has not *shrunk*, so a
+  `tree: ` line that quietly disappears is visible; it deliberately allows the set to
+  grow, because a tool that gains the shape *and* the remedy has followed the rule and
+  should not be failed for it (`#1631` adds one).
 
 What is deliberately out of scope
 ---------------------------------
@@ -76,16 +79,21 @@ SCRIPTS = REPO_ROOT / "scripts"
 # call, and two spellings of it would be one spelling too many.
 REMEDY = "sys.stdout.reconfigure(line_buffering=True)"
 
-# Measured 2026-09-26 by the sweep in the last test of this file: the gates that
-# print the family's identity line to stdout *and* write a verdict to stderr. Held as
-# a baseline the sweep must still cover - a gate losing either half leaves this set
-# and is caught there. It is not an upper bound: a gate that gains both halves and
-# carries the remedy is correct and passes without editing this.
+# Measured 2026-09-26 by the sweep in the last test of this file, and 2026-10-10
+# against the whole of `scripts/` (#2049): the tools that print the family's identity
+# line to stdout *and* write a verdict to stderr. Held as a baseline the sweep must
+# still cover - a tool losing either half leaves this set and is caught there. It is
+# not an upper bound: a tool that gains both halves and carries the remedy is correct
+# and passes without editing this. The three below are here because they were outside
+# the sweep when its class was the `check*` prefix, which is the defect #2049 fixes.
 SWEPT = {
+    "bump-version.py",
     "check-citation-resolves.py",
     "check-doc-count.py",
     "check-node-test-count.py",
     "check-rant-citations.py",
+    "review-queue.py",
+    "run-mutation-arm.py",
 }
 
 
@@ -222,7 +230,7 @@ def _sweep() -> tuple[set[str], set[str]]:
 
     needs: set[str] = set()
     have: set[str] = set()
-    for path in sorted(SCRIPTS.glob("check*.py")):
+    for path in sorted(SCRIPTS.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         if not any(emits_tree_line(n) for n in ast.walk(tree)):
             continue

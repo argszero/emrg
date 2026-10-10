@@ -673,6 +673,16 @@ def _report(arm: Arm, as_json: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # `_report` says "the tree first, before any verdict", and every other tool
+    # in this family carries this call to make that order survive a pipe (stdout
+    # is block-buffered when it is not a tty while stderr is not). This script's
+    # own stderr write is `_entry`'s crash handler, which runs *after* the
+    # report's first line. Behaviour and pin: tests/test_guard_report.py.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(
         prog="run-mutation-arm.py",
         description=(
