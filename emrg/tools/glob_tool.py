@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, brace_alternation
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,12 @@ class GlobTool(ToolExecutor):
                         "description": (
                             "Glob pattern relative to the project root. "
                             "Examples: '**/*.py', 'src/**/*.rs', '**/*test*.py', "
-                            "'*.md', 'emrg/tools/*.py'"
+                            "'*.md', 'emrg/tools/*.py'. The walk does not expand "
+                            "`{a,b}` brace alternation, and a pattern that carries one "
+                            "and selects nothing is refused with that reason rather "
+                            "than answered `No files matched` - pass one pattern per "
+                            "call. A name that really contains a brace is a literal "
+                            "name here and is still searched."
                         ),
                     },
                     "workdir": {
@@ -98,6 +103,33 @@ class GlobTool(ToolExecutor):
         except (OSError, ValueError) as e:
             return ToolResult(
                 name="glob", content=f"Error: invalid pattern: {e}", error=True
+            )
+
+        # A pattern this walk cannot expand is refused rather than searched: it matches
+        # nothing, and `No files matched` is the same sentence a real absence produces - a
+        # false negative about a question never asked. See `brace_alternation` in
+        # `emrg/tools/base.py` for the measurement.
+        #
+        # The check sits *after* the walk, on `matched`, because the refusal has to be a
+        # measurement and not a prediction. `brace_alternation` alone fires on the shape of
+        # the pattern, and `Path.glob` gives `{` no special meaning, so a literal name like
+        # `a{b}.py` selects its file and must not be refused (measured 2026-10-10,
+        # `cyc20261011-001130`: refusing it was this branch's own over-block). A pattern
+        # that selected nothing is the case the refusal is about, and there the message's
+        # two claims - alternation is not expanded, and nothing was selected - are both
+        # readings rather than guesses.
+        if not matched and brace_alternation(pattern):
+            return ToolResult(
+                name="glob",
+                content=(
+                    f"Error: the pattern {pattern!r} uses `{{a,b}}` brace alternation, "
+                    "which this tool does not expand - it walks with `Path.glob`, so the "
+                    "whole pattern is one literal string. It selected nothing, and `No "
+                    "files matched` is the sentence a real absence produces, so this "
+                    "answer would not be distinguishable from one. Pass one pattern per "
+                    "call ('**/*.py', then '**/*.rs')."
+                ),
+                error=True,
             )
 
         matches = [p for p in matched if not self._is_hidden_or_ignored(p, cwd)]

@@ -592,6 +592,362 @@ def test_grep_context_inside_its_domain_still_renders_the_block(tmp_path):
     assert "result budget" not in result.content, "a complete search is not a cut one"
 
 
+# --- the glob filter: applied to every subject, and never to a pattern it cannot read ---
+
+
+def test_the_glob_filter_applies_to_a_named_file_too(tmp_path):
+    """`glob` was read by the directory branch and **ignored** by the file branch.
+
+    Measured 2026-10-10 (`cyc20261010-220909`) on `emrg/tools/read_tool.py`: with
+    `glob='*.nomatch'` the call returned the same one match as no filter at all, and the
+    summary still printed `matching '*.nomatch'` — the output claimed a filter that had
+    never run. The description says "Only search files matching this glob pattern", and a
+    named file is still a file the filter can exclude.
+
+    Both directions, because a filter that excludes everything would pass the
+    exclusion half alone.
+    """
+    tool = GrepTool()
+    named = tmp_path / "main.py"
+    named.write_text("import os\n\ndef main():\n    return 1\n")
+
+    unfiltered = _run(tool.execute({"pattern": "def main", "path": str(named)}))
+    assert not unfiltered.error
+    assert "Found 1 matches" in unfiltered.content, unfiltered.content
+    assert "searched 1 files" in unfiltered.content
+
+    matching = _run(tool.execute({
+        "pattern": "def main", "path": str(named), "glob": "*.py",
+    }))
+    assert not matching.error
+    assert "Found 1 matches" in matching.content, matching.content
+    assert "searched 1 files" in matching.content
+
+    excluded = _run(tool.execute({
+        "pattern": "def main", "path": str(named), "glob": "*.nomatch",
+    }))
+    assert not excluded.error
+    # The discriminating assertion first: `Found` below is also satisfied by a *wrong*
+    # match, so an arm that drops the filter has to die on the line that says nothing was
+    # searched (the arm runner reports a kill on a later line as UNJUDGEABLE).
+    assert "searched 0 files" in excluded.content, (
+        "a file path plus a non-matching glob must search nothing — the filter was "
+        f"ignored here before this cycle: {excluded.content}"
+    )
+    assert "Found" not in excluded.content, excluded.content
+    # The reading has to say *why*, or `searched 0 files matching '*.nomatch'` reads as
+    # "that tree holds none" rather than "the filter you passed excluded the one file you
+    # pointed at". The two have different remedies.
+    assert "does not match the glob filter" in excluded.content, excluded.content
+    assert "main.py" in excluded.content, excluded.content
+
+
+def test_a_named_file_is_matched_the_way_the_walk_matches_it(tmp_path):
+    """`**/` matches zero directories, so `**/*.py` selects a top-level file.
+
+    Vetoed in `cyc20261011-022427`. Measured 2026-10-10 on the then head `6819efa2`:
+    one directory holding `main.py` and `sub/deep.py`, one filter, two call shapes —
+    `path=<dir>, glob='**/*.py'` found both files, `path=<dir>/main.py` answered
+    `No matches ... (searched 0 files) ... does not match the glob filter`. The filter
+    selected that file in one branch and excluded it in the other, and the reason printed
+    was one the tool's own walk contradicted: `root.rglob(p)` is `root.glob("**/" + p)`,
+    so `**/*.py` and `*.py` select the same top-level `main.py`. `**/*.py` is *glob*'s
+    first advertised example, so a caller following the description reaches this.
+
+    The predicate is now the walk's own answer for the one relative path a named file
+    offers — its own name — which is the whole of what this test pins.
+    """
+    tool = GrepTool()
+    named = tmp_path / "main.py"
+    named.write_text("import os\n\ndef main():\n    return 1\n")
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (nested / "deep.py").write_text("def other():\n    return 2\n")
+
+    by_directory = _run(tool.execute({
+        "pattern": "def ", "path": str(tmp_path), "glob": "**/*.py",
+    }))
+    assert "Found 2 matches" in by_directory.content, by_directory.content
+
+    # The discriminating assertion first: `Found` below is also satisfied by a *wrong*
+    # reading that searched the file anyway, so an arm that reverts the predicate to
+    # the name alone has to die on the file the walk selects and `fnmatch` refuses.
+    assert "main.py" in by_directory.content, by_directory.content
+
+    by_file = _run(tool.execute({
+        "pattern": "def ", "path": str(named), "glob": "**/*.py",
+    }))
+    assert "searched 1 files" in by_file.content, (
+        "`**/` matches zero directories, so the walk selects a top-level file and the "
+        f"named-file branch has to agree: {by_file.content}"
+    )
+    assert "Found 1 matches" in by_file.content, by_file.content
+
+    # The exclusion half, so this test discriminates against master as well as against a
+    # name-only predicate: master ignored the filter for a named file outright, and would
+    # pass everything above for the wrong reason (it searches the file whatever the filter
+    # says). One name-shaped miss on the same file separates "the walk's answer" from
+    # "no filter at all".
+    excluded = _run(tool.execute({
+        "pattern": "def ", "path": str(named), "glob": "**/*.nomatch",
+    }))
+    assert "searched 0 files" in excluded.content, (
+        f"a filter the walk would not select must still exclude the file: {excluded.content}"
+    )
+    assert "Found" not in excluded.content, excluded.content
+
+
+def test_a_filter_naming_a_directory_states_that_domain_not_the_file(tmp_path):
+    """`src/**/*.ts` cannot select a named file, and the reading says why.
+
+    What a named file offers the matcher is one relative path — its name — so a pattern
+    that still names a directory after its leading `**` segments are dropped has no path
+    to match: `deep.ts` is not under a `src` relative to itself, and the walk rooted at
+    the file's own directory selects nothing either. The directory branch's root is
+    somewhere else — the directory the caller passed — so the two branches answer the
+    same question only for name-shaped patterns, and the veto `cyc20261011-022427` asked
+    for that to be stated rather than asserted (`_selects` claimed "the two branches
+    answer the same question", which nothing measured).
+
+    Both halves are pinned: the sentence names the domain, and it is **not** the
+    `does not match the glob filter` sentence, which for this shape is a cause the tool's
+    own walk contradicts once the caller passes the directory.
+    """
+    tool = GrepTool()
+    src = tmp_path / "src"
+    src.mkdir()
+    named = src / "deep.ts"
+    named.write_text("const x = 1;\n")
+
+    by_directory = _run(tool.execute({
+        "pattern": "const", "path": str(tmp_path), "glob": "src/**/*.ts",
+    }))
+    assert "Found 1 matches" in by_directory.content, by_directory.content
+    assert "src/deep.ts" in by_directory.content, by_directory.content
+
+    by_file = _run(tool.execute({
+        "pattern": "const", "path": str(named), "glob": "src/**/*.ts",
+    }))
+    assert "searched 0 files" in by_file.content, by_file.content
+    assert "offers only its own name" in by_file.content, by_file.content
+    assert "does not match the glob filter" not in by_file.content, (
+        "the exclusion reason has to name *this* cause — a directory component — because "
+        f"the walk from the directory the caller could have passed does select it: {by_file.content}"
+    )
+    # A name-shaped pattern keeps the other sentence: there the walk agrees with the
+    # exclusion, so `does not match` is a reading and not a contradiction.
+    name_shaped = _run(tool.execute({
+        "pattern": "const", "path": str(named), "glob": "*.nomatch",
+    }))
+    assert "does not match the glob filter" in name_shaped.content, name_shaped.content
+
+
+def test_a_brace_glob_is_refused_rather_than_searched_to_an_empty_answer(tmp_path):
+    """`*.{py,rs}` is the pattern the description advertised, and this walk cannot read it.
+
+    `Path.rglob` has no brace expansion, so the whole pattern is one literal string that
+    matches no file whose name contains a brace. Measured 2026-10-10 (`cyc20261010-220909`)
+    over `emrg/tools/`: `glob='*.py'` -> `Found 9 matches ... (searched 15 files)`,
+    `glob='*.{py,rs}'` -> `No matches ... (searched 0 files)`. The second sentence is the
+    one a real absence produces, so a model following the description's own example was
+    told "nothing here" about a question the tool never asked.
+
+    Refusing is the reading this repository uses for a request it cannot answer (the
+    `count_argument` family): the alternative is an empty answer that is indistinguishable
+    from a true one.
+    """
+    tool = GrepTool()
+    f = tmp_path / "main.py"
+    f.write_text("import os\n")
+
+    brace = _run(tool.execute({
+        "pattern": "import", "path": str(tmp_path), "glob": "*.{py,rs}",
+    }))
+    assert brace.error, brace.content
+    assert brace.content.startswith("Error:"), (
+        "the refusal has to be an error, not an empty reading with an explanation "
+        f"beside it: {brace.content}"
+    )
+    assert "brace" in brace.content, brace.content
+    assert "does not expand" in brace.content, brace.content
+
+    # The control: the same search, spelled the way the filter can read.
+    control = _run(tool.execute({
+        "pattern": "import", "path": str(tmp_path), "glob": "*.py",
+    }))
+    assert not control.error, control.content
+    assert "Found 1 matches" in control.content, (
+        "the pattern the brace example meant has to keep working, or 'refused' is "
+        f"indistinguishable from 'handled': {control.content}"
+    )
+
+
+def _advertised_globs() -> list[str]:
+    """Every glob example the `glob` parameter's description holds.
+
+    Read from the schema rather than restated: the description is the contract the model
+    reads, so an example in it is a promise, and a promise nothing measures is how
+    `*.{py,rs}` survived in that list while selecting nothing.
+    """
+    param = GrepTool().definition().parameters["properties"]["glob"]["description"]
+    assert "Examples:" in param, (
+        f"the glob parameter states no examples, so this reader has no subject: {param}"
+    )
+    # Split on the two markers rather than on a period: the examples themselves contain
+    # periods (`'*.py'`), and a non-greedy match up to the first one parses an unterminated
+    # quote and returns nothing — the shape this reader had before it was fixed to read the
+    # same description its author wrote.
+    section = param.split("Examples:", 1)[1].split("Default:", 1)[0]
+    return re.findall(r"'([^']+)'", section)
+
+
+def test_every_glob_example_the_description_advertises_selects_files(tmp_path):
+    """Each advertised example is run, against a tree holding the file it names.
+
+    An example that selects nothing is worse than a missing one: the caller reads
+    `No matches` and concludes the pattern is absent from the tree. That is the defect
+    this cycle fixed for one entry of this very list — so the list is held to it, and a
+    later edit that reintroduces an unreadable form goes red here rather than in a
+    model's answer.
+    """
+    globs = _advertised_globs()
+    assert globs, "no examples parsed out of the description"
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("import os\n")
+    (tmp_path / "src" / "app.ts").write_text("import x\n")
+    (tmp_path / "README.md").write_text("# Project\n")
+
+    for glob_example in globs:
+        result = _run(GrepTool().execute({
+            "pattern": ".", "path": str(tmp_path), "glob": glob_example,
+        }))
+        assert not result.error, (
+            f"the description advertises {glob_example!r}, but the tool refuses it: "
+            f"{result.content}"
+        )
+        assert "searched 0 files" not in result.content, (
+            f"the description advertises {glob_example!r}, which selects no file at all — "
+            f"the caller would read 'No matches' as a fact about the tree: {result.content}"
+        )
+
+
+def test_a_literal_brace_name_in_the_filter_selects_its_file(tmp_path):
+    """The filter's brace refusal must not fire on a name the walk can read literally.
+
+    The refusal added for `*.{py,rs}` first fired on `"{" in filter or "}" in filter`, and
+    that refused filters `Path.rglob` reads correctly: on a tree holding a file named
+    `a{b}.py`, master's directory branch selected it and the branch refused the call, with a
+    message asserting `{a,b}` alternation the input does not carry. Measured 2026-10-10
+    (`cyc20261011-001130`) in this checkout. This repository named that class once already
+    (`emrg/tools/command_scan.py`, the #1513 lesson: `echo sh "patch …"` was a bug, not a
+    safe over-block).
+
+    Alternation needs two alternatives, so the trigger is a comma inside the braces — and
+    the tool additionally requires that the filter selected nothing, which is what makes the
+    refusal a reading rather than a prediction. Both halves are asserted, because each alone
+    is satisfied by a wrong rule: dropping the refusal passes the literal half, and the
+    over-block passed the alternation half.
+    """
+    tool = GrepTool()
+    literal = tmp_path / "a{b}.py"
+    literal.write_text("needle here\n")
+    comma = tmp_path / "a{b,c}.py"
+    comma.write_text("needle here\n")
+
+    through_the_directory = _run(tool.execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "a{b}.py",
+    }))
+    assert not through_the_directory.error, (
+        "the directory branch reads `a{b}.py` literally and selects the file that holds "
+        f"it; refusing it blocks a filter that works: {through_the_directory.content}"
+    )
+    assert "Found 1 matches" in through_the_directory.content, through_the_directory.content
+    assert "searched 1 files" in through_the_directory.content, through_the_directory.content
+
+    through_the_named_file = _run(tool.execute({
+        "pattern": "needle", "path": str(literal), "glob": "a{b}.py",
+    }))
+    assert not through_the_named_file.error, through_the_named_file.content
+    assert "Found 1 matches" in through_the_named_file.content, through_the_named_file.content
+
+    # The other half of the discriminator: a comma between the braces is alternation, it
+    # selected nothing, and it is still refused rather than searched to `No matches`.
+    alternation = _run(tool.execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "*.{py,rs}",
+    }))
+    assert alternation.error, (
+        "`*.{py,rs}` is the pattern the description used to advertise, and it selects "
+        f"nothing — the answer has to be the refusal: {alternation.content}"
+    )
+    assert "brace" in alternation.content, alternation.content
+
+    comma_but_selecting = _run(tool.execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "a{b,c}.py",
+    }))
+    assert not comma_but_selecting.error, (
+        "a comma-bearing filter that selects the named file is answered, not refused: the "
+        f"refusal is gated on the filter having selected nothing: {comma_but_selecting.content}"
+    )
+    assert "Found 1 matches" in comma_but_selecting.content, comma_but_selecting.content
+
+    # And a literal brace name that is simply *absent* gets the empty answer, not the
+    # refusal: `{b}` alternates between nothing, so refusing it asserts alternation the
+    # pattern does not carry. This is the reading that tells the comma predicate apart from
+    # "any brace" — with the wide predicate the gate alone still refuses this call whenever
+    # no file matches, and the files above cannot separate the two.
+    missing = _run(tool.execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "zz{b}.py",
+    }))
+    assert not missing.error, (
+        "no file matches `zz{b}.py`, and that is the true answer — `{b}` alternates "
+        f"between nothing, so this is not alternation: {missing.content}"
+    )
+    assert "No matches" in missing.content, missing.content
+
+    # A named file with an unreadable filter is refused for the filter's reason, not told
+    # that it merely failed to match: `_selects` matches with `fnmatch`, which does not
+    # expand braces either, so the exclusion and the empty walk have one cause — the pattern
+    # — and the remedy is to change it, not to look at the file.
+    named_unreadable = _run(tool.execute({
+        "pattern": "needle", "path": str(literal), "glob": "*.{py,rs}",
+    }))
+    assert named_unreadable.error, (
+        "the filter cannot be read at all, so this is the refusal and not a match "
+        f"failure the caller would fix by looking at the file: {named_unreadable.content}"
+    )
+    assert "brace" in named_unreadable.content, named_unreadable.content
+
+
+def test_the_glob_description_states_the_refusal_the_tool_gives(tmp_path):
+    """The description is the behaviour's second home, so a refusal it does not mention
+    is a surprise the caller could have been spared.
+
+    Both halves in one test, because either alone is satisfied by a wrong rule: a
+    description that promises a refusal an unread filter never gives, and a refusal whose
+    description says nothing about it, are the two ways this pair drifts apart. The
+    repository's own shape for that is `test_read_never_cuts_a_line` — a promise in a tool
+    description that no test holds is how a claim survives review.
+    """
+    param = GrepTool().definition().parameters["properties"]["glob"]["description"]
+    assert "brace-alternation" in param and "refused with that reason" in param, (
+        f"the description no longer says what an unreadable filter gets: {param}"
+    )
+
+    (tmp_path / "main.py").write_text("needle\n")
+    refused = _run(GrepTool().execute({
+        "pattern": "needle", "path": str(tmp_path), "glob": "*.{py,rs}",
+    }))
+    assert refused.error, (
+        f"the description says this is refused, and it was searched instead: {refused.content}"
+    )
+    # The description's second clause — "rather than searched to `No matches`" — is the
+    # half that matters on its own: an empty reading beside an explanation is what this
+    # whole PR exists to remove. The refusal *quotes* that sentence while refusing it, so
+    # the reading is the answer's own opening, not a substring.
+    assert refused.content.startswith("Error:"), refused.content
+    assert not refused.content.startswith("No matches"), refused.content
+    assert "brace" in refused.content, refused.content
 def test_the_siblings_spelling_of_path_selects_the_same_tree(temp_cwd):
     """`glob` names this parameter `workdir`; `grep` reads that spelling too (issue #2071).
 
