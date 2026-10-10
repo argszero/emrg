@@ -368,10 +368,21 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
     **last** because it is the anchor a reader greps for.  Non-zero exits are
     reported, not errored — the model decides how to react.
 
+    The exit marker carries a status, so it appears only when the run has one:
+    a signal death is reported as the signal, and a run that never settled
+    (``exit_code is None``) reports no exit line at all.  ``[exit code: 0]`` is
+    never written — a successful run's reading is its output, and the tool's own
+    description promises the line only for *non-zero exits*.
+
     One Windows asymmetry is stated in the tool description rather than handled
     here: a force-killed process there settles as a positive exit code, so it is
     reported as ``[exit code: 1]`` with no signal marker — a fact about the
     platform, not a second rendering rule (blueprint §14.2 layer 5).
+
+    This is the restatement whose drift issue #2039 measured: every branch below
+    was re-derived from ``bash_tool_v2.render_result``, and
+    ``tests/test_pwsh_tool_v2.py::test_the_two_twins_render_one_run_identically``
+    drives one ``ShellRunResult`` through both, so the copy has to stay faithful.
 
     :param result: the completed run.
     :param escalation_modes: the escalation targets the composition advertises
@@ -388,11 +399,12 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
         if body and not body.endswith("\n"):
             body += "\n"
         body += f"[stderr]\n{stderr}"
+    if not body:
+        body = "(no output)"
 
     markers: list[str] = []
     if result.sandbox.get("denied"):
-        mode = result.sandbox.get("mode", "")
-        markers.append(f"[sandbox: file access denied under {mode} mode]")
+        mode = str(result.sandbox.get("mode", ""))
         markers.append(
             with_retry_hint(
                 sandbox_denial_marker(mode), mode=mode, advertised=escalation_modes,
@@ -400,14 +412,16 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
         )
     if result.timed_out:
         markers.append(f"[timed out after {result.timeout_ms}ms]")
-    elif result.signal is not None:
+    if result.signal is not None:
         markers.append(f"[killed by signal: {result.signal}]")
-    if result.exit_code is not None:
+    elif result.exit_code is not None and result.exit_code != 0:
         markers.append(f"[exit code: {result.exit_code}]")
 
     if not markers:
         return body
-    return body + "\n" + "\n".join(markers) if body else "\n".join(markers)
+    if not body.endswith("\n"):
+        body += "\n"
+    return body + "\n".join(markers)
 
 
 def _fit_streams(stdout: str, stderr: str) -> tuple[str, str]:

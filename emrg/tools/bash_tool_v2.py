@@ -254,6 +254,14 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
     **last** because it is the anchor a reader greps for.  Non-zero exits are
     reported, not errored — the model decides how to react.
 
+    The exit marker carries a status, so it appears only when the run has one:
+    a signal death is reported as the signal, and a run that never settled
+    (``exit_code is None``) reports no exit line — ``[exit code: None]`` is not
+    a status the model can act on, and the tool's own description promises the
+    line only for *non-zero exits*.  The twin in ``pwsh_tool_v2`` states the
+    same contract; ``tests/test_pwsh_tool_v2.py`` drives one run through both
+    so the two cannot drift apart again (issue #2039).
+
     :param result: the completed run.
     :param escalation_modes: the escalation targets the composition advertises
         for the tier this run used (design §1.5 A5, phase P5 —
@@ -290,7 +298,7 @@ def render_result(result: ShellRunResult, escalation_modes: tuple[str, ...] = ()
         markers.append(f"[timed out after {result.timeout_ms}ms]")
     if result.signal is not None:
         markers.append(f"[killed by signal: {result.signal}]")
-    elif result.exit_code != 0:
+    elif result.exit_code is not None and result.exit_code != 0:
         markers.append(f"[exit code: {result.exit_code}]")
 
     if not markers:
