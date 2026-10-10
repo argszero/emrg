@@ -187,6 +187,7 @@ def _redact(value):
     return value
 
 from emrg.tools import ToolRegistry
+from emrg.tools.base import special_file_kind, special_file_refusal
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
 from emrg.tools.shell_dialects import (
@@ -373,6 +374,39 @@ def _create_fixed_port_socket(port: int) -> _socket.socket:
         raise
 
 
+def _non_regular_kind(path) -> str | None:
+    """Name ``path``'s kind when opening it would never return — ``None`` for a regular file.
+
+    The daemon reads files the agent or the client names, and **an open is not a read**:
+    on a FIFO it blocks until a writer appears, on a socket until a connection does, and
+    a character device has no end of file at all. Every one of these readers wrapped its
+    read in ``except (OSError, UnicodeDecodeError)``, which cannot bound this — a FIFO
+    raises nothing, it simply never returns. The read is synchronous inside a coroutine
+    the daemon awaits on its event loop, so the block is the whole daemon, and the only
+    recovery is a restart, which belongs to the host.
+
+    The rule is the tool layer's, stated once there: ``special_file_kind`` is a whitelist
+    (`#2062` taught `read`/`write`/`edit` to ask it). This resolves the one thing that
+    helper needs and a caller has to supply — the path's ``st_mode`` — and answers
+    ``None`` when the ``stat`` itself fails, because that path's unreadability is what
+    the call at hand already reports.
+
+    Measured 2026-10-11 (`cyc20261011-025906`) on master ``63ee3a54``, each call in its
+    own process killed by the parent's cap: ``open(<fifo>)`` did not return within 6 s,
+    and ``EmrgServer._cap_memory_index(<fifo>)`` did not return within 25 s, while the
+    three tools answered the same fixture in milliseconds.
+
+    :param path: the candidate subject, as a ``pathlib.Path``.
+    :returns: the noun phrase ``special_file_kind`` names (``"a FIFO (named pipe)"``),
+        or ``None`` when the subject is a regular file or its kind could not be measured.
+    """
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return None
+    return special_file_kind(mode)
+
+
 def _unreadable_index_notice(path, exc: BaseException, *, where: str) -> str:
     """The sentence both carriers of a memory index use when the file cannot be read.
 
@@ -463,6 +497,13 @@ def _memory_index_compaction_note(paths) -> str:
     """
     sections: list[str] = []
     for path in paths:
+        if _non_regular_kind(path) is not None:
+            # A different condition from the `except` below: this file was not read
+            # because it cannot be read to an end. Skipped for the same reason the
+            # torn read is — this note is advisory and per-round, and the section
+            # that does embed an index reports what it could not read.
+            logger.debug("index %s is not a regular file; not opened", path)
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -2349,7 +2390,11 @@ class EmrgServer:
 
         for name in candidates:
             path = session.cwd / name
-            if path.exists():
+            # `exists()` is not enough: this directory is the agent's own workspace, so
+            # the context file may be any kind of subject. A FIFO here is skipped rather
+            # than opened — the ask is whether this name carries context, and a subject
+            # with no end to read carries none (`_non_regular_kind`).
+            if path.exists() and _non_regular_kind(path) is None:
                 try:
                     content = path.read_text(encoding="utf-8")
                     max_chars = PROJECT_CONTEXT_MAX_CHARS
@@ -2420,6 +2465,13 @@ class EmrgServer:
         # only reader. Both scopes are measured in
         # `tests/test_memory_index_thresholds.py`.
         limit = INDEX_SIZE_WARN
+        kind = _non_regular_kind(path)
+        if kind is not None:
+            # Raised, not answered: this is a pure function whose one production caller
+            # (`_index_for_prompt`) already turns a read it cannot do into the notice
+            # the prompt carries, so the condition reaches the agent with its carrier
+            # named — the same shape as an index that is not valid UTF-8.
+            raise OSError(f"{path} is {kind}, not a regular file")
         text = path.read_text(encoding="utf-8")
         if len(text) <= limit:
             return text
@@ -2577,7 +2629,14 @@ class EmrgServer:
         wording, with the carrier named as the only part that differs.
         """
         try:
-            return path.read_text(encoding="utf-8") if path.exists() else ""
+            if not path.exists():
+                return ""
+            kind = _non_regular_kind(path)
+            if kind is not None:
+                # Same condition, same answer as an index that cannot be decoded: the
+                # frame keeps its rows and the `index` field carries the notice.
+                raise OSError(f"{path} is {kind}, not a regular file")
+            return path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             logger.debug("memory index could not be read: %s", path, exc_info=True)
             return _unreadable_index_notice(path, exc, where="this listing")
@@ -6539,6 +6598,19 @@ class EmrgServer:
                 await self._send(ws, {
                     "type": "file_content",
                     "error": f"is a directory: {path}",
+                })
+                return
+            kind = _non_regular_kind(path)
+            if kind is not None:
+                # The client names this path, and the workspace listing types every
+                # entry that is not a directory as a file — so a named pipe in a
+                # workspace is offered in the file tree, and opening it here (a
+                # synchronous read on the daemon's event loop) would never return.
+                # Same refusal the `read` tool gives the same subject.
+                await self._send(ws, {
+                    "type": "file_content",
+                    "path": str(path),
+                    "error": special_file_refusal(path, kind),
                 })
                 return
             file_size = path.stat().st_size

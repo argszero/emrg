@@ -4310,3 +4310,86 @@ def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkey
         "a genuinely completed round no longer stamps the marker the #1114 alarm "
         "measures — the empty-answer guard must not have swallowed it"
     )
+
+
+# ── the subject has to be a regular file ──────────────────────────
+#
+# An open is not a read: on a FIFO a read blocks until a writer appears, on a socket
+# until a connection does, and a device never ends. The three file tools ask
+# `special_file_kind` before opening (issue #2062). These are the daemon's **own**
+# readers of a path the agent or the client names, and they took the same guard in
+# issue #2073 — a `MEMORY.md` and a context file both live in the agent's workspace,
+# and the index readers run on every request, so a block here is the daemon never
+# answering again.
+#
+# Each test below is written so that removing the guard makes it **hang** rather than
+# pass: the condition is a call that never returns, and no assertion can bound that
+# (the shape `tests/test_read_tool.py` states for the same class). Windows has no
+# `mkfifo`, so the family is skipped there.
+
+_needs_mkfifo = pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+
+
+def test_cap_memory_index_raises_on_a_named_pipe(tmp_path):
+    """The index reader names the kind instead of opening it."""
+    server = _make_server()
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+
+    with pytest.raises(OSError) as excinfo:
+        server._cap_memory_index(fifo)
+
+    assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
+    assert "not a regular file" in str(excinfo.value), str(excinfo.value)
+
+
+def test_an_index_that_is_a_named_pipe_is_a_notice_not_a_hang(tmp_path):
+    """The prompt carrier answers it exactly as it answers an undecodable index."""
+    server = _make_server()
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+
+    text = server._index_for_prompt(fifo)
+
+    assert str(fifo) in text, text
+    assert "a FIFO (named pipe)" in text, text
+    assert "could not be read" in text, text
+
+
+def test_a_named_pipe_index_in_the_listing_is_a_notice_too(tmp_path):
+    """The `memories_list` frame's carrier, the third reader of the same file."""
+    server = _make_server()
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+
+    text = server._index_for_frame(fifo)
+
+    assert str(fifo) in text, text
+    assert "a FIFO (named pipe)" in text, text
+
+
+def test_collect_project_context_skips_a_named_pipe_beside_a_real_file(tmp_path):
+    """A subject with no end to read carries no context — and its neighbour still does."""
+    server = _make_server()
+    session = Session.create_with_id("ctx-fifo", tmp_path)
+    os.mkfifo(tmp_path / "CLAUDE.md")
+    (tmp_path / "Agent.md").write_text("Keep it simple\n", encoding="utf-8")
+
+    result = server._collect_project_context(session)
+
+    assert [r["name"] for r in result] == ["Agent.md"], result
+    assert "Keep it simple" in result[0]["content"]
+
+
+def test_the_compaction_note_skips_a_named_pipe_and_still_reads_its_neighbour(tmp_path):
+    """One call, both subjects: the pipe is not opened, the over-cap index still fires."""
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+    big = tmp_path / "BIG.md"
+    big.write_text("y" * (INDEX_SIZE_WARN + 100), encoding="utf-8")
+
+    note = daemon_mod._memory_index_compaction_note([fifo, big])
+
+    assert str(big) in note, "the reader stopped reading the index it should"
+    assert str(fifo) not in note, "a subject that was not opened is not a subject read"
