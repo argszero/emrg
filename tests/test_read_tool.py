@@ -107,11 +107,24 @@ def test_read_binary_fails(temp_file):
 
 
 def test_read_start_line_beyond_eof(temp_file):
+    """The message names the request and the subject's size — and is not a range.
+
+    The branch is reached exactly when `start_line` is past the last line, so the
+    `lines {start + 1}-{end}` it used to print was always descending (measured 2026-10-10,
+    `cyc20261010-204628`: a 10-line file answered `start_line=50` with `lines 50-10 of
+    10`). This test asserted the substring `empty range`, which that descending range
+    satisfies — a wording pinned by the presence of its words rather than by what they
+    say. Both numbers the message holds are asserted now, and the descending shape is
+    refused, so a message naming the wrong start line or the wrong file size fails here.
+    """
     tool = ReadTool()
     f, _ = temp_file
-    # 6 lines (5 + trailing newline), start_line=100 is way beyond
+    # 5 lines (the fixture writes 5, and the trailing newline is not a line)
     result = _run(tool.execute({"file_path": str(f), "start_line": 100}))
-    assert "(empty range" in result.content or "empty range" in result.content
+    assert "start_line=100" in result.content, result.content
+    assert "5 lines" in result.content, result.content
+    assert "100-5" not in result.content, result.content
+    assert "lines 100" not in result.content, result.content
 
 
 def test_read_truncation_message(temp_file):
