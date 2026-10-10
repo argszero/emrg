@@ -309,7 +309,7 @@ def test_a_real_git_patch_agrees_with_gits_own_file_list(tmp_path, mod, capsys):
     def stage(names):
         run("git", "rm", "-r", "--cached", "-q", ".")
         for path in tmp_path.rglob("*"):
-            if path.is_file() and ".git" not in path.parts:
+            if path.is_file() and ".git" not in path.relative_to(tmp_path).parts:
                 path.unlink()
         for name in names:
             target = tmp_path / name
