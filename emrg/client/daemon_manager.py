@@ -33,6 +33,12 @@ from emrg.connect import (
     is_server_running_sync,
 )
 from emrg.protocol import TaskRequest
+
+# The "is this path a regular file" rule is the tool layer's, reached at a path. Imported
+# rather than restated, for the reason `emrg/sessions_index.py` and
+# `emrg/skills/registry.py` give at the same import: the boundary is one fact, and a
+# second spelling of it is a second boundary that can drift.
+from emrg.tools.base import non_regular_kind
 from websockets.exceptions import ConnectionClosed
 
 logger = logging.getLogger(__name__)
@@ -155,7 +161,36 @@ def _truncate_start_stderr(path: Path):
     is only ever appended to would reintroduce it one level down. ``None`` means
     the caller falls back to ``DEVNULL`` — a diagnostic must never be able to make
     a start fail.
+
+    The subject's **kind** is asked before it is opened, because the open is what
+    decides whether this call returns at all: `open(path, "wb")` on a FIFO waits for a
+    *reader* to appear, raises nothing, so the `except OSError` below would never be
+    reached and this function — called by `start_daemon` **before** the child is spawned
+    — would stop every start attempt instead of only failing to capture stderr. Measured
+    2026-10-11 (`cyc20261011-185510`) on master `60541e39`, one child process per arm
+    under an 8 s cap: a `mkfifo` here left this call **not returned in 8 s**, where the
+    same fixture with a regular file returned a `BufferedWriter` at once.
+
+    Degraded rather than raised, and that is this function's own contract rather than a
+    preference: `None` is already its answer for a path it cannot open (the caller reads
+    it as "the child's stderr went to DEVNULL"), and a **directory** here has always
+    produced exactly that — measured above, `NoneType` — so a FIFO now takes the answer
+    the kind one over already had, with the kind named in the log so the omission is
+    diagnosable rather than silent.
     """
+    try:
+        # Absent is not a refusal: a writer's normal case is a file that does not exist
+        # yet, and this function exists to create it. `non_regular_kind` *stats*, so
+        # absence arrives as an `OSError` rather than as a `None` kind.
+        kind = non_regular_kind(path)
+    except OSError:
+        kind = None
+    if kind:
+        logger.debug(
+            "cannot capture the child's stderr at %s — it is %s, not a regular file",
+            path, kind,
+        )
+        return None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         return open(path, "wb")
@@ -178,8 +213,32 @@ def _read_start_stderr(path: Path | None, lines: int = 40) -> str | None:
     traceback is the *end* of it — the exception line and its cause — and a Python
     traceback is longer than fifteen lines. Nothing here raises: a diagnostic is the
     wrong place for an exception, so a failure to read is a value the caller reports.
+
+    The subject's **kind** is asked before it is opened, because the open is what decides
+    whether this call returns at all: `read_bytes` on a FIFO waits for a writer and raises
+    nothing, so the `except OSError` below would never be reached and the failure report
+    would hang instead of naming the cause. Measured 2026-10-11 (`cyc20261011-185510`) on
+    master `60541e39`, one child process per arm under an 8 s cap: a `mkfifo` here left
+    this call **not returned in 8 s**, where the same fixture with a regular file returned
+    `''` at once.
+
+    ``None`` — the "could not be read" answer this function already gives — is what a
+    non-regular subject now takes, which is also what a **directory** has always produced
+    here (measured: `None`), so no new outcome is introduced, only that it arrives.
     """
     if path is None:
+        return None
+    try:
+        kind = non_regular_kind(path)
+        if kind:
+            logger.debug(
+                "cannot read the child's stderr at %s — it is %s, not a regular file",
+                path, kind,
+            )
+            return None
+    except OSError:
+        # Absent or unstattable: the "could not be read" answer, which is the one the
+        # read below would have given it.
         return None
     try:
         data = path.read_bytes().decode("utf-8", errors="replace")
@@ -230,11 +289,33 @@ def _read_log_tail(path: Path, lines: int = 15, since: tuple[int, int | None] = 
     end, is read from the start instead: the file it marked is gone, so every byte
     of the current one belongs to this attempt. ``(0, None)`` means "no mark" and
     reads the whole file, which is what the whole-file tail caller wants.
+
+    The subject's **kind** is asked before it is opened — and it replaces the
+    ``path.exists()`` this used to lean on rather than standing beside it, because
+    ``exists()`` is **true** for a FIFO and is exactly the reading that let the block
+    through. `open(path, "rb")` on a FIFO waits for a writer and raises nothing, so the
+    `except OSError` below could not bound it. Measured 2026-10-11
+    (`cyc20261011-185510`) on master `60541e39`, one child process per arm under an 8 s
+    cap: a `mkfifo` here left this call **not returned in 8 s**, where the same fixture
+    with a regular file returned `''` at once.
+
+    ``""`` — this function's answer for a log it cannot read — is what a non-regular
+    subject now takes, which is also what a **directory** has always produced here
+    (measured: `''`): no new outcome, only that it arrives.
     """
     offset, ino = since
     try:
-        if not path.exists():
+        kind = non_regular_kind(path)
+        if kind:
+            logger.debug(
+                "cannot read the log tail at %s — it is %s, not a regular file",
+                path, kind,
+            )
             return ""
+    except OSError:
+        # Absent or unstattable: the empty tail this function already answers with.
+        return ""
+    try:
         current = path.stat()
         if (ino is not None and current.st_ino != ino) or current.st_size < offset:
             offset = 0

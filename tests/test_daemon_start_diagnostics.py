@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from emrg.client import daemon_manager as dm  # noqa: E402
 from emrg.server import daemon as srv  # noqa: E402
+from tests.bounded_read import DEADLINE_SECONDS, within  # noqa: E402
 
 
 # ── the log delta, not the file ─────────────────────────────────────────────
@@ -832,3 +834,132 @@ def test_a_config_failure_at_startup_reaches_emrgd_log(monkeypatch, caplog):
         "the record must carry the traceback: 'it crashed' without the TOML error's "
         "line and column is the message the host already could not act on"
     )
+
+
+# ── the kind is asked before the subject is opened (issue #2109) ─────────────
+#
+# The three sites above (`_truncate_start_stderr`, `_read_start_stderr`, `_read_log_tail`)
+# each opened their subject without asking what it was. An **open is not a read**: on a
+# FIFO the open waits for a peer and raises nothing, so the `except OSError` around it can
+# never fire — measured 2026-10-11 on master `60541e39`, one child process per arm under an
+# 8 s cap, a FIFO at the subject leaving all three **not returned in 8 s** where a regular
+# file returned at once. Each call is bounded here by `tests.bounded_read.within`, because
+# the failure mode of this section without it is a wedged pytest run rather than a red
+# test: a cancelled run reads as `no_verdict`, whose remedy is to re-trigger the same head.
+#
+# Every FIFO arm carries an `os.mkfifo` gate and therefore skips where there are no FIFOs
+# (Windows). `test_a_directory_subject_names_its_kind_on_every_platform` is the arm that
+# covers those legs, and it is **discriminating** rather than merely green there: both
+# trees answer the same *value* for a directory (it has always produced this function's
+# "cannot read" answer), so what the arm pins is the sentence the guard leaves behind.
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_a_fifo_start_stderr_is_refused_rather_than_opened(tmp_path):
+    """The writer: `start_daemon` opens the child's stderr *before* it spawns.
+
+    `open(path, "wb")` waits for a **reader**, so before the guard a FIFO here stopped
+    every start attempt at this line rather than only failing to capture stderr — and the
+    `except OSError` written for a failed open could not fire.
+    """
+    path = tmp_path / "emrgd-start.err"
+    os.mkfifo(path)
+
+    assert within(DEADLINE_SECONDS, lambda: dm._truncate_start_stderr(path)) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_a_fifo_child_stderr_reads_as_unreadable(tmp_path):
+    """The reader: `read_bytes` waits for a *writer* while the failure report is built."""
+    path = tmp_path / "emrgd-start.err"
+    os.mkfifo(path)
+
+    assert within(DEADLINE_SECONDS, lambda: dm._read_start_stderr(path)) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_a_fifo_log_tail_is_empty_instead_of_blocking(tmp_path):
+    """The log reader, whose `path.exists()` was the reading that let the block through.
+
+    `exists()` is true for a FIFO, so it answered "yes, read it" and the `open` that
+    followed waited for a writer.
+    """
+    path = tmp_path / "emrgd.log"
+    os.mkfifo(path)
+
+    assert within(DEADLINE_SECONDS, lambda: dm._read_log_tail(path, since=(0, None))) == ""
+
+
+def test_the_controls_with_a_regular_subject_are_unchanged(tmp_path):
+    """The kind is the axis: all three still do their job on a regular file."""
+    log = tmp_path / "emrgd.log"
+    log.write_text("this attempt: boom\n", encoding="utf-8")
+    stderr = tmp_path / "emrgd-start.err"
+    stderr.write_text("Traceback: boom\n", encoding="utf-8")
+
+    handle = dm._truncate_start_stderr(tmp_path / "fresh.err")
+    assert handle is not None, "a writer must still be able to create the file"
+    handle.write(b"child stderr\n")
+    handle.close()
+    assert (tmp_path / "fresh.err").read_bytes() == b"child stderr\n"
+
+    assert dm._read_start_stderr(stderr) == "Traceback: boom"
+    assert "this attempt: boom" in dm._read_log_tail(log, since=(0, None))
+
+
+def test_an_absent_subject_still_means_what_it_meant(tmp_path):
+    """The branch the kind check must not narrow — and a writer's *normal* case.
+
+    ``non_regular_kind`` **stats**, so absence arrives as an ``OSError`` rather than as a
+    ``None`` kind: a writer's subject does not exist yet (creating it is the job), while
+    both readers already answer "cannot read" for one. FIFO-free, so it runs everywhere.
+
+    The readers get their own names because the writer's call **creates** its subject —
+    which is the behaviour being pinned, and would otherwise turn the next assertion into
+    a read of the empty file the line above just made.
+    """
+    handle = dm._truncate_start_stderr(tmp_path / "written.err")
+    assert handle is not None, "absence is not a refusal for the writer"
+    handle.close()
+    assert (tmp_path / "written.err").exists(), "the writer still creates its subject"
+
+    assert dm._read_start_stderr(tmp_path / "unread.err") is None
+    assert dm._read_log_tail(tmp_path / "unlogged.log", since=(0, None)) == ""
+
+
+def test_a_directory_subject_names_its_kind_on_every_platform(tmp_path, caplog):
+    """**FIFO-free, and it discriminates** — what the Windows leg needs.
+
+    Both trees answer the same value for a directory — it has always produced each
+    site's "cannot read"/"cannot open" answer — so the value cannot tell them apart.
+    What can is the log line the guard leaves, and that is the arm's assertion:
+
+    ============  =========================================================
+    base          the exception's own text, which differs by platform
+    this tree     ``… it is a directory, not a regular file`` + the path
+    ============  =========================================================
+
+    The family's own phrase is pinned, not the sentence around it: the exception text
+    is ``Is a directory`` here and something else on Windows, which is exactly why a
+    guard asserting *that* would not have survived the Windows leg.
+    """
+    subjects = {
+        "start stderr (write)": tmp_path / "w" / "emrgd-start.err",
+        "start stderr (read)": tmp_path / "r" / "emrgd-start.err",
+        "log tail": tmp_path / "t" / "emrgd.log",
+    }
+    for path in subjects.values():
+        path.mkdir(parents=True)
+
+    with caplog.at_level(logging.DEBUG, logger="emrg.client.daemon_manager"):
+        assert dm._truncate_start_stderr(subjects["start stderr (write)"]) is None
+        assert dm._read_start_stderr(subjects["start stderr (read)"]) is None
+        assert dm._read_log_tail(subjects["log tail"], since=(0, None)) == ""
+
+    assert "not a regular file" in caplog.text, caplog.text
+    assert "a directory" in caplog.text, caplog.text
+    for path in subjects.values():
+        assert str(path) in caplog.text, (
+            f"the refusal must name the file it refused: {path} — a kind check that does "
+            f"not say which path it judged is not diagnosable"
+        )
