@@ -5086,12 +5086,10 @@ class TestTheDaemonAsksItsSubjectsKind:
         is asked about as `self._projects_log` — because a kind question about some other
         path leaves the open at hand exactly as reachable as before.
 
-        One open is exempt, and it is named with the branch that owns it: the rant panel
-        reads `rants.jsonl` itself in `_process_message`, which is a *second reader* of a
-        store that already has one (`emrg/server/rants.py`) — issue #2097 / PR #2098
-        removes it rather than guarding it, and an edit here would collide with that PR's
-        own hunk. The leg fails on any other unguarded open, and the exemption is inert
-        once that branch lands.
+        No exemptions. The sixteenth site in this module was the rant panel's own read of
+        `rants.jsonl` in `_process_message` — a *second reader* of a store that already has
+        one, which issue #2097 / PR #2098 removed rather than guarded; that PR landed while
+        this branch was open, so the census asks for an empty set and gets one.
 
         What this census is **not**: it asks whether the question is asked, not when. A
         guard moved below the open it guards still satisfies it, and that arm is in this
@@ -5099,12 +5097,11 @@ class TestTheDaemonAsksItsSubjectsKind:
         wedge` fails on it (measured: arm A5 KILLED while this leg passed).
         """
         unguarded = _unguarded_opens(daemon_mod.__file__)
-        exempt = {("EmrgServer/_process_message", "self._rants_log")}
 
-        assert unguarded - exempt == set(), (
+        assert unguarded == set(), (
             "these functions open a path without asking its kind first (FIFO ⇒ the open "
             "waits for a peer and raises nothing, so the daemon's event loop stops): "
-            f"{sorted(unguarded - exempt)}"
+            f"{sorted(unguarded)}"
         )
 
     def test_the_census_sees_an_open_with_no_kind_question(self, tmp_path):
@@ -5136,3 +5133,101 @@ class TestTheDaemonAsksItsSubjectsKind:
             ("unguarded", "path"),
             ("untouched", "path"),
         }
+# ── the rant panel's own reader ─────────────────────────────────────
+#
+# The family section above ("the subject has to be a regular file") names the daemon's
+# readers of a path the agent or the client names. This is one more of them, and it was
+# missed twice: once by issue #2073's sweep, and again by issue #2097 — whose own body
+# cited `daemon.py` as already handling a failed `list_rants` read, because this branch
+# has an `except OSError`. It has one, and it was unreachable: the guard was
+# `self._rants_log.exists()`, which is true for a FIFO, so the `open` blocked and raised
+# nothing (issue #2097, second half — the panel is driven by a **client frame**, so this
+# is the member of the family with the shortest path from a click to a wedged daemon).
+#
+# The `list_rants` branch now calls the store's own reader instead of keeping a second
+# copy. `_read_rants` refuses a subject of another kind by name
+# (`NotARegularFile` is an `OSError`, so the frame's existing branch carries it), and
+# the copy's *second* behaviour goes with it: it appended whatever `json.loads` returned,
+# so a legacy array row — the 2026-08-18 format drift — or a bare scalar reached
+# `r.get(...)` and raised `AttributeError`, which no `except OSError` catches.
+
+
+@_needs_mkfifo
+def test_the_rant_panel_at_a_named_pipe_answers_rather_than_wedging(tmp_path):
+    """`list_rants` must answer the frame, not wait for a writer that never comes.
+
+    Written so that removing the guard makes it **hang** rather than pass, which is why
+    the call is bounded by `within`: the failure mode is a call that never returns.
+    """
+    server = _make_server()
+    fifo = tmp_path / "rants.jsonl"
+    os.mkfifo(fifo)
+    server._rants_log = fifo
+
+    frames = within(DEADLINE_SECONDS, lambda: _drive(server, {"type": "list_rants"}))
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["type"] == "rants_list", frames[0]
+    assert "error" in frames[0], frames[0]
+    assert "a FIFO (named pipe)" in frames[0]["error"], frames[0]["error"]
+    assert "not a regular file" in frames[0]["error"], frames[0]["error"]
+
+
+def test_the_rant_panel_at_a_regular_file_still_answers_the_rows(tmp_path):
+    """The control, and it is pipe-free on purpose so it runs on the Windows leg too.
+
+    The rows also come back **filtered and newest-first**, which is the panel's contract
+    that the shared reader must not have changed: it filters by `status` exactly where
+    the deleted loop did, and the sort stays this branch's own.
+    """
+    server = _make_server()
+    log = tmp_path / "rants.jsonl"
+    rows = [
+        {"timestamp": "2026-10-11T09:00:00+08:00", "project": "emrg", "status": "pending",
+         "progress": None, "completed": None, "message": "older"},
+        {"timestamp": "2026-10-11T10:00:00+08:00", "project": "emrg", "status": "completed",
+         "progress": None, "completed": "2026-10-11T10:00:00+08:00", "message": "newer"},
+    ]
+    log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    server._rants_log = log
+
+    frames = _drive(server, {"type": "list_rants"})
+    assert len(frames) == 1, frames
+    assert "error" not in frames[0], frames[0]
+    assert [r["message"] for r in frames[0]["rants"]] == ["newer", "older"], frames[0]
+
+    frames = _drive(server, {"type": "list_rants", "status": "pending"})
+    assert [r["message"] for r in frames[0]["rants"]] == ["older"], frames[0]
+
+    frames = _drive(server, {"type": "list_rants", "status": "in_progress"})
+    assert frames[0]["rants"] == [], frames[0]
+
+
+def test_the_rant_panel_survives_a_legacy_array_row_and_a_bare_scalar(tmp_path):
+    """The second defect the shared reader fixes, and the one no timeout can read.
+
+    The deleted loop appended the raw `json.loads` result, so a row
+    `["<ts>", "emrg", "pending", null, null, "legacy"]` (the 2026-08-18 drift) or a bare
+    `5` reached `r.get(...)` and raised `AttributeError` out of the dispatcher — a frame
+    the client never gets, on a file the same code path writes. Measured in the reverse
+    direction: on the previous tree this frame raises.
+
+    Both rows are asserted at once because they are one defect — "the panel reads a
+    parsed value as if it were a rant" — and the store has always answered them: the
+    array row is converted field by field, the scalar skipped.
+    """
+    server = _make_server()
+    log = tmp_path / "rants.jsonl"
+    log.write_text(
+        json.dumps(["2026-10-11T09:00:00+08:00", "emrg", "pending", None, None, "legacy"])
+        + "\n" + "5\n" + "{not json}\n",
+        encoding="utf-8",
+    )
+    server._rants_log = log
+
+    frames = _drive(server, {"type": "list_rants"})
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["type"] == "rants_list", frames[0]
+    assert [r["message"] for r in frames[0]["rants"]] == ["legacy"], frames[0]
+    assert frames[0]["rants"][0]["project"] == "emrg", frames[0]

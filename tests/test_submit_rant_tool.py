@@ -10,17 +10,22 @@ Rant 2026-08-18T16:42:52: the tool also exposes list/update/cleanup actions
 curates rants.jsonl through the tool instead of hand-written rewrites.
 """
 
+import asyncio
 import json
+import os
 
 import pytest
 
 from emrg.server.rants import (
+    _read_rants,
+    _write_rants,
     append_rant,
     cleanup_rants,
     list_rants,
     update_rant,
 )
 from emrg.tools.submit_rant_tool import SubmitRantTool
+from tests.bounded_read import DEADLINE_SECONDS, within
 
 
 def test_append_rant_writes_sorted_entry(tmp_path):
@@ -797,3 +802,158 @@ def test_tool_definition_exposes_actions():
     assert "project" in d.parameters["properties"]
     assert "consent" in d.description.lower() or "confirm" in d.description.lower()
 
+
+
+# ── the rant store asks its subject's kind before opening it (issue #2097) ────
+#
+# `rants.jsonl` is the host's feedback channel and the evolution loop's queue, and it is
+# opened by path in three places (`_read_rants`, `_write_rants`, the tool's `projects.yml`
+# read). `exists()` was the guard, and it is the *wrong* question: it is true for a FIFO,
+# for a socket and for a device, and an `open()` on any of those blocks — the read until a
+# writer appears, the write until a reader does, a device never. Nothing is raised, so no
+# `except` can bound the consequence, and the tool runs on the daemon's event loop: the
+# block is the whole server, the host's connection included.
+#
+# Measured on `cf9304c7` before the fix (`cyc20261011-114739`), one child process per arm
+# under an 8 s cap: `_read_rants` against a FIFO **did not return**, the same call on an
+# absent path answered at once. So each test below is written the way this repository
+# writes this class: **removing the guard makes it hang, not fail** — hence the deadline
+# from `tests.bounded_read`, which turns "never returns" into a readable assertion.
+#
+# The subjects are pipes, so the family is gated on `mkfifo` (Windows has none). Every
+# **control** is pipe-free on purpose, so it runs on both CI legs and pins the half of the
+# contract the guard could have broken: absence still means "no rants", and the writer must
+# still create a log that does not exist yet.
+
+
+_needs_mkfifo = pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+
+
+@_needs_mkfifo
+def test_read_rants_refuses_a_named_pipe_instead_of_wedging(tmp_path):
+    """The store's reader names the kind rather than opening it."""
+    fifo = tmp_path / "rants.jsonl"
+    os.mkfifo(fifo)
+
+    with pytest.raises(OSError) as excinfo:
+        within(DEADLINE_SECONDS, lambda: _read_rants(fifo))
+
+    assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
+    assert "not a regular file" in str(excinfo.value), str(excinfo.value)
+
+
+@_needs_mkfifo
+def test_write_rants_refuses_a_named_pipe_too(tmp_path):
+    """The writer carries its own guard: a read-side guard does not remove this block.
+
+    `append_rant` reads *then* writes, so a guard on the read alone leaves the write's own
+    block reachable — and `open(path, "w")` on a FIFO waits for a **reader**, the opposite
+    peer to the read's, so it is a second blocking site rather than the same one.
+    """
+    fifo = tmp_path / "rants.jsonl"
+    os.mkfifo(fifo)
+    row = {
+        "timestamp": "2026-10-11T11:00:00+08:00",
+        "project": "emrg",
+        "status": "pending",
+        "progress": None,
+        "completed": None,
+        "message": "x",
+    }
+
+    with pytest.raises(OSError) as excinfo:
+        within(DEADLINE_SECONDS, lambda: _write_rants(fifo, [row]))
+
+    assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
+    assert "not a regular file" in str(excinfo.value), str(excinfo.value)
+
+
+@_needs_mkfifo
+def test_append_rant_on_a_named_pipe_refuses_rather_than_wedging(tmp_path):
+    """The public path the daemon and the tool both call, end to end."""
+    fifo = tmp_path / "rants.jsonl"
+    os.mkfifo(fifo)
+
+    with pytest.raises(OSError) as excinfo:
+        within(DEADLINE_SECONDS, lambda: append_rant(fifo, "host feedback", "emrg"))
+
+    assert "not a regular file" in str(excinfo.value), str(excinfo.value)
+
+
+@_needs_mkfifo
+def test_the_list_action_on_a_named_pipe_is_a_tool_error_not_a_hang(tmp_path, monkeypatch):
+    """What a caller actually sees: an error result, on both faces of the family.
+
+    The refusal must not escape as an unhandled exception either — the daemon runs tools
+    in a loop that must survive a bad subject, and `_execute_list` already answers a failed
+    read that way.
+    """
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    os.mkfifo(tmp_path / "rants.jsonl")
+    tool = SubmitRantTool()
+
+    for action in ("list", "cleanup"):
+        result = within(DEADLINE_SECONDS, lambda a=action: asyncio.run(tool.execute({"action": a})))
+        assert result.error is True, result
+        assert "not a regular file" in result.content, result.content
+
+
+@_needs_mkfifo
+def test_a_named_pipe_projects_yml_yields_no_candidates(tmp_path, monkeypatch):
+    """The advisory read degrades instead of refusing, as it already did for a missing file.
+
+    `projects.yml` only feeds a warning about a mis-spelled project name, so turning its
+    unreadability into a hard failure would break `submit` for a reason unrelated to the
+    rant. The control in the same test is a real file: the read still works.
+    """
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    tool = SubmitRantTool()
+    os.mkfifo(tmp_path / "projects.yml")
+
+    assert within(DEADLINE_SECONDS, tool._registered_project_names) == []
+
+    (tmp_path / "projects.yml").unlink()
+    (tmp_path / "projects.yml").write_text(
+        "- name: emrg\n- name: aitokenpool\n", encoding="utf-8")
+
+    assert sorted(within(DEADLINE_SECONDS, tool._registered_project_names)) == [
+        "aitokenpool", "emrg"]
+
+
+def test_an_absent_rant_log_reads_empty_and_the_writer_creates_it(tmp_path):
+    """The control for the whole family — and it runs on Windows, so it is a real control.
+
+    `non_regular_kind` *stats*, so absence arrives as an `OSError` rather than as `None`.
+    Both sites branch on that by treating it as the *old* answer: the reader answers `[]`
+    (the reading it has always given a missing log) and the writer proceeds to create the
+    path. Reading absence as a refusal would wedge the writer on a fresh install — the
+    shape `#2095` was fixed for — and answering a FIFO with `[]` would state a falsehood
+    about the host's queue, which is why the refusal is the reader's non-absent branch.
+    """
+    log = tmp_path / "rants.jsonl"
+    assert _read_rants(log) == []
+    assert not log.exists(), "a read must not create the log"
+
+    write = tmp_path / "nested" / "rants.jsonl"
+    _write_rants(write, [])
+    assert write.exists(), "the writer creates its subject and its parent"
+
+    assert _read_rants(write) == []
+    assert append_rant(write, "host feedback", "emrg") == 1
+    assert [r["message"] for r in _read_rants(write)] == ["host feedback"]
+
+
+def test_projects_yml_absent_or_malformed_yields_no_candidates(tmp_path, monkeypatch):
+    """The pipe-free control for the advisory read: absent, malformed, and well-formed."""
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    tool = SubmitRantTool()
+
+    assert tool._registered_project_names() == []       # absent
+    (tmp_path / "projects.yml").write_text("just a string\n", encoding="utf-8")
+    assert tool._registered_project_names() == []       # not a list
+    (tmp_path / "projects.yml").write_text(": :\n", encoding="utf-8")
+    assert tool._registered_project_names() == []       # unparseable
+    (tmp_path / "projects.yml").write_text(
+        "- name: emrg\n- notadict\n- name: ''\n", encoding="utf-8")
+    assert tool._registered_project_names() == ["emrg"]

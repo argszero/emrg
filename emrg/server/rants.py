@@ -19,6 +19,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from emrg.memory import NotARegularFile
+from emrg.tools.base import non_regular_kind
+
 # Canonical field order: timestamp → project → status → progress → completed → message
 # (project right after timestamp per user feedback; message last)
 _RANT_FIELDS = ("timestamp", "project", "status", "progress", "completed", "message")
@@ -46,11 +49,43 @@ def _normalize_rant(raw) -> dict | None:
     return None
 
 
+def _rant_log_refusal(rants_log: Path, kind: str) -> str:
+    """The one reason the store refuses a subject, shared by its reader and its writer."""
+    return (
+        f"{rants_log} is {kind}, not a regular file. The rant log is opened directly, and "
+        f"opening this one blocks until a peer appears — a FIFO waits for a writer, a socket "
+        f"for a connection, a device never ends — so the call would never return, and neither "
+        f"would the daemon, which runs the rant tool on its event loop."
+    )
+
+
 def _read_rants(rants_log: Path) -> list[dict]:
-    """Read all rant entries, tolerantly converting legacy array rows to dicts."""
+    """Read all rant entries, tolerantly converting legacy array rows to dicts.
+
+    The subject's **kind** is asked before it is opened, because opening it is what decides
+    whether this call returns at all: a FIFO blocks at the *open* until a writer appears and
+    raises nothing, so a caller's `except OSError` cannot bound the consequence. This runs on
+    the daemon's event loop, so the block is the whole server.
+
+    Measured 2026-10-11 (`cyc20261011-114739`) on `cf9304c7`, one child process per arm under
+    an 8 s cap: `_read_rants` against a FIFO **did not return in 8 s**, where the same call
+    with the log absent answered at once.
+
+    A subject that is not a regular file is **refused**, not reported as empty: `[]` already
+    means "there are no rants" and its callers act on that reading, so answering a FIFO with
+    it would state a falsehood about the host's own feedback channel. `NotARegularFile` is an
+    `OSError`, which is what every caller of this store already handles.
+    """
     rants: list[dict] = []
-    if not rants_log.exists():
+    try:
+        kind = non_regular_kind(rants_log)
+    except OSError:
+        # Absent (or unstattable) — the empty list this function has always answered a
+        # missing log with. `non_regular_kind` *stats*, so absence reaches us as an OSError
+        # rather than as `None`, and it must keep meaning "no rants", not "refuse".
         return rants
+    if kind:
+        raise NotARegularFile(_rant_log_refusal(rants_log, kind))
     with open(rants_log, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -68,7 +103,26 @@ def _read_rants(rants_log: Path) -> list[dict]:
 
 def _write_rants(rants_log: Path, rants: list[dict]) -> None:
     """Sort by timestamp ascending and rewrite the file (dict 6-field order,
-    ensure_ascii=False — the ONLY writer for rants.jsonl)."""
+    ensure_ascii=False — the ONLY writer for rants.jsonl).
+
+    Asks the subject's kind before opening it, for the reason :func:`_read_rants` states —
+    and the writer needs its own guard rather than inheriting the reader's:
+    `open(rants_log, "w")` on a FIFO blocks until a **reader** appears, so a guard on the
+    read alone would not remove the block, only move it here (`append_rant` reads and then
+    writes, so both are on one path).
+
+    Absence is the writer's **normal** case, not a refusal: `non_regular_kind` stats its
+    subject and `stat` raises on a missing path, and this function exists to create it. That
+    branch is why the `except OSError` below is empty — without it the stat would raise on
+    every fresh install, and a caller's `except OSError` would swallow it into a write that
+    silently did not happen.
+    """
+    try:
+        kind = non_regular_kind(rants_log)
+    except OSError:
+        kind = None  # absent: this writer is about to create it
+    if kind:
+        raise NotARegularFile(_rant_log_refusal(rants_log, kind))
     rants.sort(key=lambda r: r.get("timestamp", ""))
     rants_log.parent.mkdir(parents=True, exist_ok=True)
     with open(rants_log, "w", encoding="utf-8") as f:
