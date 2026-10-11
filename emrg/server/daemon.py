@@ -1336,6 +1336,16 @@ class EmrgServer:
         try:
             logs_dir = config_dir() / "logs"
             for f in logs_dir.glob("evolution-*.json"):
+                # `glob` is a name filter, not a kind one: a pipe named
+                # `evolution-….json` is yielded like any other entry, and the read
+                # below would never return (see `_non_regular_kind`). Asked before
+                # the open, and the file is skipped rather than read — it holds no
+                # record, so it is not one of the records this counts.
+                kind = _non_regular_kind(f)
+                if kind is not None:
+                    logger.debug(
+                        "evolution log %s is %s; not opened", f.name, kind)
+                    continue
                 try:
                     data = json.loads(f.read_text(encoding="utf-8"))
                     if data.get("timestamp"):
@@ -3138,6 +3148,14 @@ class EmrgServer:
                 )[: max(1, min(int(limit), 20))]
                 recent = []
                 for f in files:
+                    # Same subject as `_evolution_count`, same reason: the walk hands
+                    # back whatever holds the name, and asking the kind first is what
+                    # keeps this handler answering instead of blocking on the open.
+                    kind = _non_regular_kind(f)
+                    if kind is not None:
+                        logger.debug(
+                            "evolution log %s is %s; not opened", f.name, kind)
+                        continue
                     try:
                         data = json.loads(f.read_text(encoding="utf-8"))
                         recent.append({
@@ -5040,6 +5058,14 @@ class EmrgServer:
         try:
             marker = _PLANTED_FIRE_MARKER_PATH
             marker.parent.mkdir(parents=True, exist_ok=True)
+            # A write is an open too: `open(<fifo>, "w")` blocks until a reader
+            # appears, so a name that is not a regular file is refused rather than
+            # written (the refusal is an OSError, which the handler below already
+            # answers — no new branch, and the marker it cannot write is the same
+            # case as the marker it cannot write for any other reason).
+            kind = _non_regular_kind(marker)
+            if kind is not None:
+                raise OSError(f"{marker} is {kind}, not a regular file")
             marker.write_text(
                 datetime.now().astimezone().isoformat() + "\n",
                 encoding="utf-8",
@@ -5065,6 +5091,9 @@ class EmrgServer:
         try:
             complete = _PLANTED_FIRE_ROUND_COMPLETE_PATH
             complete.parent.mkdir(parents=True, exist_ok=True)
+            kind = _non_regular_kind(complete)
+            if kind is not None:
+                raise OSError(f"{complete} is {kind}, not a regular file")
             complete.write_text(
                 datetime.now().astimezone().isoformat() + "\n",
                 encoding="utf-8",
@@ -5095,6 +5124,16 @@ class EmrgServer:
         reader — documented limitation, issue #1114).
         """
         def _read_age(path) -> float | None:
+            # Both marker paths are read here, and either one may be a FIFO a peer
+            # planted at that name — `.exists()` above is true for one, so the flow
+            # reaches this read, which would never return. A subject that is not a
+            # regular file is answered exactly as an unreadable one is: no age, so no
+            # alarm from it (the entry condition above still holds).
+            kind = _non_regular_kind(path)
+            if kind is not None:
+                logger.debug(
+                    "planted-fire marker %s is %s; not opened", path.name, kind)
+                return None
             try:
                 raw = path.read_text(encoding="utf-8").strip()
                 return (datetime.now().astimezone()
@@ -5234,6 +5273,16 @@ class EmrgServer:
         daemon; a stats write failing is itself a signal the #1072
         measurability contract is broken, surfaced as drill FAIL)."""
         n = 0
+        # The stats file is opened directly below; a pipe at that name blocks the
+        # drill's reader for good, so the kind is asked first. Not-a-regular-file is
+        # not "unreadable": the file the drill counts its own events in is not there
+        # at all, so 0 is the honest count and the drill reports its FAIL line.
+        kind = _non_regular_kind(_USAGE_ANCHOR_STATS_PATH)
+        if kind is not None:
+            logger.debug(
+                "usage-anchor stats %s is %s; not opened",
+                _USAGE_ANCHOR_STATS_PATH.name, kind)
+            return 0
         try:
             with open(_USAGE_ANCHOR_STATS_PATH, "r", encoding="utf-8") as fh:
                 for line in fh:
@@ -7282,6 +7331,14 @@ def _append_usage_anchor_event(record: dict, path: Path | None = None) -> int:
     stats write must never take the daemon down.
     """
     path = path or _USAGE_ANCHOR_STATS_PATH
+    # Refused before the count below, and not inside its `except`: this subject is
+    # opened twice (the read that counts, then the append), and an OSError swallowed
+    # by the first would leave the second to block on the same pipe. The callers
+    # already answer an OSError from this function (`a stats write must never take
+    # the daemon down`), so the refusal costs no branch anywhere.
+    kind = _non_regular_kind(path)
+    if kind is not None:
+        raise OSError(f"{path} is {kind}, not a regular file")
     total = 0
     try:
         with open(path, "r", encoding="utf-8") as fh:
