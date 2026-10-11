@@ -368,8 +368,8 @@ def _refuse_non_regular(path: Path, opened: str) -> None:
             f"{path} is {kind}, not a regular file. This {opened} opens the path "
             f"directly, and opening it blocks until a peer appears — a FIFO waits for "
             f"a writer, a socket for a connection — so the call would never return, and "
-            f"neither would the daemon, which runs every scheduler read on its event "
-            f"loop."
+            f"neither would the daemon, which runs every scheduler read **and write** "
+            f"on its event loop."
         )
 
 
@@ -387,6 +387,36 @@ def _open_text(path, mode: str):
     """
     _refuse_non_regular(Path(path), "writer")
     return open(path, mode, encoding="utf-8")
+
+
+def _write_text(path: Path, data: str) -> None:
+    """``path.write_text(data)`` after asking its kind (``_refuse_non_regular``).
+
+    The third of the three shapes an open takes, and the one that was left out.
+    ``Path.write_text`` is ``open(path, "w")``, so it blocks on a FIFO exactly where the
+    two above do — and the scheduler writes five paths that way (the custom template's
+    temp file, the saturation flag, the heartbeat, the next-run slot, and the final
+    summary), every one of them reached from the daemon's event loop.
+
+    Measured 2026-10-11 (``cyc20261011-113605``) on this branch's own head ``a36eee38``
+    — the commit whose body says "every site routed through them" — one child process per
+    arm under an 8 s cap, driving each real writer with a ``mkfifo`` planted at its
+    subject:
+
+        _write_heartbeat         DID NOT RETURN within 8s
+        _save_saturation_state   DID NOT RETURN within 8s
+        _save_next_run_state     DID NOT RETURN within 8s
+        _write_final_summary     DID NOT RETURN within 8s
+        _write_custom_template   DID NOT RETURN within 8s
+
+    ``_read_text`` and ``_open_text`` were the two the module was routed through; this is
+    the third. A reader (or writer) that reaches its subject through ``Path``'s own
+    convenience method is the shape that keeps being missed, so the census leg in
+    ``tests/test_scheduler.py`` now asks it directly: no ``.write_text(`` may appear in
+    this module outside this function.
+    """
+    _refuse_non_regular(path, "writer")
+    path.write_text(data, encoding="utf-8")
 
 
 def read_table(path: Path | None = None) -> list[dict]:
@@ -488,7 +518,7 @@ def _write_custom_template(name: str, prompt: str) -> None:
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"{name}.md"
     tmp = p.with_suffix(".md.tmp")
-    tmp.write_text(prompt, encoding="utf-8")
+    _write_text(tmp, prompt)
     tmp.replace(p)
 
 
@@ -1727,10 +1757,10 @@ class TaskHandler:
     def _save_saturation_state(self) -> None:
         """Persist the slowdown flag to disk."""
         try:
-            self._saturation_file.write_text(
+            _write_text(
+                self._saturation_file,
                 json.dumps({"slowdown_active": self._slowdown_active},
                            ensure_ascii=False),
-                encoding="utf-8",
             )
         except Exception:
             pass
@@ -1755,9 +1785,9 @@ class TaskHandler:
                 "tool_count": self._cycle_progress.get("tool_count", 0),
             }
             payload.update(extra)
-            self._heartbeat_file.write_text(
+            _write_text(
+                self._heartbeat_file,
                 json.dumps(payload, ensure_ascii=False),
-                encoding="utf-8",
             )
         except Exception:
             pass  # heartbeat is best-effort; never affects the running cycle
@@ -1926,9 +1956,9 @@ class TaskHandler:
                 self._next_run_file.unlink(missing_ok=True)
                 return
             self._next_run_dir.mkdir(parents=True, exist_ok=True)
-            self._next_run_file.write_text(
+            _write_text(
+                self._next_run_file,
                 json.dumps({"next_run_at": self._next_run_at}, ensure_ascii=False),
-                encoding="utf-8",
             )
         except Exception:
             pass
@@ -2885,7 +2915,7 @@ class TaskHandler:
             "last_evolution": self.evolutions[-1].timestamp,
         }
         path = self._logs_dir / "summary.json"
-        path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        _write_text(path, json.dumps(summary, indent=2, ensure_ascii=False))
 
 
 # ── TaskScheduler ────────────────────────────────────────────────

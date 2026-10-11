@@ -3975,3 +3975,179 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
         (tmp_path / "prompt.md").write_text("host {{ host_name }}", encoding="utf-8")
         handler._derived["template_path"] = tmp_path / "prompt.md"
         assert "host" in within(DEADLINE_SECONDS, handler._build_evolution_prompt)
+
+
+class TestSchedulerWritersAskTheKindBeforeOpening:
+    """The write side of the same rule: an **open is not a read**.
+
+    `Path.write_text` is `open(path, "w")`, so it blocks on a FIFO exactly where
+    `read_text` does — it waits at the open for a reader and raises nothing, so no
+    handler can fire and the call never returns. Measured 2026-10-11
+    (`cyc20261011-113605`) on this branch's own head `a36eee38`, one child process per
+    arm under the driver's 8 s cap, driving each **real** writer with a `mkfifo` at its
+    subject: the heartbeat, the saturation flag, the next-run slot, the final summary and
+    the custom template's temp file each **did not return**. Three of the five swallow
+    their `OSError` by contract ("best-effort, never raises"), so the bound alone is not
+    enough — the reading is the return *plus* that the file it meant to write is still
+    the pipe it was told not to open.
+    """
+
+    @staticmethod
+    def _fifo(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        return path
+
+    def _handler(self, tmp_path, attr: str, rel: str):
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        setattr(handler, attr, self._fifo(tmp_path / rel))
+        return handler
+
+    @_needs_mkfifo
+    def test_the_heartbeat_writer_does_not_block_on_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_heartbeat_file", "task-runs/probe.heartbeat.json")
+        assert within(DEADLINE_SECONDS, lambda: handler._write_heartbeat("running")) is None
+        assert handler._heartbeat_file.exists(), (
+            "the pipe was replaced by a regular file: the guard has to refuse, not unlink "
+            "and write through"
+        )
+
+    @_needs_mkfifo
+    def test_the_saturation_writer_does_not_block_on_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_saturation_file", "saturation/probe.json")
+        handler._slowdown_active = True
+        assert within(DEADLINE_SECONDS, handler._save_saturation_state) is None
+
+    @_needs_mkfifo
+    def test_the_next_run_writer_does_not_block_on_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_next_run_file", "next-run/probe.json")
+        handler._next_run_at = 1234567890.0
+        assert within(DEADLINE_SECONDS, handler._save_next_run_state) is None
+
+    @_needs_mkfifo
+    def test_the_final_summary_writer_refuses_a_fifo(self, tmp_path):
+        """This site has no handler of its own, so the refusal is what it owes.
+
+        It is reached once per handler lifetime, on the way out of `run()`; silence
+        there is the same `never returns` the rest of this class is about.
+        """
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler._logs_dir = tmp_path / "logs"
+        self._fifo(handler._logs_dir / "summary.json")
+        handler.evolutions = [
+            EvolutionLog(timestamp="t1", work="w", recommend_slowdown=False,
+                         slowdown_reason="", tool_count=0),
+        ]
+        with pytest.raises(NotARegularFile) as excinfo:
+            within(DEADLINE_SECONDS, lambda: asyncio.run(handler._write_final_summary()))
+        assert "a FIFO" in str(excinfo.value), str(excinfo.value)
+
+    @_needs_mkfifo
+    def test_the_custom_template_writer_refuses_a_fifo(self, tmp_path, monkeypatch):
+        """The temp file is the subject, not the template: the write happens there.
+
+        `template_create` answers `(ok, error)` and this path has no handler, so the
+        refusal reaches the caller of the daemon handler rather than being logged away —
+        which is the answer for a write that cannot be made.
+        """
+        from emrg.server import scheduler as mod
+
+        monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+        self._fifo(tmp_path / "task-templates" / "probe.md.tmp")
+        with pytest.raises(NotARegularFile) as excinfo:
+            within(DEADLINE_SECONDS,
+                   lambda: mod._write_custom_template("probe", "host {{ host_name }}"))
+        assert "a FIFO" in str(excinfo.value), str(excinfo.value)
+
+    def test_the_control_writes_every_subject_when_it_is_absent(self, tmp_path, monkeypatch):
+        """Without this the suite cannot tell the guard from a writer that never writes.
+
+        Every subject below is absent, which is the state each writer is normally in: a
+        refusal for an absent path would turn the heartbeat and the next-run slot off for
+        every task, and nothing above would notice.
+        """
+        from emrg.server import scheduler as mod
+
+        monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler._heartbeat_file = tmp_path / "task-runs" / "probe.heartbeat.json"
+        handler._saturation_file = tmp_path / "saturation" / "probe.json"
+        handler._next_run_file = tmp_path / "next-run" / "probe.json"
+        handler._logs_dir = tmp_path / "logs"
+        for parent in (handler._heartbeat_file.parent, handler._saturation_file.parent,
+                       handler._next_run_file.parent, handler._logs_dir):
+            # The writers that swallow their OSError by contract cannot make a missing
+            # parent: an absent directory and a FIFO would be the same reading. The
+            # subject is the file, so the directory is this fixture's to create.
+            parent.mkdir(parents=True, exist_ok=True)
+        handler._slowdown_active = True
+        handler._next_run_at = 1234567890.0
+        handler.evolutions = [
+            EvolutionLog(timestamp="t1", work="w", recommend_slowdown=False,
+                         slowdown_reason="", tool_count=0),
+        ]
+
+        handler._write_heartbeat("running")
+        handler._save_saturation_state()
+        handler._save_next_run_state()
+        asyncio.run(handler._write_final_summary())
+        assert json.loads((handler._logs_dir / "summary.json").read_text(encoding="utf-8"))[
+            "total_evolutions"] == 1
+        assert json.loads(handler._heartbeat_file.read_text(encoding="utf-8"))["status"] == "running"
+        assert json.loads(handler._saturation_file.read_text(encoding="utf-8"))["slowdown_active"] is True
+        assert handler._next_run_file.exists()
+
+        mod._write_custom_template("probe", "host {{ host_name }}")
+        assert (tmp_path / "task-templates" / "probe.md").read_text(encoding="utf-8") == "host {{ host_name }}"
+
+    def test_no_open_shape_reaches_its_subject_unasked(self):
+        """The census leg: the shape that keeps being missed is `Path`'s own method.
+
+        Three of the five writers above were invisible to a grep for `open(` — they call
+        `Path.write_text`, which *is* an open. This asks the module's source instead of a
+        reviewer's memory: every `read_text`, `write_text` and `open(` in
+        `emrg/server/scheduler.py` is inside the one helper written for it.
+        """
+        import ast
+
+        from emrg.server import scheduler as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        owners = {
+            "_read_text": {"read_text"},
+            "_write_text": {"write_text"},
+            "_open_text": {"open"},
+        }
+        homes = {name for names in owners.values() for name in names}
+
+        def enclosing(node, stack):
+            return stack[-1] if stack else "<module>"
+
+        found: dict[str, set[str]] = {}
+        stack: list[str] = []
+
+        class Visitor(ast.NodeVisitor):
+            def visit_FunctionDef(self, node):
+                stack.append(node.name)
+                self.generic_visit(node)
+                stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                func = node.func
+                if isinstance(func, ast.Attribute) and func.attr in homes:
+                    found.setdefault(func.attr, set()).add(enclosing(node, stack))
+                elif isinstance(func, ast.Name) and func.id == "open":
+                    found.setdefault("open", set()).add(enclosing(node, stack))
+                self.generic_visit(node)
+
+        Visitor().visit(tree)
+        for method, names in owners.items():
+            callers = found.get(method.split("_", 1)[1], set())
+            unexpected = callers - {method}
+            assert not unexpected, (
+                f"{method.split('_', 1)[1]} is called outside {method}() by {sorted(unexpected)} "
+                f"— every open in this module asks its subject's kind first (issue #2095)"
+            )
