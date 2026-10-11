@@ -1,6 +1,8 @@
 """Tests for the EMRG memory module."""
 
+import logging
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -16,6 +18,8 @@ from emrg.memory import (
     SessionMemoryStore,
     generate_id,
 )
+
+from tests.bounded_read import DEADLINE_SECONDS, within
 
 
 @pytest.fixture
@@ -951,3 +955,84 @@ def test_the_store_route_refuses_rather_than_never_answering(temp_cwd):
         store.create("reference", "A note", "body")
 
     assert "MEMORY.md" in str(excinfo.value), str(excinfo.value)
+
+
+# ── The promotion's marker is an open, so its kind is asked first ─────────────
+#
+# `promote_to_project` writes `<memory>.promoted` beside the memory it has just marked
+# `merged`, in the store's own directory — inside the agent's workspace, so anything
+# running there can plant a subject at that name. A write is an open too: `write_text` on
+# a FIFO waits for a reader and raises nothing, so the call never returns and the daemon,
+# whose event loop reaches this store, never answers again. A *directory* is the same
+# defect one kind over, and there it is worse than a hang's quiet cousin: today it raises
+# `IsADirectoryError` **after** the project copy and the index row are written, so an
+# exception reports the promotion as failed while most of it happened.
+#
+# Measured 2026-10-12 (`cyc20261012-043725`) on master `f4fe92c3`, one child per arm under
+# a 10 s cap: a FIFO left this call **not returning**, a directory raised
+# `IsADirectoryError`, and a regular or absent marker returned.
+#
+# The FIFO arm is POSIX-gated; the directory arm is the one that runs on both legs, and it
+# discriminates — the raise above is what an unguarded tree answers it with.
+
+
+def _the_memory_path(store) -> Path:
+    """The one memory file a store created in this test holds."""
+    files = [p for p in store.directory.glob("*.md") if p.name != "MEMORY.md"]
+    assert len(files) == 1, files
+    return files[0]
+
+
+@_needs_mkfifo
+def test_a_named_pipe_marker_does_not_hold_the_promotion(session_store, temp_cwd):
+    """Bounded, and the promotion completes: the marker is a record, not the work."""
+    pstore = ProjectMemoryStore(temp_cwd)
+    mem = session_store.create("decision", "Important decision", "Use X over Y")
+    marker = _the_memory_path(session_store).with_suffix(".promoted")
+    os.mkfifo(marker)
+
+    promoted = within(DEADLINE_SECONDS, lambda: session_store.promote_to_project(mem.id, pstore))
+
+    assert promoted is not None, "the promotion itself must still complete"
+    assert stat.S_ISFIFO(os.stat(marker).st_mode), "the marker was written into the pipe"
+    assert (pstore.directory / promoted.filename).exists(), "the project copy is what the marker records"
+    assert session_store.get(mem.id).status == "merged"
+
+
+def test_a_directory_marker_is_skipped_by_kind_and_the_promotion_still_completes(
+    session_store, temp_cwd, caplog
+):
+    """The pipe-free half, and the one the Windows leg runs.
+
+    Unguarded, this path answers `IsADirectoryError` — an `OSError`, but raised *after* the
+    copy and the index row, so the promotion is reported as failed having mostly happened.
+    Guarded, the call returns, the promotion is whole, and the warning names the kind.
+    """
+    pstore = ProjectMemoryStore(temp_cwd)
+    mem = session_store.create("decision", "Important decision", "Use X over Y")
+    marker = _the_memory_path(session_store).with_suffix(".promoted")
+    marker.mkdir()
+
+    with caplog.at_level(logging.WARNING):
+        promoted = session_store.promote_to_project(mem.id, pstore)
+
+    assert promoted is not None, "a marker that cannot be written must not fail the promotion"
+    assert "a directory" in caplog.text, caplog.text
+    assert "not a regular file" in caplog.text, caplog.text
+    assert marker.is_dir(), "the subject was replaced rather than skipped"
+    assert session_store.get(mem.id).status == "merged"
+
+
+def test_a_regular_marker_is_still_written(session_store, temp_cwd):
+    """The control the guard must not narrow: a marker that can be written still is."""
+    pstore = ProjectMemoryStore(temp_cwd)
+    mem = session_store.create("decision", "Important decision", "Use X over Y")
+    marker = _the_memory_path(session_store).with_suffix(".promoted")
+
+    promoted = session_store.promote_to_project(mem.id, pstore)
+
+    assert promoted is not None
+    assert marker.is_file(), "the marker is this call's own record of the promotion"
+    text = marker.read_text(encoding="utf-8")
+    assert f"memory_id: {mem.id}" in text, text
+    assert str(promoted.filename) in text, text

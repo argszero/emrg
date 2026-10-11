@@ -1348,13 +1348,41 @@ class MemoryStore:
         mem_original.save(path)
 
         # Create .promoted marker
+        #
+        # Asked before it is opened, because a write is an open too: `write_text` on a FIFO
+        # waits for a reader and raises nothing, so it would hold `promote_to_project` — and
+        # the caller, which runs on the daemon's event loop — for ever. A *directory* is the
+        # same defect one kind over: today it raises `IsADirectoryError` straight out of this
+        # method, **after** the copy and the project index row have already been written, so
+        # the promotion is left half-reported by an exception. Measured 2026-10-12
+        # (`cyc20261012-043725`) on master `f4fe92c3`, one child per arm under a 10 s cap: a
+        # FIFO left this call **not returning**, a directory raised `IsADirectoryError`, and
+        # a regular or absent marker returned.
+        #
+        # Skipped rather than raised, and the difference from the index writer above is the
+        # reading, not a preference: this marker has **no reader in the tree** (nothing but
+        # this line names `.promoted`), and the promotion is already recorded where it counts
+        # — the original file's `status: merged` and the body line written just above. An
+        # exception here would fail a promotion whose real work is done, over a file nothing
+        # reads; the warning names the path and the kind instead, so the skip is not silent.
         marker = path.with_suffix(".promoted")
-        marker.write_text(
-            f"promoted_at: {now_iso()}\n"
-            f"target: {new_path}\n"
-            f"memory_id: {mem.id}\n",
-            encoding="utf-8",
-        )
+        try:
+            marker_kind = non_regular_kind(marker)
+        except OSError:
+            marker_kind = None  # an absent marker is the normal case, and this is a stat
+        if marker_kind is not None:
+            logger.warning(
+                "memory promotion: %s is %s, not a regular file — the .promoted marker was "
+                "not written; the original's status and body already record the promotion",
+                marker, marker_kind,
+            )
+        else:
+            marker.write_text(
+                f"promoted_at: {now_iso()}\n"
+                f"target: {new_path}\n"
+                f"memory_id: {mem.id}\n",
+                encoding="utf-8",
+            )
 
         # Update session index (remove the entry since it's now merged)
         sindex = self._load_index()
