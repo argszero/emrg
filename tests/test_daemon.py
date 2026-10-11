@@ -4818,3 +4818,175 @@ def test_the_rant_panel_survives_a_legacy_array_row_and_a_bare_scalar(tmp_path):
     assert frames[0]["type"] == "rants_list", frames[0]
     assert [r["message"] for r in frames[0]["rants"]] == ["legacy"], frames[0]
     assert frames[0]["rants"][0]["project"] == "emrg", frames[0]
+
+
+# ── the three opens the logs sweep did not name (issues #2105, #2107) ──────────
+#
+# #2105 enumerates four readers of `projects.yml`; #2107 names "the daemon's
+# `~/.emrg/logs` files" and then enumerates seven. Both lists are complete over what
+# they enumerate and neither is complete over its subject: this module still opens
+# three subjects without asking their kind —
+#
+#   `_current_installed_version`   `~/.emrg/install/version.txt`  (also read by `__init__`)
+#   `_build_system_prompt`         `<session>/system.md`          (inside the workspace)
+#   `_write_exit_record`           `~/.emrg/logs/emrgd-exit.log`  (**under the directory
+#                                                                  #2107 names**)
+#
+# — and the third one is not a different subject from #2107's, it is a missing member of
+# it: `_EXIT_RECORD_PATH` is `logs_dir() / "emrgd-exit.log"`, defined thirty lines above
+# the constants that issue does list, and the reason it was missed is the reason this
+# family keeps being swept one list at a time — a module constant is a *name*, and a name
+# is not a kind (`_USAGE_ANCHOR_STATS_PATH` and `_PLANTED_FIRE_*` are the others).
+#
+# Measured 2026-10-11 (`cyc20261011-191244`) on master `60541e39`, one child process per
+# arm under this parent's 8 s cap, and each arm driving the real method with a `mkfifo` at
+# the subject it actually opens:
+#
+#     version_read         DID NOT RETURN within 8s
+#     system_md_write      DID NOT RETURN within 8s
+#     exit_record_write    DID NOT RETURN within 8s
+#
+# — while the same three arms with a **directory** at the same subjects returned at once
+# (`''`, `prompt_len 13875`, `returned`). The kind of the path is the axis, not absence.
+# `EmrgServer.__init__` reads the first of them through the same method, so a pipe at
+# `install/version.txt` stopped the daemon from being **constructed**: no event loop, no
+# client, no log line.
+
+
+def _pipe(path: Path) -> Path:
+    """A FIFO at `path`, its parent created first."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(path)
+    return path
+
+
+class TestTheOpensTheSweepDidNotName:
+    """A subject that is not a regular file is answered, not opened — at the three left."""
+
+    # ── `~/.emrg/install/version.txt` ──
+    #
+    # `HOME` is pinned to `tmp_path` in these two arms, so the file under test is the one
+    # planted here and never the host's own `install/version.txt`. The server is built
+    # **before** the subject is planted, for the reason the site exists: `__init__` reads
+    # this same path, and a pipe planted first would wedge the fixture instead of the
+    # method under test.
+
+    @_needs_mkfifo
+    def test_the_installed_version_read_answers_a_fifo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        _pipe(tmp_path / ".emrg" / "install" / "version.txt")
+
+        assert _within(5.0, server._current_installed_version) == ""
+
+    def test_a_directory_version_file_is_named_in_the_log(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The FIFO-free half, and this is the half the Windows leg runs.
+
+        A directory needs no `os.mkfifo`, and it discriminates on the **log line** rather
+        than on the return value: both versions answer `""` (the method's documented answer
+        to a version it cannot read), so only the sentence separates them — on master the
+        `IsADirectoryError` is swallowed by `except (OSError, ValueError)` and **nothing is
+        logged at all**.
+
+        The phrase asserted is the kind, not the writers' `", not a regular file"`: this is
+        a **reader**, so it skips and names what it found (the shape `#2108` gives the
+        reads), rather than refusing with the sentence the writes use. Both are this
+        tree's and neither is master's.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        version = tmp_path / ".emrg" / "install" / "version.txt"
+        version.mkdir(parents=True)
+
+        with caplog.at_level(logging.DEBUG, logger="emrg.server.daemon"):
+            assert server._current_installed_version() == ""
+
+        assert "is a directory" in caplog.text, caplog.text
+        assert str(version) in caplog.text, caplog.text
+
+    def test_a_regular_version_file_is_still_read(self, tmp_path, monkeypatch):
+        """The control: the guard must not turn every read into `""`."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        version = tmp_path / ".emrg" / "install" / "version.txt"
+        version.parent.mkdir(parents=True)
+        version.write_text("9.9.9\n", encoding="utf-8")
+
+        assert server._current_installed_version() == "9.9.9"
+
+    # ── `<session>/system.md` — a path inside the workspace the agent writes to ──
+
+    @_needs_mkfifo
+    def test_the_system_prompt_copy_does_not_wedge_on_a_fifo(self, tmp_path):
+        """The write is a debug aid, so the prompt itself must still come back."""
+        server = _make_server()
+        session = Session.create_with_id("s_fifo_sysmd", tmp_path)
+        _pipe(session.dir_path / "system.md")
+
+        rendered = _within(5.0, lambda: server._build_system_prompt(session))
+
+        assert "Operating system" in rendered
+
+    def test_a_directory_system_md_is_named_in_the_log(self, tmp_path, caplog):
+        """FIFO-free, and the debug line is where the two versions differ.
+
+        Both answer with the rendered prompt (the write is inside a `try` that logs and
+        carries on), so the return value cannot tell them apart; the log can, because
+        master's `IsADirectoryError` is reported as the errno and this tree's refusal
+        names the kind.
+        """
+        server = _make_server()
+        session = Session.create_with_id("s_dir_sysmd", tmp_path)
+        (session.dir_path / "system.md").mkdir()
+
+        with caplog.at_level(logging.DEBUG, logger="emrg.server.daemon"):
+            rendered = server._build_system_prompt(session)
+
+        assert "Operating system" in rendered
+        assert "not a regular file" in caplog.text, caplog.text
+
+    def test_a_regular_system_md_is_still_written(self, tmp_path):
+        """The control: the debug copy is still written where it can be."""
+        server = _make_server()
+        session = Session.create_with_id("s_regular_sysmd", tmp_path)
+
+        server._build_system_prompt(session)
+
+        assert "Operating system" in (session.dir_path / "system.md").read_text(
+            encoding="utf-8"
+        )
+
+    # ── `~/.emrg/logs/emrgd-exit.log` — the member #2107's own directory claim misses ──
+
+    @_needs_mkfifo
+    def test_the_exit_record_write_does_not_wedge_on_a_fifo(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            daemon_mod, "_EXIT_RECORD_PATH", _pipe(tmp_path / "emrgd-exit.log")
+        )
+
+        _within(5.0, lambda: daemon_mod._write_exit_record("probe", 0, None))
+
+    def test_a_directory_exit_record_is_named_in_the_log(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """FIFO-free, and the warning is the reading: master reports `[Errno 21] Is a
+        directory`, this tree names the kind."""
+        record = tmp_path / "emrgd-exit.log"
+        record.mkdir()
+        monkeypatch.setattr(daemon_mod, "_EXIT_RECORD_PATH", record)
+
+        with caplog.at_level(logging.WARNING, logger="emrg.server.daemon"):
+            daemon_mod._write_exit_record("probe", 0, None)
+
+        assert "not a regular file" in caplog.text, caplog.text
+
+    def test_the_exit_record_still_writes_a_regular_file(self, tmp_path, monkeypatch):
+        """The control: the record is still written where it can be."""
+        record = tmp_path / "emrgd-exit.log"
+        monkeypatch.setattr(daemon_mod, "_EXIT_RECORD_PATH", record)
+
+        daemon_mod._write_exit_record("probe", 0, None)
+
+        assert json.loads(record.read_text(encoding="utf-8"))["reason"] == "probe"
