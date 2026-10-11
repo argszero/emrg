@@ -85,11 +85,12 @@ describe("词典完整性守卫（防漂移）", () => {
   // 2026-10-09 由 `composer.roots*`（3 条）+ `cmd.sandbox.hint`（1 条）+
   // `sandboxRoots.*`（12 条）——会话额外可写根的 GUI 入口与对话框，rant
   // 2026-10-09T09:43:39 Part 2(a)——从 413 改为 429。
-  it("zh/en 各 429 个 key 且完全对齐", () => {
+  // 2026-10-11 issue #2113：device flow 的两个提示串 → 431。
+  it("zh/en 各 431 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(429);
-    expect(enKeys.length).toBe(429);
+    expect(zhKeys.length).toBe(431);
+    expect(enKeys.length).toBe(431);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);
