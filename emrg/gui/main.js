@@ -979,7 +979,18 @@ vision = false
     ipcMain.handle("emrg:githubConnectWeb", async () => {
       // Windows GCM rant Stage 2b：device flow 启动（daemon github_connect_web）
       const frame = await requireConn().sendCommandAndWait("github_connect_web", {}, 15000);
-      return { ok: Boolean(frame.ok), code: frame.code || null, url: frame.url || null, error: frame.error || null };
+      // `user` is forwarded because the daemon answers an already-authenticated request with
+      // the login and no code/url (`github_connect_web_start`'s short-circuit), and the
+      // renderer's device-flow panel reads exactly that field to say "connected" instead of
+      // reporting a failure (#2113's wiring; the field was dropped here until 2026-10-11,
+      // which made an already-connected install print "already_authenticated" as an error).
+      return {
+        ok: Boolean(frame.ok),
+        code: frame.code || null,
+        url: frame.url || null,
+        user: frame.user || null,
+        error: frame.error || null,
+      };
     });
 
     ipcMain.handle("emrg:openExternal", async (_e, { url }) => {

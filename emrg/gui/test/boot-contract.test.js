@@ -159,3 +159,73 @@ test("boot chain: renderer DaemonBridgeProvider must call window.emrg.init() on 
     "App.tsx must mount DaemonBridgeProvider — unmounting it drops the entire init chain."
   );
 });
+
+/**
+ * The arrow function of an `ipcMain.handle("<channel>", …)` registration, read out of
+ * main.js by brace-walking rather than by a lazy regex: the handler's own closing brace is
+ * spelled `});` on the last line, so a regex that stops before that line truncates the
+ * function it means to extract (measured while writing this guard).
+ */
+function handlerArrow(source, channel) {
+  const at = source.indexOf(`ipcMain.handle("${channel}"`);
+  if (at < 0) return null;
+  const start = source.indexOf("async () => {", at);
+  if (start < 0) return null;
+  let depth = 0;
+  for (let i = source.indexOf("{", start); i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) return source.slice(start, i + 1);
+  }
+  return null;
+}
+
+test("device flow: the emrg:githubConnectWeb handler forwards the frame's user", async () => {
+  // The renderer's device-flow panel branches on `res.user` for the daemon's
+  // already-authenticated short-circuit: `github_connect_web_start` answers
+  // {ok, user, error:"already_authenticated"} with no code and no url, and the panel answers
+  // "connected" from that field. What the renderer receives is what THIS handler returns —
+  // and no renderer test can see it, because they all mock `window.emrg`, so a field dropped
+  // here is invisible from both sides. It was dropped: an already-connected install that
+  // pressed "Sign in with GitHub (browser)" was told
+  // "GitHub connect failed: already_authenticated".
+  //
+  // Driven, not matched: the real arrow function is read out of main.js and called with a
+  // stubbed connection, so only the boundary (the daemon's frame) is faked. A regex for
+  // `user:` would bless the spelling of a line without asking whether the value came from the
+  // frame at all — which is the shape of the defect.
+  const arrow = handlerArrow(read("main.js"), "emrg:githubConnectWeb");
+  assert.ok(arrow, "main.js must contain an emrg:githubConnectWeb ipcMain.handle arrow");
+  const handler = new Function("requireConn", `return (${arrow});`);
+  const withFrame = (frame) => handler(() => ({ sendCommandAndWait: async () => frame }))();
+
+  const started = await withFrame({
+    ok: true,
+    code: "ABCD-1234",
+    url: "https://github.com/login/device",
+    user: null,
+    error: null,
+  });
+  assert.deepStrictEqual(started, {
+    ok: true,
+    code: "ABCD-1234",
+    url: "https://github.com/login/device",
+    user: null,
+    error: null,
+  });
+
+  const already = await withFrame({
+    ok: true,
+    code: null,
+    url: null,
+    user: "octocat",
+    error: "already_authenticated",
+  });
+  assert.strictEqual(
+    already.user,
+    "octocat",
+    "the daemon's short-circuit login must cross the bridge: without `user` the renderer's " +
+      "`res.ok && res.user` branch cannot fire, and the panel reports a connect failure for " +
+      "an install that is connected already."
+  );
+  assert.strictEqual(already.code, null, "a short-circuit carries no device code");
+});
