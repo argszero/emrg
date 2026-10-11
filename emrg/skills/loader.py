@@ -26,6 +26,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+# The "is this path a regular file" rule is the tool layer's, reached at a path. Imported
+# rather than restated, for the reason `emrg/memory.py` gives at the same import: the
+# boundary is one fact, and a second spelling of it is a second boundary that can drift.
+from emrg.tools.base import non_regular_kind
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,6 +81,40 @@ def _parse_skill_file(file_path: Path, source: str) -> Optional[Skill]:
         logger.debug("skill: skipping deprecated registry file %s", file_path)
         return None
 
+    # ── Ask the subject's kind before opening it ──
+    #
+    # `read_text` on a FIFO blocks at the *open* until a writer appears, and on a socket
+    # until a connection does — so the `except (OSError, UnicodeDecodeError)` below cannot
+    # bound the consequence. Nothing is raised, the call simply never returns, and every
+    # caller of this function runs on the daemon's event loop (`load_skills` is called from
+    # `_handle_message`'s install branch, the skills auto-update loop, and startup), so the
+    # block is the whole server. Measured 2026-10-11 (`cyc20261011-070311`): a `mkfifo`
+    # named `wedged.md` beside a usable skill made `load_skills(project_dir)` **not return
+    # in 8 s**, while the same fixture without it returned in 0.00 s.
+    #
+    # The project directory is the agent's own write surface (`.emrg/skills/` under the
+    # workspace), which is what makes this reachable rather than theoretical — the same
+    # argument `#2076` made for `.emrg/memory/`.
+    #
+    # Skipping rather than refusing, because this loop walks a bag of *optional* files and
+    # already answers an entry it cannot use by skipping it: the `except` below returns
+    # `None` for an unreadable or undecodable file so the other skills still load. Refusing
+    # here would turn one odd file into a failed system-prompt build, and the answer must
+    # not be harsher than the one this function already gives. The kind is named in the log
+    # at the same level as "cannot read", so a skill that fails to appear is diagnosable
+    # rather than silent.
+    try:
+        kind = non_regular_kind(file_path)
+    except OSError:
+        # A missing path: `non_regular_kind` stats its subject and `stat` raises, which is
+        # this function's documented answer already — `None`, "if parsing fails" — and the
+        # same answer the `read_text` below gave before the kind was asked. Named here so
+        # the missing-file reading keeps saying the same thing it always said.
+        logger.debug("skill: cannot read %s", file_path)
+        return None
+    if kind:
+        logger.debug("skill: skipping %s — it is %s, not a regular file", file_path, kind)
+        return None
     try:
         text = file_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):

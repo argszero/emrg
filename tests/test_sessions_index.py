@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
+import pytest
+
+from tests.bounded_read import DEADLINE_SECONDS, within
 from emrg.session import Session
 from emrg.sessions_index import (
+    _iter_project_sessions,
     _load,
+    _read_meta_session_id,
     _write,
     rebuild_sessions_index,
     remove_session_index,
@@ -206,3 +212,60 @@ def test_sessions_index_path_is_under_config_dir():
     """The default index path lives under ~/.emrg (config_dir)."""
     p = sessions_index_path()
     assert p.name == "sessions_index.json"
+
+
+class TestAWalkByKindRatherThanByOpening:
+    """A session entry that is not a regular file is skipped, not entered (issue #2083).
+
+    `_read_meta_session_id` opened its subject inside `except (json.JSONDecodeError,
+    OSError)` — which cannot bound a *block*: `read_text` on a FIFO waits at the open for a
+    writer, raises nothing, and never returns. Measured 2026-10-11 (`cyc20261011-070311`) on
+    master `3386f239`: a `mkfifo` at `<project>/.emrg/sessions/s1/meta.json` made
+    `_iter_project_sessions` **not return in 8 s**.
+
+    The path is under the *workspace* — the agent's own write surface — and both walkers
+    (`_iter_project_sessions`, `_iter_nested_sessions`) read through this one function, so
+    the kind is asked once where the open happens.
+    """
+
+    @staticmethod
+    def _session(root: Path, sid: str):
+        sdir = root / ".emrg" / "sessions" / sid
+        sdir.mkdir(parents=True)
+        (sdir / "meta.json").write_text(
+            json.dumps({"session_id": sid}), encoding="utf-8"
+        )
+        return sdir
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_meta_is_skipped_and_the_other_sessions_still_read(self, tmp_path):
+        """Both halves: the walk returns, and the sessions beside it are still indexed.
+
+        A guard that raised out of the walk would pass "returns" while losing every session
+        in the directory — the same loss the hang caused one step earlier.
+        """
+        self._session(tmp_path, "s_real")
+        wedged = tmp_path / ".emrg" / "sessions" / "s_wedged"
+        wedged.mkdir()
+        os.mkfifo(wedged / "meta.json")
+
+        rows = within(DEADLINE_SECONDS, lambda: list(_iter_project_sessions(tmp_path)))
+        assert [sid for sid, _ in rows] == ["s_real"], rows
+
+    def test_the_control_without_the_fifo(self, tmp_path):
+        """Same fixture, a regular meta.json: both sessions read, so the kind is the axis."""
+        self._session(tmp_path, "s_real")
+        self._session(tmp_path, "s_also")
+        rows = list(_iter_project_sessions(tmp_path))
+        assert sorted(sid for sid, _ in rows) == ["s_also", "s_real"], rows
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_the_reader_answers_none_the_way_it_answers_a_corrupt_meta(self, tmp_path):
+        """At the one open site: `None` — the answer this function already gives a bad meta."""
+        fifo = tmp_path / "meta.json"
+        os.mkfifo(fifo)
+        assert within(DEADLINE_SECONDS, lambda: _read_meta_session_id(fifo)) is None
+
+    def test_a_missing_meta_is_still_none(self, tmp_path):
+        """The contract the kind check must not narrow: a missing path is `None`, not a raise."""
+        assert _read_meta_session_id(tmp_path / "absent.json") is None

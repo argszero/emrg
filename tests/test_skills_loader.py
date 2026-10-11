@@ -6,7 +6,14 @@ import sys
 import pytest
 from pathlib import Path
 
-from emrg.skills.loader import Skill, _parse_frontmatter, _parse_skill_file, build_skills_context
+from tests.bounded_read import DEADLINE_SECONDS, within
+from emrg.skills.loader import (
+    Skill,
+    _parse_frontmatter,
+    _parse_skill_file,
+    build_skills_context,
+    load_skills,
+)
 
 
 class TestParseFrontmatter:
@@ -224,3 +231,63 @@ class TestBuildSkillsContext:
         result = build_skills_context([skill])
         assert "read tool" in result
         assert "follow its instructions" in result
+
+
+class TestASkillDirectoryWalkedByKind:
+    """A skill file that is not a regular file is skipped, not opened (issue #2083).
+
+    `read_text` on a FIFO blocks at the *open* until a writer appears, so the loader's
+    `except (OSError, UnicodeDecodeError)` cannot bound it: nothing is raised and the call
+    never returns. Every caller of `load_skills` runs on the daemon's event loop — the
+    `skills_install` branch, the auto-update loop, and startup — so the block is the whole
+    server. Measured 2026-07-11-style on master `3386f239` (`cyc20261011-070311`): a `mkfifo`
+    named `wedged.md` beside a usable skill made `load_skills(project_dir)` **not return in
+    8 s**, where the same fixture without it returned in 0.00 s.
+
+    The project skills directory is under the *workspace*, the agent's own write surface,
+    which is what makes it reachable rather than theoretical.
+    """
+
+    GOOD = "---\nname: good\ndescription: a usable skill\n---\n\nbody\n"
+
+    @staticmethod
+    def _project(tmp_path, fifo: bool):
+        skills = tmp_path / ".emrg" / "skills"
+        skills.mkdir(parents=True)
+        (skills / "good.md").write_text(TestASkillDirectoryWalkedByKind.GOOD)
+        if fifo:
+            os.mkfifo(skills / "wedged.md")
+        return tmp_path
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_beside_a_skill_does_not_wedge_the_loader(self, tmp_path):
+        """The measurement: the walk returns, and the usable skill still loads.
+
+        Both halves matter. A guard that aborted the load on the odd entry would pass
+        "returns" while losing every skill in the directory, which is the same loss the
+        hang caused one step earlier.
+        """
+        project = self._project(tmp_path, fifo=True)
+        skills = within(DEADLINE_SECONDS, lambda: load_skills(project_dir=project))
+        names = [s.name for s in skills]
+        assert "good" in names, f"the usable skill was lost: {names}"
+        assert "wedged" not in names, f"a FIFO was loaded as a skill: {names}"
+
+    def test_the_control_without_the_fifo(self, tmp_path):
+        """Same fixture, no pipe: the same reading, so the pipe is what was measured."""
+        project = self._project(tmp_path, fifo=False)
+        names = [s.name for s in load_skills(project_dir=project)]
+        assert "good" in names, names
+        assert "wedged" not in names, names
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_parse_skill_file_skips_it_the_way_it_skips_an_unreadable_one(self, tmp_path):
+        """At the one open site: `None` and a named kind, not a refusal.
+
+        The loader's own answer to an entry it cannot use is `None` (an unparseable file,
+        a missing description, a deprecated registry file). A special file is one more of
+        those — refusing here would turn one odd file into a failed system-prompt build.
+        """
+        fifo = tmp_path / "wedged.md"
+        os.mkfifo(fifo)
+        assert within(DEADLINE_SECONDS, lambda: _parse_skill_file(fifo, "project")) is None
