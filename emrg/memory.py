@@ -575,8 +575,42 @@ class MemoryFile:
         return fm
 
     def save(self, path: Path) -> None:
-        """Write this memory file to disk."""
+        """Write this memory file to disk, refusing a subject that is not a regular file.
+
+        The index writer's guard, one path over, and the site neither half of the earlier
+        work covered: `from_file` refuses a non-regular subject *here* (`#2076`), and this is
+        the same path **written**. **An open is not a read, and a write is an open too** — a
+        write to a FIFO waits for a reader, to a socket for a connection — so the call would
+        never return, exactly as the reader would not have, and the store methods that reach
+        it (`create`, `update`, `merge`, `promote_to_project`) would not either.
+
+        Measured 2026-10-12 (`cyc20261012-035249`) on master `f4fe92c3`, one child per arm
+        under a parent's 10 s cap, the child printing `emrg.__file__` so the checkout is what
+        answered:
+
+            MemoryFile(...).save(<fifo>)       -> DID NOT RETURN within 10 s
+            MemoryFile(...).save(<directory>)  -> IsADirectoryError, not this refusal
+            MemoryFile(...).save(<regular>)    -> RETURNED
+            MemoryFile(...).save(<absent>)     -> RETURNED
+
+        The **refusal is raised** rather than the write skipped, for the reason the index
+        writer gives one path over: `create` writes its memory file first and indexes it
+        second, so a skip would report success with a file on disk that no index row names.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Only an existing path has a kind to judge — a writer's normal subject is a path it
+        # is about to create, and `non_regular_kind` *stats* (see `MemoryIndex.save`).
+        if path.exists():
+            kind = non_regular_kind(path)
+            if kind:
+                raise NotARegularFile(
+                    f"{path} is {kind}, not a regular file. This writer opens its subject "
+                    f"directly, and opening this one blocks until a peer appears — a write "
+                    f"to a FIFO waits for a reader, a socket for a connection, a device "
+                    f"never ends — so the call would never return, and the store methods "
+                    f"that reach it (`create`, `update`, `merge`, `promote_to_project`) "
+                    f"would not either."
+                )
         path.write_text(self.to_markdown(), encoding="utf-8")
 
     # ── Display ────────────────────────────────────────────────
