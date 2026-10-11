@@ -9,10 +9,16 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+import stat
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, brace_alternation, count_argument
+from emrg.tools.base import (
+    ToolExecutor,
+    brace_alternation,
+    count_argument,
+    special_file_kind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +261,12 @@ class GrepTool(ToolExecutor):
             )
 
         root = Path(search_path).expanduser().resolve()
-        if not root.exists():
+        # One `stat`, whose answer decides all three branches, rather than `exists()`
+        # followed by `is_file()`: the mode this reads is the mode the branch below
+        # acts on, so nothing can change between the question and the answer.
+        try:
+            info = root.stat()
+        except OSError:
             return ToolResult(
                 name="grep", content=f"Error: path not found: {root}", error=True
             )
@@ -265,6 +276,38 @@ class GrepTool(ToolExecutor):
             pattern, root, file_glob, ignore_case,
         )
 
+        # ── Only a tree can be walked and only a regular file can be searched ──
+        #
+        # `exists()` is true for a FIFO, a socket and a device node as well as for a
+        # directory, and `is_file()` is false for all three — so a path of one of those
+        # kinds fell into the **walk** branch, and `Path.rglob` over a subject that is
+        # not a directory raises nothing and yields nothing. The answer was therefore
+        # `No matches for 'needle' in <that path> (searched 0 files)`: a false negative
+        # about a subject the call never searched, in the one sentence a real absence
+        # produces — the class this branch's brace refusal below exists to keep out.
+        # Measured 2026-10-11 (`cyc20261011-081210`) on master `2fd13339`, one arm per
+        # child process under the driver's 8 s cap, driving this tool: `path=<a mkfifo>`
+        # returned `No matches … (searched 0 files)` with `error=False`, while the
+        # sibling `glob` refused the same path (`Error: workdir not found or not a
+        # directory`). The subject is reachable the way the rest of this family is —
+        # `mkfifo` succeeds inside a tracked project's workspace, which is the agent's
+        # own write surface — and the path is one the caller names in the call itself.
+        # So the kind is asked, and a subject that is neither is refused by name.
+        kind = special_file_kind(info.st_mode)
+        if kind is not None and not stat.S_ISDIR(info.st_mode):
+            return ToolResult(
+                name="grep",
+                content=(
+                    f"Error: {root} is {kind}, and grep searches a directory tree or a "
+                    f"regular file. It cannot be walked — a walk of it yields nothing "
+                    f"without raising — so this call would answer `No matches`, the same "
+                    f"sentence a real absence produces, about a subject it never "
+                    f"searched. Point it at the directory that holds it, or use the bash "
+                    f"tool if you need to touch it."
+                ),
+                error=True,
+            )
+
         # Collect files. The named-file branch is filtered too: `glob` means
         # "only search files matching this pattern", and a file the caller named
         # is still a file the filter can exclude.
@@ -272,7 +315,7 @@ class GrepTool(ToolExecutor):
         #: reason is chosen by the pattern's shape, because the two shapes have
         #: different remedies — see `_named_file_exclusion_note`.
         excluded_named_file: str | None = None
-        if root.is_file():
+        if stat.S_ISREG(info.st_mode):
             if _selects(root, file_glob):
                 files = [root]
             else:

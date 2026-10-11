@@ -1,6 +1,7 @@
 """Tests for the grep tool."""
 
 import asyncio
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -973,3 +974,71 @@ def test_the_path_description_names_the_spelling_the_reader_accepts():
     """A description is read as the domain its reader enforces, so it names the alias."""
     description = GrepTool().definition().parameters["properties"]["path"]["description"]
     assert "`workdir`" in description, description
+
+
+# ── A path that is neither a tree nor a regular file ──────────────────────
+#
+# `exists()` is true for a FIFO and a socket as well as for a directory, and
+# `is_file()` is false for all three — so such a path fell into the walk branch,
+# where `Path.rglob` raises nothing for a subject that is not a directory and
+# yields nothing. The answer was `No matches for 'needle' in <path> (searched 0
+# files)`: a false negative about a subject the call never searched, in the one
+# sentence a real absence produces (issue #2089).
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+def test_a_fifo_path_is_refused_rather_than_answered_no_matches(tmp_path):
+    """The kind is named, instead of a `No matches` that reads like a real absence.
+
+    Measured 2026-10-11 (`cyc20261011-081210`) on master `2fd13339`, one arm per child
+    process under the driver's 8 s cap, driving this tool: `path=<a mkfifo>` returned
+    `No matches for 'needle' in <fifo> (searched 0 files)` with `error=False`, while the
+    sibling `glob` refused the same path and named the problem.
+    """
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    result = _run(GrepTool().execute({"pattern": "needle", "path": str(fifo)}))
+
+    assert result.error, f"a FIFO path was answered as a search: {result.content}"
+    assert "a FIFO" in result.content, result.content
+    # The reading this exists to remove is the sentence itself, not the word: an
+    # answer that merely *says* `No matches` while refusing it would still be the
+    # false negative this test is about.
+    assert not result.content.startswith("No matches"), result.content
+
+
+def test_a_directory_holding_a_fifo_is_still_searched(tmp_path):
+    """The control one branch over: the fix must not refuse a tree for what it holds.
+
+    A FIFO beside a matching file is collected away by `_collect_files` (its
+    `is_file()` filter is a regular-file test), and the file beside it is still read —
+    so the refusal is about the path *the caller named*, not about anything found
+    under it.
+    """
+    (tmp_path / "a.txt").write_text("needle\n")
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(tmp_path / "blocked.txt")
+    result = _run(GrepTool().execute({"pattern": "needle", "path": str(tmp_path)}))
+
+    assert not result.error, result.content
+    assert "a.txt" in result.content, result.content
+    assert "searched 1 files" in result.content, result.content
+
+
+def test_a_named_regular_file_is_still_searched(tmp_path):
+    """The branch the refusal sits above: one named file, filter applied, unchanged."""
+    (tmp_path / "one.py").write_text("needle\n")
+    result = _run(GrepTool().execute(
+        {"pattern": "needle", "path": str(tmp_path / "one.py")}))
+
+    assert not result.error, result.content
+    assert "one.py" in result.content, result.content
+
+
+def test_a_missing_path_still_says_path_not_found(tmp_path):
+    """The `stat` replaced `exists()`, so its own answer has to be pinned too."""
+    result = _run(GrepTool().execute(
+        {"pattern": "needle", "path": str(tmp_path / "nope" / "absent")}))
+
+    assert result.error, result.content
+    assert "path not found" in result.content, result.content
