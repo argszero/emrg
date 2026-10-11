@@ -30,6 +30,7 @@ from emrg.server.llm import CONTENT_RISK, classify_llm_error
 from emrg.server.scheduler import TaskHandler, TaskScheduler
 from emrg.tools import base as base_mod
 from tests.task_handler_factory import make_handler
+from tests.bounded_read import DEADLINE_SECONDS, within
 from emrg.session import Session, _validate_tool_messages
 
 
@@ -4818,3 +4819,170 @@ def test_the_rant_panel_survives_a_legacy_array_row_and_a_bare_scalar(tmp_path):
     assert frames[0]["type"] == "rants_list", frames[0]
     assert [r["message"] for r in frames[0]["rants"]] == ["legacy"], frames[0]
     assert frames[0]["rants"][0]["project"] == "emrg", frames[0]
+
+
+# ── projects.yml: the registry every client reads first ─────────────
+#
+# These are the daemon's four readers of one file, `~/.emrg/projects.yml`, and each of
+# them runs on the daemon's **event loop**: the startup backfill, the per-message project
+# touch, `list_projects` — which every client sends on connect, so it is the first frame
+# a GUI or TUI ever gets an answer to — and `remove_project`. A FIFO at that path
+# therefore does not fail a request, it stops the daemon answering anyone again, which is
+# the condition issue #2062 named for the three file tools and #2073 for the daemon's own
+# readers. Measured 2026-10-11 (`cyc20261011-173122`) on master `60541e39`: each of the
+# four calls below **did not return** under a FIFO, while the pipe-free controls ran.
+#
+# Two shapes, and the difference is deliberate: a **reader** answers the refusal through
+# the `except OSError` it already has for a registry it cannot read (so no new branch is
+# added), while `_touch_project` — which reads the registry and then **rewrites** it —
+# skips the registration instead of falling through to its "rebuilding" branch, because
+# that branch would answer a host file it could not read with an *empty* registry and
+# delete every project the host had registered.
+#
+# Every arm is bounded by `within`, so a removed guard is a **5 s failure** rather than a
+# wedged pytest run (the `no_verdict` trap `tests/bounded_read.py` states). The FIFO arms
+# are skipped where `mkfifo` does not exist, so each site also carries a pipe-free arm in
+# the same shape — a **directory** — which the Windows leg runs: an unguarded read answers
+# a directory with `IsADirectoryError`'s own message, so asserting the refusal *names the
+# kind* is what makes these discriminate rather than merely pass.
+
+
+@_needs_mkfifo
+def test_a_named_pipe_registry_does_not_stop_the_project_listing(tmp_path, monkeypatch):
+    """The first frame every client sends: answered, not blocked on the open."""
+    server = _make_server()
+    fifo = tmp_path / "projects.yml"
+    os.mkfifo(fifo)
+    monkeypatch.setattr(server, "_projects_log", fifo)
+    writer = _FakeWriter()
+
+    within(DEADLINE_SECONDS, lambda: asyncio.run(server._handle_list_projects(writer)))
+
+    replies = _decode_frames(writer)
+    assert len(replies) == 1 and replies[0]["type"] == "projects_list", replies
+    assert replies[0]["projects"] == [], replies
+
+
+def test_a_directory_registry_is_refused_by_its_kind_in_the_listing(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half: the refusal names the kind, which is what discriminates."""
+    server = _make_server()
+    registry = tmp_path / "projects.yml"
+    registry.mkdir()
+    monkeypatch.setattr(server, "_projects_log", registry)
+    writer = _FakeWriter()
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(server._handle_list_projects(writer))
+
+    assert _decode_frames(writer)[0]["projects"] == []
+    assert "not a regular file" in caplog.text, (
+        "the read was refused by its kind — an unguarded one reports the raw "
+        f"directory error instead: {caplog.text}")
+
+
+@_needs_mkfifo
+def test_a_named_pipe_registry_is_neither_read_nor_rewritten_by_touch_project(
+        tmp_path, monkeypatch):
+    """The read-then-write site: skipped, and the registry is left as it was."""
+    import stat
+
+    server = _make_server()
+    fifo = tmp_path / "projects.yml"
+    os.mkfifo(fifo)
+    monkeypatch.setattr(server, "_projects_log", fifo)
+
+    within(DEADLINE_SECONDS, lambda: server._touch_project(str(tmp_path)))
+
+    assert stat.S_ISFIFO(os.stat(fifo).st_mode), (
+        "the registry was rewritten — a read that answered 'no entries' would have "
+        "deleted every project the host registered")
+
+
+def test_a_directory_registry_warns_touch_project_and_keeps_it(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half: the warning names the kind, and no write replaces it."""
+    server = _make_server()
+    registry = tmp_path / "projects.yml"
+    registry.mkdir()
+    monkeypatch.setattr(server, "_projects_log", registry)
+
+    with caplog.at_level(logging.WARNING):
+        server._touch_project(str(tmp_path))
+
+    assert registry.is_dir(), "the registry was replaced by the write this guard prevents"
+    assert "not a regular file" in caplog.text, (
+        f"the read was refused by its kind, and the warning says so: {caplog.text}")
+
+
+@_needs_mkfifo
+def test_a_named_pipe_registry_does_not_stop_the_index_backfill(tmp_path, monkeypatch):
+    """Startup: the backfill runs with no project paths rather than never returning."""
+    from emrg import sessions_index as sessions_index_mod
+
+    server = _make_server()
+    fifo = tmp_path / "projects.yml"
+    os.mkfifo(fifo)
+    monkeypatch.setattr(server, "_projects_log", fifo)
+    seen: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        sessions_index_mod, "rebuild_sessions_index",
+        lambda cfg, paths: (seen.update(paths=list(paths)), 0)[1],
+    )
+
+    within(DEADLINE_SECONDS, server._rebuild_sessions_index)
+
+    assert seen.get("paths") == [], (
+        "the backfill read a registry it could not read instead of skipping it")
+
+
+def test_a_directory_registry_is_refused_by_its_kind_in_the_backfill(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half, read through the log: the skip names the kind."""
+    from emrg import sessions_index as sessions_index_mod
+
+    server = _make_server()
+    registry = tmp_path / "projects.yml"
+    registry.mkdir()
+    monkeypatch.setattr(server, "_projects_log", registry)
+    monkeypatch.setattr(
+        sessions_index_mod, "rebuild_sessions_index", lambda cfg, paths: 0)
+
+    with caplog.at_level(logging.DEBUG):
+        server._rebuild_sessions_index()
+
+    assert "not a regular file" in caplog.text, caplog.text
+
+
+@_needs_mkfifo
+def test_a_named_pipe_registry_does_not_stop_remove_project(tmp_path):
+    """The removal answers `removed: false` with its reason, as for a corrupt file."""
+    server = _make_server()
+    fifo = tmp_path / "projects.yml"
+    os.mkfifo(fifo)
+    server._projects_log = fifo
+    writer = _FakeWriter()
+
+    within(DEADLINE_SECONDS,
+           lambda: asyncio.run(server._handle_remove_project("alpha", writer)))
+
+    replies = _decode_frames(writer)
+    assert replies and replies[0]["type"] == "project_removed", replies
+    assert replies[0]["removed"] is False, replies
+    assert "failed to read" in replies[0].get("error", ""), replies
+
+
+def test_a_directory_registry_is_refused_by_its_kind_in_remove_project(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half: the same refusal, observed through the log."""
+    server = _make_server()
+    registry = tmp_path / "projects.yml"
+    registry.mkdir()
+    monkeypatch.setattr(server, "_projects_log", registry)
+    writer = _FakeWriter()
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(server._handle_remove_project("alpha", writer))
+
+    assert _decode_frames(writer)[0]["removed"] is False
+    assert "not a regular file" in caplog.text, caplog.text
