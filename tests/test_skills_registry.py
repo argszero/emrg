@@ -419,7 +419,7 @@ class TestUpdate:
 # the *open* for a writer and raises nothing — so no handler runs and the call never returns.
 # Both readers below run on the daemon's event loop (`skills_available`, `skills_install`),
 # so the block is the whole server. Measured on master `94dcdae7` (2026-10-11,
-# `cyc20261011-100311`): each FIFO made its reader **not return in 8 s**, where a regular
+# `cyc20261011-100220`): each FIFO made its reader **not return in 8 s**, where a regular
 # file returned in 0.00 s.
 #
 # The reads are bounded by `tests.bounded_read.within`, the one deadline this suite keeps

@@ -172,7 +172,7 @@ def load_catalog_skills() -> list[dict]:
     raised and the call simply never returns. This runs on the daemon's event loop (the
     `skills_available` and `skills_install` handlers), so the block is the whole server.
 
-    Measured 2026-10-11 (`cyc20261011-100311`): a `mkfifo` at `~/.emrg/skills/skill-catalog.md`
+    Measured 2026-10-11 (`cyc20261011-100220`): a `mkfifo` at `~/.emrg/skills/skill-catalog.md`
     made this function **not return in 8 s**, where the same fixture with a regular file
     returned in 0.00 s.
 
@@ -219,7 +219,7 @@ def read_state() -> dict[str, dict]:
     :func:`load_catalog_skills` states at length: `.state.json` lives in the same directory
     (`~/.emrg/skills/`), `read_text` on a FIFO blocks at the open and raises nothing, and
     both this function and that one run on the daemon's event loop. Measured 2026-10-11
-    (`cyc20261011-100311`): a `mkfifo` at `~/.emrg/skills/.state.json` made this **not
+    (`cyc20261011-100220`): a `mkfifo` at `~/.emrg/skills/.state.json` made this **not
     return in 8 s** where a regular file returned in 0.00 s.
 
     The `path.exists()` this used to lean on is gone rather than kept: `exists()` is true
