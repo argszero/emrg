@@ -33,6 +33,7 @@ from emrg.config import LlmConfig, load_config
 from emrg.server import config_reload as cr
 from emrg.server.config_reload import ConfigReloader, describe
 from emrg.server.daemon import EmrgServer
+from tests.bounded_read import DEADLINE_SECONDS, within
 
 BASE = """[llm]
 base_url = "http://localhost:1/v1"
@@ -692,3 +693,58 @@ def test_every_live_field_is_actually_reloadable(tmp_path):
         f.name for f in dataclasses.fields(LlmConfig) if f.name != "model"
     )
     assert a.model == LlmConfig().model
+
+
+# ── the fingerprint asks its subject's kind first (issue #2103) ──────
+#
+# `fingerprint` is the reader that gives the daemon its hot-reload baseline: `poll()`
+# calls it once per `POLL_INTERVAL_SECONDS` tick on the event loop, and `ConfigReloader.
+# __init__` calls it once at construction — which `EmrgServer.__init__` does. Its contract
+# is already "a hash, or `None` when it cannot be read", and `poll()` already answers
+# `None` to that by keeping the live configuration, so the guard adds no outcome: it is
+# what makes the existing one arrive.
+#
+# Bounded by `tests/bounded_read.within` for the reason that harness states: a reader that
+# blocks at the open raises nothing, so without a deadline the failure mode of this
+# section is a wedged pytest run rather than a red test. Each FIFO arm has a FIFO-free
+# counterpart on a directory (which `read_bytes` refuses at once on both legs).
+
+
+def test_fingerprint_answers_none_for_a_directory(tmp_path):
+    """The FIFO-free control, and the answer the guard is built on.
+
+    `read_bytes` on a directory raises `IsADirectoryError` *before* any guard — so `None`
+    is the answer this function already gives a subject it cannot read, and the change is
+    that a FIFO gets it too rather than never returning.
+    """
+    d = tmp_path / "config.toml"
+    d.mkdir()
+    assert within(DEADLINE_SECONDS, lambda: cr.fingerprint(d)) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_fingerprint_answers_none_for_a_fifo_instead_of_blocking(tmp_path):
+    """Measured before the guard (`3f18f6a6`, detached worktree): no return within 8 s."""
+    p = tmp_path / "config.toml"
+    os.mkfifo(p)
+    assert within(DEADLINE_SECONDS, lambda: cr.fingerprint(p)) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_a_reloader_built_on_a_fifo_constructs_and_keeps_the_live_config(tmp_path):
+    """Construction alone fingerprints the file — which is how the daemon was wedged.
+
+    `EmrgServer.__init__` builds a `ConfigReloader` (`daemon.py:656`), so before the guard
+    a FIFO at the config path stopped the daemon from being *constructed*: no event loop,
+    no client, no log line. Measured on `3f18f6a6`: did not return within 8 s. Both the
+    baseline and the tick after it must now answer `None`, which is `poll()`'s "nothing
+    changed — keep the live config".
+    """
+    p = tmp_path / "config.toml"
+    os.mkfifo(p)
+    live = LlmConfig()
+
+    reloader = within(DEADLINE_SECONDS, lambda: ConfigReloader(live, path=p))
+
+    assert within(DEADLINE_SECONDS, reloader.poll) is None
+    assert reloader._seen is None, "the baseline is the unreadable answer, not a hash"

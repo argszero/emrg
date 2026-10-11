@@ -1,5 +1,6 @@
 """Tests for emrg.config."""
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -14,7 +15,10 @@ from emrg.config import (
     ensure_config,
 )
 from emrg import config as cfg_mod
+from emrg.memory import NotARegularFile
 from emrg.server import config_reload as cr
+from emrg.tools.base import non_regular_kind
+from tests.bounded_read import DEADLINE_SECONDS, within
 
 
 def test_config_dir():
@@ -300,3 +304,211 @@ def test_find_model_entry_skips_a_malformed_row_without_raising():
     models = ["not-a-mapping", {"name": "good", "model": "x"}]
     assert find_model_entry(models, "good") is models[1]
     assert find_model_entry(models, "not-a-mapping") is None
+
+
+# ── the kind-before-open guard (issue #2103) ─────────────────────────
+#
+# The reads below are bounded by `tests.bounded_read.within`, the one deadline this suite
+# keeps. An unbounded read is the failure mode this section is about: a FIFO blocks at the
+# **open** and raises nothing, so a test that calls the reader directly has only two
+# outcomes — the reader returns, or the whole pytest run wedges — and a wedged run is
+# unreadable as a failure (a cancelled CI job reads as `no_verdict`, whose remedy is to
+# re-trigger the same head). The deadline is what turns a regression here into a failed
+# test that names the cause.
+#
+# `_plant` is the only way a subject is made in this section, and it always builds it under
+# the test's own `tmp_path`: the config path is the host's runtime state, so a test may
+# only ever hand these readers a file it created itself.
+#
+# A FIFO needs `os.mkfifo`, so every FIFO arm is POSIX-gated; each one has a **FIFO-free**
+# counterpart on a directory, which runs on both legs and is the *kind one over* whose
+# answer the design copies.
+
+
+def _plant(path: Path, kind: str) -> None:
+    """Put a non-regular subject where a config file is expected."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "dir":
+        path.mkdir()
+    else:
+        os.mkfifo(path)
+
+
+def test_load_config_refuses_a_directory_subject(tmp_path, monkeypatch):
+    """The FIFO-free control: a directory is refused by name, not opened.
+
+    This is the reading the whole design leans on. A directory at the config path already
+    produced an answer — `IsADirectoryError`, an `OSError`, out of `read_text` — so the
+    refusal is the same class of answer with the kind named rather than a new outcome, and
+    every caller's existing handler keeps working unchanged.
+    """
+    cfg_path = tmp_path / ".emrg" / "config.toml"
+    _plant(cfg_path, "dir")
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+
+    with pytest.raises(NotARegularFile) as excinfo:
+        within(DEADLINE_SECONDS, load_config)
+
+    assert isinstance(excinfo.value, OSError), (
+        "callers answer this file's trouble with `except OSError`; the refusal has to be one"
+    )
+    assert "a directory" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_load_config_refuses_a_fifo_subject(tmp_path, monkeypatch):
+    """A FIFO at the config path raises, where before the call never returned at all.
+
+    Measured 2026-10-11 (`cyc20261011-134612`) in a detached worktree of `3f18f6a6`: this
+    call did **not return within 8 s**, because the open waits for a writer and raises
+    nothing, so no handler around it can fire.
+    """
+    cfg_path = tmp_path / ".emrg" / "config.toml"
+    _plant(cfg_path, "fifo")
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+
+    with pytest.raises(NotARegularFile) as excinfo:
+        within(DEADLINE_SECONDS, load_config)
+
+    assert "FIFO" in str(excinfo.value)
+
+
+def test_the_section_loaders_degrade_on_a_directory_subject(tmp_path, monkeypatch):
+    """The readers whose contract is a default keep it: they degrade, never raise.
+
+    `load_sandbox_config` and `load_update_config` both read through
+    `except (OSError, TOMLDecodeError)` and their docstrings promise defaults for a file
+    they cannot read. `NotARegularFile` **is** an `OSError`, so the refusal lands in the
+    handler already written there — the answer a directory already gets, one kind over.
+    A guard that raised instead would turn a documented default into a crash on a path
+    the daemon builds itself in `__init__`.
+    """
+    cfg_path = tmp_path / ".emrg" / "config.toml"
+    _plant(cfg_path, "dir")
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+
+    assert within(DEADLINE_SECONDS, cfg_mod.load_sandbox_config) == cfg_mod.SandboxConfig()
+    assert within(DEADLINE_SECONDS, cfg_mod.load_update_config) == cfg_mod.UpdateConfig()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_the_section_loaders_degrade_on_a_fifo_subject(tmp_path, monkeypatch):
+    """The same two readers, on the subject that used to block: both return 0.00 s.
+
+    Measured before the guard (`3f18f6a6`, detached worktree): both **did not return
+    within 8 s**. `EmrgServer.__init__` calls them (`daemon.py:637`/`:643`), so the block
+    was the daemon's construction, before any event loop or handler existed.
+    """
+    cfg_path = tmp_path / ".emrg" / "config.toml"
+    _plant(cfg_path, "fifo")
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+
+    assert within(DEADLINE_SECONDS, cfg_mod.load_sandbox_config) == cfg_mod.SandboxConfig()
+    assert within(DEADLINE_SECONDS, cfg_mod.load_update_config) == cfg_mod.UpdateConfig()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_ensure_config_never_opens_a_non_regular_subject(tmp_path, monkeypatch):
+    """The writer is the one open in the module that needs no guard — and this pins why.
+
+    Measured, not assumed (`3f18f6a6`, detached worktree): `ensure_config()` **returned**
+    with a FIFO at the config path, because its first act is `if cfg_path.exists(): return`
+    and `exists()` is true for a FIFO. So the subject is left exactly as it was and no open
+    happens — guarding this write would be code no reading can reach.
+    """
+    cfg_path = tmp_path / ".emrg" / "config.toml"
+    _plant(cfg_path, "fifo")
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+
+    assert within(DEADLINE_SECONDS, cfg_mod.ensure_config) is None
+    assert non_regular_kind(cfg_path) == "a FIFO (named pipe)", (
+        "the writer replaced a subject it was told to leave alone"
+    )
+
+
+def test_no_read_text_reaches_the_config_unasked():
+    """The census leg: the shape that keeps being missed is `Path`'s own method.
+
+    `emrg/config.py` had four opens and none of them asked. Asking the source rather than
+    a reviewer's memory is what `#2095`/`#2096` did for the scheduler, for the reason it
+    gave: a bare `read_text` is invisible to a grep for `open(`, and a reader added later
+    must not be able to skip the guard quietly.
+
+    The write is the measured exemption, and it is an **enumerated list** rather than a
+    wildcard: `ensure_config` is the one writer, and the leg above is what holds its
+    reason. Any `read_text`/`write_text`/`open(` outside its home fails here.
+    """
+    import ast
+
+    source = Path(cfg_mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    homes = {"read_text": "_read_config_text", "write_text": "ensure_config", "open": None}
+
+    def enclosing(stack: list[str]) -> str:
+        return stack[-1] if stack else "<module>"
+
+    found: dict[str, set[str]] = {}
+    stack: list[str] = []
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            stack.append(node.name)
+            self.generic_visit(node)
+            stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in homes:
+                found.setdefault(func.attr, set()).add(enclosing(stack))
+            elif isinstance(func, ast.Name) and func.id == "open":
+                found.setdefault("open", set()).add(enclosing(stack))
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    for shape, home in homes.items():
+        callers = found.get(shape, set())
+        assert callers <= {home}, (
+            f"{shape} is called from {sorted(callers - {home})}, outside its home "
+            f"{home!r} — every open in this module asks its subject's kind first "
+            f"(issue #2103)"
+        )
+    # A leg that finds no call at all would pass vacuously: the two shapes that exist must
+    # be seen, or this test has stopped reading the module it names.
+    assert found.get("read_text") == {"_read_config_text"}
+    assert found.get("write_text") == {"ensure_config"}
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_the_foreground_daemon_command_reports_a_refused_config(
+    tmp_path, monkeypatch, capsys
+):
+    """`emrg server` (foreground) says why and exits 1, instead of a traceback.
+
+    The command's answer for a config it cannot read is one line and exit 1 — the shape it
+    already had for a missing file — and the refusal is a new way to be unreadable, so it
+    takes the same exit. Without the handler it escapes as an unhandled `NotARegularFile`
+    traceback, which this arm kills.
+
+    Only two outcomes are reachable here and **neither starts a daemon**: the guard
+    refuses (the assertion below), or the guard is gone and `load_config` blocks at the
+    open, which the deadline turns into a failed test. The subject is a FIFO, never a
+    readable config, so `asyncio.run(run_server(...))` is unreachable by construction —
+    the safety of this test does not rest on the guard working.
+
+    `ensure_tool_dirs` is stubbed because it rewrites this process's `PATH`, which no test
+    of a config reader should leave mutated for its neighbours.
+    """
+    cfg_path = tmp_path / ".emrg" / "config.toml"
+    _plant(cfg_path, "fifo")
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+    monkeypatch.setattr("emrg.tool_path.ensure_tool_dirs", lambda: None)
+
+    from emrg.__main__ import _run_daemon
+
+    with pytest.raises(SystemExit) as excinfo:
+        within(DEADLINE_SECONDS, _run_daemon)
+
+    assert excinfo.value.code == 1
+    assert "not a regular file" in capsys.readouterr().err
