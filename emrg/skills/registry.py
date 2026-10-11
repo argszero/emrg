@@ -27,6 +27,11 @@ from pathlib import Path
 
 from emrg.config import config_dir
 
+# The "is this path a regular file" rule is the tool layer's, reached at a path. Imported
+# rather than restated, for the reason `emrg/memory.py` gives at the same import: the
+# boundary is one fact, and a second spelling of it is a second boundary that can drift.
+from emrg.tools.base import non_regular_kind
+
 logger = logging.getLogger(__name__)
 
 # Canonical baseline — must match emrg/skills/skill-catalog.md
@@ -159,9 +164,35 @@ def _strip_quotes(value: str) -> str:
 
 
 def load_catalog_skills() -> list[dict]:
-    """Read the catalog's installable-skill list (empty when missing)."""
+    """Read the catalog's installable-skill list (empty when missing).
+
+    The subject's **kind** is asked before it is opened, because opening it is what decides
+    whether this call returns at all: `read_text` on a FIFO blocks at the *open* until a
+    writer appears, so the `except OSError` below cannot bound the consequence — nothing is
+    raised and the call simply never returns. This runs on the daemon's event loop (the
+    `skills_available` and `skills_install` handlers), so the block is the whole server.
+
+    Measured 2026-10-11 (`cyc20261011-100220`): a `mkfifo` at `~/.emrg/skills/skill-catalog.md`
+    made this function **not return in 8 s**, where the same fixture with a regular file
+    returned in 0.00 s.
+
+    The path is the directory this instance installs skills into, and `load_skills` already
+    kind-checks the `*.md` files beside it (#2084) — this file sits in the same directory and
+    was the one left unguarded.
+
+    Asked **instead of** the `path.exists()` this function used to lean on, not in addition
+    to it: `exists()` is true for a FIFO, which is exactly the reading that let the block
+    through, so it is removed rather than kept as a second opinion.
+    """
     path = catalog_path()
-    if not path.exists():
+    try:
+        kind = non_regular_kind(path)
+    except OSError:
+        # A missing (or unstattable) path: the same empty answer this function has always
+        # given for one.
+        return []
+    if kind:
+        logger.debug("cannot read %s — it is %s, not a regular file", path, kind)
         return []
     try:
         text = path.read_text(encoding="utf-8")
@@ -182,9 +213,27 @@ def find_catalog_skill(name: str) -> dict | None:
 # ── install/update state (.state.json) ───────────────────────────────
 
 def read_state() -> dict[str, dict]:
-    """Read skill state: {name: {version, installed_at, managed, ...}}."""
+    """Read skill state: {name: {version, installed_at, managed, ...}}.
+
+    Asks the subject's **kind** before opening it, for the reason
+    :func:`load_catalog_skills` states at length: `.state.json` lives in the same directory
+    (`~/.emrg/skills/`), `read_text` on a FIFO blocks at the open and raises nothing, and
+    both this function and that one run on the daemon's event loop. Measured 2026-10-11
+    (`cyc20261011-100220`): a `mkfifo` at `~/.emrg/skills/.state.json` made this **not
+    return in 8 s** where a regular file returned in 0.00 s.
+
+    The `path.exists()` this used to lean on is gone rather than kept: `exists()` is true
+    for a FIFO, and a caller that answers "does it exist" when it means "can I open it" is
+    how the block got through.
+    """
     path = state_path()
-    if not path.exists():
+    try:
+        kind = non_regular_kind(path)
+    except OSError:
+        # Missing or unstattable: the empty mapping this function already answers with.
+        return {}
+    if kind:
+        logger.debug("cannot parse %s — it is %s, not a regular file", path, kind)
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
