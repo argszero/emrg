@@ -1,11 +1,14 @@
 """Tests for session module: Session class and _validate_tool_messages."""
 
 import json
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+from emrg.memory import NotARegularFile
 from emrg.session import (
     Session,
     _validate_tool_messages,
@@ -942,3 +945,138 @@ class TestGenerateSessionId:
         # Next call should produce a different ID
         new_sid = generate_session_id(tmp_path)
         assert new_sid != sid
+
+
+# ── A session file that is not a regular file ────────────────────────────
+#
+# `threading` is imported here rather than at the top of the file because this
+# deadline is the only use of it: the reads below must be bounded, and the bound
+# is what makes a regression *fail* instead of wedging the suite.
+
+
+def _within(seconds: float, fn):
+    """Return ``fn()``'s result, failing the test if it has not returned in ``seconds``.
+
+    A reader that opens a path without asking its kind cannot be bounded by ``try``/
+    ``except``: a FIFO blocks at the **open**, raises nothing, so no handler runs and the
+    call simply never returns. A test that called such a reader directly would therefore
+    have only two outcomes — the reader returns, or the whole pytest run wedges — and the
+    second is unreadable as a failure (a cancelled CI job reads as `no_verdict`, whose
+    remedy is to re-trigger the same head, and this repository has had to kill such a run
+    by hand). Hence the deadline; the exception ``fn`` raised is carried out, since "it
+    raised" and "it never returned" are different readings and the caller decides which
+    it expected.
+
+    The 5 s is headroom by three orders of magnitude (the guarded reads answer in
+    milliseconds), not a performance assertion.
+    """
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # carried out, not swallowed
+            box["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), (
+        f"the read did not return within {seconds}s — a path was opened without asking "
+        f"its kind first (a FIFO blocks at the open and raises nothing, so no handler "
+        f"can fire)"
+    )
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+class TestSessionFilesAskTheKindBeforeOpening:
+    """A session file of a non-regular kind is answered, not opened (issue #2085).
+
+    Every file `Session` opens lives in `<cwd>/.emrg/sessions/<id>/`, which is inside the
+    project the agent works in — the workspace fence grants the project root — so a
+    `mkfifo` there is the agent's own doing. Measured 2026-10-11 (`cyc20261011-071202`) on
+    master `3386f239`: `load`, `title`, `_read_history` and `append_message` each **did not
+    return** within 15 s against a pipe at `meta.json`/`history.jsonl`, where the same
+    four calls against regular files returned immediately.
+
+    Each test asks for the answer its call site already gives the kind *one over* — a
+    directory at the same path raises ``IsADirectoryError`` — so the pipe must not answer
+    differently.
+    """
+
+    @staticmethod
+    def _session_dir(root: Path, sid: str = "s1") -> Path:
+        d = root / ".emrg" / "sessions" / sid
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_meta_does_not_wedge_load(self, tmp_path):
+        """`Session.load` refuses the pipe instead of waiting at the open for a writer."""
+        os.mkfifo(self._session_dir(tmp_path) / "meta.json")
+        with pytest.raises(NotARegularFile) as excinfo:
+            _within(5.0, lambda: Session.load("s1", tmp_path))
+        assert "a FIFO" in str(excinfo.value), str(excinfo.value)
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_history_does_not_wedge_read_history(self, tmp_path):
+        """The reader seven daemon sites call through returns by refusing, not by waiting."""
+        os.mkfifo(self._session_dir(tmp_path) / "history.jsonl")
+        session = Session("s1", tmp_path)
+        with pytest.raises(NotARegularFile):
+            _within(5.0, session._read_history)
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_history_does_not_wedge_append_message(self, tmp_path):
+        """The write path too — `append_message` runs on every message the daemon keeps."""
+        os.mkfifo(self._session_dir(tmp_path) / "history.jsonl")
+        session = Session("s1", tmp_path)
+        with pytest.raises(NotARegularFile):
+            _within(
+                5.0,
+                lambda: session.append_message({"type": "message", "role": "user", "content": "hi"}),
+            )
+        # The refusal happened *before* the open, so nothing was half-written.
+        assert not (self._session_dir(tmp_path) / "history.jsonl").is_file()
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_meta_still_answers_a_title_with_the_session_id(self, tmp_path):
+        """`title` degrades the way it already degrades for a directory: the session id.
+
+        Refusing here would turn one odd file into a failed listing, and this property's
+        own `except (OSError, …)` is the statement of what a meta it cannot read means.
+        """
+        os.mkfifo(self._session_dir(tmp_path) / "meta.json")
+        session = Session("s1", tmp_path)
+        assert _within(5.0, lambda: session.title) == "s1"
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_list_sessions_skips_the_pipe_and_keeps_the_rest(self, tmp_path):
+        """Both halves: the listing returns, and the sessions beside the pipe survive.
+
+        A guard that raised out of the walk would pass "returns" while losing every
+        session in the directory — the same loss the hang caused one step earlier.
+        """
+        real = self._session_dir(tmp_path, "s_real")
+        (real / "meta.json").write_text(
+            json.dumps({"session_id": "s_real", "created_at": "2026-01-01T00:00:00"}),
+            encoding="utf-8",
+        )
+        os.mkfifo(self._session_dir(tmp_path, "s_wedged") / "meta.json")
+        rows = _within(5.0, lambda: Session.list_sessions(tmp_path))
+        assert [r["session_id"] for r in rows] == ["s_real"], rows
+
+    def test_the_control_with_regular_files(self, tmp_path):
+        """Same fixture, regular files: every one of those calls answers as it always did.
+
+        Without this the suite would not tell the kind check from a guard that refuses
+        everything.
+        """
+        session = Session.create_with_id("s1", tmp_path)
+        session.append_message({"type": "message", "role": "user", "content": "hi"})
+        assert session.title == "s1"
+        assert [r["content"] for r in session._read_history()] == ["hi"]
+        assert Session.load("s1", tmp_path).message_count == 1
+        assert [r["session_id"] for r in Session.list_sessions(tmp_path)] == ["s1"]
