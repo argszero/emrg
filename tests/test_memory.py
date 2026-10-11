@@ -1036,3 +1036,106 @@ def test_a_regular_marker_is_still_written(session_store, temp_cwd):
     text = marker.read_text(encoding="utf-8")
     assert f"memory_id: {mem.id}" in text, text
     assert str(promoted.filename) in text, text
+# ── The memory file's writer: the half #2076 left (issue #2119) ─────────────
+#
+# `#2076` guarded the memory *files* on the **read** side (`MemoryFile.from_file`), and
+# `#2078`/`#2075` guarded the index pair — reader and writer both. The site neither
+# reached is this one: `MemoryFile.save` opens the same path the guarded reader refuses,
+# and **a write is an open too** — to a FIFO it waits for a reader, to a socket for a
+# connection — so the call never returns, and neither do the store methods above it
+# (`create`, `update`, `merge`, `promote_to_project`). The sibling one path over
+# (`MemoryIndex.save`) is the shape copied here.
+#
+# Each test is written so that removing the guard makes it **hang** rather than pass, the
+# shape the two blocks above state for the same class. The *directory* arm is the one
+# that discriminates without a FIFO: an unguarded writer answers `IsADirectoryError`
+# there — an `OSError` that is not this refusal — so the family keeps an arm on Windows,
+# where `mkfifo` does not exist.
+
+
+_MEMORY_FILE_TEXT = (
+    "---\n"
+    "id: aaaa1111\n"
+    "event_at: 2026-01-01T00:00:00\n"
+    "created_at: 2026-01-01T00:00:00\n"
+    "updated_at: 2026-01-01T00:00:00\n"
+    "type: reference\n"
+    "scope: project\n"
+    "status: active\n"
+    "title: A note\n"
+    "---\n"
+    "\n"
+    "body\n"
+)
+
+
+@_needs_mkfifo
+def test_the_memory_file_writer_refuses_a_named_pipe_instead_of_blocking(tmp_path):
+    """`MemoryFile.save` names the kind rather than opening the subject.
+
+    Measured 2026-10-12 (`cyc20261012-035249`) on master `f4fe92c3`: this call did not
+    return within 10 s, while a regular file and an absent path returned in the same
+    fixture.
+    """
+    fifo = tmp_path / "notes.md"
+    os.mkfifo(fifo)
+
+    with pytest.raises(NotARegularFile) as excinfo:
+        MemoryFile.from_text(_MEMORY_FILE_TEXT).save(fifo)
+
+    assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
+    assert "not a regular file" in str(excinfo.value), str(excinfo.value)
+    assert "write" in str(excinfo.value), (
+        "the writer's refusal should say which direction it is: " + str(excinfo.value)
+    )
+
+
+def test_the_memory_file_writer_refuses_a_directory_with_its_own_verdict(tmp_path):
+    """The arm that discriminates on every platform, `mkfifo` or not.
+
+    Unguarded, this path reaches `IsADirectoryError` — an `OSError`, so a `pytest.raises`
+    on the base class would pass either way, and this refusal is the one that says the
+    writer asked the kind *before* opening.
+    """
+    directory = tmp_path / "notes.md"
+    directory.mkdir()
+
+    with pytest.raises(NotARegularFile) as excinfo:
+        MemoryFile.from_text(_MEMORY_FILE_TEXT).save(directory)
+
+    assert "a directory" in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_memory_file_writer_still_writes_a_file_and_creates_an_absent_one(tmp_path):
+    """The control, in both directions the guard must not narrow.
+
+    An existing regular file is overwritten, and an absent path is **created** with its
+    parents — the case a guard that asked `non_regular_kind` unconditionally would turn
+    into a `FileNotFoundError`, since a writer's normal subject is a path it is about to
+    make.
+    """
+    mem = MemoryFile.from_text(_MEMORY_FILE_TEXT)
+    target = tmp_path / "notes.md"
+    target.write_text("stale\n", encoding="utf-8")
+
+    mem.save(target)
+
+    assert MemoryFile.from_file(target).id == "aaaa1111"
+    assert "body" in target.read_text(encoding="utf-8")
+
+    absent = tmp_path / "nested" / "deeper" / "notes.md"
+    mem.save(absent)
+
+    assert absent.exists(), "an absent path is the writer's normal subject"
+    assert MemoryFile.from_file(absent).id == "aaaa1111"
+
+
+@_needs_mkfifo
+def test_the_memory_file_writer_still_writes_beside_a_pipe(tmp_path):
+    """The refusal is about the kind at this path, not about the directory holding it."""
+    os.mkfifo(tmp_path / "pipe.md")
+    target = tmp_path / "notes.md"
+
+    MemoryFile.from_text(_MEMORY_FILE_TEXT).save(target)
+
+    assert MemoryFile.from_file(target).id == "aaaa1111"

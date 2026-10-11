@@ -7313,6 +7313,20 @@ def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) 
     }
     line = json.dumps(record, ensure_ascii=False)
     logger.info("daemon exit record: %s", line)
+    # The append is an open, and opening a FIFO **for writing** waits for a reader — an
+    # `except OSError` around it cannot fire, so the last thing a stopped daemon does
+    # would be to hang rather than record why it stopped (issue #2115, the site #2108's
+    # log-file sweep missed: this is a separate writer from the run markers and
+    # `usage-anchor.jsonl`). Refused before the open, and absence is untouched —
+    # `_non_regular_kind` answers an unstatable path with `None`, which is this file's
+    # normal first-run case.
+    kind = _non_regular_kind(_EXIT_RECORD_PATH)
+    if kind is not None:
+        logger.warning(
+            "failed to write exit record to %s: it is %s, not a regular file",
+            _EXIT_RECORD_PATH, kind,
+        )
+        return
     try:
         with open(_EXIT_RECORD_PATH, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
