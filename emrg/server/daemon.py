@@ -409,6 +409,27 @@ def _non_regular_kind(path) -> str | None:
         return None
 
 
+def _refuse_non_regular_file(path) -> None:
+    """Raise, for a subject that cannot be read to an end, the ``OSError`` callers already answer.
+
+    The predicate above answers *what* the subject is; this states *what happens next* at a
+    site whose own ``except OSError`` already answers a file it cannot read — the refusal is
+    an ``OSError``, so it lands in that handler and the reading the caller gets is the one
+    its contract already promised for an unreadable file. Written once because the sites
+    that need it are one shape: no new branch at any of them, only the answer that
+    currently never arrives (`#2062`: a FIFO blocks at the open and raises nothing).
+
+    A missing subject does **not** raise: :func:`_non_regular_kind` answers ``None`` when
+    its ``stat`` fails, because absence is a case every caller here already has a branch
+    for, and a writer among them must keep reaching it.
+
+    :param path: the file about to be opened.
+    """
+    kind = _non_regular_kind(path)
+    if kind is not None:
+        raise OSError(f"{path} is {kind}, not a regular file")
+
+
 def _unreadable_index_notice(path, exc: BaseException, *, where: str) -> str:
     """The sentence both carriers of a memory index use when the file cannot be read.
 
@@ -1074,7 +1095,19 @@ class EmrgServer:
 
         try:
             project_paths: list[str] = []
-            if self._projects_log.exists():
+            kind = _non_regular_kind(self._projects_log)
+            if kind is not None:
+                # Not opened, and **said so** rather than caught and dropped: the reader
+                # below answers a registry it cannot read with no paths, and the
+                # difference between "the file is not there" and "the file cannot be
+                # read to an end" is the whole point of asking the kind (`#2062`). A FIFO
+                # here would hold this startup task — and the event loop with it — for
+                # ever, before any client can connect.
+                logger.debug(
+                    "sessions index backfill: %s is %s, not a regular file; not opened",
+                    self._projects_log, kind,
+                )
+            elif self._projects_log.exists():
                 try:
                     data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
                     if isinstance(data, list):
@@ -1904,6 +1937,20 @@ class EmrgServer:
 
         # Read existing entries (normalize by realpath to avoid duplicates)
         projects: dict[str, dict] = {}
+        kind = _non_regular_kind(self._projects_log)
+        if kind is not None:
+            # Skipped, and skipped **before** the read rather than inside the `except`
+            # below: this method reads the registry and then rewrites it, so falling
+            # through to the "rebuilding" branch would answer a host file it could not
+            # read with an **empty** registry — deleting every project the host
+            # registered, in one write, to report a problem it never mentioned.
+            # Registration is bookkeeping, so the honest reading is "not this time":
+            # the file keeps what it had and the warning names the kind.
+            logger.warning(
+                "_touch_project: %s is %s, not a regular file — leaving the project "
+                "registry unread and unrewritten", self._projects_log, kind,
+            )
+            return
         if self._projects_log.exists():
             try:
                 data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
@@ -2477,13 +2524,11 @@ class EmrgServer:
         # only reader. Both scopes are measured in
         # `tests/test_memory_index_thresholds.py`.
         limit = INDEX_SIZE_WARN
-        kind = _non_regular_kind(path)
-        if kind is not None:
-            # Raised, not answered: this is a pure function whose one production caller
-            # (`_index_for_prompt`) already turns a read it cannot do into the notice
-            # the prompt carries, so the condition reaches the agent with its carrier
-            # named — the same shape as an index that is not valid UTF-8.
-            raise OSError(f"{path} is {kind}, not a regular file")
+        # Raised, not answered: this is a pure function whose one production caller
+        # (`_index_for_prompt`) already turns a read it cannot do into the notice
+        # the prompt carries, so the condition reaches the agent with its carrier
+        # named — the same shape as an index that is not valid UTF-8.
+        _refuse_non_regular_file(path)
         text = path.read_text(encoding="utf-8")
         if len(text) <= limit:
             return text
@@ -2643,11 +2688,9 @@ class EmrgServer:
         try:
             if not path.exists():
                 return ""
-            kind = _non_regular_kind(path)
-            if kind is not None:
-                # Same condition, same answer as an index that cannot be decoded: the
-                # frame keeps its rows and the `index` field carries the notice.
-                raise OSError(f"{path} is {kind}, not a regular file")
+            # Same condition, same answer as an index that cannot be decoded: the
+            # frame keeps its rows and the `index` field carries the notice.
+            _refuse_non_regular_file(path)
             return path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             logger.debug("memory index could not be read: %s", path, exc_info=True)
@@ -6059,6 +6102,11 @@ class EmrgServer:
         projects: list[dict] = []
         try:
             if self._projects_log.exists():
+                # Every client asks this on connect, so an unguarded open here is the
+                # daemon's event loop stopping on the first frame a GUI or TUI sends —
+                # the refusal lands in the `except` below, which is already this
+                # method's answer for a registry it cannot read (`#2062`).
+                _refuse_non_regular_file(self._projects_log)
                 data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
                 if isinstance(data, list):
                     entries = [p for p in data if isinstance(p, dict)]
@@ -6118,6 +6166,10 @@ class EmrgServer:
             })
             return
         try:
+            # The same refusal as `_handle_list_projects`, and this caller already has
+            # the branch for it: an unreadable registry is answered with `removed:
+            # false` and the reason, so a FIFO cannot hold the event loop (`#2062`).
+            _refuse_non_regular_file(self._projects_log)
             data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
         except (yaml.YAMLError, OSError):
             logger.exception("remove_project: failed to read %s", self._projects_log)
