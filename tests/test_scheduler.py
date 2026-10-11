@@ -3793,3 +3793,361 @@ def test_a_silent_daemon_after_the_terminal_frame_does_not_wedge_the_handler(
         "the completion text, and no slowdown state is invented from silence"
     )
     assert handler._slowdown_active is False, "silence is not a slowdown signal"
+
+
+# ── every scheduler reader asks its subject's kind before opening it (issue #2095) ──
+#
+# The family one module over: an **open is not a read**. On a FIFO the open waits until
+# a writer appears and raises nothing, so the `try`/`except OSError` around it cannot
+# bound it — the call simply never returns, and the scheduler runs on the daemon's event
+# loop, so the block is every client, the scheduler and the evolution cycle.
+#
+# `within` (tests/bounded_read.py) is what turns a regression here into a *failed* test:
+# a wedged CI job is cancelled, which reads as `no_verdict`, whose remedy is to re-trigger
+# the same head — so a hang would be re-triggered forever instead of read as red.
+
+from emrg.memory import NotARegularFile  # noqa: E402
+from emrg.protocol import EvolutionLog  # noqa: E402
+from tests.bounded_read import DEADLINE_SECONDS, within  # noqa: E402
+
+_needs_mkfifo = pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="this platform has no FIFOs"
+)
+
+
+class TestSchedulerReadersAskTheKindBeforeOpening:
+    """A scheduler subject that is not a regular file is answered, not opened (#2095).
+
+    Measured on master `171d90d0` before the fix, one child process per arm under an
+    8 s cap: `read_table`, `_resolve_project_path`, `_load_project_config`,
+    `_read_custom_template` and the handler's saturation / heartbeat / next-run /
+    task-run readers each **did not return** against a FIFO, where the same call with
+    the subject absent answered at once. Each test below is therefore also a bound: it
+    fails on the deadline rather than wedging the suite.
+    """
+
+    @staticmethod
+    def _fifo(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        return path
+
+    @staticmethod
+    def _config(tmp_path, monkeypatch) -> None:
+        """Point the module's config dir at this test's tmp_path."""
+        from emrg.server import scheduler as mod
+
+        monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+
+    def _handler(self, tmp_path, attr: str, rel: str):
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        setattr(handler, attr, self._fifo(tmp_path / rel))
+        return handler
+
+    @_needs_mkfifo
+    def test_read_table_refuses_a_fifo_and_names_the_kind(self, tmp_path, monkeypatch):
+        """`TableUnreadable` is the reader's own answer to a file it cannot read.
+
+        It is raised rather than swallowed into `[]` for the reason its docstring gives:
+        "unreadable" must change nothing, while "no tasks" retires every handler.
+        """
+        from emrg.server import scheduler as mod
+
+        self._config(tmp_path, monkeypatch)
+        self._fifo(tmp_path / "tasks.yml")
+        with pytest.raises(mod.TableUnreadable) as excinfo:
+            within(DEADLINE_SECONDS, mod.read_table)
+        assert "a FIFO" in str(excinfo.value), str(excinfo.value)
+
+    @_needs_mkfifo
+    def test_resolve_project_path_answers_none_for_a_fifo(self, tmp_path, monkeypatch):
+        from emrg.server import scheduler as mod
+
+        self._config(tmp_path, monkeypatch)
+        self._fifo(tmp_path / "projects.yml")
+        assert within(DEADLINE_SECONDS, lambda: mod._resolve_project_path("probe")) is None
+
+    @_needs_mkfifo
+    def test_load_project_config_answers_empty_for_a_fifo(self, tmp_path, monkeypatch):
+        from emrg.server import scheduler as mod
+
+        self._config(tmp_path, monkeypatch)
+        self._fifo(tmp_path / "projects.yml")
+        assert within(DEADLINE_SECONDS, lambda: mod._load_project_config("probe", str(tmp_path))) == {}
+
+    @_needs_mkfifo
+    def test_read_custom_template_answers_none_for_a_fifo(self, tmp_path, monkeypatch):
+        """None is the documented answer, and the caller's fall back to the packaged
+        templates is what makes it safe: a template it cannot read is not a task that
+        must fail, it is one that renders the built-in prompt."""
+        from emrg.server import scheduler as mod
+
+        self._config(tmp_path, monkeypatch)
+        self._fifo(tmp_path / "task-templates" / "probe.md")
+        assert within(DEADLINE_SECONDS, lambda: mod._read_custom_template("probe")) is None
+
+    @_needs_mkfifo
+    def test_saturation_state_answers_false_for_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_saturation_file", "saturation/probe.json")
+        assert within(DEADLINE_SECONDS, handler._load_saturation_state) is False
+
+    @_needs_mkfifo
+    def test_the_interrupted_cycle_report_returns_for_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_heartbeat_file", "task-runs/probe.heartbeat.json")
+        assert within(DEADLINE_SECONDS, handler._report_interrupted_cycle) is None
+
+    @_needs_mkfifo
+    def test_next_run_state_answers_none_for_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_next_run_file", "next-run/probe.json")
+        assert within(DEADLINE_SECONDS, handler._load_next_run_state) is None
+
+    @_needs_mkfifo
+    def test_task_runs_read_answers_empty_for_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_task_runs_file", "task-runs/probe.jsonl")
+        assert within(DEADLINE_SECONDS, handler._load_task_runs) == []
+
+    @_needs_mkfifo
+    def test_appending_a_task_run_does_not_block_on_a_fifo(self, tmp_path, caplog):
+        """The write side blocks in the same place: opening a FIFO for writing waits for
+        a reader. Fault-tolerant as written — the caller only logs."""
+        handler = self._handler(tmp_path, "_task_runs_file", "task-runs/probe.jsonl")
+        record = EvolutionLog(timestamp="t", work="w", recommend_slowdown=False,
+                              slowdown_reason="", tool_count=0)
+        with caplog.at_level(logging.WARNING):
+            assert within(DEADLINE_SECONDS, lambda: handler._append_task_run(record)) is None
+        assert any("failed to persist task-run record" in r.getMessage() for r in caplog.records)
+
+    @_needs_mkfifo
+    def test_the_recovery_receipt_writer_refuses_a_fifo(self, tmp_path, monkeypatch, caplog):
+        """The receipt lives in the git dir — inside the project the agent works in."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        self._fifo(git_dir / "emrg-recovery-receipt.json")
+        monkeypatch.setattr(
+            TaskHandler, "_git_state_dir", staticmethod(lambda source_dir: str(git_dir))
+        )
+        with caplog.at_level(logging.WARNING):
+            out = within(
+                DEADLINE_SECONDS,
+                lambda: TaskHandler._write_recovery_receipt(str(tmp_path), {"a": 1}),
+            )
+        assert out is None
+
+    @_needs_mkfifo
+    def test_render_prompt_refuses_a_template_that_is_not_a_regular_file(self, tmp_path):
+        """This site has no handler of its own: today it does not raise, it never
+        returns. Naming the kind is the answer a task whose prompt cannot be read
+        owes — silence is not."""
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler._derived["template_path"] = self._fifo(tmp_path / "prompt.md")
+        with pytest.raises(NotARegularFile) as excinfo:
+            within(DEADLINE_SECONDS, handler._build_evolution_prompt)
+        assert "a FIFO" in str(excinfo.value), str(excinfo.value)
+
+    def test_the_control_with_regular_files(self, tmp_path, monkeypatch):
+        """Without this the suite would not tell the kind check from a reader that
+        answers None to everything: every value above is also what "absent" answers."""
+        from emrg.server import scheduler as mod
+
+        self._config(tmp_path, monkeypatch)
+        (tmp_path / "tasks.yml").write_text(
+            yaml.safe_dump([{"name": "probe", "type": "evolution", "enabled": True}]),
+            encoding="utf-8",
+        )
+        rows = within(DEADLINE_SECONDS, mod.read_table)
+        assert [r["name"] for r in rows] == ["probe"], rows
+
+        # Built without `self._handler` on purpose: that helper's whole job is to plant a
+        # FIFO, and this test's subject is a regular file, so a FIFO here would be made
+        # and thrown away one line later. Making one also needs `os.mkfifo`, which does
+        # not exist on Windows — the control would have been skipped on the one platform
+        # least able to run the subjects above it, which is the opposite of a control.
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler._task_runs_file = tmp_path / "task-runs" / "regular.jsonl"
+        handler._task_runs_file.parent.mkdir(parents=True, exist_ok=True)
+        handler._task_runs_file.write_text(
+            json.dumps({"timestamp": "t", "work": "w", "recommend_slowdown": False,
+                        "slowdown_reason": "", "tool_count": 0}) + "\n",
+            encoding="utf-8",
+        )
+        assert [r.work for r in within(DEADLINE_SECONDS, handler._load_task_runs)] == ["w"]
+
+        (tmp_path / "prompt.md").write_text("host {{ host_name }}", encoding="utf-8")
+        handler._derived["template_path"] = tmp_path / "prompt.md"
+        assert "host" in within(DEADLINE_SECONDS, handler._build_evolution_prompt)
+
+
+class TestSchedulerWritersAskTheKindBeforeOpening:
+    """The write side of the same rule: an **open is not a read**.
+
+    `Path.write_text` is `open(path, "w")`, so it blocks on a FIFO exactly where
+    `read_text` does — it waits at the open for a reader and raises nothing, so no
+    handler can fire and the call never returns. Measured 2026-10-11
+    (`cyc20261011-113605`) on this branch's own head `a36eee38`, one child process per
+    arm under the driver's 8 s cap, driving each **real** writer with a `mkfifo` at its
+    subject: the heartbeat, the saturation flag, the next-run slot, the final summary and
+    the custom template's temp file each **did not return**. Three of the five swallow
+    their `OSError` by contract ("best-effort, never raises"), so the bound alone is not
+    enough — the reading is the return *plus* that the file it meant to write is still
+    the pipe it was told not to open.
+    """
+
+    @staticmethod
+    def _fifo(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        return path
+
+    def _handler(self, tmp_path, attr: str, rel: str):
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        setattr(handler, attr, self._fifo(tmp_path / rel))
+        return handler
+
+    @_needs_mkfifo
+    def test_the_heartbeat_writer_does_not_block_on_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_heartbeat_file", "task-runs/probe.heartbeat.json")
+        assert within(DEADLINE_SECONDS, lambda: handler._write_heartbeat("running")) is None
+        assert handler._heartbeat_file.exists(), (
+            "the pipe was replaced by a regular file: the guard has to refuse, not unlink "
+            "and write through"
+        )
+
+    @_needs_mkfifo
+    def test_the_saturation_writer_does_not_block_on_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_saturation_file", "saturation/probe.json")
+        handler._slowdown_active = True
+        assert within(DEADLINE_SECONDS, handler._save_saturation_state) is None
+
+    @_needs_mkfifo
+    def test_the_next_run_writer_does_not_block_on_a_fifo(self, tmp_path):
+        handler = self._handler(tmp_path, "_next_run_file", "next-run/probe.json")
+        handler._next_run_at = 1234567890.0
+        assert within(DEADLINE_SECONDS, handler._save_next_run_state) is None
+
+    @_needs_mkfifo
+    def test_the_final_summary_writer_refuses_a_fifo(self, tmp_path):
+        """This site has no handler of its own, so the refusal is what it owes.
+
+        It is reached once per handler lifetime, on the way out of `run()`; silence
+        there is the same `never returns` the rest of this class is about.
+        """
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler._logs_dir = tmp_path / "logs"
+        self._fifo(handler._logs_dir / "summary.json")
+        handler.evolutions = [
+            EvolutionLog(timestamp="t1", work="w", recommend_slowdown=False,
+                         slowdown_reason="", tool_count=0),
+        ]
+        with pytest.raises(NotARegularFile) as excinfo:
+            within(DEADLINE_SECONDS, lambda: asyncio.run(handler._write_final_summary()))
+        assert "a FIFO" in str(excinfo.value), str(excinfo.value)
+
+    @_needs_mkfifo
+    def test_the_custom_template_writer_refuses_a_fifo(self, tmp_path, monkeypatch):
+        """The temp file is the subject, not the template: the write happens there.
+
+        `template_create` answers `(ok, error)` and this path has no handler, so the
+        refusal reaches the caller of the daemon handler rather than being logged away —
+        which is the answer for a write that cannot be made.
+        """
+        from emrg.server import scheduler as mod
+
+        monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+        self._fifo(tmp_path / "task-templates" / "probe.md.tmp")
+        with pytest.raises(NotARegularFile) as excinfo:
+            within(DEADLINE_SECONDS,
+                   lambda: mod._write_custom_template("probe", "host {{ host_name }}"))
+        assert "a FIFO" in str(excinfo.value), str(excinfo.value)
+
+    def test_the_control_writes_every_subject_when_it_is_absent(self, tmp_path, monkeypatch):
+        """Without this the suite cannot tell the guard from a writer that never writes.
+
+        Every subject below is absent, which is the state each writer is normally in: a
+        refusal for an absent path would turn the heartbeat and the next-run slot off for
+        every task, and nothing above would notice.
+        """
+        from emrg.server import scheduler as mod
+
+        monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
+        handler._heartbeat_file = tmp_path / "task-runs" / "probe.heartbeat.json"
+        handler._saturation_file = tmp_path / "saturation" / "probe.json"
+        handler._next_run_file = tmp_path / "next-run" / "probe.json"
+        handler._logs_dir = tmp_path / "logs"
+        for parent in (handler._heartbeat_file.parent, handler._saturation_file.parent,
+                       handler._next_run_file.parent, handler._logs_dir):
+            # The writers that swallow their OSError by contract cannot make a missing
+            # parent: an absent directory and a FIFO would be the same reading. The
+            # subject is the file, so the directory is this fixture's to create.
+            parent.mkdir(parents=True, exist_ok=True)
+        handler._slowdown_active = True
+        handler._next_run_at = 1234567890.0
+        handler.evolutions = [
+            EvolutionLog(timestamp="t1", work="w", recommend_slowdown=False,
+                         slowdown_reason="", tool_count=0),
+        ]
+
+        handler._write_heartbeat("running")
+        handler._save_saturation_state()
+        handler._save_next_run_state()
+        asyncio.run(handler._write_final_summary())
+        assert json.loads((handler._logs_dir / "summary.json").read_text(encoding="utf-8"))[
+            "total_evolutions"] == 1
+        assert json.loads(handler._heartbeat_file.read_text(encoding="utf-8"))["status"] == "running"
+        assert json.loads(handler._saturation_file.read_text(encoding="utf-8"))["slowdown_active"] is True
+        assert handler._next_run_file.exists()
+
+        mod._write_custom_template("probe", "host {{ host_name }}")
+        assert (tmp_path / "task-templates" / "probe.md").read_text(encoding="utf-8") == "host {{ host_name }}"
+
+    def test_no_open_shape_reaches_its_subject_unasked(self):
+        """The census leg: the shape that keeps being missed is `Path`'s own method.
+
+        Three of the five writers above were invisible to a grep for `open(` — they call
+        `Path.write_text`, which *is* an open. This asks the module's source instead of a
+        reviewer's memory: every `read_text`, `write_text` and `open(` in
+        `emrg/server/scheduler.py` is inside the one helper written for it.
+        """
+        import ast
+
+        from emrg.server import scheduler as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        owners = {
+            "_read_text": {"read_text"},
+            "_write_text": {"write_text"},
+            "_open_text": {"open"},
+        }
+        homes = {name for names in owners.values() for name in names}
+
+        def enclosing(node, stack):
+            return stack[-1] if stack else "<module>"
+
+        found: dict[str, set[str]] = {}
+        stack: list[str] = []
+
+        class Visitor(ast.NodeVisitor):
+            def visit_FunctionDef(self, node):
+                stack.append(node.name)
+                self.generic_visit(node)
+                stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                func = node.func
+                if isinstance(func, ast.Attribute) and func.attr in homes:
+                    found.setdefault(func.attr, set()).add(enclosing(node, stack))
+                elif isinstance(func, ast.Name) and func.id == "open":
+                    found.setdefault("open", set()).add(enclosing(node, stack))
+                self.generic_visit(node)
+
+        Visitor().visit(tree)
+        for method, names in owners.items():
+            callers = found.get(method.split("_", 1)[1], set())
+            unexpected = callers - {method}
+            assert not unexpected, (
+                f"{method.split('_', 1)[1]} is called outside {method}() by {sorted(unexpected)} "
+                f"— every open in this module asks its subject's kind first (issue #2095)"
+            )
