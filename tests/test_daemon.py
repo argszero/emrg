@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -4558,3 +4559,162 @@ def test_a_read_memory_through_a_pipe_directory_answers_rather_than_hangs(tmp_pa
     assert "error" in frames[0], frames[0]
     assert "pipe.md" in frames[0]["error"], frames[0]["error"]
     assert "NotARegularFile" in frames[0]["error"], frames[0]["error"]
+
+
+# ── the resume handler asks the meta's kind before opening it ───────
+#
+# `threading` is imported at the top of this block's own helper rather than at the
+# module top: it is the only use, and the bound it draws is what turns a regression
+# from a wedged suite into a failed test.
+
+
+def _within(seconds: float, fn):
+    """Return ``fn()``'s result, failing the test if it has not returned in ``seconds``.
+
+    A reader that opens a path without asking its kind cannot be bounded by
+    ``try``/``except``: a FIFO blocks at the **open**, raises nothing, so no handler
+    runs and the call never returns. A test that called such a handler directly would
+    have only two outcomes — it returns, or the whole pytest run wedges — and the second
+    is unreadable as a failure: a CI job that overruns is *cancelled*, which
+    `scripts/check-merge-freshness.py` classifies as `no_verdict`, whose prescribed
+    remedy is to re-trigger the same head, so a hang would be re-triggered forever
+    rather than read as the red it is. Hence the deadline; the exception ``fn`` raised
+    is carried out, because "it raised" and "it never returned" are different readings
+    and the caller decides which it expected.
+
+    The 5 s is headroom by three orders of magnitude (the guarded handler answers in
+    milliseconds), not a performance assertion.
+    """
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # carried out, not swallowed
+            box["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), (
+        f"the call did not return within {seconds}s — a path was opened without asking "
+        f"its kind first (a FIFO blocks at the open and raises nothing, so no handler "
+        f"can fire)"
+    )
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+@_needs_mkfifo
+def test_a_resume_at_a_fifo_meta_answers_instead_of_waiting(tmp_path):
+    """The handler reads `meta.json` itself, so `Session`'s guard does not cover it.
+
+    Measured 2026-10-11 (`cyc20261011-074557`) on master `2fd13339`, driving this
+    handler with nothing stubbed, one child process per arm under the parent's 8 s cap:
+    a `mkfifo` at `<cwd>/.emrg/sessions/s1/meta.json` left `_handle_resume_session`
+    **not returned**, where a regular file there answered at once.
+
+    The *directory* arm is **not** the standard this row meets, which an earlier draft
+    of this docstring claimed: its answer depends on the ghost-session branch firing,
+    and see `test_a_resume_at_a_directory_meta_answers_instead_of_raising` for the arm
+    where it does not and the method raises today.
+
+    The path is inside the *workspace*, so a pipe in it is the agent's own doing, and
+    the handler runs on the daemon's event loop: the block is every client.
+    """
+    server = _make_server()
+    session = Session.create_with_id("s_fifo_meta", tmp_path)
+    session._meta_path.unlink()
+    os.mkfifo(session._meta_path)
+
+    frames = _within(
+        5.0,
+        lambda: _drive(server, {
+            "type": "resume_session", "session_id": "s_fifo_meta", "cwd": str(tmp_path),
+        }),
+    )
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["type"] == "resume_result", frames[0]
+    assert "error" in frames[0], frames[0]
+    assert "a FIFO (named pipe)" in frames[0]["error"], frames[0]["error"]
+    assert "not a regular file" in frames[0]["error"], frames[0]["error"]
+
+
+def test_a_resume_at_a_regular_meta_still_answers_the_snapshot(tmp_path):
+    """The control: the kind check must not turn every resume into a refusal.
+
+    Without this the suite cannot tell the guard from a blanket "not found".
+    """
+    server = _make_server()
+    session = Session.create_with_id("s_regular_meta", tmp_path)
+    session.append_message({"type": "message", "role": "user", "content": "hi"})
+
+    frames = _drive(server, {
+        "type": "resume_session", "session_id": "s_regular_meta", "cwd": str(tmp_path),
+    })
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["type"] == "resume_result", frames[0]
+    assert "error" not in frames[0], frames[0]
+    assert frames[0]["meta"]["message_count"] == 1, frames[0]
+
+
+def test_a_resume_at_a_session_that_is_not_there_still_says_not_found(tmp_path):
+    """The contract the kind check must not narrow: a **missing** path keeps its answer.
+
+    `_non_regular_kind` answers `None` for a subject whose `stat` fails, so the
+    not-found frame is unchanged — and the error carries no kind clause.
+    """
+    server = _make_server()
+
+    frames = _drive(server, {
+        "type": "resume_session", "session_id": "s_absent", "cwd": str(tmp_path),
+    })
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["error"] == "Session s_absent not found", frames[0]
+
+
+def test_a_resume_at_a_directory_meta_answers_instead_of_raising(tmp_path):
+    """The second site this check keeps answering — measured, not inferred.
+
+    `IsADirectoryError` is an `OSError`, so the handler's first read swallows it to
+    `meta = {}` — and that is the whole of what the old comment said. What happens next
+    is decided by the ghost branch: `message_count` is 0, so the canonical-cwd lookup
+    runs, and only when it **fires** does a frame answer. In the normal resume it does
+    not fire, because `Session._save_meta_with_title` puts every session it creates into
+    the global index with its own cwd — so control reaches `Session.load`, which opens
+    this same path again with no handler at all and raises out of the method.
+
+    Measured 2026-10-11 (`cyc20261011-085014`) on master `0b5f502f`, driving this handler
+    with a directory at `meta.json` and the session indexed at that same cwd:
+    `_process_message` raised `IsADirectoryError` out of the dispatcher's `await
+    self._handle_resume_session(…)`.
+    The fixture resolves `tmp_path` on purpose — a macOS `/var/…` spelling against
+    `/private/var/…` in the index makes the ghost check fire for a reason that has
+    nothing to do with the path's kind, and that spelling-dependent frame is what an
+    earlier reading of this arm mistook for the general case.
+    """
+    server = _make_server()
+    cwd = tmp_path.resolve()
+    session = Session.create_with_id("s_dir_meta", cwd)
+    session._meta_path.unlink()
+    session._meta_path.mkdir()
+
+    # The precondition is asserted rather than assumed, because it is what makes this
+    # the arm that reaches `Session.load`: without it the ghost branch could answer and
+    # this test would pass for a reason of its own.
+    assert server._canonical_session_cwd("s_dir_meta") == str(cwd), (
+        "the ghost branch would fire, so this arm is not the one being measured")
+
+    frames = _drive(server, {
+        "type": "resume_session", "session_id": "s_dir_meta", "cwd": str(cwd),
+    })
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["type"] == "resume_result", frames[0]
+    assert "error" in frames[0], frames[0]
+    assert "a directory" in frames[0]["error"], frames[0]["error"]
+    assert "not a regular file" in frames[0]["error"], frames[0]["error"]
