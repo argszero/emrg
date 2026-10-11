@@ -27,6 +27,7 @@ from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.llm import CONTENT_RISK, classify_llm_error
 from emrg.server.scheduler import TaskHandler, TaskScheduler
+from emrg.tools import base as base_mod
 from tests.task_handler_factory import make_handler
 from emrg.session import Session, _validate_tool_messages
 
@@ -4310,6 +4311,196 @@ def test_an_answer_that_exists_still_stamps_the_completed_round(tmp_path, monkey
         "a genuinely completed round no longer stamps the marker the #1114 alarm "
         "measures — the empty-answer guard must not have swallowed it"
     )
+
+
+# ── the subject has to be a regular file ──────────────────────────
+#
+# An open is not a read: on a FIFO a read blocks until a writer appears, on a socket
+# until a connection does, and a device never ends. The three file tools ask
+# `special_file_kind` before opening (issue #2062). These are the daemon's **own**
+# readers of a path the agent or the client names, and they took the same guard in
+# issue #2073 — a `MEMORY.md` and a context file both live in the agent's workspace,
+# and the index readers run on every request, so a block here is the daemon never
+# answering again.
+#
+# Each test below is written so that removing the guard makes it **hang** rather than
+# pass: the condition is a call that never returns, and no assertion can bound that
+# (the shape `tests/test_read_tool.py` states for the same class). Windows has no
+# `mkfifo`, so the family is skipped there.
+
+_needs_mkfifo = pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+
+
+@_needs_mkfifo
+def test_cap_memory_index_raises_on_a_named_pipe(tmp_path):
+    """The index reader names the kind instead of opening it."""
+    server = _make_server()
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+
+    with pytest.raises(OSError) as excinfo:
+        server._cap_memory_index(fifo)
+
+    assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
+    assert "not a regular file" in str(excinfo.value), str(excinfo.value)
+
+
+@_needs_mkfifo
+def test_an_index_that_is_a_named_pipe_is_a_notice_not_a_hang(tmp_path):
+    """The prompt carrier answers it exactly as it answers an undecodable index."""
+    server = _make_server()
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+
+    text = server._index_for_prompt(fifo)
+
+    assert str(fifo) in text, text
+    assert "a FIFO (named pipe)" in text, text
+    assert "could not be read" in text, text
+
+
+@_needs_mkfifo
+def test_a_named_pipe_index_in_the_listing_is_a_notice_too(tmp_path):
+    """The `memories_list` frame's carrier, the third reader of the same file."""
+    server = _make_server()
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+
+    text = server._index_for_frame(fifo)
+
+    assert str(fifo) in text, text
+    assert "a FIFO (named pipe)" in text, text
+
+
+@_needs_mkfifo
+def test_collect_project_context_skips_a_named_pipe_beside_a_real_file(tmp_path):
+    """A subject with no end to read carries no context — and its neighbour still does."""
+    server = _make_server()
+    session = Session.create_with_id("ctx-fifo", tmp_path)
+    os.mkfifo(tmp_path / "CLAUDE.md")
+    (tmp_path / "Agent.md").write_text("Keep it simple\n", encoding="utf-8")
+
+    result = server._collect_project_context(session)
+
+    assert [r["name"] for r in result] == ["Agent.md"], result
+    assert "Keep it simple" in result[0]["content"]
+
+
+@_needs_mkfifo
+def test_the_compaction_note_skips_a_named_pipe_and_still_reads_its_neighbour(tmp_path):
+    """One call, both subjects: the pipe is not opened, the over-cap index still fires."""
+    fifo = tmp_path / "MEMORY.md"
+    os.mkfifo(fifo)
+    big = tmp_path / "BIG.md"
+    big.write_text("y" * (INDEX_SIZE_WARN + 100), encoding="utf-8")
+
+    note = daemon_mod._memory_index_compaction_note([fifo, big])
+
+    assert str(big) in note, "the reader stopped reading the index it should"
+    assert str(fifo) not in note, "a subject that was not opened is not a subject read"
+
+
+# ── the same condition on the two vision readers ───────────────────
+#
+# Found reviewing this change (`cyc20261011-032448`): the class is "a path the agent or
+# the client names", and it had two more members. `_build_user_content` reads a path out
+# of `TaskRequest.images` — **the client's**, unchecked, in the request handler — and
+# `_tool_content_for_llm` reads the `read` tool's image ref. Both opened it directly, in
+# a method the daemon awaits on its event loop, so a named pipe named as an image would
+# never return. The refusal takes the branch each already had for an image it cannot read.
+
+
+@_needs_mkfifo
+def test_a_client_named_image_that_is_a_named_pipe_is_unavailable_not_a_hang(tmp_path):
+    """The client's path, refused by its kind before it is opened.
+
+    The control is in the same test: a real file with the same shape still becomes an
+    image block, so the assertion is about the kind rather than about images being
+    refused here.
+    """
+    fifo = tmp_path / "pasted.png"
+    os.mkfifo(fifo)
+    real = tmp_path / "real.png"
+    real.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+
+    content = EmrgServer._build_user_content(
+        "",
+        [
+            {"path": str(fifo), "label": "paste-1"},
+            {"path": str(real), "label": "paste-2"},
+        ],
+        vision=True,
+    )
+
+    texts = [c["text"] for c in content if c["type"] == "text"]
+    assert any("a FIFO (named pipe)" in t for t in texts), texts
+    assert any("not a regular file" in t for t in texts), texts
+    assert any("paste-1" in t for t in texts), "the refusal must name which image"
+    urls = [c["image_url"]["url"] for c in content if c["type"] == "image_url"]
+    assert len(urls) == 1 and urls[0].startswith("data:image/png;base64,"), urls
+
+
+@_needs_mkfifo
+def test_a_read_tool_image_ref_at_a_named_pipe_is_unavailable_not_a_hang(tmp_path):
+    """The agent's path, through the ref the `read` tool hands over."""
+    fifo = tmp_path / "shot.png"
+    os.mkfifo(fifo)
+    real = tmp_path / "real.png"
+    real.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    server = _make_server()
+    server.llm.config.vision = True
+    ref = '{"type": "image", "path": "%s", "mime": "image/png"}'
+
+    refused = server._tool_content_for_llm(ref % fifo)
+    assert isinstance(refused, str), refused
+    assert "a FIFO (named pipe)" in refused, refused
+    assert "not a regular file" in refused, refused
+
+    accepted = server._tool_content_for_llm(ref % real)
+    assert isinstance(accepted, list), accepted
+    assert accepted[1]["image_url"]["url"].startswith("data:image/png;base64,"), accepted
+
+
+# ── the daemon's kind rule is the layer's rule ──────────────────────
+#
+# Every guard above asks through one predicate, `_non_regular_kind`, and issue #2081 is
+# that the predicate used to be a *second spelling* of the whitelist the tool layer
+# states once (`emrg/tools/base.special_file_kind`, reached by path as
+# `non_regular_kind`). Two spellings drift: a change to the layer's predicate would
+# reach the three file tools and the memory store and stop at the daemon, whose readers
+# are the ones that run on the event loop.
+
+
+def test_the_daemons_kind_rule_is_the_layers_rule(tmp_path, monkeypatch):
+    """Armed at the owner, not at the model: the layer's rule is displaced, and the
+    daemon's answer has to follow it.
+
+    Comparing the two functions' outputs on a few fixtures would pass for a copy that
+    happened to agree — which is exactly the shape being closed, so the test drives the
+    rule's **owner** (`emrg.tools.base.special_file_kind`, which `non_regular_kind`
+    reaches through its own module globals) and requires the daemon's predicate to move
+    with it. A second copy of the `stat`-then-name pair would answer from the real
+    predicate and fail here.
+    """
+    regular = tmp_path / "MEMORY.md"
+    regular.write_text("# Memory Index\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        base_mod, "special_file_kind", lambda mode: "a sentinel kind")
+
+    assert daemon_mod._non_regular_kind(regular) == "a sentinel kind", (
+        "the daemon answered from its own copy of the rule rather than from the "
+        "layer's reader")
+
+    # The one thing the wrapper adds on top of the layer's reader — and the reason it is
+    # not a bare re-export: a path whose `stat` itself fails is `None` here, while the
+    # layer raises. Callers such as `_memory_index_compaction_note` ask the kind before
+    # any `exists()` test, and a raise would escape the `except OSError` around the read.
+    missing = tmp_path / "nope.md"
+    assert daemon_mod._non_regular_kind(missing) is None
+    with pytest.raises(OSError):
+        base_mod.non_regular_kind(missing)
 
 
 # ── a memory subject that is not a regular file ────────────────────
