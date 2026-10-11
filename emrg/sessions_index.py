@@ -48,12 +48,58 @@ def sessions_index_path() -> Path:
 
 
 def _load(index_path: Path) -> dict[str, str]:
-    """Read the index; corrupt/missing file yields an empty dict (never raises)."""
-    if not index_path.exists():
+    """Read the index; a corrupt, missing or non-regular file yields an empty dict.
+
+    Never raises, and that promise is the caller's too: ``_save_meta_with_title`` records it
+    for the write half ("a failed index write must not break session creation or message
+    persistence") and calls this through ``upsert_session_index`` with no ``try`` of its own.
+    Every session create, append, rename, clear and delete comes through here, so a raise
+    would take message persistence down with it.
+
+    The subject's **kind** is asked before it is opened, because opening it is what decides
+    whether this call returns at all: ``read_text`` on a FIFO blocks at the *open* until a
+    writer appears, raises nothing, and so the ``except`` below cannot bound the consequence.
+    Measured 2026-10-11 (`cyc20261011-123924`) on master `99477516`, one child process per
+    arm under an 8 s cap: a ``mkfifo`` at the index path made ``_load``, ``_upsert`` and
+    ``rebuild_sessions_index`` **not return in 8 s**, where the same fixture with a regular
+    file returned in 0.00 s.
+
+    A non-regular subject takes **the answer this function already gives a corrupt file** —
+    logged, and ``{}``. Raising would be a worse answer than the hang it replaces: every
+    message would fail to persist instead of one call blocking. The index is a derived cache
+    rather than a source of truth, which is what makes the empty answer safe:
+    ``rebuild_sessions_index`` rebuilds it from the session directories on disk, and each
+    caller re-establishes the entry it cares about. ``_write`` needs no guard of its own — it
+    is ``mkstemp`` plus ``os.replace``, which renames over the destination without opening it
+    (measured: a FIFO destination returns in 0.00 s and is left a regular file).
+
+    ``exists()`` was the guard this used to lean on, and it is *true* for a FIFO — the reading
+    that let the block through — so it is removed rather than kept as a second opinion, for
+    the reason ``emrg/skills/registry.py`` gives at its own two sites. ``non_regular_kind``
+    answers both halves of the question the old line got wrong: it names the kind when there
+    is one, and raises ``FileNotFoundError`` for a missing path, which is the ``OSError``
+    handled below.
+
+    ``UnicodeDecodeError`` is in that ``except`` for the same reason: bytes that are not
+    UTF-8 are one more form of *corrupt*, and the promise above says corrupt is answered, not
+    raised. Measured the same day on the same master: a ``b"\\xff\\xfe..."`` at the index path
+    raised ``UnicodeDecodeError`` out of this function, through ``upsert_session_index``, into
+    the session-save path that documents it as never raising.
+    """
+    try:
+        kind = non_regular_kind(index_path)
+    except OSError:
+        # Missing or unstattable — the empty answer a missing index has always got.
+        return {}
+    if kind:
+        logger.warning(
+            "sessions index %s is %s, not a regular file — treating it as corrupt",
+            index_path, kind,
+        )
         return {}
     try:
         data = json.loads(index_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         logger.warning("corrupt sessions index %s — resetting", index_path)
         return {}
     if not isinstance(data, dict):
