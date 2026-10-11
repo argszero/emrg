@@ -6403,11 +6403,45 @@ class EmrgServer:
         """
         session_dir = cwd / ".emrg" / "sessions" / session_id
         meta_path = session_dir / "meta.json"
-        if not session_dir.exists() or not meta_path.exists():
+
+        # ── Ask the meta's kind before opening it ──
+        #
+        # The rule the three file tools (`#2062`), this daemon's other readers
+        # (`#2073`), the memory store (`#2076`) and `Session`'s own files (`#2085`) all
+        # share, applied to the one open here that does not go through `Session`; the
+        # path family is the same one, and it is **inside the project the agent works
+        # in**, so a `mkfifo` there is the agent's own doing.
+        #
+        # An **open is not a read**: on a FIFO this `read_text` waits at the open until a
+        # writer appears and raises nothing, so the `except (OSError, …)` below cannot
+        # bound it — and this handler runs on the daemon's event loop, so the block is
+        # every client, the scheduler and the evolution loop. Measured 2026-10-11
+        # (`cyc20261011-074557`) by driving *this* handler, one child process per arm
+        # under the parent's 8 s cap: a `mkfifo` at
+        # `<cwd>/.emrg/sessions/s1/meta.json` left `_handle_resume_session` **not
+        # returned**, while the same fixture holding a regular file answered at once.
+        #
+        # The kind one over sets the standard: a *directory* at this path answers this
+        # handler with the not-found frame, because `IsADirectoryError` is an `OSError`
+        # the read already catches and the ghost-session branch then fires. A FIFO must
+        # not answer differently — by not answering at all.
+        #
+        # Answered here rather than falling through to `meta = {}`: `Session.load` below
+        # opens this same file again, so a meta that cannot be opened is not a session
+        # this cwd can resume. A missing path is unchanged — `_non_regular_kind` answers
+        # `None` for a subject whose `stat` fails.
+        kind = _non_regular_kind(meta_path)
+        if kind or not session_dir.exists() or not meta_path.exists():
+            if kind:
+                logger.warning(
+                    "resume rejected: %s is %s, not a regular file (session %s)",
+                    meta_path, kind, session_id,
+                )
+            reason = f": {meta_path} is {kind}, not a regular file" if kind else ""
             await self._send(ws, {
                 "type": "resume_result",
                 "session_id": session_id,
-                "error": f"Session {session_id} not found",
+                "error": f"Session {session_id} not found{reason}",
             })
             return
 
