@@ -11,6 +11,7 @@ using it (an abort increments, a round the filter let through resets).
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta
 
@@ -271,8 +272,14 @@ class TestTheStateFileIsOpenedByKind:
     lands exactly where a client is waiting to be told why its turn failed.
 
     The answer is the module's own: an unreadable file reads as "no run open" (module docstring),
-    so a non-regular one does too. The FIFO subject carries an `os.mkfifo` gate; the control is
-    FIFO-free, so the Windows leg runs the discriminating half.
+    so a non-regular one does too.
+
+    The FIFO subjects carry an `os.mkfifo` gate, so they skip where there are no FIFOs; the arms
+    that cover those platforms are the FIFO-free ones — and one of them,
+    `test_a_directory_is_named_rather_than_merely_unreadable`, is **discriminating** as well.
+    That distinction is the point rather than a detail: a FIFO-free arm that passes both with
+    and without the guard does not cover the leg it appears to cover, which is what an earlier
+    version of this paragraph claimed it did.
     """
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
@@ -308,6 +315,44 @@ class TestTheStateFileIsOpenedByKind:
         FIFO-free on purpose — this one runs on every platform.
         """
         assert AbortRuns(tmp_path / "absent.json").snapshot() == {}
+
+    def test_a_directory_is_named_rather_than_merely_unreadable(self, tmp_path, caplog):
+        """**FIFO-free, and it discriminates** — what the Windows leg needs.
+
+        The two FIFO arms above are gated on `os.mkfifo`, so they skip wherever there are
+        none (Windows), and every other arm in this class passes with *and* without the
+        guard: measured 2026-10-11 on this file with `emrg/server/abort_runs.py` reverted to
+        `3f18f6a6`, the FIFO-free half is green either way (60 passed, 3 deselected across
+        this file and `tests/test_skills_registry.py`). The claim that "the Windows leg runs
+        the discriminating half" was therefore false, and the fix is to give that leg an arm
+        that discriminates rather than to weaken the sentence.
+
+        A directory is that arm, and it is why this one reads the **log**: both versions
+        answer `{}` for a directory — the module's "no run open" is the same answer on both
+        — so the return value cannot tell them apart. What can is the sentence they leave
+        behind, which is this class's whole subject:
+
+        ==================  =================================================================
+        base `3f18f6a6`     ``abort-run state at … is unreadable (IsADirectoryError: …)``
+        this tree           ``abort-run state at … is a directory, not a regular file — …``
+        ==================  =================================================================
+
+        What is pinned is this family's own **phrase** and the path, the same way the FIFO
+        arms pin `"a FIFO (named pipe)"` and `"not a regular file"` separately — not the
+        sentence around them, which is free to be reworded (measured: the equivalent
+        reword ``is a directory (not a regular file)`` leaves this arm green). The base
+        cannot produce the phrase at all: its own wording is the exception's, and the
+        exception's text differs by platform (``Is a directory`` here, ``Permission
+        denied`` on Windows) — which is why pinning *that* would not have survived Windows.
+        """
+        state = tmp_path / "abort-runs.json"
+        state.mkdir()
+
+        with caplog.at_level(logging.WARNING, logger="emrg.server.abort_runs"):
+            assert AbortRuns(state).snapshot() == {}
+
+        assert "not a regular file" in caplog.text, caplog.text
+        assert str(state) in caplog.text, caplog.text
 
     def test_an_unreadable_state_file_still_counts_from_scratch(self, tmp_path):
         """The branch the kind check must not shadow: a corrupt file still degrades, still logs."""

@@ -482,8 +482,11 @@ class TestThePublisherAsksTheKindBeforeOpening:
 
     The answer is the refusal this function already gives a failed write — `NotARegularFile` is
     an `OSError`, so it lands in the `except OSError` already written there and comes back as
-    `{"error": "cannot write skill file: …"}` — now with the kind named. The FIFO subject is
-    gated on `os.mkfifo`; the control is FIFO-free.
+    `{"error": "cannot write skill file: …"}` — now with the kind named.
+
+    The FIFO arm carries an `os.mkfifo` gate, so it skips where there are no FIFOs; the arm
+    that covers those platforms is `test_a_directory_target_is_refused_by_kind_on_every_platform`,
+    which is FIFO-free **and discriminating** (see its docstring for the two-way measurement).
     """
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
@@ -512,3 +515,39 @@ class TestThePublisherAsksTheKindBeforeOpening:
 
         assert result["ok"] is True, result
         assert (tmp_home / ".emrg" / "skills" / "browser-harness.md").is_file()
+
+    def test_a_directory_target_is_refused_by_kind_on_every_platform(self, tmp_home, with_cli):
+        """**FIFO-free, and it discriminates** — the arm the Windows leg was missing.
+
+        The FIFO arm above is gated on `os.mkfifo`, so it skips wherever there are none
+        (Windows), and the other arms here pass with *and* without the guard: measured
+        2026-10-11 on this file with `emrg/skills/installer.py` reverted to `3f18f6a6`,
+        the FIFO-free half is green either way — so the suite's earlier claim that "the
+        Windows leg runs the discriminating half" was false, and the fix is to give that
+        leg an arm that really does discriminate rather than to weaken the sentence.
+
+        A **directory** is the arm that works on every platform, and it is the one
+        `tests/test_config.py` uses for the same reason (issue #2103 / PR #2104): both
+        versions refuse the write, and only one of them refuses it **by name**. The
+        assertion is therefore on the name, not on the failure:
+
+        ==================  =========================================================
+        base `3f18f6a6`     ``cannot write skill file: [Errno 21] Is a directory: …``
+        this tree           ``cannot write skill file: … is a directory, not a regular file``
+        ==================  =========================================================
+
+        The `IsADirectoryError`/`PermissionError` text differs by platform, which is
+        exactly why pinning it would not have survived Windows; ``not a regular file`` is
+        this family's own wording and is what the base cannot produce.
+        """
+        ensure_catalog_file()
+        (tmp_home / ".emrg" / "skills" / "browser-harness.md").mkdir()
+        runner = FakeRunner(skill_output=VALID_SKILL_MD)
+
+        result = _run(installer.install_skill(
+            "browser-harness", confirmed=True, runner=runner, http_get=FakeHttp("v0.1.8")
+        ))
+
+        assert "error" in result, result
+        assert "cannot write skill file" in result["error"], result["error"]
+        assert "not a regular file" in result["error"], result["error"]
