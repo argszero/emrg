@@ -352,15 +352,23 @@ def test_a_crash_never_reaches_the_screen(
 # write surface — and it is opened on the client's startup path, before the first screen is
 # drawn. An open is not a read: on a FIFO it blocks until a reader appears and raises
 # nothing, so the `except OSError` this block keeps cannot bound it, and the client would
-# never reach its own UI. Measured 2026-10-12 (`cyc20261012-000836`) on master `17d3dadc`:
-# (issue #2116) `_contain_stderr_for_tui()` **did not return in 10 s** under a `mkfifo`, while the
-# same
-# fixture with a regular file returned in 0.09 s.
+# never reach its own UI. Measured 2026-10-12 (`cyc20261012-000836`) on master `17d3dadc`
+# (issue #2116): `_contain_stderr_for_tui()` **did not return in 10 s** under a `mkfifo`,
+# while the same fixture with a regular file returned in 0.09 s.
 #
-# The pipe-free half is the whole rest of this file: the same call against a real file
-# installs containment and writes the crash log, and those tests still pass unchanged — so
-# the kind is what the pair discriminates. The read is bounded by `within`, the one deadline
-# this suite keeps (#2091): without it a regression wedges the run instead of failing it.
+# The rest of this file is the regular-file half: the same call against a real file installs
+# containment and writes the crash log, and those tests still pass unchanged — so the kind is
+# what the pair discriminates rather than the writer's general shape. The read is bounded by
+# `within`, the one deadline this suite keeps (#2091): without it a regression wedges the run
+# instead of failing it.
+#
+# Named limit, so this arm being POSIX-gated is a stated gap rather than an unremarked one:
+# the pipe is the **only** shape whose answer this block's own `except OSError` cannot give. A
+# directory already raises out of the open and takes that same answer — measured on master
+# `f4fe92c3` (2026-10-12, `cyc20261012-022400`) with a directory at this sink and a TTY
+# `sys.stderr`: **RETURNED** an inert `_StderrContainment`, no raise — so a directory here
+# cannot tell the guarded tree from the unguarded one, and no FIFO-free arm can carry a
+# reading for this site. That is why the daemon's log site grew one and this one did not.
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")

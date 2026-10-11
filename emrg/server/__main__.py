@@ -145,6 +145,14 @@ def _redirect_std_streams() -> None:
         # a regular file takes that answer rather than a new one. Measured 2026-10-12
         # (`cyc20261012-000836`) on master `17d3dadc`: this function **did not return in 10 s**
         # under a `mkfifo` at the crash log, versus 0.24 s with a regular file.
+        #
+        # Named limit, so the POSIX-gated arm that carries this is a stated gap rather than an
+        # unremarked one: the pipe is the **only** shape here that the `except OSError` below
+        # cannot answer. A directory — the one non-regular shape every platform has — already
+        # raises out of the open, and that handler returns the DEVNULL sinks exactly as this
+        # guard does; measured on master `f4fe92c3` (2026-10-12, `cyc20261012-022400`) with a
+        # directory at this crash log: **RETURNED**, no raise. So no FIFO-free arm can carry a
+        # reading for this site, and there is no Windows-leg hole to close.
         if _non_regular_kind(crash_log) is not None:
             return  # best-effort: keep the original DEVNULL sinks
         stream = open(str(crash_log), "a", encoding="utf-8", buffering=1)

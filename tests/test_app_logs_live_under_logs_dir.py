@@ -527,11 +527,31 @@ def test_a_declared_root_that_is_not_there_is_reported(tmp_path):
 # Both writers below run on the daemon's **startup** path — `main()` calls
 # `_configure_logging()` and then `_redirect_std_streams()` — and an open is not a read: on
 # a FIFO it blocks until a reader appears and raises nothing, so the `except OSError` each of
-# them keeps cannot bound it. A directory is the same defect in another shape: it raises
-# `IsADirectoryError` out of `main()`. Measured 2026-10-12 (`cyc20261012-000836`) on master
+# them keeps cannot bound it. A directory is the same defect in another shape at the first of
+# them — it raises `IsADirectoryError` out of `main()` — while at the second it raises into
+# that function's own handler, which already answers it (the asymmetry below). Measured
+# 2026-10-12 (`cyc20261012-000836`) on master
 # `17d3dadc` (issue #2116): both calls **did not return in 10 s** under a `mkfifo` at their
-# subject, while
-# the same fixture with a regular file returned in 0.12 s and 0.24 s.
+# subject, while the same fixture with a regular file returned in 0.12 s and 0.24 s.
+#
+# The two sites are not symmetric, and the difference is the reason only one of them has a
+# FIFO-free arm. The pipe is the only shape whose answer the surrounding code cannot give:
+#
+#   * `_configure_logging` — a directory **raises** `IsADirectoryError` out of `main()`
+#     (measured: `python -c "…_configure_logging()"` on master `f4fe92c3` with a directory at
+#     the log, 2026-10-12 `cyc20261012-022400`), so the daemon does not start at all, and the
+#     guard's `None`-vs-kind branch is what makes the difference between crashing and serving.
+#     That is a reading both legs can take ⇒ the pair below is FIFO arm + **directory** arm.
+#   * `_redirect_std_streams` — a directory already raises *into* the `except OSError` this
+#     function keeps, which returns the DEVNULL sinks exactly as the guard does (measured the
+#     same way: **RETURNED**, no raise). So a directory cannot tell the guarded tree from the
+#     unguarded one here, and the pipe — the shape only a POSIX leg can plant — is the whole of
+#     the gap. Named rather than left unremarked; there is no Windows-leg hole to close.
+#
+# The family states the convention the first bullet obeys (`tests/test_config.py:323`: *"every
+# FIFO arm is POSIX-gated; each one has a FIFO-free counterpart on a directory, which runs on
+# both legs"*), and the merged siblings keep it — `tests/test_daemon.py` (#2108), and
+# `test_config.py`, `test_abort_runs.py`, `test_skills_registry.py`, `test_sessions_index.py`.
 #
 # The regular-file half of each pair is the behavioural test already in this file
 # (`test_the_daemon_log_handler_writes_under_logs`,
@@ -587,6 +607,42 @@ def test_a_fifo_at_the_daemon_log_does_not_wedge_the_startup(tmp_path):
         f"{proc.stderr!r}"
     )
     assert stat.S_ISFIFO(os.stat(fifo).st_mode), "the log file was written into the pipe"
+
+
+def test_a_directory_at_the_daemon_log_names_its_kind_and_still_starts(
+    tmp_path, monkeypatch, capsys
+):
+    """The pipe-free half, and the one the Windows leg runs.
+
+    A FIFO is the only shape that *blocks*, so the arm above is POSIX-gated and reverting the
+    guard there is undetectable on Windows. A directory is the shape both legs have, and at
+    this site it is the failure that actually crashes the daemon: unguarded,
+    `RotatingFileHandler` raises straight out of `main()` (`IsADirectoryError` on POSIX, and
+    `PermissionError` on Windows, which is what the reviewer measured), so nothing is served
+    at all. Guarded, the call returns and says which kind it found — the message, not the
+    return value, is what tells the two trees apart, which is the discriminator this leg was
+    missing. This is the family's convention rather than a local choice:
+    `tests/test_config.py:323` states it as *"every FIFO arm is POSIX-gated; each one
+    has a FIFO-free counterpart on a directory, which runs on both legs"*, and the merged
+    siblings keep it (`tests/test_daemon.py`, `tests/test_abort_runs.py`,
+    `tests/test_skills_registry.py`, `tests/test_sessions_index.py`).
+    """
+    _stub_home(monkeypatch, tmp_path)
+    log_file = tmp_path / ".emrg" / "logs" / "emrgd.log"
+    log_file.mkdir(parents=True)
+
+    with _root_handlers_cleared():
+        server_main._configure_logging()
+
+    err = capsys.readouterr().err
+    assert "a directory" in err, (
+        f"the skip must name the kind it found rather than pass over it silently: {err!r}"
+    )
+    assert "not a regular file" in err, f"the message states the boundary: {err!r}"
+    assert not [
+        h for h in logging.root.handlers
+        if isinstance(h, logging.handlers.RotatingFileHandler)
+    ], "a rotating handler was installed on a subject that is a directory"
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")

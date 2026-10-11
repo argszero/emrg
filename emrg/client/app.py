@@ -880,6 +880,13 @@ def _contain_stderr_for_tui() -> _StderrContainment:
         # Absent is not a refusal: the normal case is a file that does not exist yet, and
         # `non_regular_kind` *stats*, so absence arrives as an `OSError` rather than as a
         # `None` kind — exactly as `daemon_manager._capture_child_stderr` reads it.
+        #
+        # Named limit, so the POSIX-gated arm that carries this is a stated gap rather than an
+        # unremarked one: the pipe is the **only** shape here the `except OSError` below cannot
+        # answer. A directory already raises out of the open and takes that same answer —
+        # measured on master `f4fe92c3` (2026-10-12, `cyc20261012-022400`) with a directory at
+        # this sink and a TTY stderr: **RETURNED** an inert `_StderrContainment`, no raise. So
+        # nothing FIFO-free can discriminate this site, and no Windows-leg hole is left open.
         try:
             kind = non_regular_kind(crash_log)
         except OSError:
