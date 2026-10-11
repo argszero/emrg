@@ -44,11 +44,17 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from emrg.config import config_dir
+from emrg.memory import NotARegularFile
 from emrg.skills.registry import (
     find_catalog_skill,
     read_state,
     write_state,
 )
+
+# The "is this path a regular file" rule is the tool layer's, reached at a path. Imported
+# rather than restated, for the reason `emrg/skills/registry.py` gives at the same import:
+# the boundary is one fact, and a second spelling of it is a second boundary that can drift.
+from emrg.tools.base import non_regular_kind
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +174,27 @@ async def _publish_skill(entry: dict, runner: Optional[Runner]) -> dict:
     dest.mkdir(parents=True, exist_ok=True)
     target = dest / f"{name}.md"
     try:
+        # The subject's kind is asked before it is opened, because the open is what decides
+        # whether this call returns at all: `Path.write_text` is `open(path, "w")`, and opening
+        # a FIFO for **writing** waits for a *reader* to appear — raises nothing, so the
+        # `except OSError` below would never be reached and the install would never finish.
+        # Measured 2026-10-11 (`cyc20261011-130932`) on master `3f18f6a6`, one child process per
+        # arm under an 8 s cap: a `mkfifo` at `<dest>/probe.md` left `_publish_skill` **not
+        # returned in 8 s**, where the same fixture with a regular file returned in 0.00 s with
+        # `{"ok": True, ...}`.
+        #
+        # Refused rather than degraded, and named: `NotARegularFile` **is** an `OSError`, so it
+        # lands in the handler already written for a failed write and produces the reading this
+        # function already gives one — `{"error": "cannot write skill file: <the kind>"}` —
+        # which `install_skill` returns to the tool and the client. The `FileNotFoundError`
+        # branch is not optional: a writer's normal case is a destination that does not exist
+        # yet, and this function exists to create it.
+        try:
+            kind = non_regular_kind(target)
+        except FileNotFoundError:
+            kind = None
+        if kind:
+            raise NotARegularFile(f"{target} is {kind}, not a regular file")
         target.write_text(skill_text + "\n", encoding="utf-8")
     except OSError as e:
         return {"error": f"cannot write skill file: {e}"}

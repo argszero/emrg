@@ -42,6 +42,11 @@ from pathlib import Path
 from emrg.config import config_dir
 from emrg.server.atomic import atomic_write_bytes
 
+# The "is this path a regular file" rule is the tool layer's, reached at a path. Imported
+# rather than restated, for the reason `emrg/sessions_index.py` gives at the same import:
+# the boundary is one fact, and a second spelling of it is a second boundary that can drift.
+from emrg.tools.base import non_regular_kind
+
 logger = logging.getLogger(__name__)
 
 
@@ -147,6 +152,46 @@ class AbortRuns:
         return self._state
 
     def _read(self) -> dict[str, dict]:
+        """The stored state; unreadable, missing and non-regular all read as "nothing open".
+
+        The subject's **kind** is asked before it is opened, because opening it is what decides
+        whether this call returns at all: `read_text` on a FIFO waits at the *open* for a writer,
+        raises nothing, and so the handlers below are unreachable — no exception ever reaches
+        them and the call simply never ends. Measured 2026-10-11 (`cyc20261011-130932`) on master
+        `3f18f6a6`, one child process per arm under an 8 s cap: a `mkfifo` at the state path left
+        `AbortRuns.snapshot()` and `AbortRuns.note()` **not returned in 8 s**, where the same
+        fixture with a regular file returned in 0.00 s.
+
+        Why it matters more here than elsewhere in this family: `note()` is called from the
+        content-filter path — `emrg/server/daemon.py:4352` / `:4410`, the moment a turn has just
+        lost its answer and the retry ladder is spent — as the argument of the `logger.error` that
+        reports the run, with the `_broadcast` of the error frame *after* it. The block therefore
+        hangs the daemon exactly where the client is waiting for the explanation of a failed turn.
+
+        Degraded rather than raised, which is this module's own contract rather than a preference
+        — see the module docstring: *"Every read and write here is best-effort. An unreadable file
+        reads as 'no run open'"*. A refusal would make the abort path raise while it is trying to
+        *report* an abort. It is safe for the reason `emrg/sessions_index.py::_load` gives at the
+        same answer: the state is re-derived on the next `note()`, and `_save` is
+        `atomic_write_bytes` (`mkstemp` + `os.replace`), which renames over the destination
+        instead of opening it — measured, a FIFO destination returns at once — so there is no
+        block for a reader-side guard to move onto the writer.
+
+        The kind is named in the log so the omission is diagnosable rather than silent.
+        """
+        try:
+            kind = non_regular_kind(self._path)
+        except OSError:
+            # Absent (or unstattable) — the empty state a missing file has always got. The
+            # `FileNotFoundError` branch this replaces is now this one: `non_regular_kind`
+            # *stats*, so absence arrives as an OSError rather than as a `None` kind.
+            return {}
+        if kind:
+            logger.warning(
+                "abort-run state at %s is %s, not a regular file — counting from scratch",
+                self._path, kind,
+            )
+            return {}
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
