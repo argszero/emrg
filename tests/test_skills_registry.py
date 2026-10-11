@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.bounded_read import DEADLINE_SECONDS, within
 import emrg.skills.installer as installer
 import emrg.skills.registry as registry
 from emrg.skills.loader import _parse_frontmatter, _parse_skill_file, load_skills
@@ -409,3 +410,58 @@ class TestUpdate:
         ensure_catalog_file()
         result = _run(installer.update_managed_skills(runner=FakeRunner(VALID_SKILL_MD), http_get=FakeHttp("v0.1.8")))
         assert result == {"checked": 0, "updated": [], "skipped": [], "errors": []}
+
+
+# ── the catalog and the state file are read by kind, not by opening ──
+#
+# `exists()` is true for a FIFO, which is why it is not a kind: a reader that tested it and
+# then opened its subject had nothing bounding the open, and `read_text` on a FIFO waits at
+# the *open* for a writer and raises nothing — so no handler runs and the call never returns.
+# Both readers below run on the daemon's event loop (`skills_available`, `skills_install`),
+# so the block is the whole server. Measured on master `94dcdae7` (2026-10-11,
+# `cyc20261011-100311`): each FIFO made its reader **not return in 8 s**, where a regular
+# file returned in 0.00 s.
+#
+# The reads are bounded by `tests.bounded_read.within`, the one deadline this suite keeps
+# (issue #2091): the bound is what makes a regression *fail* instead of wedging the run.
+
+
+class TestTheRegistryAsksTheKindBeforeOpening:
+    """A FIFO at either path is skipped, not opened (issue #2093)."""
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_catalog_is_skipped_rather_than_opened(self, tmp_home):
+        """Returns the empty answer it gives a missing catalog — and it returns at all."""
+        path = registry.catalog_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        assert within(DEADLINE_SECONDS, load_catalog_skills) == []
+
+    def test_the_control_catalog_without_the_fifo(self, tmp_home):
+        """Same fixture, a regular file: the catalog reads, so the kind is the axis."""
+        ensure_catalog_file()
+        assert [e["name"] for e in load_catalog_skills()] == ["browser-harness"]
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_state_file_is_skipped_rather_than_opened(self, tmp_home):
+        path = registry.state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        assert within(DEADLINE_SECONDS, read_state) == {}
+        # the reader's other caller goes through the same open
+        assert within(DEADLINE_SECONDS, lambda: skill_is_managed("browser-harness")) is False
+
+    def test_the_control_state_file_without_the_fifo(self, tmp_home):
+        write_state({"browser-harness": {"managed": True}})
+        assert read_state() == {"browser-harness": {"managed": True}}
+        assert skill_is_managed("browser-harness") is True
+
+    def test_a_missing_subject_is_still_the_empty_answer(self, tmp_home):
+        """What the kind check must not narrow: absent is empty, not an exception.
+
+        `non_regular_kind` stats its subject and `stat` raises on a missing path, so this
+        contract is the one the fix had to keep while dropping `path.exists()`.
+        """
+        assert load_catalog_skills() == []
+        assert read_state() == {}
+        assert skill_is_managed("anything") is False
