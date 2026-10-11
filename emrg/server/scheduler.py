@@ -495,6 +495,12 @@ def _template_task_context(config: dict, record: dict) -> dict:
 
     Blank counts as absent on both sides: ``{% if task.extra_prompt %}`` renders nothing for
     ``""``, so a blank copy is not a value anyone can lose by falling back.
+
+    The rule this leaves is one-sided and deliberate: **the top-level copy is never dropped
+    silently** — either it renders, or it is named in a warning (because ``config`` also
+    supplies one, or because it is not a string the templates can interpolate). A malformed
+    ``config.extra_prompt`` beside a usable top-level one is the one case left unwarned, since
+    the value the file meant does render.
     """
     task = dict(config)
     top = record.get("extra_prompt")
@@ -511,6 +517,16 @@ def _template_task_context(config: dict, record: dict) -> dict:
             )
         else:
             task["extra_prompt"] = top
+    elif top is not None:
+        # Present at the top level, and not a non-blank string: it renders nothing whether or
+        # not `config` supplies one. Warned here rather than skipped, because "nothing renders
+        # it" is the same silent loss this function exists to end — a `{% if %}` over a value
+        # the templates cannot interpolate is not a value anyone can see going missing.
+        logger.warning(
+            "task %r has a top-level extra_prompt of type %s — the templates interpolate a "
+            "non-blank string, so this one renders nothing; move it under config: as text",
+            record.get("name"), type(top).__name__,
+        )
     return task
 
 

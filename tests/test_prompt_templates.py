@@ -1884,3 +1884,40 @@ def test_a_blank_copy_is_not_a_value(tmp_path, monkeypatch) -> None:
         "a blank `config.extra_prompt` shadowed a usable top-level one — the section is lost "
         "to whitespace"
     )
+
+
+def test_a_top_level_copy_that_cannot_render_is_named(tmp_path, monkeypatch, caplog) -> None:
+    """The residual silence: a non-string top-level `extra_prompt` renders nothing either way.
+
+    A YAML author who writes a list, a mapping or a bare number has made the same mistake as
+    the one this file's block above describes — the section vanishes without a line of
+    feedback — so the rule the fallback leaves is that the top-level copy is never dropped
+    quietly. Both sub-cases are read, because they fail for different reasons: nothing else
+    supplies a value, and `config` does.
+    """
+    for label, under_config in (("alone", None), ("beside a usable config copy", EXTRA_CFG)):
+        caplog.clear()
+        with caplog.at_level("WARNING", logger=mod.__name__):
+            rendered = _handler_for_record(
+                tmp_path, monkeypatch, top=["do this", "then that"], under_config=under_config
+            )._build_evolution_prompt()
+
+        assert EXTRA_TOP not in rendered, (
+            f"{label}: a list rendered as the extra_prompt section"
+        )
+        if under_config is None:
+            assert EXTRA_CFG not in rendered, label
+        else:
+            assert EXTRA_CFG in rendered, (
+                f"{label}: the usable config copy stopped rendering, so this test is not "
+                f"reading the config/top-level interaction it claims to"
+            )
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        naming = [w for w in warnings if "extra_prompt" in w and "demo-task" in w]
+        assert naming, (
+            f"a non-string top-level extra_prompt ({label}) was dropped without a warning: "
+            f"{warnings}"
+        )
+        assert "list" in naming[0], (
+            f"the warning must name the type it cannot interpolate: {naming[0]!r}"
+        )
