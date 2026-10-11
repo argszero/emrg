@@ -28,6 +28,9 @@ from emrg.sandbox.escalation import APPROVAL_TIMEOUT_SECONDS
 from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.session import generate_session_id
 from emrg.skills.loader import load_skills
+# The "is this path a regular file" rule is the tool layer's, reached at a path — the same
+# import `emrg/client/daemon_manager.py` makes for the same reason (`#2062`, `#2081`).
+from emrg.tools.base import non_regular_kind
 from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
@@ -865,6 +868,24 @@ def _contain_stderr_for_tui() -> _StderrContainment:
     crash_log = Path.cwd() / ".emrg" / "emrg-client-crash.log"
     try:
         crash_log.parent.mkdir(parents=True, exist_ok=True)
+        # An open is not a read, and this one is on the startup path: `open()` on a FIFO
+        # blocks until a reader appears and raises nothing, so the `except OSError` below
+        # cannot bound it — the client would never reach its own first screen. The path is
+        # `<cwd>/.emrg/`, which is the **workspace** — the agent's own write surface — so
+        # this is reachable rather than theoretical. A subject that is not a regular file
+        # takes the answer this block already has for a crash log it cannot open. Measured
+        # 2026-10-12 (`cyc20261012-000836`) on master `17d3dadc`: `_contain_stderr_for_tui()`
+        # **did not return in 10 s** under a `mkfifo`, versus 0.12 s with a regular file.
+        #
+        # Absent is not a refusal: the normal case is a file that does not exist yet, and
+        # `non_regular_kind` *stats*, so absence arrives as an `OSError` rather than as a
+        # `None` kind — exactly as `daemon_manager._capture_child_stderr` reads it.
+        try:
+            kind = non_regular_kind(crash_log)
+        except OSError:
+            kind = None
+        if kind is not None:
+            return _StderrContainment()
         sink = open(str(crash_log), "a", encoding="utf-8",
                     errors="backslashreplace", buffering=1)
     except OSError:

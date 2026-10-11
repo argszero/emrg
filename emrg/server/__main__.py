@@ -7,7 +7,7 @@ from logging.handlers import RotatingFileHandler
 
 from emrg.config import logs_dir
 from emrg.logfiles import migrate_legacy_logs
-from emrg.server.daemon import DaemonExit, run_server
+from emrg.server.daemon import DaemonExit, _non_regular_kind, run_server
 from emrg.server.logcontext import session_label
 from emrg.tool_path import ensure_tool_dirs
 
@@ -55,12 +55,37 @@ def _configure_logging() -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     migrate_legacy_logs(log_dir)
     log_file = log_dir / "emrgd.log"
-    file_handler = RotatingFileHandler(
-        str(log_file), maxBytes=10 * 1024 * 1024, backupCount=3,
-        encoding="utf-8",  # rant 2026-08-07T14:00Z: default locale code page (GBK on zh-CN Windows) mojibakes CJK log lines
-    )
-    file_handler.setFormatter(_fmt)
-    handlers = [file_handler]
+    handlers: list[logging.Handler] = []
+    # ── An open is not a read, and this one runs before the daemon can serve anything ──
+    #
+    # `RotatingFileHandler` opens its subject at **construction**, so a FIFO at this path
+    # would block here — on the daemon's startup path, before it has answered anyone — and
+    # `open()` on a FIFO raises nothing, so no handler can bound it. A directory is the same
+    # defect in a different shape: it raises `IsADirectoryError` straight out of `main()`.
+    # Measured 2026-10-12 (`cyc20261012-000836`) on master `17d3dadc`: `_configure_logging()`
+    # **did not return in 10 s** under a `mkfifo`, where the same fixture with a regular file
+    # returned in 0.12 s.
+    #
+    # Skipped rather than raised, because a log sink must not become a startup dependency: a
+    # daemon that cannot write its log file still serves, while a daemon that refuses to start
+    # over one is down for a reason the host never chose. The reason is said on stderr instead
+    # of swallowed. Named limit: a spawned daemon's stderr is DEVNULL (`daemon_manager`
+    # spawns it that way, which is the whole reason this file log exists), so the note is
+    # readable in an interactive run only — the degraded mode is silent by construction, and
+    # what is visible is the file's absence under `~/.emrg/logs/`.
+    kind = _non_regular_kind(log_file)
+    if kind is not None:
+        sys.stderr.write(
+            f"emrg: {log_file} is {kind}, not a regular file — no file log this run\n"
+        )
+        sys.stderr.flush()
+    else:
+        file_handler = RotatingFileHandler(
+            str(log_file), maxBytes=10 * 1024 * 1024, backupCount=3,
+            encoding="utf-8",  # rant 2026-08-07T14:00Z: default locale code page (GBK on zh-CN Windows) mojibakes CJK log lines
+        )
+        file_handler.setFormatter(_fmt)
+        handlers.append(file_handler)
     # StreamHandler only for interactive runs: daemon_manager spawns emrgd
     # with stderr=DEVNULL, so the stream handler is pure waste there — and
     # since _redirect_std_streams() later points sys.stderr at the crash log,
@@ -113,6 +138,15 @@ def _redirect_std_streams() -> None:
         # and self-sufficient by design — a crash sink that silently vanishes
         # because a directory was missing is the defect it exists to prevent.
         crash_log.parent.mkdir(parents=True, exist_ok=True)
+        # The same subject as `_configure_logging`, one file over, and the same reason: this
+        # is an open on the startup path, and a FIFO here would hold it for ever. A crash
+        # sink that cannot be opened is already this function's answered case — the
+        # `except OSError` below keeps the original DEVNULL sinks — so a subject that is not
+        # a regular file takes that answer rather than a new one. Measured 2026-10-12
+        # (`cyc20261012-000836`) on master `17d3dadc`: this function **did not return in 10 s**
+        # under a `mkfifo` at the crash log, versus 0.24 s with a regular file.
+        if _non_regular_kind(crash_log) is not None:
+            return  # best-effort: keep the original DEVNULL sinks
         stream = open(str(crash_log), "a", encoding="utf-8", buffering=1)
     except OSError:
         return  # best-effort: keep the original DEVNULL sinks
