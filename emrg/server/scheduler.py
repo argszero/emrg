@@ -10,8 +10,13 @@ projects.yml remains for project tracking (_touch_project only).
 
 Task config schema:
   name, type, enabled, interval — common base fields.
-  config — type-specific config. For evolution: config.project links to projects.yml name.
-  sandbox / description / extra_prompt — optional; anything else is ignored.
+  config — type-specific config, and the mapping the templates see as ``task``. For
+    evolution: config.project links to projects.yml name.
+  sandbox — optional; also accepted under config, where the record-level value wins.
+  extra_prompt — optional; also accepted at the record's top level, where config wins
+    (the templates read it as ``task.extra_prompt``; see ``_template_task_context``).
+  description — optional; carried for humans, read by no code today.
+  Anything else is ignored.
 """
 
 from __future__ import annotations
@@ -454,6 +459,59 @@ def write_table(records: list[dict], path: Path | None = None) -> None:
     """
     path = path or _tasks_yml_path()
     atomic_write_yaml(records, path, prefix=".tasks_", dumper=_TaskTableDumper)
+
+
+def _template_task_context(config: dict, record: dict) -> dict:
+    """The ``task`` mapping the prompt templates render against.
+
+    ``task`` is the record's ``config``: every name a template reads there —
+    ``extra_prompt``, ``project``, ``role``, ``author_id``, ``keywords``, ``platform`` —
+    lives under ``config:`` in tasks.yml.
+
+    ``extra_prompt`` is **also honoured at the record's top level**, which is the position
+    this module's schema comment advertised beside ``sandbox`` until 2026-10-11. A file that
+    used that position lost the whole section in silence: the templates read
+    ``{% if task.extra_prompt %}`` under ``jinja2.Undefined``, so a name that is not in the
+    context renders as the empty string, the condition takes the false branch, and the
+    heading and body both disappear — no error, no warning, no log line. Measured
+    2026-10-11 (``cyc20261011-193407``) through the real builder: a record carrying
+    ``extra_prompt`` at its top level rendered **without** it; the same value under
+    ``config`` rendered with it.
+
+    The host reported the cost of that silence (rant 2026-10-11T11:23:55): the ``promote``
+    task's 4601-char ``extra_prompt`` and the ``competition`` task's 3042-char one sat at the
+    top level without ever entering a prompt, and one competition round was spent
+    diagnosing the missing section instead of doing its work. The feedback the host asks
+    for first is not leniency but **audibility** — so the losing copy is named in a warning
+    here rather than dropped quietly.
+
+    Precedence, when a record carries both: ``config`` wins. It is the canonical home — the
+    whole ``task`` namespace comes from it, and the design that introduced ``extra_prompt``
+    (PR #964) renders ``task`` *as* the config — so the fallback exists for the file that
+    was written against the old comment, not to make the top level a second equal spelling.
+    ``sandbox`` resolves the other way round (``_resolve_sandbox`` prefers the record-level
+    value); the asymmetry is deliberate and stated in both docstrings, because the two
+    fields have different canonical homes.
+
+    Blank counts as absent on both sides: ``{% if task.extra_prompt %}`` renders nothing for
+    ``""``, so a blank copy is not a value anyone can lose by falling back.
+    """
+    task = dict(config)
+    top = record.get("extra_prompt")
+
+    def usable(value: object) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    if usable(top):
+        if usable(task.get("extra_prompt")):
+            logger.warning(
+                "task %r carries extra_prompt both under config: and at its top level — "
+                "config: wins and the top-level copy (%d chars) is ignored; keep one",
+                record.get("name"), len(top),
+            )
+        else:
+            task["extra_prompt"] = top
+    return task
 
 
 def validate_task_record(record: dict) -> str | None:
@@ -2897,7 +2955,7 @@ class TaskHandler:
             "session_id": self._session_id,
             "timestamp": datetime.now().strftime("%Y%m%d-%H%M%S"),
             "current_time_human": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "task": self._config,
+            "task": _template_task_context(self._config, self._task),
             "project": _load_project_config(self._project_name, str(self._source_dir)),
         }
 
