@@ -33,7 +33,7 @@ from emrg.server.rants import (
     update_rant,
 )
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor
+from emrg.tools.base import ToolExecutor, non_regular_kind
 
 _ACTIONS = ("submit", "list", "update", "cleanup")
 
@@ -282,12 +282,22 @@ class SubmitRantTool(ToolExecutor):
         The daemon registers projects there on first use; the list is the
         authoritative source for the rant ``project`` field. Any read error
         degrades to "no candidates" (validation is advisory, never blocking).
+
+        The subject's kind is asked before it is opened: `exists()` is true for a FIFO, and
+        `read_text` on one blocks at the open and raises nothing, so the
+        ``except Exception`` below cannot bound the consequence — this is a tool, so the
+        block is the daemon's event loop. Advisory reads degrade rather than refuse, which is
+        this function's existing contract with a missing file.
         """
         try:
             import yaml
 
             p = self._rants_log().parent / "projects.yml"
-            if not p.exists():
+            try:
+                kind = non_regular_kind(p)
+            except OSError:
+                return []  # absent (or unstattable) — "no candidates", as before
+            if kind:
                 return []
             data = yaml.safe_load(p.read_text(encoding="utf-8"))
             if isinstance(data, list):

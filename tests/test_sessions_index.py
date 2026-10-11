@@ -269,3 +269,68 @@ class TestAWalkByKindRatherThanByOpening:
     def test_a_missing_meta_is_still_none(self, tmp_path):
         """The contract the kind check must not narrow: a missing path is `None`, not a raise."""
         assert _read_meta_session_id(tmp_path / "absent.json") is None
+
+
+class TestTheIndexItselfIsOpenedByKind:
+    """The index file, not a session's `meta.json`, is the other open in this module (#2099).
+
+    `_read_meta_session_id` was kind-checked by #2083; `_load` — the reader every session save,
+    rename, clear, delete and the daemon's startup rebuild go through — still leaned on
+    `index_path.exists()`, and `exists()` is *true* for a FIFO. Measured 2026-10-11
+    (`cyc20261011-123924`) on master `99477516`: a `mkfifo` at the index path made `_load`,
+    `_upsert` and `rebuild_sessions_index` **not return in 8 s**, where the same fixture with a
+    regular file returned in 0.00 s.
+
+    The answer is the one this module already gives a corrupt index — `{}`, logged — because
+    the alternative is worse than the hang: `_save_meta_with_title` calls through here with no
+    `try` of its own and records the promise that the index must never break message
+    persistence.
+
+    The FIFO subjects carry an `os.mkfifo` gate; every control is FIFO-free, so the Windows leg
+    still runs it (measured cost of the other shape: `#2096` needed its own follow-up, `a2d...`).
+    """
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_index_answers_empty_instead_of_hanging(self, tmp_path):
+        fifo = tmp_path / "sessions_index.json"
+        os.mkfifo(fifo)
+        assert within(DEADLINE_SECONDS, lambda: _load(fifo)) == {}
+
+    def test_the_control_with_a_regular_index(self, tmp_path):
+        """The kind is the axis: the same call on a regular file still reads it."""
+        p = tmp_path / "sessions_index.json"
+        p.write_text('{"s_1": "/tmp/s_1"}', encoding="utf-8")
+        assert _load(p) == {"s_1": "/tmp/s_1"}
+
+    def test_a_non_utf8_index_answers_empty(self, tmp_path):
+        """The same promise, the other hole in it: bytes that are not UTF-8 are corrupt too.
+
+        Without `UnicodeDecodeError` in the handler this raised out of `_load`, through
+        `upsert_session_index`, into the session-save path that documents it as never raising.
+
+        FIFO-free on purpose — this one runs on every platform.
+        """
+        p = tmp_path / "sessions_index.json"
+        p.write_bytes(b"\xff\xfe\x00\x01 not utf-8")
+        assert _load(p) == {}
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_session_save_over_a_fifo_index_returns(self, tmp_path):
+        """The caller's path, not just the reader's: `upsert` returns and leaves a real file.
+
+        `_write` renames over the destination rather than opening it, so the FIFO is replaced
+        instead of blocking the writer — which is why the guard belongs at the read and not
+        also at the write.
+        """
+        idx = tmp_path / "sessions_index.json"
+        os.mkfifo(idx)
+        within(DEADLINE_SECONDS, lambda: upsert_session_index("s_1", tmp_path / "s_1"))
+        assert not os.path.stat.S_ISFIFO(os.stat(idx).st_mode), "the writer did not replace it"
+        assert _load(idx) == {"s_1": str(tmp_path / "s_1")}
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_the_startup_rebuild_over_a_fifo_index_returns(self, tmp_path):
+        """`rebuild_sessions_index` reads the index first (daemon startup scan)."""
+        os.mkfifo(tmp_path / "sessions_index.json")
+        count = within(DEADLINE_SECONDS, lambda: rebuild_sessions_index(tmp_path))
+        assert count == 0

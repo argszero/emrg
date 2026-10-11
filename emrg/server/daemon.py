@@ -203,7 +203,7 @@ from emrg.tools.grep_tool import GrepTool
 from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
-from emrg.server.rants import append_rant
+from emrg.server.rants import append_rant, list_rants
 from emrg.server.scheduler import TaskScheduler
 from emrg.server import logcontext
 
@@ -3006,22 +3006,25 @@ class EmrgServer:
         elif msg_type == "list_rants":
             # Rant panel (rant 2026-08-13T14:10:14 P4): read ~/.emrg/rants.jsonl,
             # optional status filter (pending/in_progress/completed/"" = all).
+            #
+            # The store's own reader, not a second copy of it. This branch used to open
+            # the path itself behind `self._rants_log.exists()` — which is true for a
+            # FIFO, a socket and a device node, on every one of which the `open` blocks
+            # until a peer appears and **raises nothing**, so the `except OSError` below
+            # was never reached and the panel could never be answered again
+            # (issue #2097, found by sweeping the *predicate* rather than the previous
+            # cycle's file list). `_read_rants` refuses a subject of another kind by name
+            # — `NotARegularFile` is an `OSError`, so that failure still takes the branch
+            # this frame has always had for a read it cannot do.
+            #
+            # The copy was also a second *behaviour*, not only a second guard: it
+            # appended whatever `json.loads` returned, so a legacy array row or a bare
+            # scalar reached `r.get(...)` and raised `AttributeError` — the format drift
+            # of 2026-08-18 has a live crash path here, which the store's
+            # `_normalize_rant` has always converted or skipped.
             try:
                 filter_status = str(msg.get("status", "") or "").strip()
-                rants = []
-                if self._rants_log.exists():
-                    with open(self._rants_log, encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                r = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            if filter_status and r.get("status", "pending") != filter_status:
-                                continue
-                            rants.append(r)
+                rants = list_rants(self._rants_log, status=filter_status or None)
                 # 时间倒序（最新在前，面板列表惯例）
                 rants.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
                 await self._send(ws, {
