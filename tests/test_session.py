@@ -2,12 +2,12 @@
 
 import json
 import os
-import threading
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+from tests.bounded_read import DEADLINE_SECONDS, within
 from emrg.memory import NotARegularFile
 from emrg.session import (
     Session,
@@ -949,46 +949,10 @@ class TestGenerateSessionId:
 
 # ── A session file that is not a regular file ────────────────────────────
 #
-# `threading` is imported here rather than at the top of the file because this
-# deadline is the only use of it: the reads below must be bounded, and the bound
-# is what makes a regression *fail* instead of wedging the suite.
-
-
-def _within(seconds: float, fn):
-    """Return ``fn()``'s result, failing the test if it has not returned in ``seconds``.
-
-    A reader that opens a path without asking its kind cannot be bounded by ``try``/
-    ``except``: a FIFO blocks at the **open**, raises nothing, so no handler runs and the
-    call simply never returns. A test that called such a reader directly would therefore
-    have only two outcomes — the reader returns, or the whole pytest run wedges — and the
-    second is unreadable as a failure (a cancelled CI job reads as `no_verdict`, whose
-    remedy is to re-trigger the same head, and this repository has had to kill such a run
-    by hand). Hence the deadline; the exception ``fn`` raised is carried out, since "it
-    raised" and "it never returned" are different readings and the caller decides which
-    it expected.
-
-    The 5 s is headroom by three orders of magnitude (the guarded reads answer in
-    milliseconds), not a performance assertion.
-    """
-    box: dict = {}
-
-    def _run() -> None:
-        try:
-            box["value"] = fn()
-        except BaseException as exc:  # carried out, not swallowed
-            box["error"] = exc
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-    thread.join(seconds)
-    assert not thread.is_alive(), (
-        f"the read did not return within {seconds}s — a path was opened without asking "
-        f"its kind first (a FIFO blocks at the open and raises nothing, so no handler "
-        f"can fire)"
-    )
-    if "error" in box:
-        raise box["error"]
-    return box["value"]
+# The reads below are bounded by `tests.bounded_read.within`, the one deadline this
+# suite keeps (issue #2091): a reader that opens its subject without asking its kind
+# cannot be bounded by `try`/`except` — a FIFO blocks at the *open* and raises nothing
+# — so the bound is what makes a regression *fail* instead of wedging the run.
 
 
 class TestSessionFilesAskTheKindBeforeOpening:
@@ -1017,7 +981,7 @@ class TestSessionFilesAskTheKindBeforeOpening:
         """`Session.load` refuses the pipe instead of waiting at the open for a writer."""
         os.mkfifo(self._session_dir(tmp_path) / "meta.json")
         with pytest.raises(NotARegularFile) as excinfo:
-            _within(5.0, lambda: Session.load("s1", tmp_path))
+            within(DEADLINE_SECONDS, lambda: Session.load("s1", tmp_path))
         assert "a FIFO" in str(excinfo.value), str(excinfo.value)
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
@@ -1026,7 +990,7 @@ class TestSessionFilesAskTheKindBeforeOpening:
         os.mkfifo(self._session_dir(tmp_path) / "history.jsonl")
         session = Session("s1", tmp_path)
         with pytest.raises(NotARegularFile):
-            _within(5.0, session._read_history)
+            within(DEADLINE_SECONDS, session._read_history)
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
     def test_a_fifo_history_does_not_wedge_append_message(self, tmp_path):
@@ -1034,8 +998,8 @@ class TestSessionFilesAskTheKindBeforeOpening:
         os.mkfifo(self._session_dir(tmp_path) / "history.jsonl")
         session = Session("s1", tmp_path)
         with pytest.raises(NotARegularFile):
-            _within(
-                5.0,
+            within(
+                DEADLINE_SECONDS,
                 lambda: session.append_message({"type": "message", "role": "user", "content": "hi"}),
             )
         # The refusal happened *before* the open, so nothing was half-written.
@@ -1050,7 +1014,7 @@ class TestSessionFilesAskTheKindBeforeOpening:
         """
         os.mkfifo(self._session_dir(tmp_path) / "meta.json")
         session = Session("s1", tmp_path)
-        assert _within(5.0, lambda: session.title) == "s1"
+        assert within(DEADLINE_SECONDS, lambda: session.title) == "s1"
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
     def test_list_sessions_skips_the_pipe_and_keeps_the_rest(self, tmp_path):
@@ -1065,7 +1029,7 @@ class TestSessionFilesAskTheKindBeforeOpening:
             encoding="utf-8",
         )
         os.mkfifo(self._session_dir(tmp_path, "s_wedged") / "meta.json")
-        rows = _within(5.0, lambda: Session.list_sessions(tmp_path))
+        rows = within(DEADLINE_SECONDS, lambda: Session.list_sessions(tmp_path))
         assert [r["session_id"] for r in rows] == ["s_real"], rows
 
     def test_the_control_with_regular_files(self, tmp_path):
