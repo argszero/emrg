@@ -29,6 +29,8 @@ import yaml
 
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
+from emrg.memory import NotARegularFile
+from emrg.tools.base import non_regular_kind
 # The tier vocabulary, from the module that owns it: the legacy scanner kept its
 # own literal too, and `tests/test_bash_v2_policy.py` pins the two equal until P7
 # deletes that file (issue #1675). Reading it from here is what makes this the
@@ -336,6 +338,57 @@ def _tasks_yml_path() -> Path:
     return config_dir() / "tasks.yml"
 
 
+def _refuse_non_regular(path: Path, opened: str) -> None:
+    """Refuse a subject that is not a regular file, naming its kind (issue #2095).
+
+    ``kind`` comes from the tool layer's path-taking reader
+    (:func:`emrg.tools.base.non_regular_kind` — the one ``#2062``, ``#2076`` and the
+    daemon's own readers share), and the refusal is
+    :class:`emrg.memory.NotARegularFile`, which is an ``OSError`` naming the kind.
+
+    Being an ``OSError`` is the point rather than an implementation detail: every call
+    site in this module already answers a file it cannot read — a missing one, a
+    corrupt one — from its own ``except``, so routing the refusal through that same
+    class keeps each reader's contract exactly as written. The only behaviour that
+    changes is that the answer *arrives*: measured 2026-10-11 (``cyc20261011-102355``)
+    on ``171d90d0``, a FIFO at any of these subjects left the reader **not returned**
+    under an 8 s cap, because an open is not a read — it waits at the open and raises
+    nothing, so no handler can fire.
+    """
+    try:
+        kind = non_regular_kind(path)
+    except FileNotFoundError:
+        # A path that does not exist yet is not a refusal: `read_table` seeds a missing
+        # tasks.yml, and `_append_task_run` creates the JSONL it appends to. The `stat`
+        # raising is the `FileNotFoundError` those callers already handle, and the check
+        # is one syscall with no gap for the path to change in.
+        return
+    if kind:
+        raise NotARegularFile(
+            f"{path} is {kind}, not a regular file. This {opened} opens the path "
+            f"directly, and opening it blocks until a peer appears — a FIFO waits for "
+            f"a writer, a socket for a connection — so the call would never return, and "
+            f"neither would the daemon, which runs every scheduler read on its event "
+            f"loop."
+        )
+
+
+def _read_text(path: Path) -> str:
+    """``path.read_text()`` after asking its kind (``_refuse_non_regular``)."""
+    _refuse_non_regular(path, "reader")
+    return path.read_text(encoding="utf-8")
+
+
+def _open_text(path, mode: str):
+    """``open(path, mode)`` after asking its kind (``_refuse_non_regular``).
+
+    The write side blocks in the same place as the read side: opening a FIFO for
+    writing waits for a reader, so a writer needs the same guard before its ``open``.
+    """
+    _refuse_non_regular(Path(path), "writer")
+    return open(path, mode, encoding="utf-8")
+
+
 def read_table(path: Path | None = None) -> list[dict]:
     """Read tasks.yml. The only reader in the codebase.
 
@@ -351,7 +404,7 @@ def read_table(path: Path | None = None) -> list[dict]:
         logger.info("TaskScheduler: %s was missing — seeded the default table", path)
         return [dict(DEFAULT_TASK_RECORD)]
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml.safe_load(_read_text(path))
     except (yaml.YAMLError, OSError) as exc:
         raise TableUnreadable(f"{path}: {exc}") from exc
     if data is None:
@@ -423,7 +476,7 @@ def _read_custom_template(name: str) -> str | None:
     p = _task_templates_dir() / f"{name}.md"
     try:
         if p.exists():
-            return p.read_text(encoding="utf-8")
+            return _read_text(p)
     except OSError:
         pass
     return None
@@ -471,7 +524,7 @@ def _resolve_project_path(name: str) -> str | None:
     if not projects_file.exists():
         return None
     try:
-        data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+        data = yaml.safe_load(_read_text(projects_file))
     except (yaml.YAMLError, OSError):
         return None
     if not isinstance(data, list):
@@ -494,7 +547,7 @@ def _load_project_config(name: str, source_dir: str) -> dict:
     if not projects_file.exists():
         return {}
     try:
-        data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+        data = yaml.safe_load(_read_text(projects_file))
     except (yaml.YAMLError, OSError):
         return {}
     if not isinstance(data, list):
@@ -1287,7 +1340,7 @@ class TaskHandler:
             return None
         target = os.path.join(state, "emrg-recovery-receipt.json")
         try:
-            with open(target, "w", encoding="utf-8") as handle:
+            with _open_text(target, "w") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
         except OSError as exc:
@@ -1659,7 +1712,7 @@ class TaskHandler:
         """
         try:
             if self._saturation_file.exists():
-                data = json.loads(self._saturation_file.read_text(encoding="utf-8"))
+                data = json.loads(_read_text(self._saturation_file))
                 active = bool(data.get("slowdown_active", False))
                 if active:
                     self._logger.info(
@@ -1827,7 +1880,7 @@ class TaskHandler:
         try:
             if not self._heartbeat_file.exists():
                 return
-            data = json.loads(self._heartbeat_file.read_text(encoding="utf-8"))
+            data = json.loads(_read_text(self._heartbeat_file))
             status = str(data.get("status") or "")
             if status == self._CLEAN_END:
                 return
@@ -1858,7 +1911,7 @@ class TaskHandler:
         """
         try:
             if self._next_run_file.exists():
-                data = json.loads(self._next_run_file.read_text(encoding="utf-8"))
+                data = json.loads(_read_text(self._next_run_file))
                 ts = data.get("next_run_at")
                 if isinstance(ts, (int, float)) and ts > time.time():
                     return float(ts)
@@ -1916,7 +1969,7 @@ class TaskHandler:
         records: list[EvolutionLog] = []
         try:
             if self._task_runs_file.exists():
-                lines = self._task_runs_file.read_text(encoding="utf-8").splitlines()
+                lines = _read_text(self._task_runs_file).splitlines()
                 for line in lines:
                     line = line.strip()
                     if not line:
@@ -1960,7 +2013,7 @@ class TaskHandler:
         """
         try:
             self._task_runs_dir.mkdir(parents=True, exist_ok=True)
-            with open(self._task_runs_file, "a", encoding="utf-8") as f:
+            with _open_text(self._task_runs_file, "a") as f:
                 f.write(json.dumps({
                     "timestamp": log.timestamp,
                     "work": log.work,
@@ -2819,7 +2872,7 @@ class TaskHandler:
         }
 
         env = jinja2.Environment(undefined=jinja2.Undefined)
-        template = env.from_string(self._template_path.read_text(encoding="utf-8"))
+        template = env.from_string(_read_text(self._template_path))
         return template.render(**context)
 
     async def _write_final_summary(self) -> None:
@@ -3123,7 +3176,7 @@ class TaskScheduler:
         try:
             entries: list[dict] = []
             if projects_file.exists():
-                data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+                data = yaml.safe_load(_read_text(projects_file))
                 if isinstance(data, list):
                     entries = [e for e in data if isinstance(e, dict)]
             if not any(e.get("name") == "emrg" for e in entries):
@@ -3286,7 +3339,7 @@ class TaskScheduler:
             try:
                 p = Path(__file__).parent / TASK_TEMPLATES[name]
                 if p.exists():
-                    prompt = p.read_text(encoding="utf-8")
+                    prompt = _read_text(p)
             except OSError:
                 pass
             result.append({
