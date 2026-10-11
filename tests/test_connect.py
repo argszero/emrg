@@ -2,9 +2,13 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
+import pytest
+
 from emrg.connect import CONNECT_ID, AuthError, cleanup_server, get_server_path, is_server_running_sync
+from tests.bounded_read import DEADLINE_SECONDS, within
 
 
 class TestGetServerPath:
@@ -164,3 +168,69 @@ class TestConnectToServer:
         assert captured["uri"] == f"ws://127.0.0.1:{connect_mod.EMRGD_PORT}"
         assert captured["kwargs"]["proxy"] is None
         assert captured["kwargs"]["max_size"] == 16 * 1024 * 1024
+
+
+class TestConnectToServerAsksItsKind:
+    """The token file's kind is asked before it is opened (issue #2115).
+
+    `connect_to_server` was the last reader of the runtime's own files under `~/.emrg/` that
+    opened its subject on a bare contract. The path is fixed (`<config dir>/emrgd.token`) and
+    the corpus is the **client entry path**: every Python client, and the scheduler's own
+    `connect_to_server` (`emrg/server/scheduler.py`, how a scheduled task reaches the daemon).
+    `read_text` on a FIFO waits at the open for a writer and raises nothing, so the
+    `FileNotFoundError` the docstring promises could not fire — the *client* would stop, and
+    the only recovery is a restart, which belongs to the host.
+
+    The FIFO arms carry `os.mkfifo`'s own gate so the Windows leg still runs every control
+    (the shape `#2096` had to be split over); the kind is what discriminates, so the arms read
+    the noun phrase out of the refusal rather than only "it raised" — an unguarded directory
+    raises `IsADirectoryError`, an `OSError` too.
+    """
+
+    def _wedge(self, monkeypatch, tmp_path, make):
+        """Point the module at `tmp_path`, plant the subject with `make`, stub the socket.
+
+        `connect` is stubbed to fail loudly: the guard must answer before any handshake, and a
+        live daemon on `EMRGD_PORT` would answer one.
+        """
+        from emrg import connect as connect_mod
+
+        def _must_not_connect(uri, **kwargs):  # pragma: no cover - reached only on a lapse
+            raise AssertionError(f"connect_to_server reached the socket: {uri}")
+
+        monkeypatch.setattr(connect_mod, "config_dir", lambda: tmp_path)
+        monkeypatch.setattr(connect_mod, "connect", _must_not_connect)
+        make(tmp_path / f"{CONNECT_ID}.token")
+        return connect_mod
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_named_pipe_token_is_refused_without_being_opened(self, monkeypatch, tmp_path):
+        """Bounded: an unguarded `read_text` here never returns, it does not raise."""
+        mod = self._wedge(monkeypatch, tmp_path, os.mkfifo)
+
+        with pytest.raises(OSError) as caught:
+            within(DEADLINE_SECONDS, lambda: asyncio.run(mod.connect_to_server()))
+
+        assert "FIFO" in str(caught.value), caught.value
+
+    def test_a_directory_token_is_refused_by_kind(self, monkeypatch, tmp_path):
+        """The pipe-free half, and it runs on Windows: the refusal names the kind."""
+        mod = self._wedge(monkeypatch, tmp_path, lambda p: p.mkdir())
+
+        with pytest.raises(OSError) as caught:
+            asyncio.run(mod.connect_to_server())
+
+        assert "not a regular file" in str(caught.value), caught.value
+        assert "a directory" in str(caught.value), caught.value
+
+    def test_a_missing_token_still_raises_file_not_found(self, monkeypatch, tmp_path):
+        """The contract the kind check must not narrow: absence is still `FileNotFoundError`.
+
+        `non_regular_kind` *stats*, so an absent path raises out of the `stat` — the answer
+        every caller in this repository already has a handler for (`os.path.exists`-style
+        "daemon not running"), and the one a refusal-shaped guard would have replaced.
+        """
+        mod = self._wedge(monkeypatch, tmp_path, lambda p: None)
+
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(mod.connect_to_server())
