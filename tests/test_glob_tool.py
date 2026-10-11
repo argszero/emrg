@@ -140,7 +140,7 @@ def test_the_definition_names_the_one_hidden_entry_that_is_not_skipped():
     """The skip declaration is a claim, and as first written it was a universal one.
 
     "Skips hidden entries and the noise directories …" is refuted by `.emrg`, which is a
-    hidden entry `_is_hidden_or_ignored` deliberately keeps — measured 2026-10-07
+    hidden entry `base.is_hidden_or_ignored` deliberately keeps — measured 2026-10-07
     (`cyc20261007-000240`, and independently by review on 2026-10-06): from the repo root
     `.emrg/memory/MEMORY.md` is read while `.git/config` and `.github/workflows/test.yml`
     are skipped. A caller who believes the universal sentence does not expect
@@ -157,7 +157,7 @@ def test_the_definition_names_the_one_hidden_entry_that_is_not_skipped():
 def test_the_emrg_directory_it_declares_as_read_really_is_read(temp_cwd):
     """The exception in the description, measured rather than asserted in prose.
 
-    `_is_hidden_or_ignored` keeps any path whose parts include `.emrg` (and skips every
+    `base.is_hidden_or_ignored` keeps any path whose parts include `.emrg` (and skips every
     other dot-part), so a search from the root does return the agent's own state. Pinned
     because the description promises it: a promise in a tool description that no test holds
     is how the universal claim above survived review.

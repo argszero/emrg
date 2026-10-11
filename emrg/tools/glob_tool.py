@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, brace_alternation
+from emrg.tools.base import ToolExecutor, brace_alternation, is_hidden_or_ignored
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class GlobTool(ToolExecutor):
                 error=True,
             )
 
-        matches = [p for p in matched if not self._is_hidden_or_ignored(p, cwd)]
+        matches = [p for p in matched if not is_hidden_or_ignored(p, cwd)]
         #: Paths that *matched the pattern* and were then dropped by the skip policy.
         #: Both messages below name this number, because without it "0" reads as "the
         #: tree holds none" and "Found N" reads as "the tree holds N" - the two readings
@@ -148,7 +148,7 @@ class GlobTool(ToolExecutor):
             if skipped:
                 # Not "no files matched": the pattern matched, and the answer is about
                 # the skip rather than about the tree. The remedy is the measured one -
-                # `_is_hidden_or_ignored` compares each path *relative to the root it was
+                # `is_hidden_or_ignored` compares each path *relative to the root it was
                 # given*, so pointing `workdir` at the directory that holds them reads
                 # them (measured: `workdir=<repo>/.git`, pattern `config` returns it).
                 content += (
@@ -189,15 +189,3 @@ class GlobTool(ToolExecutor):
 
         return ToolResult(name="glob", content=result)
 
-    @staticmethod
-    def _is_hidden_or_ignored(path: Path, root: Path) -> bool:
-        """Skip hidden files/dirs and common ignore paths."""
-        # Skip hidden files/dirs (starting with .)
-        parts = path.relative_to(root).parts
-        for part in parts:
-            if part.startswith(".") and part not in (".emrg",):
-                return True
-        # Skip common noise
-        if any(p in parts for p in ("__pycache__", "node_modules", ".git", ".venv")):
-            return True
-        return False

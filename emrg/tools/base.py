@@ -10,6 +10,7 @@ import math
 import os
 import stat
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
 
@@ -180,6 +181,64 @@ def brace_alternation(pattern: str) -> bool:
         elif char == "," and depth:
             return True
     return False
+
+
+#: The one component of a *relative path* here that names a directory rather than an
+#: entry: `..` is the parent of the directory a pattern is parsed against, and `Path.glob`
+#: keeps it verbatim in the paths it yields (`<root>/sub/../sibling/x.py`). No directory
+#: entry is called `..`, so it cannot be the name a hidden-entry rule is about.
+#:
+#: `.` is deliberately absent, and the reason is a measurement rather than a judgement:
+#: it cannot reach this predicate. `PurePath` drops `.` segments as it constructs a path
+#: (`Path("a/./b").parts == ("a", "b")`), so no walk yields a `.` component. Measured
+#: 2026-10-11 (`cyc20261011-091039`): a mutation arm that removed `.` from this set left
+#: every leg green — the code was unreachable, and the set now holds only what arrives.
+_NOT_A_NAME = frozenset({".."})
+
+#: Directory names skipped as noise, wherever they appear below the root.
+_NOISE_DIRECTORIES = frozenset({"__pycache__", "node_modules", ".git", ".venv"})
+
+
+def is_hidden_or_ignored(path: Path, root: Path) -> bool:
+    """Does the skip policy drop ``path``, read relative to the root the walk was given?
+
+    One home for a rule that was written twice — here, and inline in
+    ``GrepTool._collect_files`` — and whose two spellings carried the same blind spot.
+
+    **The subject of the rule is a name, and a relative-path component is not always
+    one.** Both copies asked ``part.startswith(".")`` over
+    ``path.relative_to(root).parts``, and ``".."`` starts with ``"."``. So a pattern
+    that reaches out of the root — ``../tests/*.py``, which is how a caller names a
+    *sibling* directory — made the walk return its real matches and the policy drop
+    **every one of them** as hidden. Measured 2026-10-11 (`cyc20261011-091039`) on
+    master `0b5f502f`, one fixture, in this checkout, workdir ``<checkout>/emrg``, the
+    same 204 files that ``tests/*.py`` returns from the root:
+
+        glob pattern='../tests/*.py'
+            -> "No files matched … - 204 path(s) matched it but were skipped as hidden
+               or ignored"
+        grep path=<dir> glob='../tests/*.py'
+            -> "No matches … (searched 0 files)"
+
+    That is a false negative *and* a false cause: not one of the 204 is hidden, and the
+    remedy the message prints — point ``workdir`` at the directory that holds them —
+    names the directory the caller is already in. It is the shape this repository keeps
+    closing (`No matches` / `No files matched` is the sentence a real absence produces),
+    here produced by the rule that exists to explain the difference.
+
+    ``..`` is therefore dropped from the components before the policy reads them;
+    nothing else about the rule moves. A name starting with ``.`` is hidden,
+    ``.emrg`` is the one exception (the agent's own state is meant to be readable), and
+    the four noise directories are skipped wherever they appear.
+
+    :param path: a path a walk returned.
+    :param root: the directory the walk was given; ``path`` is read relative to it.
+    :returns: True when the policy skips this path.
+    """
+    names = [p for p in path.relative_to(root).parts if p not in _NOT_A_NAME]
+    if any(p.startswith(".") and p != ".emrg" for p in names):
+        return True
+    return any(p in _NOISE_DIRECTORIES for p in names)
 
 
 def special_file_kind(mode: int) -> str | None:

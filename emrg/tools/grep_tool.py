@@ -12,7 +12,12 @@ import re
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, brace_alternation, count_argument
+from emrg.tools.base import (
+    ToolExecutor,
+    brace_alternation,
+    count_argument,
+    is_hidden_or_ignored,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -498,17 +503,18 @@ class GrepTool(ToolExecutor):
 
     @staticmethod
     def _collect_files(root: Path, file_glob: str | None) -> list[Path]:
-        """Collect files recursively, skipping hidden/ignored dirs."""
-        skip_dirs = {"__pycache__", "node_modules", ".git", ".venv"}
+        """Collect files recursively, skipping hidden/ignored dirs.
+
+        The skip policy is `base.is_hidden_or_ignored` — one home, asked with this walk's
+        root. It used to be written again here, and the two copies shared a blind spot:
+        a `..` component read as a hidden name. See that function for the measurement.
+        """
         glob_pattern = file_glob or "*"
 
         # Filter first (cheap), then sort (expensive on large repos)
         files: list[Path] = []
         for path in root.rglob(glob_pattern):
-            parts = path.relative_to(root).parts
-            if any(p.startswith(".") and p not in (".emrg",) for p in parts):
-                continue
-            if any(p in skip_dirs for p in parts):
+            if is_hidden_or_ignored(path, root):
                 continue
             if path.is_file():
                 files.append(path)
