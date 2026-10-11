@@ -1763,3 +1763,161 @@ def test_the_prompt_path_scan_answers_both_ways() -> None:
     # The `.github/` exclusion is a decision rather than an oversight — the open-source flow reads the
     # *target* project's conventions. Pinned here so widening the scope is a visible change.
     assert _repo_paths_named_in("cat .github/pull_request_template.md 2>/dev/null") == []
+
+
+# ── Where `extra_prompt` may sit in a record ────────────────────────────────────
+#
+# The module docstring listed `extra_prompt` beside `sandbox` as a record-level optional
+# field, while the render site passed only `self._config` as `task`. A file written against
+# that comment therefore rendered `{% if task.extra_prompt %}` **false**, and the section —
+# heading and body together — disappeared with no error, no warning and no log line, because
+# the daemon renders under `jinja2.Undefined`.
+#
+# Measured on master `60541e39` (2026-10-11, `cyc20261011-193407`) through the real builder:
+# a record carrying `extra_prompt` at its top level rendered **without** it; the same value
+# under `config` rendered with it. The host reported the cost (rant 2026-10-11T11:23:55,
+# issue #2110): the `promote` task's 4601-char and the `competition` task's 3042-char
+# `extra_prompt` sat at the top level without ever entering a prompt.
+#
+# Both directions are pinned below, and the unset control matters as much as the set one:
+# a test that only asserts the marker is *present* would pass an empty render.
+
+EXTRA_TOP = "TOP-LEVEL-EXTRA-PROMPT-MARKER"
+EXTRA_CFG = "CONFIG-EXTRA-PROMPT-MARKER"
+
+
+def _handler_for_record(tmp_path, monkeypatch, *, top=None, under_config=None, template=None):
+    """A real handler whose record carries `extra_prompt` in the named position(s).
+
+    Built through `_apply_record`, which is the seam the daemon itself calls once per cycle
+    with the record read at that moment — so this is the production path, not a copy of it.
+    `make_handler` cannot express this case: it puts everything it is given under `config`.
+    """
+    monkeypatch.setattr(mod, "config_dir", lambda: tmp_path)
+    _write_projects_yml(tmp_path, "demoproj", {"name": "demoproj"})
+    handler = TaskHandler(name="demo-task", identity=InstanceIdentity())
+    config: dict = {"project": "demoproj"}
+    if under_config is not None:
+        config["extra_prompt"] = under_config
+    record: dict = {
+        "name": "demo-task",
+        "type": "evolution",
+        "interval": 300,
+        "enabled": True,
+        "config": config,
+    }
+    if top is not None:
+        record["extra_prompt"] = top
+    handler._apply_record(record)
+    handler._derived["template_path"] = PROMPTS_DIR / (template or "evolution_prompt.md")
+    return handler
+
+
+def test_a_record_level_extra_prompt_reaches_the_prompt(tmp_path, monkeypatch) -> None:
+    """The position the old comment advertised must work, in every template that reads it."""
+    for task_type, filename in _builtin_templates():
+        rendered = _handler_for_record(
+            tmp_path, monkeypatch, top=EXTRA_TOP, template=filename
+        )._build_evolution_prompt()
+        assert EXTRA_TOP in rendered, (
+            f"{task_type}/{filename}: a top-level `extra_prompt` did not reach the prompt — "
+            f"the file's instructions would be dropped in silence"
+        )
+
+
+def test_the_control_extra_prompt_under_config_still_reaches_the_prompt(
+    tmp_path, monkeypatch
+) -> None:
+    """The canonical home keeps working — the fallback must not displace it."""
+    rendered = _handler_for_record(
+        tmp_path, monkeypatch, under_config=EXTRA_CFG
+    )._build_evolution_prompt()
+    assert EXTRA_CFG in rendered, "`config.extra_prompt` stopped reaching the prompt"
+
+
+def test_neither_position_renders_the_section(tmp_path, monkeypatch) -> None:
+    """The unset control: without either position the section is absent, so the two tests
+    above are reading the marker rather than a template that always prints something."""
+    rendered = _handler_for_record(tmp_path, monkeypatch)._build_evolution_prompt()
+    assert EXTRA_TOP not in rendered and EXTRA_CFG not in rendered, (
+        "the extra_prompt section rendered with no extra_prompt set anywhere"
+    )
+    assert "Task-specific Instructions" not in rendered, (
+        "the section's heading rendered while its guard was false"
+    )
+
+
+def test_both_positions_warn_and_config_wins(tmp_path, monkeypatch, caplog) -> None:
+    """Ambiguity is audible and resolved the documented way.
+
+    The host's first ask was not leniency but feedback: the expensive part of this defect was
+    that a copy in the unhonoured position produced *nothing at all* to read. With the
+    fallback in place the only silent loss left is a record that carries both, so that one
+    names the task and the size of the copy it is ignoring.
+    """
+    with caplog.at_level("WARNING", logger=mod.__name__):
+        rendered = _handler_for_record(
+            tmp_path, monkeypatch, top=EXTRA_TOP, under_config=EXTRA_CFG
+        )._build_evolution_prompt()
+
+    assert EXTRA_CFG in rendered and EXTRA_TOP not in rendered, (
+        "config must win when a record carries both — it is the canonical home of the "
+        "`task` namespace"
+    )
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    naming = [w for w in warnings if "extra_prompt" in w and "demo-task" in w]
+    assert naming, (
+        f"a record carrying extra_prompt twice was resolved without a warning: {warnings}"
+    )
+    assert str(len(EXTRA_TOP)) in naming[0], (
+        f"the warning must name the copy it is ignoring by size, so the host can find it: "
+        f"{naming[0]!r}"
+    )
+
+
+def test_a_blank_copy_is_not_a_value(tmp_path, monkeypatch) -> None:
+    """`{% if %}` renders nothing for a blank string, so blank falls back rather than wins."""
+    rendered = _handler_for_record(
+        tmp_path, monkeypatch, top=EXTRA_TOP, under_config="   \n"
+    )._build_evolution_prompt()
+    assert EXTRA_TOP in rendered, (
+        "a blank `config.extra_prompt` shadowed a usable top-level one — the section is lost "
+        "to whitespace"
+    )
+
+
+def test_a_top_level_copy_that_cannot_render_is_named(tmp_path, monkeypatch, caplog) -> None:
+    """The residual silence: a non-string top-level `extra_prompt` renders nothing either way.
+
+    A YAML author who writes a list, a mapping or a bare number has made the same mistake as
+    the one this file's block above describes — the section vanishes without a line of
+    feedback — so the rule the fallback leaves is that the top-level copy is never dropped
+    quietly. Both sub-cases are read, because they fail for different reasons: nothing else
+    supplies a value, and `config` does.
+    """
+    for label, under_config in (("alone", None), ("beside a usable config copy", EXTRA_CFG)):
+        caplog.clear()
+        with caplog.at_level("WARNING", logger=mod.__name__):
+            rendered = _handler_for_record(
+                tmp_path, monkeypatch, top=["do this", "then that"], under_config=under_config
+            )._build_evolution_prompt()
+
+        assert EXTRA_TOP not in rendered, (
+            f"{label}: a list rendered as the extra_prompt section"
+        )
+        if under_config is None:
+            assert EXTRA_CFG not in rendered, label
+        else:
+            assert EXTRA_CFG in rendered, (
+                f"{label}: the usable config copy stopped rendering, so this test is not "
+                f"reading the config/top-level interaction it claims to"
+            )
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        naming = [w for w in warnings if "extra_prompt" in w and "demo-task" in w]
+        assert naming, (
+            f"a non-string top-level extra_prompt ({label}) was dropped without a warning: "
+            f"{warnings}"
+        )
+        assert "list" in naming[0], (
+            f"the warning must name the type it cannot interpolate: {naming[0]!r}"
+        )
