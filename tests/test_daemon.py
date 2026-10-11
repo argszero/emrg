@@ -5241,3 +5241,144 @@ def test_a_directory_usage_anchor_stats_is_refused_by_kind_before_either_open(tm
 
     assert "not a regular file" in str(excinfo.value), (
         f"the refusal names the kind: {excinfo.value}")
+
+
+# ── the last two opens the kind sweeps did not name ───────────────────────────
+#
+# This module has been swept for `#2062`'s rule once per issue, and each sweep found
+# "three more" — #2105 (four readers of `projects.yml`), #2107 (seven opens under
+# `~/.emrg/logs`), #2106/#2108 (the rest of those two subjects), #2115 (three readers
+# under `~/.emrg/`), #2116 (three log sinks). Two sites of this module were left by
+# every one of them, and the reason is a defect in the sweep rather than in the sites:
+#
+#   `_current_installed_version`   `~/.emrg/install/version.txt`  — the **name** puts it
+#     in the upgrade chain's basket (`upgrade.py`'s `VERSION_FILE` is the same string),
+#     and #2115 says in as many words that rows "that belong to the upgrade chain" were
+#     left alone. Nothing here reaches that chain; this is a disk read the daemon makes.
+#   `_build_system_prompt`         `<session>/system.md`          — inside the workspace.
+#
+# The second is the one to read twice, because it is not a site the sweeps overlooked:
+# it is a site their **exclusion rule hides by construction**. #2115 describes that rule
+# — "every call that opens or writes a path, grouped by its enclosing function, with any
+# function that reaches a kind guard ... excluded, directly or through a same-file
+# helper". `_build_system_prompt` calls `_collect_project_context`, which does ask the
+# kind (about the project-context files), so the closure excludes this function whole —
+# and the `write_text` on the next line is never looked at. A guard in a callee is not a
+# guard on this call; the closure has to be per-subject, not per-function.
+#
+# Measured 2026-10-12 (`cyc20261012-034740`) on master `f4fe92c3`, one child process per
+# arm under this parent's 8 s cap, `HOME` pinned to a temporary directory:
+#
+#     version_read      DID NOT RETURN within 8s
+#     system_md_write   DID NOT RETURN within 8s
+#
+# — and the same two arms with a **directory** at the same subjects returned at once.
+# The kind of the path is the axis, not absence. `EmrgServer.__init__` reads the first
+# through the same method (`self._run_version = self._current_installed_version()`), so
+# a pipe at `install/version.txt` stopped the daemon from being **constructed**: no event
+# loop, no client, no log line.
+
+
+def _pipe(path: Path) -> Path:
+    """A FIFO at `path`, its parent created first."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(path)
+    return path
+
+
+class TestTheLastTwoOpensTheSweepsDidNotName:
+    """A subject that is not a regular file is answered, not opened — at the two left."""
+
+    # ── `~/.emrg/install/version.txt` ──
+    #
+    # `HOME` is pinned to `tmp_path` in all three arms, so the file under test is the one
+    # planted here and never the host's own `install/version.txt`. The server is built
+    # **before** the subject is planted, for the reason the site exists: `__init__` reads
+    # this same path, and a pipe planted first would wedge the fixture instead of the
+    # method under test.
+
+    @_needs_mkfifo
+    def test_the_installed_version_read_answers_a_fifo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        _pipe(tmp_path / ".emrg" / "install" / "version.txt")
+
+        assert _within(5.0, server._current_installed_version) == ""
+
+    def test_a_directory_version_file_is_named_in_the_log(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The FIFO-free half, and the half the Windows leg runs.
+
+        A directory needs no `os.mkfifo`, and it discriminates on the **log line**
+        rather than on the return value: both versions answer `""` (this method's
+        documented answer for a version it cannot read), so only the sentence separates
+        them — on master the `IsADirectoryError` is swallowed by
+        `except (OSError, ValueError)` and **nothing is logged at all**.
+
+        The phrase asserted is the kind, not the writes' `", not a regular file"`: this
+        is a **reader**, so it skips and names what it found (the shape `#2108` gives the
+        reads) rather than refusing with the sentence the writes use.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        version = tmp_path / ".emrg" / "install" / "version.txt"
+        version.mkdir(parents=True)
+
+        with caplog.at_level(logging.DEBUG, logger="emrg.server.daemon"):
+            assert server._current_installed_version() == ""
+
+        assert "is a directory" in caplog.text, caplog.text
+        assert str(version) in caplog.text, caplog.text
+
+    def test_a_regular_version_file_is_still_read(self, tmp_path, monkeypatch):
+        """The control: the guard must not turn every read into `""`."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        version = tmp_path / ".emrg" / "install" / "version.txt"
+        version.parent.mkdir(parents=True)
+        version.write_text("9.9.9\n", encoding="utf-8")
+
+        assert server._current_installed_version() == "9.9.9"
+
+    # ── `<session>/system.md` — a path inside the workspace the agent writes to ──
+
+    @_needs_mkfifo
+    def test_the_system_prompt_copy_does_not_wedge_on_a_fifo(self, tmp_path):
+        """The write is a debug aid, so the prompt itself must still come back."""
+        server = _make_server()
+        session = Session.create_with_id("s_fifo_sysmd", tmp_path)
+        _pipe(session.dir_path / "system.md")
+
+        rendered = _within(5.0, lambda: server._build_system_prompt(session))
+
+        assert "Operating system" in rendered
+
+    def test_a_directory_system_md_is_named_in_the_log(self, tmp_path, caplog):
+        """FIFO-free, and the debug line is where the two versions differ.
+
+        Both answer with the rendered prompt (the write sits inside a `try` that logs
+        and carries on), so the return value cannot tell them apart; the log can,
+        because master's `IsADirectoryError` is reported as the errno while this tree's
+        refusal names the kind.
+        """
+        server = _make_server()
+        session = Session.create_with_id("s_dir_sysmd", tmp_path)
+        (session.dir_path / "system.md").mkdir()
+
+        with caplog.at_level(logging.DEBUG, logger="emrg.server.daemon"):
+            rendered = server._build_system_prompt(session)
+
+        assert "Operating system" in rendered
+        assert "not a regular file" in caplog.text, caplog.text
+
+    def test_a_regular_system_md_is_still_written(self, tmp_path):
+        """The control: the debug copy is still written where it can be."""
+        server = _make_server()
+        session = Session.create_with_id("s_regular_sysmd", tmp_path)
+
+        server._build_system_prompt(session)
+
+        assert "Operating system" in (session.dir_path / "system.md").read_text(
+            encoding="utf-8"
+        )

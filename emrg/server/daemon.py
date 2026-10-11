@@ -1331,9 +1331,33 @@ class EmrgServer:
         runs the pre-upgrade code. The GUI compares it with the in-memory
         ``_run_version`` and shows the upgrade banner when they differ.
         Returns "" when the file is missing (dev/standalone runs).
+
+        The subject's **kind** is asked before it is opened, because the open is what
+        decides whether this returns at all: `read_text` on a FIFO waits at the open
+        for a writer and raises nothing, so the handler below is unreachable and the
+        call never ends. It matters more here than at most of this module's sites —
+        `EmrgServer.__init__` reads this same path through this same method
+        (``self._run_version = self._current_installed_version()``), so a pipe at
+        `~/.emrg/install/version.txt` stopped the daemon from being **constructed**:
+        no event loop, no client, and no line anywhere saying why.
+
+        A subject that is not a regular file reads as "" for the same reason a missing
+        one does — that is this method's documented answer, and the version is unknown
+        rather than unreadable-to-the-end. The caller's own line is what names it.
+
+        The name `~/.emrg/install/version.txt` is also why the kind sweeps kept
+        stepping past this site: the same file is the upgrade chain's ``VERSION_FILE``
+        (`emrg/server/upgrade.py`), so a sweep reading its subject by *name* put it in
+        the upgrade chain's basket and left it alone. Nothing here reaches the upgrade
+        chain — this is a plain disk read whose reader is the daemon.
         """
+        path = Path.home() / ".emrg" / "install" / "version.txt"
+        kind = _non_regular_kind(path)
+        if kind is not None:
+            logger.debug("installed version file %s is %s; not opened", path, kind)
+            return ""
         try:
-            v = (Path.home() / ".emrg" / "install" / "version.txt").read_text(encoding="utf-8").strip()
+            v = path.read_text(encoding="utf-8").strip()
             return v
         except (OSError, ValueError):
             return ""
@@ -2426,6 +2450,21 @@ class EmrgServer:
         if session:
             try:
                 path = session.dir_path / "system.md"
+                # A write is an open too, and this subject lives **inside the workspace
+                # the agent works in** — so a pipe here is the agent's own doing rather
+                # than an attacker's, which makes it the likelier of this module's sites
+                # to be reached. `write_text` on a FIFO waits for a reader and raises
+                # nothing, so the handler below would never run.
+                #
+                # This is the site the family's sweeps kept missing, and the reason is
+                # in the sweep rather than in the site: a worklist that excludes "any
+                # function that reaches a kind guard, directly or **through a
+                # same-file helper**" drops this function wholesale, because it calls
+                # `_collect_project_context` — which does ask the kind, about a
+                # *different* subject. A guard in a callee is not a guard on this call.
+                kind = _non_regular_kind(path)
+                if kind is not None:
+                    raise OSError(f"{path} is {kind}, not a regular file")
                 path.write_text(rendered, encoding="utf-8")
             except OSError:
                 logger.debug("failed to write system.md", exc_info=True)
