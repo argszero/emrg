@@ -14,6 +14,9 @@ from typing import Optional
 
 import tomllib  # Python 3.11+ stdlib
 
+from emrg.memory import NotARegularFile
+from emrg.tools.base import non_regular_kind
+
 
 @dataclass
 class LlmConfig:
@@ -204,6 +207,72 @@ def config_path() -> Path:
 
 
 
+def _refuse_non_regular(path: Path) -> None:
+    """Refuse a config subject that is not a regular file, naming its kind (issue #2103).
+
+    ``kind`` comes from the tool layer's path-taking reader
+    (:func:`emrg.tools.base.non_regular_kind` — the one ``#2062``, ``#2076`` and the
+    daemon's own readers share), and the refusal is
+    :class:`emrg.memory.NotARegularFile`, which is an ``OSError`` naming the kind.
+
+    Being an ``OSError`` is the point rather than an implementation detail: every reader
+    in this module already answers a file it cannot read — a missing one (``load_config``
+    raises ``FileNotFoundError``), a corrupt one (the two section loaders fall back to
+    their defaults) — so routing the refusal through that same class keeps each reader's
+    contract exactly as written. The only behaviour that changes is that the answer
+    *arrives*.
+
+    Measured 2026-10-11 (``cyc20261011-134612``) on master ``3f18f6a6``, one child process
+    per arm under this parent's 8 s cap, the subject built under a ``TemporaryDirectory``
+    with ``config_path`` re-pointed at it before any call:
+
+        arm                          regular            directory              FIFO
+        load_config(path=…)          returns            IsADirectoryError      no return, 8 s
+        load_config()                returns            IsADirectoryError      no return, 8 s
+        load_sandbox_config()        returns            returns defaults       no return, 8 s
+        load_update_config()         returns            returns defaults       no return, 8 s
+        fingerprint(path)            returns a hash     returns None           no return, 8 s
+        ConfigReloader(…, path=…)    constructs         constructs             no return, 8 s
+        ensure_config()              returns            returns                returns
+
+    The **directory** column is the reading that fixes the design: the kind one over
+    already produces each site's answer, so the refusal adds no new answer — and the
+    ``ensure_config`` row is why this module guards three readers and not a writer:
+    ``if cfg_path.exists(): return`` is its first act, ``exists()`` is **true** for a FIFO,
+    so its ``write_text`` is never reached. That one is measured, not assumed.
+
+    An **open is not a read**: on a FIFO it waits at the open until a writer appears and
+    raises nothing, so no ``except (OSError, …)`` around these call sites can bound the
+    consequence. Two of them run before the daemon has an event loop at all — they are
+    called from ``EmrgServer.__init__`` (``daemon.py:637``/``:643``/``:656``) — and the
+    reload tick reads the file on the loop every ``POLL_INTERVAL_SECONDS``.
+    """
+    # A missing path is not a refusal: it raises `FileNotFoundError` from the `stat`,
+    # which is the answer callers of a missing config already handle. One syscall,
+    # on the path the open is about to follow.
+    kind = non_regular_kind(path)
+    if kind:
+        raise NotARegularFile(
+            f"{path} is {kind}, not a regular file. This reader opens the config file "
+            f"directly, and opening it blocks until a peer appears — a FIFO waits for a "
+            f"writer, a socket for a connection — so the call would never return, and "
+            f"neither would the daemon: two of these readers run in "
+            f"`EmrgServer.__init__`, before any handler exists to time them out."
+        )
+
+
+def _read_config_text(path: Path) -> str:
+    """``path.read_text()`` after asking its kind (``_refuse_non_regular``).
+
+    Every read of the config file in this module goes through here, and
+    ``tests/test_config.py::test_no_read_text_reaches_the_config_unasked`` parses this
+    file to keep it that way: a reader that reaches its subject through ``Path``'s own
+    convenience method is the shape that keeps being missed (``#2095``/``#2096``).
+    """
+    _refuse_non_regular(path)
+    return path.read_text(encoding="utf-8")
+
+
 def load_config(path: Optional[Path] = None) -> EmrgConfig:
     """Load EMRG configuration from ~/.emrg/config.toml.
 
@@ -218,7 +287,7 @@ def load_config(path: Optional[Path] = None) -> EmrgConfig:
             f"config not found at {cfg_path} — create it with [llm] section"
         )
 
-    content = cfg_path.read_text(encoding="utf-8")
+    content = _read_config_text(cfg_path)
     data = tomllib.loads(content)
     llm_data = data.get("llm", {})
 
@@ -293,7 +362,7 @@ def load_sandbox_config() -> SandboxConfig:
     cfg_path = config_path()
     if cfg_path.exists():
         try:
-            data = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+            data = tomllib.loads(_read_config_text(cfg_path))
         except (OSError, tomllib.TOMLDecodeError):
             data = {}
         cfg = _sandbox_from(data)
@@ -310,7 +379,7 @@ def load_update_config() -> UpdateConfig:
     if not cfg_path.exists():
         return UpdateConfig()
     try:
-        data = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+        data = tomllib.loads(_read_config_text(cfg_path))
     except (OSError, tomllib.TOMLDecodeError):
         return UpdateConfig()
     update_data = data.get("update", {})
@@ -321,7 +390,14 @@ def load_update_config() -> UpdateConfig:
 
 
 def ensure_config() -> None:
-    """Create default config file if it doesn't exist."""
+    """Create default config file if it doesn't exist.
+
+    The one writer of the config file, and the one open in this module that needs no kind
+    guard — measured, not assumed (issue #2103): its first act is the ``exists()`` return
+    below, and ``exists()`` is **true** for a FIFO, a socket and a directory alike, so a
+    non-regular subject never reaches the ``write_text``. Guarding it would be code no
+    reading can reach.
+    """
     cfg_path = config_path()
     if cfg_path.exists():
         return

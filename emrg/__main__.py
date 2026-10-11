@@ -386,6 +386,7 @@ def _run_daemon() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     from emrg.config import load_config
+    from emrg.memory import NotARegularFile
     from emrg.tool_path import ensure_tool_dirs
 
     # Rant 2026-09-27T19:45:54 defect B — the same normalization the `emrgd`
@@ -396,6 +397,13 @@ def _run_daemon() -> None:
     try:
         config = load_config()
     except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except NotARegularFile as e:
+        # `load_config` refuses a config that is not a regular file (issue #2103) before
+        # opening it — a FIFO there would otherwise block this process forever, with no
+        # output on either channel. A refusal this command cannot act on is reported the
+        # same way a missing config is: one line, exit 1.
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

@@ -11,8 +11,13 @@ using it (an abort increments, a round the filter let through resets).
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime, timedelta
 
+import pytest
+
+from tests.bounded_read import DEADLINE_SECONDS, within
 import emrg.server.abort_runs as mod
 from emrg.server.abort_runs import RUN_TTL_DAYS, AbortRuns, default_path
 
@@ -249,3 +254,108 @@ def test_the_test_suite_is_not_pointed_at_the_hosts_state(tmp_path):
     # reading the sibling above wants, and the only one that can see the
     # resolution rather than the redirect.
     assert mod.default_path() == tmp_path / "abort-runs.json"
+
+
+class TestTheStateFileIsOpenedByKind:
+    """The state file itself is asked its kind before it is opened (issue #2101).
+
+    `_read` opened its subject inside `except (OSError, ValueError)` / `except FileNotFoundError`
+    — neither of which can bound a *block*: `read_text` on a FIFO waits at the open for a writer,
+    raises nothing, so no handler runs and the call never returns. Measured 2026-10-11
+    (`cyc20261011-130932`) on master `3f18f6a6`: a `mkfifo` at `~/.emrg/logs/abort-runs.json`
+    left `AbortRuns.snapshot()` and `AbortRuns.note()` **not returned in 8 s**, where the same
+    fixture with a regular file returned in 0.00 s.
+
+    `note()` is the reason this one is not merely a hang: the daemon calls it from the
+    content-filter path (`daemon.py:4352`, `:4410`) as the argument of the `logger.error` that
+    reports the run, and the error frame to the client is broadcast *after* it — so the block
+    lands exactly where a client is waiting to be told why its turn failed.
+
+    The answer is the module's own: an unreadable file reads as "no run open" (module docstring),
+    so a non-regular one does too.
+
+    The FIFO subjects carry an `os.mkfifo` gate, so they skip where there are no FIFOs; the arms
+    that cover those platforms are the FIFO-free ones — and one of them,
+    `test_a_directory_is_named_rather_than_merely_unreadable`, is **discriminating** as well.
+    That distinction is the point rather than a detail: a FIFO-free arm that passes both with
+    and without the guard does not cover the leg it appears to cover, which is what an earlier
+    version of this paragraph claimed it did.
+    """
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_state_file_reads_as_nothing_open(self, tmp_path):
+        state = tmp_path / "abort-runs.json"
+        os.mkfifo(state)
+        runs = AbortRuns(state)
+        assert within(DEADLINE_SECONDS, lambda: runs.snapshot()) == {}
+
+    def test_the_control_with_a_regular_state_file(self, tmp_path):
+        """The kind is the axis: the same reader still reads a regular file."""
+        state = tmp_path / "abort-runs.json"
+        state.write_text(json.dumps({"k: s": {"cause": "k", "session_id": "s", "count": 1}}),
+                         encoding="utf-8")
+        assert list(AbortRuns(state).snapshot()) == ["k: s"]
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_the_abort_path_notes_an_abort_rather_than_hanging(self, tmp_path):
+        """The daemon's own call, not just the reader: `note()` returns and the count is kept.
+
+        It returns `count == 1` rather than raising, because the module's contract is that this
+        store may never fail a turn that has already lost its answer.
+        """
+        state = tmp_path / "abort-runs.json"
+        os.mkfifo(state)
+        runs = AbortRuns(state)
+        record = within(DEADLINE_SECONDS, lambda: runs.note("content_filter", "s_1"))
+        assert record["count"] == 1, record
+
+    def test_a_missing_state_file_is_still_empty(self, tmp_path):
+        """The contract the kind check must not narrow: absent reads as `{}`, not as a raise.
+
+        FIFO-free on purpose — this one runs on every platform.
+        """
+        assert AbortRuns(tmp_path / "absent.json").snapshot() == {}
+
+    def test_a_directory_is_named_rather_than_merely_unreadable(self, tmp_path, caplog):
+        """**FIFO-free, and it discriminates** — what the Windows leg needs.
+
+        The two FIFO arms above are gated on `os.mkfifo`, so they skip wherever there are
+        none (Windows), and every other arm in this class passes with *and* without the
+        guard: measured 2026-10-11 on this file with `emrg/server/abort_runs.py` reverted to
+        `3f18f6a6`, the FIFO-free half is green either way (60 passed, 3 deselected across
+        this file and `tests/test_skills_registry.py`). The claim that "the Windows leg runs
+        the discriminating half" was therefore false, and the fix is to give that leg an arm
+        that discriminates rather than to weaken the sentence.
+
+        A directory is that arm, and it is why this one reads the **log**: both versions
+        answer `{}` for a directory — the module's "no run open" is the same answer on both
+        — so the return value cannot tell them apart. What can is the sentence they leave
+        behind, which is this class's whole subject:
+
+        ==================  =================================================================
+        base `3f18f6a6`     ``abort-run state at … is unreadable (IsADirectoryError: …)``
+        this tree           ``abort-run state at … is a directory, not a regular file — …``
+        ==================  =================================================================
+
+        What is pinned is this family's own **phrase** and the path, the same way the FIFO
+        arms pin `"a FIFO (named pipe)"` and `"not a regular file"` separately — not the
+        sentence around them, which is free to be reworded (measured: the equivalent
+        reword ``is a directory (not a regular file)`` leaves this arm green). The base
+        cannot produce the phrase at all: its own wording is the exception's, and the
+        exception's text differs by platform (``Is a directory`` here, ``Permission
+        denied`` on Windows) — which is why pinning *that* would not have survived Windows.
+        """
+        state = tmp_path / "abort-runs.json"
+        state.mkdir()
+
+        with caplog.at_level(logging.WARNING, logger="emrg.server.abort_runs"):
+            assert AbortRuns(state).snapshot() == {}
+
+        assert "not a regular file" in caplog.text, caplog.text
+        assert str(state) in caplog.text, caplog.text
+
+    def test_an_unreadable_state_file_still_counts_from_scratch(self, tmp_path):
+        """The branch the kind check must not shadow: a corrupt file still degrades, still logs."""
+        state = tmp_path / "abort-runs.json"
+        state.write_text("{not json", encoding="utf-8")
+        assert AbortRuns(state).snapshot() == {}

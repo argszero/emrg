@@ -4986,3 +4986,258 @@ def test_a_directory_registry_is_refused_by_its_kind_in_remove_project(
 
     assert _decode_frames(writer)[0]["removed"] is False
     assert "not a regular file" in caplog.text, caplog.text
+
+
+
+# ── the daemon's own `~/.emrg/logs` files ────────────────────────────────────────────
+#
+# The registry above, one directory further in. Every file the daemon opens under
+# `~/.emrg/logs` is reached through a name filter (`glob("evolution-*.json")`), a plain
+# `.exists()`, or a module constant — and `glob` and `exists()` answer about a FIFO
+# exactly as they answer about a regular file. Two of these sites are on the **round**
+# path: the planted-fire markers are written every round, and the usage-anchor append runs
+# with each anchor refresh, so a pipe at one of those names stops the daemon on its first
+# round rather than on a request nobody makes.
+#
+# Measured 2026-10-11 (`cyc20261011-173122`) on master `60541e39`: each call below **did
+# not return** under a FIFO, while its pipe-free control ran. The controls are not
+# decoration. For a reader whose contract already answers an unreadable file with a skip, a
+# **directory** produces the same answer a pipe does (its `IsADirectoryError` is swallowed
+# by the same handler), so the arms that discriminate are the ones that read the **log line
+# naming the kind** — that string exists only when the kind was asked. The writers are the
+# exception: their refusal is an `OSError` whose message carries the kind through the
+# `except OSError` the site already keeps, so there the message itself discriminates.
+
+
+@_needs_mkfifo
+def test_a_named_pipe_evolution_log_does_not_stop_the_count(tmp_path, monkeypatch):
+    """`_evolution_count` walks `evolution-*.json`: the walk counts names, not kinds."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    os.mkfifo(logs / "evolution-20260101-000000.json")
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+
+    assert _within(5.0, server._evolution_count) == 0
+
+
+def test_a_directory_evolution_log_is_skipped_by_kind_in_the_count(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half: the skip is observable only through the line naming the kind.
+
+    A directory is not a record either, and an unguarded read of one is swallowed by the
+    same `except (json.JSONDecodeError, OSError)` — so the count alone cannot tell the two
+    trees apart, and the log line is what does.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "evolution-20260101-000000.json").mkdir()
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+
+    with caplog.at_level(logging.DEBUG):
+        assert server._evolution_count() == 0
+
+    assert "not opened" in caplog.text, (
+        "the guard names the kind before skipping — an unguarded read reports "
+        f"nothing at all here: {caplog.text}")
+
+
+@_needs_mkfifo
+def test_a_named_pipe_evolution_log_does_not_stop_the_summary(tmp_path, monkeypatch):
+    """The same files, read by the `evolution_summary` frame: answered, not blocked."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    os.mkfifo(logs / "evolution-20260101-000000.json")
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+
+    frames = _within(
+        5.0,
+        lambda: _drive(server, {"type": "evolution_summary", "limit": 5}),
+    )
+
+    assert len(frames) == 1 and frames[0]["type"] == "evolution_summary", frames
+    assert frames[0]["recent"] == [] and frames[0]["count"] == 0, frames
+
+
+def test_a_directory_evolution_log_is_skipped_by_kind_in_the_summary(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half, read through the log."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "evolution-20260101-000000.json").mkdir()
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+
+    with caplog.at_level(logging.DEBUG):
+        frames = _drive(server, {"type": "evolution_summary", "limit": 5})
+
+    assert frames[0]["recent"] == [], frames
+    assert "not opened" in caplog.text, caplog.text
+
+
+@_needs_mkfifo
+def test_a_named_pipe_planted_fire_marker_does_not_stop_the_stale_check(
+        tmp_path, monkeypatch):
+    """`_check_planted_fire_stale` enters on `.exists()` — true for a pipe — then reads it."""
+    marker = tmp_path / "planted-fire-heartbeat"
+    os.mkfifo(marker)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
+    server = _make_server()
+
+    assert _within(5.0, server._check_planted_fire_stale) is False
+
+
+def test_a_directory_planted_fire_marker_is_refused_by_kind_neither_alarming_nor_raising(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half: no age, so no alarm — and the skip names the kind.
+
+    A marker that cannot be read is not evidence of staleness (the site's own contract for
+    a missing or unparsable one), so the guard must answer like those — while an unguarded
+    read swallows the directory error silently, which is why the log line discriminates.
+    """
+    marker = tmp_path / "planted-fire-heartbeat"
+    marker.mkdir()
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
+    server = _make_server()
+
+    with caplog.at_level(logging.DEBUG):
+        assert server._check_planted_fire_stale() is False
+
+    assert "planted-fire marker" in caplog.text and "not opened" in caplog.text, caplog.text
+
+
+@_needs_mkfifo
+def test_a_named_pipe_planted_fire_marker_is_not_written(tmp_path, monkeypatch):
+    """The round path: a write is an open, and this one runs on every round."""
+    import stat
+
+    marker = tmp_path / "planted-fire-heartbeat"
+    os.mkfifo(marker)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    server = _make_server()
+
+    _within(5.0, server._touch_planted_fire_marker)
+
+    assert stat.S_ISFIFO(os.stat(marker).st_mode), (
+        "the marker was written to the pipe instead of being refused")
+
+
+def test_a_directory_planted_fire_marker_is_refused_by_kind_on_write(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half: the refusal is the one the site's `except OSError` already logs."""
+    marker = tmp_path / "planted-fire-heartbeat"
+    marker.mkdir()
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    server = _make_server()
+
+    with caplog.at_level(logging.DEBUG):
+        server._touch_planted_fire_marker()
+
+    assert marker.is_dir()
+    assert "not a regular file" in caplog.text, (
+        f"the refusal names the kind; a bare directory errno would not: {caplog.text}")
+
+
+@_needs_mkfifo
+def test_a_named_pipe_round_complete_marker_is_not_written(tmp_path, monkeypatch):
+    """The same for the completed-round stamp, which a finalized round writes."""
+    import stat
+
+    complete = tmp_path / "planted-fire-round-complete"
+    os.mkfifo(complete)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", complete)
+    server = _make_server()
+
+    _within(5.0, server._touch_planted_fire_round_complete)
+
+    assert stat.S_ISFIFO(os.stat(complete).st_mode), (
+        "the round-complete stamp was written to the pipe")
+
+
+def test_a_directory_round_complete_marker_is_refused_by_kind_on_write(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half."""
+    complete = tmp_path / "planted-fire-round-complete"
+    complete.mkdir()
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", complete)
+    server = _make_server()
+
+    with caplog.at_level(logging.DEBUG):
+        server._touch_planted_fire_round_complete()
+
+    assert complete.is_dir()
+    assert "not a regular file" in caplog.text, caplog.text
+
+
+@_needs_mkfifo
+def test_a_named_pipe_usage_anchor_stats_does_not_stop_the_drill_count(
+        tmp_path, monkeypatch):
+    """`_count_drill_drift_events` counts the drill's own events in the stats file."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    os.mkfifo(stats)
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    server = _make_server()
+
+    assert _within(5.0, server._count_drill_drift_events) == 0
+
+
+def test_a_directory_usage_anchor_stats_is_refused_by_kind_in_the_drill_count(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half: 0 either way, so the log line is the discriminator."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    stats.mkdir()
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    server = _make_server()
+
+    with caplog.at_level(logging.DEBUG):
+        assert server._count_drill_drift_events() == 0
+
+    assert "usage-anchor stats" in caplog.text and "not opened" in caplog.text, caplog.text
+
+
+@_needs_mkfifo
+def test_a_named_pipe_usage_anchor_stats_is_refused_before_either_open(tmp_path):
+    """The append opens its subject **twice** — the count, then the append.
+
+    Refusing inside the first open's `except` would leave the second to block on the same
+    pipe, so the refusal sits before both. The callers already answer an `OSError` from
+    this function, which is why refusing costs no branch anywhere.
+    """
+    stats = tmp_path / "usage-anchor.jsonl"
+    os.mkfifo(stats)
+    raised: dict[str, BaseException] = {}
+
+    def call() -> None:
+        try:
+            daemon_mod._append_usage_anchor_event({"type": "probe"}, path=stats)
+        except OSError as exc:  # carried out, never swallowed by this arm
+            raised["exc"] = exc
+
+    _within(5.0, call)
+
+    assert isinstance(raised.get("exc"), OSError), (
+        "the append must refuse a subject it cannot open, not block on it")
+    assert "not a regular file" in str(raised["exc"]), raised
+
+
+def test_a_directory_usage_anchor_stats_is_refused_by_kind_before_either_open(tmp_path):
+    """The pipe-free half: the refusal names the kind, and a directory measures it.
+
+    On this subject an unguarded append answers with the bare errno from the *append*
+    (`[Errno 21] Is a directory: …`) rather than a named refusal, so the message is what
+    tells the two trees apart — and this arm runs on the Windows leg too.
+    """
+    stats = tmp_path / "usage-anchor.jsonl"
+    stats.mkdir()
+
+    with pytest.raises(OSError) as excinfo:
+        daemon_mod._append_usage_anchor_event({"type": "probe"}, path=stats)
+
+    assert "not a regular file" in str(excinfo.value), (
+        f"the refusal names the kind: {excinfo.value}")
