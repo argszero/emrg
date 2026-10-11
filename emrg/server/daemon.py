@@ -6421,10 +6421,28 @@ class EmrgServer:
         # `<cwd>/.emrg/sessions/s1/meta.json` left `_handle_resume_session` **not
         # returned**, while the same fixture holding a regular file answered at once.
         #
-        # The kind one over sets the standard: a *directory* at this path answers this
-        # handler with the not-found frame, because `IsADirectoryError` is an `OSError`
-        # the read already catches and the ghost-session branch then fires. A FIFO must
-        # not answer differently — by not answering at all.
+        # The kind one over is a **second site, not a standard already met**, and which
+        # one it is depends on the ghost branch below. A *directory* here raises
+        # `IsADirectoryError` from the read, which the `except (OSError, …)` swallows to
+        # `meta = {}` — so the answer is decided by what follows: with `message_count`
+        # at 0 the ghost check runs, and only when it fires (`canonical is None`, or a
+        # cwd that does not match the index) does the not-found frame answer. In the
+        # **normal** resume — the session is in the global index at exactly this cwd,
+        # which `Session._save_meta_with_title` guarantees for every session it creates
+        # — `canonical == cwd`, the branch is skipped, and control reaches
+        # `Session.load`, which opens this same path a second time with no handler at
+        # all and raises out of this method, past the dispatcher's `await
+        # self._handle_resume_session(…)` and into the message loop.
+        # Measured 2026-10-11 (`cyc20261011-085014`) on master `0b5f502f`, driving this
+        # handler: with a directory at `<cwd>/.emrg/sessions/s_dir_meta/meta.json` and
+        # the session indexed at that same cwd, `_process_message` raised
+        # `IsADirectoryError`; and one host's reading of the other arm is not the
+        # general case — the frame that answered there came from the ghost branch
+        # firing, which a macOS `tmp_path` (`/var/…` storing `/private/var/…`, or the
+        # reverse) causes by **spelling** alone.
+        #
+        # So the FIFO is not the only kind this check keeps answering: a directory is
+        # the second, and it is the one this method would otherwise leave to raise.
         #
         # Answered here rather than falling through to `meta = {}`: `Session.load` below
         # opens this same file again, so a meta that cannot be opened is not a session

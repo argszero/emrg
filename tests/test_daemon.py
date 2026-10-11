@@ -4569,8 +4569,12 @@ def test_a_resume_at_a_fifo_meta_answers_instead_of_waiting(tmp_path):
     Measured 2026-10-11 (`cyc20261011-074557`) on master `2fd13339`, driving this
     handler with nothing stubbed, one child process per arm under the parent's 8 s cap:
     a `mkfifo` at `<cwd>/.emrg/sessions/s1/meta.json` left `_handle_resume_session`
-    **not returned**, where a regular file there answered at once — and a *directory*
-    there answered the not-found frame, which is the standard this row has to meet.
+    **not returned**, where a regular file there answered at once.
+
+    The *directory* arm is **not** the standard this row meets, which an earlier draft
+    of this docstring claimed: its answer depends on the ghost-session branch firing,
+    and see `test_a_resume_at_a_directory_meta_answers_instead_of_raising` for the arm
+    where it does not and the method raises today.
 
     The path is inside the *workspace*, so a pipe in it is the agent's own doing, and
     the handler runs on the daemon's event loop: the block is every client.
@@ -4627,3 +4631,46 @@ def test_a_resume_at_a_session_that_is_not_there_still_says_not_found(tmp_path):
 
     assert len(frames) == 1, f"expected one frame, got {frames!r}"
     assert frames[0]["error"] == "Session s_absent not found", frames[0]
+
+
+def test_a_resume_at_a_directory_meta_answers_instead_of_raising(tmp_path):
+    """The second site this check keeps answering — measured, not inferred.
+
+    `IsADirectoryError` is an `OSError`, so the handler's first read swallows it to
+    `meta = {}` — and that is the whole of what the old comment said. What happens next
+    is decided by the ghost branch: `message_count` is 0, so the canonical-cwd lookup
+    runs, and only when it **fires** does a frame answer. In the normal resume it does
+    not fire, because `Session._save_meta_with_title` puts every session it creates into
+    the global index with its own cwd — so control reaches `Session.load`, which opens
+    this same path again with no handler at all and raises out of the method.
+
+    Measured 2026-10-11 (`cyc20261011-085014`) on master `0b5f502f`, driving this handler
+    with a directory at `meta.json` and the session indexed at that same cwd:
+    `_process_message` raised `IsADirectoryError` out of the dispatcher's `await
+    self._handle_resume_session(…)`.
+    The fixture resolves `tmp_path` on purpose — a macOS `/var/…` spelling against
+    `/private/var/…` in the index makes the ghost check fire for a reason that has
+    nothing to do with the path's kind, and that spelling-dependent frame is what an
+    earlier reading of this arm mistook for the general case.
+    """
+    server = _make_server()
+    cwd = tmp_path.resolve()
+    session = Session.create_with_id("s_dir_meta", cwd)
+    session._meta_path.unlink()
+    session._meta_path.mkdir()
+
+    # The precondition is asserted rather than assumed, because it is what makes this
+    # the arm that reaches `Session.load`: without it the ghost branch could answer and
+    # this test would pass for a reason of its own.
+    assert server._canonical_session_cwd("s_dir_meta") == str(cwd), (
+        "the ghost branch would fire, so this arm is not the one being measured")
+
+    frames = _drive(server, {
+        "type": "resume_session", "session_id": "s_dir_meta", "cwd": str(cwd),
+    })
+
+    assert len(frames) == 1, f"expected one frame, got {frames!r}"
+    assert frames[0]["type"] == "resume_result", frames[0]
+    assert "error" in frames[0], frames[0]
+    assert "a directory" in frames[0]["error"], frames[0]["error"]
+    assert "not a regular file" in frames[0]["error"], frames[0]["error"]
