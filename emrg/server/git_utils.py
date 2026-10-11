@@ -14,6 +14,11 @@ from emrg._win import win32_no_window_kwargs
 from emrg.config import config_dir
 from emrg.server.atomic import atomic_write_bytes
 
+# The "is this path a regular file" rule is the tool layer's, reached at a path — the same
+# import `emrg/config.py`, `emrg/session.py` and `emrg/memory.py` make at their own readers,
+# because the boundary is one fact and a second spelling of it is a second boundary.
+from emrg.tools.base import non_regular_kind
+
 INSTALL_BIN = Path.home() / ".emrg" / "install" / "bin"
 INSTALL_INFO = config_dir() / "install-info.json"
 
@@ -171,9 +176,38 @@ def _detect_git_remote(cwd: str) -> str:
     return ""
 
 
+def _non_regular_kind(path: Path) -> str | None:
+    """Name ``path``'s kind when opening it would never return — ``None`` for a regular file.
+
+    **An open is not a read**: on a FIFO it waits for the other end and raises nothing, so the
+    ``except OSError`` every caller here already has could not fire and ``resolve_git_gh()`` —
+    which every ``git_cmd`` goes through — would stop instead of degrading. Measured
+    2026-10-11 (``cyc20261011-234936``) on master ``17d3dadc``, one child per arm under the
+    parent's cap: a FIFO at ``install-info.json`` left ``_cached_tool_path`` **not returned**.
+
+    A missing path answers ``None`` rather than raising, because absence is this module's
+    normal case — the cache is created by its first write, so a reader that refused an absent
+    subject would refuse every first run. ``non_regular_kind`` *stats*, so absence arrives as
+    an ``OSError``; it is answered here, never propagated. Same wrapper, same reason, as the
+    daemon's own ``_non_regular_kind``.
+    """
+    try:
+        return non_regular_kind(path)
+    except OSError:
+        return None
+
+
 def _cached_tool_path(tool: str) -> str | None:
     """Return a cached tool path from install-info.json, if present."""
     try:
+        kind = _non_regular_kind(INSTALL_INFO)
+        if kind is not None:
+            logger.warning(
+                "install-info cache: %s is %s, not a regular file — not read; the resolved "
+                "tool paths fall back to the install dir and PATH",
+                INSTALL_INFO, kind,
+            )
+            return None
         data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
         value = data.get(f"{tool}_path")
         return str(value) if value else None
@@ -194,7 +228,22 @@ def _cache_tool_paths(git: str, gh: str) -> None:
     concurrent writer) degrades to an empty dict instead of raising
     JSONDecodeError (observed as a flaky test_daemon failure when the
     live daemon rewrote install-info.json mid-suite).
+
+    Both paths this function opens ask their kind first (issue #2115), because **a write is
+    an open too**: ``tmp.write_text`` waits for a reader when ``tmp`` is a FIFO, and the
+    subject's own read waits for a writer — neither raises, so the ``except OSError`` below
+    cannot bound either. Skipped rather than raised, which is this function's own contract:
+    it is a cache nobody depends on within a process (``resolve_git_gh`` returns the paths it
+    just resolved), so a cache file that cannot be written leaves the reading correct.
     """
+    for subject in (INSTALL_INFO, INSTALL_INFO.with_name(INSTALL_INFO.name + ".tmp")):
+        kind = _non_regular_kind(subject)
+        if kind is not None:
+            logger.warning(
+                "install-info cache: %s is %s, not a regular file — not written this time",
+                subject, kind,
+            )
+            return
     try:
         data = {}
         if INSTALL_INFO.exists():

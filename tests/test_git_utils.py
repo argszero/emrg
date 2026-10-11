@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 from unittest.mock import MagicMock
 
+import pytest
+
 from emrg.server.git_utils import _detect_git_remote
+from tests.bounded_read import DEADLINE_SECONDS, within
+
+#: Windows has no `mkfifo`, so the arms whose subject is a pipe are skipped there; every
+#: control is pipe-free on purpose, so each one still runs on both legs.
+_needs_mkfifo = pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
 
 
 # ── URL parsing (mocked subprocess) ──────────────────────────────
@@ -153,6 +163,170 @@ def test_cache_tool_paths_atomic_write_no_temp_leftover(tmp_path, monkeypatch):
     data = _json.loads(info.read_text(encoding="utf-8"))
     assert data["git_path"] == "/usr/bin/git"
     assert data["custom"] == "old"
+
+
+# ── the install-info cache asks the kind before it opens (issue #2115) ────────────────
+#
+# `_cached_tool_path` re-reads `~/.emrg/install-info.json` on **every** `resolve_git_gh()`,
+# which every one of this module's `git_cmd` call sites goes through — so a pipe at that
+# path stops the daemon's git handlers, not one of them. `_cache_tool_paths` is the writer
+# beside it: its guard was `INSTALL_INFO.exists()` (true for a pipe) and its write is an
+# **open for writing**, which waits for a reader just as a read waits for a writer.
+#
+# Measured 2026-10-11 (`cyc20261011-234936`) on master `17d3dadc`, one child per arm under
+# the parent's cap: a `mkfifo` at the cache left `_cached_tool_path` **not returned**, and
+# `_cache_tool_paths` likewise. Both answers here are this module's **own** fallbacks — a
+# cache that cannot be read falls back to the install dir and PATH, and a cache that cannot
+# be written is skipped — so no `except OSError` is added anywhere; the arms read the
+# subject's survival and the log line that names the kind.
+
+
+@_needs_mkfifo
+def test_a_named_pipe_cache_is_not_opened_for_a_read(tmp_path, monkeypatch):
+    """Bounded: `read_text` on a pipe never returns, so an unguarded read has no red."""
+    from emrg.server import git_utils as mod
+
+    info = tmp_path / "install-info.json"
+    os.mkfifo(info)
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    assert within(DEADLINE_SECONDS, lambda: mod._cached_tool_path("git")) is None
+
+
+def test_a_directory_cache_is_answered_with_none_and_names_the_kind(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half, run on every platform: the answer alone cannot discriminate.
+
+    A directory produces `None` from the unguarded tree too — its `IsADirectoryError` is
+    swallowed by the `except OSError` the reader already keeps — so the kind is read out of
+    the log line, which exists only when the kind was asked.
+    """
+    import logging
+
+    from emrg.server import git_utils as mod
+
+    info = tmp_path / "install-info.json"
+    info.mkdir()
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    with caplog.at_level(logging.WARNING):
+        assert mod._cached_tool_path("git") is None
+
+    assert "not a regular file" in caplog.text, caplog.text
+    assert "a directory" in caplog.text, caplog.text
+
+
+def test_a_regular_cache_is_still_read(tmp_path, monkeypatch):
+    """The control: with the kind untouched the cached path comes back as before."""
+    import json as _json
+
+    from emrg.server import git_utils as mod
+
+    info = tmp_path / "install-info.json"
+    info.write_text(_json.dumps({"git_path": "/usr/bin/git"}), encoding="utf-8")
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    assert mod._cached_tool_path("git") == "/usr/bin/git"
+
+
+def test_a_missing_cache_is_still_an_absent_cache(tmp_path, monkeypatch):
+    """The other contract the kind check must not narrow: no file, no refusal, no raise."""
+    from emrg.server import git_utils as mod
+
+    monkeypatch.setattr(mod, "INSTALL_INFO", tmp_path / "install-info.json")
+
+    assert mod._cached_tool_path("git") is None
+
+
+@_needs_mkfifo
+def test_a_named_pipe_cache_is_not_opened_for_a_write(tmp_path, monkeypatch):
+    """Bounded, and the pipe survives: the early return happens before either open."""
+    from emrg.server import git_utils as mod
+
+    info = tmp_path / "install-info.json"
+    os.mkfifo(info)
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    within(DEADLINE_SECONDS, lambda: mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh"))
+
+    assert stat.S_ISFIFO(os.stat(info).st_mode), "the pipe was replaced, not skipped"
+    assert not (tmp_path / "install-info.json.tmp").exists()
+
+
+def test_a_directory_cache_is_not_written_and_names_the_kind(tmp_path, monkeypatch, caplog):
+    """The pipe-free half for the **write** site, and the one the Windows leg runs.
+
+    This site's only pipe-free arm before this one (`test_a_missing_cache_is_still_created`)
+    exercises the guard's *absent* branch — the writer's normal case — so on a leg without
+    `mkfifo` the guard here was removable without a red test. A directory discriminates, and
+    it discriminates by two readings at once, measured in both directions 2026-10-12
+    (`cyc20261012-022400`) with `HOME` pinned to a temporary root and a directory planted at
+    `install-info.json`:
+
+    * **unguarded** (master `f4fe92c3`): `_cache_tool_paths` still *returns* — `os.replace`
+      onto a directory fails and the bare `except OSError` swallows it — but it leaves the
+      temp file behind, so the exit is a **leftover `install-info.json.tmp`**;
+    * **guarded**: no temp file is created at all, and the reason is logged.
+
+    So the exit code cannot tell the two trees apart and the two facts below are what does.
+    Same shape as the read site's `test_a_directory_cache_is_answered_with_none_and_names_the_kind`.
+    """
+    import logging
+
+    from emrg.server import git_utils as mod
+
+    info = tmp_path / "install-info.json"
+    info.mkdir()
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    with caplog.at_level(logging.WARNING):
+        mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh")
+
+    assert "a directory" in caplog.text, caplog.text
+    assert "not a regular file" in caplog.text, caplog.text
+    assert not (tmp_path / "install-info.json.tmp").exists(), (
+        "the write was attempted into a subject it could not replace — the temp file is the "
+        "residue an unguarded writer leaves, and this arm's discriminator on both legs")
+    assert info.is_dir(), "the subject was replaced rather than skipped"
+
+
+@_needs_mkfifo
+def test_a_named_pipe_at_the_temp_path_does_not_block_the_write(tmp_path, monkeypatch):
+    """The `to` half of the write: `tmp.write_text` waits for a reader on a pipe.
+
+    Distinct from the arm above — here the *cache itself* is a regular file, so only the
+    `install-info.json.tmp` subject can block, and its survival is what proves the guard
+    reached it before the write did.
+    """
+    import json as _json
+
+    from emrg.server import git_utils as mod
+
+    info = tmp_path / "install-info.json"
+    info.write_text(_json.dumps({"custom": "old"}), encoding="utf-8")
+    tmp = tmp_path / "install-info.json.tmp"
+    os.mkfifo(tmp)
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    within(DEADLINE_SECONDS, lambda: mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh"))
+
+    assert stat.S_ISFIFO(os.stat(tmp).st_mode), "the pipe was replaced, not skipped"
+    assert _json.loads(info.read_text(encoding="utf-8")) == {"custom": "old"}, (
+        "the write was skipped whole — the subject must not be half-updated")
+
+
+def test_a_missing_cache_is_still_created(tmp_path, monkeypatch):
+    """Absence is the writer's normal case: it must still create the file from nothing."""
+    import json as _json
+
+    from emrg.server import git_utils as mod
+
+    info = tmp_path / "install-info.json"
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh")
+
+    assert _json.loads(info.read_text(encoding="utf-8"))["git_path"] == "/usr/bin/git"
 
 
 # ── no_prompt_env / parse_gh_auth_user (rant 2026-08-07T10:17:27) ──

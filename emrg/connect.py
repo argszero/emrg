@@ -30,6 +30,11 @@ from websockets.exceptions import ConnectionClosed
 
 from emrg.config import config_dir
 
+# The "is this path a regular file" rule is the tool layer's, reached at a path — the same
+# import `emrg/config.py`, `emrg/session.py` and `emrg/memory.py` make at their own readers,
+# because the boundary is one fact and a second spelling of it is a second boundary.
+from emrg.tools.base import non_regular_kind
+
 logger = logging.getLogger(__name__)
 
 # ── Connection identifier ───────────────────────────────────────
@@ -74,6 +79,21 @@ async def connect_to_server():
         ConnectionRefusedError / OSError / FileNotFoundError: daemon not running.
     """
     port_path = Path(get_server_path())
+    # The subject's kind is asked before it is opened, because the open decides whether this
+    # call returns at all: `read_text` on a FIFO waits for a writer and raises nothing, so the
+    # `FileNotFoundError` this docstring promises for "daemon not running" could never fire and
+    # this coroutine — reached by every Python client **and** by the scheduler's own
+    # `connect_to_server` (`emrg/server/scheduler.py`, which is how a scheduled task reaches the
+    # daemon) — would stop there instead. `non_regular_kind` *stats*, so a token that is not
+    # there still arrives as the `FileNotFoundError` callers already answer; only a subject that
+    # cannot be read to an end gets a new answer, and it is the `OSError` those callers catch.
+    kind = non_regular_kind(port_path)
+    if kind is not None:
+        raise OSError(
+            f"the daemon auth token at {port_path} is {kind}, not a regular file — opening "
+            f"it blocks until a peer appears, so no client can authenticate and no scheduled "
+            f"task can reach the daemon until the path is a file again."
+        )
     token = port_path.read_text(encoding="utf-8").strip()
     # proxy=None: loopback connections must never go through a system proxy.
     # websockets 17 defaults proxy=True and reads the OS proxy settings — when a

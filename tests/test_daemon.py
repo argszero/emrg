@@ -5241,3 +5241,69 @@ def test_a_directory_usage_anchor_stats_is_refused_by_kind_before_either_open(tm
 
     assert "not a regular file" in str(excinfo.value), (
         f"the refusal names the kind: {excinfo.value}")
+
+
+# ── the daemon's own exit record (issue #2115) ───────────────────────────────────────
+#
+# `_write_exit_record` was the site the `~/.emrg/logs` sweep of #2108 missed: that fix guarded
+# the log-file loop, the run markers and `usage-anchor.jsonl`, and this is a **separate
+# writer** at the same level (the module constant `_EXIT_RECORD_PATH`, opened `"a"`). What
+# makes it worth a guard of its own is where it runs: it is the **last** thing a stopping
+# daemon does, so an open that waits for a reader there means the daemon hangs instead of
+# recording why it stopped — and `except OSError` around an open on a FIFO cannot fire.
+#
+# Measured 2026-10-11 (`cyc20261011-234936`) on master `17d3dadc`, one child per arm under the
+# parent's cap: a `mkfifo` at the exit-record path left `_write_exit_record` **not returned**.
+# The answer chosen here is this function's own — "not written this time", with a warning —
+# because the record is best-effort by construction (the `except OSError` below already
+# swallows every failure), so the guard adds one branch and no new contract.
+#
+# The kind is what discriminates, so the pipe-free arm reads it out of the log line: on a
+# directory the unguarded tree writes the bare errno (`[Errno 21] Is a directory: …`) into a
+# warning too, and only the guard's sentence names the kind. That arm runs on both legs.
+
+
+@_needs_mkfifo
+def test_a_named_pipe_exit_record_is_not_opened(tmp_path, monkeypatch):
+    """Bounded: an unguarded `open(<fifo>, "a")` waits for a reader and never returns."""
+    import stat
+
+    from emrg.server.daemon import _write_exit_record
+
+    target = tmp_path / "emrgd-exit.log"
+    os.mkfifo(target)
+    monkeypatch.setattr("emrg.server.daemon._EXIT_RECORD_PATH", target)
+
+    _within(5.0, lambda: _write_exit_record("crash", 1, None))
+
+    assert stat.S_ISFIFO(os.stat(target).st_mode), "the pipe was replaced, not skipped"
+
+
+def test_a_directory_exit_record_is_refused_by_kind_in_the_log(
+        tmp_path, monkeypatch, caplog):
+    """The pipe-free half, and it runs on Windows: the warning names the kind."""
+    import logging
+
+    from emrg.server.daemon import _write_exit_record
+
+    target = tmp_path / "emrgd-exit.log"
+    target.mkdir()
+    monkeypatch.setattr("emrg.server.daemon._EXIT_RECORD_PATH", target)
+
+    with caplog.at_level(logging.WARNING):
+        _write_exit_record("crash", 1, None)
+
+    assert "not a regular file" in caplog.text, caplog.text
+    assert "a directory" in caplog.text, caplog.text
+
+
+def test_a_missing_exit_record_is_still_created(tmp_path, monkeypatch):
+    """Absence is this writer's normal case: the record must still be appended from nothing."""
+    from emrg.server.daemon import _write_exit_record
+
+    target = tmp_path / "emrgd-exit.log"
+    monkeypatch.setattr("emrg.server.daemon._EXIT_RECORD_PATH", target)
+
+    _write_exit_record("normal", 0, None)
+
+    assert json.loads(target.read_text(encoding="utf-8").splitlines()[0])["reason"] == "normal"
