@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { useI18n, setLocale, type Locale } from "../lib/i18n";
 import { dialogReducer, initialDialogState } from "../lib/dialog";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { GithubDeviceDialog } from "./GithubDeviceDialog";
 
 /**
  * SettingsPanel — Batch 5 slice 6：设置面板接线（vanilla dialogs.js showSettings/
@@ -47,13 +48,26 @@ interface GetSettingsResult {
   lang?: string;
 }
 
+interface DeviceFlow {
+  open: boolean;
+  code: string | null;
+  url: string | null;
+  waiting: boolean;
+  error: string | null;
+}
+
+/** device flow 轮询间隔（daemon 侧 gh 进程 300s 超时会自行退出） */
+export const DEVICE_POLL_MS = 2000;
+
 /** SettingsPanel 用到的 preload 桥方法（与 preload.js 通道对齐） */
 interface EmrgBridge {
   getSettings(): Promise<GetSettingsResult>;
   saveSettings(cfg: unknown): Promise<unknown>;
   githubStatus(): Promise<{ authenticated?: boolean; user?: string | null }>;
   githubConnect(p: { token: string }): Promise<{ ok?: boolean; user?: string; error?: string }>;
+  githubConnectWeb(): Promise<{ ok?: boolean; code?: string | null; url?: string | null; user?: string | null; error?: string | null }>;
   githubDisconnect(): Promise<unknown>;
+  openExternal(p: { url: string }): Promise<unknown>;
   taskTemplateList(): Promise<TemplateRec[]>;
   taskTemplateCreate(p: { name: string; prompt: string }): Promise<unknown>;
   taskTemplateUpdate(p: { name: string; prompt: string }): Promise<unknown>;
@@ -85,6 +99,7 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
   const [theme, setTheme] = useState<string>("system");
   const [github, setGithub] = useState<{ authenticated: boolean; user: string | null } | null>(null);
   const [githubToken, setGithubToken] = useState("");
+  const [device, setDevice] = useState<DeviceFlow | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   // model 行内表单态（vanilla openModelForm/saveModelForm）
@@ -296,6 +311,65 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     } finally {
       setBusy(false);
     }
+  }
+
+  /** PAT-free login: the daemon starts `gh auth login --web` and hands back the one-time code
+   *  and URL; the dialog below shows them. Issue #2113 — the whole chain existed, including
+   *  this dialog component, and no module rendered it, so the only way in was a pasted token. */
+  async function startDeviceLogin() {
+    const b = bridge();
+    if (!b?.githubConnectWeb) return;
+    setBusy(true);
+    try {
+      const res = await b.githubConnectWeb();
+      if (res.ok && res.code && res.url) {
+        setDevice({ open: true, code: res.code, url: res.url, waiting: true, error: null });
+      } else if (res.ok && res.user) {
+        // daemon short-circuits when already authenticated
+        setGithub({ authenticated: true, user: res.user });
+        setMsg({ kind: "ok", text: t("settings.githubConnected", { user: res.user }) });
+      } else {
+        setMsg({ kind: "err", text: t("settings.githubConnectFailed", { msg: res.error || t("app.unknownError") }) });
+      }
+    } catch (e: unknown) {
+      setMsg({ kind: "err", text: t("settings.githubConnectFailed", { msg: (e as Error).message }) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // While the dialog waits, poll github_status — the daemon never pushes a device-flow result.
+  useEffect(() => {
+    if (!device?.open || !device.waiting) return;
+    const b = bridge();
+    if (!b?.githubStatus) return;
+    const timer = setInterval(() => {
+      void b
+        .githubStatus()
+        .then((s) => {
+          if (!s.authenticated) return;
+          setDevice(null);
+          setGithub({ authenticated: true, user: s.user || null });
+          setMsg({ kind: "ok", text: t("settings.githubConnected", { user: s.user || "" }) });
+        })
+        .catch(() => {
+          /* a failed poll is not a failure of the flow; the next tick asks again */
+        });
+    }, DEVICE_POLL_MS);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [device?.open, device?.waiting]);
+
+  function openDeviceUrl() {
+    const b = bridge();
+    if (!b?.openExternal || !device?.url) return;
+    void b.openExternal({ url: device.url });
+  }
+
+  /** Dismissing only hides the dialog: the daemon's gh process is reclaimed by its own 300 s
+   *  timeout, and no IPC channel exposes `github_connect_web`'s cancel. */
+  function dismissDevice() {
+    setDevice(null);
   }
 
   // ── templates tab（自定义任务类型管理，vanilla dialogs.js 语义） ──
@@ -538,6 +612,17 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
                     ? t("settings.githubConnectedStatus", { user: github.user || "" })
                     : t("settings.githubNotConnected")}
               </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  data-testid="github-device-btn"
+                  disabled={busy}
+                  onClick={startDeviceLogin}
+                >
+                  {t("settings.githubSignIn")}
+                </button>
+              </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <input
                   type="password"
@@ -567,10 +652,10 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
                 </button>
               </div>
               <div className="hint" style={{ marginTop: 6 }}>{t("settings.githubHint")}</div>
+              <div className="hint" style={{ marginTop: 6 }}>{t("settings.githubSignInHint")}</div>
             </div>
           </div>
         )}
-
         {/* ── 外观 ── */}
         {tab === "appearance" && (
           <div className="panel-tab-body" data-settings-body="appearance" data-testid="settings-body-appearance">
@@ -746,6 +831,15 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
         </div>
       </div>
       <ConfirmDialog request={dialogState.confirm} onDismiss={() => dispatch({ type: "close-confirm" })} />
+      <GithubDeviceDialog
+        open={Boolean(device?.open)}
+        code={device?.code ?? null}
+        url={device?.url ?? null}
+        waiting={Boolean(device?.waiting)}
+        error={device?.error ?? null}
+        onOpenBrowser={openDeviceUrl}
+        onDismiss={dismissDevice}
+      />
     </section>
   );
 }

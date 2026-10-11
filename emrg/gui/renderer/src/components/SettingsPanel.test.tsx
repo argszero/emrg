@@ -225,6 +225,89 @@ describe("SettingsPanel", () => {
     );
   });
 
+  /**
+   * Issue #2113 — the device flow (daemon `github_connect_web` → main.js → preload
+   * `githubConnectWeb`) and the dialog component were both complete, and nothing rendered the
+   * dialog, so a pasted PAT was the only path. These two tests live at the seam that was
+   * missing: they drive the panel, not the dialog with injected props, because a fake-injected
+   * component test cannot fail when the wire is cut.
+   */
+  it("starts the GitHub device flow without a token and shows the code", async () => {
+    const githubConnectWeb = vi
+      .fn()
+      .mockResolvedValue({ ok: true, code: "ABCD-1234", url: "https://github.com/login/device" });
+    const openExternal = vi.fn().mockResolvedValue({ ok: true });
+    setup({
+      githubConnectWeb,
+      openExternal,
+      // not authenticated, or the poller below would close the dialog under the assertions
+      githubStatus: vi.fn().mockResolvedValue({ authenticated: false, user: null }),
+    });
+
+    fireEvent.click(screen.getByTestId("settings-tab-github"));
+    fireEvent.click(screen.getByTestId("github-device-btn"));
+
+    await waitFor(() => expect(githubConnectWeb).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByTestId("github-device-code").textContent).toBe("ABCD-1234"),
+    );
+    expect(screen.getByTestId("github-device-wait")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("github-device-open"));
+    await waitFor(() =>
+      expect(openExternal).toHaveBeenCalledWith({ url: "https://github.com/login/device" }),
+    );
+
+    // Dismiss closes it; no token was ever typed.
+    fireEvent.click(screen.getByTestId("github-device-close"));
+    await waitFor(() => expect(screen.queryByTestId("github-device-code")).toBeNull());
+  });
+
+  it("closes the device dialog once github_status reports authenticated", async () => {
+    let authenticated = false;
+    const githubStatus = vi
+      .fn()
+      .mockImplementation(async () => ({
+        authenticated,
+        user: authenticated ? "argszero" : null,
+      }));
+    const githubConnectWeb = vi
+      .fn()
+      .mockResolvedValue({ ok: true, code: "WXYZ-9876", url: "https://github.com/login/device" });
+    setup({ githubStatus, githubConnectWeb });
+
+    fireEvent.click(screen.getByTestId("settings-tab-github"));
+    fireEvent.click(screen.getByTestId("github-device-btn"));
+    await waitFor(() => expect(screen.getByTestId("github-device-code")).toBeTruthy());
+
+    // The daemon never pushes a device-flow result: the panel has to poll.
+    authenticated = true;
+    await waitFor(
+      () => expect(screen.queryByTestId("github-device-code")).toBeNull(),
+      { timeout: 5000 },
+    );
+    expect(screen.getByTestId("github-status").textContent).toContain("argszero");
+  });
+
+  it("short-circuits the device flow when the daemon reports an existing login", async () => {
+    const githubConnectWeb = vi
+      .fn()
+      .mockResolvedValue({ ok: true, user: "argszero", code: null, url: null, error: "already_authenticated" });
+    setup({
+      githubConnectWeb,
+      // unauthenticated on mount, so only the short-circuit can put a user in the status row
+      githubStatus: vi.fn().mockResolvedValue({ authenticated: false, user: null }),
+    });
+
+    fireEvent.click(screen.getByTestId("settings-tab-github"));
+    fireEvent.click(screen.getByTestId("github-device-btn"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("github-status").textContent).toContain("argszero"),
+    );
+    expect(screen.queryByTestId("github-device-code")).toBeNull();
+  });
+
   it("applies theme option to documentElement and persists via saveSettings", async () => {
     const { calls } = setup();
     await screen.findByTestId("settings-tab-appearance");
