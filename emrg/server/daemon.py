@@ -187,7 +187,7 @@ def _redact(value):
     return value
 
 from emrg.tools import ToolRegistry
-from emrg.tools.base import special_file_kind, special_file_refusal
+from emrg.tools.base import non_regular_kind, special_file_refusal
 from emrg.tools.bash_tool_v2 import BashToolV2
 from emrg.tools.pwsh_tool_v2 import PwshToolV2
 from emrg.tools.shell_dialects import (
@@ -386,10 +386,13 @@ def _non_regular_kind(path) -> str | None:
     recovery is a restart, which belongs to the host.
 
     The rule is the tool layer's, stated once there: ``special_file_kind`` is a whitelist
-    (`#2062` taught `read`/`write`/`edit` to ask it). This resolves the one thing that
-    helper needs and a caller has to supply — the path's ``st_mode`` — and answers
-    ``None`` when the ``stat`` itself fails, because that path's unreadability is what
-    the call at hand already reports.
+    (`#2062` taught `read`/`write`/`edit` to ask it, `#2076` the memory store). This
+    reaches the layer's **path-taking** reader, ``non_regular_kind``, rather than
+    restating the ``stat``-then-``special_file_kind`` pair a second time (issue #2081):
+    one spelling of the whitelist, so a change to it reaches these readers too. What is
+    added on top is one line — ``None`` when the ``stat`` itself fails, because that
+    path's unreadability is what the call at hand already reports, and a raise here
+    would escape the ``except OSError`` that wraps only the read which follows.
 
     Measured 2026-10-11 (`cyc20261011-025906`) on master ``63ee3a54``, each call in its
     own process killed by the parent's cap: ``open(<fifo>)`` did not return within 6 s,
@@ -401,10 +404,9 @@ def _non_regular_kind(path) -> str | None:
         or ``None`` when the subject is a regular file or its kind could not be measured.
     """
     try:
-        mode = path.stat().st_mode
+        return non_regular_kind(path)
     except OSError:
         return None
-    return special_file_kind(mode)
 
 
 def _unreadable_index_notice(path, exc: BaseException, *, where: str) -> str:

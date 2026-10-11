@@ -27,6 +27,7 @@ from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.llm import CONTENT_RISK, classify_llm_error
 from emrg.server.scheduler import TaskHandler, TaskScheduler
+from emrg.tools import base as base_mod
 from tests.task_handler_factory import make_handler
 from emrg.session import Session, _validate_tool_messages
 
@@ -4459,6 +4460,49 @@ def test_a_read_tool_image_ref_at_a_named_pipe_is_unavailable_not_a_hang(tmp_pat
     accepted = server._tool_content_for_llm(ref % real)
     assert isinstance(accepted, list), accepted
     assert accepted[1]["image_url"]["url"].startswith("data:image/png;base64,"), accepted
+
+
+# ── the daemon's kind rule is the layer's rule ──────────────────────
+#
+# Every guard above asks through one predicate, `_non_regular_kind`, and issue #2081 is
+# that the predicate used to be a *second spelling* of the whitelist the tool layer
+# states once (`emrg/tools/base.special_file_kind`, reached by path as
+# `non_regular_kind`). Two spellings drift: a change to the layer's predicate would
+# reach the three file tools and the memory store and stop at the daemon, whose readers
+# are the ones that run on the event loop.
+
+
+def test_the_daemons_kind_rule_is_the_layers_rule(tmp_path, monkeypatch):
+    """Armed at the owner, not at the model: the layer's rule is displaced, and the
+    daemon's answer has to follow it.
+
+    Comparing the two functions' outputs on a few fixtures would pass for a copy that
+    happened to agree — which is exactly the shape being closed, so the test drives the
+    rule's **owner** (`emrg.tools.base.special_file_kind`, which `non_regular_kind`
+    reaches through its own module globals) and requires the daemon's predicate to move
+    with it. A second copy of the `stat`-then-name pair would answer from the real
+    predicate and fail here.
+    """
+    regular = tmp_path / "MEMORY.md"
+    regular.write_text("# Memory Index\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        base_mod, "special_file_kind", lambda mode: "a sentinel kind")
+
+    assert daemon_mod._non_regular_kind(regular) == "a sentinel kind", (
+        "the daemon answered from its own copy of the rule rather than from the "
+        "layer's reader")
+
+    # The one thing the wrapper adds on top of the layer's reader — and the reason it is
+    # not a bare re-export: a path whose `stat` itself fails is `None` here, while the
+    # layer raises. Callers such as `_memory_index_compaction_note` ask the kind before
+    # any `exists()` test, and a raise would escape the `except OSError` around the read.
+    missing = tmp_path / "nope.md"
+    assert daemon_mod._non_regular_kind(missing) is None
+    with pytest.raises(OSError):
+        base_mod.non_regular_kind(missing)
+
+
 # ── a memory subject that is not a regular file ────────────────────
 #
 # The sibling of the section above, one layer down: `list_memories` and `read_memory`
