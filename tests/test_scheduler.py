@@ -3957,8 +3957,14 @@ class TestSchedulerReadersAskTheKindBeforeOpening:
         rows = within(DEADLINE_SECONDS, mod.read_table)
         assert [r["name"] for r in rows] == ["probe"], rows
 
-        handler = self._handler(tmp_path, "_task_runs_file", "task-runs/probe.jsonl")
+        # Built without `self._handler` on purpose: that helper's whole job is to plant a
+        # FIFO, and this test's subject is a regular file, so a FIFO here would be made
+        # and thrown away one line later. Making one also needs `os.mkfifo`, which does
+        # not exist on Windows — the control would have been skipped on the one platform
+        # least able to run the subjects above it, which is the opposite of a control.
+        handler = _make_handler(tmp_path, name="probe", project="", path=str(tmp_path))
         handler._task_runs_file = tmp_path / "task-runs" / "regular.jsonl"
+        handler._task_runs_file.parent.mkdir(parents=True, exist_ok=True)
         handler._task_runs_file.write_text(
             json.dumps({"timestamp": "t", "work": "w", "recommend_slowdown": False,
                         "slowdown_reason": "", "tool_count": 0}) + "\n",
