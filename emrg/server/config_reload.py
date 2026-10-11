@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Optional
 
 from emrg.config import EmrgConfig, LlmConfig, UpdateConfig, config_path, load_config
+from emrg.tools.base import non_regular_kind
 
 logger = logging.getLogger("emrg.server")
 
@@ -135,6 +136,15 @@ def fingerprint(path: Path) -> Optional[str]:
     coarse timestamps is a property of the mount, not of the OS.
     """
     try:
+        if non_regular_kind(path):
+            # A FIFO (or a socket, or a device) opens and then waits: `read_bytes` on it
+            # never returns and raises nothing, so the `except OSError` below cannot fire
+            # and this poll would wedge the daemon's loop instead of skipping a tick.
+            # `None` is already this function's answer for a subject it cannot read, and
+            # `poll()` already answers `None` to that by keeping the live config — so the
+            # refusal needs no new outcome, only that it arrives (issue #2103, measured
+            # 2026-10-11 on `3f18f6a6`: a FIFO here did not return within an 8 s cap).
+            return None
         data = path.read_bytes()
     except OSError:
         return None
