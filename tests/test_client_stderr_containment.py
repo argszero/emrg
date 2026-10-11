@@ -353,7 +353,8 @@ def test_a_crash_never_reaches_the_screen(
 # drawn. An open is not a read: on a FIFO it blocks until a reader appears and raises
 # nothing, so the `except OSError` this block keeps cannot bound it, and the client would
 # never reach its own UI. Measured 2026-10-12 (`cyc20261012-000836`) on master `17d3dadc`:
-# `_contain_stderr_for_tui()` **did not return in 10 s** under a `mkfifo`, where the same
+# (issue #2116) `_contain_stderr_for_tui()` **did not return in 10 s** under a `mkfifo`, while the
+# same
 # fixture with a regular file returned in 0.09 s.
 #
 # The pipe-free half is the whole rest of this file: the same call against a real file

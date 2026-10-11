@@ -529,7 +529,8 @@ def test_a_declared_root_that_is_not_there_is_reported(tmp_path):
 # a FIFO it blocks until a reader appears and raises nothing, so the `except OSError` each of
 # them keeps cannot bound it. A directory is the same defect in another shape: it raises
 # `IsADirectoryError` out of `main()`. Measured 2026-10-12 (`cyc20261012-000836`) on master
-# `17d3dadc`: both calls **did not return in 10 s** under a `mkfifo` at their subject, while
+# `17d3dadc` (issue #2116): both calls **did not return in 10 s** under a `mkfifo` at their
+# subject, while
 # the same fixture with a regular file returned in 0.12 s and 0.24 s.
 #
 # The regular-file half of each pair is the behavioural test already in this file
