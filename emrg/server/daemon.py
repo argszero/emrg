@@ -83,6 +83,7 @@ from emrg.memory import (
     INDEX_COUNT_WARN,
     INDEX_SIZE_WARN,
     INDEX_TITLE_MAX_CHARS,
+    NotARegularFile,
     ProjectMemoryStore,
     SessionMemoryStore,
     is_index_row,
@@ -407,6 +408,49 @@ def _non_regular_kind(path) -> str | None:
         return non_regular_kind(path)
     except OSError:
         return None
+
+
+def _refuse_non_regular(path, opened: str = "reader") -> None:
+    """Refuse a subject whose kind would make the open below never return.
+
+    The counterpart of :func:`_non_regular_kind` for the sites that **open**: this module
+    asked the kind at eight places and opened without asking at fifteen more, and the two
+    questions are not the same one. `_non_regular_kind` answers it as data, which suits a
+    caller that wants to skip a file and carry on; here the answer is a refusal, because
+    the call at hand has no branch for "this subject cannot be opened" other than the
+    ``except`` it already has.
+
+    ``kind`` comes from :func:`_non_regular_kind`, so the whitelist stays the tool layer's
+    (`#2081`: one spelling, reached two ways), and the refusal is
+    :class:`emrg.memory.NotARegularFile` — the same class ``#2076``, ``#2085`` and the
+    scheduler (`#2095`) raise. Being an ``OSError`` is the point rather than an
+    implementation detail: every call site routed through here already answers a file it
+    cannot open (a missing one, a corrupt one, an unreadable one) from its own ``except``,
+    so the refusal arrives down the branch that call has always had. The only behaviour
+    that changes is that the answer *arrives*.
+
+    A path that does not exist yet is **not** a refusal: :func:`_non_regular_kind` returns
+    ``None`` when the ``stat`` itself fails, and the open then creates the file exactly as
+    it did before (the markers, the exit record and the usage-anchor stats are all written
+    to paths that may not exist on the first call).
+
+    Fifteen opens in this module had no kind question in front of them (measured on master
+    ``3f18f6a6`` by the census in ``tests/test_daemon.py``, which names each one), and a
+    ``mkfifo`` planted at the subject of any of them left that call **not returned** under
+    a child process's 8 s cap, while the same arm with the file absent answered at once.
+
+    :param path: the subject the caller is about to open.
+    :param opened: what the caller is — ``"reader"`` or ``"writer"``, which is the one
+        part of the sentence the two directions do not share.
+    """
+    kind = _non_regular_kind(path)
+    if kind:
+        raise NotARegularFile(
+            f"{path} is {kind}, not a regular file. This {opened} opens the path "
+            f"directly, and opening it blocks until a peer appears — a FIFO waits for a "
+            f"writer, a socket for a connection — so the call would never return, and "
+            f"neither would the daemon, which runs this open on its event loop."
+        )
 
 
 def _unreadable_index_notice(path, exc: BaseException, *, where: str) -> str:
@@ -1076,6 +1120,7 @@ class EmrgServer:
             project_paths: list[str] = []
             if self._projects_log.exists():
                 try:
+                    _refuse_non_regular(self._projects_log)
                     data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
                     if isinstance(data, list):
                         project_paths = [
@@ -1299,8 +1344,10 @@ class EmrgServer:
         ``_run_version`` and shows the upgrade banner when they differ.
         Returns "" when the file is missing (dev/standalone runs).
         """
+        path = Path.home() / ".emrg" / "install" / "version.txt"
         try:
-            v = (Path.home() / ".emrg" / "install" / "version.txt").read_text(encoding="utf-8").strip()
+            _refuse_non_regular(path)
+            v = path.read_text(encoding="utf-8").strip()
             return v
         except (OSError, ValueError):
             return ""
@@ -1337,6 +1384,7 @@ class EmrgServer:
             logs_dir = config_dir() / "logs"
             for f in logs_dir.glob("evolution-*.json"):
                 try:
+                    _refuse_non_regular(f)
                     data = json.loads(f.read_text(encoding="utf-8"))
                     if data.get("timestamp"):
                         disk += 1
@@ -1896,6 +1944,7 @@ class EmrgServer:
         projects: dict[str, dict] = {}
         if self._projects_log.exists():
             try:
+                _refuse_non_regular(self._projects_log)
                 data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
                 if isinstance(data, list):
                     for entry in data:
@@ -2369,6 +2418,7 @@ class EmrgServer:
         if session:
             try:
                 path = session.dir_path / "system.md"
+                _refuse_non_regular(path, "writer")
                 path.write_text(rendered, encoding="utf-8")
             except OSError:
                 logger.debug("failed to write system.md", exc_info=True)
@@ -3136,6 +3186,7 @@ class EmrgServer:
                 recent = []
                 for f in files:
                     try:
+                        _refuse_non_regular(f)
                         data = json.loads(f.read_text(encoding="utf-8"))
                         recent.append({
                             "timestamp": data.get("timestamp", ""),
@@ -5037,6 +5088,7 @@ class EmrgServer:
         try:
             marker = _PLANTED_FIRE_MARKER_PATH
             marker.parent.mkdir(parents=True, exist_ok=True)
+            _refuse_non_regular(marker, "writer")
             marker.write_text(
                 datetime.now().astimezone().isoformat() + "\n",
                 encoding="utf-8",
@@ -5062,6 +5114,7 @@ class EmrgServer:
         try:
             complete = _PLANTED_FIRE_ROUND_COMPLETE_PATH
             complete.parent.mkdir(parents=True, exist_ok=True)
+            _refuse_non_regular(complete, "writer")
             complete.write_text(
                 datetime.now().astimezone().isoformat() + "\n",
                 encoding="utf-8",
@@ -5093,6 +5146,7 @@ class EmrgServer:
         """
         def _read_age(path) -> float | None:
             try:
+                _refuse_non_regular(path)
                 raw = path.read_text(encoding="utf-8").strip()
                 return (datetime.now().astimezone()
                         - datetime.fromisoformat(raw)).total_seconds() / 86400.0
@@ -5232,6 +5286,7 @@ class EmrgServer:
         measurability contract is broken, surfaced as drill FAIL)."""
         n = 0
         try:
+            _refuse_non_regular(_USAGE_ANCHOR_STATS_PATH)
             with open(_USAGE_ANCHOR_STATS_PATH, "r", encoding="utf-8") as fh:
                 for line in fh:
                     try:
@@ -6007,6 +6062,7 @@ class EmrgServer:
         projects: list[dict] = []
         try:
             if self._projects_log.exists():
+                _refuse_non_regular(self._projects_log)
                 data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
                 if isinstance(data, list):
                     entries = [p for p in data if isinstance(p, dict)]
@@ -6066,6 +6122,7 @@ class EmrgServer:
             })
             return
         try:
+            _refuse_non_regular(self._projects_log)
             data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
         except (yaml.YAMLError, OSError):
             logger.exception("remove_project: failed to read %s", self._projects_log)
@@ -7189,6 +7246,7 @@ def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) 
     line = json.dumps(record, ensure_ascii=False)
     logger.info("daemon exit record: %s", line)
     try:
+        _refuse_non_regular(_EXIT_RECORD_PATH, "writer")
         with open(_EXIT_RECORD_PATH, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError as exc:
@@ -7281,6 +7339,7 @@ def _append_usage_anchor_event(record: dict, path: Path | None = None) -> int:
     path = path or _USAGE_ANCHOR_STATS_PATH
     total = 0
     try:
+        _refuse_non_regular(path)
         with open(path, "r", encoding="utf-8") as fh:
             total = sum(1 for _ in fh)
     except OSError:
@@ -7290,6 +7349,7 @@ def _append_usage_anchor_event(record: dict, path: Path | None = None) -> int:
         record = {**record}
         record.setdefault("timestamp", datetime.now().astimezone().isoformat())
         record["total"] = total + 1
+        _refuse_non_regular(path, "writer")
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:

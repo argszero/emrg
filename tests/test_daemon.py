@@ -7,13 +7,13 @@ evolution infrastructure stays operational.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
 import os
 import re
 import tempfile
-import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -21,7 +21,7 @@ import pytest
 import yaml
 
 from emrg.config import LlmConfig
-from emrg.memory import INDEX_SIZE_WARN, ProjectMemoryStore
+from emrg.memory import INDEX_SIZE_WARN, NotARegularFile, ProjectMemoryStore
 from emrg.protocol import InstanceIdentity, TaskRequest
 from emrg.server import abort_runs as mod_abort_runs
 from emrg.server import daemon as daemon_mod
@@ -29,6 +29,7 @@ from emrg.server.daemon import EmrgServer
 from emrg.server.llm import CONTENT_RISK, classify_llm_error
 from emrg.server.scheduler import TaskHandler, TaskScheduler
 from emrg.tools import base as base_mod
+from tests.bounded_read import DEADLINE_SECONDS, within
 from tests.task_handler_factory import make_handler
 from emrg.session import Session, _validate_tool_messages
 
@@ -4563,47 +4564,12 @@ def test_a_read_memory_through_a_pipe_directory_answers_rather_than_hangs(tmp_pa
 
 # ── the resume handler asks the meta's kind before opening it ───────
 #
-# `threading` is imported at the top of this block's own helper rather than at the
-# module top: it is the only use, and the bound it draws is what turns a regression
-# from a wedged suite into a failed test.
-
-
-def _within(seconds: float, fn):
-    """Return ``fn()``'s result, failing the test if it has not returned in ``seconds``.
-
-    A reader that opens a path without asking its kind cannot be bounded by
-    ``try``/``except``: a FIFO blocks at the **open**, raises nothing, so no handler
-    runs and the call never returns. A test that called such a handler directly would
-    have only two outcomes — it returns, or the whole pytest run wedges — and the second
-    is unreadable as a failure: a CI job that overruns is *cancelled*, which
-    `scripts/check-merge-freshness.py` classifies as `no_verdict`, whose prescribed
-    remedy is to re-trigger the same head, so a hang would be re-triggered forever
-    rather than read as the red it is. Hence the deadline; the exception ``fn`` raised
-    is carried out, because "it raised" and "it never returned" are different readings
-    and the caller decides which it expected.
-
-    The 5 s is headroom by three orders of magnitude (the guarded handler answers in
-    milliseconds), not a performance assertion.
-    """
-    box: dict = {}
-
-    def _run() -> None:
-        try:
-            box["value"] = fn()
-        except BaseException as exc:  # carried out, not swallowed
-            box["error"] = exc
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-    thread.join(seconds)
-    assert not thread.is_alive(), (
-        f"the call did not return within {seconds}s — a path was opened without asking "
-        f"its kind first (a FIFO blocks at the open and raises nothing, so no handler "
-        f"can fire)"
-    )
-    if "error" in box:
-        raise box["error"]
-    return box["value"]
+# The arms below read through `tests.bounded_read.within` — the one bounded-read
+# deadline, shared rather than copied. This module carried its own `_within` until the
+# sweep that guarded the fifteen opens below needed a bound: two implementations of one
+# rule is what issue #2091 was about, and a later fix to one silently leaves the other
+# behind (that is how `tests/test_session.py` came to carry a second copy in the first
+# place). `threading` went with it — the copy was its only use.
 
 
 @_needs_mkfifo
@@ -4628,8 +4594,8 @@ def test_a_resume_at_a_fifo_meta_answers_instead_of_waiting(tmp_path):
     session._meta_path.unlink()
     os.mkfifo(session._meta_path)
 
-    frames = _within(
-        5.0,
+    frames = within(
+        DEADLINE_SECONDS,
         lambda: _drive(server, {
             "type": "resume_session", "session_id": "s_fifo_meta", "cwd": str(tmp_path),
         }),
@@ -4718,3 +4684,455 @@ def test_a_resume_at_a_directory_meta_answers_instead_of_raising(tmp_path):
     assert "error" in frames[0], frames[0]
     assert "a directory" in frames[0]["error"], frames[0]["error"]
     assert "not a regular file" in frames[0]["error"], frames[0]["error"]
+
+
+# ── every open in this module asks its subject's kind first ──────────────
+#
+# The family `#2062 → #2073 → #2076 → #2083 → #2087 → #2093 → #2095 → #2097 → #2099 →
+# #2101` closes one carrier at a time, and each issue closed the sites the *previous*
+# issue named. This module was the largest carrier left: it asked the kind at eight places
+# and opened without asking at fifteen more, and the census that finds them is "every open
+# in `emrg/server/daemon.py`" — which is what `test_every_open_in_the_daemon_asks_its_
+# subject_kind` runs on the source, not on a list of names somebody remembered.
+#
+# Why each arm is a *deadline* and not just a call: an open on a FIFO waits for a peer and
+# raises nothing, so `try`/`except` cannot bound it — the only outcomes are "returns" and
+# "the whole pytest run wedges", and a wedged CI job is cancelled and read as
+# `no_verdict`, whose remedy is to re-trigger the same head. `within` is what makes the
+# regression read as red instead.
+
+_FIFO_SUBJECTS = "these arms need a FIFO, which this platform cannot make"
+
+
+def _mkfifo(path: Path) -> Path:
+    """A FIFO at `path`, its parent created first."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(path)
+    return path
+
+
+_OPEN_METHODS = ("read_text", "write_text", "read_bytes", "write_bytes")
+_KIND_ASKERS = ("_refuse_non_regular", "_non_regular_kind", "non_regular_kind",
+                "special_file_kind")
+
+
+def _open_subject(call: ast.Call) -> str | None:
+    """The subject expression an open-family call reaches, or None when it is not one."""
+    func = call.func
+    if isinstance(func, ast.Attribute) and func.attr in _OPEN_METHODS:
+        return ast.unparse(func.value)
+    if isinstance(func, ast.Name) and func.id == "open" and call.args:
+        return ast.unparse(call.args[0])
+    return None
+
+
+def _unguarded_opens(source_path: str) -> set[tuple[str, str]]:
+    """(function, subject expression) for every open with no kind question about it.
+
+    The subject is read from the call itself rather than from a list of names, and the
+    question must be about **that same expression**: a guard on another path leaves the
+    open at hand exactly as reachable as before. A nested function is a scope of its own,
+    which is how `_check_planted_fire_stale/_read_age` is named.
+    """
+    tree = ast.parse(Path(source_path).read_text(encoding="utf-8"))
+    found: set[tuple[str, str]] = set()
+
+    def collect(
+        node: ast.AST,
+        opens: list[str],
+        asked: set[str],
+        nested: list[ast.AST],
+    ) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                nested.append(child)
+                continue
+            if isinstance(child, ast.Call):
+                subject = _open_subject(child)
+                if subject is not None:
+                    opens.append(subject)
+                callee = child.func
+                callee_name = (
+                    callee.attr if isinstance(callee, ast.Attribute)
+                    else callee.id if isinstance(callee, ast.Name)
+                    else None
+                )
+                if callee_name in _KIND_ASKERS:
+                    # Every spelling of the question counts: `_refuse_non_regular(path)`
+                    # and `_refuse_non_regular(path=path)` ask the same thing, and a census
+                    # that only read positional arguments would call the second one
+                    # unguarded — a false red is cheap, but it is also how a guard gets
+                    # "fixed" by respelling it.
+                    if child.args:
+                        asked.add(ast.unparse(child.args[0]))
+                    for keyword in child.keywords:
+                        asked.add(ast.unparse(keyword.value))
+            collect(child, opens, asked, nested)
+
+    def walk(node: ast.AST, name: str) -> None:
+        opens: list[str] = []
+        asked: set[str] = set()
+        nested: list[ast.AST] = []
+        collect(node, opens, asked, nested)
+        for subject in opens:
+            if subject not in asked:
+                found.add((name, subject))
+        for child in nested:
+            child_name = getattr(child, "name", "?")
+            walk(child, child_name if name == "<module>" else f"{name}/{child_name}")
+
+    walk(tree, "<module>")
+    return found
+
+
+class TestTheDaemonAsksItsSubjectsKind:
+    """A daemon subject that is not a regular file is answered, not opened."""
+
+    # ── the projects log: read at startup, on registration, and by both GUI handlers ──
+
+    @_needs_mkfifo
+    def test_the_startup_index_rebuild_does_not_wedge_on_a_fifo_projects_log(
+        self, tmp_path, monkeypatch
+    ):
+        """`_rebuild_sessions_index` reads projects.yml before it scans anything."""
+        called: list[list[str]] = []
+        monkeypatch.setattr(
+            "emrg.sessions_index.rebuild_sessions_index",
+            lambda config, paths: called.append(list(paths)) or 0,
+        )
+        monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path / "cfg")
+        server = _make_server()
+        server._projects_log = _mkfifo(tmp_path / "projects.yml")
+
+        within(DEADLINE_SECONDS, server._rebuild_sessions_index)
+
+        assert called == [[]], (
+            "the projects log is a FIFO, so it states no projects — and the rebuild must "
+            "reach its own scan with that answer instead of waiting for a writer"
+        )
+
+    def test_the_startup_index_rebuild_still_reads_a_regular_projects_log(
+        self, tmp_path, monkeypatch
+    ):
+        """The control: the refusal must not swallow a log it can read."""
+        called: list[list[str]] = []
+        monkeypatch.setattr(
+            "emrg.sessions_index.rebuild_sessions_index",
+            lambda config, paths: called.append(list(paths)) or 0,
+        )
+        monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path / "cfg")
+        server = _make_server()
+        server._projects_log = tmp_path / "projects.yml"
+        server._projects_log.write_text(
+            yaml.safe_dump([{"name": "p", "path": str(tmp_path)}]), encoding="utf-8"
+        )
+
+        server._rebuild_sessions_index()
+
+        assert called == [[str(tmp_path)]], called
+
+    @_needs_mkfifo
+    def test_registering_a_project_does_not_wedge_on_a_fifo_projects_log(self, tmp_path):
+        """`_touch_project` reads the log to merge its entry, then writes it back.
+
+        The write is `atomic_write_yaml` (`mkstemp` + `os.replace`), which renames over
+        the destination instead of opening it — so the read is the whole of the block
+        here, and the arm proves the call returns rather than that it refuses.
+        """
+        server = _make_server()
+        server._projects_log = _mkfifo(tmp_path / "cfg" / "projects.yml")
+
+        within(DEADLINE_SECONDS, lambda: server._touch_project(str(tmp_path / "proj")))
+
+        assert server._projects_log.is_file(), (
+            "the FIFO is replaced by the log the registration writes — and getting "
+            "there means the read did not wait for a writer"
+        )
+
+    @_needs_mkfifo
+    def test_list_projects_answers_a_fifo_projects_log(self, tmp_path):
+        """The GUI's project list reads the same log on the event loop."""
+        server = _make_server()
+        server._projects_log = _mkfifo(tmp_path / "projects.yml")
+
+        frames = within(
+            DEADLINE_SECONDS, lambda: _drive(server, {"type": "list_projects"})
+        )
+
+        assert len(frames) == 1, frames
+        assert frames[0]["type"] == "projects_list", frames[0]
+        assert frames[0]["projects"] == [], (
+            "a log that cannot be read states no projects — and the frame arrives"
+        )
+
+    @_needs_mkfifo
+    def test_remove_project_reports_a_fifo_projects_log(self, tmp_path):
+        """`_handle_remove_project` has its own read of the same log."""
+        server = _make_server()
+        server._projects_log = _mkfifo(tmp_path / "projects.yml")
+
+        frames = within(
+            DEADLINE_SECONDS,
+            lambda: _drive(server, {"type": "remove_project", "name": "p"}),
+        )
+
+        assert len(frames) == 1, frames
+        assert frames[0]["type"] == "project_removed", frames[0]
+        assert frames[0]["removed"] is False, frames[0]
+        assert frames[0]["error"] == "failed to read projects.yml", frames[0]
+
+    # ── the state files the daemon derives from config_dir() ──
+
+    @_needs_mkfifo
+    def test_the_evolution_count_does_not_wedge_on_a_fifo_log(self, tmp_path, monkeypatch):
+        """`_evolution_count` counts `logs/evolution-*.json` on the event loop."""
+        monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path)
+        logs = tmp_path / "logs"
+        _mkfifo(logs / "evolution-2026-01-01.json")
+        server = _make_server()
+        server._scheduler = None
+        server.evolutions = []
+
+        assert within(DEADLINE_SECONDS, server._evolution_count) == 0
+
+    def test_the_evolution_count_still_counts_a_regular_log(self, tmp_path, monkeypatch):
+        """The control: one readable log is still counted."""
+        monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path)
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "evolution-2026-01-01.json").write_text(
+            json.dumps({"timestamp": "2026-01-01T00:00:00"}), encoding="utf-8"
+        )
+        server = _make_server()
+        server._scheduler = None
+        server.evolutions = []
+
+        assert server._evolution_count() == 1
+
+    @_needs_mkfifo
+    def test_the_evolution_summary_frame_does_not_wedge_on_a_fifo_log(
+        self, tmp_path, monkeypatch
+    ):
+        """The `evolution_summary` frame reads the same files in `_process_message`."""
+        monkeypatch.setattr(daemon_mod, "config_dir", lambda: tmp_path)
+        _mkfifo(tmp_path / "logs" / "evolution-2026-01-01.json")
+        server = _make_server()
+
+        frames = within(
+            DEADLINE_SECONDS, lambda: _drive(server, {"type": "evolution_summary"})
+        )
+
+        assert len(frames) == 1, frames
+        assert frames[0]["type"] == "evolution_summary", frames[0]
+        assert frames[0]["recent"] == [], frames[0]
+
+    @_needs_mkfifo
+    def test_the_installed_version_read_answers_a_fifo(self, tmp_path, monkeypatch):
+        """`_current_installed_version` answers "" for a file it cannot open.
+
+        `HOME` is pinned to `tmp_path` for this arm, so the read under test is the one
+        planted here and never the host's own `install/version.txt`.
+
+        The server is built **before** the FIFO is planted, and that order is a reading
+        rather than a convenience: `EmrgServer.__init__` reads this same file (for
+        `_run_version`), so a FIFO planted first wedges the constructor itself — on
+        master, with `HOME` pinned and the pipe in place, `EmrgServer(...)` never
+        returned. The arm drives the method; the constructor's own copy of the read is
+        the same call, so one guard covers both.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        _mkfifo(tmp_path / ".emrg" / "install" / "version.txt")
+
+        assert within(DEADLINE_SECONDS, server._current_installed_version) == ""
+
+    def test_the_installed_version_read_still_answers_a_regular_file(
+        self, tmp_path, monkeypatch
+    ):
+        """The control: a readable version file is still read."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        version = tmp_path / ".emrg" / "install" / "version.txt"
+        version.parent.mkdir(parents=True)
+        version.write_text("9.9.9\n", encoding="utf-8")
+
+        assert server._current_installed_version() == "9.9.9"
+
+    # ── the debug prompt copy, inside the session directory the agent writes to ──
+
+    @_needs_mkfifo
+    def test_the_system_prompt_copy_does_not_wedge_on_a_fifo(self, tmp_path):
+        """`_build_system_prompt` writes `<session>/system.md` — a path in the workspace.
+
+        The write is the debug aid, so the prompt itself must still come back: the arm
+        asserts both the return and the content.
+        """
+        server = _make_server()
+        session = Session.create_with_id("s_fifo_sysmd", tmp_path)
+        _mkfifo(session.dir_path / "system.md")
+
+        rendered = within(DEADLINE_SECONDS, lambda: server._build_system_prompt(session))
+
+        assert "Operating system" in rendered
+
+    def test_the_system_prompt_copy_still_writes_a_regular_file(self, tmp_path):
+        """The control: the debug copy is still written where it can be."""
+        server = _make_server()
+        session = Session.create_with_id("s_regular_sysmd", tmp_path)
+
+        server._build_system_prompt(session)
+
+        assert "Operating system" in (session.dir_path / "system.md").read_text(
+            encoding="utf-8"
+        )
+
+    # ── the planted-fire markers and the usage-anchor stats ──
+
+    @_needs_mkfifo
+    def test_the_planted_fire_marker_write_does_not_wedge(self, tmp_path, monkeypatch):
+        """The per-exchange heartbeat marker, written on every exchange."""
+        monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", _mkfifo(tmp_path / "hb"))
+        server = _make_server()
+
+        within(DEADLINE_SECONDS, server._touch_planted_fire_marker)
+
+    @_needs_mkfifo
+    def test_the_round_complete_write_does_not_wedge(self, tmp_path, monkeypatch):
+        """The completed-round marker, written at every tool-loop finalization."""
+        monkeypatch.setattr(
+            daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", _mkfifo(tmp_path / "rc")
+        )
+        server = _make_server()
+
+        within(DEADLINE_SECONDS, server._touch_planted_fire_round_complete)
+
+    @_needs_mkfifo
+    def test_the_staleness_check_reads_past_a_fifo_marker(self, tmp_path, monkeypatch):
+        """`_read_age` reads both markers — a FIFO at either must not hold the check."""
+        monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", _mkfifo(tmp_path / "hb"))
+        monkeypatch.setattr(
+            daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", _mkfifo(tmp_path / "rc")
+        )
+        server = _make_server()
+
+        assert within(DEADLINE_SECONDS, server._check_planted_fire_stale) is False
+
+    @_needs_mkfifo
+    def test_the_drill_drift_counter_answers_a_fifo_stats_file(self, tmp_path, monkeypatch):
+        """`_count_drill_drift_events` counts 0 for stats it cannot read."""
+        monkeypatch.setattr(
+            daemon_mod, "_USAGE_ANCHOR_STATS_PATH", _mkfifo(tmp_path / "usage-anchor.jsonl")
+        )
+        server = _make_server()
+
+        assert within(DEADLINE_SECONDS, server._count_drill_drift_events) == 0
+
+    @_needs_mkfifo
+    def test_the_usage_anchor_append_refuses_a_fifo(self, tmp_path, monkeypatch):
+        """Both of this function's opens are of the same subject: read, then append.
+
+        The read is bounded by its own `except OSError`; the append is not, and its
+        contract is "callers swallow OSError" — so the arm asserts the refusal arrives
+        as that class rather than as a wait.
+        """
+        monkeypatch.setattr(
+            daemon_mod, "_USAGE_ANCHOR_STATS_PATH", _mkfifo(tmp_path / "usage-anchor.jsonl")
+        )
+
+        with pytest.raises(NotARegularFile) as excinfo:
+            within(DEADLINE_SECONDS, lambda: daemon_mod._append_usage_anchor_event({}))
+
+        assert "a FIFO" in str(excinfo.value), str(excinfo.value)
+
+    def test_the_usage_anchor_append_still_appends_to_a_regular_file(
+        self, tmp_path, monkeypatch
+    ):
+        """The control: the stats file the daemon writes is still written."""
+        stats = tmp_path / "usage-anchor.jsonl"
+        monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+
+        assert daemon_mod._append_usage_anchor_event({"type": "probe"}) == 1
+        assert json.loads(stats.read_text(encoding="utf-8"))["total"] == 1
+
+    @_needs_mkfifo
+    def test_the_exit_record_write_does_not_wedge(self, tmp_path, monkeypatch):
+        """The daemon's shutdown record, appended as the process exits."""
+        monkeypatch.setattr(
+            daemon_mod, "_EXIT_RECORD_PATH", _mkfifo(tmp_path / "emrgd-exit.log")
+        )
+
+        within(
+            DEADLINE_SECONDS,
+            lambda: daemon_mod._write_exit_record("test", 0, None),
+        )
+
+    def test_the_exit_record_still_writes_a_regular_file(self, tmp_path, monkeypatch):
+        """The control: the record is still written where it can be."""
+        record = tmp_path / "emrgd-exit.log"
+        monkeypatch.setattr(daemon_mod, "_EXIT_RECORD_PATH", record)
+
+        daemon_mod._write_exit_record("test", 0, None)
+
+        assert json.loads(record.read_text(encoding="utf-8"))["reason"] == "test"
+
+    # ── the census: the rule, asked of the source rather than of a memory ──
+
+    def test_every_open_in_the_daemon_asks_its_subject_kind(self):
+        """No open in this module lacks a kind question about *its own* subject.
+
+        A census, not a list: the previous issues in this family closed the sites the issue
+        before them had named, so what finds the next one is "every open in this file".
+        The subject is matched by the **expression** the open uses — `self._projects_log`
+        is asked about as `self._projects_log` — because a kind question about some other
+        path leaves the open at hand exactly as reachable as before.
+
+        One open is exempt, and it is named with the branch that owns it: the rant panel
+        reads `rants.jsonl` itself in `_process_message`, which is a *second reader* of a
+        store that already has one (`emrg/server/rants.py`) — issue #2097 / PR #2098
+        removes it rather than guarding it, and an edit here would collide with that PR's
+        own hunk. The leg fails on any other unguarded open, and the exemption is inert
+        once that branch lands.
+
+        What this census is **not**: it asks whether the question is asked, not when. A
+        guard moved below the open it guards still satisfies it, and that arm is in this
+        class rather than in the census — `test_the_planted_fire_marker_write_does_not_
+        wedge` fails on it (measured: arm A5 KILLED while this leg passed).
+        """
+        unguarded = _unguarded_opens(daemon_mod.__file__)
+        exempt = {("EmrgServer/_process_message", "self._rants_log")}
+
+        assert unguarded - exempt == set(), (
+            "these functions open a path without asking its kind first (FIFO ⇒ the open "
+            "waits for a peer and raises nothing, so the daemon's event loop stops): "
+            f"{sorted(unguarded - exempt)}"
+        )
+
+    def test_the_census_sees_an_open_with_no_kind_question(self, tmp_path):
+        """The census is measured against a tree that is wrong on purpose.
+
+        Without this, the leg above passes for the same reason a scanner that reads
+        nothing passes: `unguarded` being empty is not the claim — being able to *find*
+        one is. The sample also carries the shape that matters, an unguarded open beside a
+        guarded one in the same function.
+        """
+        sample = tmp_path / "sample.py"
+        sample.write_text(
+            "import pathlib\n"
+            "def guarded(path):\n"
+            "    _refuse_non_regular(path)\n"
+            "    return path.read_text()\n"
+            "def also_guarded(path):\n"
+            "    _refuse_non_regular(path=path)\n"
+            "    return path.read_text()\n"
+            "def unguarded(path):\n"
+            "    _refuse_non_regular(other)\n"
+            "    return path.read_text()\n"
+            "def untouched(path):\n"
+            "    return path.read_text()\n",
+            encoding="utf-8",
+        )
+
+        assert _unguarded_opens(str(sample)) == {
+            ("unguarded", "path"),
+            ("untouched", "path"),
+        }
