@@ -253,6 +253,43 @@ def test_a_named_pipe_cache_is_not_opened_for_a_write(tmp_path, monkeypatch):
     assert not (tmp_path / "install-info.json.tmp").exists()
 
 
+def test_a_directory_cache_is_not_written_and_names_the_kind(tmp_path, monkeypatch, caplog):
+    """The pipe-free half for the **write** site, and the one the Windows leg runs.
+
+    This site's only pipe-free arm before this one (`test_a_missing_cache_is_still_created`)
+    exercises the guard's *absent* branch — the writer's normal case — so on a leg without
+    `mkfifo` the guard here was removable without a red test. A directory discriminates, and
+    it discriminates by two readings at once, measured in both directions 2026-10-12
+    (`cyc20261012-022400`) with `HOME` pinned to a temporary root and a directory planted at
+    `install-info.json`:
+
+    * **unguarded** (master `f4fe92c3`): `_cache_tool_paths` still *returns* — `os.replace`
+      onto a directory fails and the bare `except OSError` swallows it — but it leaves the
+      temp file behind, so the exit is a **leftover `install-info.json.tmp`**;
+    * **guarded**: no temp file is created at all, and the reason is logged.
+
+    So the exit code cannot tell the two trees apart and the two facts below are what does.
+    Same shape as the read site's `test_a_directory_cache_is_answered_with_none_and_names_the_kind`.
+    """
+    import logging
+
+    from emrg.server import git_utils as mod
+
+    info = tmp_path / "install-info.json"
+    info.mkdir()
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    with caplog.at_level(logging.WARNING):
+        mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh")
+
+    assert "a directory" in caplog.text, caplog.text
+    assert "not a regular file" in caplog.text, caplog.text
+    assert not (tmp_path / "install-info.json.tmp").exists(), (
+        "the write was attempted into a subject it could not replace — the temp file is the "
+        "residue an unguarded writer leaves, and this arm's discriminator on both legs")
+    assert info.is_dir(), "the subject was replaced rather than skipped"
+
+
 @_needs_mkfifo
 def test_a_named_pipe_at_the_temp_path_does_not_block_the_write(tmp_path, monkeypatch):
     """The `to` half of the write: `tmp.write_text` waits for a reader on a pipe.
