@@ -1775,9 +1775,9 @@ def test_the_prompt_path_scan_answers_both_ways() -> None:
 #
 # Measured on master `60541e39` (2026-10-11, `cyc20261011-193407`) through the real builder:
 # a record carrying `extra_prompt` at its top level rendered **without** it; the same value
-# under `config` rendered with it. The host reported the cost (rant 2026-10-11T11:23:55): the
-# `promote` task's 4601-char and the `competition` task's 3042-char `extra_prompt` sat at the
-# top level without ever entering a prompt.
+# under `config` rendered with it. The host reported the cost (rant 2026-10-11T11:23:55,
+# issue #2110): the `promote` task's 4601-char and the `competition` task's 3042-char
+# `extra_prompt` sat at the top level without ever entering a prompt.
 #
 # Both directions are pinned below, and the unset control matters as much as the set one:
 # a test that only asserts the marker is *present* would pass an empty render.
