@@ -54,7 +54,12 @@ from emrg.config import LlmConfig
 from emrg.protocol import TaskRequest
 from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
-from emrg.server.redaction import INLINE_SECRET_PATTERNS, redact_argv, redact_string
+from emrg.server.redaction import (
+    INLINE_SECRET_PATTERNS,
+    redact_argv,
+    redact_prefix,
+    redact_string,
+)
 from emrg.session import Session
 
 #: A key-shaped string, assembled rather than written out: a literal `sk-` + 32 alphanumerics
@@ -297,3 +302,184 @@ def test_the_tool_call_log_masks_the_intent(tmp_path, monkeypatch, caplog):
     assert SECRET not in logged
     # The intent itself is still readable — the line's job is to say why the call happened.
     assert "is still valid" in logged
+
+
+# ── the window ────────────────────────────────────────────────────────────
+#
+# Thirteen sites printed a *window* of a value rather than the whole thing, and wrote the
+# window **inside** the call: `redact_string(text[:60])` in the daemon (the `task received`
+# prompt, the `rant recorded` message, the memory-reflection tool result) and
+# `_redact_text(text[:N])` ten times in `emrg/server/llm.py`. Every pattern in
+# `INLINE_SECRET_PATTERNS` has a minimum length — `sk-` needs 16 alphanumerics, `ghp_` 20, a
+# base64 blob 40 — so a credential that **crosses the cut** stops matching and its surviving
+# prefix is logged verbatim. Measured 2026-10-13 on master `af4dd670`: a key beginning at
+# index 48 of a 60-character window leaves `sk-A1b2C3d4E`, twelve characters of a live key,
+# in the line hosts paste into issues. The rule is not "print less", it is "the rule sees the
+# whole value, then the line takes its window" — `redact_prefix`, plus an AST census that
+# keeps the window from being written inside any string redactor's argument again.
+
+#: The redactors that take **one string** and must therefore see all of it. A sequence
+#: redactor (`redact_argv`) is deliberately absent: its callers slice a list of argv
+#: elements, each element is redacted whole, and `test_the_argv_form_masks_every_element`
+#: below is the arm that holds that contract up.
+STRING_REDACTORS = ("redact_string", "_redact_text", "redact_prefix")
+
+
+def test_the_window_is_taken_after_the_rule_not_before():
+    """The defect and its fix, in one arm — the negative half is what gives it power.
+
+    A credential planted so that it crosses a 60-character cut. Truncating first loses it
+    (the pattern no longer matches), redacting first cannot: the whole value goes through
+    the rule, so the cut only ever lands on text a real key never reached.
+    """
+    text = "x" * 48 + SECRET + " and the rest of the request"
+
+    # The defect shape, pinned: this is the leak the fix exists for. Without this half the
+    # arm would pass on a redactor that had simply stopped redacting anything.
+    leaked = redact_string(text[:60])
+    assert SECRET[:6] in leaked, (
+        "the truncate-first form no longer leaks, so this arm no longer measures the "
+        f"defect it names: {leaked[-24:]!r}"
+    )
+    assert SECRET not in leaked
+
+    masked = redact_prefix(text, 60)
+    assert SECRET[:6] not in masked
+    assert "sk-" not in masked
+    # Same window, still a window: the cut is a cut, not the end of the line.
+    assert len(redact_prefix(text, 60)) == 60
+    assert masked.endswith("and the ")
+    # A benign value is untouched and shortened by nothing but the window itself.
+    assert redact_prefix("echo hello world", 60) == "echo hello world"
+    assert redact_prefix("z" * 200, 60) == "z" * 60
+
+
+#: The tree the census walks, and what it does not descend into. The walk skip reads the path
+#: **relative to the root it walks** (the family's spelling, held by
+#: `tests/test_walk_skips_read_their_root.py`); the skip set is the three that can appear inside
+#: these roots, and is deliberately **smaller** than the guard family's, which pins only an exact
+#: match (`tests/test_guard_scan_scope_pairing.py`'s membership reading) — the same reason the
+#: dead-string guard's smaller set is left unpinned.
+ROOT = Path(__file__).resolve().parent.parent
+SWEPT = ("emrg",)
+SKIPPED = {".venv", "__pycache__", "node_modules"}
+
+
+def _takes_a_slice(call) -> bool:
+    """Whether `call` is handed a `x[:n]` slice as one of its arguments."""
+    import ast
+
+    for arg in call.args:
+        if not isinstance(arg, ast.Subscript):
+            continue
+        inner = arg.slice
+        if isinstance(inner, ast.Slice):                                          # 3.9+
+            return True
+        if isinstance(inner, ast.Index) and isinstance(inner.value, ast.Slice):   # <= 3.8
+            return True
+    return False
+
+
+def _string_redactor_calls():
+    """`(path, line, source, node)` for every production call of a string redactor.
+
+    Hand-written rather than driven by a `git ls-files` list, so the tree leg below can assert
+    how many files it judged: a walk that silently stopped descending would otherwise come back
+    as a clean census of nothing.
+    """
+    import ast
+
+    found = []
+    for name in SWEPT:
+        base = ROOT / name
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            if SKIPPED & set(path.relative_to(ROOT).parts):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                callee = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+                if callee in STRING_REDACTORS:
+                    found.append((path, node.lineno, ast.unparse(node), node))
+    return found
+
+
+def test_no_string_redactor_is_handed_a_slice():
+    """The window belongs *after* the call — a slice inside it is the defect, everywhere.
+
+    An AST census rather than a reading of the thirteen sites, because the sites are thirteen
+    today and the next log line is written by whoever adds it. **Named limits**: (1) the
+    population is first-party code under `emrg/` — this file must be able to write the forbidden
+    form, which is the negative half of the arm above; (2) it catches a *slice*, not a value
+    truncated somewhere upstream and arriving as a plain name — the shape the client's
+    `r.content[:30]` rows have, which no call-site census can see.
+    """
+    calls = _string_redactor_calls()
+
+    # Fail closed on a shrunken population: a rename or a moved module must not read as a clean
+    # census. 24 is what master `af4dd670` holds (measured 2026-10-13); a change that lowers it
+    # has to say so here rather than pass.
+    assert len(calls) >= 24, (
+        f"only {len(calls)} string-redactor call(s) found under {ROOT} — the census has lost "
+        "its subject, so 'no slice' would prove nothing"
+    )
+
+    offenders = [f"{p.relative_to(ROOT)}:{n} {src}" for p, n, src, node in calls if _takes_a_slice(node)]
+    assert not offenders, (
+        "a string redactor is handed a slice — the rule cannot see a credential crossing the "
+        "cut, so its prefix reaches the log in the clear; redact the whole value and take the "
+        "window outside the call (`redact_prefix(x, n)`):\n  " + "\n  ".join(offenders)
+    )
+
+    # The other direction: the census really is reading the sites it is about, counted by module,
+    # so a module that loses its callers is visible rather than silent.
+    per_file: dict[str, int] = {}
+    for path, _n, _src, _node in calls:
+        key = path.relative_to(ROOT).as_posix()
+        per_file[key] = per_file.get(key, 0) + 1
+    assert per_file.get("emrg/server/daemon.py", 0) == 5, per_file
+    assert per_file.get("emrg/server/llm.py", 0) >= 16, per_file
+    assert per_file.get("emrg/server/redaction.py", 0) == 2, per_file
+
+
+class _FakeWriter:
+    """Minimal websocket stand-in: `_process_message` answers through `_send` → `ws.send`."""
+
+    async def send(self, data) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def recv(self) -> str:
+        raise ConnectionError("no frames to receive in test")
+
+
+def test_the_rant_line_masks_a_credential_crossing_its_window(tmp_path, caplog):
+    """A real windowed site, driven through its real caller: `rant recorded`.
+
+    The rant is host text recorded into a file hosts paste into issues, and the line prints
+    its first 100 characters. The credential sits at index 48, inside the window but
+    crossing nothing — what matters is that the window is taken *after* the rule, so the same
+    arm holds for any offset (the arm above sweeps that at the rule, where it is cheap).
+    """
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    server = _make_server(tmp_path)
+    server._rants_log = tmp_path / "rants.jsonl"
+
+    asyncio.run(server._process_message(
+        {"type": "rant", "message": "x" * 48 + SECRET + " tail of the rant", "project": "emrg"},
+        _FakeWriter(),
+    ))
+
+    logged = caplog.text
+    assert "rant recorded" in logged, (
+        "the rant line was not written at all, so 'the secret is absent' would prove "
+        f"nothing:\n{logged[-800:]}"
+    )
+    assert SECRET[:6] not in logged
+    assert "tail of the rant" in logged  # the window still shows the rant's own text
