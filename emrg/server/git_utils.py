@@ -508,6 +508,19 @@ def ensure_local_exclude(repo_dir: str) -> str:
     * ``"not-a-repo"`` — no git dir there, or git is unavailable;
     * ``"error: <reason>"`` — the file could not be read or written.
 
+    **``"added"`` means the bytes are on disk**, which it did not always: the write
+    goes through ``atomic_write_bytes``, whose failure used to arrive here as ``None``
+    with the reason already logged and swallowed one layer down — so a subject the
+    replace could not overwrite answered ``"added"``. Measured 2026-10-12
+    (`cyc20261012-115759`) with a *directory* at ``.git/info/exclude``: the caller was
+    told ``"added"``, and both of this function's production callers read that as "this
+    tree now ignores EMRG's runtime directory" and log exactly that
+    (``scheduler._ensure_runtime_dir_ignored``, ``daemon._touch_project``) — a claim
+    about a write that never landed, in the situation those log lines exist for
+    (rant 2026-09-21T10:12:01 / issue #979: the runtime dir left unignored makes the
+    dirty-tree probe blame the host). The docstring's fourth line was a promise the
+    code could not keep for a write; now it can.
+
     Only the repository's *local* exclude is touched. The upstream
     ``.gitignore`` belongs to the project and is left alone (rant
     2026-09-21T10:12:01).
@@ -538,7 +551,14 @@ def ensure_local_exclude(repo_dir: str) -> str:
     body += _EXCLUDE_NOTE + runtime_exclude_entry(prefix) + "\n"
     try:
         mode = os.stat(exclude).st_mode & 0o777 if exclude.exists() else 0o644
-        atomic_write_bytes(body, exclude, mode=mode)
     except OSError as exc:
         return f"error: {exc}"
+    # Read the writer's own report rather than inferring success from the absence of an
+    # exception: a failure inside `atomic_write_bytes` (a subject the `os.replace` cannot
+    # overwrite — a directory, a path on a read-only mount) is logged and swallowed there,
+    # and used to arrive here as `None`, which read as success. `not` rather than
+    # `is False` on purpose: if that report is ever reverted to `None`, this answers
+    # `error:` for every write — loud and wrong, rather than silent and wrong.
+    if not atomic_write_bytes(body, exclude, mode=mode):
+        return f"error: could not write {exclude}"
     return "added"

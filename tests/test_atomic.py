@@ -136,3 +136,61 @@ def test_atomic_write_cjk_content(tmp_path: Path):
 
     content = yaml.safe_load(target.read_text(encoding="utf-8"))
     assert content == data
+
+
+# ── a writer reports whether its bytes landed ────────────────────────────────
+#
+# Both writers returned `None` in *both* states, so no caller could tell a write that
+# happened from one that did not — and a caller that reported the outcome anyway reported
+# the wrong one. Measured 2026-10-12 (`cyc20261012-115759`) one layer up: with a directory
+# at `.git/info/exclude`, `os.replace` raised `IsADirectoryError`, this module's own
+# handler logged it and swallowed it, and `ensure_local_exclude` answered `"added"` — a
+# success report its two callers log as "this tree now ignores EMRG's runtime directory".
+#
+# The arms below pin the report itself, in both directions. The failing subject is a
+# **directory**: it needs no `mkfifo` (every platform has directories), and it is a
+# reachable shape rather than a synthetic one — `os.replace` cannot overwrite a directory
+# on POSIX (`EISDIR`) or on Windows (a `PermissionError`, also an `OSError`), and the same
+# branch answers a read-only mount and a full disk.
+
+
+def test_atomic_write_bytes_reports_a_write_that_did_not_land(tmp_path: Path):
+    """The measured defect: the target could not be replaced, so the answer is False."""
+    target = tmp_path / "emrgd.token"
+    target.mkdir()
+
+    assert atomic_write_bytes("s3cret", target) is False, (
+        "a write the replace could not complete must not be reported as a success"
+    )
+    assert target.is_dir(), "and the subject it could not overwrite is left as it was"
+    assert [p.name for p in tmp_path.iterdir()] == ["emrgd.token"], (
+        "the temp file it wrote into is cleaned up either way"
+    )
+
+
+def test_atomic_write_yaml_reports_a_write_that_did_not_land(tmp_path: Path):
+    """The sibling writer, same question — one convention in this module, not two."""
+    target = tmp_path / "projects.yml"
+    target.mkdir()
+
+    assert atomic_write_yaml([{"name": "emrg"}], target) is False
+    assert target.is_dir()
+    assert [p.name for p in tmp_path.iterdir()] == ["projects.yml"]
+
+
+def test_atomic_write_bytes_reports_a_write_that_landed(tmp_path: Path):
+    """The control, and the direction that keeps the pair discriminating: a guard that
+    always answered False would satisfy the two arms above and break every caller."""
+    target = tmp_path / "emrgd.token"
+
+    assert atomic_write_bytes("t", target) is True
+    assert target.read_text(encoding="utf-8") == "t"
+
+
+def test_atomic_write_yaml_reports_a_write_that_landed(tmp_path: Path):
+    """The same control for the other writer, replacing an existing file."""
+    target = tmp_path / "projects.yml"
+    target.write_text("old: data", encoding="utf-8")
+
+    assert atomic_write_yaml([{"name": "emrg"}], target) is True
+    assert yaml.safe_load(target.read_text(encoding="utf-8")) == [{"name": "emrg"}]

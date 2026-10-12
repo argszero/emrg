@@ -360,3 +360,67 @@ def test_touch_project_writes_nothing_for_a_directory_in_no_repository(tmp_path,
     assert "now ignores .emrg/" not in caplog.text, caplog.text
     registered = (tmp_path / "config" / "projects.yml").read_text(encoding="utf-8")
     assert str(plain) in registered, "the registration half must be unaffected"
+
+
+# ── "added" means the bytes are on disk ──────────────────────────────────────
+#
+# `ensure_local_exclude`'s docstring promises `"error: <reason>"` for a file it could not
+# write, and until now the code could not keep that promise for a *write*: the call went
+# through `atomic_write_bytes`, whose failure was logged and swallowed one layer down and
+# arrived here as `None` — indistinguishable from success. Measured 2026-10-12
+# (`cyc20261012-115759`) with a directory at `.git/info/exclude`: this function answered
+# `"added"`.
+#
+# That is not a cosmetic mislabel. Both production callers read `"added"` as the fact and
+# log it — `scheduler._ensure_runtime_dir_ignored` says the tree "now ignores EMRG's own
+# runtime directory", `daemon._touch_project` says it "now ignores .emrg/ locally" — so the
+# host is told the runtime dir is ignored while it is not, which is precisely the state
+# rant 2026-09-21T10:12:01 / issue #979 exists for (the dirty-tree probe then blames the
+# host for EMRG's own bookkeeping).
+#
+# The failing subject below is a **directory**, so the arm needs no `mkfifo` and the
+# Windows leg runs it. The controls are the other half: a report that is always an error
+# would satisfy the failing arm and break every caller, so the success shapes are pinned
+# byte-for-byte, not just by the string.
+
+
+def test_a_write_that_could_not_land_is_not_reported_as_added(tmp_path):
+    """The measured defect, at its call site."""
+    repo = _repo(tmp_path / "clone")
+    exclude = _exclude_file(repo)
+    exclude.unlink()  # `git init` ships one; the measured subject replaces it
+    exclude.mkdir()
+
+    status = ensure_local_exclude(str(repo))
+
+    assert status.startswith("error"), (
+        f"a directory at the exclude path cannot be written, so this is not a success: "
+        f"{status!r}"
+    )
+    assert exclude.is_dir(), "and the subject it could not write is left as it was"
+    assert not any(p.name.startswith(".atomic_") for p in exclude.parent.iterdir()), (
+        "no temp file is left behind by the failed write"
+    )
+
+
+def test_a_regular_exclude_file_still_reports_added(tmp_path):
+    """The direction that keeps the pair honest: the report is read, not always False."""
+    repo = _repo(tmp_path / "clone")
+    exclude = _exclude_file(repo)
+
+    assert ensure_local_exclude(str(repo)) == "added"
+
+    assert EXCLUDE_ENTRY in exclude.read_text(encoding="utf-8")
+    assert _status(repo).strip() == ""
+
+
+def test_an_absent_exclude_file_still_reports_added(tmp_path):
+    """The other success shape, and the one a caller meets first: nothing there yet."""
+    repo = _repo(tmp_path / "clone")
+    exclude = _exclude_file(repo)
+    if exclude.exists():
+        exclude.unlink()
+
+    assert ensure_local_exclude(str(repo)) == "added"
+
+    assert EXCLUDE_ENTRY in exclude.read_text(encoding="utf-8")
