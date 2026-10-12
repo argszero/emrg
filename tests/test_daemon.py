@@ -5339,3 +5339,69 @@ def test_a_missing_exit_record_is_still_created(tmp_path, monkeypatch):
     _write_exit_record("normal", 0, None)
 
     assert json.loads(target.read_text(encoding="utf-8").splitlines()[0])["reason"] == "normal"
+
+
+# ── install/version.txt: the third reader the family handed over (#2115, #2125) ──
+#
+# `~/.emrg/install/version.txt` is read in three places and the family's sweeps took it
+# one site at a time. #2115's worklist filed every site that recites this path under
+# "the upgrade chain, leave alone" — its own words — and #2125 then opened on two of
+# them, `upgrade.py::_installed_versions` and `UpgradeManager._read_local_version`.
+# This is the third, and it is the one whose block is worst: `EmrgServer.__init__` reads
+# it through this same method (`self._run_version = self._current_installed_version()`),
+# so a pipe at the path stopped the daemon from being **constructed** — no event loop,
+# no client, and no line anywhere saying why.
+#
+# Measured on `aff0d59a`, one child per arm under an 8 s cap with `HOME` pinned to a
+# temporary directory: a `mkfifo` at the subject left this call **without a return**,
+# while a directory at the same subject returned at once. The kind of the path is the
+# axis, not absence.
+#
+# `HOME` is pinned in every arm below, which is also what keeps this file inside the
+# host's red line: the read under test is aimed at the directory the test created, never
+# at the host's own install directory (MANIFESTO.md 第四条附则三).
+
+
+class TestTheInstalledVersionReaderAsksTheKind:
+    """A subject that is not a regular file is answered, not opened."""
+
+    @_needs_mkfifo
+    def test_the_installed_version_read_answers_a_fifo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        fifo = tmp_path / ".emrg" / "install" / "version.txt"
+        fifo.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(fifo)
+
+        assert _within(5.0, server._current_installed_version) == ""
+
+    def test_a_directory_version_file_is_named_in_the_log(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The FIFO-free half, and the half the Windows leg runs.
+
+        Both trees answer `""` (the method's documented answer for a version it cannot
+        read), so only the sentence separates them — on `aff0d59a` the
+        `IsADirectoryError` is swallowed by `except (OSError, ValueError)` and
+        **nothing is logged at all**.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        version = tmp_path / ".emrg" / "install" / "version.txt"
+        version.mkdir(parents=True)
+
+        with caplog.at_level(logging.DEBUG, logger="emrg.server.daemon"):
+            assert server._current_installed_version() == ""
+
+        assert "is a directory" in caplog.text, caplog.text
+        assert str(version) in caplog.text, caplog.text
+
+    def test_a_regular_version_file_is_still_read(self, tmp_path, monkeypatch):
+        """The control: the guard must not turn every read into `""`."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        server = _make_server()
+        version = tmp_path / ".emrg" / "install" / "version.txt"
+        version.parent.mkdir(parents=True)
+        version.write_text("9.9.9\n", encoding="utf-8")
+
+        assert server._current_installed_version() == "9.9.9"

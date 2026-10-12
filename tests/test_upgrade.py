@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import time
 from pathlib import Path
 
@@ -28,6 +30,7 @@ from emrg.server.upgrade import (
     is_newer,
     parse_version,
 )
+from tests.bounded_read import DEADLINE_SECONDS, within
 
 # ── parse_version / is_newer (migrated from update_check.py) ──────────────
 
@@ -1057,3 +1060,187 @@ def test_tick_prunes_nothing_while_enabled_is_false(monkeypatch, tmp_path):
     asyncio.run(mgr.tick())
 
     assert sorted(p.name for p in backups.iterdir()) == ["0.2.90", "0.2.91", "0.2.95"]
+
+
+# ── the two readers of install/version.txt ask its kind (issue #2125) ─────────
+#
+# `install/version.txt` is the one subject two cycles handed over and no cycle took:
+# #2115's worklist filed every site that reads it under "the upgrade chain, leave alone"
+# (its own words), and #2125 then opened on two of them — `_installed_versions` and
+# `_read_local_version`, both reached by the tick the daemon runs every five minutes.
+#
+# An open is not a read: `read_text` on a FIFO waits for a writer and raises nothing, so
+# the `except OSError` both readers carried could never fire. Measured on `aff0d59a`,
+# one child per arm under a 10 s cap, both module constants redirected to a scratch
+# directory (never the host's install dir — the red line, MANIFESTO.md 第四条附则三):
+#
+#     _installed_versions()   FIFO  DID NOT RETURN within 10 s   | directory  ()
+#     _read_local_version()   FIFO  DID NOT RETURN within 10 s   | directory  ''
+#
+# **The two sites do not take the same answer, and the directory column is why.**
+# `_installed_versions` feeds `keep_versions` — the snapshots retention must *not*
+# delete — so "no version named" would drop the running version out of the protected
+# set and the rollback snapshot with it. It refuses. `_read_local_version`'s docstring
+# already promises `""`, and `""` is what a missing file gives, so it keeps that answer
+# and names the kind in its warning instead of inventing an outcome. Every arm is
+# FIFO-free except the two gated ones, so the Windows leg runs the discriminating half.
+
+
+def _plant(path: Path, kind: str) -> None:
+    """Put a non-regular subject where an install version file is expected."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "dir":
+        path.mkdir()
+    else:
+        os.mkfifo(path)
+
+
+def test_installed_versions_refuses_a_directory_subject(monkeypatch, tmp_path):
+    """The FIFO-free arm, and the one the Windows leg runs.
+
+    It discriminates on the *outcome*: on `aff0d59a` a directory raised
+    `IsADirectoryError` inside `read_text`, the `except OSError: continue` swallowed it
+    and the function answered `()` — the exact "no version named" the retention must
+    never be handed. Here it raises instead, and the message names the kind.
+    """
+    import emrg.server.upgrade as up
+    from emrg.server.upgrade import _installed_versions
+
+    subject = tmp_path / "version.txt"
+    _plant(subject, "dir")
+    monkeypatch.setattr(up, "VERSION_FILE", subject)
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "absent.txt")
+
+    with pytest.raises(OSError) as excinfo:
+        within(DEADLINE_SECONDS, _installed_versions)
+
+    assert "a directory" in str(excinfo.value), str(excinfo.value)
+    assert str(subject) in str(excinfo.value), str(excinfo.value)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_installed_versions_refuses_a_fifo_subject(monkeypatch, tmp_path):
+    """The subject that used to make the call never return at all."""
+    import emrg.server.upgrade as up
+    from emrg.server.upgrade import _installed_versions
+
+    subject = tmp_path / "version.txt"
+    _plant(subject, "fifo")
+    monkeypatch.setattr(up, "VERSION_FILE", subject)
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "absent.txt")
+
+    with pytest.raises(OSError) as excinfo:
+        within(DEADLINE_SECONDS, _installed_versions)
+
+    assert "FIFO" in str(excinfo.value), str(excinfo.value)
+
+
+def test_installed_versions_still_reads_regular_files(monkeypatch, tmp_path):
+    """The control: the guard must not turn every read into a refusal."""
+    import emrg.server.upgrade as up
+    from emrg.server.upgrade import _installed_versions
+
+    current = tmp_path / "version.txt"
+    current.write_text("v0.3.9\n", encoding="utf-8")
+    previous = tmp_path / "previous-version.txt"
+    previous.write_text("0.3.8\n", encoding="utf-8")
+    monkeypatch.setattr(up, "VERSION_FILE", current)
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", previous)
+
+    assert _installed_versions() == ("0.3.9", "0.3.8")
+
+
+def test_installed_versions_ignores_absent_files(monkeypatch, tmp_path):
+    """The other control, and the one that keeps a refusal from becoming a crash.
+
+    `non_regular_kind` *stats*, so an absent subject arrives as `FileNotFoundError`;
+    a fresh install with neither file present must stay a non-event rather than a
+    refusal the tick has to log.
+    """
+    import emrg.server.upgrade as up
+    from emrg.server.upgrade import _installed_versions
+
+    monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "no-version.txt")
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "no-previous.txt")
+
+    assert _installed_versions() == ()
+
+
+def test_read_local_version_names_the_kind_on_a_directory(monkeypatch, tmp_path, caplog):
+    """FIFO-free, and the warning is the reading.
+
+    Both trees answer `""` here (that is the method's documented answer, and a
+    directory already produced it through the old handler), so only the log line
+    separates them — on `aff0d59a` nothing is logged at all.
+    """
+    import emrg.server.upgrade as up
+
+    subject = tmp_path / "version.txt"
+    _plant(subject, "dir")
+    monkeypatch.setattr(up, "VERSION_FILE", subject)
+
+    mgr = UpgradeManager(UpdateConfig(), lambda **kw: asyncio.sleep(0))
+    with caplog.at_level(logging.WARNING, logger="emrg.server.upgrade"):
+        assert mgr._read_local_version() == ""
+
+    assert "a directory" in caplog.text, caplog.text
+    assert str(subject) in caplog.text, caplog.text
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
+def test_read_local_version_does_not_wedge_on_a_fifo(monkeypatch, tmp_path):
+    """The tick's own reader, on the subject that used to stop the tick."""
+    import emrg.server.upgrade as up
+
+    subject = tmp_path / "version.txt"
+    _plant(subject, "fifo")
+    monkeypatch.setattr(up, "VERSION_FILE", subject)
+
+    mgr = UpgradeManager(UpdateConfig(), lambda **kw: asyncio.sleep(0))
+
+    assert within(DEADLINE_SECONDS, mgr._read_local_version) == ""
+
+
+def test_read_local_version_still_reads_a_regular_file(monkeypatch, tmp_path):
+    """The control, both spellings of the tag."""
+    import emrg.server.upgrade as up
+
+    subject = tmp_path / "version.txt"
+    subject.write_text("v0.3.9\n", encoding="utf-8")
+    monkeypatch.setattr(up, "VERSION_FILE", subject)
+
+    mgr = UpgradeManager(UpdateConfig(), lambda **kw: asyncio.sleep(0))
+    assert mgr._read_local_version() == "0.3.9"
+
+
+def test_prune_deletes_nothing_when_the_version_file_is_not_regular(
+    monkeypatch, tmp_path
+):
+    """Why the refusal, and not a degrade: the answer is a *deletion* list.
+
+    `keep_versions` names the snapshots retention must **not** remove, so a
+    `version.txt` answered as "no version named" drops the running version out of the
+    protected set — and the snapshot it names can be the one a failed upgrade is
+    restored from. On `aff0d59a` a directory at the subject was reported as exactly
+    that: the `IsADirectoryError` was swallowed and `prune_upgrade_backups` went on to
+    delete the rollback snapshot. Here the sweep is refused whole, so every snapshot
+    survives; `UpgradeManager.tick` turns the raise into "backup retention failed" and
+    carries on, which is the handler the issue names.
+    """
+    import emrg.server.upgrade as up
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    backups = tmp_path / "upgrade-backup"
+    for ver in ("0.2.90", "0.2.91", "0.2.92", "0.2.93", "0.2.94", "0.2.95"):
+        _snapshot(backups, ver)
+    subject = tmp_path / "version.txt"
+    _plant(subject, "dir")
+    monkeypatch.setattr(up, "VERSION_FILE", subject)
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "absent.txt")
+
+    with pytest.raises(OSError):
+        prune_upgrade_backups(backups)
+
+    assert sorted(p.name for p in backups.iterdir()) == [
+        "0.2.90", "0.2.91", "0.2.92", "0.2.93", "0.2.94", "0.2.95",
+    ], "a refused sweep must delete none of the snapshots it could not protect"

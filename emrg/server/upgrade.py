@@ -28,6 +28,7 @@ from typing import Callable, Optional
 import httpx
 
 from emrg.config import UpdateConfig
+from emrg.tools.base import non_regular_kind
 
 logger = logging.getLogger(__name__)
 
@@ -191,9 +192,36 @@ def _installed_versions() -> tuple:
     writes `{{ target_tag }}`), so the leading `v` is stripped before parsing;
     `parse_version` would drop it anyway, but saying so keeps the two readers in
     step with `_read_local_version`.
+
+    **A subject that is not a regular file is refused, not skipped**, because this
+    policy's answer is a *deletion* list: a `version.txt` answered as "no version
+    named" drops the running version's snapshot out of the protected set, and that
+    snapshot can be the one a failed upgrade is restored from (the retention's own
+    reason for existing, issue #1389). An open is not a read — `read_text` on a FIFO
+    waits for a writer and raises nothing — so the old `except OSError: continue` was
+    unreachable and the call never returned at all: measured on `aff0d59a`, a `mkfifo`
+    at either subject left this function **without a return inside 10 s**. Refusing
+    costs nothing here: `UpgradeManager.tick` wraps `prune_upgrade_backups()` in
+    `except Exception` and logs "backup retention failed", so the sweep is skipped and
+    the snapshots it would have deleted are simply kept.
+
+    Absence is still *not* a refusal — nothing installed under that name is the
+    ordinary fresh-install state, and `non_regular_kind` *stats*, so its
+    `FileNotFoundError` is the branch that keeps today's behaviour.
     """
     versions = []
     for path in (VERSION_FILE, PREVIOUS_VERSION_FILE):
+        try:
+            kind = non_regular_kind(path)
+        except OSError:
+            continue  # absent: nothing installed under this name
+        if kind is not None:
+            raise OSError(
+                f"{path} is {kind}, not a regular file — refusing to read it. "
+                "Opening a non-regular file blocks until a peer appears and raises "
+                "nothing, so it would never return; the retention below must not "
+                "treat this as 'no version named'."
+            )
         try:
             text = path.read_text(encoding="utf-8").strip()
         except OSError:
@@ -415,7 +443,32 @@ class UpgradeManager:
 
         Normalized without the leading 'v' — the target tag keeps its 'v'
         prefix when passed to the template/agent (git tag lookup needs it).
+
+        The subject's **kind** is asked before it is opened, for the reason the whole
+        family asks it: an open is not a read, and `read_text` on a FIFO waits for a
+        writer while raising nothing, so the `except OSError` below could never fire.
+        Measured on `aff0d59a`: a `mkfifo` at this path left the call **without a
+        return inside 10 s**, on the tick the daemon runs every five minutes — so the
+        block was the daemon.
+
+        This one **skips and warns** where `_installed_versions` refuses, because the
+        two feed different decisions and `""` is this method's documented answer: the
+        tick reads it as "not at the target yet", which is the module's own
+        "version.txt unchanged → trigger again" semantics. A directory already
+        produced `""` here (the `IsADirectoryError` the handler swallows), so the
+        warning is what names the kind rather than a new outcome being invented.
+        Absence stays `""` through the same handler.
         """
+        try:
+            kind = non_regular_kind(VERSION_FILE)
+        except OSError:
+            return ""  # absent: nothing installed yet
+        if kind is not None:
+            logger.warning(
+                "upgrade: %s is %s, not a regular file — reading it as no local "
+                "version", VERSION_FILE, kind,
+            )
+            return ""
         try:
             text = VERSION_FILE.read_text(encoding="utf-8").strip()
         except OSError:

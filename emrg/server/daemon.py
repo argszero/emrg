@@ -1331,9 +1331,34 @@ class EmrgServer:
         runs the pre-upgrade code. The GUI compares it with the in-memory
         ``_run_version`` and shows the upgrade banner when they differ.
         Returns "" when the file is missing (dev/standalone runs).
+
+        The subject's **kind** is asked before it is opened, because the open is what
+        decides whether this returns at all: `read_text` on a FIFO waits at the open
+        for a writer and raises nothing, so the handler below is unreachable and the
+        call never ends. It matters more here than at the module's other sites —
+        `EmrgServer.__init__` reads this same path through this same method
+        (``self._run_version = self._current_installed_version()``), so a pipe at
+        `~/.emrg/install/version.txt` stopped the daemon from being **constructed**:
+        no event loop, no client, and no line anywhere saying why.
+
+        A subject that is not a regular file reads as "" for the same reason a missing
+        one does — that is this method's documented answer, and the version is unknown
+        rather than unreadable-to-the-end. The debug line is what names the kind.
+
+        This is the third reader of `install/version.txt` the family's sweeps handed
+        over and did not take: issue #2115's worklist filed every site that reads this
+        path under "the upgrade chain, leave alone", and issue #2125 then opened on two
+        of them (`upgrade.py::_installed_versions`, `_read_local_version`). Nothing
+        here reaches the upgrade chain — this is a plain disk read whose only caller is
+        the daemon.
         """
+        path = Path.home() / ".emrg" / "install" / "version.txt"
+        kind = _non_regular_kind(path)
+        if kind is not None:
+            logger.debug("installed version file %s is %s; not opened", path, kind)
+            return ""
         try:
-            v = (Path.home() / ".emrg" / "install" / "version.txt").read_text(encoding="utf-8").strip()
+            v = path.read_text(encoding="utf-8").strip()
             return v
         except (OSError, ValueError):
             return ""
