@@ -28,6 +28,8 @@ from typing import Callable, Optional
 import httpx
 
 from emrg.config import UpdateConfig
+from emrg.memory import NotARegularFile
+from emrg.tools.base import non_regular_kind
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +185,16 @@ def backup_snapshots_to_prune(
     return [name for _ver, name in snapshots if name not in survivors]
 
 
+def _version_refusal(path: Path, kind: str) -> str:
+    """Why the retention sweep refuses a version file that is not a regular file."""
+    return (
+        f"{path} is {kind}, not a regular file. The version files are opened directly, and "
+        f"opening this one blocks until a peer appears — a FIFO waits for a writer, a socket "
+        f"for a connection, a device never ends — so the call would never return, and neither "
+        f"would the daemon, whose upgrade tick opens it on its own schedule."
+    )
+
+
 def _installed_versions() -> tuple:
     """The versions the install can still name: what runs, and what it replaced.
 
@@ -191,9 +203,32 @@ def _installed_versions() -> tuple:
     writes `{{ target_tag }}`), so the leading `v` is stripped before parsing;
     `parse_version` would drop it anyway, but saying so keeps the two readers in
     step with `_read_local_version`.
+
+    The subject's **kind** is asked before it is opened (issue #2062's family;
+    `#2125` here). An **open is not a read**: `read_text` on a FIFO waits for a
+    writer and raises nothing, so the `except OSError` below can never fire and the
+    call never returns — and this runs inside `UpgradeManager.tick`, on the daemon's
+    own schedule, so the block is the whole daemon.
+
+    A non-regular file is **refused**, not skipped, and the reading decides it: what
+    this returns is `keep_versions`, the snapshots the retention must not delete.
+    Answering a FIFO with "no version named" would drop the running version's
+    snapshot from the protected set, and that snapshot can be the one a failed
+    upgrade is restored from. The caller already has the handler — `tick()` wraps
+    `prune_upgrade_backups()` in `except Exception` — so refusing skips the sweep
+    and loses nothing: the next tick tries again.
     """
     versions = []
     for path in (VERSION_FILE, PREVIOUS_VERSION_FILE):
+        try:
+            kind = non_regular_kind(path)
+        except OSError:
+            # Absent (or unstattable) — the branch that has always meant "nothing
+            # installed yet". `non_regular_kind` *stats*, so absence reaches us as an
+            # OSError, and it must keep reaching the write-free path, not a refusal.
+            continue
+        if kind is not None:
+            raise NotARegularFile(_version_refusal(path, kind))
         try:
             text = path.read_text(encoding="utf-8").strip()
         except OSError:
@@ -415,7 +450,27 @@ class UpgradeManager:
 
         Normalized without the leading 'v' — the target tag keeps its 'v'
         prefix when passed to the template/agent (git tag lookup needs it).
+
+        The subject's kind is asked before it is opened (issue #2125): `read_text`
+        on a FIFO waits for a writer and raises nothing, so `except OSError` cannot
+        bound it, and this runs inside `tick()`. A non-regular file **keeps the
+        documented `""`** — the same answer a *missing* file gives, which the tick
+        already reads as "not yet installed" — and names the kind in a warning
+        rather than inventing a new outcome: `""` is the absence of evidence, and
+        this is the answer callers act on (see `_record_attempt`), so refusing here
+        would change a decision rather than replace a block.
         """
+        try:
+            kind = non_regular_kind(VERSION_FILE)
+        except OSError:
+            return ""  # absent — the "" this has always answered a missing file with
+        if kind is not None:
+            logger.warning(
+                "upgrade: %s is %s, not a regular file — treating the installed version "
+                "as unknown ('')",
+                VERSION_FILE, kind,
+            )
+            return ""
         try:
             text = VERSION_FILE.read_text(encoding="utf-8").strip()
         except OSError:

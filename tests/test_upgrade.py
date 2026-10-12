@@ -1057,3 +1057,133 @@ def test_tick_prunes_nothing_while_enabled_is_false(monkeypatch, tmp_path):
     asyncio.run(mgr.tick())
 
     assert sorted(p.name for p in backups.iterdir()) == ["0.2.90", "0.2.91", "0.2.95"]
+
+
+# ── The two version readers ask their subject's kind (issue #2125) ─────────
+# `tick()` is called by the daemon on its own schedule, so an open that never
+# returns is the whole daemon — and `except OSError` cannot bound it, because a
+# FIFO raises nothing. Both readers here are reached by that tick. A *directory*
+# stands in for the FIFO: it is the one non-regular shape this platform can
+# create, and it discriminates the same way — the unguarded reader swallows its
+# `IsADirectoryError` into a normal answer, where the guarded one never opens it.
+
+
+def test_installed_versions_refuses_a_non_regular_version_file(monkeypatch, tmp_path):
+    """A non-regular `version.txt` is **refused**, not read as "no version named".
+
+    What `_installed_versions()` returns is `keep_versions` — the snapshots the
+    retention must not delete — so degrading a FIFO into an empty answer would drop
+    the running version's snapshot from the protected set. The refusal names the
+    path and the kind, and `tick()` already catches it.
+    """
+    import emrg.server.upgrade as up
+
+    version = tmp_path / "version.txt"
+    version.mkdir()  # not a regular file; openable-looking, unreadable
+    monkeypatch.setattr(up, "VERSION_FILE", version)
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "previous-version.txt")
+
+    with pytest.raises(up.NotARegularFile) as excinfo:
+        up._installed_versions()
+
+    message = str(excinfo.value)
+    assert str(version) in message, "the refusal names the subject"
+    assert "directory" in message, "and its kind"
+
+
+def test_installed_versions_still_reads_regular_files(monkeypatch, tmp_path):
+    """The other direction: the guard must not cost the ordinary case."""
+    import emrg.server.upgrade as up
+
+    (tmp_path / "version.txt").write_text("v0.3.9\n", encoding="utf-8")
+    (tmp_path / "previous-version.txt").write_text("0.3.8\n", encoding="utf-8")
+    monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "version.txt")
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "previous-version.txt")
+
+    assert up._installed_versions() == ("0.3.9", "0.3.8")
+
+
+def test_installed_versions_keeps_degrading_for_an_absent_file(monkeypatch, tmp_path):
+    """Absence must still reach the write-free path — not the refusal.
+
+    `non_regular_kind` *stats*, so a missing file arrives as an `OSError`; the guard
+    swallows that one into `continue`, exactly as this reader always has.
+    """
+    import emrg.server.upgrade as up
+
+    monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "version.txt")
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "previous-version.txt")
+
+    assert up._installed_versions() == ()
+
+
+def test_read_local_version_keeps_and_names_a_non_regular_file(monkeypatch, tmp_path, caplog):
+    """`_read_local_version` keeps its documented `""` and names the kind.
+
+    Its `""` is the answer `tick()` already acts on ("not yet installed"), so the guard
+    replaces the *block*, not the decision — and the warning is the half that
+    discriminates here, because the return value is `""` either way.
+    """
+    import logging
+
+    import emrg.server.upgrade as up
+
+    version = tmp_path / "version.txt"
+    version.mkdir()
+    monkeypatch.setattr(up, "VERSION_FILE", version)
+
+    manager = up.UpgradeManager(UpdateConfig(), run_session_cb=lambda **kw: None)
+    with caplog.at_level(logging.WARNING, logger="emrg.server.upgrade"):
+        assert manager._read_local_version() == ""
+
+    assert any(
+        str(version) in r.getMessage() and "directory" in r.getMessage()
+        for r in caplog.records
+    ), "the skip names the subject and its kind — it is not silent"
+
+
+def test_tick_survives_a_refused_retention_sweep(monkeypatch, tmp_path):
+    """A refused sweep must not stop the tick, and must not delete a snapshot.
+
+    `prune_upgrade_backups()` now propagates `NotARegularFile` out of
+    `_installed_versions()`, and `tick()` wraps the call in `except Exception`. The
+    tick must still reach target discovery — the refusal may cost the sweep, never
+    the tick — and the snapshot set must be untouched.
+    """
+    import emrg.server.upgrade as up
+
+    backups = tmp_path / "upgrade-backup"
+    for ver in ("0.2.90", "0.2.91", "0.2.95"):
+        _snapshot(backups, ver)
+    (tmp_path / "version.txt").mkdir()  # the non-regular subject
+    monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "version.txt")
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "previous-version.txt")
+    monkeypatch.setattr(up, "BACKUP_DIR", backups)
+
+    class _EmptyClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            class _Resp:
+                status_code = 200
+
+                def json(self):
+                    return []
+
+            return _Resp()
+
+    monkeypatch.setattr(up.httpx, "AsyncClient", _EmptyClient)
+    mgr = UpgradeManager(UpdateConfig(), run_session_cb=lambda **kw: asyncio.sleep(0))
+    asyncio.run(mgr.tick())  # must return, not block, not raise
+
+    assert sorted(p.name for p in backups.iterdir()) == ["0.2.90", "0.2.91", "0.2.95"], (
+        "the sweep was skipped, so nothing was deleted — a degraded read would have "
+        "pruned 0.2.90 and 0.2.91 in place of the protected set"
+    )
