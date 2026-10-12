@@ -198,6 +198,12 @@ def test_the_refusal_has_one_wording() -> None:
 # The FIFO arm is written so that removing the guard makes it *fail at the deadline*
 # rather than pass (`tests/bounded_read.py`), and the directory arms need no `mkfifo`, so
 # the Windows leg reads them too.
+#
+# Each arm is checked against the **pre-change** tree, not only against a mutated one:
+# `run-mutation-arm.py` judges a *file*, so a sibling's red hides an arm that pins
+# nothing. Measured 2026-10-12 (`cyc20261012-134702`), this file against `8c4a9f55`'s
+# `app.py`: the two arms that name a defect fail there, and the FIFO verdict arm failed
+# only once it asserted the subject's survival beside the answer.
 
 _needs_mkfifo = pytest.mark.skipif(
     not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
@@ -256,8 +262,17 @@ def test_a_named_pipe_at_the_target_does_not_wedge_the_tui(tmp_path, monkeypatch
 
 @_needs_mkfifo
 def test_a_named_pipe_at_the_target_is_not_read_as_an_image(tmp_path) -> None:
-    """The decision on its own, so the arm reads the helper rather than only its caller."""
+    """The decision on its own, so the arm reads the helper rather than only its caller.
+
+    The **survival** is the half that moves for this kind, and it is asserted here. A
+    FIFO's `st_size` is 0, so on the pre-change tree the verdict fell past the size test
+    into `path.unlink()` — which succeeds on a FIFO — and removed the subject (measured
+    2026-10-12, `cyc20261012-134702`: verdict `False` on both trees, subject survived
+    `False` before / `True` after). The `False` alone is therefore green on the unfixed
+    tree, and asserting it by itself would leave this arm pinning nothing.
+    """
     target = tmp_path / "_clipboard_tmp_1.png"
     os.mkfifo(target)
 
     assert client_app._clipboard_extraction_verdict(str(target)) is False
+    assert target.exists(), "the verdict removed a subject it did not create"
