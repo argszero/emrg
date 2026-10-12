@@ -1726,12 +1726,31 @@ def _open_stop_log() -> object | None:
     name makes concurrent stop_all runs naturally isolated; the directory is
     ``_stop_log_dir()``). Returns the file object or None on any failure —
     best-effort, never breaks the stop flow. The handle closes naturally at
-    process exit (no finally dependency)."""
+    process exit (no finally dependency).
+
+    The kind is asked **before** the open, for the reason its sibling
+    ``_read_token_file`` states (issue #2140) and this site is the same shape
+    (issue #2152): the ``except OSError`` below answers only the *raising* kinds —
+    a missing directory, an unwritable one — and a **FIFO does not raise at the
+    open**, it waits for a writer. Measured 2026-10-12 (``cyc20261012-223924``), one
+    child process under a 10 s cap with the window's names planted as FIFOs inside a
+    pinned ``EMRG_STOP_LOG_DIR``: the call **did not return**, while the same code
+    with nothing planted returned a ``TextIOWrapper``. This call sits at the top of
+    ``stop_all()``, before any step and before the tee exists, so the subject's kind
+    decided whether ``emrg stop`` returned at all.
+
+    ``None`` is the answer, not an exception, because it is what this function already
+    returns for every failure it can see and what its caller already handles: the stop
+    proceeds without a log rather than acquiring a new way to fail.
+    """
+    d = _stop_log_dir()
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(d, f"stop_all-{ts}.log")
     try:
-        d = _stop_log_dir()
         os.makedirs(d, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        return open(os.path.join(d, f"stop_all-{ts}.log"), "a", encoding="utf-8")
+        if _non_regular_kind(path) is not None:
+            return None
+        return open(path, "a", encoding="utf-8")
     except OSError:
         return None
 

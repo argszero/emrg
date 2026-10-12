@@ -1491,3 +1491,100 @@ class TestTheTokenReadAsksItsSubjectsKind:
         token = tmp_path / "emrgd.token"
         token.mkdir()
         assert _read_token_file(token) == ""
+
+
+class TestTheStopLogAsksItsSubjectsKind:
+    """Issue #2152: the stop log's own open must ask the kind, like the token read beside it.
+
+    `_open_stop_log` opened `stop_all-<YYYYMMDD-HHMMSS>.log` inside `except OSError`, which
+    answers only the **raising** kinds. A FIFO raises nothing at the open — it waits for a
+    writer — and this call sits at the top of `stop_all()`, before any step and before the tee
+    exists, so the subject's kind decided whether `emrg stop` returned at all.
+
+    The name is second-resolution and computed from `datetime.now()`, which is why the FIFO arm
+    plants the whole window around the call rather than one name: whichever second the call
+    lands on, the subject is already there. Driving this function needs no new seam — it reads
+    `$EMRG_STOP_LOG_DIR` (`TestStopLogDirIsNotHostState`), so nothing here touches host state and
+    nothing reaches real teardown.
+
+    The FIFO arm is gated on `os.mkfifo`, so the Windows leg skips it and runs only the controls
+    below. That is stated rather than papered over: the controls pin what the guard must not
+    narrow, they do **not** cover the guard.
+    """
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_at_the_logs_own_name_answers_none_instead_of_blocking(self, tmp_path, monkeypatch):
+        import datetime as _dt
+
+        from emrg import _stop_all as stop_mod
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(logs))
+        # The name is built from `datetime.now()` inside the call, so the window is planted
+        # around the clock this test reads: a single name would be a race, not an arm.
+        base = _dt.datetime.now()
+        planted = 0
+        for delta in range(-5, 31):
+            name = f"stop_all-{(base + _dt.timedelta(seconds=delta)).strftime('%Y%m%d-%H%M%S')}.log"
+            fifo = logs / name
+            if not fifo.exists():
+                os.mkfifo(fifo)
+                planted += 1
+        assert planted, "no FIFO was planted, so this arm has no subject"
+
+        # The deadline is the assertion: an unguarded `open(..., "a")` here does not return, and
+        # `within` turns that into a failure naming the cause rather than a wedged run.
+        assert within(DEADLINE_SECONDS, stop_mod._open_stop_log) is None
+
+    def test_the_control_with_no_fifo_still_returns_a_handle(self, tmp_path, monkeypatch):
+        """The kind is the axis: with nothing planted the log is still opened and written.
+
+        FIFO-free on purpose, so it is one of the arms the Windows leg actually runs.
+        """
+        from emrg import _stop_all as stop_mod
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(logs))
+        handle = stop_mod._open_stop_log()
+        assert handle is not None
+        name = handle.name
+        handle.close()
+        assert Path(name).parent == logs
+        assert Path(name).name.startswith("stop_all-")
+
+    def test_a_directory_at_the_logs_own_name_answers_none(self, tmp_path, monkeypatch):
+        """The FIFO-free control, and the one that pins *why* it cannot discriminate.
+
+        A directory made the pre-guard version raise `IsADirectoryError`, which its own handler
+        already caught — so this arm is green with and without the kind check and is a control
+        rather than coverage. Saying so is the point: an arm reported as covering the guard while
+        passing either way is the defect `tests/test_abort_runs.py` records.
+        """
+        import datetime as _dt
+
+        from emrg import _stop_all as stop_mod
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(logs))
+        base = _dt.datetime.now()
+        for delta in range(-5, 31):
+            name = f"stop_all-{(base + _dt.timedelta(seconds=delta)).strftime('%Y%m%d-%H%M%S')}.log"
+            (logs / name).mkdir()
+        assert within(DEADLINE_SECONDS, stop_mod._open_stop_log) is None
+
+    def test_the_makedirs_failure_arm_still_answers_none(self, monkeypatch, tmp_path):
+        """The contract the guard must not narrow, pinned beside the existing arm.
+
+        `_open_stop_log` already answered `None` for every failure it could see; adding the kind
+        ask must not turn any of them into something else.
+        """
+        from emrg import _stop_all as stop_mod
+
+        def boom(*a, **k):
+            raise OSError("cannot create logs dir")
+
+        monkeypatch.setattr(stop_mod.os, "makedirs", boom)
+        assert stop_mod._open_stop_log() is None
