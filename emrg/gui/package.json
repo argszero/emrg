@@ -44,6 +44,7 @@
       "!renderer/vite.config.ts",
       "vendor/**",
       "conn-manager.js",
+      "config_mode.js",
       "gui-state.js",
       "daemon_client.js",
       "nav-policy.js",
