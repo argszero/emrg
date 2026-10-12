@@ -178,6 +178,11 @@ max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
+# vision: set to true if model supports OpenAI vision API (image_url content type).
+# This is the DEFAULT for every model that says nothing below: a [[llm.models]]
+# entry with its own `vision` key wins, and an entry without one (or no entry at
+# all) falls back to this value — it never inherits the previous model's answer.
+vision = false
 
 # Additional models for /model switching (optional — add or remove as needed)
 # model: API model name (optional — defaults to name if not set)
@@ -185,11 +190,13 @@ auto_compact_threshold = 0.0
 name = "deepseek-v3"
 model = "deepseek-chat"
 context_window = 131072
+vision = false
 
 [[llm.models]]
 name = "deepseek-r1"
 model = "deepseek-reasoner"
 context_window = 65536
+vision = false
 EMRGCONF
     log "config template created — edit $cfg to set your api_key and model"
 }
