@@ -35,12 +35,14 @@ defect. A green run of this file is a statement about how those lines are writte
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 
 import pytest
 
 from emrg.client import app as client_app
+from tests.bounded_read import DEADLINE_SECONDS, within
 
 APP_SOURCE = (Path(client_app.__file__)).read_text(encoding="utf-8")
 
@@ -177,3 +179,85 @@ def test_the_refusal_has_one_wording() -> None:
     assert APP_SOURCE.count(REFUSAL_TEXT) == 1, (
         "the refusal text appears more than once, so the two paths can diverge again"
     )
+
+
+# ── the target's kind: the same class, one arm of it per defect ───────────────
+#
+# Issue #2130. Two measurements on master `aff0d59a` (2026-10-12, `cyc20261012-112323`),
+# each arm in its own child under a probe cap with `platform.system` pinned so the Linux
+# arm is the real code path on a macOS host — and the arm the ubuntu CI leg runs:
+#
+#   * `_clipboard_extraction_verdict(<directory>)` -> **True** — `st_size` is a size only
+#     for a regular file, and a directory's is its own metadata. The caller believed it:
+#     `handle_key` then calls `tmp_path.read_bytes()`, which raises `IsADirectoryError`,
+#     which the TUI's main loop turns into `TUI main loop crashed`.
+#   * `_extract_clipboard_image(<fifo>)` on the Linux arm -> **did not return within 5 s**
+#     — that arm opens the target itself, with no bound (`subprocess.run(..., timeout=5)`
+#     is what makes the Darwin arm safe, which is why this hid here).
+#
+# The FIFO arm is written so that removing the guard makes it *fail at the deadline*
+# rather than pass (`tests/bounded_read.py`), and the directory arms need no `mkfifo`, so
+# the Windows leg reads them too.
+
+_needs_mkfifo = pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+
+
+def test_a_directory_at_the_target_is_not_an_extracted_image(tmp_path, caplog) -> None:
+    """The verdict asks the kind before the size, and keeps what it did not create.
+
+    Both halves matter: answering `True` is what took the TUI down, and removing the
+    subject would be this helper deleting something no extraction of its own made.
+    """
+    target = tmp_path / "_clipboard_tmp_1.png"
+    target.mkdir()
+
+    with caplog.at_level(logging.WARNING, logger=client_app.logger.name):
+        verdict = client_app._clipboard_extraction_verdict(str(target))
+
+    assert verdict is False, (
+        "a directory reads as a successful extraction — `st_size > 0` is its metadata, "
+        "and the caller's `read_bytes()` is what a `True` here leads to"
+    )
+    assert target.is_dir(), "the verdict removed a subject it did not create"
+    assert any(
+        "a directory" in rec.getMessage() and str(target) in rec.getMessage()
+        for rec in caplog.records
+    ), f"the refusal names neither the kind nor the subject: {[r.getMessage() for r in caplog.records]!r}"
+
+
+def test_a_directory_at_the_target_is_refused_before_any_arm_opens_it(tmp_path, monkeypatch, caplog) -> None:
+    """Through the extraction itself, on the arm that would open it.
+
+    A directory cannot be opened for writing at all (`IsADirectoryError`), so this arm
+    would pass on the Linux branch without a guard — the assertion that carries the
+    change is the verdict's, one line above the open. It is kept because it is the
+    caller's own shape: `_extract_clipboard_image` must answer `False` and must not
+    raise, whatever the kind, since the TUI's main loop is what a raise reaches.
+    """
+    target = tmp_path / "_clipboard_tmp_1.png"
+    target.mkdir()
+    monkeypatch.setattr(client_app.platform, "system", lambda: "Linux")
+
+    with caplog.at_level(logging.WARNING, logger=client_app.logger.name):
+        assert client_app._extract_clipboard_image(str(target)) is False
+    assert target.is_dir()
+
+
+@_needs_mkfifo
+def test_a_named_pipe_at_the_target_does_not_wedge_the_tui(tmp_path, monkeypatch) -> None:
+    """The Linux arm's own open, bounded: it is the TUI process that would stop here."""
+    target = tmp_path / "_clipboard_tmp_1.png"
+    os.mkfifo(target)
+    monkeypatch.setattr(client_app.platform, "system", lambda: "Linux")
+
+    assert within(DEADLINE_SECONDS, lambda: client_app._extract_clipboard_image(str(target))) is False
+
+
+@_needs_mkfifo
+def test_a_named_pipe_at_the_target_is_not_read_as_an_image(tmp_path) -> None:
+    """The decision on its own, so the arm reads the helper rather than only its caller."""
+    target = tmp_path / "_clipboard_tmp_1.png"
+    os.mkfifo(target)
+
+    assert client_app._clipboard_extraction_verdict(str(target)) is False

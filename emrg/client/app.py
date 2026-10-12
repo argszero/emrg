@@ -665,13 +665,36 @@ def _clipboard_extraction_verdict(target_path: str) -> bool:
     holding no bytes is *removed* and reported as a failure, so no caller can keep
     the litter by forgetting a branch, and a caller that gets `False` can say the
     clipboard yielded no image without tripping over a leftover file.
+
+    **The kind is asked before the size**, because `st_size` is a *size* only for a regular
+    file: a directory's is its own metadata (96 bytes on this host), so a png-named
+    directory read as "bytes were written" — measured 2026-10-12 (`cyc20261012-112323`) on
+    master `aff0d59a`, this function called directly with each kind at the target:
+    **directory → `True`**, FIFO → `False`, regular file → `True`, absent → `False`. The
+    caller believed the `True`: `handle_key` goes on to `tmp_path.read_bytes()`, which raises
+    `IsADirectoryError`, which the TUI's main loop turns into `TUI main loop crashed` — the
+    client exits.
+
+    A subject of another kind is **not removed**, unlike the 0-byte file above, and the
+    difference is whose bytes they are: the cleanup half of this decision exists for the
+    empty file *the attempt itself created*, while a FIFO or a directory at this path was
+    created by somebody else — `unlink` on it is either a deletion of a channel another
+    process may hold open or, for a directory, an operation that cannot succeed at all.
     """
     path = Path(target_path)
+    try:
+        kind = non_regular_kind(path)
+    except OSError:
+        # Nothing was created at all: a failure with no litter to remove.
+        return False
+    if kind is not None:
+        logger.warning(
+            "clipboard: %s is %s, not a regular file — not an extracted image", path, kind)
+        return False
     try:
         if path.stat().st_size > 0:
             return True
     except OSError:
-        # Nothing was created at all: a failure with no litter to remove.
         return False
     try:
         path.unlink()
@@ -694,8 +717,33 @@ def _report_clipboard_extraction_failure(chat, target_path: str) -> None:
 
 
 def _extract_clipboard_image(target_path: str) -> bool:
-    """Extract clipboard image as PNG to target_path. Returns True on success."""
+    """Extract clipboard image as PNG to target_path. Returns True on success.
+
+    The target's kind is asked **before any arm runs**, because one of the three opens it
+    itself: the Linux arm does `open(target_path, "wb")` with no bound at all, so a FIFO
+    there waits for a reader that never comes and the TUI process stops — measured
+    2026-10-12 (`cyc20261012-112323`) on master `aff0d59a`, this function with
+    `platform.system` pinned to each arm and a `mkfifo` at the target: the Linux arm **did
+    not return within 5 s**, while the Darwin arm returned in 0.4–1.0 s (its open lives in
+    `osascript`, bounded by `subprocess.run(..., timeout=5)` — safe incidentally, which is
+    exactly the shape that hides a defect on a single-platform host). The target is the
+    app's own `…/.emrg/sessions/<id>/images/_clipboard_tmp_<n>.png`, i.e. inside the
+    workspace the agent writes to, so the kind is not exotic there.
+
+    A non-regular target is answered `False` rather than opened: the caller reads that as
+    "no image could be extracted" and tells the reader so (`_report_clipboard_extraction_failure`),
+    and the refusal names the path and the kind in the log.
+    """
     system = platform.system()
+    try:
+        kind = non_regular_kind(target_path)
+    except OSError:
+        kind = None  # absent is the normal case: every arm creates the file it writes into
+    if kind is not None:
+        logger.warning(
+            "clipboard: %s is %s, not a regular file — not an extraction target",
+            target_path, kind)
+        return False
     try:
         if system == "Darwin":
             # Use osascript to write clipboard as PNG
