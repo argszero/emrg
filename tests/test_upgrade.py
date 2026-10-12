@@ -144,6 +144,17 @@ def test_tick_disabled_by_config(monkeypatch, tmp_path):
 
 
 def test_tick_network_failure_silent(monkeypatch, tmp_path):
+    """A failed releases request starts no session.
+
+    "Silent" is the *absence of a trigger*, and the callback is what says so —
+    `tick()` returning without raising is the weaker half, and on its own it is
+    green for a tick that raises nothing and starts a session anyway. The three
+    other no-trigger tests in this family read the captured calls
+    (`..._local_matches_target`, `..._disabled_by_config`, and the no-eligible-tag
+    path of `test_tick_delay_filter_takes_newest_eligible`); this one asserted
+    nothing, so a failure path that fell back to a remembered tag would have
+    left it green.
+    """
     monkeypatch.setattr(
         "emrg.server.upgrade.VERSION_FILE", tmp_path / "version.txt"
     )
@@ -162,11 +173,20 @@ def test_tick_network_failure_silent(monkeypatch, tmp_path):
         async def get(self, url):
             raise Exception("network down")
 
+    calls = []
+
+    async def fake_run_session(session_id, cwd, prompt):
+        calls.append({"session_id": session_id, "cwd": cwd, "prompt": prompt})
+
     import emrg.server.upgrade as up
 
     monkeypatch.setattr(up.httpx, "AsyncClient", _FailClient)
-    mgr = UpgradeManager(UpdateConfig(), lambda **kw: asyncio.sleep(0))
+    mgr = UpgradeManager(UpdateConfig(), fake_run_session)
     asyncio.run(mgr.tick())  # must not raise
+    assert calls == [], (
+        "a network failure is silent: the tick must not start an upgrade "
+        f"session — it started {len(calls)}"
+    )
 
 
 def test_inflight_guard_skips_retrigger(monkeypatch, tmp_path):
