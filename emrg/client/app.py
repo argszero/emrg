@@ -27,6 +27,10 @@ from emrg.protocol import TaskResponse, ToolEnd, ToolStart, new_task_id
 from emrg.sandbox.escalation import APPROVAL_TIMEOUT_SECONDS
 from emrg.sandbox.policy import SANDBOX_MODES
 from emrg.session import generate_session_id
+# The credential rule is a stdlib-only leaf (`emrg/server/redaction.py`), deliberately
+# importable from outside the daemon: this is the client's own log surface, and a window
+# applied there before the rule sees the text is the defect that module exists to prevent.
+from emrg.server.redaction import redact_string
 from emrg.skills.loader import load_skills
 # The "is this path a regular file" rule is the tool layer's, reached at a path — the same
 # import `emrg/client/daemon_manager.py` makes for the same reason (`#2062`, `#2081`).
@@ -34,6 +38,28 @@ from emrg.tools.base import non_regular_kind
 from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
+
+
+def _rows_for_log(rows, width: int) -> str:
+    """The chat rows as one log line, each row's content **redacted and then** windowed.
+
+    The order is the whole point, and it is why this is a name rather than a convention at
+    two call sites: ``content[:width]`` applied *before* the rule cannot see a credential
+    the cut lands inside. Every pattern in ``emrg.server.redaction.INLINE_SECRET_PATTERNS``
+    has a minimum length (``sk-`` needs 16 alphanumerics, ``ghp_`` 20, a base64 run 40), so a
+    secret sliced early stops matching and its surviving prefix is written in the clear —
+    measured 2026-10-13 on master ``daab42c6``: a key starting 13 characters in, windowed at
+    30, left ``sk-A1b2C3d4E5F6G7`` (17 characters of a live key) in the line, where the order
+    below leaves ``***``.
+
+    ``width`` is a display choice, not a rule: ``ROWS after delta`` reads 30 and ``ROWS after
+    asst`` 20, and this helper does not reconcile them. The rule is only the order.
+    """
+    return ", ".join(
+        f"{r.role}={redact_string(r.content)[:width]}"
+        for r in rows
+        if isinstance(r, ChatRow)
+    )
 
 
 def _csi_modifier_action(data: bytes) -> str | None:
@@ -1531,7 +1557,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             # Fallback: no StreamingMarkdown found, use plain text
                             chat.update_last(stream_buffer)
                     logger.debug("ROWS after delta: %d [%s]", len(chat.rows),
-                        ', '.join(f'{r.role}={r.content[:30]}' for r in chat.rows if isinstance(r, ChatRow)))
+                        _rows_for_log(chat.rows, 30))
                     _last_center = "streaming..."
                     status.update(center=_last_center); _render_throttled()
                 if resp.done:
@@ -3497,7 +3523,7 @@ Streaming
                 chat.add("assistant", "")
                 msg_count += 1; _update_left_extra()
                 logger.debug("ROWS after asst: %d [%s]", len(chat.rows),
-                    ', '.join(f'{r.role}={r.content[:20]}' for r in chat.rows if isinstance(r, ChatRow)))
+                    _rows_for_log(chat.rows, 20))
                 _last_center = "thinking..."
                 status.update(center=_last_center)
                 term.render()
