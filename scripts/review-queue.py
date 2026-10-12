@@ -128,10 +128,9 @@ the clock, and a cycle id **is** its start time in the host's local zone
 (`cyc20260917-221117` began at 22:11:17 local). So the window is decidable from two
 datums this tool already has — the push time (the counter prints it) and the cycle's
 id — plus one it does not: **the previous cycle**, which `--prev-cycle` supplies and
-which is otherwise read from the cycle records in the directory the evolution
-template names them in (`--cycles-log`, default `DEFAULT_CYCLES_LOGS` — the project
-memory root inside the checkout, which D9 made the template's path and where the
-corpus now lives). A head pushed inside
+which is otherwise read from the cycle records in the directories the memory system
+writes them to (`--cycles-log`, default `DEFAULT_CYCLES_LOGS` — the checkout's project
+memory root, plus one memory directory per session under it). A head pushed inside
 `[previous cycle's start, now)` is reported `abstain` instead of `vote` or `merge`.
 
 When the previous cycle cannot be found, `--cycle` is not silently ignored: the
@@ -228,50 +227,73 @@ RUNNER = "uv run --no-sync python3"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
+def session_memory_roots(checkout: Path) -> tuple[Path, ...]:
+    """The memory directories of the sessions run inside `checkout`, in a stable order.
+
+    A cycle record is an ordinary memory entry, so it lands where the memory
+    instructions put one of its kind: the checkout's project memory root or the
+    memory directory of the session that wrote it. This is the second of those
+    levels, and it is **globbed off the filesystem rather than constructed** — a
+    memory store mkdirs the directory it is handed, and a reading with a side effect
+    is how a search comes to create the corpus it searches. `check-memory-index.py`
+    globs `*/memory/MEMORY.md` beside the project index for the same reason.
+
+    Empty when the tree carries no session memory, which is every fresh clone:
+    `.emrg` is gitignored, so on a runner the default is the project root alone.
+    """
+    sessions = checkout / ".emrg" / "sessions"
+    return tuple(sorted(path for path in sessions.glob("*/memory") if path.is_dir()))
+
+
 #: Where the evolution task writes its cycle records — one `cycle-<date>-<time>.md`
 #: per cycle, the cycle's id without its `cyc` prefix in the filename, which is why
 #: the id is rebuilt rather than read off.
 #:
-#: **One root, because the corpus has finished moving.** `SCRIPTS_DIR` is
-#: `<source_dir>/scripts`, so `SCRIPTS_DIR.parent` is the checkout. D9 (PR #1555)
-#: re-based the prompt's memory roots from the evolution root beside the checkout onto
-#: `{{ source_dir }}` inside it, and the records followed — but not at once: while the
-#: move was under way the corpus still sat beside the checkout while the template wrote
-#: inside it, so this tool searched **both** and took the newest record across the
-#: union, because reading either one alone leaves the abstention window unresolvable.
+#: **Two roots, because a tree's memory is not one directory.** `SCRIPTS_DIR` is
+#: `<source_dir>/scripts`, so `SCRIPTS_DIR.parent` is the checkout. A record is a
+#: memory entry like any other, and the memory instructions name two levels for it —
+#: the checkout's project root (`.emrg/memory/`, the cross-session scope) and the
+#: session that wrote it (`.emrg/sessions/*/memory/`, the session scope) — so which
+#: level a record lands at is the writer's scope choice, not a path the instructions
+#: fix. So both are live, and this search has to
+#: read both: the project root holds the older records, and the session directories
+#: hold the ones written since a cycle put its record under the session it belongs to.
 #:
-#: One root is enough now, and the reason is a fact about the *writers* rather than
-#: about any one filesystem: D9 stopped every writer of the second root, so the newest
-#: record cannot be there, and the template in this checkout — the one the guard below
-#: ties this tuple to — names the checkout's own root.
+#: **The direction of the error is why this is worth a paragraph.** The newest record
+#: decides the previous cycle, so a root that has stopped growing *freezes* the window
+#: at the last cycle that wrote there, and a frozen window is an over-wide one: heads
+#: pushed by the cycles in between are reported `abstain` when they are not one's own,
+#: and the cycles that pushed them lose a vote they were entitled to. Nothing is
+#: printed as a fault — the tool names a window, names the cycle it resolved and exits
+#: 0 — so only the row's cycle is wrong, and it is wrong in the permissive direction.
+#: Measured 2026-10-12: the project root's newest record was a day older than the
+#: newest record the session directories held, and the window was resolved from the
+#: stale one.
 #:
-#: What remains at the old path is **deliberately not stated here**: it is a host-side
-#: matter that differs between hosts, while this script runs on all of them and is not
-#: told which one it is on. A path, a file count or a byte size that is true of one host
-#: and absent on another is the defect class that had this paragraph rewritten — a
-#: derived number no guard measures goes stale in silence (`Agent.md`). A window that
-#: does need one of those older records opens them where they are, by naming the
-#: directory it knows them to be in (see the override below).
+#: This is the shape this tool carried while the prompt's record path moved once
+#: before (D9, PR #1555) and the corpus was split over two roots — it searched both
+#: and took the newest across the union then, for the same reason.
 #:
-#: A guard ties this set to the template's path
-#: (`tests/test_review_queue.py::test_the_prompt_writes_its_cycle_records_where_the_queue_reads_them`):
-#: it renders this tree's `evolution_prompt.md` and requires every cycle-record path in
-#: it to be one of these roots, so reader and template cannot drift apart silently again.
+#: A guard ties this set to the writers
+#: (`tests/test_review_queue.py::test_the_records_land_where_the_queue_reads_them`):
+#: it measures the project root the loader derives and a session root this search
+#: visits, so reader and writers cannot drift apart silently again.
 #:
 #: Overridable by `--cycles-log` / `EMRG_CYCLES_LOG` (one directory, or several joined by
 #: `os.pathsep`); a directory that is not there is reported as unreadable, never guessed at.
 DEFAULT_CYCLES_LOGS: tuple[Path, ...] = (
-    SCRIPTS_DIR.parent / ".emrg" / "memory",          # this tree's template, and D9's root
+    SCRIPTS_DIR.parent / ".emrg" / "memory",          # the checkout's project memory root
+    *session_memory_roots(SCRIPTS_DIR.parent),        # plus one per session that wrote
 )
 
 
 def resolve_cycle_logs(override: str | None = None) -> tuple[Path, ...]:
     """The cycle-record directories to search: the override, else the default.
 
-    `--cycles-log` / `EMRG_CYCLES_LOG` still accept several directories joined by
-    `os.pathsep` — the shape the tool carried while the corpus was split across two
-    roots — so a caller can name a corpus of its own without the default changing
-    meaning.
+    `--cycles-log` / `EMRG_CYCLES_LOG` accept one directory or several joined by
+    `os.pathsep`, so a caller can name a corpus of its own without the default
+    changing meaning — and the default is itself several directories, because the
+    writers do not all use one root.
     """
     raw = override or os.environ.get("EMRG_CYCLES_LOG")
     if raw:
@@ -326,10 +348,9 @@ def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str]:
     The newest cycle record whose id sorts before this cycle's; ids are fixed width,
     so string order is time order, and a file's `<date>-<time>` stem is turned back
     into an id here because the filename does not carry the `cyc` prefix. The default
-    is one directory (`DEFAULT_CYCLES_LOGS`); a caller may name several, and the newest
-    record then wins *across* them — the shape this tool carried while the prompt's
-    record path moved and the corpus was split over two roots, kept because a caller
-    with its own corpus still needs it.
+    is several directories (`DEFAULT_CYCLES_LOGS`: the project memory root and one per
+    session); a caller may name several too, and the newest record wins *across* them —
+    which is the only reading that is right when the writers do not all use one root.
 
     `("", reason)` when there is none — an unresolvable window is the one input this
     reading must not invent, because inventing it spends a vote. A directory that
@@ -1450,8 +1471,8 @@ def main(argv: list[str] | None = None) -> int:
         "--cycles-log",
         default=None,
         help="directory of `cycle-<id>.md` records, used to find the previous cycle "
-             "when --prev-cycle is not given (default: $EMRG_CYCLES_LOG, else both "
-             f"{os.pathsep}-joined directories the template may name: "
+             "when --prev-cycle is not given (default: $EMRG_CYCLES_LOG, else the "
+             f"{os.pathsep}-joined directories the memory system writes records to: "
              f"{os.pathsep.join(str(d) for d in DEFAULT_CYCLES_LOGS)})",
     )
     parser.add_argument(
