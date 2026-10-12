@@ -28,6 +28,7 @@ from typing import Callable, Optional
 import httpx
 
 from emrg.config import UpdateConfig
+from emrg.memory import NotARegularFile
 
 # The "is this a regular file" rule is the tool layer's (`special_file_kind`, a whitelist of
 # `S_ISREG`), reached at a *path* rather than at a mode — the shape `emrg/config.py`,
@@ -219,12 +220,17 @@ def _installed_versions() -> tuple:
         # has the handler — `UpgradeManager.tick` wraps `prune_upgrade_backups()` in
         # `try/except Exception` and logs "backup retention failed" — so refusing skips the
         # sweep and deletes nothing.
+        #
+        # `NotARegularFile` rather than a bare `OSError`: it is the family's own refusal
+        # (`emrg/memory.py`, raised the same way by `emrg/config.py`), it **is** an `OSError`
+        # so every `except OSError` here keeps working, and the class carries the kind into
+        # frames that render `type(exc).__name__` (`tests/test_daemon.py` pins exactly that).
         try:
             kind = non_regular_kind(path)
         except OSError:
             continue  # absent: nothing installed yet, the answer this loop already gave
         if kind is not None:
-            raise OSError(
+            raise NotARegularFile(
                 f"{path} is {kind}, not a regular file — the version it names decides which "
                 f"pre-upgrade snapshots the retention may remove, so it is refused rather "
                 f"than read as 'no version installed'."

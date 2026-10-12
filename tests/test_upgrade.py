@@ -1089,7 +1089,7 @@ def test_the_retention_reader_refuses_a_named_pipe_at_the_version_file(monkeypat
     monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "version.txt")
     monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "previous-version.txt")
 
-    with pytest.raises(OSError) as excinfo:
+    with pytest.raises(up.NotARegularFile) as excinfo:
         within(DEADLINE_SECONDS, up._installed_versions)
 
     assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
@@ -1106,7 +1106,7 @@ def test_the_retention_reader_asks_the_second_subject_too(monkeypatch, tmp_path)
     os.mkfifo(tmp_path / "previous-version.txt")
     monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "previous-version.txt")
 
-    with pytest.raises(OSError) as excinfo:
+    with pytest.raises(up.NotARegularFile) as excinfo:
         within(DEADLINE_SECONDS, up._installed_versions)
 
     assert "previous-version.txt" in str(excinfo.value), str(excinfo.value)
@@ -1125,7 +1125,7 @@ def test_the_sweep_is_skipped_rather_than_held_by_a_pipe(monkeypatch, tmp_path):
     monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "version.txt")
     monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "previous-version.txt")
 
-    with pytest.raises(OSError):
+    with pytest.raises(up.NotARegularFile):
         within(DEADLINE_SECONDS, lambda: up.prune_upgrade_backups(backups))
 
     assert sorted(p.name for p in backups.iterdir()) == ["0.2.90", "0.2.91", "0.2.95"]
@@ -1154,14 +1154,23 @@ def test_a_directory_at_the_version_file_refuses_the_retention_reader(monkeypatc
     monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "version.txt")
     monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "previous-version.txt")
 
-    with pytest.raises(OSError) as excinfo:
+    with pytest.raises(up.NotARegularFile) as excinfo:
         up._installed_versions()
 
     assert "a directory" in str(excinfo.value), str(excinfo.value)
 
 
-def test_a_directory_at_the_version_file_reads_as_no_local_version(monkeypatch, tmp_path):
-    """The other answer for the same shape — the two sites part company here on purpose."""
+def test_a_directory_at_the_version_file_reads_as_no_local_version(monkeypatch, tmp_path, caplog):
+    """The other answer for the same shape — the two sites part company here on purpose.
+
+    This is the one site that **keeps** its `""`, so the return value cannot distinguish a
+    guarded reader from an unguarded one: a directory is swallowed into the same `""` by the
+    `except OSError` below. The **warning** is therefore what discriminates here — it is what
+    makes the skip visible instead of silent, and a guard that skipped without saying so
+    would leave the host with a version the tick never compares.
+    """
+    import logging
+
     import emrg.server.upgrade as up
 
     (tmp_path / "version.txt").mkdir()
@@ -1169,7 +1178,62 @@ def test_a_directory_at_the_version_file_reads_as_no_local_version(monkeypatch, 
 
     mgr = UpgradeManager(UpdateConfig(), lambda **kw: asyncio.sleep(0))
 
-    assert mgr._read_local_version() == ""
+    with caplog.at_level(logging.WARNING, logger="emrg.server.upgrade"):
+        assert mgr._read_local_version() == ""
+
+    assert any(
+        str(tmp_path / "version.txt") in r.getMessage() and "a directory" in r.getMessage()
+        for r in caplog.records
+    ), "the skip names its subject and its kind — it is not silent"
+
+
+def test_a_refused_sweep_does_not_stop_the_tick(monkeypatch, tmp_path):
+    """The caller's side, FIFO-free so the Windows leg reads it: `prune_upgrade_backups()`
+    now propagates the refusal out of `_installed_versions()`, and `tick()` wraps the call in
+    `except Exception`. The tick must still return and still reach target discovery — the
+    refusal may cost the sweep, never the tick — and the snapshot set must be untouched.
+
+    This is the arm that reads the *consequence* rather than the refusal: the protected set
+    is what the retention may not delete, so a reader that degraded to `()` instead of
+    refusing would prune two snapshots the running version had covered.
+    """
+    import emrg.server.upgrade as up
+
+    backups = tmp_path / "upgrade-backup"
+    for ver in ("0.2.90", "0.2.91", "0.2.95"):
+        _snapshot(backups, ver)
+    (tmp_path / "version.txt").mkdir()  # the non-regular subject
+    monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "version.txt")
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "previous-version.txt")
+    monkeypatch.setattr(up, "BACKUP_DIR", backups)
+
+    class _EmptyClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            class _Resp:
+                status_code = 200
+
+                def json(self):
+                    return []
+
+            return _Resp()
+
+    monkeypatch.setattr(up.httpx, "AsyncClient", _EmptyClient)
+    mgr = UpgradeManager(UpdateConfig(), lambda **kw: asyncio.sleep(0))
+    asyncio.run(mgr.tick())  # must return, not block, not raise
+
+    assert sorted(p.name for p in backups.iterdir()) == ["0.2.90", "0.2.91", "0.2.95"], (
+        "the sweep was skipped, so nothing was deleted — a degraded read would have pruned "
+        "0.2.90 and 0.2.91 in place of the protected set"
+    )
 
 
 def test_the_version_readers_still_read_a_regular_file(monkeypatch, tmp_path):
