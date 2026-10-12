@@ -855,6 +855,68 @@ def test_a_linked_pair_exits_zero_and_names_both_directions(mod, monkeypatch, ca
     assert sorted(fake.timeline_calls) == [10, 20]
 
 
+def test_a_comment_names_the_pr_even_when_github_emitted_no_cross_reference(
+    mod, monkeypatch, capsys
+) -> None:
+    """The second half is read from the issue's text, not from the event alone.
+
+    Measured 2026-10-13 on this queue's own pair: issue #2176's `Handled by #2177`
+    comment was written before the PR record existed, GitHub attached **no**
+    `cross-referenced` event to #2177 for it, and the reading printed `one-way` on both
+    rows with a remedy that comment already satisfied. Re-posting the identical comment
+    after the PR existed attached the event — so the event is a notification that can be
+    missing, and a reading keyed on it alone reports a declaration that exists as absent.
+
+    The fixture is the positive pair with that one event removed, which is exactly the
+    difference: `#20` declares `Closes #10`, `#10`'s half is a comment, and `#20`'s
+    timeline carries nothing.
+
+    A test whose fake was never called cannot pass, which is why the comments call for
+    #10 is asserted too: the widened candidate set has to be the thing that read it.
+    """
+    fake = FakeGh(
+        [_issue(10, "the problem")],
+        [_pr(20, "the fix", body="Closes #10.")],
+        {10: [_refers_to(20, is_pr=True, body="Closes #10.")], 20: []},
+        comments={10: [_comment("Handled by #20 — the daemon half, updated in the PR.")]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 0, out
+    assert "#10 issue ok" in out and "#20 PR ok" in out
+    assert "#20 declares it and this issue names #20 back" in _detail(out, "#10 issue ok")
+    assert "declares #10, named back in the issue" in _detail(out, "#20 PR ok")
+    assert 10 in fake.comments_calls, "the declared issue's text was never fetched"
+
+
+def test_a_declared_issue_that_never_names_the_pr_is_still_one_way(
+    mod, monkeypatch, capsys
+) -> None:
+    """The widened candidate set reads a text; it does not manufacture a link.
+
+    The same fixture with the comment saying nothing about #20. `#10` is now read for
+    claim text where the old candidate set would not have read it at all, so this is the
+    direction that keeps the change from turning every declared pair `linked`: the text
+    is fetched, and `claiming_issues` still drops an issue that does not name the PR.
+    """
+    fake = FakeGh(
+        [_issue(10, "the problem")],
+        [_pr(20, "the fix", body="Closes #10.")],
+        {10: [_refers_to(20, is_pr=True, body="Closes #10.")], 20: []},
+        comments={10: [_comment("Reproduced on master — the exit code is 0 there too.")]},
+    )
+    _install(mod, monkeypatch, fake)
+
+    rc, out = _run(mod, capsys)
+
+    assert rc == 1, out
+    assert 10 in fake.comments_calls, "the declared issue's text was never fetched"
+    assert "#20 declares it, and this issue never names #20" in _detail(out, "#10 issue ONE-WAY")
+    assert "declares #10 and none of those issues names it back" in _detail(out, "#20 PR ONE-WAY")
+
+
 def test_the_queue_is_read_from_the_one_endpoint_that_returns_both(mod, monkeypatch, capsys) -> None:
     """Issues and PRs are separated by the `pull_request` key, not by a number range.
 
