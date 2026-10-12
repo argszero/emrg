@@ -463,19 +463,56 @@ def _send_rant(message: str, project: str | None = None) -> None:
 
 # ── Client ────────────────────────────────────────────────────
 
-def _run_client(init_auto_evolve: bool = False) -> None:
-    # Client logs go to ./.emrg/emrg-client.log
+def _configure_client_logging() -> Path:
+    """Write client logs to ``<cwd>/.emrg/emrg-client.log`` — unless that is not a regular file.
+
+    A module-level helper rather than a block inside `_run_client`, because a test that
+    had to reach this through the client would have to start the TUI — which is why this
+    sink was still asking nothing while its three siblings were fixed. Returns the path
+    it derived, so a caller can assert the derivation without opening anything.
+    """
     log_dir = Path.cwd() / ".emrg"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "emrg-client.log"
 
     from logging.handlers import RotatingFileHandler
 
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
+    from emrg.tools.base import non_regular_kind
+
+    handlers: list[logging.Handler] = []
+    # ── An open is not a read, and this one is on the client's startup path ──
+    #
+    # `RotatingFileHandler` opens its subject at **construction**, so a FIFO at this path
+    # blocks here — before the TUI exists, where nothing the host can press reaches it —
+    # and `open()` on a FIFO raises nothing, so no `except OSError` could bound it. A
+    # directory is the same defect in the other shape: it raises `IsADirectoryError`
+    # straight out of `_run_client`, so the client never starts at all. Measured
+    # 2026-10-12 (`cyc20261012-060054`) on master `23bec8dc`, the block below replicated in
+    # a child, one child per subject kind, 10 s cap: a FIFO **did not return within 10 s**,
+    # a directory raised `IsADirectoryError` in 0.08 s, a regular file returned in 0.22 s.
+    # The path is under `<cwd>/.emrg/` — the **workspace**, the agent's own write surface —
+    # so this is reachable rather than theoretical.
+    #
+    # Skipped rather than raised, for the daemon's own reason one sink over (#2117): a log
+    # sink must not become a startup dependency, and a client that refuses to start over a
+    # log file is down for a reason the host never chose. The reason is said on stderr
+    # instead of swallowed — still the terminal here, because the TUI has not taken the
+    # screen yet.
+    #
+    # Absent is not a refusal: the normal case is a file that does not exist yet, and
+    # `non_regular_kind` *stats*, so absence arrives as an `OSError` rather than as a
+    # `None` kind.
+    try:
+        kind = non_regular_kind(log_path)
+    except OSError:
+        kind = None
+    if kind is not None:
+        sys.stderr.write(
+            f"emrg: {log_path} is {kind}, not a regular file — no client file log this run\n"
+        )
+        sys.stderr.flush()
+    else:
+        handlers.append(
             RotatingFileHandler(
                 str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3,
                 # encoding="utf-8" — symmetric with the daemon's #556 fix:
@@ -485,12 +522,23 @@ def _run_client(init_auto_evolve: bool = False) -> None:
                 # "backslashreplace" is defense-in-depth: logging must never
                 # crash on exotic characters (rant 2026-08-08T09:35:30).
                 encoding="utf-8", errors="backslashreplace",
-            ),
-        ],
+            )
+        )
+
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
     )
 
     # Suppress noisy third-party DEBUG logs
     logging.getLogger("markdown_it").setLevel(logging.WARNING)
+    return log_path
+
+
+def _run_client(init_auto_evolve: bool = False) -> None:
+    _configure_client_logging()
 
     from emrg.config import ensure_config
     from emrg.client.app import run_client
