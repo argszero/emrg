@@ -59,6 +59,7 @@ import re
 import secrets
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -468,6 +469,64 @@ def ws_graceful_shutdown(port: int, token: str, timeout: float = 3.0) -> bool:
 
 # ── Individual stop steps ───────────────────────────────────────
 
+def _non_regular_kind(path) -> str | None:
+    """Name ``path``'s kind when opening it would never return — ``None`` for a regular file.
+
+    Stated here in stdlib instead of importing ``emrg.tools.base.non_regular_kind``: this module
+    is extracted to ``{tmp}`` and run by the runtime's Python with no ``emrg`` package importable
+    (see the module docstring and ``tests/test_stop_all.py::TestPureStdlib``), so the shared
+    predicate is out of reach. The *name* is the shared family's deliberately — the opener census
+    (``tests/test_every_opener_asks_its_subject_kind.py``) decides "does this scope ask?" by name
+    against its ``GUARDS`` set, and accepts any definition whose body reads a mode, so a
+    differently-spelled local predicate would read as a new gap rather than as a guard.
+
+    A missing subject answers ``None`` rather than raising, because absence is this module's normal
+    case: the token file is written by the daemon at startup and removed once it is down.
+    """
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return None
+    if stat.S_ISREG(mode):
+        return None
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISFIFO(mode):
+        return "a FIFO (named pipe)"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    return "not a regular file"
+
+
+def _read_token_file(path: Path) -> str:
+    """The daemon's auth token, or ``""`` when there is nothing readable there (issue #2140).
+
+    The kind is asked **before** the open, because the ``except (OSError, ValueError)`` below
+    answers only the *raising* kinds: absence, a directory and undecodable bytes all bound it, and
+    a **FIFO does not** — it waits at the open for a writer and raises nothing, so the handler never
+    runs and the call never returns. On this module that is worse than elsewhere: ``emrg stop``
+    exists to terminate processes, and a subject it cannot open would make it never return on the
+    one command whose purpose is to return. Measured 2026-10-12 (``cyc20261012-183804``), as a
+    mutation arm on this tree: with this guard removed, the FIFO test does not return within its
+    deadline and fails on ``assert not thread.is_alive()``.
+
+    Every refusal degrades the same way, and that is the contract rather than a shortcut: ``""`` is
+    what the caller already produced for a missing, unreadable or undecodable token, and its next
+    step — the cmdline-scan kill fallback — is unchanged. A stop path must not acquire a new way to
+    fail.
+    """
+    if _non_regular_kind(path) is not None:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return ""
+
+
 def stop_daemon() -> None:
     """Stop the daemon: ws shutdown → fixed-port wait → cmdline-scan kill
     fallback (``-m emrg.server``) → token cleanup (rant 2026-08-21T16:45:06:
@@ -482,11 +541,10 @@ def stop_daemon() -> None:
     # Fixed-port shutdown (rant 2026-08-19T08:05:21): the daemon always
     # listens on _EMRGD_PORT; the token file only supplies the auth token
     # (single line, rant 2026-08-20T14:32:52). If the file is missing/stale,
-    # fall through to the cmdline-scan path.
-    try:
-        token = token_path.read_text(encoding="utf-8").strip()
-    except (OSError, ValueError):
-        token = ""
+    # fall through to the cmdline-scan path — and `_read_token_file` answers
+    # `""` for a subject that is not a regular file too, rather than blocking
+    # at the open (issue #2140).
+    token = _read_token_file(token_path)
     if token and ws_graceful_shutdown(_EMRGD_PORT, token):
         # wait for the daemon to exit — the port closing is the ground truth
         # (~10s grace: old stop-emrg.cmd v2 polled up to 10s; a busy daemon
