@@ -198,6 +198,12 @@ model = "deepseek-reasoner"
 context_window = 65536
 vision = false
 EMRGCONF
+    # The file holds `api_key` in plaintext and this script's own closing line tells the host
+    # to put a real key in it before running anything, so it is born private rather than
+    # waiting for the first `emrg` start to tighten it (`emrg.config.CONFIG_FILE_MODE`) —
+    # the same rule the GUI's two writers use. On Git Bash `chmod` sets only the read-only
+    # attribute, so this is a no-op there and cannot leave the file unwritable.
+    chmod 600 "$cfg"
     log "config template created — edit $cfg to set your api_key and model"
 }
 
