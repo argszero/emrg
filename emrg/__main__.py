@@ -534,6 +534,15 @@ def _configure_client_logging() -> Path:
 
     # Suppress noisy third-party DEBUG logs
     logging.getLogger("markdown_it").setLevel(logging.WARNING)
+    # Frame-level DEBUG *is* the conversation (rant 2026-08-06T10:21:26): `websockets`
+    # logs every frame it sends and receives with the payload inside the record, so with
+    # the root at DEBUG the client's own log file collected them — measured 2026-10-12 on
+    # the host's `~/.emrg/emrg-client.log`: 3226 `websockets.client` records, 3129 of them
+    # received `TEXT` frames, half the file's lines. The daemon's sink states the same rule
+    # for the same library (`emrg/server/__main__.py`); this is the client's half of it.
+    # INFO is the trade the daemon already makes: connection open/closed survives, the
+    # per-frame records do not.
+    logging.getLogger("websockets").setLevel(logging.INFO)
     return log_path
 
 
