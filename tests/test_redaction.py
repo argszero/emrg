@@ -416,7 +416,9 @@ def test_no_string_redactor_is_handed_a_slice():
     population is first-party code under `emrg/` — this file must be able to write the forbidden
     form, which is the negative half of the arm above; (2) it catches a *slice*, not a value
     truncated somewhere upstream and arriving as a plain name — the shape the client's
-    `r.content[:30]` rows have, which no call-site census can see.
+    `r.content[:30]` rows have, which no call-site census can see. The per-module numbers are
+    **floors**, so the census catches a module that *loses* a call site without reddening the
+    tree of whoever adds one — which is the edit this guard exists to protect.
     """
     calls = _string_redactor_calls()
 
@@ -436,14 +438,32 @@ def test_no_string_redactor_is_handed_a_slice():
     )
 
     # The other direction: the census really is reading the sites it is about, counted by module,
-    # so a module that loses its callers is visible rather than silent.
+    # so a module that **loses** its callers is visible rather than silent. The number is a
+    # **floor**, not an equality (#2176): a module that gains a call site is a legitimate edit —
+    # it is what applying the rule to one more site looks like — and an equality turns this line
+    # into a global write target that serialises every future redacting PR through one derived
+    # count, reddening a tree whose defect is somebody else's line. The shape is the per-file
+    # floor `tests/test_prompt_templates.py` keeps for its own census, with the same rule: a
+    # removal is allowed, but it has to be deliberate and it has to be this line that is edited.
+    # Measured on master `7f59c2f7` (2026-10-13).
     per_file: dict[str, int] = {}
     for path, _n, _src, _node in calls:
         key = path.relative_to(ROOT).as_posix()
         per_file[key] = per_file.get(key, 0) + 1
-    assert per_file.get("emrg/server/daemon.py", 0) == 5, per_file
-    assert per_file.get("emrg/server/llm.py", 0) >= 16, per_file
-    assert per_file.get("emrg/server/redaction.py", 0) == 2, per_file
+    floor = {
+        "emrg/server/daemon.py": 5,
+        "emrg/server/llm.py": 17,
+        "emrg/server/redaction.py": 2,
+    }
+    thin = [
+        f"{name}: {per_file.get(name, 0)} < {needed}"
+        for name, needed in floor.items()
+        if per_file.get(name, 0) < needed
+    ]
+    assert not thin, (
+        "these modules hold fewer string-redactor call sites than they did when the floor was "
+        "measured: " + ", ".join(thin)
+    )
 
 
 class _FakeWriter:
