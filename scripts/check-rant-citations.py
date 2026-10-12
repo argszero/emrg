@@ -28,7 +28,12 @@ sites over 28 timestamps in 8 files without the CI README. `memory_compaction.j2
 carries no site; `competition_prompt.md` carries four, and all four are the bare
 `host, <ts>:` spelling this class could not see before, which is why admitting the
 file and widening the word set are one change rather than two. Each figure is a
-reading of the tree it names rather than an estimate.
+reading of the tree it names rather than an estimate. Re-measured 2026-10-13 on
+master `8011295d`, after the plain-language block landed in
+`emrg/server/prompts/system.j2` (issue #2171): **46 sites over 33 distinct
+timestamps in 9 of the 12 files**. The added site is the first bare-`host`
+citation outside `competition_prompt.md`, which is why the delta this class's own
+test pins moved from 4 to 5 in the same change.
 (The figure printed here said 29 until issue #1289 measured it: neither it nor the
 27 records-only timestamps.) The citation words are the class's own four spellings -
 `rant`, `ruling`, `directive`, and the bare `host` (see `CITATION`): on `94504e5d` the original one-word set
