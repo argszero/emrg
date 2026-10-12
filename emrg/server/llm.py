@@ -27,13 +27,13 @@ from emrg.config import LlmConfig
 
 # ── 错误信息脱敏（20260807-0107）────────────────────────────
 # LLM 错误日志/异常可能包含 response headers（set-cookie/auth 回显）与 body
-# （模型回显的密钥/令牌）。复用 daemon._redact_string 的内联凭据遮蔽能力，
+# （模型回显的密钥/令牌）。复用 `emrg.server.redaction` 的内联凭据遮蔽能力，
 # 避免 emrgd.log / 会话历史泄露。
 def _redact_text(text: str) -> str:
     """遮蔽字符串中的内联凭据（sk-/ghp_/Bearer/JWT/base64-JSON）。"""
     try:
-        from emrg.server.daemon import _redact_string
-        return _redact_string(text)
+        from emrg.server.redaction import redact_string
+        return redact_string(text)
     except Exception:
         return text
 

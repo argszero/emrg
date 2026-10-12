@@ -58,6 +58,7 @@ from emrg.sandbox.policy import (
 from emrg.sandbox.roots import canonical_path, writable_roots
 from emrg.sandbox.providers import unconfined_mode
 from emrg.server.git_utils import no_prompt_env
+from emrg.server.redaction import redact_argv
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools import command_scan
 from emrg.sandbox.escalation import ESCALATION_TARGETS
@@ -467,12 +468,17 @@ async def run_command(
         argv = inner_argv
 
     timeout_ms = int(float(timeout) * 1000)
+    # ⚠️ The command is element 2 of an unconfined argv (`[shell, "-c", command]`), so this
+    # line printed whole commands into `emrgd.log` — a file hosts paste into issues. The
+    # redaction is applied to the argv rather than to a fixed slice of it, so widening the
+    # slice below cannot reintroduce the leak (rant 2026-08-06T10:21:26; measured 2026-10-12:
+    # 909 such lines in the host's own log, carrying the command verbatim).
     logger.debug(
         "bash v2: mode=%s effective=%s workdir=%s argv=%r",
         policy.mode,
         effective_mode or policy.mode,
         workdir,
-        argv[:4],
+        redact_argv(argv[:4]),
     )
     # The child's environment: the caller's, with interactive git prompts off
     # (that is the old tool's behaviour, kept) and — when this run really is

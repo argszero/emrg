@@ -69,6 +69,7 @@ from emrg.sandbox.policy import (
 from emrg.sandbox.escalation import with_retry_hint
 from emrg.sandbox.providers import unconfined_mode
 from emrg.server.git_utils import no_prompt_env
+from emrg.server.redaction import redact_argv
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools import command_scan
 from emrg.sandbox.escalation import ESCALATION_TARGETS
@@ -589,12 +590,15 @@ async def run_command(
         argv = inner_argv
 
     timeout_ms = int(float(timeout) * 1000)
+    # Same rule as the bash twin (see its comment): the argv is logged redacted rather than
+    # sliced and trusted. This dialect's slice stops before `-Command` today, so the command
+    # is not in it — which is exactly why the guarantee must not rest on the slice's width.
     logger.debug(
         "pwsh v2: mode=%s effective=%s workdir=%s argv=%r",
         policy.mode,
         effective_mode or policy.mode,
         workdir,
-        argv[:3],
+        redact_argv(argv[:3]),
     )
     # The child's environment: the caller's with interactive git prompts off,
     # the dialect's own colour/pager overrides (no `TERM` — see ENV_OVERRIDES),
