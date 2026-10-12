@@ -59,6 +59,12 @@ Exit codes
 the pattern, and both sources covered the span. ``2`` the question could not be
 answered: no source, or a `--since` older than what either source reaches back to.
 ``2`` is not a ``1``: an unmeasured window is never evidence of absence.
+
+`--measure` answers no pattern: it lists the window's host messages and exits ``0``.
+Asking both at once is therefore an unanswerable question and is refused with ``2``,
+rather than answered by the inventory — which before that refusal printed every
+message and exited ``0`` for a pattern nothing matched, a found verdict for a
+question the caller never asked (issue #2185).
 """
 
 from __future__ import annotations
@@ -365,7 +371,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all", action="store_true",
                         help="include scheduled task prompts (default: the host only)")
     parser.add_argument("--measure", action="store_true",
-                        help="print every host message in the window instead of a verdict")
+                        help="print every host message in the window instead of a verdict "
+                             "(takes no --pattern)")
     args = parser.parse_args(argv)
 
     since = None
@@ -379,6 +386,19 @@ def main(argv: list[str] | None = None) -> int:
                   "use YYYY-MM-DD (or YYYY-MM-DD HH:MM[:SS]), zero-padded",
                   file=sys.stderr)
             return 2
+
+    if args.measure and args.pattern:
+        # Two questions, and the flags used together answered neither: the inventory
+        # compiled its own pattern (`re.compile(".*")`) and returned 0 whatever
+        # `--pattern` was, so a caller reaching for the mode that prints messages in
+        # full got a *found* verdict for a question it had not asked. Measured
+        # 2026-10-13: an absent pattern printed 8,202 rows and exited 0, where the
+        # same pattern alone answered 2 (the log directory it reads holds no file).
+        # Refused rather than resolved - an inventory has no pattern to answer.
+        print("unmeasurable: --measure prints the inventory and answers no --pattern; "
+              "ask one of the two, because an inventory exits 0 whatever the pattern is",
+              file=sys.stderr)
+        return 2
     log_dir = Path(args.log_dir)
     log_messages, log_files, log_oldest, log_newest = read_log(log_dir)
 
