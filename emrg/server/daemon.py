@@ -129,62 +129,13 @@ def resolve_client_tier(session, req_sandbox: str | None = None) -> str:
     return getattr(session, "sandbox", None) or req_sandbox or SESSION_DEFAULT_SANDBOX_MODE
 
 # ── 日志脱敏（rant 2026-08-06T10:21:26）────────────────────────────
-# tool call 参数可能含 api_key/token/authorization/password 等敏感字段，
-# 递归替换值为 ***，避免 emrgd.log 泄露凭据。
-# 除按键名脱敏外，字符串值内联的凭据模式（sk-*/ghp_*/Bearer/JWT/base64-JSON）
-# 也会被遮蔽——防止 bash command 里 `export OPENAI_API_KEY=sk-...` 或
-# base64 编码的 access_token 整体泄露（跨项目教训：明文正则匹配不到编码形式）。
-_SENSITIVE_KEY_SUBSTRINGS = (
-    "api_key", "token", "authorization", "password", "secret",
-    "api-key", "auth", "credential", "key",
-)
-
-# 字符串值内联凭据模式（保守匹配，宁多勿漏）
-_INLINE_SECRET_PATTERNS = (
-    # sk- 密钥：sk- 后必须 ≥16 位纯字母数字（OpenAI/DeepSeek），或 sk-proj-（OpenAI 项目）
-    # 或 sk-ant-apiNN-（Anthropic）—— 排除 "task-evolution" 等路径片段误伤
-    re.compile(r"(sk-(?:proj-)?[A-Za-z0-9]{16,})"),
-    re.compile(r"(sk-ant-api[0-9]+-[A-Za-z0-9]{16,})"),           # Anthropic
-    re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,})"),                  # GitHub PAT / OAuth / gist token
-    re.compile(r"(xox[baprs]-[A-Za-z0-9\-]{10,})"),               # Slack token
-    re.compile(r"(AKIA[0-9A-Z]{16})"),                            # AWS access key id
-    re.compile(r"(Bearer\s+[A-Za-z0-9\-._~+/]+=*)", re.IGNORECASE),  # Bearer 令牌
-    re.compile(r"(Authorization\s*[:=]\s*[A-Za-z0-9\-._~+/]+=*)", re.IGNORECASE),
-    re.compile(r"((api[_-]?key|apikey|password|passwd|secret|token)\s*[:=]\s*[^\s,;\"']+)", re.IGNORECASE),
-    # JWT：三段 base64url（eyJ... 开头）—— 一段即泄露签名密钥
-    re.compile(r"(eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)"),
-)
-
-
-def _redact_string(s: str) -> str:
-    """遮蔽字符串值内联的凭据模式；base64-JSON 含敏感键时整段遮蔽。"""
-    out = s
-    for pat in _INLINE_SECRET_PATTERNS:
-        out = pat.sub("***", out)
-    # base64 编码的 JSON（跨项目教训：access_token 以编码形式进日志，明文正则匹配不到）
-    for b64 in re.findall(r"[A-Za-z0-9+/]{40,}={0,2}", out):
-        try:
-            decoded = base64.b64decode(b64, validate=True)
-            if any(k in decoded for k in (b"access_token", b"api_key", b"apikey", b"authorization", b"password", b"secret")):
-                out = out.replace(b64, "***")
-        except Exception:
-            continue
-    return out
-
-
-def _redact(value):
-    """递归脱敏 dict/list 中的敏感字段值与字符串内联凭据（不修改原对象）。"""
-    if isinstance(value, dict):
-        return {
-            k: ("***" if any(s in k.lower() for s in _SENSITIVE_KEY_SUBSTRINGS)
-                else _redact(v))
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact(v) for v in value]
-    if isinstance(value, str):
-        return _redact_string(value)
-    return value
+# 规则本体在 `emrg.server.redaction` —— 一句话，因为两个 shell 工具要记录它们即将 spawn
+# 的 argv，而工具无法 import 本模块（本模块 import 工具）。
+# 随规则一起删掉了 dict/list 递归形式与按键名脱敏：它们是为「tool call 参数进 emrgd.log」
+# 写的，而工具调用日志只记录工具的**名字与 intent**、从不记录参数，全树再无别的字典经过
+# 脱敏（2026-10-12 实测：无调用者，只有 pinned 它的 5 个测试）。本模块一律用
+# `redact_string` 遮蔽后再输出。
+from emrg.server.redaction import redact_string
 
 from emrg.tools import ToolRegistry
 from emrg.tools.base import non_regular_kind, special_file_refusal
@@ -1633,7 +1584,7 @@ class EmrgServer:
                     try:
                         logger.info(
                             'task received: session=%s prompt="%s" → routing via LLM',
-                            session_id, _redact_string(req.prompt[:60]),
+                            session_id, redact_string(req.prompt[:60]),
                         )
                         _cancel_event = asyncio.Event()
                         self._session_busy[session_id] = True  # lock (released in *locked wrapper)
@@ -3104,7 +3055,7 @@ class EmrgServer:
             count = append_rant(self._rants_log, rant_message, project)
 
             logger.info("rant recorded (%d total)%s: %s",
-                count, f" project={project}" if project else "", _redact_string(rant_message[:100]))
+                count, f" project={project}" if project else "", redact_string(rant_message[:100]))
             await self._send(ws, {"ok": True, "count": count})
 
         elif msg_type == "list_rants":
@@ -4712,7 +4663,7 @@ class EmrgServer:
                     # static purpose. intent missing (internal/LLM-free calls)
                     # → "-", no fallback.
                     intent = (args or {}).get("intent") or "-"
-                    logger.info("tool call: %s — %s", tc_name, intent)
+                    logger.info("tool call: %s — %s", tc_name, redact_string(intent))
 
                     # Notify client (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
@@ -7293,8 +7244,8 @@ class EmrgServer:
                         intent = (args or {}).get("intent") or "-"
                         logger.debug(
                             "memory reflection: id=%s round=%d tool %s — %s → %s%s",
-                            session.session_id, _round + 1, tc_name, intent,
-                            _redact_string(result_text[:100]),
+                            session.session_id, _round + 1, tc_name, redact_string(intent),
+                            redact_string(result_text[:100]),
                             "…" if len(result_text) > 100 else "",
                         )
 
