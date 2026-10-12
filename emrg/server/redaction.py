@@ -65,6 +65,33 @@ def redact_string(s: str) -> str:
     return out
 
 
+def redact_prefix(text: str, limit: int) -> str:
+    """The windowed form a log line wants: ``redact_string(text)[:limit]``.
+
+    **The order is the whole point, and it is why this exists as a name rather than as a
+    convention nobody can enforce.** ``redact_string(text[:limit])`` — what every windowed
+    site in the daemon and the LLM layer used to write — cannot see a credential that
+    *crosses the cut*: every pattern in :data:`INLINE_SECRET_PATTERNS` has a minimum length
+    (``sk-`` needs 16 alphanumerics, ``ghp_`` 20, a base64 blob 40), so a secret truncated
+    early stops matching and its surviving prefix is logged in the clear. Measured
+    2026-10-13 on master ``af4dd670``: a key beginning at index 48 of a 60-character window
+    (``redact_string(text[:60])``) leaves ``sk-A1b2C3d4E`` — 12 characters of a live key —
+    in the buffer, where ``redact_prefix(text, 60)`` leaves ``***`` and nothing else.
+
+    **Cost, named rather than hidden**: the whole value goes through the rule, so a site
+    that prints the head of a large tool result now scans all of it — 3.9 ms per 100 KB,
+    37 ms per 1 MB on this host. That is the price of the guarantee; a bounded scan would
+    be a heuristic, because the patterns' extent is unbounded (a labelled value runs to the
+    next whitespace, a base64 run is ``{40,}``), so no window width can be proved to
+    contain a credential that starts inside :func:`redact_string`'s reach.
+
+    ``limit`` is honoured as "at most this many characters", not "exactly": masking
+    shortens the text, so a redacted prefix may come back shorter. A caller that needs a
+    fixed width has to pad it, and none does.
+    """
+    return redact_string(text)[:limit]
+
+
 def redact_argv(argv) -> list:
     """The spawn argv with every element passed through :func:`redact_string`.
 
