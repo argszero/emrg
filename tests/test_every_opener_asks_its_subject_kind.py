@@ -25,28 +25,31 @@ What is asserted
 ----------------
 An **opener** is a call whose name is one of `OPENERS` -- the methods and the builtin that
 take a path and open it. A scope **asks** when its own body, or the body of a function that
-encloses it, calls one of the `GUARDS` (the whitelist itself, a per-layer wrapper for it, or
-the refusal the family raises). Every opener must either sit in a scope that asks, or be
-listed in `EXEMPT` with the reading that makes it safe.
+encloses it, calls one of the `GUARDS` (the whitelist itself, or a per-layer wrapper that
+reaches it). Every opener must either sit in a scope that asks, or be listed in `EXEMPT` with
+the reading that makes it safe.
 
 This is a **structural** check, not a dataflow one: it asks whether the scope that opens asks
 the kind *at all*, which is the question every historical site above would have failed
 (`_current_installed_version` and `_read_local_version` were existing functions that named no
 kind, not new code). A named limit below records what that costs.
 
-Measured 2026-10-12 (cycle `cyc20261012-132122`) on master `be1dea5`: **91** files judged,
-**77** opener sites, **7** with no asking scope, each of them in `EXEMPT` with its reason. The
-table is asserted to be **exactly** the flagged set, so an exemption that is no longer needed
--- a site fixed, a function removed -- fails here too rather than rotting.
+Measured 2026-10-12 (cycle `cyc20261012-150608`) on master `8454654`: **91** files judged,
+**77** opener sites, **6** scopes with no asking scope -- 7 calls, because
+`interactive.handle_key` opens twice -- each in `EXEMPT` with its reason. The table is
+asserted to be **exactly** the flagged set, so an exemption that is no longer needed -- a site
+fixed, a function removed -- fails here too rather than rotting.
 
 Named limits
 ------------
-* the guard is read at the **scope**, so a scope that asks about one subject and opens
-  another reads as asking. Measured on the same tree: of the 70 sites this detector calls
-  asked, 7 name a subject other than the guard's argument, and all 7 are the tool layer's
-  **mode form** (`special_file_kind(info.st_mode)`, after `path.stat()`) -- one shape for one
-  rule, not one rule per spelling. Zero sites anywhere in this checkout ask about one subject
-  and open another;
+* the guard is read at the **scope**, so a scope that asks about one subject can open another
+  without the detector noticing. The mode form gives this away: `special_file_kind(info.st_mode)`
+  takes no subject argument at all, so a scope that asks in that form has nothing at the call
+  site to key on. A site that *does* name a subject can still differ from the one it opens --
+  `GrepTool.execute` asks about `root` (`root.stat()`) and opens `filepath`, a name it got from
+  `_collect_files`, and it is `_collect_files`' own `path.is_file()` gate that makes that safe,
+  not the ask in this scope. The rule the sweep enforces is "the scope asks", and no reading of
+  the call site can widen it to "the scope asks about *this* subject";
 * an opener reached through a **helper** is out of reach: `shutil.copyfile`, `os.read` and
   `os.write` open their subject inside another module, and no reading of the call site can see
   it. The repair belongs in that helper, and this file's tree leg is green on it;
@@ -54,10 +57,13 @@ Named limits
   (`webbrowser.open`) would be reported. There is none in `emrg/` today, and the repair is an
   exemption row with its reason, not a narrower predicate -- the same doubt this file resolves
   toward reporting everywhere else;
-* the sweep covers `emrg/`, the package this checkout ships. `emrg/gui/` holds no Python at
-  all (`emrg/gui/**/*.py` matches nothing), so the exclusion conceals no site. `scripts/` and
-  `tests/` are not swept: the rule is about the daemon's own opens, and a guard script or a
-  test that opens a FIFO it just created is exercising the rule, not obeying it.
+* the sweep covers `emrg/`, the package this checkout ships. `emrg/gui/` is JavaScript and
+  TypeScript; the only Python under it is **vendored into an npm dependency** --
+  `emrg/gui/node_modules/dmg-builder/vendor/mac_alias/*.py` is 12 files in a checkout that has
+  run `npm ci` and 0 in a fresh one -- which is the reason `node_modules` is in `SKIPPED`, and
+  the reason this file's sentence about it names the vendored copies rather than the directory.
+  `scripts/` and `tests/` are not swept: the rule is about the daemon's own opens, and a guard
+  script or a test that opens a FIFO it just created is exercising the rule, not obeying it.
 """
 
 from __future__ import annotations
@@ -67,8 +73,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: The trees whose opens the rule governs. `emrg/gui/` holds no Python (measured: the glob
-#: matches nothing), so this is the whole shipped-Python surface.
+#: The tree whose opens the rule governs. `emrg/gui/` is JavaScript/TypeScript; its only Python
+#: is vendored into an npm dependency under `node_modules` (which `SKIPPED` drops), so this is
+#: the whole shipped-Python surface.
 SWEPT = REPO_ROOT / "emrg"
 
 #: Directories under `SWEPT` that hold no first-party source. The skip reads the path
@@ -91,21 +98,33 @@ OPENERS = frozenset(
     }
 )
 
-#: The calls that ask a subject's kind. Three shapes for one rule: the whitelist itself
-#: (`special_file_kind`, mode form), its path-taking twin (`non_regular_kind`), the per-layer
-#: wrappers that refuse on its answer, and the refusal the family raises.
+#: The calls that ask a subject's kind. Two shapes for one rule: the whitelist itself
+#: (`special_file_kind`, mode form) and its path-taking twin (`non_regular_kind`), plus the
+#: per-layer wrappers that reach one of them.
+#:
+#: Two names that *look* like they belong are deliberately absent, because a scope that says a
+#: refusal has not necessarily asked: `special_file_refusal` renders the message **after** a
+#: kind is in hand, and `NotARegularFile` is the exception raised **after** -- and one of the
+#: two is a class whose body asks nothing at all. Both were measured free to remove (stripping
+#: them leaves the flagged set unchanged), so keeping them would only widen the blind spot
+#: the docstring's Named limits records: a scope whose *only* guard-named call was a refusal
+#: would read as asking. `test_every_guard_asks_the_whitelist` is what holds the rest of this
+#: list to its meaning.
 GUARDS = frozenset(
     {
         "special_file_kind",
-        "special_file_refusal",
         "non_regular_kind",
         "_non_regular_kind",
         "_refuse_non_regular",
         "_refuse_non_regular_file",
         "_refuse_a_non_regular_subject",
-        "NotARegularFile",
     }
 )
+
+#: The name the whitelist itself is spelled by, and the mode-form read a wrapper may reach it
+#: through (`special_file_kind(info.st_mode)`) -- the two things a guard's body may name to
+#: count as asking. `test_every_guard_asks_the_whitelist` reads this.
+WHITELIST_NAMES = frozenset({"special_file_kind", "non_regular_kind"})
 
 #: Openers with no asking scope, keyed by `(path relative to REPO_ROOT, qualname, opener)`.
 #: Keyed by qualname rather than by line so an edit above a site does not rot the table -- and
@@ -114,13 +133,20 @@ GUARDS = frozenset(
 #: asserts this is exactly the flagged set, so a row whose site is fixed is reported too.
 EXEMPT: dict[tuple[str, str, str], str] = {
     ("emrg/_stop_all.py", "stop_daemon", "read_text"): (
-        "the stop path, which MANIFESTO pin 4-2 (host-established) forbids a cycle to write, "
-        "restore or introduce anything into -- a guard here is a change no cycle may make. "
-        "Recorded as a known gap rather than repaired."
+        "a gap of this family, documented rather than repaired: a subject that is not a regular "
+        "file at `~/.emrg/emrgd.token` blocks this read, and the `except (OSError, ValueError)` "
+        "below answers only the **raising** kinds -- a FIFO raises nothing. It is left because "
+        "the site is on the stop path, where `MANIFESTO.md` pin 4-2 (host-established) forbids "
+        "writing or restoring anything that stops or restarts the server, so no test for a fix "
+        "here could reach its own code and this family's rows all carry a two-direction test. "
+        "The pin forbids the *stop*, not editing this module: the gap is real, and this row is "
+        "where a later cycle finds it rather than a claim that none exists."
     ),
     ("emrg/_stop_all.py", "_open_stop_log", "open"): (
-        "the same forbidden surface: `_open_stop_log` writes the stop log this family's red "
-        "line protects. Recorded, not repaired."
+        "the same stop path: `open(..., \"a\")` on `stop_all-<YYYYMMDD-HHMMSS>.log`, whose name "
+        "carries a second-resolution timestamp, inside a `try/except OSError` that answers a "
+        "raising open. Recorded beside `stop_daemon` for the same reason the file is not "
+        "touched here -- the stop path, and no test can reach its own code."
     ),
     ("emrg/client/app.py", "interactive.handle_key", "read_bytes"): (
         "reads back the `_clipboard_tmp_<n>.png` that `_extract_clipboard_image` just wrote, "
@@ -140,12 +166,14 @@ EXEMPT: dict[tuple[str, str, str], str] = {
         "the file by atomic rename rather than by opening it for writing."
     ),
     ("emrg/session.py", "Session.save_image", "write_bytes"): (
-        "the family's one known gap: the subject is `self.images_dir / <name derived from the "
-        "image bytes>`, and a non-regular file could sit at that path -- the `while "
-        "filepath.exists()` above it is the code's own acknowledgement that something may "
-        "already be there. Left unguarded because the method has no caller in this checkout "
-        "(measured: `save_image` occurs once, at its own definition). Recorded so the cycle "
-        "that next touches `session.py` decides between guarding it and dropping it."
+        "the `while filepath.exists()` above it exits only on a name `exists()` says is "
+        "**absent**, and `exists()` is true for a FIFO, a socket and a directory alike -- the "
+        "same reading this table carries for `ensure_config` -- so no non-regular subject "
+        "reaches this `write_bytes`. Measured 2026-10-12 (`cyc20261012-142737`): a FIFO planted "
+        "at the name the method computes (`shot_<hash>.png`, reproducible -- the label and the "
+        "hash both come from the caller) is diverted, the call returning `shot_1_<hash>.png` "
+        "with the FIFO still in place. An earlier revision of this row read the loop as an "
+        "acknowledgement that something may be there; it is what removes the possibility."
     ),
 }
 
@@ -194,11 +222,20 @@ def opener_sites(tree: ast.AST) -> list[tuple[str, str, int, bool]]:
             name = _called_name(node)
             if name in OPENERS:
                 found.append((prefix or "<module>", name, node.lineno, asked))
-        for child in ast.iter_child_nodes(scope):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                qualname = f"{prefix}.{child.name}" if prefix else child.name
-                carried = asked if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) else inherited
-                visit(child, qualname, carried)
+        # The recursion is over `owns`, not over `ast.iter_child_nodes(scope)`: `owns` yields a
+        # nested `def` wherever it sits (inside a `try`, an `if`, a `with`) and a `lambda`
+        # wherever it appears (an assignment, a call argument), while `iter_child_nodes` yields
+        # only this node's **direct** children. Recursing over the direct children instead is
+        # measured 2026-10-12 to return `[]` for a lambda in an assignment, a lambda at module
+        # level, a lambda as a call argument, and a `def` nested inside an `if` or a `try` --
+        # four shapes of scope the sweep would not have looked into at all, which is the one
+        # thing a file claiming to enumerate the rule may not carry.
+        carried = asked if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) else inherited
+        for node in owns:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(node, f"{prefix}.{node.name}" if prefix else node.name, carried)
+            elif isinstance(node, ast.Lambda):
+                visit(node, f"{prefix}.<lambda>" if prefix else "<lambda>", carried)
 
     visit(tree, "", False)
     return sorted(set(found))
@@ -211,6 +248,49 @@ def unguarded(source: str) -> list[tuple[str, str, int]]:
         for qualname, opener, line, asked in opener_sites(ast.parse(source))
         if not asked
     ]
+
+
+def definitions_of(tree: ast.AST, names: frozenset[str]) -> dict[str, list[list[ast.AST]]]:
+    """For each of `names` defined in `tree`, the nodes of every definition found."""
+    found: dict[str, list[list[ast.AST]]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in names:
+                found.setdefault(node.name, []).append(list(ast.walk(node)))
+    return found
+
+
+def guards_that_ask(
+    defined: dict[str, list[list[ast.AST]]], names: frozenset[str] = GUARDS
+) -> set[str]:
+    """Which of these definitions reach the whitelist -- by naming it, or by calling one that does.
+
+    A name whose body neither reads a mode nor calls another guard asks nothing, whatever it is
+    called. Reachability is read from the whitelist outward (a breadth-first walk over callers),
+    so a chain of wrappers counts only while it ends at the whitelist -- two new names calling
+    each other reach nothing and are reported. The whitelist's two names are roots **by name**,
+    whether or not this tree defines them, because that is what they are.
+    """
+    roots: set[str] = set(WHITELIST_NAMES)
+    callers: dict[str, set[str]] = {}
+    for name, sites in defined.items():
+        for nodes in sites:
+            for node in nodes:
+                if isinstance(node, ast.Attribute) and node.attr.startswith("S_IS"):
+                    roots.add(name)  # reads a mode directly -- asking whatever its name
+                called = _called_name(node)
+                if called is not None and called in names:
+                    callers.setdefault(called, set()).add(name)
+
+    reached: set[str] = set()
+    frontier = set(roots)
+    while frontier:
+        name = frontier.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        frontier |= callers.get(name, set()) - reached
+    return {name for name in defined if name in reached}
 
 
 class TestTheDetector:
@@ -311,6 +391,157 @@ class TestTheDetector:
         source = "import webbrowser\n\ndef show(url):\n    return webbrowser.open(url)\n"
 
         assert unguarded(source) == [("show", "open", 4)]
+
+    def test_a_lambda_body_is_scanned(self) -> None:
+        """A lambda is a scope, and its body is where an opener hides.
+
+        A lambda is never a **direct** child of a scope node: it sits inside an assignment, a
+        call argument, an expression. So a recursion over `ast.iter_child_nodes` never reaches
+        it, and its body is never scanned. Measured 2026-10-12: the direct-children form
+        returned `[]` for each shape below -- three openers the sweep would not have looked at.
+        """
+        shapes = (
+            "def outer(p):\n    f = lambda q: q.read_text()\n    return f\n",
+            "handler = lambda p: p.read_text()\n",
+            "use(fn=lambda p: p.read_text())\n",
+        )
+        for source in shapes:
+            assert unguarded(source), f"a lambda body went unscanned: {source!r}"
+
+    def test_a_lambda_that_asks_is_silent(self) -> None:
+        """The other direction: a lambda that asks is a scope that asked, like a nested def."""
+        source = "handler = lambda p: p.read_text() if non_regular_kind(p) is None else None\n"
+
+        assert unguarded(source) == []
+
+    def test_a_lambda_is_covered_by_an_enclosing_guard(self) -> None:
+        """And it inherits the way a nested function does, or a real site reads as a gap."""
+        source = (
+            "def load(p):\n"
+            "    if non_regular_kind(p) is not None:\n"
+            "        raise OSError('not a regular file')\n"
+            "    return lambda: p.read_text()\n"
+        )
+
+        assert unguarded(source) == []
+
+    def test_a_def_nested_in_a_control_flow_block_is_scanned(self) -> None:
+        """A nested `def` is not always a direct child of the scope that holds it.
+
+        Inside a `try`, an `if` or a `with`, the nested function hangs off the **statement**
+        rather than off the enclosing scope, so a recursion over direct children never visits it
+        as a scope and its body is never scanned. Measured 2026-10-12: each shape below returned
+        `[]` under the direct-children recursion.
+        """
+        shapes = (
+            "def outer(p):\n    if True:\n        def inner(q):\n            return q.read_text()\n",
+            "def outer(p):\n    try:\n        def inner(q):\n            return q.read_text()\n    except OSError:\n        pass\n",
+            "def outer(p):\n    with open('x'):\n        def inner(q):\n            return q.read_text()\n",
+        )
+        for source in shapes:
+            assert unguarded(source), f"a nested def went unscanned: {source!r}"
+
+    def test_a_def_nested_in_a_control_flow_block_keeps_its_own_name(self) -> None:
+        """And it is reported under its own qualname, not the enclosing scope's."""
+        source = "def outer(p):\n    if True:\n        def inner(q):\n            return q.read_text()\n"
+
+        assert unguarded(source) == [("outer.inner", "read_text", 4)]
+
+
+class TestTheGuardList:
+    """`GUARDS` is hand-typed, and this family grows a wrapper name with nearly every merge.
+
+    That is the erosion direction: the next wrapper is absent from the list, every site behind
+    it becomes a **false positive**, and the remedy a later cycle reaches for is an `EXEMPT` row
+    reading "guarded by the new wrapper". A table of irreducible gaps then becomes a list of
+    excuses. The control below is what makes the list grow deliberately instead.
+    """
+
+    def test_a_guard_whose_body_asks_nothing_is_reported(self) -> None:
+        """Both directions on a source small enough to read."""
+        source = (
+            "def special_file_kind(mode):\n"
+            "    if stat.S_ISREG(mode):\n"
+            "        return None\n"
+            "    return 'a directory'\n"
+            "\n"
+            "def _refuse_regular_or_something(p):\n"
+            "    return f'{p} is not a regular file'\n"
+        )
+        defined = definitions_of(ast.parse(source), frozenset({"_refuse_regular_or_something"}))
+
+        assert guards_that_ask(defined) == set(), (
+            "a name whose body names no mode and calls no guard asks nothing, whatever it is "
+            "called -- the whitelist reached by a speculative name is the whole point"
+        )
+
+    def test_a_wrapper_that_calls_a_guard_is_accepted(self) -> None:
+        source = (
+            "def _refuse_non_regular(p):\n"
+            "    kind = non_regular_kind(p)\n"
+            "    if kind:\n"
+            "        raise OSError(kind)\n"
+        )
+
+        assert guards_that_ask(definitions_of(ast.parse(source), GUARDS)) == {"_refuse_non_regular"}
+
+    def test_two_names_calling_each_other_reach_nothing(self) -> None:
+        """Reachability is read from the whitelist outward, so a cycle is not a chain."""
+        names = frozenset({"_wrapper_a", "_wrapper_b"})
+        source = (
+            "def _wrapper_a(p):\n"
+            "    return _wrapper_b(p)\n"
+            "\n"
+            "def _wrapper_b(p):\n"
+            "    return _wrapper_a(p)\n"
+        )
+
+        assert guards_that_ask(definitions_of(ast.parse(source), names), names) == set()
+
+    def test_the_whitelist_is_reached_through_a_chain(self) -> None:
+        source = (
+            "def special_file_kind(mode):\n"
+            "    if stat.S_ISREG(mode):\n"
+            "        return None\n"
+            "    return 'a socket'\n"
+            "\n"
+            "def non_regular_kind(path):\n"
+            "    return special_file_kind(os.stat(path).st_mode)\n"
+            "\n"
+            "def _non_regular_kind(path):\n"
+            "    return non_regular_kind(path)\n"
+            "\n"
+            "def _refuse_non_regular(path):\n"
+            "    return _non_regular_kind(path)\n"
+        )
+
+        assert guards_that_ask(definitions_of(ast.parse(source), GUARDS)) == {
+            "special_file_kind", "non_regular_kind", "_non_regular_kind", "_refuse_non_regular",
+        }
+
+    def test_every_guard_in_this_tree_asks_the_whitelist(self) -> None:
+        """The rule, over every `GUARDS` name this tree defines."""
+        defined: dict[str, list[list[ast.AST]]] = {}
+        for path in sorted(SWEPT.rglob("*.py")):
+            if SKIPPED & set(path.relative_to(REPO_ROOT).parts):
+                continue
+            for name, sites in definitions_of(ast.parse(path.read_text(encoding="utf-8")), GUARDS).items():
+                defined.setdefault(name, []).extend(sites)
+
+        assert defined, (
+            "no `GUARDS` name is defined anywhere in this tree: the control has stopped "
+            "measuring, and a clean verdict over an empty set is not one"
+        )
+
+        asked = guards_that_ask(defined)
+        silent = sorted(name for name in defined if name not in asked)
+        assert not silent, (
+            "a name in `GUARDS` is not a thing that asks: its definition reaches neither the "
+            "whitelist (`special_file_kind` / `non_regular_kind`) nor a mode read. A name added "
+            "speculatively makes every site behind it a false positive, and the remedy then "
+            "becomes an EXEMPT row that says 'guarded by the new wrapper'. Either the wrapper "
+            "asks, or it is not a guard: " + ", ".join(silent)
+        )
 
 
 class TestThisTree:
