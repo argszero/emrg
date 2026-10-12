@@ -1332,8 +1332,38 @@ class EmrgServer:
         ``_run_version`` and shows the upgrade banner when they differ.
         Returns "" when the file is missing (dev/standalone runs).
         """
+        path = Path.home() / ".emrg" / "install" / "version.txt"
+        # Asked before it is opened, because the open decides whether this call returns at
+        # all: `read_text` on a FIFO waits for a writer and raises nothing, so the
+        # `except (OSError, ValueError)` below could never fire and the block would be
+        # whatever awaited this — see `_non_regular_kind`. **This reader's first caller is
+        # `__init__` (`self._run_version = self._current_installed_version()`), with no
+        # handler above it**: a pipe at this path is a daemon that never finishes starting.
+        # Its second is the `ping` handler, awaited on the event loop, so it is also every
+        # client's pong. Measured 2026-10-12 (`cyc20261012-103602`) on master `aff0d59a`,
+        # one child per arm under the probe's cap, `Path.home` redirected to a scratch
+        # root: this call **did not return within 5 s** with a pipe at the path, where a
+        # directory, a regular file and an absent path all returned in milliseconds.
+        #
+        # `""` is **kept** rather than refused (issue #2128), and the readings decide it,
+        # not a preference: `""` is what the docstring above already promises for a file
+        # it cannot read, it is what a *directory* at this path returns today through that
+        # same handler, and it is what `__init__` must keep receiving — a raise there is a
+        # daemon that cannot start, a worse outcome than the block the guard removes. The
+        # warning is what makes the skip visible instead of silent; it is the shape
+        # `UpgradeManager._read_local_version` took for the same reason (`#2126`).
+        #
+        # No branch is added for absence: `_non_regular_kind` answers `None` when its own
+        # `stat` fails, so a missing file reaches exactly the `""` it reaches today.
+        kind = _non_regular_kind(path)
+        if kind is not None:
+            logger.warning(
+                "installed version: %s is %s, not a regular file — read as no installed "
+                "version; opening it would never return", path, kind,
+            )
+            return ""
         try:
-            v = (Path.home() / ".emrg" / "install" / "version.txt").read_text(encoding="utf-8").strip()
+            v = path.read_text(encoding="utf-8").strip()
             return v
         except (OSError, ValueError):
             return ""

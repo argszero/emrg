@@ -4496,6 +4496,101 @@ def test_a_read_tool_image_ref_at_a_named_pipe_is_unavailable_not_a_hang(tmp_pat
     assert accepted[1]["image_url"]["url"].startswith("data:image/png;base64,"), accepted
 
 
+# ── the third reader of install/version.txt ─────────────────────────
+#
+# The upgrade tick's two readers of this file are `emrg/server/upgrade.py`'s (#2125 /
+# #2126). This one is the daemon's own (`_current_installed_version`), and it is the
+# family's only member whose **first** caller is `__init__` — `self._run_version =
+# self._current_installed_version()`, with no handler above it — so a pipe at the path is
+# not a stalled turn or tick but a daemon that never finishes starting. Its second caller
+# is the `ping` handler, awaited on the event loop, so it is every client's pong too.
+#
+# Measured 2026-10-12 (`cyc20261012-103602`) on master `aff0d59a`, one child per arm under
+# the probe's cap, `Path.home` redirected to a scratch root: the call **did not return
+# within 5 s** with a pipe at the path, while a directory, a regular file and an absent
+# path all returned in milliseconds. Each arm below fails loudly — not by hanging — because
+# `within` runs the call on a daemon thread and raises at the deadline.
+
+
+@_needs_mkfifo
+def test_the_installed_version_reader_does_not_open_a_named_pipe(tmp_path, monkeypatch, caplog):
+    """The reader names the kind instead of opening it, and keeps its `""` answer.
+
+    The server is built **before** the pipe exists, deliberately: `_make_server()` runs
+    this same method from `__init__`, so building it with the pipe in place would move the
+    block outside the bounded call and turn the arm's failure into a hang — the trap
+    `tests/bounded_read.py` states. The row where that shape is the subject is the test
+    below this one.
+    """
+    import logging
+
+    import emrg.server.daemon as daemon_mod
+
+    root = tmp_path / "home"
+    install = root / ".emrg" / "install"
+    install.mkdir(parents=True)
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: root)
+    server = _make_server()
+
+    fifo = install / "version.txt"
+    os.mkfifo(fifo)
+    caplog.set_level(logging.WARNING, logger="emrg.server.daemon")
+
+    value = within(DEADLINE_SECONDS, server._current_installed_version)
+
+    assert value == "", value
+    assert stat.S_ISFIFO(os.stat(fifo).st_mode), "the version was read out of the pipe"
+    assert "a FIFO (named pipe)" in caplog.text, caplog.text
+    assert str(fifo) in caplog.text, caplog.text
+
+
+@_needs_mkfifo
+def test_the_daemon_still_constructs_with_a_named_pipe_at_the_installed_version(tmp_path, monkeypatch):
+    """The row `__init__` owns, and the reason this site is worse than its siblings.
+
+    No handler sits above the constructor, so a block here is a daemon that never serves:
+    not a turn a later message retries and not a tick the next schedule retries. The whole
+    construction is therefore the bounded call — the assertion is that the server exists
+    and was told nothing is installed, rather than that some read returned.
+    """
+    import emrg.server.daemon as daemon_mod
+
+    root = tmp_path / "home"
+    install = root / ".emrg" / "install"
+    install.mkdir(parents=True)
+    os.mkfifo(install / "version.txt")
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: root)
+
+    server = within(DEADLINE_SECONDS, _make_server)
+
+    assert server._run_version == "", server._run_version
+
+
+def test_a_directory_at_the_installed_version_is_still_no_version(tmp_path, monkeypatch, caplog):
+    """The control: the guard changes no answer but the one that has none.
+
+    A directory at this path returned `""` through `except OSError` before the guard and
+    returns `""` now — the assertion is about the answer, and the warning says which kind
+    was skipped rather than leaving it silent. Nothing here needs `mkfifo`, so the arm
+    that says "the guard did not turn a readable answer into a new one" runs on every leg.
+    """
+    import logging
+
+    import emrg.server.daemon as daemon_mod
+
+    root = tmp_path / "home"
+    install = root / ".emrg" / "install"
+    install.mkdir(parents=True)
+    (install / "version.txt").mkdir()
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: root)
+    server = _make_server()
+    caplog.set_level(logging.WARNING, logger="emrg.server.daemon")
+
+    assert server._current_installed_version() == ""
+
+    assert "a directory" in caplog.text, caplog.text
+
+
 # ── the daemon's kind rule is the layer's rule ──────────────────────
 #
 # Every guard above asks through one predicate, `_non_regular_kind`, and issue #2081 is
