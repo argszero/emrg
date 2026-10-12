@@ -40,7 +40,11 @@ Measured 2026-10-12 (cycle `cyc20261012-150608`) on master `8454654`: **91** fil
 (cycle `cyc20261012-183804`) after `stop_daemon`'s token read moved behind a kind check
 (issue #2140): the same **91** files and **77** opener sites, **5** scopes and **6** calls, the row
 that left being the one whose stated reason -- "no test for a fix here could reach its own code" --
-turned out to be a fact about where the guard sat rather than about the site. The table is
+turned out to be a fact about where the guard sat rather than about the site. Re-measured once more
+2026-10-12 (cycle `cyc20261012-223924`) after the last row of that same file was repaired
+(issue #2152, `_open_stop_log`): **91** files, **77** opener sites, **4** scopes and **4** calls --
+so the sentence above has now been paid for twice, and the second time by the very row that
+repeated it. The table is
 asserted to be **exactly** the flagged set, so an exemption that is no longer needed -- a site
 fixed, a function removed -- fails here too rather than rotting.
 
@@ -146,12 +150,6 @@ WHITELIST_NAMES = frozenset({"special_file_kind", "non_regular_kind"})
 #: today; the tree leg asserts this is exactly the flagged set, so a row whose site is fixed is
 #: reported too.
 EXEMPT: dict[tuple[str, str, str], str] = {
-    ("emrg/_stop_all.py", "_open_stop_log", "open"): (
-        "the same stop path: `open(..., \"a\")` on `stop_all-<YYYYMMDD-HHMMSS>.log`, whose name "
-        "carries a second-resolution timestamp, inside a `try/except OSError` that answers a "
-        "raising open. Recorded beside `stop_daemon` for the same reason the file is not "
-        "touched here -- the stop path, and no test can reach its own code."
-    ),
     ("emrg/client/app.py", "interactive.handle_key", "read_bytes"): (
         "reads back the `_clipboard_tmp_<n>.png` that `_extract_clipboard_image` just wrote, "
         "under `if _extract_clipboard_image(str(tmp_path)):` -- and that function asks "
