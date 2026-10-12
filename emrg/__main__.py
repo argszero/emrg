@@ -26,6 +26,9 @@ from pathlib import Path
 from emrg import __version__
 from emrg._win import win32_no_window_kwargs
 from emrg.connect import AuthError, cleanup_server, connect_to_server
+# The credential rule's single home (#2151, issue #2156). A leaf module — stdlib only, and
+# `emrg.server` resolves its package lazily — so this costs the CLI no daemon import.
+from emrg.server.redaction import redact_string
 from websockets.exceptions import ConnectionClosed
 
 
@@ -463,6 +466,42 @@ def _send_rant(message: str, project: str | None = None) -> None:
 
 # ── Client ────────────────────────────────────────────────────
 
+class _RedactClientLogRecords(logging.Filter):
+    """Mask inline credentials in every record the client's log sink writes.
+
+    The client's log is the same kind of artefact as the daemon's: a file a host pastes into
+    an issue. It carries the host's own text by design — the submitted message, the stream
+    coming back, and the chat rows on every delta — and the rule's origin (rant
+    ``2026-08-06T10:21:26``) is a credential typed into the TUI, which is exactly what those
+    records hold: measured 2026-10-12 on the host's own ``~/.emrg/emrg-client.log``, five
+    sites in ``emrg/client/app.py`` print it (``ENTER``, ``SUBMIT``, ``DONE: stream_buffer``
+    and the two ``ROWS`` lines, the last of which runs once per delta).
+
+    Applied at the **sink** rather than at each of those call sites, and that is the point:
+    the rule has one home (``emrg/server/redaction.py``, #2151) and a site added later is
+    covered by construction instead of by remembering. A record's own text is redacted
+    *before* formatting, so ``%r`` and ``%s`` both see the masked value.
+
+    Only string parts are touched: a non-string argument keeps its identity, so a caller
+    that logs an object still sees the object in ``record.args``.
+    """
+
+    @staticmethod
+    def _redact(value):
+        return redact_string(value) if isinstance(value, str) else value
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self._redact(record.msg)
+        args = record.args
+        if isinstance(args, tuple):
+            record.args = tuple(self._redact(a) for a in args)
+        elif isinstance(args, dict):
+            record.args = {k: self._redact(v) for k, v in args.items()}
+        else:
+            record.args = self._redact(args)
+        return True
+
+
 def _configure_client_logging() -> Path:
     """Write client logs to ``<cwd>/.emrg/emrg-client.log`` — unless that is not a regular file.
 
@@ -512,18 +551,20 @@ def _configure_client_logging() -> Path:
         )
         sys.stderr.flush()
     else:
-        handlers.append(
-            RotatingFileHandler(
-                str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3,
-                # encoding="utf-8" — symmetric with the daemon's #556 fix:
-                # the default locale code page (GBK on zh-CN Windows) cannot
-                # encode U+FFFD and logging.emit would crash with "--- Logging
-                # error ---", polluting the shared TUI terminal. errors=
-                # "backslashreplace" is defense-in-depth: logging must never
-                # crash on exotic characters (rant 2026-08-08T09:35:30).
-                encoding="utf-8", errors="backslashreplace",
-            )
+        file_handler = RotatingFileHandler(
+            str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3,
+            # encoding="utf-8" — symmetric with the daemon's #556 fix:
+            # the default locale code page (GBK on zh-CN Windows) cannot
+            # encode U+FFFD and logging.emit would crash with "--- Logging
+            # error ---", polluting the shared TUI terminal. errors=
+            # "backslashreplace" is defense-in-depth: logging must never
+            # crash on exotic characters (rant 2026-08-08T09:35:30).
+            encoding="utf-8", errors="backslashreplace",
         )
+        # The sink states the rule for everything it writes (issue #2156), so a call site
+        # added later cannot silently reprint a credential into this file.
+        file_handler.addFilter(_RedactClientLogRecords())
+        handlers.append(file_handler)
 
     logging.basicConfig(
         level=logging.DEBUG,
