@@ -36,7 +36,11 @@ kind, not new code). A named limit below records what that costs.
 
 Measured 2026-10-12 (cycle `cyc20261012-150608`) on master `8454654`: **91** files judged,
 **77** opener sites, **6** scopes with no asking scope -- 7 calls, because
-`interactive.handle_key` opens twice -- each in `EXEMPT` with its reason. The table is
+`interactive.handle_key` opens twice -- each in `EXEMPT` with its reason. Re-measured 2026-10-12
+(cycle `cyc20261012-183804`) after `stop_daemon`'s token read moved behind a kind check
+(issue #2140): the same **91** files and **77** opener sites, **5** scopes and **6** calls, the row
+that left being the one whose stated reason -- "no test for a fix here could reach its own code" --
+turned out to be a fact about where the guard sat rather than about the site. The table is
 asserted to be **exactly** the flagged set, so an exemption that is no longer needed -- a site
 fixed, a function removed -- fails here too rather than rotting.
 
@@ -132,16 +136,6 @@ WHITELIST_NAMES = frozenset({"special_file_kind", "non_regular_kind"})
 #: fails here. Every row states the reading that makes the site safe today; the tree leg
 #: asserts this is exactly the flagged set, so a row whose site is fixed is reported too.
 EXEMPT: dict[tuple[str, str, str], str] = {
-    ("emrg/_stop_all.py", "stop_daemon", "read_text"): (
-        "a gap of this family, documented rather than repaired: a subject that is not a regular "
-        "file at `~/.emrg/emrgd.token` blocks this read, and the `except (OSError, ValueError)` "
-        "below answers only the **raising** kinds -- a FIFO raises nothing. It is left because "
-        "the site is on the stop path, where `MANIFESTO.md` pin 4-2 (host-established) forbids "
-        "writing or restoring anything that stops or restarts the server, so no test for a fix "
-        "here could reach its own code and this family's rows all carry a two-direction test. "
-        "The pin forbids the *stop*, not editing this module: the gap is real, and this row is "
-        "where a later cycle finds it rather than a claim that none exists."
-    ),
     ("emrg/_stop_all.py", "_open_stop_log", "open"): (
         "the same stop path: `open(..., \"a\")` on `stop_all-<YYYYMMDD-HHMMSS>.log`, whose name "
         "carries a second-resolution timestamp, inside a `try/except OSError` that answers a "
