@@ -28,6 +28,15 @@ from typing import Callable, Optional
 import httpx
 
 from emrg.config import UpdateConfig
+from emrg.memory import NotARegularFile
+
+# The "is this a regular file" rule is the tool layer's (`special_file_kind`, a whitelist of
+# `S_ISREG`), reached at a *path* rather than at a mode — the shape `emrg/config.py`,
+# `emrg/memory.py`, `emrg/connect.py` and `emrg/sessions_index.py` already use. Imported
+# rather than restated: a second spelling of the boundary is a second boundary that can
+# drift. `emrg.tools.base` imports only `emrg.server.tool_types`, and `emrg.config` is
+# already in this module's import graph, so this adds no cycle.
+from emrg.tools.base import non_regular_kind
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +203,38 @@ def _installed_versions() -> tuple:
     """
     versions = []
     for path in (VERSION_FILE, PREVIOUS_VERSION_FILE):
+        # Asked before it is opened, because the open decides whether this call returns at
+        # all: `read_text` on a FIFO waits for a writer and raises nothing, so the
+        # `except OSError` below could never fire and the block would be the daemon's own
+        # tick. Measured 2026-10-12 (`cyc20261012-091639`) on master `aff0d59a`, one child
+        # per arm under a 10 s cap: this function **did not return** with a pipe at either
+        # path, where a regular file returned the version, an absent path returned `()`, and
+        # a directory returned `()`.
+        #
+        # **Refused rather than degraded to `()`, which is the opposite of the answer its own
+        # directory case used to give** — and the reading decides it, not a preference. This
+        # function's answer is not "which version is installed" but "which snapshots the
+        # retention must not delete": a version missing from the protected set can be pruned,
+        # and the snapshot it protects can be the one a failed upgrade is restored from. So a
+        # subject that cannot be read must not be answered *as absent*. The caller already
+        # has the handler — `UpgradeManager.tick` wraps `prune_upgrade_backups()` in
+        # `try/except Exception` and logs "backup retention failed" — so refusing skips the
+        # sweep and deletes nothing.
+        #
+        # `NotARegularFile` rather than a bare `OSError`: it is the family's own refusal
+        # (`emrg/memory.py`, raised the same way by `emrg/config.py`), it **is** an `OSError`
+        # so every `except OSError` here keeps working, and the class carries the kind into
+        # frames that render `type(exc).__name__` (`tests/test_daemon.py` pins exactly that).
+        try:
+            kind = non_regular_kind(path)
+        except OSError:
+            continue  # absent: nothing installed yet, the answer this loop already gave
+        if kind is not None:
+            raise NotARegularFile(
+                f"{path} is {kind}, not a regular file — the version it names decides which "
+                f"pre-upgrade snapshots the retention may remove, so it is refused rather "
+                f"than read as 'no version installed'."
+            )
         try:
             text = path.read_text(encoding="utf-8").strip()
         except OSError:
@@ -416,6 +457,32 @@ class UpgradeManager:
         Normalized without the leading 'v' — the target tag keeps its 'v'
         prefix when passed to the template/agent (git tag lookup needs it).
         """
+        # Asked before it is opened, because the open decides whether this call returns at
+        # all: `read_text` on a FIFO waits for a writer and raises nothing, so the
+        # `except OSError` below could never fire and `tick()` would stop there instead —
+        # on the daemon's own schedule. Measured 2026-10-12 (`cyc20261012-091639`) on master
+        # `aff0d59a`, one child per arm under a 10 s cap: **did not return** with a pipe at
+        # this path, where a regular file returned `'0.3.9'`, an absent one `''` and a
+        # directory `''`.
+        #
+        # `""` is **kept** rather than refused, unlike `_installed_versions` five hundred
+        # lines up, because `""` is the answer the docstring above already gives an
+        # unreadable file *and* the answer a missing one gives today: the tick then reads the
+        # target as not-yet-installed, which is this module's documented "version.txt
+        # unchanged → trigger again" semantics. Refusing would invent an outcome for a
+        # function whose whole contract is "`""` on failure"; naming the kind in a warning is
+        # what makes the skip visible instead of silent.
+        try:
+            kind = non_regular_kind(VERSION_FILE)
+        except OSError:
+            kind = None  # absent: the ordinary "nothing installed yet" path
+        if kind is not None:
+            logger.warning(
+                "upgrade: %s is %s, not a regular file — read as no local version; opening "
+                "it would never return, and this runs on the daemon's own tick",
+                VERSION_FILE, kind,
+            )
+            return ""
         try:
             text = VERSION_FILE.read_text(encoding="utf-8").strip()
         except OSError:
