@@ -57,6 +57,13 @@ Named limits
   (`webbrowser.open`) would be reported. There is none in `emrg/` today, and the repair is an
   exemption row with its reason, not a narrower predicate -- the same doubt this file resolves
   toward reporting everywhere else;
+* an `EXEMPT` row exempts a **(scope, opener) pair, not a call site** -- the key carries no line,
+  so a scope that opens the *same* opener twice is covered by the one row and a repeat is
+  invisible. `interactive.handle_key` is that pair today (`emrg/client/app.py:2465` and `:3176`,
+  both `read_bytes`), and it is a real rule rather than an oversight: it is what keeps an edit
+  above a site from rotting the table, and a *different* opener added to the same scope is still
+  reported (`ensure_config` + `read_text` fails, measured 2026-10-12). What it cannot see is a
+  third unguarded call of the same opener in that scope, which the row's reading would not cover;
 * the sweep covers `emrg/`, the package this checkout ships. `emrg/gui/` is JavaScript and
   TypeScript; the only Python under it is **vendored into an npm dependency** --
   `emrg/gui/node_modules/dmg-builder/vendor/mac_alias/*.py` is 12 files in a checkout that has
@@ -128,9 +135,12 @@ WHITELIST_NAMES = frozenset({"special_file_kind", "non_regular_kind"})
 
 #: Openers with no asking scope, keyed by `(path relative to REPO_ROOT, qualname, opener)`.
 #: Keyed by qualname rather than by line so an edit above a site does not rot the table -- and
-#: by the opener, so a **second** unguarded open added to an already-exempt function still
-#: fails here. Every row states the reading that makes the site safe today; the tree leg
-#: asserts this is exactly the flagged set, so a row whose site is fixed is reported too.
+#: by the opener, so a **different** unguarded opener added to an already-exempt function still
+#: fails here. A repeat of the *same* opener in the same scope does not: the key carries no line,
+#: so two such calls collapse into one row (`interactive.handle_key` is that pair today), which
+#: the docstring's Named limits states. Every row states the reading that makes the site safe
+#: today; the tree leg asserts this is exactly the flagged set, so a row whose site is fixed is
+#: reported too.
 EXEMPT: dict[tuple[str, str, str], str] = {
     ("emrg/_stop_all.py", "stop_daemon", "read_text"): (
         "a gap of this family, documented rather than repaired: a subject that is not a regular "
@@ -230,7 +240,18 @@ def opener_sites(tree: ast.AST) -> list[tuple[str, str, int, bool]]:
         # level, a lambda as a call argument, and a `def` nested inside an `if` or a `try` --
         # four shapes of scope the sweep would not have looked into at all, which is the one
         # thing a file claiming to enumerate the rule may not carry.
-        carried = asked if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) else inherited
+        # `Lambda` is in this tuple for the same reason a `def` is: a lambda's body **is** a
+        # function body, and a scope it encloses inherits an ask made there. Leaving it out sent
+        # a nested scope the *grandparent's* flag instead, measured 2026-10-12: an opener inside
+        # a lambda nested in an asking lambda was reported, while the identical shape nested in
+        # an asking `def` was silent -- the false-red direction, since the inner call runs only
+        # in the branch where the enclosing lambda already asked its subject's kind. `ClassDef`
+        # stays out deliberately, and has its own reading in the docstring above.
+        carried = (
+            asked
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+            else inherited
+        )
         for node in owns:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 visit(node, f"{prefix}.{node.name}" if prefix else node.name, carried)
@@ -424,6 +445,42 @@ class TestTheDetector:
         )
 
         assert unguarded(source) == []
+
+    def test_a_lambda_is_covered_by_an_asking_lambda(self) -> None:
+        """A lambda is an enclosing **function**, so the chain carries the same way twice.
+
+        The sibling above pins this for a `def` that encloses a lambda; this pins it for a lambda
+        that encloses one. The two read differently until `Lambda` joined the tuple that decides
+        which scopes carry their ask -- measured 2026-10-12, this source was **reported** while
+        the `def`-shaped one was silent, which is the false red that erodes a guard: the inner
+        call runs only in the branch where the enclosing lambda has already asked the subject's
+        kind.
+        """
+        source = (
+            "load = lambda p: (\n"
+            "    (lambda: p.read_text()) if non_regular_kind(p) is None else None\n"
+            ")\n"
+        )
+
+        assert unguarded(source) == []
+
+    def test_a_class_body_still_does_not_cover_its_methods(self) -> None:
+        """The other half of the same tuple, pinned so widening it for lambdas cannot take this.
+
+        A class body's ask is a statement that ran once, not evidence about the subject a method
+        opens -- the reading the docstring gives for keeping `ClassDef` out. A lambda body is
+        different in kind: it is a function body, and it runs per call.
+        """
+        source = (
+            "class C:\n"
+            "    if non_regular_kind(X) is not None:\n"
+            "        raise OSError('not a regular file')\n"
+            "\n"
+            "    def read(self, p):\n"
+            "        return p.read_text()\n"
+        )
+
+        assert unguarded(source) == [("C.read", "read_text", 6)]
 
     def test_a_def_nested_in_a_control_flow_block_is_scanned(self) -> None:
         """A nested `def` is not always a direct child of the scope that holds it.
