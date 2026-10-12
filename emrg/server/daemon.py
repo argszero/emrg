@@ -2424,11 +2424,32 @@ class EmrgServer:
 
         # Debug aid: save rendered system prompt to session dir
         if session:
-            try:
-                path = session.dir_path / "system.md"
-                path.write_text(rendered, encoding="utf-8")
-            except OSError:
-                logger.debug("failed to write system.md", exc_info=True)
+            path = session.dir_path / "system.md"
+            # ── An open is not a read, and this one runs on **every** prompt build ──
+            #
+            # The subject is `<session dir>/system.md`, inside the agent's own workspace, so
+            # a FIFO there is reachable rather than exotic — and `open(..., "w")` on a FIFO
+            # waits for a reader and raises nothing, so the `except OSError` below (which
+            # this block already has for a dump it cannot write) can never fire: the daemon
+            # would stop dead on the next message. Measured 2026-10-12
+            # (`cyc20261012-043725`) on master `f4fe92c3`, one child per arm under a 10 s
+            # cap: `_build_system_prompt()` **did not return** with a FIFO at this path,
+            # while a regular file, a directory and an absent path all returned.
+            #
+            # Skipped rather than raised, because this is a **debug aid** — the answer the
+            # `except OSError` already gives it — and the kind is named rather than the
+            # skip being silent. Named limit: a *directory* here is already answered by
+            # that handler (measured: the same call returns), so the pipe is the only shape
+            # whose answer the surrounding code cannot give, and the arm that pins this is
+            # POSIX-gated because of it.
+            kind = _non_regular_kind(path)
+            if kind is not None:
+                logger.debug("system.md is %s, not a regular file — prompt dump skipped", kind)
+            else:
+                try:
+                    path.write_text(rendered, encoding="utf-8")
+                except OSError:
+                    logger.debug("failed to write system.md", exc_info=True)
 
         return rendered
 

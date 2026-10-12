@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 import threading
 from datetime import datetime, timedelta
@@ -4346,6 +4347,37 @@ def test_cap_memory_index_raises_on_a_named_pipe(tmp_path):
 
     assert "a FIFO (named pipe)" in str(excinfo.value), str(excinfo.value)
     assert "not a regular file" in str(excinfo.value), str(excinfo.value)
+
+
+@_needs_mkfifo
+def test_a_named_pipe_at_the_prompt_dump_does_not_stop_the_daemon(tmp_path):
+    """The **writer** of the session's own file, one site over from those readers.
+
+    `_build_system_prompt` dumps the rendered prompt to `<session dir>/system.md` on
+    **every** build, and the session dir is inside the agent's own workspace — so a FIFO
+    there is reachable rather than exotic, and `write_text` on one waits for a reader and
+    raises nothing. Measured 2026-10-12 (`cyc20261012-043725`) on master `f4fe92c3`, one
+    child per arm under a 10 s cap: this call **did not return** with a pipe at the dump,
+    while a regular file, a directory and an absent path all returned.
+
+    Named limit, so this arm being POSIX-gated is a stated gap rather than an unremarked
+    one: a *directory* at this path is already answered by the block's own `except OSError`
+    (the same measurement returns), so the pipe is the only shape whose answer the
+    surrounding code cannot give, and no FIFO-free arm can carry a reading here. The
+    regular-file half lives beside this subject's other tests —
+    `test_system_prompt_environment_time_and_os` asserts the dump *is* written — so the
+    kind is what the pair discriminates rather than the dump's general shape.
+    """
+    server = _make_server()
+    session = Session.create_with_id("dump-test", tmp_path)
+    dump = session.dir_path / "system.md"
+    os.mkfifo(dump)
+
+    rendered = within(DEADLINE_SECONDS, lambda: server._build_system_prompt(session))
+
+    assert rendered, "the prompt itself must still be built — the dump is a debug aid"
+    assert "Operating system" in rendered, rendered[:200]
+    assert stat.S_ISFIFO(os.stat(dump).st_mode), "the prompt was written into the pipe"
 
 
 @_needs_mkfifo
