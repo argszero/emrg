@@ -7180,9 +7180,15 @@ class EmrgServer:
                     tool_calls = msg.get("tool_calls")
 
                     if not tool_calls:
+                        # The rule before the window, and for the reason the sibling line
+                        # below states: this is the model's own reply, the same text
+                        # `emrg/server/llm.py` redacts at every site that logs it, and
+                        # `content[:150]` cannot see a credential the cut lands inside
+                        # (every pattern has a minimum length). When `#2162` lands it
+                        # becomes `redact_prefix(content, 150)` — one name for the order.
                         logger.debug(
                             "memory reflection: id=%s round=%d result=%s",
-                            session.session_id, _round + 1, content[:150],
+                            session.session_id, _round + 1, redact_string(content)[:150],
                         )
                         break
 
