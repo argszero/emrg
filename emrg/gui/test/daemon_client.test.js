@@ -14,7 +14,9 @@
  * - turn 生命周期广播（rant 2026-09-30T09:47:11）：turn_start/turn_end 转发到
  *   渲染层而非落进兜底；兜底日志以 `type=` 开头（可 grep 计数）
  * - 命令-响应配对（G93+G103）：配对 resolve / 超时 reject / error FIFO reject /
- *   无未决 error → 广播事件
+ *   无未决 error → 广播
+ * - 同类型并发命令（measured 2026-10-13）：两条同类型命令各配一帧都兑现；超时只清掉
+ *   自己那条；error 帧 reject 同类型里最早的一条事件
  * - 分组生命周期（G83+G104）：tool_start/delta 建组 → done 清理；>20 丢最老
  * - 断连 pending 请求 reject（G89/G90）
  * - generateSessionId 格式 + 碰撞兜底（G28+G81）
@@ -1007,6 +1009,73 @@ test("error 帧 FIFO reject 最早未决（G103）；无未决 error → 广播"
   await p2;
   currentMockWs.emit("message", Buffer.from(JSON.stringify({ error: "broadcast error" })));
   assert.ok(seen.some(([t, d]) => t === "error" && d.error === "broadcast error"));
+});
+
+// ── 同一响应类型的并发命令（measured 2026-10-13）─────────────────────────
+//
+// One connection can carry two commands of the **same** type at once — the GUI's own
+// `listSessions` has four independent callers (startup `emrg:init`, the post-recovery
+// refresh, the `emrg:switchSession` not-found fallback, the renderer's
+// `emrg:listSessions`) — and the daemon answers **each frame it received**, one per
+// command. Keying the pending index by response type (`_pending.set(respType, entry)`)
+// made the older command's promise wait for an answer that could no longer reach it: it
+// rejected `command timeout` although the daemon had answered, the surplus frame found no
+// entry and fell into the broadcast branch, and the timeout callback's by-key cleanup
+// (`_pending.delete(respType)`) could delete a **newer** command's entry, leaving that one
+// to time out too. Measured on this host's own `~/.emrg/emrg-gui.log`: 18,075
+// `list_sessions failed: command timeout: list_sessions` lines, in runs 0.2–0.6 s apart —
+// the shape of N calls each rejected five seconds later. Three arms: the queue, the
+// identity-bound cleanup, and the error frame's FIFO choice.
+
+test("同类型两条命令同时在飞：各配一帧，两条都兑现", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  // The daemon answers per frame: two frames, one per command.
+  send({ type: "sessions_list", sessions: [{ session_id: "a" }] });
+  send({ type: "sessions_list", sessions: [{ session_id: "b" }] });
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.strictEqual(r1.sessions[0].session_id, "a", "最早的命令配最早的一帧");
+  assert.strictEqual(r2.sessions[0].session_id, "b");
+  assert.strictEqual(client._pending.size, 0);
+  assert.strictEqual(client._pendingFifo.length, 0);
+});
+
+test("超时只清掉自己那条：同类型后来者仍被答案兑现", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 30);
+  const timedOut = assert.rejects(p1, /command timeout: list_sessions/);
+  await new Promise((r) => setTimeout(r, 10));
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  await timedOut;
+  assert.strictEqual(client._pending.size, 1, "超时的那条不得带走后来者");
+  assert.strictEqual(client._pendingFifo.length, 1);
+  send({ type: "sessions_list", sessions: [{ session_id: "b" }] });
+  const r2 = await p2;
+  assert.strictEqual(r2.sessions[0].session_id, "b");
+  assert.strictEqual(client._pending.size, 0);
+  assert.strictEqual(client._pendingFifo.length, 0);
+});
+
+test("error 帧 reject 同类型里最早的那条，后来者仍活", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ error: "boom" });
+  await assert.rejects(p1, /boom/);
+  assert.strictEqual(client._pending.size, 1, "p2 仍未决");
+  assert.strictEqual(client._pendingFifo.length, 1);
+  send({ type: "sessions_list", sessions: [{ session_id: "b" }] });
+  const r2 = await p2;
+  assert.strictEqual(r2.sessions[0].session_id, "b");
 });
 
 test("分组生命周期（G83+G104）：建组 → done 清理；>20 丢最老", async () => {
