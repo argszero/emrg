@@ -324,6 +324,30 @@ def test_the_tool_call_log_masks_the_intent(tmp_path, monkeypatch, caplog):
 #: below is the arm that holds that contract up.
 STRING_REDACTORS = ("redact_string", "_redact_text", "redact_prefix")
 
+#: Per-module **floors** for the census below — minimums, never equalities (issue #2176).
+#:
+#: The census's own self-check exists to notice a module that stopped being read: "a module that
+#: loses its callers is visible rather than silent". A module that **gains** a redactor call is
+#: the opposite — a new site applying the rule, which is what the rule wants — and pinning that
+#: as a red row blocks work the guard does not own. Measured 2026-10-13: #2169's landing tree
+#: failed the equality with `assert 6 == 5` on `emrg/server/daemon.py`, on a PR whose only change
+#: there was to redact the value **before** its window.
+#:
+#: The cost is not just the false red: the only way to land a legitimate addition without this
+#: fix is to bump the number, which writes a *derived* count into a file a guard can measure and
+#: makes this line a global write target for every future redacting site. The same census shape
+#: in `tests/test_prompt_templates.py` already keeps a floor dict for this reason, and spells the
+#: rule out: a removal is allowed, but it has to be deliberate and it has to be that line that is
+#: edited.
+#:
+#: Numbers measured on master `7f59c2f7` (2026-10-13). Raising a floor when a module grows is
+#: optional; lowering one is the deliberate act the floor exists to make visible.
+REDACTOR_FLOORS = {
+    "emrg/server/daemon.py": 5,
+    "emrg/server/llm.py": 16,
+    "emrg/server/redaction.py": 2,
+}
+
 
 def test_the_window_is_taken_after_the_rule_not_before():
     """The defect and its fix, in one arm — the negative half is what gives it power.
@@ -441,9 +465,17 @@ def test_no_string_redactor_is_handed_a_slice():
     for path, _n, _src, _node in calls:
         key = path.relative_to(ROOT).as_posix()
         per_file[key] = per_file.get(key, 0) + 1
-    assert per_file.get("emrg/server/daemon.py", 0) == 5, per_file
-    assert per_file.get("emrg/server/llm.py", 0) >= 16, per_file
-    assert per_file.get("emrg/server/redaction.py", 0) == 2, per_file
+    thin = [
+        f"{name}: {per_file.get(name, 0)} < {needed}"
+        for name, needed in REDACTOR_FLOORS.items()
+        if per_file.get(name, 0) < needed
+    ]
+    assert not thin, (
+        "these modules hold fewer string-redactor calls than they did when this floor was "
+        "taken, so the census is no longer reading the population it is about: "
+        + ", ".join(thin)
+        + f"\n  the whole census: {per_file}"
+    )
 
 
 class _FakeWriter:

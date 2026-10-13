@@ -75,8 +75,9 @@ What it reads, and the boundary of that reading
 -----------------------------------------------
 One call lists the open issues and the open PRs together (`/issues` returns both, and
 the `pull_request` key is the discriminator), then one timeline call per open issue and
-per open PR, and one comments call per issue that some open PR references (the claim text
-costs a call — see `issue_text`). Boundary facts, stated rather than implied:
+per open PR, and one comments call per **candidate** issue — one that some open PR
+references, or that an open PR declares with a closing keyword (the claim text costs a
+call — see `issue_text` and `collect`). Boundary facts, stated rather than implied:
 
 * the subject is the **open** queue. A PR that references only a *closed* issue reads
   `unlinked`, and an issue naming a *closed* PR is not counted as naming a live one —
@@ -84,6 +85,10 @@ costs a call — see `issue_text`). Boundary facts, stated rather than implied:
 * a claim phrase is read from an issue's body **and** its comments, with code spans and
   fenced blocks blanked out first, so an issue that *quotes* `handled by #N` is not read
   as making that claim — the same direction, for the same reason, as the PR side;
+* a claim is read from an issue's **text** and its candidacy from either source, because
+  a `cross-referenced` event can be omitted for a reference that was really made —
+  measured 2026-10-13 on issue #2176 (see `collect`). A reading keyed on the event alone
+  reports a comment that exists as missing, and prints a remedy already satisfied;
 * a timeline is read to 100 events per page, paginated, and truncation is not silently
   treated as the whole history. What `--paginate` actually prints was measured rather
   than assumed (see `_paged_json`);
@@ -1486,10 +1491,21 @@ def collect(repo: str) -> tuple[Queue, dict[int, Refs], dict[int, set[int]]]:
     complementary reads rather than from one read interpreted two ways.
 
     That direction is then filtered through the claim text, which costs one comments call
-    per **referencing** issue — not per open issue. A claim is what GitHub cross-references,
-    so an issue that claims a PR is always in some PR's reference set and the filter cannot
-    miss one; an issue nobody references is not read for text at all, and its own row is
-    decided by the issue timeline alone.
+    per **candidate** issue — one that referenced the PR on its own timeline, or one the PR
+    **declares** with a closing keyword — not per open issue.
+
+    Why the declaration has to be a candidate source too, rather than trusting the
+    reference set to be complete: GitHub's `cross-referenced` event is a *notification*
+    about a reference, and it can be missing for a reference that really was made —
+    measured 2026-10-13, issue #2176's `Handled by #2177` comment was written before the
+    PR record existed (`20:21:56Z` against the PR's `20:22:04Z` `createdAt`), the PR's
+    timeline carried no event for it, and the pair read `one-way` two ways with a remedy
+    the comment already satisfied; re-posting the identical comment after the PR existed
+    attached the event. Reading a **declared** pair's second half from the declaration
+    instead of from an event GitHub may omit is what makes that row answerable at all.
+    The filter still decides: an issue that does not name the PR is not its second half.
+    An issue that is neither referenced nor declared is not read for text at all, and its
+    own row is decided by the issue timeline alone.
     """
     queue = load_queue(repo)
     refs_by_issue: dict[int, Refs] = {}
@@ -1502,17 +1518,28 @@ def collect(repo: str) -> tuple[Queue, dict[int, Refs], dict[int, set[int]]]:
         referencing_by_pr[number] = referencing_issues(
             timeline(repo, number), queue.issue_numbers
         )
+    # Restricted to the open issues this run read, for the same reason
+    # `referencing_issues` is: a closed issue's half is history, and a comments call for a
+    # number outside the queue would be a call for a subject this report has no row for.
+    declared_by_pr: dict[int, set[int]] = {
+        number: declared_claims(pr.get("body")) & queue.issue_numbers
+        for number, pr in ((int(p["number"]), p) for p in queue.prs)
+    }
+    candidates_by_pr: dict[int, set[int]] = {
+        number: referencing_by_pr[number] | declared_by_pr.get(number, set())
+        for number in referencing_by_pr
+    }
     bodies = {int(issue["number"]): issue.get("body") for issue in queue.issues}
     referenced = (
-        set().union(*referencing_by_pr.values()) if referencing_by_pr else set()
+        set().union(*candidates_by_pr.values()) if candidates_by_pr else set()
     )
     claims_by_issue = {
         number: issue_claims(issue_text(repo, number, bodies[number]))
         for number in sorted(referenced)
     }
     stated_by_pr: dict[int, set[int]] = {}
-    for number, referenced_issues in referencing_by_pr.items():
-        stated_by_pr[number] = claiming_issues(referenced_issues, claims_by_issue, number)
+    for number, candidates in candidates_by_pr.items():
+        stated_by_pr[number] = claiming_issues(candidates, claims_by_issue, number)
     return queue, refs_by_issue, stated_by_pr
 
 

@@ -780,7 +780,10 @@ class LlmClient:
                         try:
                             chunk = json.loads(json_str)
                         except json.JSONDecodeError:
-                            logger.debug("SSE parse skip: %s", json_str[:80])
+                            # The rule before the window, the module's own stated convention
+                            # (see `_redact_text`): `json_str` is raw text off the wire, so the
+                            # window must not be the only thing that happens to it.
+                            logger.debug("SSE parse skip: %s", _redact_text(json_str)[:80])
                             continue
 
                         choices = chunk.get("choices", [])
