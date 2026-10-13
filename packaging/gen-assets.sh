@@ -53,15 +53,22 @@ render_svg_to_png() {
   fi
   # 2) Chrome/Chromium headless --screenshot (full filter support)
   # Windows (Git Bash): convert /c/... → file:///C:/... so Chrome resolves the URL.
-  # ⚠️ rant 2026-08-12T17:25:28: two failure modes confirmed by local testing —
-  #    (a) screenshotting the raw file:// SVG yields an unpainted (fully transparent)
-  #        image; (b) `--default-background-color=00000000` alone makes Chrome emit an
-  #        all-transparent PNG even from a working HTML wrapper (verified empirically:
-  #        without the flag the same page paints correctly as opaque RGB).
-  #    Fix: wrap the SVG in a local HTML <img> page with an OPAQUE white background,
-  #    never pass the transparent-background flag, and add --allow-file-access-from-files
-  #    so the file:// img can load from the file:// page. The transparency check below
-  #    then fails loudly if a future change regresses to a blank render.
+  # ⚠️ rant 2026-08-12T17:25:28: screenshotting the raw file:// SVG yields an unpainted
+  #    (fully transparent) image, so the SVG is wrapped in a local HTML <img> page.
+  #    That first wrapper painted an OPAQUE WHITE page and passed no background flag —
+  #    which baked the white into the render and shipped a ring around the icon; the
+  #    current wrapper is the one described at the renderer below (rant
+  #    2026-10-13T17:45:42).
+  #    The page background and the flag each do half the job. Measured on Chrome
+  #    154.0.8037.99 over all four combinations (page transparent vs #fff × flag
+  #    present vs absent): a transparent page alone still renders opaque RGB, and the
+  #    flag alone over a white page is a no-op — because
+  #    `--default-background-color` paints whatever the *page* leaves transparent, and
+  #    a white page leaves nothing. BOTH are required: a transparent wrapper page AND
+  #    --default-background-color=00000000. Also add --allow-file-access-from-files so
+  #    the file:// img can load from the file:// page. The checks in check_icon_opaque
+  #    then fail loudly in both directions — a blank/transparent render, and a
+  #    flattened (no-alpha or opaque-corner) one.
   SVG_URL="file://$SVG"
   if command -v cygpath >/dev/null 2>&1; then
     SVG_URL="file:///$(cygpath -m "$SVG")"
