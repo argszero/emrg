@@ -223,6 +223,13 @@ def test_write_frame_spacer_tail_overwrites_stale_char():
     and its 2nd column inherently covers the stale 'o' — writing an extra
     space would land one column PAST the spacer (cursor is at x+2, not x+1)
     and shift subsequent characters (review 2026-08-11, off-by-one).
+
+    What this test pins is that geometry: a cursor move to the WIDE cell and the
+    glyph, with no space written for the spacer. The leading `\x1b[0m` is the frame's
+    opening transition — at the first diff cell the terminal's attributes are not
+    known (`last_style_id = -1`), so the transition is absolute and the glyph cannot
+    inherit whatever attribute the terminal was carrying (report 2026-10-13: reverse
+    video only cleared on a frame's first cell).
     """
     pool = _pool()
     diffs = [
@@ -235,7 +242,8 @@ def test_write_frame_spacer_tail_overwrites_stale_char():
     ]
     out = write_frame(diffs, style_pool=pool)
     assert "\x1b[0K" not in out
-    assert out == "\x1b[1;7H世"  # wide glyph alone covers the stale 'o'
+    assert out == "\x1b[1;7H\x1b[0m世"  # wide glyph alone covers the stale 'o'
+    assert " 世" not in out  # no space was written for the spacer
 
 
 def test_write_frame_spacer_tail_empty_prev_emits_nothing():
