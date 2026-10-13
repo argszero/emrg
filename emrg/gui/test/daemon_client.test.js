@@ -815,6 +815,101 @@ test("rant 2026-10-09T09:43:39：sandbox_roots 帧转发（GUI 的额外可写�
   assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
 });
 
+test("issue #2189：task_queued / steer_committed 帧转发（GUI 的排队提示与待重发表释放）", async () => {
+  // 与 turn_start / sandbox_roots 同一个形状的缝：daemon 广播、渲染层有 case、
+  // 中间层把它丢进兜底。渲染层 daemonBridge.ts 的 `case "task_queued"`（排队提示）
+  // 与 `case "steer_committed"`（从待重发表移除已注入的请求）都靠这一层转发才拿得到帧
+  // （TUI 同款在 app.py:1345/:1353），而兜底只记日志、不发事件 —— 排队提示永不出现，
+  // 待重发表永不释放。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ type: "task_queued", request_id: "r1", session_id: "s1", position: 2 });
+  send({ type: "steer_committed", request_id: "r1", session_id: "s1", timestamp: "2026-10-13T00:40:00" });
+
+  // ① 按原名转发 —— 渲染层 switch 的就是这两个名字
+  assert.deepStrictEqual(seen.map(([t]) => t), ["task_queued", "steer_committed"]);
+  // ② 负载原样带过去：排队位置与请求 id 由渲染层读，中间层不二次解释
+  assert.strictEqual(seen[0][1].position, 2);
+  assert.strictEqual(seen[0][1].request_id, "r1");
+  assert.strictEqual(seen[1][1].request_id, "r1");
+  // ③ 不再落入兜底（「只记日志、不发事件」正是本 bug 的形状）
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
+test("issue #2189 续：queued_requeue / queued_cancelled 帧转发（GUI 的排队重发与作废）", async () => {
+  // 与上面 task_queued / steer_committed 同一条缝的第三对。daemon 的队列排空契约
+  // `_broadcast` 这两个帧（`daemon.py:3873` 干净收尾带 `request_ids`；`:3879` 取消 /
+  // 出错 / 断连；`clear_session` / `delete_session` 各一次，`:3270` / `:3305`），
+  // 渲染层两个 `case` 都在（`daemonBridge.ts:696` / `:701`）：前者按 `request_ids`
+  // 重发本地待发表，后者清空待发表并提示「排队消息已取消」。中间层此前不认这两个
+  // 名字，它们落进兜底 —— 于是 GUI 排队的消息永不重发、也不作废。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ type: "queued_requeue", session_id: "s1", request_ids: ["r1", "r2"] });
+  send({ type: "queued_cancelled", session_id: "s1" });
+
+  // ① 按原名转发 —— 渲染层 switch 的就是这两个名字
+  assert.deepStrictEqual(seen.map(([t]) => t), ["queued_requeue", "queued_cancelled"]);
+  // ② 负载原样带过去：重发的是哪些请求由渲染层按 request_ids 决定，中间层不筛选
+  assert.deepStrictEqual(seen[0][1].request_ids, ["r1", "r2"]);
+  assert.strictEqual(seen[0][1].session_id, "s1");
+  // ③ 不再落入兜底（「只记日志、不发事件」正是本 bug 的形状）
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
+test("守卫：daemon `_broadcast` 的每一种帧类型，中间层要么转发、要么在豁免表里具名", async () => {
+  // 这条缝已经断过三次（turn_start/turn_end → #2189 的 task_queued/steer_committed
+  // → 同类的 queued_requeue/queued_cancelled），每次都靠「有人注意到日志」才发现。
+  // 一次一例的测试挡不住第四例，所以这里不比对手抄的名单，而是**从生产者读**：
+  // 解析 `emrg/server/daemon.py` 里每个 `_broadcast(..., {...})` 载荷的 `type`，
+  // 逐个喂给连着 mock ws 的 DaemonClient，任何落进兜底的类型都必须在这张豁免表里
+  // 具名并给出理由 —— 否则断言失败。
+  //
+  // 手抄的名单本身就是一种读数（漏项与重名同样看不见），所以这份类型集合是**推导**
+  // 出来的，不是写死的；下面第一条断言兜住推导本身失败（解析不到东西时不能算通过）。
+  const daemonPy = fs.readFileSync(
+    path.join(__dirname, "..", "..", "server", "daemon.py"), "utf8");
+  const broadcastTypes = new Set();
+  for (const m of daemonPy.matchAll(/_broadcast\([^,]+,\s*\{([^{}]*)\}/g)) {
+    const t = /"type":\s*"([a-z_]+)"/.exec(m[1]);
+    if (t) broadcastTypes.add(t[1]);
+  }
+  // ① 被测对象非空：解析坏了要让本测试红，而不是静默地「全都没问题」
+  assert.ok(broadcastTypes.size >= 10,
+    `只从 daemon.py 解析出 ${broadcastTypes.size} 种广播帧 —— 解析式失效了，本次测量无效`);
+
+  // ② 中间层**故意**不转发给渲染层的类型。每条都要写清理由：渲染层没有 case 的
+  //    （TUI 独有）、或本就是别的会话命令的回执。写进这里＝承认它会被兜底记一行。
+  const NOT_FORWARDED = {
+    compact_result: "别的会话 /compact 的回执，渲染层无 case（daemon 广播给全部订阅者）",
+    user_message: "TUI 独有的通知（app.py:1505），渲染层 daemonBridge 无 case",
+  };
+
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  for (const type of broadcastTypes) send({ type, session_id: "s1" });
+
+  const dropped = [...broadcastTypes]
+    .filter((t) => warned.some((m) => m.includes(`unknown frame type=${t}`)));
+  // ③ 落进兜底的类型必须全部在豁免表里具名 —— 第四例会在这里失败
+  assert.deepStrictEqual(dropped.filter((t) => !(t in NOT_FORWARDED)), []);
+  // ④ 豁免表不许腐烂：写进去的类型必须确实还被丢着（转发后又忘了删＝名单说谎）
+  assert.deepStrictEqual(
+    Object.keys(NOT_FORWARDED).filter((t) => !dropped.includes(t)), []);
+});
+
 test("sendSetSandboxRoots：帧形状与 daemon 的 op 词表一致（缺 path 也发空串）", async () => {
   const client = new DaemonClient();
   await connectClient(client);
