@@ -867,6 +867,49 @@ test("issue #2189 续：queued_requeue / queued_cancelled 帧转发（GUI 的排
   assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
 });
 
+// ── `_broadcast` 载荷的切分与类型推导 ────────────────────────
+// 从生产者读：把 `daemon.py` 里每个 `_broadcast(...)` 调用的实参列表原样切出来，
+// 再从里面取 `type`。**切分必须按括号配平**，不能用「不含花括号的段」那种正则：
+// `\{([^{}]*)\}` 在载荷里第一个 `{` 就停（f-string 替换字段、嵌套字典都算），
+// 实测漏掉 5 个（共 35 个）调用点 —— 而漏掉的正是这条守卫声称覆盖的对象。
+function broadcastPayloads(daemonPy) {
+  const out = [];
+  const re = /_broadcast\(/g;
+  let m;
+  while ((m = re.exec(daemonPy)) !== null) {
+    const before = daemonPy.slice(Math.max(0, m.index - 20), m.index);
+    if (/(async\s+)?def\s+$/.test(before)) continue; // 方法自身的签名不是调用
+    let depth = 0;
+    let j = m.index + m[0].length - 1; // 指向 '('
+    for (; j < daemonPy.length; j += 1) {
+      const c = daemonPy[j];
+      if (c === "(") depth += 1;
+      else if (c === ")") {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    out.push(daemonPy.slice(m.index, j + 1));
+  }
+  return out;
+}
+
+// `_broadcast(` 的出现次数，减去方法签名那一处 —— 切分结果的条数必须等于它。
+function broadcastCallCount(daemonPy) {
+  const all = (daemonPy.match(/_broadcast\(/g) || []).length;
+  const defs = (daemonPy.match(/(async\s+)?def\s+_broadcast\s*\(/g) || []).length;
+  return all - defs;
+}
+
+function broadcastFrameTypes(daemonPy) {
+  const types = new Set();
+  for (const source of broadcastPayloads(daemonPy)) {
+    const t = /"type":\s*f?"([a-z_]+)"/.exec(source);
+    if (t) types.add(t[1]);
+  }
+  return types;
+}
+
 test("守卫：daemon `_broadcast` 的每一种帧类型，中间层要么转发、要么在豁免表里具名", async () => {
   // 这条缝已经断过三次（turn_start/turn_end → #2189 的 task_queued/steer_committed
   // → 同类的 queued_requeue/queued_cancelled），每次都靠「有人注意到日志」才发现。
@@ -876,17 +919,19 @@ test("守卫：daemon `_broadcast` 的每一种帧类型，中间层要么转发
   // 具名并给出理由 —— 否则断言失败。
   //
   // 手抄的名单本身就是一种读数（漏项与重名同样看不见），所以这份类型集合是**推导**
-  // 出来的，不是写死的；下面第一条断言兜住推导本身失败（解析不到东西时不能算通过）。
+  // 出来的，不是写死的；下面第一条断言兜住推导本身失败（解析不到东西时不能算通过），
+  // 第二条兜住推导**漏读**（切分漏掉调用点时，少读的那几个正是它该覆盖的）。
   const daemonPy = fs.readFileSync(
     path.join(__dirname, "..", "..", "server", "daemon.py"), "utf8");
-  const broadcastTypes = new Set();
-  for (const m of daemonPy.matchAll(/_broadcast\([^,]+,\s*\{([^{}]*)\}/g)) {
-    const t = /"type":\s*"([a-z_]+)"/.exec(m[1]);
-    if (t) broadcastTypes.add(t[1]);
-  }
+  const payloads = broadcastPayloads(daemonPy);
+  const broadcastTypes = broadcastFrameTypes(daemonPy);
   // ① 被测对象非空：解析坏了要让本测试红，而不是静默地「全都没问题」
   assert.ok(broadcastTypes.size >= 10,
     `只从 daemon.py 解析出 ${broadcastTypes.size} 种广播帧 —— 解析式失效了，本次测量无效`);
+  // ①b 切分不许漏读：每一个 `_broadcast(...)` 调用都要切出来（漏掉的那些＝守卫的
+  //     盲区，读不到就永远不会被判定，于是第四例照样能溜过去）
+  assert.strictEqual(payloads.length, broadcastCallCount(daemonPy),
+    `从 daemon.py 切出 ${payloads.length} 段调用，文件里有 ${broadcastCallCount(daemonPy)} 个 —— 切分漏掉了调用点`);
 
   // ② 中间层**故意**不转发给渲染层的类型。每条都要写清理由：渲染层没有 case 的
   //    （TUI 独有）、或本就是别的会话命令的回执。写进这里＝承认它会被兜底记一行。
@@ -908,6 +953,32 @@ test("守卫：daemon `_broadcast` 的每一种帧类型，中间层要么转发
   // ④ 豁免表不许腐烂：写进去的类型必须确实还被丢着（转发后又忘了删＝名单说谎）
   assert.deepStrictEqual(
     Object.keys(NOT_FORWARDED).filter((t) => !dropped.includes(t)), []);
+});
+
+test("守卫的载荷切分按花括号配平：带 f-string 的载荷里，帧类型也看得见", () => {
+  // 反向臂。`\{([^{}]*)\}` 这类正则在载荷里第一个 `{` 处就停，因此**看不见**载荷里
+  // 带 f-string 替换字段的调用点 —— 实测 master 上漏 5 个（共 35 个），漏掉的恰好是
+  // 这条守卫声称覆盖的对象：daemon.py 里 `f"...{self._max_tool_rounds}..."` 这种写法。
+  // 这条臂在旧正则下必红（切出来的是空集），钉住「按配平切」这个性质本身。
+  const withFstring = [
+    "await self._broadcast(session_id, {",
+    '    "type": "fstring_frame",',
+    '    "content": f"rounds={self._max_tool_rounds}",',
+    "})",
+  ].join("\n");
+  assert.deepStrictEqual([...broadcastFrameTypes(withFstring)], ["fstring_frame"]);
+  assert.strictEqual(broadcastPayloads(withFstring).length, 1);
+
+  // 正向方向的反面：切出来的载荷没有 `type`（`done` 形状）时，不许凭空造出一个类型 ——
+  // 「读得更多」不能变成「编得更多」，否则豁免表会开始收到不存在的名字。
+  const typeless = 'await self._broadcast(session_id, {"done": True, "content": f"{n}"})';
+  assert.deepStrictEqual([...broadcastFrameTypes(typeless)], []);
+  assert.strictEqual(broadcastPayloads(typeless).length, 1);
+
+  // 方法签名不是调用：不能被算进切分结果（否则 ①b 的等式永远差一，或反过来掩盖漏读）
+  const defOnly = "    async def _broadcast(self, session_id: str, data: dict) -> None:";
+  assert.strictEqual(broadcastPayloads(defOnly).length, 0);
+  assert.strictEqual(broadcastCallCount(defOnly), 0);
 });
 
 test("sendSetSandboxRoots：帧形状与 daemon 的 op 词表一致（缺 path 也发空串）", async () => {
