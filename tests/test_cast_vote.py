@@ -1559,6 +1559,61 @@ def test_the_previous_cycle_is_read_from_the_cycle_records(
     assert "20260916-030000" not in err, "the later record must not widen the window"
 
 
+def test_the_refusal_names_the_window_it_inferred_and_its_blind_spot(
+    mod, monkeypatch, capsys, body_file, tmp_path
+):
+    """Issue #2214, on the side where the cost is a posted vote.
+
+    A window read off the cycle records can reach further back than the clause does when
+    a cycle ran and wrote no record — the resolver then lands on the record before it.
+    `review-queue.py` prints that as a note; here it is a refusal, and the refusal is the
+    one place a cycle cannot answer by re-reading next cycle (nothing was posted, and the
+    head is unchanged), so a reader who is refused on a wider boundary than the clause
+    means has to be told the instant the window used. Measured 2026-10-13: two such
+    cycles in one day, and the boundary landed 2h29m before the cycle that really
+    preceded the measuring one.
+
+    The second half is the control: with `--prev-cycle` the caller named the boundary, so
+    there is no resolution of the tool's to disclose and the sentence is suppressed — a
+    clause appended unconditionally would pass the first half.
+    """
+    (tmp_path / "cycle-20260916-015906.md").write_text(
+        "---\nid: cyc20260916-015906\n---\n", encoding="utf-8"
+    )
+    pushed = _push(2026, 9, 16, 2, 0, 0)
+
+    counter = FakeCounter(verdict_with(push_time=pushed))
+    gh = FakeGh()
+    rc = _run(
+        mod, monkeypatch, counter, gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM"),
+         "--cycles-log", str(tmp_path)],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2 and gh.calls == [], "nothing was posted, and nothing had to be undone"
+    assert "issue #2214" in err, err
+    assert f"previous cycle {PREV_CYCLE}" in err, err
+    assert "2026-09-16T01:59:06" in err, (
+        "the instant the window used is named, not implied - the id alone does not give "
+        "a reader the width"
+    )
+
+    counter = FakeCounter(verdict_with(push_time=pushed))
+    gh = FakeGh()
+    rc = _run(
+        mod, monkeypatch, counter, gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM"),
+         "--prev-cycle", PREV_CYCLE],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "inside the window this cycle treats as its own" in err, err
+    assert "issue #2214" not in err, (
+        "the boundary was named by the caller, so the tool has no record lookup of its "
+        f"own to disclose: {err}"
+    )
+
+
 def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
     mod, monkeypatch, capsys, body_file, tmp_path
 ):

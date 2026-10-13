@@ -109,6 +109,7 @@ RUN_HERE = (
     "check-doc-count.py",
     "check-memory-index.py",
     "check-rant-citations.py",
+    "check-retry-bounds.py",
     "check_nonlocal.py",
     "check_unbound_reads.py",
     "check-undefined-names.py",
@@ -163,6 +164,7 @@ TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
 #: pointed either at a tree.
 POINTABLE_AT_A_TREE = {
     "check-citation-resolves.py": (),
+    "check-retry-bounds.py": ("--root",),
     "check_unbound_reads.py": ("--root",),
     "check-undefined-names.py": ("--root",),
     "check-workflows.py": ("--root",),

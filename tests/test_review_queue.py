@@ -1475,6 +1475,9 @@ def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
     out = capsys.readouterr().out
     assert "abstain" not in out  # not a claim the tool cannot support
     assert "note: the abstention window could not be widened" in out
+    # Also inferred (the lookup ran and found nothing), so the two notes meet here:
+    # the narrowed one is the stronger statement and takes the line.
+    assert "issue #2214" not in out, out[:400]
     assert "no cycle record before" in out
     # The other half of "narrowed, and said so": the note names the boundary that
     # *was* checked, so a reader can still apply the clause by hand to an earlier push
@@ -1843,6 +1846,66 @@ def test_the_json_document_keeps_its_shape_and_carries_the_same_fact(
     assert payload[0]["tree"] == str(REPO_ROOT)
     assert payload[0]["branch"] == "feature/x"
     assert "tree: " not in out, "the prose line must not be emitted into the JSON document"
+def test_an_inferred_window_names_the_instant_it_used_and_its_blind_spot(
+        mod, monkeypatch, capsys, tmp_path
+):
+    """Issue #2214: here the clause *was* applied, and the row still cannot show from
+    where.
+
+    The boundary is looked up in the `cycle-*.md` records, so a cycle that ran and wrote
+    none is found nowhere: the resolver lands on the record before it and the window
+    reaches further back than the clause does, so a head pushed inside that gap reads
+    `abstain` where it was votable. Measured 2026-10-13 — two such cycles in one day
+    (`cyc20261013-150748`, `cyc20261013-194608`), the window starting at 17:17:21 where
+    the cycle before the measuring one began at 19:46:08, and a head pushed at 19:32:47
+    inside the gap.
+
+    Silence is exactly how a full window reads, so this state has to name the instant it
+    used. The remedy is *not* the reader's — they cannot see the missing cycle either —
+    which is why the sentence states the gap instead of printing a flag.
+    """
+    (tmp_path / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30))
+    fresh = FakeFresh()
+    rc = _run(mod, monkeypatch, votes, fresh,
+              ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "issue #2214" in out
+    # The instant, not just the id: the width is the fact being disclosed, and the id
+    # alone does not give one to a reader who does not convert ids by hand.
+    assert mod.cycle_start(PREV_CYCLE).isoformat(timespec="seconds") in out, out[:400]
+    assert PREV_CYCLE in out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert lines[0].startswith("tree: "), lines[0]
+    assert lines[1].startswith(
+        "note: the own-window clause was read off the cycle records"), lines[:2]
+    assert out.index("issue #2214") < out.index("#1 "), out[:400]
+    # The row itself is unchanged: this note says where the window came from, it does
+    # not move a verdict.
+    assert "abstain" in out
+
+
+def test_the_inferred_window_note_stays_out_of_the_json_document(
+        mod, monkeypatch, capsys, tmp_path
+):
+    """The fact rides as fields — `vote_window_start` already carries the instant the
+    note exists to disclose — and a prose line ahead of the list would break every
+    machine consumer instead of warning them."""
+    (tmp_path / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh,
+         ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path), "--json"])
+    out = capsys.readouterr().out
+
+    payload = json.loads(out)  # a prose line here raises, which is the assertion
+    assert payload[0]["vote_window_start"] == \
+        mod.cycle_start(PREV_CYCLE).isoformat(timespec="seconds")
+    assert "issue #2214" not in out, out[:400]
+
+
 def test_a_windowed_run_prints_no_such_note(mod, monkeypatch, capsys):
     """The control: with `--cycle` and a previous cycle in hand the clause *is*
     applied in full, and a note printed anyway would be a claim about a gap that is not
@@ -1855,6 +1918,10 @@ def test_a_windowed_run_prints_no_such_note(mod, monkeypatch, capsys):
 
     assert "no --cycle was given" not in out, out[:300]
     assert "could not be widened" not in out, out[:300]
+    # And the note a *records-only* resolution prints is the other half of this control:
+    # the caller named the boundary, so the tool has no resolution of its own to
+    # disclose, and a line printed anyway is how the line that matters gets skimmed.
+    assert "issue #2214" not in out, out[:400]
     # Same move as above: the row is the first line after the tree line, and no
     # window note sits between them.
     lines = [line for line in out.splitlines() if line.strip()]
