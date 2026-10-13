@@ -720,7 +720,7 @@ def own_head_window(
         raise ValueError("own_head_window needs the vote's cycle id")
     queue = review_queue()
     previous, where = queue.previous_cycle(cycle, queue.resolve_cycle_logs(cycles_log))
-    window = queue.abstain_window(cycle, previous, where)
+    window = queue.abstain_window(cycle, previous, where, inferred=True)
     if not window.applied:
         return True, (
             "the head's own window cannot be decided from this vote's cycle "
@@ -757,12 +757,13 @@ def own_head_window(
         if window.unresolved
         else ""
     )
+    widened = f" {window.inferred_clause()}." if window.inferred else ""
     return True, (
         f"cast inside the window this vote's cycle treats as its own - the head was "
         f"pushed {push_time}, at or after {window.window_start_text()} ({window.source}"
         f"{narrowed}); a cycle does not vote on a head it pushed, and the window "
         "immediately before it counts as its own, so `cast-vote.py` refuses to post "
-        "this vote (issue #1408)"
+        f"this vote (issue #1408).{widened}"
     )
 
 
