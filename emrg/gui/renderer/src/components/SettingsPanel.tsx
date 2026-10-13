@@ -56,6 +56,14 @@ interface DeviceFlow {
   error: string | null;
 }
 
+/** one row of the daemon's `recent` list (`evolution_summary`) */
+export interface RecentImprovement {
+  timestamp?: string;
+  task?: string;
+  work?: string;
+  operations?: string[];
+}
+
 /** device flow 轮询间隔（daemon 侧 gh 进程 300s 超时会自行退出） */
 export const DEVICE_POLL_MS = 2000;
 
@@ -72,10 +80,31 @@ interface EmrgBridge {
   taskTemplateCreate(p: { name: string; prompt: string }): Promise<unknown>;
   taskTemplateUpdate(p: { name: string; prompt: string }): Promise<unknown>;
   taskTemplateDelete(p: { name: string }): Promise<unknown>;
+  evolutionSummary(p: { limit: number }): Promise<{ count?: number; recent?: RecentImprovement[] }>;
 }
 
 function bridge(): EmrgBridge | undefined {
   return (window as unknown as { emrg?: EmrgBridge }).emrg;
+}
+
+/** `2026-10-13T08:00:00.123456` → `2026-10-13 08:00`（vanilla 同款：前 16 字符，T→空格） */
+export function recentTime(ts: string | undefined): string {
+  return String(ts ?? "").slice(0, 16).replace("T", " ");
+}
+
+/**
+ * 一行的正文。
+ *
+ * `work` 是持久化 task-run 记录里的那个字段（`emrg/server/scheduler.py`
+ * `read_task_run_records`），也就是 cycle 自己写下的那句话。`operations` 属于
+ * `~/.emrg/logs/evolution-*.json` —— 那个目录**没有写者**（issue #2187：删掉
+ * `_write_evolution_log` 的同一提交 diff 自己写着 "never consumed"），所以在
+ * #2188 之前帧里带的还是它；两版之间按这个顺序取，是为了这份界面在两棵树上都说得出话。
+ */
+export function recentText(it: RecentImprovement): string {
+  if (it.work) return it.work;
+  const ops = Array.isArray(it.operations) ? it.operations : [];
+  return ops.join(" · ");
 }
 
 const TABS: { id: SettingsTab; labelKey: string }[] = [
@@ -116,6 +145,10 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
   const [tplBuiltinView, setTplBuiltinView] = useState(false);
   const [tplName, setTplName] = useState("");
   const [tplPrompt, setTplPrompt] = useState("");
+  // about tab 状态：`recent === null` 尚未取到；`recentFailed` 是「读不到」，与
+  // 「没有记录」（`recent` 为 []）是两件事，空态文案说的是后者。
+  const [recent, setRecent] = useState<RecentImprovement[] | null>(null);
+  const [recentFailed, setRecentFailed] = useState(false);
   // 删除确认（lib/dialog reducer + ConfirmDialog，vanilla showConfirm 对等）
   const [dialogState, dispatch] = useReducer(dialogReducer, initialDialogState);
 
@@ -150,6 +183,28 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     if (tab === "templates") void loadTemplates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  // about tab 激活 → 拉取「最近改进」（vanilla loadEvolutionSummary 对等）。懒加载，
+  // 与 templates tab 同款：打开这一页才向 daemon 要 `evolution_summary` 帧。
+  useEffect(() => {
+    if (tab === "about") void loadEvolutionSummary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  async function loadEvolutionSummary() {
+    const b = bridge();
+    if (!b?.evolutionSummary) return;
+    try {
+      const res = await b.evolutionSummary({ limit: 5 });
+      setRecent(Array.isArray(res?.recent) ? res.recent : []);
+      setRecentFailed(false);
+    } catch {
+      // 读不到 ≠ 没有。空态那句说的是「还没有改进记录」，而这里什么都没读到，
+      // 两者不能共用一句文案（会让人以为演化从未发生）。
+      setRecent(null);
+      setRecentFailed(true);
+    }
+  }
 
   async function refreshGithubStatus() {
     const b = bridge();
@@ -727,6 +782,32 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
                   </span>
                 </div>
                 <div className="hint" style={{ marginTop: 6 }}>{t("settings.aboutDesc")}</div>
+              </div>
+            </div>
+            <div className="settings-group">
+              <div className="settings-group-title">{t("settings.recentTitle")}</div>
+              <div className="about-recent" data-testid="about-recent">
+                {recentFailed ? (
+                  <div className="about-recent-item" data-testid="about-recent-failed">
+                    {t("settings.recentFailed")}
+                  </div>
+                ) : (
+                  recent?.map((it, i) => (
+                    <div
+                      className="about-recent-item"
+                      data-testid="about-recent-item"
+                      key={`${it.timestamp ?? ""}-${i}`}
+                    >
+                      <span className="about-recent-time">{recentTime(it.timestamp)}</span>
+                      <span>{recentText(it)}</span>
+                    </div>
+                  ))
+                )}
+                {!recentFailed && recent?.length === 0 && (
+                  <div className="about-recent-item" data-testid="about-recent-empty">
+                    {t("app.noImprovements")}
+                  </div>
+                )}
               </div>
             </div>
           </div>

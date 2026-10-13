@@ -43,6 +43,7 @@ function mockEmrg(over: Record<string, unknown> = {}) {
     githubStatus: fn("githubStatus", { authenticated: true, user: "argszero" }),
     githubConnect: fn("githubConnect", { ok: true, user: "argszero" }),
     githubDisconnect: fn("githubDisconnect", { ok: true }),
+    evolutionSummary: fn("evolutionSummary", { count: 0, recent: [] }),
     ...over,
   };
   (window as unknown as { emrg?: unknown }).emrg = bridge;
@@ -382,6 +383,50 @@ describe("SettingsPanel", () => {
     const line = screen.getByTestId("about-line").textContent || "";
     expect(line).toContain("0.2.81");
     expect(line).toContain("115");
+  });
+
+  // 关于页那句自带承诺（settings.aboutDesc：「每次改进都会自动汇报，你可以随时在这里看到
+  // 它的成长」）指向的就是下面这块列表。React 迁移（#1024 删掉 vanilla 渲染层）之后，
+  // 数据通路（daemon `evolution_summary` 帧 → main.js IPC → preload）与文案都还在，
+  // 只有渲染它的那个组件没了 —— 这三条把通路重新钉住。
+  it("about tab asks the daemon for the recent improvements", async () => {
+    const summary = vi.fn().mockResolvedValue({
+      count: 2,
+      recent: [
+        { timestamp: "2026-10-13T08:00:00.123456", work: "read the task-run store" },
+        // 旧的帧形状（`operations`）：#2188 之前 daemon 发的还是这一版，两个分支都要说话
+        { timestamp: "2026-10-13T07:00:00", operations: ["llm-reflection", "tool-execution"] },
+      ],
+    });
+    setup({ evolutionSummary: summary });
+    await screen.findByTestId("settings-tab-about");
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+    await waitFor(() => expect(summary).toHaveBeenCalledTimes(1));
+    expect(summary.mock.calls[0][0]).toEqual({ limit: 5 });
+    const rows = await screen.findAllByTestId("about-recent-item");
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("2026-10-13 08:00");
+    expect(rows[0].textContent).toContain("read the task-run store");
+    expect(rows[1].textContent).toContain("llm-reflection · tool-execution");
+  });
+
+  it("about tab says it could not read the list instead of claiming there is none", async () => {
+    // 读不到与「没有记录」是两回事：空态那句说的是「还没有改进记录，输入 /rant 驱动
+    // 第一次进化吧」，拿它顶替读取失败，就是把「测不到」印成人畜无害的「没有」。
+    setup({ evolutionSummary: vi.fn().mockRejectedValue(new Error("daemon gone")) });
+    await screen.findByTestId("settings-tab-about");
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+    expect(await screen.findByTestId("about-recent-failed")).toBeTruthy();
+    expect(screen.queryByTestId("about-recent-empty")).toBeNull();
+  });
+
+  it("about tab shows the empty copy when the daemon reports no records", async () => {
+    setup({ evolutionSummary: vi.fn().mockResolvedValue({ count: 0, recent: [] }) });
+    await screen.findByTestId("settings-tab-about");
+    fireEvent.click(screen.getByTestId("settings-tab-about"));
+    expect(await screen.findByTestId("about-recent-empty")).toBeTruthy();
+    expect(screen.queryByTestId("about-recent-failed")).toBeNull();
+    expect(screen.queryAllByTestId("about-recent-item").length).toBe(0);
   });
 
   it("degrades gracefully without window.emrg", async () => {
