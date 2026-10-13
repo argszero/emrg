@@ -254,7 +254,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 #: directory it knows them to be in (see the override below).
 #:
 #: A guard ties this set to the template's path
-#: (`tests/test_review_queue.py::test_the_prompt_writes_its_cycle_records_where_the_queue_reads_them`):
+#: (`tests/test_review_queue.py::test_the_records_land_where_the_queue_reads_them`):
 #: it renders this tree's `evolution_prompt.md` and requires every cycle-record path in
 #: it to be one of these roots, so reader and template cannot drift apart silently again.
 #:
