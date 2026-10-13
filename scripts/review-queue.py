@@ -331,8 +331,12 @@ def resolve_cycle_logs(override: str | None = None) -> tuple[Path, ...]:
 #
 # The default follows the **records** rather than a constant of its own, so the two
 # corpora cannot be pointed at different roots: a record root `<...>/.emrg/memory` has
-# its dispatches in `<...>/.emrg/sessions`, and a caller naming a corpus of its own
-# (`--cycles-log`) gets that corpus's sibling — one that is named, or absent.
+# its dispatches in the `sessions` directory of the **same `.emrg` root**, and a
+# session's record root — the other scope a record root comes in — is owned by that
+# same root, so both answer with the one corpus instead of one real corpus and one
+# directory that never existed. A caller naming a corpus of its own (`--cycles-log`) is
+# answered from its own `.emrg` root, or from beside it when it has none — one
+# directory that is named, or absent.
 
 #: A dispatch marker, and the histories that hold one. Only the *line* has to be
 #: recognised cheaply, so the marker is matched as a substring before any parsing:
@@ -773,8 +777,9 @@ def own_window(
     :param cycles_log: the cycle-record corpus, `os.pathsep`-joined for several, or
         `None` for the default roots.
     :param sessions_dir: the dispatch corpus, or `None` for `$EMRG_SESSIONS_DIR`, else
-        the `sessions` directory beside each record root — so naming a corpus of one's
-        own points both at *it*, and the two cannot drift apart.
+        the `sessions` directory of the `.emrg` root each record root belongs to
+        (`sessions_root`) — so naming a corpus of one's own points both at *it*, and
+        the two cannot drift apart.
     :returns: the window to use. `inferred` is cleared when the dispatch corpus reaches
         the boundary the records gave, since an id equal to that boundary confirms it;
         it also stays clear when `prev_cycle` named the boundary.
@@ -1878,9 +1883,9 @@ def main(argv: list[str] | None = None) -> int:
         help="directory holding the task sessions whose histories record every cycle "
              "dispatch, used to move the abstention window up to a cycle that ran and "
              "wrote no record (default: $EMRG_SESSIONS_DIR, else the `sessions` "
-             "directory beside each --cycles-log root). Absent is not an error: a "
-             "checkout shaped like CI's has none, and the window is then the one the "
-             "records alone give",
+             "directory of the `.emrg` root each --cycles-log root belongs to). "
+             "Absent is not an error: a checkout shaped like CI's has none, and the "
+             "window is then the one the records alone give",
     )
     parser.add_argument(
         "--min-votes",
