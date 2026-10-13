@@ -339,8 +339,13 @@ iterates, with `$VAR` resolved from the nearest assignment above it. A stale lit
 caught, and so is a variable that disagrees. Exit `0` = every claim agrees; `1` = one
 disagrees, and the file, the line, the claim, the bound *and the sentence itself* are
 printed so the fix is right there; `2` = **could not measure — never a pass**, with the
-reason: no workflow file, no retry loop at all, or a bound variable with no assignment
-above it to read.
+reason: no workflow file, no retry loop at all, a bound variable with no assignment
+above it to read, or **a loop that names the counter in a spelling the reader does not
+classify** — `for attempt in 1 2 3 4` with `do` on the next line, or an `until` loop, or
+`for attempt in $(seq 1 4)`. That last reason is the point of the exit-2 contract rather
+than a corner of it: a loop whose bound cannot be read is exactly where the guard must
+not answer `OK`, and it prints the header and its line so the reader can rewrite the loop
+or teach the reader the spelling.
 
 **The host-side counterpart of the install step.** The daemon renders a built-in task
 template from its own `__file__`, and on a running install that is

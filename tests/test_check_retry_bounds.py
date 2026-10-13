@@ -197,6 +197,93 @@ def test_a_tree_with_no_retry_loop_is_not_a_pass(tmp_path, mod, capsys) -> None:
     assert "0 retry loop(s)" in out, out
 
 
+def test_a_counter_loop_whose_header_cannot_be_classified_is_not_a_pass(
+    tmp_path, mod, capsys
+) -> None:
+    """A header that names the counter but matches no known shape is exit 2, never `OK`.
+
+    Measured before this arm existed (cycle cyc20261013-194608, on a copy of the real
+    workflow): the loop was skipped silently, so a file whose only retry loop was spelled
+    `for attempt in 1 2 3 4` with `do` on the next line reported
+    `OK: every bound message in 1 claim(s) reads its loop's bound` while its message said
+    `/2` over four iterations - and reported the *identical* line once the message was
+    corrected, so the reading told a clean loop from a stale one by nothing at all.
+
+    The clean, classifiable loop above keeps this arm off the "no claim at all" rule, so what
+    it measures is the classification and not the emptiness - the mixed case the veto asked
+    to pin.
+    """
+    root = _tree(
+        tmp_path,
+        """
+for attempt in 1 2 3; do
+  echo "try (attempt ${attempt}/3)"
+done
+for attempt in 1 2 3 4
+do
+  echo "try (attempt ${attempt}/2)"
+done
+""",
+    )
+    code, out, err = _run(mod, capsys, root)
+    assert code == 2, f"an unreadable bound was reported as a pass: {code=} {out=} {err=}"
+    assert "cannot classify its header" in err, err
+    assert "for attempt in 1 2 3 4" in err, (
+        f"the message does not name the header it could not read, so a reader cannot find "
+        f"it:\n{err}"
+    )
+
+
+def test_an_until_loop_over_the_counter_is_not_a_pass(tmp_path, mod, capsys) -> None:
+    """The same hole in the other spelling the veto measured.
+
+    The clean sibling is load-bearing here too: without it this arm's `code == 2` would hold
+    on the unfixed guard as well, by the unrelated "no claim was read at all" rule, and only
+    its message assertion would bite. Measured against the unfixed reader, this arm fails.
+    """
+    root = _tree(
+        tmp_path,
+        """
+for attempt in 1 2 3; do
+  echo "try (attempt ${attempt}/3)"
+done
+attempt=1
+until [ "$attempt" -gt 4 ]; do
+  echo "try (attempt ${attempt}/2)"
+  attempt=$((attempt + 1))
+done
+""",
+    )
+    code, out, err = _run(mod, capsys, root)
+    assert code == 2, f"{code=} {out=} {err=}"
+    assert "cannot classify its header" in err, err
+    assert 'until [ "$attempt" -gt 4 ]' in err, err
+
+
+def test_a_loop_that_never_names_the_counter_is_not_this_guards_subject(
+    tmp_path, mod, capsys
+) -> None:
+    """The control: without it, "unreadable header" would swallow every unrelated loop.
+
+    `for f in dist/...` presents no bound for the counter, so it is a loop this guard is not
+    about - skipped, green, exactly as before this change.
+    """
+    root = _tree(
+        tmp_path,
+        """
+for attempt in 1 2 3; do
+  echo "try (attempt ${attempt}/3)"
+done
+for f in dist/a dist/b; do
+  echo "not this guard's subject: $f"
+done
+""",
+    )
+    code, out, err = _run(mod, capsys, root)
+    assert (code, err) == (0, ""), f"{code=} {out=} {err=}"
+    assert "1 retry loop(s)" in out, out
+
+
 # --- the real subject ---------------------------------------------------------
 
 

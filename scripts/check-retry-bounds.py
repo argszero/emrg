@@ -40,6 +40,22 @@ equal the bound the loop actually iterates.
 So a number that agrees passes, and a *variable* that disagrees is caught too - strictly
 stronger than "no literals", and green on both spellings while the tree is mid-migration.
 
+The reader classifies a loop from its **header line**, and only three spellings are among
+them: `for attempt in 1 2 3 4 5; do`, `for (( attempt=1; attempt<=VAR; attempt++ ))` and
+`while [ "$attempt" -le "$VAR" ]`. The scope of that classification is what makes the guard
+honest rather than merely quiet, and it is the one clause cycle cyc20261013-194608 vetoed:
+
+  * a header that **names the counter** in none of those three shapes - `for attempt in 1 2 3
+    4` with `do` on the next line, `until [ "$attempt" -gt 4 ]; do`, `for attempt in $(seq 1
+    4); do` - is this guard's subject with a bound it cannot read, so it is **exit 2**, with
+    the header and its line printed. It used to be skipped in silence, which made the run
+    answer `OK` over a stale message and answer the identical line once that message was
+    corrected: a guard that tells a clean loop from a stale one by nothing is worse than no
+    guard, because a reader relies on its `OK`;
+  * a header that never names the counter - `for f in dist/...`, `while IFS= read -r f` - is
+    a loop this guard is not about, and is skipped. That is the control that keeps the rule
+    above from becoming "every other loop in the file is exit 2".
+
 The subject is never assumed: a tree with no retry loop at all is exit 2, never 0, and the
 census printed is what a reader can check against the workflow.
 
@@ -95,6 +111,14 @@ _C_LOOP = re.compile(
 )
 #: `while [ "$attempt" -le "$attempts" ]; do` - group 1 is the bound variable.
 _WHILE_LOOP = re.compile(rf"\bwhile\s*\[\s*\"\${COUNTER}\"\s*-l[et]\s*\"?\$(\w+)\"?\s*\]")
+
+#: A loop header that names the counter at all. Its purpose is the *negative* of the three
+#: patterns above: a header this reader cannot classify but that names `attempt` is this
+#: guard's subject with an unreadable bound (exit 2), while one that never names it - `for f
+#: in ...`, `while IFS= read -r f` - is a loop this guard is not about, and is skipped.
+#: `\b` keeps `attempts/` and `attempt_count` out of it; `$attempt` and `${attempt}` both
+#: match, since `$` and `{` are not word characters.
+_NAMES_COUNTER = re.compile(rf"\b{COUNTER}\b")
 
 _ASSIGN = re.compile(r"\b(\w+)=(\d+)\b")
 
@@ -220,7 +244,22 @@ def _read_bound(lines: list[str], loop: Loop) -> None:
     else:
         match = _WHILE_LOOP.search(line)
         if not match:
-            return  # not a loop over the attempt counter; not this guard's subject
+            # The header names the counter but is spelled in none of the three shapes this
+            # reader classifies - `for attempt in 1 2 3 4` with `do` on the next line,
+            # `until [ "$attempt" -gt 4 ]; do`, `for attempt in $(seq 1 4); do`. That is
+            # this guard's subject with a bound it cannot read, which its own contract makes
+            # exit 2 ("a loop whose bound cannot be read"), never a pass. Skipping it was a
+            # hole measured by cycle cyc20261013-194608: a file whose only retry loop was
+            # spelled this way with a stale `/2` over four iterations reported
+            # `OK: every bound message in 1 claim(s) reads its loop's bound`, rc 0 - and the
+            # same file with the message corrected reported the identical line, so the two
+            # readings told a clean loop from a stale one by nothing at all.
+            if _NAMES_COUNTER.search(line):
+                loop.reason = (
+                    f"the loop at line {loop.header + 1} names `{COUNTER}` but this reader "
+                    f"cannot classify its header, so its bound is unread: {line.strip()}"
+                )
+            return  # a loop that never names the counter is not this guard's subject
         loop.form = "while"
         name = match.group(1)
     bound = _assigned_above(lines, loop.header, name)
@@ -299,10 +338,14 @@ def measure(root: Path) -> Reading:
         relative = path.relative_to(root).as_posix()
         for loop in _loop_spans(lines):
             _read_bound(lines, loop)
-            if loop.form == "other":
-                continue
+            # The reason is read *before* the form: a header the reader could not classify
+            # still sets one when it names the counter, and the order matters - a loop left
+            # as `form == "other"` because its header was unreadable is precisely the case
+            # this guard must not answer "OK" about.
             if loop.reason:
                 reading.unmeasured.append(f"{relative}: {loop.reason}")
+                continue
+            if loop.form == "other":
                 continue
             if not loop.closed:
                 reading.unmeasured.append(
