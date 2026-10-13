@@ -381,6 +381,32 @@ class TestTheInventory:
         assert "the first thing the host said" in done.stdout
         assert "## Evolution Cycle" not in done.stdout
 
+    def test_measure_refuses_a_pattern_instead_of_answering_it_with_a_zero(self, sources):
+        """`--measure` answers no pattern, so asking both is an unanswerable question.
+
+        Before the refusal the inventory compiled its own `.*` and returned 0 whatever
+        `--pattern` was — measured on this host 2026-10-13, an absent pattern printed
+        8,202 rows and exited 0, a *found* verdict for a question never asked. Exit 0 is
+        the value the host-attribution rule reads as "the message is there", so the
+        combination has to refuse rather than list.
+        """
+        absent = "ZXQ-not-present-ZXQ"
+        done = run(["--pattern", absent, "--measure", *both(sources)])
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "unmeasurable" in done.stderr
+        assert "--measure" in done.stderr and "--pattern" in done.stderr
+        assert "host message(s)" not in done.stdout, (
+            "the inventory ran anyway, and its exit 0 is what read as a found verdict"
+        )
+        assert "FOUND" not in done.stdout
+
+        # The control: the refusal is about the *combination*. The same absent pattern,
+        # asked as a pattern, still gets its own answer over the fixture's covered span -
+        # which is what the combination used to override with a 0.
+        alone = run(["--pattern", absent, *both(sources)])
+        assert alone.returncode == 1, alone.stdout + alone.stderr
+        assert "NOT FOUND" in alone.stdout
+
 
 class TestTheTemplateCarriesTheStep:
     """A tool nothing tells a cycle to run is dead code (measured, this cycle)."""
