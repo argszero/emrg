@@ -1416,11 +1416,24 @@ def test_the_records_land_where_the_queue_reads_them(mod, tmp_path):
     has no such file and the guard failed there while passing here (run 36519484170,
     `test` and `test-windows`). A guard whose premise is a local-only artifact measures
     the host, not the tree. So the checkout is built here with `tmp_path` and the claim is
-    split into its two halves, each measured where it is decidable:
+    split into its three halves, each measured where it is decidable:
 
     1. the **writer** derives `<cwd>/.emrg/memory` — measured on a directory this test
-       creates, so it holds on any host; and
-    2. the **reader** searches `<this checkout>/.emrg/memory` — a constant, needing no file.
+       creates, so it holds on any host;
+    2. the **reader** searches `<this checkout>/.emrg/memory` — a constant, needing no
+       file; and
+    3. the **reader** also searches each session's memory directory under the checkout —
+       measured on a `tmp_path` checkout, because that half is a glob, and a glob is
+       exactly what a constant frozen on one root would miss.
+
+    The third half is the one that was missing until 2026-10-12, and its absence is why
+    this guard is not prose. A record's root is the writer's choice — the memory
+    instructions name both levels and fix no path — so the corpus really can sit at
+    either level, and it did: the project root's newest record was a day older than the
+    newest one under the session directory, and `review-queue` resolved the previous
+    cycle from the stale root. The window it printed was over-wide by a day's worth of
+    cycles, named the wrong cycle on the row, and exited 0. So the reader has to cover
+    both levels the writers use, and this guard measures both.
 
     Composed, they are the sentence the old scan asserted: a cycle running in this checkout
     records where the queue reads. A record written anywhere else is a record no window
@@ -1460,6 +1473,34 @@ def test_the_records_land_where_the_queue_reads_them(mod, tmp_path):
         f"review-queue searches {sorted(str(r) for r in roots)}, which does not include "
         f"{REPO_ROOT / '.emrg' / 'memory'} — the abstention window is read from the "
         "records, so a cycle writing where the queue does not look is one no window can see"
+    )
+
+    # 3. The reader's second level, on the same checkout: a record a session writes lands
+    # in that session's memory directory, so a search that stops at the project root stops
+    # reading the corpus the moment a writer switches level — which is what happened.
+    (checkout / ".emrg" / "sessions" / "s1" / "memory").mkdir(parents=True)
+    (checkout / ".emrg" / "sessions" / "s2" / "memory").mkdir(parents=True)
+    (checkout / ".emrg" / "sessions" / "s3").mkdir(parents=True)  # a session with no memory
+    assert mod.session_memory_roots(checkout) == (
+        checkout / ".emrg" / "sessions" / "s1" / "memory",
+        checkout / ".emrg" / "sessions" / "s2" / "memory",
+    ), "every session memory directory is searched, in a stable order, and only those"
+
+    # The control, and the reason this is globbed rather than constructed: a tree with no
+    # session memory yields nothing, and asking must not create the directory it looks for
+    # — a reading with a side effect is how a search comes to create its own corpus.
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert mod.session_memory_roots(bare) == ()
+    assert not (bare / ".emrg").exists(), "the search created the tree it searched"
+
+    # And this is that half as the default really carries it — the constant is this
+    # function applied to this checkout, so a default that stopped at the project root
+    # would have to drop it here.
+    assert mod.DEFAULT_CYCLES_LOGS[0] == mod.SCRIPTS_DIR.parent / ".emrg" / "memory"
+    assert mod.DEFAULT_CYCLES_LOGS[1:] == mod.session_memory_roots(mod.SCRIPTS_DIR.parent), (
+        "the default's session half is not this search — a reader that stopped at the "
+        "project root leaves the corpus behind the moment a writer moves level"
     )
 
 
