@@ -1,23 +1,28 @@
 """The notarize step must name the cause it measured, and retry only what is transient.
 
-Two shapes arrive as the same non-zero exit, and they have opposite remedies:
+Three shapes arrive as the same non-zero exit, and each has its own remedy:
 
 * **Apple answered and refused** — a credential verdict. Diagnosed with the preflight, and
   **never** retried: the answer will not change.
 * **The exchange never completed** — a lost connection or a timeout. Apple never answered,
   so no credential was judged, and the shape is transient.
+* **Apple accepted the upload and the wait then lost the connection** — a submission id came
+  back, so the upload landed and its verdict was never read. Never retried either, because a
+  re-send could double-submit; the terminal sentence must say so (issue #2205).
 
-Until this change the step printed the first shape's sentence for both: *"the SUBMISSION was
-refused"* plus the three credential causes, for a run whose only problem was the network.
+Until this change the step printed the first shape's sentence for the second: *"the SUBMISSION
+was refused"* plus the three credential causes, for a run whose only problem was the network.
 Measured by driving the parsed step body with an `xcrun` stub that fails the way the release
 actually failed on tag `v0.3.10` (run `38353839071`, where the *sibling* `Staple pkg` step
 lost its connection to `api.apple-cloudkit.com` about six seconds in and exited 68).
 
 These arms pin each direction, because either alone passes trivially: retrying a refusal
 would be pointless traffic, and diagnosing a transport loss as a refusal sends the reader to
-check credentials that were never refused. A fourth arm guards the retry's own hazard — a
-connection lost *after* Apple returned a submission id must not re-send, or the release
-double-submits.
+check credentials that were never refused. Two further arms guard the retry's own hazards and
+outcomes: a connection lost *after* Apple returned a submission id must not re-send, and that
+scenario must end on **its own** sentence rather than the transport one — three of whose
+clauses are false there ("every attempt was retried", "Apple never answered", "nothing was
+uploaded"), which is what issue #2205 measured.
 
 The body is read from the **parsed** step and executed the way the runner runs it, with
 `xcrun` and `sleep` stubbed — the shape `tests/test_release_notarize_reports_its_reason.py`
@@ -273,6 +278,16 @@ def test_a_lost_connection_on_every_attempt_names_the_transport_not_the_credenti
         "the credentials were not judged, and this sends them to check the wrong thing "
         f"(issue #2199).\noutput={result.output!r}"
     )
+    # The number the sentence prints is a reading, not a second copy of the bound: compare it
+    # to the attempts actually observed, so a sentence left behind by a bound change is caught
+    # here rather than in a release log (issue #2205, and `Agent.md`'s rule about derived
+    # numbers).
+    measured = _submits(result)
+    assert f"every one of the {measured} attempts" in result.output, (
+        f"the transport sentence does not print the number of attempts that were measured "
+        f"({measured}) — a count written as a literal beside the loop bound goes stale when "
+        f"the bound moves.\noutput={result.output!r}"
+    )
 
 
 @_posix_shell_only
@@ -306,6 +321,13 @@ def test_a_connection_lost_after_an_upload_id_is_not_re_sent(tmp_path) -> None:
 
     A submission id in the output is what proves the upload landed, so re-sending there
     would submit the pkg twice. The arm pins that the id suppresses the retry.
+
+    It also **reads the sentence**, which is what issue #2205 measured as missing: this
+    scenario reported itself with the transport sentence, and three of that sentence's
+    clauses are false here — "every attempt was retried" against one attempt and no sleep,
+    "Apple never answered" against a returned submission id, "nothing was uploaded" against
+    an accepted upload. The exit code was right; the diagnosis an operator triages on was
+    not, and it contradicted the warning printed directly above it.
     """
     result = _run_step(tmp_path, "lost_after_id")
     assert _submits(result) == 1, (
@@ -315,4 +337,43 @@ def test_a_connection_lost_after_an_upload_id_is_not_re_sent(tmp_path) -> None:
     assert "NOT re-sent" in result.output, (
         "the step suppressed the retry without saying so, so the log cannot explain why the "
         f"failure was not retried.\noutput={result.output!r}"
+    )
+
+    errors = [ln for ln in result.output.splitlines() if "::error::" in ln]
+    assert errors, (
+        "the step failed without an ::error:: line, so the run's summary carries no cause "
+        f"at all.\noutput={result.output!r}"
+    )
+    sentence = errors[-1]
+
+    # The three clauses that are false on this path — the defect itself.
+    for false_claim in (
+        "every one of the",
+        "Apple never answered",
+        "nothing was uploaded",
+        TRANSPORT_CLAIM,
+    ):
+        assert false_claim not in sentence, (
+            f"an accepted upload that lost the wait reported itself with the transport "
+            f"sentence ({false_claim!r} is false here: one submit was taken, no sleep ran, "
+            f"and Apple answered with a submission id).\noutput={result.output!r}"
+        )
+
+    # What the sentence must say instead: what was measured, that it is not re-sent, and
+    # what the reader can do about it.
+    assert "ACCEPTED the upload" in sentence, (
+        "the sentence does not say Apple accepted the upload, so the reader cannot tell this "
+        f"apart from an exchange that never reached Apple.\noutput={result.output!r}"
+    )
+    assert "verdict was NOT read" in sentence, (
+        "the sentence does not say the notarization verdict went unread, which is the whole "
+        f"reason the exit code is 1.\noutput={result.output!r}"
+    )
+    assert "sub-7" in result.output, (
+        "the submission id Apple returned is no longer in the step's output, so the remedy "
+        f"below cannot be carried out.\noutput={result.output!r}"
+    )
+    assert "notarytool log" in sentence, (
+        "the sentence names no way to read the accepted submission's verdict, which is the "
+        f"action the reader is left with.\noutput={result.output!r}"
     )
