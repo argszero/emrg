@@ -39,7 +39,7 @@ from emrg.protocol import TaskRequest
 # same kind of artefact as `emrgd.log` — a file a host pastes into an issue. It is a
 # stdlib-only leaf, so it costs this layer no daemon import (`emrg/server/__init__.py` is a
 # lazy proxy; the client's own sink takes the same import, `emrg/__main__.py:31`).
-from emrg.server.redaction import redact_string
+from emrg.server.redaction import redact_prefix
 
 # The "is this path a regular file" rule is the tool layer's, reached at a path. Imported
 # rather than restated, for the reason `emrg/sessions_index.py` and
@@ -836,12 +836,13 @@ class DaemonConnection:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            # The rule before the window: `text[:120]` alone cannot see a credential the
-            # cut lands inside (every pattern in the rule has a minimum length), so the
-            # surviving prefix would reach the log in the clear. `%.120r` then bounds the
-            # repr; the value handed to it is already masked. When `#2162` lands this
-            # becomes `redact_prefix(text, 120)` — one name for the order.
-            logger.warning("bad JSON frame ignored: %.120r", redact_string(text)[:120])
+            # The rule before the window, and it is one name rather than an order spelled
+            # out at the site: `redact_prefix(text, 120)` is `redact_string(text)[:120]` by
+            # definition, so the rule sees the whole value and the cut only ever lands on
+            # text a real credential never reached. `text[:120]` alone cannot — every
+            # pattern in the rule has a minimum length, so a credential crossing the cut
+            # stops matching and its surviving prefix would reach the log in the clear.
+            logger.warning("bad JSON frame ignored: %.120r", redact_prefix(text, 120))
             return None
 
     async def read_stream(self) -> AsyncIterator[dict]:
