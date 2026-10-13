@@ -1066,6 +1066,23 @@ class DaemonClient {
       this._emit(frame.type, frame);
       return;
     }
+    if (frame.type === "task_queued" || frame.type === "steer_committed") {
+      // The same seam as the turn frames above, for two more types (#2189). The
+      // daemon `_broadcast`s both to every connection subscribed to the session
+      // — `task_queued` when a task arrives for a busy session (`daemon.py:1557`,
+      // carrying `position`), `steer_committed` when a parked message is injected
+      // into the running turn (`daemon.py:3719`, carrying `request_id` and
+      // `timestamp`). The renderer has a handler for each (`daemonBridge.ts`
+      // `case "task_queued"` shows the queued notice; `case "steer_committed"`
+      // drops the injected request from the local resend map) and the TUI handles
+      // both (`app.py:1345` / `:1353`), so this layer was the only client that
+      // dropped them: they matched no branch, fell to the unknown-frame log at
+      // the bottom, and reached no renderer. The catch-all's list of *expected*
+      // drops (`templates_list` / `compact_result` / `projects_list`) never named
+      // them.
+      this._emit(frame.type, frame);
+      return;
+    }
     // 兜底——本函数恰好三个出口，缺一不可：
     //   ① 已决命令响应（`_resolvePending`，按 `type` / `id` 配对）
     //   ② 已知广播（按自己的名字转发，如上面的 turn 帧）

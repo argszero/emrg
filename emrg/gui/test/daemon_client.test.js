@@ -813,6 +813,32 @@ test("rant 2026-10-09T09:43:39：sandbox_roots 帧转发（GUI 的额外可写�
   assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
 });
 
+test("issue #2189：task_queued / steer_committed 帧转发（GUI 的排队提示与待重发表释放）", async () => {
+  // 与 turn_start / sandbox_roots 同一个形状的缝：daemon 广播、渲染层有 case、
+  // 中间层把它丢进兜底。渲染层 daemonBridge.ts 的 `case "task_queued"`（排队提示）
+  // 与 `case "steer_committed"`（从待重发表移除已注入的请求）都靠这一层转发才拿得到帧
+  // （TUI 同款在 app.py:1345/:1353），而兜底只记日志、不发事件 —— 排队提示永不出现，
+  // 待重发表永不释放。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ type: "task_queued", request_id: "r1", session_id: "s1", position: 2 });
+  send({ type: "steer_committed", request_id: "r1", session_id: "s1", timestamp: "2026-10-13T00:40:00" });
+
+  // ① 按原名转发 —— 渲染层 switch 的就是这两个名字
+  assert.deepStrictEqual(seen.map(([t]) => t), ["task_queued", "steer_committed"]);
+  // ② 负载原样带过去：排队位置与请求 id 由渲染层读，中间层不二次解释
+  assert.strictEqual(seen[0][1].position, 2);
+  assert.strictEqual(seen[0][1].request_id, "r1");
+  assert.strictEqual(seen[1][1].request_id, "r1");
+  // ③ 不再落入兜底（「只记日志、不发事件」正是本 bug 的形状）
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
 test("sendSetSandboxRoots：帧形状与 daemon 的 op 词表一致（缺 path 也发空串）", async () => {
   const client = new DaemonClient();
   await connectClient(client);
