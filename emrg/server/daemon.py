@@ -134,8 +134,11 @@ def resolve_client_tier(session, req_sandbox: str | None = None) -> str:
 # 随规则一起删掉了 dict/list 递归形式与按键名脱敏：它们是为「tool call 参数进 emrgd.log」
 # 写的，而工具调用日志只记录工具的**名字与 intent**、从不记录参数，全树再无别的字典经过
 # 脱敏（2026-10-12 实测：无调用者，只有 pinned 它的 5 个测试）。本模块一律用
-# `redact_string` 遮蔽后再输出。
-from emrg.server.redaction import redact_string
+# `redact_string` 遮蔽后再输出；要**截断**的行（`task received` / `rant recorded` /
+# memory reflection 的 tool result）用 `redact_prefix` —— 先过规则再取窗口，因为
+# `redact_string(x[:N])` 看不见跨过截断点的凭据（2026-10-13 实测：60 字符窗口里落在
+# 第 48 位的密钥留下 12 个明文字符）。
+from emrg.server.redaction import redact_prefix, redact_string
 
 from emrg.tools import ToolRegistry
 from emrg.tools.base import non_regular_kind, special_file_refusal
@@ -1584,7 +1587,7 @@ class EmrgServer:
                     try:
                         logger.info(
                             'task received: session=%s prompt="%s" → routing via LLM',
-                            session_id, redact_string(req.prompt[:60]),
+                            session_id, redact_prefix(req.prompt, 60),
                         )
                         _cancel_event = asyncio.Event()
                         self._session_busy[session_id] = True  # lock (released in *locked wrapper)
@@ -3055,7 +3058,7 @@ class EmrgServer:
             count = append_rant(self._rants_log, rant_message, project)
 
             logger.info("rant recorded (%d total)%s: %s",
-                count, f" project={project}" if project else "", redact_string(rant_message[:100]))
+                count, f" project={project}" if project else "", redact_prefix(rant_message, 100))
             await self._send(ws, {"ok": True, "count": count})
 
         elif msg_type == "list_rants":
@@ -7251,7 +7254,7 @@ class EmrgServer:
                         logger.debug(
                             "memory reflection: id=%s round=%d tool %s — %s → %s%s",
                             session.session_id, _round + 1, tc_name, redact_string(intent),
-                            redact_string(result_text[:100]),
+                            redact_prefix(result_text, 100),
                             "…" if len(result_text) > 100 else "",
                         )
 

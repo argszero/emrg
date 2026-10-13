@@ -44,6 +44,14 @@ from emrg.sandbox.policy import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
+# The credential rule, imported rather than restated: this module logs text it did not
+# author — an error string off the daemon's wire, and an abort reason built from an
+# exception or a failed request — and the daemon's log is the artefact the rule exists
+# for (`emrg/server/redaction.py` calls it "a file hosts paste into issues"). `redact_prefix`
+# is the *windowed* form, so the rule runs over the whole value and only then is it cut:
+# every pattern has a minimum length, so a value windowed first cannot match a credential
+# that crosses the cut.
+from emrg.server.redaction import redact_prefix, redact_string
 from emrg.server.git_utils import (
     _detect_git_remote,
     ensure_local_exclude,
@@ -2539,9 +2547,11 @@ class TaskHandler:
                 if frame.get("type") != "vibe_check_result":
                     continue
                 if not frame.get("ok"):
+                    # The rule before the window: the error text is the daemon's, and a
+                    # value windowed first cannot match a credential that crosses the cut.
                     self._logger.warning(
                         "TaskHandler[%s]: vibe check error: %s",
-                        self.name, (frame.get("error") or "")[:120],
+                        self.name, redact_prefix(frame.get("error") or "", 120),
                     )
                     return None
                 result = frame.get("result") or {}
@@ -2801,9 +2811,13 @@ class TaskHandler:
                 if isinstance(resp_error, str):
                     error = str(resp_error)
                     end_reason = "server-error"
+                    # The rule, and no window here: this line has always printed the whole
+                    # error, so the only thing added is the credential rule. The same value
+                    # is windowed at the abort line below, which is where the rule's
+                    # windowed form is used.
                     self._logger.warning(
                         "TaskHandler[%s] server error: %s",
-                        self.name, error,
+                        self.name, redact_string(error),
                     )
                     break
 
@@ -2887,7 +2901,7 @@ class TaskHandler:
         if error:
             self._logger.warning(
                 "TaskHandler[%s]: cycle aborted (%s) — not counted as evolution",
-                self.name, error[:200],
+                self.name, redact_prefix(error, 200),
             )
             return end_reason
 
