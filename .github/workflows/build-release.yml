@@ -468,15 +468,70 @@ jobs:
             echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg, and a release missing its macOS product must not be reported as success"
             exit 1
           fi
+          # A non-zero exit from the submit has two shapes and they have different remedies,
+          # so the step must classify before it speaks. (1) Apple ANSWERED and refused -
+          # a credential verdict, never retried. (2) The exchange never completed - a lost
+          # connection or a timeout, where Apple never answered and no credential was judged;
+          # that one is transient and is retried. Measured on tag v0.3.10, run 38353839071:
+          # the sibling `Staple pkg` step lost its connection ~6 s into a ticket call to
+          # api.apple-cloudkit.com and exited 68. Before this, the sentence below called
+          # shape (2) "the SUBMISSION was refused" and sent the reader to check credentials
+          # that were never refused.
+          #
+          # The two predicates are pure bash `case` matches rather than `printf | grep`:
+          # under the job's `-o pipefail`, `grep -q` exiting on its first match can hand the
+          # writer a SIGPIPE and fail the pipeline the caller is branching on.
+          notary_lost_connection() {
+            case "$1" in
+              *NSURLErrorDomain*|*"network connection was lost"*|*"Code=-1005"*|*NSURLErrorTimedOut*|*"Code=-1001"*|*"Could not connect to the server"*)
+                return 0 ;;
+            esac
+            return 1
+          }
+          # Apple returned a submission id, so it accepted the upload - a re-send could
+          # double-submit, which the retry must never do.
+          notary_accepted_an_upload() {
+            case "$1" in
+              *'"id"'*) return 0 ;;
+            esac
+            return 1
+          }
           NOTARY_RC=0
-          NOTARY_OUT="$(xcrun notarytool submit "$PKG" \
-            --apple-id "$APPLE_ID" \
-            --password "$MACOS_NOTARY_APP_PASSWORD" \
-            --team-id "$MACOS_NOTARY_TEAM_ID" \
-            --wait --timeout 20m --output-format json 2>&1)" || NOTARY_RC=$?
-          echo "$NOTARY_OUT"
+          NOTARY_OUT=""
+          notary_submit() {
+            local attempt
+            for attempt in 1 2 3; do
+              NOTARY_RC=0
+              NOTARY_OUT="$(xcrun notarytool submit "$PKG" \
+                --apple-id "$APPLE_ID" \
+                --password "$MACOS_NOTARY_APP_PASSWORD" \
+                --team-id "$MACOS_NOTARY_TEAM_ID" \
+                --wait --timeout 20m --output-format json 2>&1)" || NOTARY_RC=$?
+              echo "$NOTARY_OUT"
+              if [ "$NOTARY_RC" -eq 0 ]; then
+                return 0
+              fi
+              if ! notary_lost_connection "$NOTARY_OUT"; then
+                return 0
+              fi
+              if notary_accepted_an_upload "$NOTARY_OUT"; then
+                echo "::warning::the connection was lost after Apple returned a submission id - a credential verdict may still be readable from that submission, so it is NOT re-sent"
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "::warning::the exchange with Apple's notary service did not complete (attempt ${attempt}/3) - retrying in $((attempt * 20))s"
+                sleep $((attempt * 20))
+              fi
+            done
+            return 0
+          }
+          notary_submit
           if [ "$NOTARY_RC" -ne 0 ]; then
-            echo "::error::xcrun notarytool submit exited $NOTARY_RC - the SUBMISSION was refused, so this is not a notarization verdict. Apple's own reply is the output above. Usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement that needs accepting. A verdict failure looks different: it takes minutes, exits 0, and reports status=Invalid. Reproduce it at home before re-tagging, with the same three variables this step sends: APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them, and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
+            if notary_lost_connection "$NOTARY_OUT"; then
+              echo "::error::xcrun notarytool submit exited $NOTARY_RC and the exchange with Apple never completed - the connection was lost, and every attempt was retried (3). This is a TRANSPORT failure, not a refusal and not a notarization verdict: Apple never answered, so no credential was judged and nothing was uploaded. Re-run the release run's failed jobs (gh run rerun <the run id> --failed); the tag need not be re-pushed. If you want the credentials ruled out anyway, ask Apple directly with APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
+            else
+              echo "::error::xcrun notarytool submit exited $NOTARY_RC - the SUBMISSION was refused, so this is not a notarization verdict. Apple's own reply is the output above. Usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement that needs accepting. A verdict failure looks different: it takes minutes, exits 0, and reports status=Invalid. Reproduce it at home before re-tagging, with the same three variables this step sends: APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them, and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
+            fi
           fi
           # 解析提交 ID 与状态（--output-format json 输出 {"id","message","status"}）
           SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
