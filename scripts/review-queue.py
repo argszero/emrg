@@ -162,7 +162,7 @@ import re
 import subprocess
 import sys
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -510,12 +510,15 @@ class Window:
     window shrunk to this cycle alone can say so rather than reading as the full one.
 
     `inferred` says the boundary was **read off the cycle records** rather than named
-    by the caller, and that is a different kind of answer: records are the only
-    evidence consulted, so a cycle that ran without writing one has no record to be
-    found and the window lands on the record *before* it instead - wider than the
+    by the caller, *and* that no second corpus was able to confirm it, and that is a
+    different kind of answer: a cycle that ran without writing a record has no record to
+    be found, so the window lands on the record *before* it instead - wider than the
     clause says, silently, because a missing record and a cycle that never ran look
-    identical from here (issue #2214). `previous` keeps the id the boundary was read
-    from, so the reading can name it.
+    identical from there (issue #2214). `dispatch_ids`/`with_dispatches` clear the flag
+    where the session histories reach the boundary (issue #2216), so what it marks is
+    the state the records alone leave: the gap is real or unverifiable, never confirmed
+    otherwise. `previous` keeps the id the boundary was read from, so the reading can
+    name it.
     """
 
     start: datetime | None = None
@@ -617,9 +620,12 @@ def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Wi
     :param window: the window the records produced.
     :param cycle: this cycle's id.
     :param dispatched: every cycle id the session histories recorded as dispatched.
-    :returns: the window to use. Unchanged unless the newest dispatched cycle before this
-        one started later than the record the window was resolved from — in which case
-        the source names that cycle and says why the records do not hold it.
+    :returns: the window to use. Moved when the newest dispatched cycle before this one
+        started later than the record the window was resolved from — in which case the
+        source names that cycle and says why the records do not hold it — and with its
+        `inferred` flag **cleared** either way when the corpus reaches the boundary: an
+        id equal to the records' own answer confirms it, so the disclosure that answer
+        owes its reader is not owed (see the two cases below).
     """
     own = cycle_start(cycle)
     if own is None or not dispatched:
@@ -628,7 +634,22 @@ def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Wi
     if not earlier:
         return window
     boundary = cycle_start(earlier[-1])
-    if boundary is None or (window.start is not None and boundary <= window.start):
+    if boundary is None:
+        return window
+    if window.start is not None and boundary <= window.start:
+        # The corpus names no *later* cycle than the records did, and the two cases in
+        # that are different answers. An id **older** than the boundary does not reach
+        # the gap above it — a stale quotation, a re-delivered prompt of an older cycle
+        # — and leaves the window, and its caveat, exactly as the records gave them.
+        # An id *equal* to the boundary is the **same cycle the records answered with**,
+        # and that confirms it: the gap this file's note is about is a cycle the daemon
+        # dispatched, so a corpus that was read and names no later one has nothing to
+        # disclose. Without this second case the note would print on every run of a
+        # checkout that has a session corpus — the ordinary shape here, measured
+        # 2026-10-13 while resolving issue #2216: 1798 dispatched ids, the newest the
+        # record's own answer — which is how a caveat that matters gets skimmed.
+        if boundary == window.start:
+            return replace(window, inferred=False)
         return window
     from_records = (
         f"the newest record is {window.start.isoformat(timespec='seconds')}"
@@ -1418,8 +1439,10 @@ def window_note(window: Window | None) -> str:
       found there, so the boundary lands on the record before it and the window reaches
       further back than the clause does. The session histories' dispatch lines close that
       gap where they are present (`dispatch_ids`/`with_dispatches`, which run first and
-      leave `inferred` false when they move the window), so this state is reached where
-      that corpus is absent — a checkout shaped like CI's — or names no later cycle. It
+      clear `inferred` both when they move the window and when they confirm it), so this
+      state is reached where that corpus is absent or empty — a checkout shaped like
+      CI's — or where the newest id it names is *older* than the record boundary and so
+      does not reach the gap. It
       is the third state because it is the one silence read as a
       pass for longest — the row says `abstain` and nothing else, and `abstain` here is
       indistinguishable from `abstain` for a boundary that is right. Naming the instant
@@ -1473,8 +1496,8 @@ def window_note(window: Window | None) -> str:
     # for a cycle that ended in error - but the session histories' dispatch lines,
     # which `dispatch_ids`/`with_dispatches` read: a dispatch names its cycle's own id,
     # so a cycle the records miss is found there and this note is then not reached.
-    # So a reader still sees it only where that corpus is absent (a checkout shaped
-    # like CI's) or names no later cycle - never as "the gap cannot be closed".
+    # So a reader still sees it only where that corpus is absent, empty, or names no
+    # cycle the records do not — never as "the gap cannot be closed".
     return (
         f"note: {window.inferred_clause()}. "
         "Pass --prev-cycle <id> to name the boundary yourself."

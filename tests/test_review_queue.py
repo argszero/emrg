@@ -1613,6 +1613,71 @@ def test_a_dispatch_older_than_the_record_does_not_move_the_window(mod):
         timespec="seconds")
 
 
+def test_a_corpus_that_reaches_the_boundary_confirms_it_and_clears_the_caveat(mod):
+    """Issue #2216, composed with #2214's disclosure: two of the three cases agree on the
+    boundary and differ on what may be claimed about it.
+
+    An id **equal** to the records' own answer is the same cycle, so the corpus has
+    confirmed that nothing was dispatched between it and now — the missing cycle #2214
+    is about is one this corpus would have named — and the caveat a records-only
+    lookup owes its reader is not owed. An id **older** than the boundary reaches no gap
+    above it (a stale quotation, a re-delivered prompt) and must leave the caveat
+    standing. An empty corpus is the absent one: nothing was read to confirm with.
+    """
+    window = mod.abstain_window(CYCLE, PREV_CYCLE, "/some/records", inferred=True)
+    assert window.inferred is True
+
+    confirmed = mod.with_dispatches(window, CYCLE, [PREV_CYCLE])
+    assert confirmed.window_start_text() == window.window_start_text()
+    assert confirmed.inferred is False, (
+        "the corpus named the very cycle the records did - that is a confirmation, not a "
+        "silence, so the note has nothing left to disclose"
+    )
+
+    older = "cyc20260917-210000"
+    assert mod.cycle_start(older) < window.start
+    assert mod.with_dispatches(window, CYCLE, [older]).inferred is True, (
+        "an id older than the boundary does not reach the gap above it"
+    )
+    assert mod.with_dispatches(window, CYCLE, []).inferred is True
+    assert mod.with_dispatches(window, CYCLE, [CYCLE]).inferred is True, (
+        "a cycle is not its own predecessor: the id must be strictly earlier"
+    )
+    # The direction that moves the window already carried the flag down with it.
+    moved = mod.with_dispatches(window, CYCLE, [PREV_CYCLE, GAP_CYCLE])
+    assert moved.window_start_text() != window.window_start_text()
+    assert moved.inferred is False
+
+
+def test_a_dispatch_naming_the_records_own_cycle_suppresses_the_note(
+        mod, monkeypatch, capsys, tmp_path):
+    """The same fact at the report, which is where the reader meets it.
+
+    Measured while resolving #2215/#2217 on 2026-10-13: the live corpus holds 1798
+    dispatched ids and the newest one before the measuring cycle was the record's own
+    answer, so before this every run of a checkout with sessions printed the note. A
+    caveat on every run is how the caveat that matters gets skimmed.
+
+    The control is the test below it (`..._says_so_...`), which runs the same report
+    with no sessions at all: there the id is absent, nothing confirms, and the note must
+    still print.
+    """
+    (tmp_path / "records").mkdir()
+    (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    _session_history(tmp_path, [_dispatch_line(PREV_CYCLE)])
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 23, 0))
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), [
+        "1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "records"),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "issue #2214" not in out, (
+        "the corpus named the record's own cycle, so the boundary was confirmed and there "
+        f"is no gap to disclose: {out[:400]}"
+    )
+    assert "note: the own-window" not in out, out[:400]
+
+
 def test_the_dispatch_reader_takes_the_id_the_prompt_carries(mod, tmp_path):
     """How the id is read, and what is refused.
 
