@@ -4,6 +4,7 @@ Tests use asyncio.run() directly since pytest-asyncio is not installed.
 """
 
 import asyncio
+import logging
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -446,3 +447,47 @@ class TestDisconnectConsolidationDisabled:
             "if it is back, the disconnect entry was re-introduced."
         )
 
+
+
+class TestReflectionReplyRedaction:
+    """The reflection reply is masked **before** its window (#2168).
+
+    `_reflect` logs the model's own reply (`content[:150]`) into `emrgd.log` — the same text
+    `emrg/server/llm.py` redacts at every site that logs it. The window alone cannot see a
+    credential the cut lands inside, because every pattern in the rule has a minimum length:
+    a key starting at offset 145 of a 150-character window keeps five characters, `sk-A1`,
+    and no pattern matches that. The arm below plants the key at exactly that offset.
+    """
+
+    def test_the_reflection_reply_is_masked_before_it_is_windowed(self, caplog):
+        KEY = "sk-A1b2C3d4E5F6G7H8J9K0L1M2N3P4Q5R6"
+        reply = "z" * 145 + KEY + " and the rest of it"
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                session = Session.create_with_id("s_test_reflect_redact", cwd)
+                server = _make_server({"content": reply})
+                with caplog.at_level(logging.DEBUG, logger="emrg.server.daemon"):
+                    server._maybe_reflect_memory(
+                        session,
+                        "Please set up the credentials for the deployment pipeline",
+                        "I have configured the deployment credentials for this project",
+                    )
+                    await asyncio.sleep(0.2)
+
+        asyncio.run(_test())
+
+        results = [
+            r.getMessage() for r in caplog.records
+            if "memory reflection" in r.getMessage() and "result=" in r.getMessage()
+        ]
+        assert results, "no reflection reply record was written — the arm would pass vacuously"
+        message = results[0]
+        assert "sk-" not in message, (
+            f"the cut landed inside the key and the rule never ran: {message!r}"
+        )
+        assert "***" in message, (
+            f"nothing was masked, so the reply's text is the text that was logged: {message!r}"
+        )
+        assert "zzzz" in message, f"the reply's own text is gone: {message!r}"

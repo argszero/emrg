@@ -1103,6 +1103,37 @@ class DaemonClient {
       this._emit(frame.type, frame);
       return;
     }
+    if (frame.type === "task_queued" || frame.type === "steer_committed") {
+      // The same seam as the turn frames above, for two more types (#2189). The
+      // daemon `_broadcast`s both to every connection subscribed to the session
+      // — `task_queued` when a task arrives for a busy session (`daemon.py:1557`,
+      // carrying `position`), `steer_committed` when a parked message is injected
+      // into the running turn (`daemon.py:3719`, carrying `request_id` and
+      // `timestamp`). The renderer has a handler for each (`daemonBridge.ts`
+      // `case "task_queued"` shows the queued notice; `case "steer_committed"`
+      // drops the injected request from the local resend map) and the TUI handles
+      // both (`app.py:1345` / `:1353`), so this layer was the only client that
+      // dropped them: they matched no branch, fell to the unknown-frame log at
+      // the bottom, and reached no renderer. The catch-all's list of *expected*
+      // drops (`templates_list` / `compact_result` / `projects_list`) never named
+      // them.
+      this._emit(frame.type, frame);
+      return;
+    }
+    if (frame.type === "queued_requeue" || frame.type === "queued_cancelled") {
+      // 同一条缝上的第三对（#2189 同一类）。daemon 的队列排空契约把这两个帧
+      // `_broadcast` 给订阅该会话的每个连接：干净收尾时 `queued_requeue`
+      // （`daemon.py:3873`，带 `request_ids`，即「该重发的那些请求」），
+      // 取消/出错/断连时 `queued_cancelled`（`daemon.py:3879`；clear_session 与
+      // delete_session 也各广播一次，`daemon.py:3270` / `:3305`）。
+      // 渲染层两个 `case` 都在（`daemonBridge.ts:696` / `:701`）：前者按
+      // `request_ids` 重发本地待发表，后者清空它并提示「排队消息已取消」——
+      // 中间层不转发，GUI 排队的消息就永远不重发、也不作废（TUI 侧同款在
+      // `app.py:1369` / `:1404`）。此前它们不匹配任何分支，落进下方兜底：
+      // 只记日志、不发事件，从渲染层看就是「什么都没发生」。
+      this._emit(frame.type, frame);
+      return;
+    }
     // 兜底——本函数恰好三个出口，缺一不可：
     //   ① 已决命令响应（`_resolvePending`，按 `type` / `id` 配对）
     //   ② 已知广播（按自己的名字转发，如上面的 turn 帧）

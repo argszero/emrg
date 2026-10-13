@@ -5034,12 +5034,12 @@ def test_a_directory_registry_is_refused_by_its_kind_in_remove_project(
 # ── the daemon's own `~/.emrg/logs` files ────────────────────────────────────────────
 #
 # The registry above, one directory further in. Every file the daemon opens under
-# `~/.emrg/logs` is reached through a name filter (`glob("evolution-*.json")`), a plain
-# `.exists()`, or a module constant — and `glob` and `exists()` answer about a FIFO
-# exactly as they answer about a regular file. Two of these sites are on the **round**
-# path: the planted-fire markers are written every round, and the usage-anchor append runs
-# with each anchor refresh, so a pipe at one of those names stops the daemon on its first
-# round rather than on a request nobody makes.
+# `~/.emrg/logs` is reached through a name filter (`glob("*.jsonl")` over the task-run
+# store), a plain `.exists()`, or a module constant — and `glob` and `exists()` answer
+# about a FIFO exactly as they answer about a regular file. Two of these sites are on the
+# **round** path: the planted-fire markers are written every round, and the usage-anchor
+# append runs with each anchor refresh, so a pipe at one of those names stops the daemon on
+# its first round rather than on a request nobody makes.
 #
 # Measured 2026-10-11 (`cyc20261011-173122`) on master `60541e39`: each call below **did
 # not return** under a FIFO, while its pipe-free control ran. The controls are not
@@ -5052,45 +5052,45 @@ def test_a_directory_registry_is_refused_by_its_kind_in_remove_project(
 
 
 @_needs_mkfifo
-def test_a_named_pipe_evolution_log_does_not_stop_the_count(tmp_path, monkeypatch):
-    """`_evolution_count` walks `evolution-*.json`: the walk counts names, not kinds."""
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    os.mkfifo(logs / "evolution-20260101-000000.json")
+def test_a_named_pipe_task_run_does_not_stop_the_count(tmp_path, monkeypatch):
+    """`_evolution_count` walks `task-runs/*.jsonl`: the walk counts names, not kinds."""
+    runs = tmp_path / "logs" / "task-runs"
+    runs.mkdir(parents=True)
+    os.mkfifo(runs / "probe.jsonl")
     monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
     server = _make_server()
 
     assert _within(5.0, server._evolution_count) == 0
 
 
-def test_a_directory_evolution_log_is_skipped_by_kind_in_the_count(
+def test_a_directory_task_run_is_skipped_by_kind_in_the_count(
         tmp_path, monkeypatch, caplog):
     """The pipe-free half: the skip is observable only through the line naming the kind.
 
     A directory is not a record either, and an unguarded read of one is swallowed by the
-    same `except (json.JSONDecodeError, OSError)` — so the count alone cannot tell the two
-    trees apart, and the log line is what does.
+    same handler — so the count alone cannot tell the two trees apart, and the log line is
+    what does.
     """
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    (logs / "evolution-20260101-000000.json").mkdir()
+    runs = tmp_path / "logs" / "task-runs"
+    runs.mkdir(parents=True)
+    (runs / "probe.jsonl").mkdir()
     monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
     server = _make_server()
 
     with caplog.at_level(logging.DEBUG):
         assert server._evolution_count() == 0
 
-    assert "not opened" in caplog.text, (
-        "the guard names the kind before skipping — an unguarded read reports "
+    assert "skipped" in caplog.text and "a directory" in caplog.text, (
+        "the reader names the kind before skipping — an unguarded read reports "
         f"nothing at all here: {caplog.text}")
 
 
 @_needs_mkfifo
-def test_a_named_pipe_evolution_log_does_not_stop_the_summary(tmp_path, monkeypatch):
+def test_a_named_pipe_task_run_does_not_stop_the_summary(tmp_path, monkeypatch):
     """The same files, read by the `evolution_summary` frame: answered, not blocked."""
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    os.mkfifo(logs / "evolution-20260101-000000.json")
+    runs = tmp_path / "logs" / "task-runs"
+    runs.mkdir(parents=True)
+    os.mkfifo(runs / "probe.jsonl")
     monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
     server = _make_server()
 
@@ -5103,12 +5103,12 @@ def test_a_named_pipe_evolution_log_does_not_stop_the_summary(tmp_path, monkeypa
     assert frames[0]["recent"] == [] and frames[0]["count"] == 0, frames
 
 
-def test_a_directory_evolution_log_is_skipped_by_kind_in_the_summary(
+def test_a_directory_task_run_is_skipped_by_kind_in_the_summary(
         tmp_path, monkeypatch, caplog):
     """The pipe-free half, read through the log."""
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    (logs / "evolution-20260101-000000.json").mkdir()
+    runs = tmp_path / "logs" / "task-runs"
+    runs.mkdir(parents=True)
+    (runs / "probe.jsonl").mkdir()
     monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
     server = _make_server()
 
@@ -5116,7 +5116,85 @@ def test_a_directory_evolution_log_is_skipped_by_kind_in_the_summary(
         frames = _drive(server, {"type": "evolution_summary", "limit": 5})
 
     assert frames[0]["recent"] == [], frames
-    assert "not opened" in caplog.text, caplog.text
+    assert "skipped" in caplog.text and "a directory" in caplog.text, caplog.text
+
+
+def _write_task_run(runs, name: str, *records: dict) -> None:
+    """One task-run file, one JSON object per line — the shape `_append_task_run` writes."""
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / f"{name}.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records),
+        encoding="utf-8",
+    )
+
+
+def _write_dead_evolution_log(logs, name: str, timestamp: str) -> None:
+    """A file of the store whose writer was removed — the directory this used to read."""
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / name).write_text(
+        json.dumps({"timestamp": timestamp, "impact": ["x"], "operations": ["y"]}),
+        encoding="utf-8",
+    )
+
+
+def test_the_count_reads_the_store_the_writers_fill(tmp_path, monkeypatch):
+    """Both directions, because "the dead directory is ignored" alone is also what a
+    reader that finds nothing at all answers.
+
+    The store the cycle appends to is `<logs>/task-runs/<task>.jsonl`; the directory the
+    readings used to walk is `<logs>/evolution-*.json`, whose writer went with the store
+    it belonged to (`e401246e`). Measured on this host 2026-10-13
+    (`cyc20261013-080459`): 27 files there, newest `evolution-2026-08-23T21-33-49`, against
+    699 records in the store — so a reading that walks the dead directory cannot show a
+    cycle written since August.
+    """
+    logs = tmp_path / "logs"
+    runs = logs / "task-runs"
+    for i in range(3):
+        _write_dead_evolution_log(logs, f"evolution-2026010{i}-000000.json",
+                                  f"2026-01-0{i + 1}T00:00:00")
+    _write_task_run(runs, "probe", {"timestamp": "2026-10-13T08:00:00", "work": "w"})
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+
+    # 1 against 3: the store is the smaller tree here, so a reading that kept the larger
+    # of the two numbers — or that counted the directory by its name filter — answers 3.
+    assert server._evolution_count() == 1
+
+    _write_task_run(runs, "probe",
+                    {"timestamp": "2026-10-13T08:00:00", "work": "w"},
+                    {"timestamp": "2026-10-13T09:00:00", "work": "w2"})
+    assert server._evolution_count() == 2
+
+
+def test_the_recent_list_shows_the_newest_store_records(tmp_path, monkeypatch):
+    """The frame's `recent` is the store's own newest records, newest first.
+
+    Its entries carry the fields the live store holds (`work`/`tool_count`/`task`), not
+    the dead directory's `impact`/`operations`, which no live writer produces.
+    """
+    logs = tmp_path / "logs"
+    runs = logs / "task-runs"
+    _write_dead_evolution_log(logs, "evolution-20260823-000000.json",
+                              "2026-08-23T21:33:49")
+    _write_task_run(
+        runs, "probe",
+        {"timestamp": "2026-10-13T07:00:00", "work": "older", "tool_count": 3},
+        {"timestamp": "2026-10-13T09:00:00", "work": "newer", "tool_count": 7,
+         "recommend_slowdown": True},
+    )
+    _write_task_run(runs, "other", {"timestamp": "2026-10-13T08:00:00", "work": "middle"})
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+
+    frames = _drive(server, {"type": "evolution_summary", "limit": 5})
+    recent = frames[0]["recent"]
+
+    assert [r["work"] for r in recent] == ["newer", "middle", "older"], recent
+    assert [r["task"] for r in recent] == ["probe", "other", "probe"], recent
+    assert recent[0]["timestamp"] == "2026-10-13T09:00:00" and recent[0]["tool_count"] == 7
+    assert recent[0]["recommend_slowdown"] is True
+    assert all("impact" not in r for r in recent), recent
 
 
 @_needs_mkfifo
