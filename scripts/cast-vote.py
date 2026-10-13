@@ -567,14 +567,14 @@ def own_head_window(
             "pushes under (`gh api user` and `git remote -v`), so the head is another "
             "instance's work and the abstention clause is not asked of it"
         )
-    if prev_cycle:
-        previous, where = prev_cycle, "named by --prev-cycle"
-    else:
-        previous, where = queue.previous_cycle(
-            cycle, queue.resolve_cycle_logs(cycles_log)
-        )
-    window = queue.abstain_window(cycle, previous, where,
-                                  inferred=not prev_cycle)
+    # One producer for the window, shared with the queue that prints the verdict and the
+    # counter that voids a posted vote (`review-queue.own_window`). Resolved here from
+    # the records alone it was too early for 20 of the corpus's 350 cycle records
+    # (measured 2026-10-14), so a head pushed in such a gap was refused a vote it was
+    # entitled to post - a vote lost to an arithmetic difference between carriers rather
+    # than to the clause (issue #2218). `prev_cycle` is the caller's own answer and is
+    # not second-guessed.
+    window = queue.own_window(cycle, prev_cycle, cycles_log)
 
     note = ""
     if window.unresolved:

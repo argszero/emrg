@@ -391,6 +391,31 @@ def dispatch_ids(dirs: Sequence[Path] | None = None) -> tuple[list[str], list[st
     return sorted(found), unreadable
 
 
+#: The dispatch corpus, read at most once per process **per corpus**. A history is the
+#: largest file this tool reads (11 MB on the host that measured it) and the answer is a
+#: pure function of what is on disk, so a run that asks for the window once per vote -
+#: `check_pr` asks per voting cycle and `review-queue.py` asks once per PR - would pay the
+#: scan every time: 0.58 s, measured 2026-10-14 over 1802 ids. The key is the **resolved**
+#: dirs rather than the caller's argument, so two spellings of one corpus share an entry.
+#: A caller that writes to a corpus and re-reads it inside one process must clear this
+#: first; nothing in this tool does, and every test names a corpus of its own.
+_DISPATCHED_IDS: dict[tuple[str, ...], list[str]] = {}
+
+
+def dispatched_ids(dirs: Sequence[Path] | None = None) -> list[str]:
+    """`dispatch_ids`'s ids for one corpus, read once per process (see `_DISPATCHED_IDS`).
+
+    The unreadable half is deliberately not cached and not returned: what a caller acts
+    on is the ids, and a corpus that could not be read answers with none of them - the
+    same window the records alone give, which the caller then discloses as `inferred`.
+    """
+    resolved = resolve_session_dirs() if dirs is None else tuple(dirs)
+    key = tuple(str(directory) for directory in resolved)
+    if key not in _DISPATCHED_IDS:
+        _DISPATCHED_IDS[key] = dispatch_ids(resolved)[0]
+    return _DISPATCHED_IDS[key]
+
+
 def _dispatch_lines(history: Path, unreadable: list[str]) -> Iterator[str]:
     """The lines of one history that hold a dispatch marker.
 
@@ -660,6 +685,56 @@ def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Wi
         start=boundary,
         source=f"previous cycle {earlier[-1]} (dispatched, no cycle record; {from_records})",
         unresolved="",
+    )
+
+
+def own_window(
+    cycle: str,
+    prev_cycle: str | None = None,
+    cycles_log: str | None = None,
+    sessions_dir: str | None = None,
+) -> Window:
+    """The own-window, resolved from **both** corpora — the single producer for a rule
+    three tools act on.
+
+    `previous_cycle` answers from the records and `with_dispatches` moves that boundary
+    up past a cycle the daemon dispatched and that reached no record (issue #2216),
+    while `inferred` carries the disclosure a records-only resolution owes its reader
+    (issue #2214). The three compose **here and nowhere else**, because a window is a
+    rule and not an implementation detail: `review-queue.py` prints the verdict from it,
+    `cast-vote.py` refuses to *post* on it, and `check-vote-count.py` voids a posted
+    vote on it. Resolved from the records alone in one carrier and from both in another,
+    the same head reads `vote` in the queue and is refused at the poster — a vote lost
+    to an arithmetic difference between two carriers rather than to the clause (issue
+    #2218; measured 2026-10-14: the records-only boundary is too early for **20** of the
+    corpus's **350** cycle records, so a head pushed in such a gap is abstained *later*
+    than the clause asks, or refused a vote it was entitled to post).
+
+    `prev_cycle` is the caller's own answer (`--prev-cycle`) and the dispatches are not
+    consulted for it: a caller that named its boundary asked a different question, and
+    the note about a cycle the records cannot see is not owed to one that never asked
+    the records. It is also not *second-guessed*, which is the reading `--prev-cycle`
+    has always had.
+
+    :param cycles_log: the cycle-record corpus, `os.pathsep`-joined for several, or
+        `None` for the default roots.
+    :param sessions_dir: the dispatch corpus, or `None` for `$EMRG_SESSIONS_DIR`, else
+        the `sessions` directory beside each record root — so naming a corpus of one's
+        own points both at *it*, and the two cannot drift apart.
+    :returns: the window to use. `inferred` is cleared when the dispatch corpus reaches
+        the boundary the records gave, since an id equal to that boundary confirms it;
+        it also stays clear when `prev_cycle` named the boundary.
+    """
+    roots = resolve_cycle_logs(cycles_log)
+    if prev_cycle:
+        # The caller's own answer, taken as named: a caller that named its boundary asked
+        # a different question from one that asked the records, and the dispatches are
+        # not consulted for it.
+        return abstain_window(cycle, prev_cycle, "named by --prev-cycle", inferred=False)
+    previous, where = previous_cycle(cycle, roots)
+    window = abstain_window(cycle, previous, where, inferred=True)
+    return with_dispatches(
+        window, cycle, dispatched_ids(resolve_session_dirs(sessions_dir, roots))
     )
 
 
@@ -1790,28 +1865,15 @@ def main(argv: list[str] | None = None) -> int:
 
     window: Window | None = None
     if args.cycle:
-        if args.prev_cycle:
-            previous, where = args.prev_cycle, "named by --prev-cycle"
-        else:
-            previous, where = previous_cycle(
-                args.cycle, resolve_cycle_logs(args.cycles_log)
-            )
-        # Both halves of the own-window's answer, in the order they compose: the records
-        # resolve the boundary and say whether it was inferred or named (issue #2214),
-        # and the dispatches then move it up past a cycle that ran without writing a
-        # record (issue #2216). Neither is a substitute for the other - `inferred=` moves
-        # the reading and not the extent, `with_dispatches` moves the extent and not the
-        # reading - so the resolved tree carries both, and taking either side alone would
-        # drop a fix that is on master.
-        window = abstain_window(args.cycle, previous, where,
-                                inferred=not args.prev_cycle)
-        if not args.prev_cycle:
-            # A named --prev-cycle is the caller's own answer and is not second-guessed;
-            # otherwise the dispatches are read because the record corpus cannot see a
-            # cycle that died before writing one (issue #2214).
-            roots = resolve_cycle_logs(args.cycles_log)
-            sessions = resolve_session_dirs(args.sessions_dir, roots)
-            window = with_dispatches(window, args.cycle, dispatch_ids(sessions)[0])
+        # Both halves of the own-window's answer, and they compose in exactly one place:
+        # the records resolve the boundary and say whether it was inferred or named
+        # (issue #2214), and the dispatches then move it up past a cycle that ran without
+        # writing a record (issue #2216). `own_window` owns the composition because the
+        # two sibling tools that act on the same window - `cast-vote.py` at the poster and
+        # `check-vote-count.py` at the counter - read it from there too (issue #2218).
+        window = own_window(
+            args.cycle, args.prev_cycle, args.cycles_log, args.sessions_dir
+        )
 
     try:
         queue = args.prs if args.prs else open_prs(args.repo)

@@ -122,6 +122,10 @@ def _pinned_cycle_records(mod, tmp_path, monkeypatch):
     is cleared for the same reason — it would otherwise reach the reading too.
     """
     monkeypatch.delenv("EMRG_CYCLES_LOG", raising=False)
+    # The dispatch corpus is the window's other half and has its own override, honoured
+    # ahead of the records' sibling: left set on a host that names one, every test below
+    # would resolve its boundary from that corpus instead of the one it wrote.
+    monkeypatch.delenv("EMRG_SESSIONS_DIR", raising=False)
     empty = tmp_path / "no-cycle-records"
     empty.mkdir()
     monkeypatch.setattr(mod.review_queue(), "DEFAULT_CYCLES_LOGS", (empty,))
@@ -2302,6 +2306,57 @@ def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_pa
     out = capsys.readouterr().out
     assert "1/3 valid votes" in out, out
     assert "inside the window" not in out, out
+
+
+def test_the_counter_reads_the_window_the_queue_reads(mod, monkeypatch, capsys, tmp_path):
+    """Issue #2218 at the counter: the same clause, resolved from **both** corpora.
+
+    `<repo>/.emrg/memory` holds a record for the cycle two back; the session histories
+    beside it record every *dispatch*. A cycle was dispatched between them and wrote no
+    record — it died before §4 — so the cycle immediately before this one is the
+    record-less one, and a head it did **not** push is votable. Read from the records
+    alone the boundary lands a whole cycle earlier and the vote below is voided; the
+    queue, which resolves from both corpora, calls the same head votable (issue #2218:
+    the records-only boundary is too early for 20 of the corpus's 350 records).
+
+    That difference is a count a cycle acts on before merging, so both ends are pinned
+    here: the same corpus with the push moved *into* the record-less cycle's own window
+    must still void it — a counter that stopped applying the clause would pass the first
+    half alone.
+    """
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
+    sessions = tmp_path / "sessions" / "emrg-evolution-emrg-task"
+    sessions.mkdir(parents=True)
+    (sessions / "history_260911.jsonl").write_text(
+        json.dumps({
+            "type": "message",
+            "role": "user",
+            "content": "## Evolution Cycle\n\nyou are cycle cyc20260911-093000 of x",
+            "timestamp": "2026-09-11T09:30:00",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    vote = _approve("cyc20260911-100000", _push(2026, 9, 11, 10, 30))
+    argv = ["1", "--cycles-log", str(records)]
+
+    # (a) pushed at 09:15: after the record's cycle began, before the record-less one did
+    counted = FakeGh([vote], push_time=_push(2026, 9, 11, 9, 15))
+    _run(mod, monkeypatch, counted, argv)
+    out = capsys.readouterr().out
+    assert "1/3 valid votes" in out, out
+    assert "VOID" not in out, out
+    assert "inside the window" not in out, out
+
+    # (b) the control: 09:45 is the record-less cycle's own work, which *is* the cycle
+    # immediately before this one - the case the clause exists to protect.
+    inside = FakeGh([vote], push_time=_push(2026, 9, 11, 9, 45))
+    rc = _run(mod, monkeypatch, inside, argv)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "VOID cyc20260911-100000" in out, out
+    assert "cyc20260911-093000" in out, "the reason must name the window it applied"
 
 
 def test_the_void_reason_names_the_window_it_inferred_and_its_blind_spot(mod, tmp_path):

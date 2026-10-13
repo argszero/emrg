@@ -1658,9 +1658,9 @@ def test_a_dispatch_naming_the_records_own_cycle_suppresses_the_note(
     answer, so before this every run of a checkout with sessions printed the note. A
     caveat on every run is how the caveat that matters gets skimmed.
 
-    The control is the test below it (`..._says_so_...`), which runs the same report
-    with no sessions at all: there the id is absent, nothing confirms, and the note must
-    still print.
+    The control is `test_an_inferred_window_names_the_instant_it_used_and_its_blind_spot`
+    below, which runs the same report with no sessions at all: there the id is absent,
+    nothing confirms, and the note must still print.
     """
     (tmp_path / "records").mkdir()
     (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
@@ -1751,6 +1751,137 @@ def test_the_sessions_override_reaches_the_window(mod, monkeypatch, capsys, tmp_
     )
     assert rc == 0
     assert "abstain" not in capsys.readouterr().out
+
+
+# ── one window, three carriers (issue #2218) ────────────────────────────────
+#
+# The own-window clause is decided once and acted on **thrice**: this tool prints
+# `vote` / `abstain` from it, `cast-vote.py` refuses to *post* on it, and
+# `check-vote-count.py` voids a posted vote on it. Resolve it in one carrier from the
+# records alone while another has already moved it past a record-less cycle, and the
+# same head reads `vote` in the queue and is refused at the poster -- a vote lost to an
+# arithmetic difference between two readings of one rule rather than to the clause.
+# Measured 2026-10-14, after #2217 fixed the queue's half and left both siblings on the
+# records-only boundary: it is too early for **20** of this corpus's **350** cycle
+# records. `own_window` is now the single producer; these two tests are the comparison
+# that keeps the carriers from drifting apart again.
+
+
+def _load_sibling(module_name, filename):
+    """A sibling script by file, under a name of its own.
+
+    A distinct name so that loading it does not displace a module the fixture already
+    registered in `sys.modules` -- `dataclasses` resolves annotations through that entry
+    at class-creation time, and a missing one raises from inside `dataclasses` itself.
+    """
+    spec = importlib.util.spec_from_file_location(
+        module_name, REPO_ROOT / "scripts" / filename
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _gap_corpus(tmp_path):
+    """The two corpora of the shape issue #2214 is about, and the record directory.
+
+    `records` holds the cycle *two* back (`PREV_CYCLE`, 21:59:29). A cycle was dispatched
+    at 22:03:00 (`GAP_CYCLE`) and wrote no record, so the cycle immediately before
+    `CYCLE` (22:11:17) is the record-less one -- and the record corpus cannot say so.
+    The sessions go beside the records, which is the default the tool derives.
+    """
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    _session_history(tmp_path, [_dispatch_line(GAP_CYCLE)])
+    return records
+
+
+def test_own_window_resolves_the_boundary_from_the_dispatches(mod, tmp_path):
+    """The producer's own half: the boundary the dispatches give, and the disclosure
+    cleared along with it.
+
+    `previous_cycle` reads records, so a cycle that reached no §4 leaves none and the
+    boundary lands on the record *before* it (issue #2214). `with_dispatches` moves it
+    onto the dispatched cycle -- whose id is its own start, so the boundary is exact
+    rather than estimated -- and `inferred` goes with it, because a corpus that reached
+    the boundary confirmed it rather than merely failing to extend it.
+    """
+    records = _gap_corpus(tmp_path)
+    window = mod.own_window(CYCLE, None, str(records), None)
+    assert window.start == mod.cycle_start(GAP_CYCLE), window.source
+    assert GAP_CYCLE in window.source
+    assert window.inferred is False, (
+        "the dispatch corpus named the boundary, so the note a records-only resolution "
+        f"owes its reader is not owed here: {window.source}"
+    )
+
+    # The control, over the same records and no sessions at all: the window is the
+    # records' one and says so. Without it the assertion above would pass on a producer
+    # that ignored `--cycles-log` and answered the gap from nowhere.
+    window = mod.own_window(CYCLE, None, str(records), str(tmp_path / "no-sessions"))
+    assert window.start == mod.cycle_start(PREV_CYCLE), window.source
+    assert window.inferred is True
+
+
+class _CarrierVerdict:
+    """The four fields the poster's clause reads, and nothing else.
+
+    A wider fake would let the clause reach for something the real verdict does not
+    answer, and the failure would land in the live tool rather than here. An empty
+    `pusher` is the ordinary case for the clause's own question: it keeps the window in
+    charge and makes no identity call, which is what these tests are about.
+    """
+
+    def __init__(self, push_time):
+        self.pusher = ""
+        self.head_sha = "a" * 40
+        self.push_time = push_time
+        self.push_time_exact = True
+
+
+def test_the_three_carriers_read_one_window(mod, tmp_path):
+    """Issue #2218, as a comparison rather than a claim: same corpora, two heads, three
+    verdicts, and the queue's own reading is the one the other two must reproduce.
+
+    Both instants are driven through both siblings. A pair that only compared the head
+    the clause lets through would pass on a tool that never applied it, and one that only
+    compared the head it refuses would pass on a tool that refused everything -- so the
+    two are asserted to fall on *opposite* sides first, and then each carrier is held to
+    the side the queue put it on. The head at 22:01 is the work of `PREV_CYCLE`, two
+    cycles back and votable; the one at 22:05 is `GAP_CYCLE`'s own, which is the cycle
+    immediately before this one and therefore this cycle's own.
+    """
+    records = _gap_corpus(tmp_path)
+    counter = _load_sibling("check_vote_count_carrier", "check-vote-count.py")
+    poster = _load_sibling("cast_vote_carrier", "cast-vote.py")
+
+    window = mod.own_window(CYCLE, None, str(records), None)
+    assert window.start == mod.cycle_start(GAP_CYCLE), window.source
+
+    heads = [_push(2026, 9, 17, 22, 1), _push(2026, 9, 17, 22, 5)]
+    wanted = {mod.instant(head) >= window.start for head in heads}
+    assert wanted == {False, True}, (
+        "the fixture must put one head on each side of the window, or the loop below "
+        "measures one direction only"
+    )
+
+    for head in heads:
+        want = mod.instant(head) >= window.start
+        counted, why = counter.own_head_window(
+            CYCLE, push_time=head, push_time_exact=True, cycles_log=str(records)
+        )
+        assert counted is want, (
+            f"the counter and the queue disagree about {head}: the counter says "
+            f"inside={counted} ({why[:200]})"
+        )
+        refusal, _note = poster.own_head_window(
+            CYCLE, _CarrierVerdict(head), cycles_log=str(records)
+        )
+        assert bool(refusal) is want, (
+            f"the poster and the queue disagree about {head}: {refusal[:200]}"
+        )
 
 
 def test_without_a_cycle_the_clause_is_not_applied(mod, monkeypatch, capsys):

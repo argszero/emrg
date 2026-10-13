@@ -37,6 +37,7 @@ from __future__ import annotations
 import functools
 import importlib.util
 import io
+import json
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -1612,6 +1613,64 @@ def test_the_refusal_names_the_window_it_inferred_and_its_blind_spot(
         "the boundary was named by the caller, so the tool has no record lookup of its "
         f"own to disclose: {err}"
     )
+
+
+def test_a_recordless_cycle_moves_the_window_the_poster_refuses_on(
+    mod, monkeypatch, capsys, body_file, tmp_path
+):
+    """Issue #2218 on the side where the cost is a vote that was never posted.
+
+    The queue and the counter resolve the own-window from **both** corpora — the cycle
+    records and the session histories that record every dispatch — because a cycle that
+    died before §4 leaves no record and the records alone then land a whole cycle early
+    (issue #2214). This tool resolved it from the records alone, so a head pushed in that
+    gap was refused a vote it was entitled to post, and a refusal is the one place a
+    cycle cannot answer by re-reading next cycle. Both ends are pinned: the same corpus
+    with the push moved *into* the record-less cycle's own window must still refuse.
+
+    The records hold `PREV_CYCLE` (01:59:06) and the histories name a cycle dispatched at
+    02:00:00 that wrote none, so the cycle immediately before `CYCLE` began at 02:00:00
+    rather than at 01:59:06 — and the push at 01:59:30 below is `PREV_CYCLE`'s work, two
+    cycles back, which the clause lets through.
+    """
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    sessions = tmp_path / "sessions" / "emrg-evolution-emrg-task"
+    sessions.mkdir(parents=True)
+    (sessions / "history_260916.jsonl").write_text(
+        json.dumps({
+            "type": "message",
+            "role": "user",
+            "content": "## Evolution Cycle\n\nyou are cycle cyc20260916-020000 of x",
+            "timestamp": "2026-09-16T02:00:00",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    argv = ["1255", "--body-file", body_file(f"{CYCLE} — ✅ LGTM"),
+            "--cycles-log", str(records)]
+
+    counter = FakeCounter(
+        verdict_with(push_time=_push(2026, 9, 16, 1, 59, 30)),
+        verdict_with([vote()], counted=[True], valid_count=1),
+    )
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, argv)
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    assert "inside the window" not in out.err, out.err
+    assert len(gh.calls) == 1 and gh.calls[0][:3] == ["pr", "review", "1255"], (
+        "the vote was posted, which is the whole point of the fix"
+    )
+
+    counter = FakeCounter(verdict_with(push_time=_push(2026, 9, 16, 2, 0, 30)))
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, argv)
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert gh.calls == [], "nothing was posted, so nothing has to be rolled back"
+    assert "inside the window this cycle treats as its own" in err, err
+    assert "cyc20260916-020000" in err, "the reason must name the window it applied"
 
 
 def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
