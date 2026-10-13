@@ -573,7 +573,8 @@ def own_head_window(
         previous, where = queue.previous_cycle(
             cycle, queue.resolve_cycle_logs(cycles_log)
         )
-    window = queue.abstain_window(cycle, previous, where)
+    window = queue.abstain_window(cycle, previous, where,
+                                  inferred=not prev_cycle)
 
     note = ""
     if window.unresolved:
@@ -618,11 +619,17 @@ def own_head_window(
         ), note
 
     if pushed >= window.start:
+        # The same disclosure the report carries, from the same producer: a window read
+        # off the records can be wider than the clause, and here that costs a *posted
+        # vote* rather than a reading - this refusal is the one place a cycle cannot
+        # simply re-read next cycle (issue #2214).
+        widened = f" {window.inferred_clause()}." if window.inferred else ""
         return (
             f"the head {head[:8]} was pushed {push_time}, inside the window this cycle "
-            f"treats as its own ({window.source}) - a cycle does not vote on a head it "
-            "pushed, and the window immediately before this one counts as its own as "
-            "well, because every cycle on a host is the same instance running again. "
+            f"treats as its own, which starts {window.window_start_text()} "
+            f"({window.source}) - a cycle does not vote on a head it pushed, and the "
+            "window immediately before this one counts as its own as well, because every "
+            f"cycle on a host is the same instance running again.{widened} "
             "Nothing was posted. The next vote here has to come from a later cycle "
             "(the same head is an `abstain` row in "
             f"`{RUNNER} scripts/review-queue.py --cycle <id>`); if the head is stale and its "
