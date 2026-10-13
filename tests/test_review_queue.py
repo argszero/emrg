@@ -1506,6 +1506,172 @@ def test_a_narrowed_window_still_catches_this_cycles_own_push(mod, monkeypatch, 
     assert "abstain" in out
 
 
+# --- the record-less cycle: the hole in the record corpus -------------------
+#
+# A cycle writes its record in §4, so a cycle that dies earlier leaves none and the
+# corpus cannot tell "no cycle ran" from "one ran and wrote nothing". `previous_cycle`
+# then answers with the *older* record and the window widens over the missing cycle's
+# work — a vote **blocked**, silently, which is the direction the clause exists to keep
+# narrow (issue #2214). The dispatches name that cycle exactly: the prompt carries the
+# cycle's own id, and the id *is* its start.
+
+#: A cycle dispatched between `PREV_CYCLE` (21:59:29) and `CYCLE` (22:11:17), with no
+#: record of its own. It is the cycle immediately before `CYCLE`, so a head it pushed is
+#: an abstain while a head pushed before it started belongs to `PREV_CYCLE` — two cycles
+#: back, and so votable.
+GAP_CYCLE = "cyc20260917-220300"
+
+
+def _dispatch_line(cycle, ts="2026-09-17T22:03:00", kind="message", role="user"):
+    """One history line, and the shell that holds it.
+
+    The real history is JSONL under `<sessions>/<session>/history[_YYMMDD].jsonl`, one
+    object per line; a message line carries the rendered prompt, which is where the
+    cycle's own id is substituted. Written through `json.dumps` so the fixture is the
+    file format rather than a hand-spelled lookalike of it.
+    """
+    body = f"## Evolution Cycle\n\nyou are cycle {cycle} of emrg-evolution-emrg-task"
+    record = {"type": kind, "content": body, "timestamp": ts}
+    if role:
+        record["role"] = role
+    return json.dumps(record)
+
+
+def _session_history(tmp_path, lines, name="history_260917.jsonl"):
+    """A session directory holding one history, and the directory it sits in."""
+    sessions = tmp_path / "sessions"
+    session = sessions / "emrg-evolution-emrg-task"
+    session.mkdir(parents=True, exist_ok=True)
+    (session / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return sessions
+
+
+def test_a_recordless_cycle_is_the_immediately_preceding_one_not_the_older_record(
+        mod, monkeypatch, capsys, tmp_path):
+    """The head that issue #2214 is about: pushed by the cycle *two* back, which the
+    clause lets this cycle vote on, while the records alone read it as an abstain.
+
+    The records hold one cycle, `PREV_CYCLE` (21:59:29). A cycle was dispatched at
+    22:03:00 and wrote no record, so the cycle immediately before this one began there,
+    and the window's near end is 22:03:00 rather than 21:59:29. The head below is pushed
+    at 22:01 — after `PREV_CYCLE` began, before the record-less cycle did — so it is
+    `PREV_CYCLE`'s work: two cycles back, and votable.
+    """
+    (tmp_path / "records").mkdir()
+    (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    _session_history(tmp_path, [_dispatch_line(GAP_CYCLE)])  # beside the records: the default
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1))
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), [
+        "1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "records"),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" not in out
+    assert f"cast-vote.py 1 --cycle {CYCLE}" in out
+
+
+def test_the_recordless_cycle_itself_is_still_an_abstain(
+        mod, monkeypatch, capsys, tmp_path):
+    """The control, over the same two corpora: narrowing must not delete the clause.
+
+    A head pushed at 22:05 is the record-less cycle's own work, and that cycle *is* the
+    one immediately before this one — the case the precedent widened the window for. A
+    fix that stopped abstaining here would be spending exactly the vote the clause
+    exists to protect.
+    """
+    (tmp_path / "records").mkdir()
+    (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    _session_history(tmp_path, [_dispatch_line(GAP_CYCLE)])
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), [
+        "1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "records"),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" in out
+    assert GAP_CYCLE in out  # the cycle the window was resolved to, named on the row
+
+
+def test_a_dispatch_older_than_the_record_does_not_move_the_window(mod):
+    """The refinement runs one way. Where a record exists it is the answer, so an id
+    from before it — a stale quotation, a re-delivered prompt of an older cycle — must
+    not drag a resolved window backwards and un-abstain work the record covers."""
+    window = mod.abstain_window(CYCLE, PREV_CYCLE, "/some/records")
+    older = "cyc20260917-210000"
+    assert mod.cycle_start(older) < window.start
+    for ids in ([older], [older, "cyc20260917-200000"], [], ["cyc20260917-230000"]):
+        moved = mod.with_dispatches(window, CYCLE, ids)
+        assert moved.window_start_text() == window.window_start_text(), ids
+    # And the direction it does take: a dispatched cycle between the record and this
+    # cycle's own id is the new near end.
+    moved = mod.with_dispatches(window, CYCLE, [PREV_CYCLE, GAP_CYCLE])
+    assert moved.window_start_text() != window.window_start_text()
+    assert moved.window_start_text() == mod.cycle_start(GAP_CYCLE).isoformat(
+        timespec="seconds")
+
+
+def test_the_dispatch_reader_takes_the_id_the_prompt_carries(mod, tmp_path):
+    """How the id is read, and what is refused.
+
+    The marker is a substring of anything that *quotes* a prompt — this file was
+    measured by grepping one — so a line is accepted only when it parses to a `user`
+    message. A tool result echoing the same text carries the marker and the id and is
+    not a dispatch.
+    """
+    sessions = _session_history(tmp_path, [
+        _dispatch_line("cyc20260917-220300"),
+        json.dumps({"type": "tool_result", "content": _dispatch_line("cyc20260917-230000")}),
+        "not json at all",
+        _dispatch_line("cyc20260917-211500", kind="message", role="assistant"),
+    ])
+    ids, unreadable = mod.dispatch_ids((sessions,))
+    assert ids == ["cyc20260917-220300"]
+    assert unreadable == []
+    # An absent directory is named, not raised: a checkout with no sessions is a state,
+    # and the caller must be able to tell it from a directory it failed to read.
+    ids, unreadable = mod.dispatch_ids((tmp_path / "nowhere",))
+    assert ids == []
+    assert unreadable and "nowhere" in unreadable[0]
+
+
+def test_the_dispatch_corpus_defaults_to_the_records_sibling(mod, tmp_path):
+    """One root, two corpora: pointing `--cycles-log` at a corpus of your own answers
+    the dispatches from beside it, so a test never reads the machine's real sessions and
+    a host needs no second path to keep in step."""
+    root = tmp_path / "records"
+    assert mod.resolve_session_dirs(None, (root,)) == (tmp_path / "sessions",)
+    assert mod.resolve_session_dirs("/elsewhere", (root,)) == (Path("/elsewhere"),)
+
+
+def test_the_sessions_override_reaches_the_window(mod, monkeypatch, capsys, tmp_path):
+    """`--sessions-dir` / `$EMRG_SESSIONS_DIR` name the dispatch corpus somewhere else, and
+    both have to reach `main`'s reading rather than only the parser: the flag is the
+    remedy when the histories do not sit beside the records, so a wiring mistake would
+    leave the fix silently off for the callers who need it. Neither the records' sibling
+    nor the real machine's sessions is read here — the override is what is passed."""
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    elsewhere = _session_history(tmp_path / "elsewhere", [_dispatch_line(GAP_CYCLE)])
+    argv = ["1", "--cycle", CYCLE, "--cycles-log", str(records)]
+
+    rc = _run(mod, monkeypatch, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
+              FakeFresh(), argv + ["--sessions-dir", str(elsewhere)])
+    assert rc == 0
+    assert "abstain" not in capsys.readouterr().out
+
+    # Undone first: `_install` binds each fake to the sibling it replaces by calling the
+    # patched name, so a second run over the first run's seams would hand the new fake
+    # the *old fake* as its "real" module (`'FakeVotes' object has no attribute
+    # 'Verdict'`), which is a fact about this fixture and not about the flag.
+    monkeypatch.undo()
+    monkeypatch.setenv("EMRG_SESSIONS_DIR", str(elsewhere))
+    rc = _run(mod, monkeypatch, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
+              FakeFresh(), argv)
+    assert rc == 0
+    assert "abstain" not in capsys.readouterr().out
+
+
 def test_without_a_cycle_the_clause_is_not_applied(mod, monkeypatch, capsys):
     """`--cycle` is what makes the question a cycle's own. Without it the tool answers
     the count and nothing else, and the push time stays on the row for a reader who

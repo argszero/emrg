@@ -165,6 +165,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator, Sequence
 
 REPO = "argszero/emrg"
 
@@ -277,6 +278,137 @@ def resolve_cycle_logs(override: str | None = None) -> tuple[Path, ...]:
     if raw:
         return tuple(Path(part) for part in raw.split(os.pathsep) if part)
     return DEFAULT_CYCLES_LOGS
+
+
+# ── the dispatch corpus: the cycles the record corpus cannot see ──────────────
+#
+# Where a **dispatched** cycle leaves a trace even when it never reaches §4: one
+# `## Evolution Cycle` message per dispatch, in the task sessions' histories that sit
+# beside the cycle records under the same `.emrg` root.
+#
+# This corpus exists because the record one is written by the cycle itself, in its
+# final step, and a cycle that dies earlier writes nothing at all — so the record
+# corpus cannot tell "no cycle ran" from "a cycle ran and wrote no record". Issue
+# #2214 measured the consequence: `previous_cycle` then answers with the *older*
+# record, and the own-window widens silently over the missing cycle's work, which is
+# the direction that **blocks** a vote the clause would allow.
+#
+# What is read is the **cycle id the prompt carries**, never the line's timestamp. The
+# id is exact — it *is* the cycle's start — while a line's timestamp is a write instant
+# lagging it without a stated bound: over one host's 1793 dispatch lines, 1781 carry
+# their own id, and the gap between an id and the line holding it runs from 0.17 s to
+# 133 s (fourteen pairs above 5 s) against a 124 s minimum between two cycles. The two
+# ranges overlap, so a reading built on the timestamps cannot tell a late-written line
+# from a later cycle; the id decides it outright, and no threshold is fitted here.
+#
+# A session directory is not required, and its absence is not a failure: a checkout
+# shaped like CI's has no `.emrg/sessions/` at all, and the reading there is the one
+# the records alone give.
+#
+# The default follows the **records** rather than a constant of its own, so the two
+# corpora cannot be pointed at different roots: a record root `<...>/.emrg/memory` has
+# its dispatches in `<...>/.emrg/sessions`, and a caller naming a corpus of its own
+# (`--cycles-log`) gets that corpus's sibling — one that is named, or absent.
+
+#: A dispatch marker, and the histories that hold one. Only the *line* has to be
+#: recognised cheaply, so the marker is matched as a substring before any parsing:
+#: a session history is the largest file this tool reads (11 MB on the host that
+#: measured it, and never compacted), and every line of it is a JSON object.
+_DISPATCH_MARK = "## Evolution Cycle"
+_HISTORY_NAME = re.compile(r"history(?:_\d{6})?\.jsonl")
+
+
+def resolve_session_dirs(
+    override: str | None = None, cycles_logs: Sequence[Path] | None = None
+) -> tuple[Path, ...]:
+    """The session directories to read dispatches from.
+
+    The override (`--sessions-dir` / `$EMRG_SESSIONS_DIR`) wins; otherwise the sibling
+    `sessions` directory of each cycle-record root, so the dispatches are read from the
+    same `.emrg` root as the records and there is no second constant to keep in step —
+    a caller that pointed `--cycles-log` at a corpus of its own is answered from beside
+    it, which is also what keeps a test off the machine's real sessions.
+    """
+    raw = override or os.environ.get("EMRG_SESSIONS_DIR")
+    if raw:
+        return tuple(Path(part) for part in raw.split(os.pathsep) if part)
+    roots = tuple(cycles_logs) if cycles_logs else DEFAULT_CYCLES_LOGS
+    return tuple(Path(root).parent / "sessions" for root in roots)
+
+
+def dispatch_ids(dirs: Sequence[Path] | None = None) -> tuple[list[str], list[str]]:
+    """Every cycle id these sessions recorded as dispatched, oldest first, and what was unread.
+
+    One id per rendered evolution prompt, taken from the message that *is* the prompt:
+    the template substitutes the cycle's own id, so the line says which cycle it
+    dispatched. Duplicates collapse — a compacted `history.jsonl` and the daily file it
+    was compacted from hold the same dispatch, and a re-delivered prompt carries the id
+    it was first rendered with — and ids sort as time, so the caller can take the newest
+    one before its own.
+
+    A line is accepted only when it parses to a `message` whose role is `user`: the
+    marker is also a substring of anything that *quotes* a prompt (a tool result echoing
+    a history or the template, which is how this very file was measured), and an id read
+    off a quotation would attribute somebody else's dispatch to this corpus.
+
+    :param dirs: the session directories to read. `None` means the default.
+    :returns: `(ids, unreadable)` — the second names each directory or history that could
+        not be read, so a caller can tell "no dispatch is recorded here" from "the record
+        could not be read". An absent directory is named there too and is not an error: a
+        checkout with no sessions has no dispatches to offer, which is a state and not a
+        measurement that failed.
+    """
+    found: set[str] = set()
+    unreadable: list[str] = []
+    for directory in (resolve_session_dirs() if dirs is None else tuple(dirs)):
+        try:
+            sessions = sorted(entry for entry in directory.iterdir() if entry.is_dir())
+        except OSError as exc:
+            unreadable.append(f"{directory} ({exc.strerror or exc})")
+            continue
+        for session in sessions:
+            try:
+                histories = sorted(
+                    entry
+                    for entry in session.iterdir()
+                    if _HISTORY_NAME.fullmatch(entry.name)
+                )
+            except OSError as exc:
+                unreadable.append(f"{session} ({exc.strerror or exc})")
+                continue
+            for history in histories:
+                for line in _dispatch_lines(history, unreadable):
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if record.get("type") != "message" or record.get("role") != "user":
+                        continue
+                    content = record.get("content") or ""
+                    if not isinstance(content, str):
+                        content = json.dumps(content)
+                    found.update(match.group(0) for match in _CYCLE_ID.finditer(content))
+    return sorted(found), unreadable
+
+
+def _dispatch_lines(history: Path, unreadable: list[str]) -> Iterator[str]:
+    """The lines of one history that hold a dispatch marker.
+
+    Reading line by line and matching before parsing is what keeps this affordable on
+    a file that grows without bound: the parse is paid only for the handful of lines
+    that can be a dispatch.
+
+    :param history: the history file to read.
+    :param unreadable: appended to when the file cannot be read.
+    :returns: the candidate lines, in file order.
+    """
+    try:
+        with history.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if _DISPATCH_MARK in line and '"role": "user"' in line:
+                    yield line
+    except OSError as exc:
+        unreadable.append(f"{history} ({exc.strerror or exc})")
 
 
 # ── the abstention window ────────────────────────────────────────────────────
@@ -414,6 +546,58 @@ def abstain_window(cycle: str, previous: str, where: str) -> Window:
             unresolved=where or "the previous cycle was not determined",
         )
     return Window(start=None, source="", unresolved=where or f"{cycle!r} is not a cycle id")
+
+
+def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Window:
+    """The window, moved up to a dispatched cycle the record corpus does not hold.
+
+    `previous_cycle` reads records, and a cycle that ran and never reached its record
+    step leaves none — so the corpus answers with the *older* record and the window it
+    found is wider than the clause asks. Every head pushed in the gap is then reported
+    `abstain`: not a vote spent, but a vote **blocked**, and silently, because nothing in
+    the row says the boundary it used is the wrong one. Issue #2214, whose two examples
+    are exactly this shape.
+
+    The remedy is the other corpus's own answer rather than an estimate of it: a
+    dispatched cycle's id *is* its start, so the boundary is exact, and a window moved
+    here is the one a record at that position would have produced. Nothing is inferred
+    from the clock, which is what the timestamps in those same histories cannot support
+    — see `dispatch_ids`.
+
+    An id taken here cannot be one the records hold: `previous_cycle` answers with the
+    **newest** record before this cycle, so a record newer than the window's own would
+    have *been* the window. That is the whole reason the move is sound in one direction
+    only — a dispatched id older than the record the window came from is either that same
+    cycle's own dispatch or an older cycle's, and it changes nothing. Where a record
+    exists it is authoritative; the dispatch corpus is never allowed to drag a resolved
+    window backwards.
+
+    :param window: the window the records produced.
+    :param cycle: this cycle's id.
+    :param dispatched: every cycle id the session histories recorded as dispatched.
+    :returns: the window to use. Unchanged unless the newest dispatched cycle before this
+        one started later than the record the window was resolved from — in which case
+        the source names that cycle and says why the records do not hold it.
+    """
+    own = cycle_start(cycle)
+    if own is None or not dispatched:
+        return window
+    earlier = [entry for entry in dispatched if entry < cycle]
+    if not earlier:
+        return window
+    boundary = cycle_start(earlier[-1])
+    if boundary is None or (window.start is not None and boundary <= window.start):
+        return window
+    from_records = (
+        f"the newest record is {window.start.isoformat(timespec='seconds')}"
+        if window.start is not None
+        else "no cycle record exists before this cycle"
+    )
+    return Window(
+        start=boundary,
+        source=f"previous cycle {earlier[-1]} (dispatched, no cycle record; {from_records})",
+        unresolved="",
+    )
 
 
 def _sibling(name: str, module_name: str):
@@ -1450,9 +1634,19 @@ def main(argv: list[str] | None = None) -> int:
         "--cycles-log",
         default=None,
         help="directory of `cycle-<id>.md` records, used to find the previous cycle "
-             "when --prev-cycle is not given (default: $EMRG_CYCLES_LOG, else both "
-             f"{os.pathsep}-joined directories the template may name: "
+             "when --prev-cycle is not given (default: $EMRG_CYCLES_LOG, else the "
+             f"{os.pathsep}-joined roots the template may name: "
              f"{os.pathsep.join(str(d) for d in DEFAULT_CYCLES_LOGS)})",
+    )
+    parser.add_argument(
+        "--sessions-dir",
+        default=None,
+        help="directory holding the task sessions whose histories record every cycle "
+             "dispatch, used to move the abstention window up to a cycle that ran and "
+             "wrote no record (default: $EMRG_SESSIONS_DIR, else the `sessions` "
+             "directory beside each --cycles-log root). Absent is not an error: a "
+             "checkout shaped like CI's has none, and the window is then the one the "
+             "records alone give",
     )
     parser.add_argument(
         "--min-votes",
@@ -1498,6 +1692,13 @@ def main(argv: list[str] | None = None) -> int:
                 args.cycle, resolve_cycle_logs(args.cycles_log)
             )
         window = abstain_window(args.cycle, previous, where)
+        if not args.prev_cycle:
+            # A named --prev-cycle is the caller's own answer and is not second-guessed;
+            # otherwise the dispatches are read because the record corpus cannot see a
+            # cycle that died before writing one (issue #2214).
+            roots = resolve_cycle_logs(args.cycles_log)
+            sessions = resolve_session_dirs(args.sessions_dir, roots)
+            window = with_dispatches(window, args.cycle, dispatch_ids(sessions)[0])
 
     try:
         queue = args.prs if args.prs else open_prs(args.repo)
