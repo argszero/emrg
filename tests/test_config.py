@@ -512,3 +512,194 @@ def test_the_foreground_daemon_command_reports_a_refused_config(
 
     assert excinfo.value.code == 1
     assert "not a regular file" in capsys.readouterr().err
+
+
+class TestTheInstallerWritesTheConfigPrivate:
+    """`install.sh` is the third writer of `~/.emrg/config.toml`, and the one that creates it.
+
+    `ensure_config()` and the GUI's writers were brought onto one rule
+    (`emrg.config.CONFIG_FILE_MODE`), but the installer — which runs first, on a machine where
+    nothing exists yet — wrote the file through a bare `cat > "$cfg"` heredoc and no `chmod`,
+    so it landed `0644` under umask 022. Measured 2026-10-12 on master by extracting
+    `generate_config_template()` and running it with `HOME` pinned to a scratch tree
+    (issue #2146).
+
+    The reason that is not merely a window: the installer's own closing line tells the host to
+    edit the file and paste a key into it *before* running anything, so the mode the installer
+    gives the file is the mode it keeps while it holds a real secret.
+
+    The reading is **behavioural** — the real function is extracted from `install.sh` and run —
+    rather than a text search for a `chmod`, which a `chmod` that never executes would satisfy.
+    The `log()` the script's preamble provides under an installed run is stubbed; that stub is
+    not the subject and the function's own output is not read.
+
+    What is asserted is the **property** (`mode & 0o077 == 0`, the mask
+    `emrg.config._make_config_private` tests), not the number `0o600`: a shell script and a
+    Python module cannot share one constant, so pinning the digit here would leave the two
+    carriers free to drift apart one digit at a time with every test green.
+    """
+
+    INSTALL_SH = Path(__file__).resolve().parents[1] / "install.sh"
+
+    posix_only = pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows carries no POSIX permission bits for chmod to set, so there is "
+        "nothing on that leg for this assertion to be right or wrong about",
+    )
+
+    @staticmethod
+    def _function_source() -> str:
+        """The `generate_config_template` body, lifted out of `install.sh`.
+
+        Anchored on the function's own header and its closing brace at column 0, so a rename
+        or a reformat is a loud failure rather than a silent empty string
+        (`git ls-files`-style discovery is not available for a shell function).
+        """
+        import re
+
+        text = TestTheInstallerWritesTheConfigPrivate.INSTALL_SH.read_text(encoding="utf-8")
+        match = re.search(r"^generate_config_template\(\) \{.*?^\}", text, re.S | re.M)
+        assert match is not None, (
+            "generate_config_template() could not be lifted out of install.sh — the pattern "
+            "has gone stale, and a stale pattern is not a pass"
+        )
+        return match.group(0)
+
+    @posix_only
+    def test_the_created_config_file_is_private(self, tmp_path):
+        import stat as _stat
+        import subprocess
+
+        home = tmp_path / "home"
+        home.mkdir()
+        script = tmp_path / "gen.sh"
+        script.write_text(
+            # `log` is install.sh's own reporter; stubbed because this test reads the file's
+            # mode, not the installer's output.
+            "log() { :; }\n"
+            + self._function_source()
+            + "\ngenerate_config_template\n",
+            encoding="utf-8",
+        )
+        env = dict(os.environ, HOME=str(home))
+
+        subprocess.run(
+            ["bash", str(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+        )
+
+        cfg_path = home / ".emrg" / "config.toml"
+        assert cfg_path.exists(), (
+            "the installer wrote no config file, so the mode below would be asserted about "
+            "nothing — the extraction or the stub is wrong, not the rule"
+        )
+        mode = _stat.S_IMODE(os.stat(cfg_path).st_mode)
+        # The **property**, in the spelling the Python-side writer uses
+        # (`emrg.config._make_config_private` tests exactly this mask): nothing outside the
+        # owner may read it. Asserting the number instead would pin a constant this file
+        # cannot import (a shell script and a Python module cannot share one), and the two
+        # would then be free to drift one digit apart with every test green.
+        assert mode & 0o077 == 0, (
+            f"install.sh left the config file at {oct(mode)} — readable by group or other. It "
+            f"holds `api_key` in plaintext, and the installer's own closing line tells the host "
+            f"to paste a key in before running anything"
+        )
+class TestTheConfigFileIsPrivate:
+    """The config file holds ``api_key`` in plaintext, so it is private — the rule the GUI's
+    writer already states (`G69`: mode 0o600) and this module did not.
+
+    Measured 2026-10-12 before the fix, with `HOME` pinned to a scratch tree: `ensure_config()`
+    created `~/.emrg/config.toml` at **0644** under umask 022, while
+    `emrg/gui/main.js`'s `ensureConfigTemplate()` and `writeConfig()` both pass `0o600`. One
+    file, two writers, two answers — and the host's own install, made before the rule existed,
+    carries the wider one.
+
+    The mode is asserted on POSIX only: Windows has no POSIX permission bits for `os.chmod` to
+    set (`stat.S_IMODE` reports the read-only flag), so there is nothing on that leg for these
+    tests to be right or wrong about.
+    """
+
+    posix_only = pytest.mark.skipif(
+        os.name == "nt", reason="Windows carries no POSIX permission bits to assert"
+    )
+
+    @staticmethod
+    def _mode(path) -> int:
+        import stat as _stat
+
+        return _stat.S_IMODE(os.stat(str(path)).st_mode)
+
+    @posix_only
+    def test_a_created_config_file_is_private(self, tmp_path, monkeypatch):
+        cfg_path = tmp_path / ".emrg" / "config.toml"
+        monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+        assert not cfg_path.exists()
+
+        ensure_config()
+
+        assert cfg_path.exists(), "the fixture did not reach the create path"
+        assert self._mode(cfg_path) == cfg_mod.CONFIG_FILE_MODE
+
+    @posix_only
+    def test_an_existing_world_readable_config_file_is_tightened(self, tmp_path, monkeypatch):
+        """The half that reaches an install made before the rule existed.
+
+        Without it the rule only ever helps a *fresh* install, and the host's own file — 0644
+        since 2026-09-27, holding a real 33-character key — would stay readable by every other
+        local user for the life of the machine.
+        """
+        cfg_path = tmp_path / ".emrg" / "config.toml"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text('api_key = "a-real-key"\n', encoding="utf-8")
+        os.chmod(cfg_path, 0o644)
+        monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+
+        ensure_config()
+
+        assert self._mode(cfg_path) == cfg_mod.CONFIG_FILE_MODE
+        assert cfg_path.read_text(encoding="utf-8") == 'api_key = "a-real-key"\n', (
+            "the mode was the subject; the host's file content is not this function's to touch"
+        )
+
+    @posix_only
+    def test_a_file_the_owner_closed_further_is_left_alone(self, tmp_path, monkeypatch):
+        """The direction that must *not* move: a tighter mode is not the rule's business.
+
+        A mode narrower than the rule (0400, or one carrying a set-id bit the owner meant) is
+        already closed to other users. Rewriting it would be this function opening a file its
+        owner shut.
+        """
+        cfg_path = tmp_path / ".emrg" / "config.toml"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text("[llm]\n", encoding="utf-8")
+        os.chmod(cfg_path, 0o400)
+        monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+
+        ensure_config()
+
+        assert self._mode(cfg_path) == 0o400
+
+    @posix_only
+    def test_no_chmod_when_the_mode_is_already_the_rule(self, tmp_path, monkeypatch):
+        """The docstring's "written only when it differs", pinned rather than asserted in prose.
+
+        `ensure_config` runs on every daemon start, so an unconditional `chmod` would be a
+        write to the host's own filesystem on every one of them.
+        """
+        from unittest import mock
+
+        cfg_path = tmp_path / ".emrg" / "config.toml"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text("[llm]\n", encoding="utf-8")
+        os.chmod(cfg_path, cfg_mod.CONFIG_FILE_MODE)
+        monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+
+        with mock.patch("emrg.config.os.chmod") as chmod:
+            ensure_config()
+
+        assert chmod.call_count == 0, f"chmod reached a file already at the rule: {chmod.call_args_list}"

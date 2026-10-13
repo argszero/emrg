@@ -1516,6 +1516,9 @@ def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
     out = capsys.readouterr().out
     assert "abstain" not in out  # not a claim the tool cannot support
     assert "note: the abstention window could not be widened" in out
+    # Also inferred (the lookup ran and found nothing), so the two notes meet here:
+    # the narrowed one is the stronger statement and takes the line.
+    assert "issue #2214" not in out, out[:400]
     assert "no cycle record before" in out
     # The other half of "narrowed, and said so": the note names the boundary that
     # *was* checked, so a reader can still apply the clause by hand to an earlier push
@@ -1545,6 +1548,250 @@ def test_a_narrowed_window_still_catches_this_cycles_own_push(mod, monkeypatch, 
          ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
     out = capsys.readouterr().out
     assert "abstain" in out
+
+
+# --- the record-less cycle: the hole in the record corpus -------------------
+#
+# A cycle writes its record in §4, so a cycle that dies earlier leaves none and the
+# corpus cannot tell "no cycle ran" from "one ran and wrote nothing". `previous_cycle`
+# then answers with the *older* record and the window widens over the missing cycle's
+# work — a vote **blocked**, silently, which is the direction the clause exists to keep
+# narrow (issue #2214). The dispatches name that cycle exactly: the prompt carries the
+# cycle's own id, and the id *is* its start.
+
+#: A cycle dispatched between `PREV_CYCLE` (21:59:29) and `CYCLE` (22:11:17), with no
+#: record of its own. It is the cycle immediately before `CYCLE`, so a head it pushed is
+#: an abstain while a head pushed before it started belongs to `PREV_CYCLE` — two cycles
+#: back, and so votable.
+GAP_CYCLE = "cyc20260917-220300"
+
+
+def _dispatch_line(cycle, ts="2026-09-17T22:03:00", kind="message", role="user"):
+    """One history line, and the shell that holds it.
+
+    The real history is JSONL under `<sessions>/<session>/history[_YYMMDD].jsonl`, one
+    object per line; a message line carries the rendered prompt, which is where the
+    cycle's own id is substituted. Written through `json.dumps` so the fixture is the
+    file format rather than a hand-spelled lookalike of it.
+    """
+    body = f"## Evolution Cycle\n\nyou are cycle {cycle} of emrg-evolution-emrg-task"
+    record = {"type": kind, "content": body, "timestamp": ts}
+    if role:
+        record["role"] = role
+    return json.dumps(record)
+
+
+def _session_history(tmp_path, lines, name="history_260917.jsonl"):
+    """A session directory holding one history, and the directory it sits in."""
+    sessions = tmp_path / "sessions"
+    session = sessions / "emrg-evolution-emrg-task"
+    session.mkdir(parents=True, exist_ok=True)
+    (session / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return sessions
+
+
+def test_a_recordless_cycle_is_the_immediately_preceding_one_not_the_older_record(
+        mod, monkeypatch, capsys, tmp_path):
+    """The head that issue #2214 is about: pushed by the cycle *two* back, which the
+    clause lets this cycle vote on, while the records alone read it as an abstain.
+
+    The records hold one cycle, `PREV_CYCLE` (21:59:29). A cycle was dispatched at
+    22:03:00 and wrote no record, so the cycle immediately before this one began there,
+    and the window's near end is 22:03:00 rather than 21:59:29. The head below is pushed
+    at 22:01 — after `PREV_CYCLE` began, before the record-less cycle did — so it is
+    `PREV_CYCLE`'s work: two cycles back, and votable.
+    """
+    (tmp_path / "records").mkdir()
+    (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    _session_history(tmp_path, [_dispatch_line(GAP_CYCLE)])  # beside the records: the default
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1))
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), [
+        "1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "records"),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" not in out
+    assert f"cast-vote.py 1 --cycle {CYCLE}" in out
+
+
+def test_the_recordless_cycle_itself_is_still_an_abstain(
+        mod, monkeypatch, capsys, tmp_path):
+    """The control, over the same two corpora: narrowing must not delete the clause.
+
+    A head pushed at 22:05 is the record-less cycle's own work, and that cycle *is* the
+    one immediately before this one — the case the precedent widened the window for. A
+    fix that stopped abstaining here would be spending exactly the vote the clause
+    exists to protect.
+    """
+    (tmp_path / "records").mkdir()
+    (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    _session_history(tmp_path, [_dispatch_line(GAP_CYCLE)])
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), [
+        "1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "records"),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abstain" in out
+    assert GAP_CYCLE in out  # the cycle the window was resolved to, named on the row
+
+
+def test_a_dispatch_older_than_the_record_does_not_move_the_window(mod):
+    """The refinement runs one way. Where a record exists it is the answer, so an id
+    from before it — a stale quotation, a re-delivered prompt of an older cycle — must
+    not drag a resolved window backwards and un-abstain work the record covers."""
+    window = mod.abstain_window(CYCLE, PREV_CYCLE, "/some/records")
+    older = "cyc20260917-210000"
+    assert mod.cycle_start(older) < window.start
+    for ids in ([older], [older, "cyc20260917-200000"], [], ["cyc20260917-230000"]):
+        moved = mod.with_dispatches(window, CYCLE, ids)
+        assert moved.window_start_text() == window.window_start_text(), ids
+    # And the direction it does take: a dispatched cycle between the record and this
+    # cycle's own id is the new near end.
+    moved = mod.with_dispatches(window, CYCLE, [PREV_CYCLE, GAP_CYCLE])
+    assert moved.window_start_text() != window.window_start_text()
+    assert moved.window_start_text() == mod.cycle_start(GAP_CYCLE).isoformat(
+        timespec="seconds")
+
+
+def test_a_corpus_that_reaches_the_boundary_confirms_it_and_clears_the_caveat(mod):
+    """Issue #2216, composed with #2214's disclosure: two of the three cases agree on the
+    boundary and differ on what may be claimed about it.
+
+    An id **equal** to the records' own answer is the same cycle, so the corpus has
+    confirmed that nothing was dispatched between it and now — the missing cycle #2214
+    is about is one this corpus would have named — and the caveat a records-only
+    lookup owes its reader is not owed. An id **older** than the boundary reaches no gap
+    above it (a stale quotation, a re-delivered prompt) and must leave the caveat
+    standing. An empty corpus is the absent one: nothing was read to confirm with.
+    """
+    window = mod.abstain_window(CYCLE, PREV_CYCLE, "/some/records", inferred=True)
+    assert window.inferred is True
+
+    confirmed = mod.with_dispatches(window, CYCLE, [PREV_CYCLE])
+    assert confirmed.window_start_text() == window.window_start_text()
+    assert confirmed.inferred is False, (
+        "the corpus named the very cycle the records did - that is a confirmation, not a "
+        "silence, so the note has nothing left to disclose"
+    )
+
+    older = "cyc20260917-210000"
+    assert mod.cycle_start(older) < window.start
+    assert mod.with_dispatches(window, CYCLE, [older]).inferred is True, (
+        "an id older than the boundary does not reach the gap above it"
+    )
+    assert mod.with_dispatches(window, CYCLE, []).inferred is True
+    assert mod.with_dispatches(window, CYCLE, [CYCLE]).inferred is True, (
+        "a cycle is not its own predecessor: the id must be strictly earlier"
+    )
+    # The direction that moves the window already carried the flag down with it.
+    moved = mod.with_dispatches(window, CYCLE, [PREV_CYCLE, GAP_CYCLE])
+    assert moved.window_start_text() != window.window_start_text()
+    assert moved.inferred is False
+
+
+def test_a_dispatch_naming_the_records_own_cycle_suppresses_the_note(
+        mod, monkeypatch, capsys, tmp_path):
+    """The same fact at the report, which is where the reader meets it.
+
+    Measured while resolving #2215/#2217 on 2026-10-13: the live corpus holds 1798
+    dispatched ids and the newest one before the measuring cycle was the record's own
+    answer, so before this every run of a checkout with sessions printed the note. A
+    caveat on every run is how the caveat that matters gets skimmed.
+
+    The control is the test below it (`..._says_so_...`), which runs the same report
+    with no sessions at all: there the id is absent, nothing confirms, and the note must
+    still print.
+    """
+    (tmp_path / "records").mkdir()
+    (tmp_path / "records" / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    _session_history(tmp_path, [_dispatch_line(PREV_CYCLE)])
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 23, 0))
+    rc = _run(mod, monkeypatch, votes, FakeFresh(), [
+        "1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "records"),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "issue #2214" not in out, (
+        "the corpus named the record's own cycle, so the boundary was confirmed and there "
+        f"is no gap to disclose: {out[:400]}"
+    )
+    assert "note: the own-window" not in out, out[:400]
+
+
+def test_the_dispatch_reader_takes_the_id_the_prompt_carries(mod, tmp_path):
+    """How the id is read, and what is refused.
+
+    The marker is a substring of anything that *quotes* a prompt — this file was
+    measured by grepping one — so a line is accepted only when it parses to a `user`
+    message. A tool result echoing the same text carries the marker and the id and is
+    not a dispatch.
+    """
+    sessions = _session_history(tmp_path, [
+        _dispatch_line("cyc20260917-220300"),
+        json.dumps({"type": "tool_result", "content": _dispatch_line("cyc20260917-230000")}),
+        "not json at all",
+        _dispatch_line("cyc20260917-211500", kind="message", role="assistant"),
+    ])
+    ids, unreadable = mod.dispatch_ids((sessions,))
+    assert ids == ["cyc20260917-220300"]
+    assert unreadable == []
+    # An absent directory is named, not raised: a checkout with no sessions is a state,
+    # and the caller must be able to tell it from a directory it failed to read.
+    ids, unreadable = mod.dispatch_ids((tmp_path / "nowhere",))
+    assert ids == []
+    assert unreadable and "nowhere" in unreadable[0]
+
+
+def test_the_dispatch_corpus_defaults_to_the_records_sibling(mod, tmp_path):
+    """One root, two corpora: pointing `--cycles-log` at a corpus of your own answers
+    the dispatches from beside it, so a test never reads the machine's real sessions and
+    a host needs no second path to keep in step."""
+    root = tmp_path / "records"
+    assert mod.resolve_session_dirs(None, (root,)) == (tmp_path / "sessions",)
+    assert mod.resolve_session_dirs("/elsewhere", (root,)) == (Path("/elsewhere"),)
+
+
+def test_the_sessions_override_reaches_the_window(mod, monkeypatch, capsys, tmp_path):
+    """`--sessions-dir` / `$EMRG_SESSIONS_DIR` name the dispatch corpus somewhere else, and
+    both have to reach `main`'s reading rather than only the parser: the flag is the
+    remedy when the histories do not sit beside the records, so a wiring mistake would
+    leave the fix silently off for the callers who need it. Neither the records' sibling
+    nor the real machine's sessions is read here — the override is what is passed."""
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    elsewhere = _session_history(tmp_path / "elsewhere", [_dispatch_line(GAP_CYCLE)])
+    argv = ["1", "--cycle", CYCLE, "--cycles-log", str(records)]
+
+    # Each run installs both seams, and `_install` binds its fake to the sibling it
+    # replaces by calling the *patched* name — so a second run over the first run's seams
+    # would hand the new fake the old fake as its "real" module (`'FakeVotes' object has
+    # no attribute 'Verdict'`), which is a fact about this fixture and not about the flag.
+    # A nested context undoes exactly what that run installed. It is not `undo()`:
+    # `monkeypatch.undo()` undoes the autouse ledger seam too, and the second run then
+    # reads the machine's `~/.emrg/rants.jsonl` — absent on a CI runner, where the tool
+    # answers `unmeasurable` and exits 2, and present on the host that wrote this, where
+    # it exits 0. Measured: run 38411916623, both legs, 1 failed / 4976 passed.
+    with monkeypatch.context() as first:
+        rc = _run(mod, first, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
+                  FakeFresh(), argv + ["--sessions-dir", str(elsewhere)])
+    assert rc == 0
+    assert "abstain" not in capsys.readouterr().out
+
+    monkeypatch.setenv("EMRG_SESSIONS_DIR", str(elsewhere))
+    rc = _run(mod, monkeypatch, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
+              FakeFresh(), argv)
+    # The seam, not only the exit code: an exit code is a fact about the machine as much
+    # as about the flag (that is exactly how the run above went green here and red on
+    # CI), so the property this test rests on — every invocation read the ledger through
+    # the fixture — is asserted directly, and holds on a host with the file or without it.
+    assert isinstance(mod.open_rant_rows, FakeLedger), (
+        "this test ran the tool against the machine's own ~/.emrg/rants.jsonl: the ledger "
+        "seam was undone, so the verdict below is about this host's files, not the flag"
+    )
+    assert rc == 0
+    assert "abstain" not in capsys.readouterr().out
 
 
 def test_without_a_cycle_the_clause_is_not_applied(mod, monkeypatch, capsys):
@@ -1705,6 +1952,66 @@ def test_the_json_document_keeps_its_shape_and_carries_the_same_fact(
     assert payload[0]["tree"] == str(REPO_ROOT)
     assert payload[0]["branch"] == "feature/x"
     assert "tree: " not in out, "the prose line must not be emitted into the JSON document"
+def test_an_inferred_window_names_the_instant_it_used_and_its_blind_spot(
+        mod, monkeypatch, capsys, tmp_path
+):
+    """Issue #2214: here the clause *was* applied, and the row still cannot show from
+    where.
+
+    The boundary is looked up in the `cycle-*.md` records, so a cycle that ran and wrote
+    none is found nowhere: the resolver lands on the record before it and the window
+    reaches further back than the clause does, so a head pushed inside that gap reads
+    `abstain` where it was votable. Measured 2026-10-13 — two such cycles in one day
+    (`cyc20261013-150748`, `cyc20261013-194608`), the window starting at 17:17:21 where
+    the cycle before the measuring one began at 19:46:08, and a head pushed at 19:32:47
+    inside the gap.
+
+    Silence is exactly how a full window reads, so this state has to name the instant it
+    used. The remedy is *not* the reader's — they cannot see the missing cycle either —
+    which is why the sentence states the gap instead of printing a flag.
+    """
+    (tmp_path / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30))
+    fresh = FakeFresh()
+    rc = _run(mod, monkeypatch, votes, fresh,
+              ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "issue #2214" in out
+    # The instant, not just the id: the width is the fact being disclosed, and the id
+    # alone does not give one to a reader who does not convert ids by hand.
+    assert mod.cycle_start(PREV_CYCLE).isoformat(timespec="seconds") in out, out[:400]
+    assert PREV_CYCLE in out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert lines[0].startswith("tree: "), lines[0]
+    assert lines[1].startswith(
+        "note: the own-window clause was read off the cycle records"), lines[:2]
+    assert out.index("issue #2214") < out.index("#1 "), out[:400]
+    # The row itself is unchanged: this note says where the window came from, it does
+    # not move a verdict.
+    assert "abstain" in out
+
+
+def test_the_inferred_window_note_stays_out_of_the_json_document(
+        mod, monkeypatch, capsys, tmp_path
+):
+    """The fact rides as fields — `vote_window_start` already carries the instant the
+    note exists to disclose — and a prose line ahead of the list would break every
+    machine consumer instead of warning them."""
+    (tmp_path / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30))
+    fresh = FakeFresh()
+    _run(mod, monkeypatch, votes, fresh,
+         ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path), "--json"])
+    out = capsys.readouterr().out
+
+    payload = json.loads(out)  # a prose line here raises, which is the assertion
+    assert payload[0]["vote_window_start"] == \
+        mod.cycle_start(PREV_CYCLE).isoformat(timespec="seconds")
+    assert "issue #2214" not in out, out[:400]
+
+
 def test_a_windowed_run_prints_no_such_note(mod, monkeypatch, capsys):
     """The control: with `--cycle` and a previous cycle in hand the clause *is*
     applied in full, and a note printed anyway would be a claim about a gap that is not
@@ -1717,6 +2024,10 @@ def test_a_windowed_run_prints_no_such_note(mod, monkeypatch, capsys):
 
     assert "no --cycle was given" not in out, out[:300]
     assert "could not be widened" not in out, out[:300]
+    # And the note a *records-only* resolution prints is the other half of this control:
+    # the caller named the boundary, so the tool has no resolution of its own to
+    # disclose, and a line printed anyway is how the line that matters gets skimmed.
+    assert "issue #2214" not in out, out[:400]
     # Same move as above: the row is the first line after the tree line, and no
     # window note sits between them.
     lines = [line for line in out.splitlines() if line.strip()]

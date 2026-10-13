@@ -44,6 +44,14 @@ from emrg.sandbox.policy import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
+# The credential rule, imported rather than restated: this module logs text it did not
+# author — an error string off the daemon's wire, and an abort reason built from an
+# exception or a failed request — and the daemon's log is the artefact the rule exists
+# for (`emrg/server/redaction.py` calls it "a file hosts paste into issues"). `redact_prefix`
+# is the *windowed* form, so the rule runs over the whole value and only then is it cut:
+# every pattern has a minimum length, so a value windowed first cannot match a credential
+# that crosses the cut.
+from emrg.server.redaction import redact_prefix, redact_string
 from emrg.server.git_utils import (
     _detect_git_remote,
     ensure_local_exclude,
@@ -422,6 +430,75 @@ def _write_text(path: Path, data: str) -> None:
     """
     _refuse_non_regular(path, "writer")
     path.write_text(data, encoding="utf-8")
+
+
+#: The durable per-task execution record's extension. Rant 2026-08-19T20:50:36 (host Plan
+#: B): every completed cycle is appended as one JSON object per line to
+#: ``<logs>/task-runs/<task>.jsonl``, which is what replaced the ``evolution-*.json``
+#: single-file archival whose writer was removed the same day (rant 2026-08-19T14:18:40,
+#: commit ``e401246e`` — the same change that left its readers behind).
+TASK_RUN_SUFFIX = ".jsonl"
+
+
+def task_run_files(task_runs_dir: Path) -> list[Path]:
+    """Every task-run file in the durable store, by name.
+
+    A missing directory is no files rather than an error: a host that has not run a
+    scheduled task yet has no store. The directory also holds ``<task>.heartbeat.json``
+    — a liveness slot, not a record — which this suffix excludes by name.
+    """
+    try:
+        return sorted(task_runs_dir.glob(f"*{TASK_RUN_SUFFIX}"))
+    except OSError:
+        return []
+
+
+def read_task_run_records(path: Path) -> list[dict]:
+    """Every record in one task-run file, oldest first, each naming its task.
+
+    **One derivation of the durable task-run store**, shared by its readers: a handler
+    restores its own file at init (:meth:`TaskHandler._load_task_runs`) and the daemon
+    reports the instance's record from every file in the store
+    (:meth:`Daemon._evolution_count` and the ``evolution_summary`` frame).
+
+    Those two daemon readings used to walk ``<logs>/evolution-*.json`` instead — a
+    directory whose writer was removed with the store it belonged to. Measured on this
+    host, 2026-10-13 (``cyc20261013-080459``): that directory holds 27 files whose newest
+    is ``evolution-2026-08-23T21-33-49``, while this store then held 699 records, the
+    newest written that morning — and it keeps growing. So the "recent improvements" list
+    could not show a cycle written after 2026-08-23, and the count's disk half answered
+    27 — a number that reaches the reader whenever it is the larger of the two (a host
+    whose tasks are all disabled, or a daemon whose scheduler is not up).
+
+    Each returned dict is the JSONL line with ``task`` (the file's stem) added, so a
+    reader walking several files can say which task ran without a second derivation of
+    the name. A line that is not JSON is skipped one at a time — a torn line is a lost
+    record, not a lost file — and a file whose kind is not a regular file is skipped
+    whole, the rule the writers and the per-handler restore apply: a pipe at one of these
+    names would block the daemon's event loop at the open. A missing file is no records.
+    """
+    records: list[dict] = []
+    try:
+        text = _read_text(path)
+    except NotARegularFile as exc:
+        logger.debug("task-run record %s skipped: %s", path.name, exc)
+        return records
+    except (OSError, ValueError):
+        # A file that cannot be read is no records — `ValueError` because a decode
+        # failure is one of the ways a read fails and is not an `OSError`.
+        return records
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except (ValueError, TypeError):
+            logger.warning("task-runs: skipping a corrupt line in %s", path)
+            continue
+        if isinstance(data, dict):
+            records.append({**data, "task": path.stem})
+    return records
 
 
 def read_table(path: Path | None = None) -> list[dict]:
@@ -2064,40 +2141,31 @@ class TaskHandler:
     # `{{ evolution_count }}` line printed it as a total (rant
     # 2026-09-29T09:29:21).
     def _load_task_runs(self) -> list[EvolutionLog]:
-        """Restore the most recent execution records from the task JSONL.
+        """Restore the execution records from this task's own JSONL.
 
-        Fault-tolerant (rant 2026-08-19T20:50:36): a missing or corrupt file
-        yields an empty list (never raises); a single corrupt line is skipped
-        while the rest is kept.
+        The read itself — a missing file as no records, a torn line skipped one at a
+        time — is :func:`read_task_run_records`, the one derivation of this store, which
+        the daemon's readings of it share; fault-tolerance is the point (rant
+        2026-08-19T20:50:36): a file that cannot be read at all yields an empty list and
+        never raises.
         """
         records: list[EvolutionLog] = []
         try:
-            if self._task_runs_file.exists():
-                lines = _read_text(self._task_runs_file).splitlines()
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except (ValueError, TypeError):
-                        self._logger.warning(
-                            "TaskHandler[%s]: skipping corrupt task-run line in %s",
-                            self.name, self._task_runs_file,
-                        )
-                        continue
-                    records.append(EvolutionLog(
-                        timestamp=str(data.get("timestamp") or ""),
-                        work=str(data.get("work") or ""),
-                        recommend_slowdown=bool(data.get("recommend_slowdown")),
-                        slowdown_reason=str(data.get("slowdown_reason") or ""),
-                        tool_count=int(data.get("tool_count") or 0),
-                    ))
-                if records:
-                    self._logger.info(
-                        "TaskHandler[%s]: restored %d execution record(s) from %s",
-                        self.name, len(records), self._task_runs_file,
-                    )
+            records = [
+                EvolutionLog(
+                    timestamp=str(data.get("timestamp") or ""),
+                    work=str(data.get("work") or ""),
+                    recommend_slowdown=bool(data.get("recommend_slowdown")),
+                    slowdown_reason=str(data.get("slowdown_reason") or ""),
+                    tool_count=int(data.get("tool_count") or 0),
+                )
+                for data in read_task_run_records(self._task_runs_file)
+            ]
+            if records:
+                self._logger.info(
+                    "TaskHandler[%s]: restored %d execution record(s) from %s",
+                    self.name, len(records), self._task_runs_file,
+                )
         except Exception:
             # unreadable file → start empty, never crash the handler
             records = []
@@ -2539,9 +2607,11 @@ class TaskHandler:
                 if frame.get("type") != "vibe_check_result":
                     continue
                 if not frame.get("ok"):
+                    # The rule before the window: the error text is the daemon's, and a
+                    # value windowed first cannot match a credential that crosses the cut.
                     self._logger.warning(
                         "TaskHandler[%s]: vibe check error: %s",
-                        self.name, (frame.get("error") or "")[:120],
+                        self.name, redact_prefix(frame.get("error") or "", 120),
                     )
                     return None
                 result = frame.get("result") or {}
@@ -2801,9 +2871,13 @@ class TaskHandler:
                 if isinstance(resp_error, str):
                     error = str(resp_error)
                     end_reason = "server-error"
+                    # The rule, and no window here: this line has always printed the whole
+                    # error, so the only thing added is the credential rule. The same value
+                    # is windowed at the abort line below, which is where the rule's
+                    # windowed form is used.
                     self._logger.warning(
                         "TaskHandler[%s] server error: %s",
-                        self.name, error,
+                        self.name, redact_string(error),
                     )
                     break
 
@@ -2887,7 +2961,7 @@ class TaskHandler:
         if error:
             self._logger.warning(
                 "TaskHandler[%s]: cycle aborted (%s) — not counted as evolution",
-                self.name, error[:200],
+                self.name, redact_prefix(error, 200),
             )
             return end_reason
 

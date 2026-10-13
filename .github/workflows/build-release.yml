@@ -106,13 +106,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # `set -e` is load-bearing: the preflight's exit 2 (not measurable) must fail
-          # this step too, never pass it as "nothing to check".
-          python3 scripts/check-notary-credentials.py || {
-            rc=$?
-            echo "::error::the notarization preflight answered $rc -- 1 means Apple REFUSED these credentials (an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); 2 means the exchange did not complete, so no verdict was reached. Either way this tag cannot publish a macOS product, and the four-platform build would be spent before saying so. Run the same command at home with the same three variables to read Apple's own reply."
-            exit 1
-          }
+          # The preflight asks Apple a question **over the network**, so its exit 2 ("the
+          # exchange did not complete, so no verdict was reached") is also what a transport
+          # answer produces: the exchange's own 60 s bound, an `OSError` running `xcrun`, a
+          # 5xx, a DNS failure. This step is on the build job's path (`build: needs:
+          # [verify-tag, verify-credentials]`, and a failed dependency does not run it), and
+          # `release` needs `build` -- so one such blip skips the build, skips the release,
+          # and leaves the pushed tag with no release at all (issue #2201; the same
+          # consequence issue #2197 removes at the `Staple pkg` step and #2199/#2200 at the
+          # `Notarize pkg` step).
+          #
+          # So a `2` is retried, bounded; a `1` is Apple's verdict on the credential and is
+          # NEVER retried (only a human can change it); and an exchange that stays
+          # unmeasurable through every attempt still fails this step, because "could not
+          # measure" must never read as "nothing to check" -- the retry removes the flake,
+          # never the verdict (the rule PR #2198 states for the sibling step).
+          attempts=3
+          attempt=1
+          while [ "$attempt" -le "$attempts" ]; do
+            rc=0
+            python3 scripts/check-notary-credentials.py || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            if [ "$rc" -eq 1 ]; then
+              echo "::error::the notarization preflight answered 1 -- Apple REFUSED these credentials (an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted). This tag cannot publish a macOS product, and the four-platform build would be spent before saying so. Run the same command at home with the same three variables to read Apple's own reply."
+              exit 1
+            fi
+            if [ "$attempt" -lt "$attempts" ]; then
+              delay=$((attempt * 15))
+              echo "the notarization preflight answered ${rc} on attempt ${attempt}/${attempts} -- the exchange did not reach a verdict, which a transport blip produces; retrying in ${delay}s"
+              sleep "$delay"
+            fi
+            attempt=$((attempt + 1))
+          done
+          echo "::error::the notarization preflight answered ${rc} on every one of ${attempts} attempts -- the exchange never completed, so no verdict was reached (2 is this tool's code for a question it could not answer; 1, Apple's refusal, is reported above without a retry). This tag cannot publish a macOS product, and the four-platform build would be spent before saying so. Run the same command at home with the same three variables to read Apple's own reply."
+          exit 1
 
   build:
     needs: [verify-tag, verify-credentials]
@@ -468,15 +497,108 @@ jobs:
             echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg, and a release missing its macOS product must not be reported as success"
             exit 1
           fi
+          # A non-zero exit from the submit has two shapes and they have different remedies,
+          # so the step must classify before it speaks. (1) Apple ANSWERED and refused -
+          # a credential verdict, never retried. (2) The exchange never completed - a lost
+          # connection or a timeout, where Apple never answered and no credential was judged;
+          # that one is transient and is retried. Measured on tag v0.3.10, run 38353839071:
+          # the sibling `Staple pkg` step lost its connection ~6 s into a ticket call to
+          # api.apple-cloudkit.com and exited 68. Before this, the sentence below called
+          # shape (2) "the SUBMISSION was refused" and sent the reader to check credentials
+          # that were never refused.
+          #
+          # The two predicates are pure bash `case` matches rather than `printf | grep`:
+          # under the job's `-o pipefail`, `grep -q` exiting on its first match can hand the
+          # writer a SIGPIPE and fail the pipeline the caller is branching on.
+          notary_lost_connection() {
+            case "$1" in
+              *NSURLErrorDomain*|*"network connection was lost"*|*"Code=-1005"*|*NSURLErrorTimedOut*|*"Code=-1001"*|*"Could not connect to the server"*)
+                return 0 ;;
+            esac
+            return 1
+          }
+          # Apple returned a submission id, so it accepted the upload - a re-send could
+          # double-submit, which the retry must never do.
+          notary_accepted_an_upload() {
+            case "$1" in
+              *'"id"'*) return 0 ;;
+            esac
+            return 1
+          }
           NOTARY_RC=0
-          NOTARY_OUT="$(xcrun notarytool submit "$PKG" \
-            --apple-id "$APPLE_ID" \
-            --password "$MACOS_NOTARY_APP_PASSWORD" \
-            --team-id "$MACOS_NOTARY_TEAM_ID" \
-            --wait --timeout 20m --output-format json 2>&1)" || NOTARY_RC=$?
-          echo "$NOTARY_OUT"
+          NOTARY_OUT=""
+          # One attempt is one `notarytool submit`. The bound is stated once so the message
+          # below can print the count the loop actually took instead of a literal that goes
+          # stale the moment the bound moves (`Agent.md`: a derived number is never written
+          # where a guard can measure it; issue #2199).
+          ATTEMPTS=3
+          # The third outcome, and the only one this step can reach where the retry is
+          # suppressed: Apple ACCEPTED the upload and returned a submission id, and the wait
+          # then lost the connection. It is neither a refusal nor the transport-exhausted
+          # shape, so the caller has to be able to tell it apart from both - and it must not
+          # be reported with the transport sentence, three of whose clauses are false here
+          # (one submit WAS taken, Apple DID answer, the pkg WAS uploaded).
+          #
+          # A flag beside NOTARY_RC rather than a return code: NOTARY_RC has to keep
+          # reporting the submit's own exit code for the message below, and the caller runs
+          # under the job's `-e`, where a non-zero return from `notary_submit` would abort
+          # the step before it could speak at all.
+          NOTARY_UNREAD_UPLOAD_ID=0
+          # How many `notarytool submit` calls this run took, carried out of the loop for the
+          # same reason `ATTEMPTS` is a variable: `attempt` is `local` to `notary_submit`, so
+          # it is gone by the time the message below runs, and a sentence that states the
+          # count must read it rather than assert a literal. The accepted-upload branch is
+          # reachable on attempt 2, not only on attempt 1 (one attempt may lose the connection
+          # without an id and be retried), so the count is genuinely not always one.
+          NOTARY_SUBMITS_TAKEN=0
+          notary_submit() {
+            local attempt
+            for (( attempt=1; attempt<=ATTEMPTS; attempt++ )); do
+              NOTARY_RC=0
+              NOTARY_OUT="$(xcrun notarytool submit "$PKG" \
+                --apple-id "$APPLE_ID" \
+                --password "$MACOS_NOTARY_APP_PASSWORD" \
+                --team-id "$MACOS_NOTARY_TEAM_ID" \
+                --wait --timeout 20m --output-format json 2>&1)" || NOTARY_RC=$?
+              echo "$NOTARY_OUT"
+              if [ "$NOTARY_RC" -eq 0 ]; then
+                return 0
+              fi
+              if ! notary_lost_connection "$NOTARY_OUT"; then
+                return 0
+              fi
+              if notary_accepted_an_upload "$NOTARY_OUT"; then
+                echo "::warning::the connection was lost after Apple returned a submission id - a credential verdict may still be readable from that submission, so it is NOT re-sent"
+                NOTARY_UNREAD_UPLOAD_ID=1
+                NOTARY_SUBMITS_TAKEN=$attempt
+                return 0
+              fi
+              if [ "$attempt" -lt "$ATTEMPTS" ]; then
+                echo "::warning::the exchange with Apple's notary service did not complete (attempt ${attempt}/${ATTEMPTS}) - retrying in $((attempt * 20))s"
+                sleep $((attempt * 20))
+              fi
+            done
+            return 0
+          }
+          notary_submit
+          if [ "$NOTARY_UNREAD_UPLOAD_ID" -ne 0 ]; then
+            # Measured on this step's own `lost_after_id` arm before this branch existed: the
+            # transport sentence ran here, and it told the operator that "every attempt was
+            # retried (3)" when exactly one was taken (zero sleeps), that "Apple never
+            # answered" when Apple had returned an id and "Successfully uploaded", and that
+            # "nothing was uploaded" when the upload was accepted - contradicting the warning
+            # printed directly above it, which says a verdict "may still be readable from
+            # that submission". Exiting here also keeps the parse below from reporting an
+            # unread verdict as one that failed.
+            echo "::error::xcrun notarytool submit exited $NOTARY_RC after Apple ACCEPTED the upload and returned a submission id (the JSON line above). This is neither a refusal nor the transport-exhausted failure: ${NOTARY_SUBMITS_TAKEN} submit attempt(s) were taken, Apple DID answer the last one, and the pkg WAS uploaded - it is NOT re-sent, because another submit would submit it twice. What was NOT reached is the verdict: the wait then lost the connection, so no credential was judged and no notarization verdict was read. Read that verdict with xcrun notarytool log <the submission id from the line above> --apple-id \"$APPLE_ID\" --team-id \"$MACOS_NOTARY_TEAM_ID\" --password <the app-specific password>, or wait for the submission to finish and then re-run this particular job. The tag need not be re-pushed."
+            exit 1
+          fi
           if [ "$NOTARY_RC" -ne 0 ]; then
-            echo "::error::xcrun notarytool submit exited $NOTARY_RC - the SUBMISSION was refused, so this is not a notarization verdict. Apple's own reply is the output above. Usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement that needs accepting. A verdict failure looks different: it takes minutes, exits 0, and reports status=Invalid. Reproduce it at home before re-tagging, with the same three variables this step sends: APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them, and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
+            if notary_lost_connection "$NOTARY_OUT"; then
+              echo "::error::xcrun notarytool submit exited $NOTARY_RC and the exchange with Apple never completed - the connection was lost, and every attempt was retried (${ATTEMPTS}). This is a TRANSPORT failure, not a refusal and not a notarization verdict: Apple never answered, so no credential was judged and nothing was uploaded. Re-run the release run's failed jobs (gh run rerun <the run id> --failed); the tag need not be re-pushed. If you want the credentials ruled out anyway, ask Apple directly with APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
+            else
+              echo "::error::xcrun notarytool submit exited $NOTARY_RC - the SUBMISSION was refused, so this is not a notarization verdict. Apple's own reply is the output above. Usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement that needs accepting. A verdict failure looks different: it takes minutes, exits 0, and reports status=Invalid. Reproduce it at home before re-tagging, with the same three variables this step sends: APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them, and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
+            fi
           fi
           # 解析提交 ID 与状态（--output-format json 输出 {"id","message","status"}）
           SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
@@ -508,8 +630,38 @@ jobs:
             echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg, and a release missing its macOS product must not be reported as success"
             exit 1
           fi
-          xcrun stapler staple "$PKG"
-          xcrun stapler validate "$PKG"
+          # Both stapler calls fetch/attach Apple's ticket over the network
+          # (api.apple-cloudkit.com), so either can fail for a reason that has nothing to do
+          # with the artifact. A red macOS leg skips `release` (`needs: build`) and leaves a
+          # bare tag, which the upgrade chain cannot see - it reads the releases API only.
+          # Measured 2026-10-13, run 38353839071 (tag v0.3.10): `staple` succeeded, the
+          # following `validate` lost the connection ~6 s in and exited 68, and the release
+          # was lost to a re-run. Retry the transport; a permanent failure still reddens the
+          # step, it just takes a bounded number of attempts (errors below in the log).
+          # `spctl` below is deliberately NOT retried: it is the Gatekeeper acceptance
+          # verdict, not ticket transport, and it is not what failed here.
+          stapler_retry() {
+            local attempt
+            # The bound is stated once, and every sentence below reads it - the last one
+            # included, because a summary printed after `done` is the sentence an operator
+            # triaging a lost release reads (issue #2210). A second copy is a number
+            # nothing measures, and it is the copy that goes stale.
+            # `scripts/check-retry-bounds.py` measures exactly that, over this file.
+            local attempts=5
+            for (( attempt=1; attempt<=attempts; attempt++ )); do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -lt "$attempts" ]; then
+                echo "::warning::$* failed (attempt ${attempt}/${attempts}) - retrying in $((attempt * 15))s"
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "::error::$* failed on all ${attempts} attempts - the last error is above"
+            return 1
+          }
+          stapler_retry xcrun stapler staple "$PKG"
+          stapler_retry xcrun stapler validate "$PKG"
           # P3 终验（rant 验收 + 设计文档 §5.1）：spctl 确认 Gatekeeper 接受
           # （签名 + 公证 + staple 全链路的最终裁决；期望输出 "accepted"）
           # ⚠️ --type install 必需（#477 教训）：spctl 默认类型为 execute，
@@ -611,10 +763,14 @@ jobs:
           n="${#found[@]}"
           api() { gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq "$1"; }
           exists=""
-          for attempt in 1 2 3 4 5 6; do
+          # The bound is stated once and the message reads it (scripts/check-retry-bounds.py):
+          # this step polls for a release the previous job creates, so widening the poll
+          # must move what the log says, not leave a second copy behind (issue #2210).
+          attempts=6
+          for (( attempt=1; attempt<=attempts; attempt++ )); do
             exists="$(api .tag_name 2>/dev/null || true)"
             [ -n "$exists" ] && break
-            echo "the release for ${tag} is not readable yet (attempt ${attempt}/6)"
+            echo "the release for ${tag} is not readable yet (attempt ${attempt}/${attempts})"
             sleep 10
           done
           if [ -z "$exists" ]; then

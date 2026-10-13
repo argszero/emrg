@@ -7,6 +7,7 @@ Config is stored at ~/.emrg/config.toml.
 from __future__ import annotations
 
 import os
+import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -389,17 +390,35 @@ def load_update_config() -> UpdateConfig:
     )
 
 
+#: The mode the config file must have. It holds ``api_key`` in plaintext, so it is private
+#: on the same rule as the daemon's token file (``emrg.server.atomic.atomic_write_bytes``)
+#: and as the GUI's own writer, which states it as ``G69`` — "mode 0o600（含明文 api_key）".
+#: The two writers agreed about the file's content and disagreed about its permissions
+#: (measured 2026-10-12: this function left it ``0644`` under umask 022 while the GUI wrote
+#: ``0o600``), which is the defect this constant closes.
+CONFIG_FILE_MODE = 0o600
+
+
 def ensure_config() -> None:
-    """Create default config file if it doesn't exist.
+    """Create the default config file if it doesn't exist, and keep it private.
 
     The one writer of the config file, and the one open in this module that needs no kind
     guard — measured, not assumed (issue #2103): its first act is the ``exists()`` return
     below, and ``exists()`` is **true** for a FIFO, a socket and a directory alike, so a
     non-regular subject never reaches the ``write_text``. Guarding it would be code no
     reading can reach.
+
+    Two rules, one file. The kind rule is the paragraph above; the **permission** rule is
+    :data:`CONFIG_FILE_MODE`, applied to a file this function creates *and* to one it finds
+    already there — an install made before the rule existed keeps its ``0644`` otherwise,
+    and the plaintext key a user adds to it is readable by every other local user for the
+    life of that install. Tightening a mode is one-way-safe: the owner keeps full access,
+    and nothing reads the mode.
     """
     cfg_path = config_path()
+
     if cfg_path.exists():
+        _make_config_private(cfg_path)
         return
 
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -434,5 +453,40 @@ model = "deepseek-reasoner"
 context_window = 65536
 vision = false
 """, encoding="utf-8")
+    _make_config_private(cfg_path)
     print(f"Default config created at {cfg_path}", file=sys.stderr)
     print("Edit it to set your API key and model.", file=sys.stderr)
+
+
+def _make_config_private(cfg_path: Path) -> None:
+    """Tighten ``cfg_path`` to :data:`CONFIG_FILE_MODE` unless it is already that or narrower.
+
+    Called on both of :func:`ensure_config`'s paths, so a file this function creates and one
+    an earlier install left behind get the same answer. The mode is read first: a file already
+    at the rule, or closed further than it, is left untouched.
+
+    The rule is applied *after* the ``write_text`` rather than by writing through the atomic
+    primitive that owns this mode for the token file. The reason is what the window between
+    the two calls can hold: this function only reaches its create path when no file exists,
+    and what it puts there is the placeholder template — the host's key arrives later, by an
+    edit, when the mode is already the rule. So the gap never holds a secret, and the write
+    the census holds for this module (issue #2103) is the one that stays.
+
+    A failure is swallowed the way every other best-effort mode write in this tree is: on a
+    filesystem that does not carry POSIX modes (a FAT volume, a Windows share) the call
+    either raises or does nothing, and neither is a reason to refuse to start the daemon. The
+    file's *contents* are what the caller came for.
+    """
+    try:
+        current = stat.S_IMODE(cfg_path.stat().st_mode)
+        # `0o077` is the whole test, and the arm in `tests/test_config.py` is what proves it is
+        # doing the work: a file already at `CONFIG_FILE_MODE` carries none of these bits, so
+        # the write is skipped for it without a second branch — and a mode narrower than the
+        # rule (0400, or a set-id bit its owner meant) is left alone, because this function's
+        # job is to close a file to other users, never to open one already shut further.
+        # An equality branch here was written first and **measured redundant**: an arm that
+        # removed it survived every test, which is how the dead line was found (2026-10-12).
+        if current & 0o077:
+            os.chmod(cfg_path, CONFIG_FILE_MODE)
+    except OSError:
+        pass

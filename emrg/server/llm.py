@@ -27,13 +27,15 @@ from emrg.config import LlmConfig
 
 # ── 错误信息脱敏（20260807-0107）────────────────────────────
 # LLM 错误日志/异常可能包含 response headers（set-cookie/auth 回显）与 body
-# （模型回显的密钥/令牌）。复用 daemon._redact_string 的内联凭据遮蔽能力，
-# 避免 emrgd.log / 会话历史泄露。
+# （模型回显的密钥/令牌）。复用 `emrg.server.redaction` 的内联凭据遮蔽能力，
+# 避免 emrgd.log / 会话历史泄露。**要截断的行一律 `_redact_text(text)[:N]`** ——
+# 先过规则再取窗口；`_redact_text(text[:N])` 看不见跨过截断点的凭据，会把它留在明文
+# 里（2026-10-13 实测，见 `emrg.server.redaction.redact_prefix` 的 docstring）。
 def _redact_text(text: str) -> str:
     """遮蔽字符串中的内联凭据（sk-/ghp_/Bearer/JWT/base64-JSON）。"""
     try:
-        from emrg.server.daemon import _redact_string
-        return _redact_string(text)
+        from emrg.server.redaction import redact_string
+        return redact_string(text)
     except Exception:
         return text
 
@@ -602,7 +604,7 @@ class LlmClient:
                     logger.warning(
                         "LLM content-filter refusal %d — re-sending (%s of %d) with %s: %s",
                         resp.status_code, content_risk_stage, len(CONTENT_RISK_LADDER),
-                        CONTENT_RISK_RUNG_DESCRIPTION[rung], _redact_text(text[:200]),
+                        CONTENT_RISK_RUNG_DESCRIPTION[rung], _redact_text(text)[:200],
                     )
                     payload["messages"] = messages
                     self.last_payload = dict(payload)
@@ -610,14 +612,14 @@ class LlmClient:
                 logger.error(
                     "LLM content-filter refusal again after %d retries "
                     "(status=%d): %s", len(CONTENT_RISK_LADDER), resp.status_code,
-                    _redact_text(text[:500]),
+                    _redact_text(text)[:500],
                 )
             if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
                 logger.warning(
                     "LLM transient error %d, retrying in %.1fs (attempt %d/%d): %s",
                     resp.status_code, delay, attempt + 1, MAX_RETRIES,
-                    _redact_text(text[:200]),
+                    _redact_text(text)[:200],
                 )
                 await asyncio.sleep(delay)
                 last_error = RuntimeError(
@@ -715,7 +717,7 @@ class LlmClient:
                         # yielded, so retrying here cannot duplicate streamed content.
                         refusal = (
                             f"LLM stream request failed: {resp.status_code} - "
-                            f"{_redact_text(text[:500])}"
+                            f"{_redact_text(text)[:500]}"
                         )
                         if classify_llm_error(RuntimeError(refusal)) == CONTENT_RISK:
                             nxt = content_risk_retry(content_risk_stage, original_messages)
@@ -728,7 +730,7 @@ class LlmClient:
                                     resp.status_code, content_risk_stage,
                                     len(CONTENT_RISK_LADDER),
                                     CONTENT_RISK_RUNG_DESCRIPTION[rung],
-                                    _redact_text(text[:200]),
+                                    _redact_text(text)[:200],
                                 )
                                 payload["messages"] = messages
                                 self.last_payload = dict(payload)
@@ -736,7 +738,7 @@ class LlmClient:
                             logger.error(
                                 "LLM stream content-filter refusal again after %d "
                                 "retries (status=%d): %s", len(CONTENT_RISK_LADDER),
-                                resp.status_code, _redact_text(text[:500]),
+                                resp.status_code, _redact_text(text)[:500],
                             )
                         if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
                             delay = RETRY_BASE_DELAY * (2 ** attempt)
@@ -744,19 +746,19 @@ class LlmClient:
                                 "LLM stream transient error %d, retrying in %.1fs "
                                 "(attempt %d/%d): %s",
                                 resp.status_code, delay, attempt + 1, MAX_RETRIES,
-                                _redact_text(text[:200]),
+                                _redact_text(text)[:200],
                             )
                             await asyncio.sleep(delay)
                             last_error = RuntimeError(
-                                f"LLM stream request failed: {resp.status_code} - {_redact_text(text[:500])}"
+                                f"LLM stream request failed: {resp.status_code} - {_redact_text(text)[:500]}"
                             )
                             continue
-                        logger.error("LLM stream error: %s %s", resp.status_code, _redact_text(text[:500]))
+                        logger.error("LLM stream error: %s %s", resp.status_code, _redact_text(text)[:500])
                         hdr = _redact_headers(dict(resp.headers))
                         raise RuntimeError(
                             with_content_risk_hint(
                                 f"LLM stream request failed: {resp.status_code} "
-                                f"headers={hdr} body={_redact_text(text[:1000])}"
+                                f"headers={hdr} body={_redact_text(text)[:1000]}"
                             )
                         )
 
@@ -778,7 +780,10 @@ class LlmClient:
                         try:
                             chunk = json.loads(json_str)
                         except json.JSONDecodeError:
-                            logger.debug("SSE parse skip: %s", json_str[:80])
+                            # The rule before the window, the module's own stated convention
+                            # (see `_redact_text`): `json_str` is raw text off the wire, so the
+                            # window must not be the only thing that happens to it.
+                            logger.debug("SSE parse skip: %s", _redact_text(json_str)[:80])
                             continue
 
                         choices = chunk.get("choices", [])

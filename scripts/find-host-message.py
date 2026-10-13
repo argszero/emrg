@@ -59,6 +59,12 @@ Exit codes
 the pattern, and both sources covered the span. ``2`` the question could not be
 answered: no source, or a `--since` older than what either source reaches back to.
 ``2`` is not a ``1``: an unmeasured window is never evidence of absence.
+
+`--measure` answers no pattern: it lists the window's host messages and exits ``0``.
+Asking both at once is therefore an unanswerable question and is refused with ``2``,
+rather than answered by the inventory — which before that refusal printed every
+message and exited ``0`` for a pattern nothing matched, a found verdict for a
+question the caller never asked (issue #2185).
 """
 
 from __future__ import annotations
@@ -73,15 +79,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from emrg.config import logs_dir  # noqa: E402
+from emrg.config import config_dir, logs_dir  # noqa: E402
+from emrg.logfiles import legacy_log_names  # noqa: E402
 
 #: Where the daemon writes its received-message record, and where it keeps the index
 #: of session directories that the second source is read from. The log directory is
 #: read from its one derivation (rant 2026-10-09T14:20:18) rather than spelled here,
 #: so this reader moved with the writers instead of being left pointing at the old
-#: root — which is the failure mode the rant names for every tail-reader.
+#: root — which is the failure mode the rant names for every tail-reader. A host whose
+#: *running* daemon predates that move is covered by `config_root_log_dir()` below.
 DEFAULT_LOG_DIR = logs_dir()
 DEFAULT_INDEX = Path.home() / ".emrg" / "sessions_index.json"
+
+#: The file names this instrument reads, as a prefix: `emrgd.log` and its rotation
+#: backups. Kept in step with `read_log`'s glob by construction — the fallback below
+#: asks the same question the reader does, so a fallback directory that holds no
+#: `emrgd.log*` is not a log directory for this purpose.
+EMRGD_LOG_PREFIX = "emrgd.log"
 
 #: The daemon's line for one received message. The prompt is quoted and may be
 #: followed by the routing note; both the quote and the note are optional in the
@@ -223,6 +237,38 @@ def read_log(log_dir: Path) -> tuple[list[Message], list[Path], str | None, str 
     return messages, files, min(e[0] for e in ends), max(e[1] for e in ends)
 
 
+def config_root_log_dir() -> Path | None:
+    """The config root, when a daemon that predates the log move left its record there.
+
+    Rant 2026-10-09T14:20:18 moved the application-level logs into `logs_dir()` and this
+    reader moved with them. What that leaves uncovered is a host whose **running** daemon
+    predates the move: the new directory holds no `emrgd.log*`, the live log sits in the
+    config root, so the log source contributes nothing — and a message only the log holds
+    (one whose session history was compacted, cleared or lives outside the index) then
+    answers `2` on the one host this instrument exists for. Measured 2026-10-13 on this
+    host, installed build **0.3.9** — which has no `logs_dir()` at all and writes
+    `~/.emrg/emrgd.log`: `emrgd.log` plus `.1`–`.3` in the root, `~/.emrg/logs/emrgd.log*`
+    absent. With an empty session source, `--pattern '说人话'` answered `2`
+    (`the log had nothing to read; session histories had nothing to read`) before this
+    function and `0` after it. The instrument was not wrong about what it read; it was
+    reading the wrong directory.
+
+    The names come from `emrg.logfiles.legacy_log_names()` — the migration's own
+    enumerated list, which is the only exemption `tests/test_app_logs_live_under_logs_dir.py`
+    allows for a root spelling — filtered to the `emrgd.log` ones, because those are
+    exactly what `read_log` globs. A root holding only, say, `emrg-gui.log` is not this
+    question's directory and must not be adopted as if it were.
+
+    `None` when the root holds none of them, so the caller reports the empty default
+    instead of silently reading a directory that has nothing to do with this question.
+    """
+    root = config_dir()
+    if any((root / name).is_file()
+           for name in legacy_log_names() if name.startswith(EMRGD_LOG_PREFIX)):
+        return root
+    return None
+
+
 def read_sessions(
     roots: list[Path],
 ) -> tuple[list[Message], list[Path], str | None, str | None]:
@@ -355,8 +401,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="a regex searched in the recorded text (a plain phrase works)")
     parser.add_argument("--since", default=None,
                         help="ISO date/time; the window the claim is about")
-    parser.add_argument("--log-dir", default=str(DEFAULT_LOG_DIR),
-                        help=f"where emrgd.log* lives (default: {DEFAULT_LOG_DIR})")
+    parser.add_argument("--log-dir", default=None,
+                        help=f"where emrgd.log* lives (default: {DEFAULT_LOG_DIR}, and when "
+                             "that directory holds none, the config root a daemon predating "
+                             "the 2026-10-09 move still writes it in)")
     parser.add_argument("--index", default=str(DEFAULT_INDEX),
                         help=f"the session index to read directories from (default: {DEFAULT_INDEX})")
     parser.add_argument("--sessions", action="append", default=None,
@@ -365,7 +413,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all", action="store_true",
                         help="include scheduled task prompts (default: the host only)")
     parser.add_argument("--measure", action="store_true",
-                        help="print every host message in the window instead of a verdict")
+                        help="print every host message in the window instead of a verdict "
+                             "(takes no --pattern)")
     args = parser.parse_args(argv)
 
     since = None
@@ -379,8 +428,34 @@ def main(argv: list[str] | None = None) -> int:
                   "use YYYY-MM-DD (or YYYY-MM-DD HH:MM[:SS]), zero-padded",
                   file=sys.stderr)
             return 2
-    log_dir = Path(args.log_dir)
+
+    if args.measure and args.pattern:
+        # Two questions, and the flags used together answered neither: the inventory
+        # compiled its own pattern (`re.compile(".*")`) and returned 0 whatever
+        # `--pattern` was, so a caller reaching for the mode that prints messages in
+        # full got a *found* verdict for a question it had not asked. Measured
+        # 2026-10-13: an absent pattern printed 8,202 rows and exited 0, where the
+        # same pattern alone answered 2 (the log directory it reads holds no file).
+        # Refused rather than resolved - an inventory has no pattern to answer.
+        print("unmeasurable: --measure prints the inventory and answers no --pattern; "
+              "ask one of the two, because an inventory exits 0 whatever the pattern is",
+              file=sys.stderr)
+        return 2
+
+    # A caller who names a directory gets exactly that directory, empty or not: `--log-dir`
+    # answers "read this file", and second-guessing it would make the instrument's own
+    # explicit argument unreliable. The fallback exists only for the default, where the
+    # question is "where is this host's log". `config_root_log_dir()` resolves the config
+    # root through `config_dir()` at call time, so a test's stubbed home is honoured.
+    log_dir = Path(args.log_dir) if args.log_dir else Path(DEFAULT_LOG_DIR)
     log_messages, log_files, log_oldest, log_newest = read_log(log_dir)
+    fell_back = False
+    if args.log_dir is None and not log_files:
+        root = config_root_log_dir()
+        if root is not None:
+            log_dir = root
+            fell_back = True
+            log_messages, log_files, log_oldest, log_newest = read_log(log_dir)
 
     if args.sessions:
         roots = [Path(p) for p in args.sessions]
@@ -391,8 +466,14 @@ def main(argv: list[str] | None = None) -> int:
             roots.extend(p for p in here.iterdir() if p.is_dir() and p not in roots)
     session_messages, session_dirs, ses_oldest, ses_newest = read_sessions(roots)
 
+    note = (
+        f" [not {DEFAULT_LOG_DIR}: it holds no emrgd.log*, and this host's daemon "
+        "predates the 2026-10-09 log move]"
+        if fell_back
+        else ""
+    )
     print(f"log: {log_dir} ({len(log_files)} file(s), "
-          f"{log_oldest or 'none'} -> {log_newest or 'none'})")
+          f"{log_oldest or 'none'} -> {log_newest or 'none'}){note}")
     print(f"sessions: {len(session_dirs)} dir(s) with a history, "
           f"{ses_oldest or 'none'} -> {ses_newest or 'none'}")
     if since:

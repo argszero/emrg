@@ -17,6 +17,7 @@ const { generateSessionId, SESSION_ID_RE } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
 const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = require("./gui-state");
 const { externalNavPolicy } = require("./nav-policy");
+const { makeConfigPrivate } = require("./config_mode");
 const APP_VERSION = require("./package.json").version;
 
 // issue #1100 加固：导航策略只放行应用自身 renderer dist 前缀内的 file:// URL
@@ -269,6 +270,10 @@ vision = false
     // G69：mode 0o600（含明文 api_key）
     fs.mkdirSync(path.dirname(configPath()), { recursive: true });
     fs.writeFileSync(configPath(), stringifyToml(toml), { mode: 0o600 });
+    // `mode` above applies only when the file is CREATED, so the rule is not stated by it for a
+    // file an earlier install left at 0644 — measured, and issue #2148 is the reading. The
+    // module carries the rule for both cases (creation is already covered by the option).
+    makeConfigPrivate(configPath());
   }
 
   function isKeyConfigured(key) {

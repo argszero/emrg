@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -94,10 +95,11 @@ def sources(tmp_path: Path) -> dict:
     return {"log_dir": log_dir, "sessions": sessions}
 
 
-def run(args: list[str]) -> subprocess.CompletedProcess:
+def run(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        env=env,
     )
 
 
@@ -239,6 +241,138 @@ class TestTheThreeStates:
         assert "NOT FOUND" in done.stdout
 
 
+class TestTheDefaultLogDirectory:
+    """The default must be where this host's daemon actually writes, not where master does.
+
+    Rant 2026-10-09T14:20:18 moved the application-level logs into
+    `emrg.config.logs_dir()` and this reader moved with them — correctly, and it left one
+    host uncovered: the host whose **running** daemon predates the move. Measured
+    2026-10-13 on this host, installed build **0.3.9** (it has no `logs_dir()` at all and
+    writes `~/.emrg/emrgd.log`): `~/.emrg/logs/` held no `emrgd.log*` while
+    `~/.emrg/emrgd.log` plus `.1`–`.3` were being written. The log source therefore
+    contributed nothing, and a message only the log holds — one whose session history was
+    compacted or lives outside the index — answered `2`. Same host, same command: with an
+    empty session source, `--pattern '说人话'` answered `2` ("the log had nothing to read;
+    session histories had nothing to read") before the fallback and `0` after it.
+
+    A wrong directory is not a small error here: `2` is "nothing was measured", which R7
+    distinguishes from `1` precisely so that a blind instrument is not mistaken for an
+    answered question. Both directions are pinned below, and so is the boundary — a named
+    `--log-dir` is never second-guessed, and a root holding no `emrgd.log*` is not adopted.
+    """
+
+    @staticmethod
+    def _stub_home(tmp_path: Path) -> dict[str, str]:
+        """A home under which `logs_dir()` and `config_dir()` both resolve to `tmp_path`.
+
+        Both spellings are set because `Path.home()` is `os.path.expanduser("~")`
+        underneath, and Windows' `ntpath` reads `USERPROFILE` while POSIX reads `HOME` —
+        a test that set one would silently exercise the real home on the other.
+        """
+        return {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+
+    @staticmethod
+    def _no_sessions(tmp_path: Path) -> str:
+        """An empty session source, so the verdict is about the log and nothing else."""
+        empty = tmp_path / "no-sessions"
+        empty.mkdir(exist_ok=True)
+        return str(empty)
+
+    def test_the_root_is_read_when_the_moved_directory_holds_no_log(self, tmp_path):
+        root = tmp_path / ".emrg"
+        root.mkdir()
+        (root / "emrgd.log").write_text(
+            "\n".join([
+                "2026-10-09 00:00:00 [DEBUG] [-] [-] emrg.server.daemon: starting up",
+                host_line("2026-10-10 10:00:00", "sess-a", "the root only thing the host said"),
+                "2026-10-11 00:00:00 [DEBUG] [-] [-] emrg.server.daemon: still running",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        done = run(["--pattern", "the root only thing",
+                    "--sessions", self._no_sessions(tmp_path)],
+                   env=self._stub_home(tmp_path))
+
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert str(root) in done.stdout, done.stdout
+        assert "predates the 2026-10-09 log move" in done.stdout, (
+            "the reader must say which directory it fell back to and why, or the log line "
+            "it prints names a place the reader did not expect: " + done.stdout
+        )
+
+    def test_the_moved_directory_wins_when_it_has_the_log(self, tmp_path):
+        """The control for the fallback: a root copy is not read *in addition*.
+
+        Both directories hold a log with its own message, and only the moved one exists
+        for a daemon that has already been upgraded. Reading the root as well would find
+        the stale copy — the fallback is a default, not a merge.
+        """
+        root = tmp_path / ".emrg"
+        (root / "logs").mkdir(parents=True)
+        (root / "emrgd.log").write_text(
+            host_line("2026-10-10 10:00:00", "sess-a", "the stale root copy only") + "\n",
+            encoding="utf-8",
+        )
+        (root / "logs" / "emrgd.log").write_text(
+            host_line("2026-10-10 11:00:00", "sess-a", "the live moved copy only") + "\n",
+            encoding="utf-8",
+        )
+        env = self._stub_home(tmp_path)
+        sessions = self._no_sessions(tmp_path)
+
+        live = run(["--pattern", "the live moved copy only", "--sessions", sessions], env=env)
+        assert live.returncode == 0, live.stdout + live.stderr
+        assert "predates the 2026-10-09 log move" not in live.stdout, (
+            "the moved directory is the default and the root copy was not needed: "
+            + live.stdout
+        )
+
+        stale = run(["--pattern", "the stale root copy only", "--sessions", sessions], env=env)
+        assert stale.returncode == 2, stale.stdout + stale.stderr
+        assert "the stale root copy only" not in stale.stdout, (
+            "the root's copy was read as a second source; the fallback must be a default, "
+            "never a merge: " + stale.stdout
+        )
+
+    def test_a_named_directory_is_never_second_guessed(self, tmp_path):
+        """`--log-dir` answers "read this file": the fallback is for the default only."""
+        root = tmp_path / ".emrg"
+        root.mkdir()
+        (root / "emrgd.log").write_text(
+            host_line("2026-10-10 10:00:00", "sess-a", "the root only thing the host said") + "\n",
+            encoding="utf-8",
+        )
+        named = tmp_path / "named"
+        named.mkdir()
+
+        done = run(["--log-dir", str(named), "--pattern", "the root only thing",
+                    "--sessions", self._no_sessions(tmp_path)],
+                   env=self._stub_home(tmp_path))
+
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "unmeasurable" in done.stderr
+        assert "predates the 2026-10-09 log move" not in done.stdout
+
+    def test_a_root_with_no_daemon_log_is_not_adopted(self, tmp_path):
+        """A root log name that is not the one this reader reads is not this question.
+
+        `emrg-gui.log` is in the migration list and in the config root for plenty of
+        hosts, and adopting the root on its strength would print a fallback note about a
+        directory that holds nothing the reader globs.
+        """
+        root = tmp_path / ".emrg"
+        root.mkdir()
+        (root / "emrg-gui.log").write_text("a gui log, not the daemon's record\n", encoding="utf-8")
+
+        done = run(["--pattern", "anything at all",
+                    "--sessions", self._no_sessions(tmp_path)],
+                   env=self._stub_home(tmp_path))
+
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "predates the 2026-10-09 log move" not in done.stdout, done.stdout
+
+
 class TestTheInventory:
     def test_measure_lists_host_messages_and_not_prompts(self, sources):
         done = run(["--measure", *both(sources)])
@@ -246,6 +380,32 @@ class TestTheInventory:
         assert "host message(s)" in done.stdout
         assert "the first thing the host said" in done.stdout
         assert "## Evolution Cycle" not in done.stdout
+
+    def test_measure_refuses_a_pattern_instead_of_answering_it_with_a_zero(self, sources):
+        """`--measure` answers no pattern, so asking both is an unanswerable question.
+
+        Before the refusal the inventory compiled its own `.*` and returned 0 whatever
+        `--pattern` was — measured on this host 2026-10-13, an absent pattern printed
+        8,202 rows and exited 0, a *found* verdict for a question never asked. Exit 0 is
+        the value the host-attribution rule reads as "the message is there", so the
+        combination has to refuse rather than list.
+        """
+        absent = "ZXQ-not-present-ZXQ"
+        done = run(["--pattern", absent, "--measure", *both(sources)])
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert "unmeasurable" in done.stderr
+        assert "--measure" in done.stderr and "--pattern" in done.stderr
+        assert "host message(s)" not in done.stdout, (
+            "the inventory ran anyway, and its exit 0 is what read as a found verdict"
+        )
+        assert "FOUND" not in done.stdout
+
+        # The control: the refusal is about the *combination*. The same absent pattern,
+        # asked as a pattern, still gets its own answer over the fixture's covered span -
+        # which is what the combination used to override with a 0.
+        alone = run(["--pattern", absent, *both(sources)])
+        assert alone.returncode == 1, alone.stdout + alone.stderr
+        assert "NOT FOUND" in alone.stdout
 
 
 class TestTheTemplateCarriesTheStep:

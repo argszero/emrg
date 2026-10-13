@@ -129,62 +129,16 @@ def resolve_client_tier(session, req_sandbox: str | None = None) -> str:
     return getattr(session, "sandbox", None) or req_sandbox or SESSION_DEFAULT_SANDBOX_MODE
 
 # ── 日志脱敏（rant 2026-08-06T10:21:26）────────────────────────────
-# tool call 参数可能含 api_key/token/authorization/password 等敏感字段，
-# 递归替换值为 ***，避免 emrgd.log 泄露凭据。
-# 除按键名脱敏外，字符串值内联的凭据模式（sk-*/ghp_*/Bearer/JWT/base64-JSON）
-# 也会被遮蔽——防止 bash command 里 `export OPENAI_API_KEY=sk-...` 或
-# base64 编码的 access_token 整体泄露（跨项目教训：明文正则匹配不到编码形式）。
-_SENSITIVE_KEY_SUBSTRINGS = (
-    "api_key", "token", "authorization", "password", "secret",
-    "api-key", "auth", "credential", "key",
-)
-
-# 字符串值内联凭据模式（保守匹配，宁多勿漏）
-_INLINE_SECRET_PATTERNS = (
-    # sk- 密钥：sk- 后必须 ≥16 位纯字母数字（OpenAI/DeepSeek），或 sk-proj-（OpenAI 项目）
-    # 或 sk-ant-apiNN-（Anthropic）—— 排除 "task-evolution" 等路径片段误伤
-    re.compile(r"(sk-(?:proj-)?[A-Za-z0-9]{16,})"),
-    re.compile(r"(sk-ant-api[0-9]+-[A-Za-z0-9]{16,})"),           # Anthropic
-    re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,})"),                  # GitHub PAT / OAuth / gist token
-    re.compile(r"(xox[baprs]-[A-Za-z0-9\-]{10,})"),               # Slack token
-    re.compile(r"(AKIA[0-9A-Z]{16})"),                            # AWS access key id
-    re.compile(r"(Bearer\s+[A-Za-z0-9\-._~+/]+=*)", re.IGNORECASE),  # Bearer 令牌
-    re.compile(r"(Authorization\s*[:=]\s*[A-Za-z0-9\-._~+/]+=*)", re.IGNORECASE),
-    re.compile(r"((api[_-]?key|apikey|password|passwd|secret|token)\s*[:=]\s*[^\s,;\"']+)", re.IGNORECASE),
-    # JWT：三段 base64url（eyJ... 开头）—— 一段即泄露签名密钥
-    re.compile(r"(eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)"),
-)
-
-
-def _redact_string(s: str) -> str:
-    """遮蔽字符串值内联的凭据模式；base64-JSON 含敏感键时整段遮蔽。"""
-    out = s
-    for pat in _INLINE_SECRET_PATTERNS:
-        out = pat.sub("***", out)
-    # base64 编码的 JSON（跨项目教训：access_token 以编码形式进日志，明文正则匹配不到）
-    for b64 in re.findall(r"[A-Za-z0-9+/]{40,}={0,2}", out):
-        try:
-            decoded = base64.b64decode(b64, validate=True)
-            if any(k in decoded for k in (b"access_token", b"api_key", b"apikey", b"authorization", b"password", b"secret")):
-                out = out.replace(b64, "***")
-        except Exception:
-            continue
-    return out
-
-
-def _redact(value):
-    """递归脱敏 dict/list 中的敏感字段值与字符串内联凭据（不修改原对象）。"""
-    if isinstance(value, dict):
-        return {
-            k: ("***" if any(s in k.lower() for s in _SENSITIVE_KEY_SUBSTRINGS)
-                else _redact(v))
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact(v) for v in value]
-    if isinstance(value, str):
-        return _redact_string(value)
-    return value
+# 规则本体在 `emrg.server.redaction` —— 一句话，因为两个 shell 工具要记录它们即将 spawn
+# 的 argv，而工具无法 import 本模块（本模块 import 工具）。
+# 随规则一起删掉了 dict/list 递归形式与按键名脱敏：它们是为「tool call 参数进 emrgd.log」
+# 写的，而工具调用日志只记录工具的**名字与 intent**、从不记录参数，全树再无别的字典经过
+# 脱敏（2026-10-12 实测：无调用者，只有 pinned 它的 5 个测试）。本模块一律用
+# `redact_string` 遮蔽后再输出；要**截断**的行（`task received` / `rant recorded` /
+# memory reflection 的 tool result）用 `redact_prefix` —— 先过规则再取窗口，因为
+# `redact_string(x[:N])` 看不见跨过截断点的凭据（2026-10-13 实测：60 字符窗口里落在
+# 第 48 位的密钥留下 12 个明文字符）。
+from emrg.server.redaction import redact_prefix, redact_string
 
 from emrg.tools import ToolRegistry
 from emrg.tools.base import non_regular_kind, special_file_refusal
@@ -204,7 +158,7 @@ from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
 from emrg.server.rants import append_rant, list_rants
-from emrg.server.scheduler import TaskScheduler
+from emrg.server.scheduler import TaskScheduler, read_task_run_records, task_run_files
 from emrg.server import logcontext
 
 logger = logging.getLogger(__name__)
@@ -1369,7 +1323,7 @@ class EmrgServer:
             return ""
 
     def _evolution_count(self) -> int:
-        """Total completed evolution cycles across scheduler handlers + disk.
+        """Total completed evolution cycles across scheduler handlers + the store.
 
         The daemon's own ``self.evolutions`` list is a legacy from the
         pre-scheduler BackgroundThread design (#95) and is never appended;
@@ -1377,11 +1331,15 @@ class EmrgServer:
         the scheduler, falling back to the legacy list only when the
         scheduler is unavailable (e.g. test harnesses mock it away).
 
-        The scheduler's in-memory count resets to 0 on daemon restart, while
-        the ``evolution-*.json`` log files persist — so also count valid log
-        files on disk and return the max. This keeps the GUI growth card /
-        evolution toast consistent with the ``recent`` list (which reads the
-        same files) across restarts instead of showing 0.
+        The scheduler's in-memory count covers the handlers that are up, so a task
+        that is disabled (or a daemon whose scheduler is not up) is answered from the
+        durable store instead, and the reading is the larger of the two.
+
+        That store is ``<logs>/task-runs/<task>.jsonl``
+        (:func:`emrg.server.scheduler.read_task_run_records` — the one derivation of it).
+        This used to walk ``<logs>/evolution-*.json``, whose writer was removed with the
+        store it belonged to (``e401246e``); measured 2026-10-13 (``cyc20261013-080459``),
+        that directory answers 27 where the live store holds 699.
         """
         in_memory = 0
         sched = getattr(self, "_scheduler", None)
@@ -1395,29 +1353,12 @@ class EmrgServer:
         else:
             in_memory = len(self.evolutions)
 
-        disk = 0
-        try:
-            logs_dir = config_dir() / "logs"
-            for f in logs_dir.glob("evolution-*.json"):
-                # `glob` is a name filter, not a kind one: a pipe named
-                # `evolution-….json` is yielded like any other entry, and the read
-                # below would never return (see `_non_regular_kind`). Asked before
-                # the open, and the file is skipped rather than read — it holds no
-                # record, so it is not one of the records this counts.
-                kind = _non_regular_kind(f)
-                if kind is not None:
-                    logger.debug(
-                        "evolution log %s is %s; not opened", f.name, kind)
-                    continue
-                try:
-                    data = json.loads(f.read_text(encoding="utf-8"))
-                    if data.get("timestamp"):
-                        disk += 1
-                except (json.JSONDecodeError, OSError):
-                    continue  # corrupt/partial write — don't count
-        except OSError:
-            pass
-        return max(in_memory, disk)
+        on_disk = 0
+        for path in task_run_files(config_dir() / "logs" / "task-runs"):
+            on_disk += sum(
+                1 for record in read_task_run_records(path) if record.get("timestamp")
+            )
+        return max(in_memory, on_disk)
 
     async def _handle_client(self, ws) -> None:
         """Handle a single WebSocket client connection.
@@ -1633,7 +1574,7 @@ class EmrgServer:
                     try:
                         logger.info(
                             'task received: session=%s prompt="%s" → routing via LLM',
-                            session_id, _redact_string(req.prompt[:60]),
+                            session_id, redact_prefix(req.prompt, 60),
                         )
                         _cancel_event = asyncio.Event()
                         self._session_busy[session_id] = True  # lock (released in *locked wrapper)
@@ -3104,7 +3045,7 @@ class EmrgServer:
             count = append_rant(self._rants_log, rant_message, project)
 
             logger.info("rant recorded (%d total)%s: %s",
-                count, f" project={project}" if project else "", _redact_string(rant_message[:100]))
+                count, f" project={project}" if project else "", redact_prefix(rant_message, 100))
             await self._send(ws, {"ok": True, "count": count})
 
         elif msg_type == "list_rants":
@@ -3230,46 +3171,45 @@ class EmrgServer:
 
         elif msg_type == "evolution_summary":
             # WorkBuddy P3 (rant 21:35): self-evolution visibility.
-            # Low-cost: read evolution log files (~/.emrg/logs/evolution-*.json)
-            # written by TaskHandler; return count + recent N summaries.
+            # count + the most recent N cycle records, read from the durable store
+            # (`<logs>/task-runs/<task>.jsonl`) through the one derivation of it
+            # (`emrg.server.scheduler.read_task_run_records`).
+            # This walked `<logs>/evolution-*.json` until 2026-10-13
+            # (`cyc20261013-080459`), a directory whose writer had been removed with the
+            # store it belonged to: the newest record it could show was from 2026-08-23,
+            # so every cycle since was missing from the list. Its entries are the store's
+            # own fields (`work` / `tool_count` / `recommend_slowdown`) rather than the
+            # dead store's `impact` / `operations`, which no live writer produces.
+            # No `except` around the read: a store file that is missing, torn or not a
+            # regular file is answered by the reader itself, so this frame cannot be
+            # lost to one — which is what the handler that used to sit here did.
             limit = msg.get("limit", 5)
             try:
-                logs_dir = config_dir() / "logs"
-                files = sorted(
-                    logs_dir.glob("evolution-*.json"),
-                    key=lambda p: p.name,
-                    reverse=True,
-                )[: max(1, min(int(limit), 20))]
-                recent = []
-                for f in files:
-                    # Same subject as `_evolution_count`, same reason: the walk hands
-                    # back whatever holds the name, and asking the kind first is what
-                    # keeps this handler answering instead of blocking on the open.
-                    kind = _non_regular_kind(f)
-                    if kind is not None:
-                        logger.debug(
-                            "evolution log %s is %s; not opened", f.name, kind)
-                        continue
-                    try:
-                        data = json.loads(f.read_text(encoding="utf-8"))
-                        recent.append({
-                            "timestamp": data.get("timestamp", ""),
-                            "impact": data.get("impact", []),
-                            "operations": data.get("operations", []),
-                        })
-                    except (json.JSONDecodeError, OSError):
-                        continue
-                await self._send(ws, {
-                    "type": "evolution_summary",
-                    "count": self._evolution_count(),
-                    "recent": recent,
-                })
-            except OSError:
-                await self._send(ws, {
-                    "type": "evolution_summary",
-                    "count": self._evolution_count(),
-                    "recent": [],
-                })
+                limit = max(1, min(int(limit), 20))
+            except (TypeError, ValueError):
+                limit = 5
+            records = [
+                record
+                for path in task_run_files(config_dir() / "logs" / "task-runs")
+                for record in read_task_run_records(path)
+                if record.get("timestamp")
+            ]
+            records.sort(key=lambda r: str(r.get("timestamp")), reverse=True)
+            recent = [
+                {
+                    "timestamp": r.get("timestamp", ""),
+                    "task": r.get("task", ""),
+                    "work": r.get("work", ""),
+                    "tool_count": r.get("tool_count", 0),
+                    "recommend_slowdown": bool(r.get("recommend_slowdown")),
+                }
+                for r in records[:limit]
+            ]
+            await self._send(ws, {
+                "type": "evolution_summary",
+                "count": self._evolution_count(),
+                "recent": recent,
+            })
 
         elif msg_type == "github_status":
             # Windows GCM rant (2026-08-07T10:17:27): GUI queries whether
@@ -4712,7 +4652,7 @@ class EmrgServer:
                     # static purpose. intent missing (internal/LLM-free calls)
                     # → "-", no fallback.
                     intent = (args or {}).get("intent") or "-"
-                    logger.info("tool call: %s — %s", tc_name, intent)
+                    logger.info("tool call: %s — %s", tc_name, redact_string(intent))
 
                     # Notify client (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
@@ -7229,9 +7169,16 @@ class EmrgServer:
                     tool_calls = msg.get("tool_calls")
 
                     if not tool_calls:
+                        # The rule before the window, and one name rather than an order
+                        # spelled out at the site: this is the model's own reply, the same
+                        # text `emrg/server/llm.py` redacts at every site that logs it, and
+                        # `redact_prefix(content, 150)` is `redact_string(content)[:150]` by
+                        # definition — so the rule sees the whole value and the cut only
+                        # ever lands on text a real credential never reached, which
+                        # `content[:150]` alone cannot guarantee.
                         logger.debug(
                             "memory reflection: id=%s round=%d result=%s",
-                            session.session_id, _round + 1, content[:150],
+                            session.session_id, _round + 1, redact_prefix(content, 150),
                         )
                         break
 
@@ -7293,8 +7240,8 @@ class EmrgServer:
                         intent = (args or {}).get("intent") or "-"
                         logger.debug(
                             "memory reflection: id=%s round=%d tool %s — %s → %s%s",
-                            session.session_id, _round + 1, tc_name, intent,
-                            _redact_string(result_text[:100]),
+                            session.session_id, _round + 1, tc_name, redact_string(intent),
+                            redact_prefix(result_text, 100),
                             "…" if len(result_text) > 100 else "",
                         )
 

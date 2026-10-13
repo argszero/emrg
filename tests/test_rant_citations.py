@@ -29,6 +29,7 @@ import importlib.util
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -418,6 +419,12 @@ def test_the_two_omissions_compound_and_the_file_list_alone_moves_nothing(mod, m
     file-list reading (`missing_templates`) cannot find this on its own - which is why
     both halves are one change. The delta is pinned rather than described, so narrowing
     either half later is not mistaken for an unrelated count change.
+
+    The delta moved 4 -> 5 on 2026-10-13 (master `8011295d`): `system.j2` gained a bare
+    `host, <ts>` citation when the plain-language block landed (issue #2171), and it is
+    the first bare-`host` site outside `competition_prompt.md`. The historical claim
+    stays true of the four, so the split is pinned per file rather than as a total: the
+    file that `missing_templates` could not find on its own is still the one with four.
     """
     sites, _ = mod.scan_tree(REPO_ROOT)
     monkeypatch.setattr(
@@ -426,13 +433,18 @@ def test_the_two_omissions_compound_and_the_file_list_alone_moves_nothing(mod, m
                    r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)"),
     )
     without_host_word, _ = mod.scan_tree(REPO_ROOT)
-    assert len(without_host_word) == len(sites) - 4
+    assert len(without_host_word) == len(sites) - 5
     hidden = {(s.path, tuple(s.timestamps)) for s in without_host_word}
-    assert all(
-        s.path.endswith("competition_prompt.md")
-        for s in sites
-        if (s.path, tuple(s.timestamps)) not in hidden
-    ), "the four sites the bare spelling hides do not all live in the newly-listed file"
+    per_file = Counter(
+        s.path for s in sites if (s.path, tuple(s.timestamps)) not in hidden
+    )
+    assert per_file == Counter(
+        {"emrg/server/competition_prompt.md": 4, "emrg/server/prompts/system.j2": 1}
+    ), (
+        "the bare `host, <ts>` spelling hides a different set than it used to: "
+        f"{dict(per_file)} — four in the file this test was written for, one in `system.j2` "
+        "since the plain-language block landed"
+    )
 
 
 def test_a_template_outside_the_class_is_reported(mod, tmp_path):

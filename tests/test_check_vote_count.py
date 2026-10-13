@@ -2304,6 +2304,30 @@ def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_pa
     assert "inside the window" not in out, out
 
 
+def test_the_void_reason_names_the_window_it_inferred_and_its_blind_spot(mod, tmp_path):
+    """Issue #2214 at the counter: same clause, same reader, one more carrier.
+
+    This counter has no `--prev-cycle`, so every window it draws is *inferred* from the
+    records - the state the note describes is not an option here but the only case. It
+    matters because the output is a count a cycle acts on: a window too wide voids a vote
+    that stands and reports `0/3` where the clause's own boundary reports `1/3`, and the
+    merge decision follows the count. The instant is named so the width is inspectable
+    rather than taken on trust.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "cycle-20260911-090000.md").write_text("x", encoding="utf-8")
+    counted, why = mod.own_head_window(
+        "cyc20260911-100000",
+        push_time=_push(2026, 9, 11, 9, 30),
+        push_time_exact=True,
+        cycles_log=str(corpus),
+    )
+    assert counted is True, why
+    assert "at or after 2026-09-11T09:00:00" in why, why
+    assert "issue #2214" in why, why
+
+
 def test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window(
     mod, monkeypatch, capsys
 ):

@@ -14,7 +14,9 @@
  * - turn 生命周期广播（rant 2026-09-30T09:47:11）：turn_start/turn_end 转发到
  *   渲染层而非落进兜底；兜底日志以 `type=` 开头（可 grep 计数）
  * - 命令-响应配对（G93+G103）：配对 resolve / 超时 reject / error FIFO reject /
- *   无未决 error → 广播事件
+ *   无未决 error → 广播
+ * - 同类型并发命令（measured 2026-10-13）：两条同类型命令各配一帧都兑现；超时只清掉
+ *   自己那条；error 帧 reject 同类型里最早的一条事件
  * - 分组生命周期（G83+G104）：tool_start/delta 建组 → done 清理；>20 丢最老
  * - 断连 pending 请求 reject（G89/G90）
  * - generateSessionId 格式 + 碰撞兜底（G28+G81）
@@ -813,6 +815,172 @@ test("rant 2026-10-09T09:43:39：sandbox_roots 帧转发（GUI 的额外可写�
   assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
 });
 
+test("issue #2189：task_queued / steer_committed 帧转发（GUI 的排队提示与待重发表释放）", async () => {
+  // 与 turn_start / sandbox_roots 同一个形状的缝：daemon 广播、渲染层有 case、
+  // 中间层把它丢进兜底。渲染层 daemonBridge.ts 的 `case "task_queued"`（排队提示）
+  // 与 `case "steer_committed"`（从待重发表移除已注入的请求）都靠这一层转发才拿得到帧
+  // （TUI 同款在 app.py:1345/:1353），而兜底只记日志、不发事件 —— 排队提示永不出现，
+  // 待重发表永不释放。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ type: "task_queued", request_id: "r1", session_id: "s1", position: 2 });
+  send({ type: "steer_committed", request_id: "r1", session_id: "s1", timestamp: "2026-10-13T00:40:00" });
+
+  // ① 按原名转发 —— 渲染层 switch 的就是这两个名字
+  assert.deepStrictEqual(seen.map(([t]) => t), ["task_queued", "steer_committed"]);
+  // ② 负载原样带过去：排队位置与请求 id 由渲染层读，中间层不二次解释
+  assert.strictEqual(seen[0][1].position, 2);
+  assert.strictEqual(seen[0][1].request_id, "r1");
+  assert.strictEqual(seen[1][1].request_id, "r1");
+  // ③ 不再落入兜底（「只记日志、不发事件」正是本 bug 的形状）
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
+test("issue #2189 续：queued_requeue / queued_cancelled 帧转发（GUI 的排队重发与作废）", async () => {
+  // 与上面 task_queued / steer_committed 同一条缝的第三对。daemon 的队列排空契约
+  // `_broadcast` 这两个帧（`daemon.py:3873` 干净收尾带 `request_ids`；`:3879` 取消 /
+  // 出错 / 断连；`clear_session` / `delete_session` 各一次，`:3270` / `:3305`），
+  // 渲染层两个 `case` 都在（`daemonBridge.ts:696` / `:701`）：前者按 `request_ids`
+  // 重发本地待发表，后者清空待发表并提示「排队消息已取消」。中间层此前不认这两个
+  // 名字，它们落进兜底 —— 于是 GUI 排队的消息永不重发、也不作废。
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ type: "queued_requeue", session_id: "s1", request_ids: ["r1", "r2"] });
+  send({ type: "queued_cancelled", session_id: "s1" });
+
+  // ① 按原名转发 —— 渲染层 switch 的就是这两个名字
+  assert.deepStrictEqual(seen.map(([t]) => t), ["queued_requeue", "queued_cancelled"]);
+  // ② 负载原样带过去：重发的是哪些请求由渲染层按 request_ids 决定，中间层不筛选
+  assert.deepStrictEqual(seen[0][1].request_ids, ["r1", "r2"]);
+  assert.strictEqual(seen[0][1].session_id, "s1");
+  // ③ 不再落入兜底（「只记日志、不发事件」正是本 bug 的形状）
+  assert.deepStrictEqual(warned.filter((m) => m.includes("unknown frame")), []);
+});
+
+// ── `_broadcast` 载荷的切分与类型推导 ────────────────────────
+// 从生产者读：把 `daemon.py` 里每个 `_broadcast(...)` 调用的实参列表原样切出来，
+// 再从里面取 `type`。**切分必须按括号配平**，不能用「不含花括号的段」那种正则：
+// `\{([^{}]*)\}` 在载荷里第一个 `{` 就停（f-string 替换字段、嵌套字典都算），
+// 实测漏掉 5 个（共 35 个）调用点 —— 而漏掉的正是这条守卫声称覆盖的对象。
+function broadcastPayloads(daemonPy) {
+  const out = [];
+  const re = /_broadcast\(/g;
+  let m;
+  while ((m = re.exec(daemonPy)) !== null) {
+    const before = daemonPy.slice(Math.max(0, m.index - 20), m.index);
+    if (/(async\s+)?def\s+$/.test(before)) continue; // 方法自身的签名不是调用
+    let depth = 0;
+    let j = m.index + m[0].length - 1; // 指向 '('
+    for (; j < daemonPy.length; j += 1) {
+      const c = daemonPy[j];
+      if (c === "(") depth += 1;
+      else if (c === ")") {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    out.push(daemonPy.slice(m.index, j + 1));
+  }
+  return out;
+}
+
+// `_broadcast(` 的出现次数，减去方法签名那一处 —— 切分结果的条数必须等于它。
+function broadcastCallCount(daemonPy) {
+  const all = (daemonPy.match(/_broadcast\(/g) || []).length;
+  const defs = (daemonPy.match(/(async\s+)?def\s+_broadcast\s*\(/g) || []).length;
+  return all - defs;
+}
+
+function broadcastFrameTypes(daemonPy) {
+  const types = new Set();
+  for (const source of broadcastPayloads(daemonPy)) {
+    const t = /"type":\s*f?"([a-z_]+)"/.exec(source);
+    if (t) types.add(t[1]);
+  }
+  return types;
+}
+
+test("守卫：daemon `_broadcast` 的每一种帧类型，中间层要么转发、要么在豁免表里具名", async () => {
+  // 这条缝已经断过三次（turn_start/turn_end → #2189 的 task_queued/steer_committed
+  // → 同类的 queued_requeue/queued_cancelled），每次都靠「有人注意到日志」才发现。
+  // 一次一例的测试挡不住第四例，所以这里不比对手抄的名单，而是**从生产者读**：
+  // 解析 `emrg/server/daemon.py` 里每个 `_broadcast(..., {...})` 载荷的 `type`，
+  // 逐个喂给连着 mock ws 的 DaemonClient，任何落进兜底的类型都必须在这张豁免表里
+  // 具名并给出理由 —— 否则断言失败。
+  //
+  // 手抄的名单本身就是一种读数（漏项与重名同样看不见），所以这份类型集合是**推导**
+  // 出来的，不是写死的；下面第一条断言兜住推导本身失败（解析不到东西时不能算通过），
+  // 第二条兜住推导**漏读**（切分漏掉调用点时，少读的那几个正是它该覆盖的）。
+  const daemonPy = fs.readFileSync(
+    path.join(__dirname, "..", "..", "server", "daemon.py"), "utf8");
+  const payloads = broadcastPayloads(daemonPy);
+  const broadcastTypes = broadcastFrameTypes(daemonPy);
+  // ① 被测对象非空：解析坏了要让本测试红，而不是静默地「全都没问题」
+  assert.ok(broadcastTypes.size >= 10,
+    `只从 daemon.py 解析出 ${broadcastTypes.size} 种广播帧 —— 解析式失效了，本次测量无效`);
+  // ①b 切分不许漏读：每一个 `_broadcast(...)` 调用都要切出来（漏掉的那些＝守卫的
+  //     盲区，读不到就永远不会被判定，于是第四例照样能溜过去）
+  assert.strictEqual(payloads.length, broadcastCallCount(daemonPy),
+    `从 daemon.py 切出 ${payloads.length} 段调用，文件里有 ${broadcastCallCount(daemonPy)} 个 —— 切分漏掉了调用点`);
+
+  // ② 中间层**故意**不转发给渲染层的类型。每条都要写清理由：渲染层没有 case 的
+  //    （TUI 独有）、或本就是别的会话命令的回执。写进这里＝承认它会被兜底记一行。
+  const NOT_FORWARDED = {
+    compact_result: "别的会话 /compact 的回执，渲染层无 case（daemon 广播给全部订阅者）",
+    user_message: "TUI 独有的通知（app.py:1505），渲染层 daemonBridge 无 case",
+  };
+
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  for (const type of broadcastTypes) send({ type, session_id: "s1" });
+
+  const dropped = [...broadcastTypes]
+    .filter((t) => warned.some((m) => m.includes(`unknown frame type=${t}`)));
+  // ③ 落进兜底的类型必须全部在豁免表里具名 —— 第四例会在这里失败
+  assert.deepStrictEqual(dropped.filter((t) => !(t in NOT_FORWARDED)), []);
+  // ④ 豁免表不许腐烂：写进去的类型必须确实还被丢着（转发后又忘了删＝名单说谎）
+  assert.deepStrictEqual(
+    Object.keys(NOT_FORWARDED).filter((t) => !dropped.includes(t)), []);
+});
+
+test("守卫的载荷切分按花括号配平：带 f-string 的载荷里，帧类型也看得见", () => {
+  // 反向臂。`\{([^{}]*)\}` 这类正则在载荷里第一个 `{` 处就停，因此**看不见**载荷里
+  // 带 f-string 替换字段的调用点 —— 实测 master 上漏 5 个（共 35 个），漏掉的恰好是
+  // 这条守卫声称覆盖的对象：daemon.py 里 `f"...{self._max_tool_rounds}..."` 这种写法。
+  // 这条臂在旧正则下必红（切出来的是空集），钉住「按配平切」这个性质本身。
+  const withFstring = [
+    "await self._broadcast(session_id, {",
+    '    "type": "fstring_frame",',
+    '    "content": f"rounds={self._max_tool_rounds}",',
+    "})",
+  ].join("\n");
+  assert.deepStrictEqual([...broadcastFrameTypes(withFstring)], ["fstring_frame"]);
+  assert.strictEqual(broadcastPayloads(withFstring).length, 1);
+
+  // 正向方向的反面：切出来的载荷没有 `type`（`done` 形状）时，不许凭空造出一个类型 ——
+  // 「读得更多」不能变成「编得更多」，否则豁免表会开始收到不存在的名字。
+  const typeless = 'await self._broadcast(session_id, {"done": True, "content": f"{n}"})';
+  assert.deepStrictEqual([...broadcastFrameTypes(typeless)], []);
+  assert.strictEqual(broadcastPayloads(typeless).length, 1);
+
+  // 方法签名不是调用：不能被算进切分结果（否则 ①b 的等式永远差一，或反过来掩盖漏读）
+  const defOnly = "    async def _broadcast(self, session_id: str, data: dict) -> None:";
+  assert.strictEqual(broadcastPayloads(defOnly).length, 0);
+  assert.strictEqual(broadcastCallCount(defOnly), 0);
+});
+
 test("sendSetSandboxRoots：帧形状与 daemon 的 op 词表一致（缺 path 也发空串）", async () => {
   const client = new DaemonClient();
   await connectClient(client);
@@ -1007,6 +1175,73 @@ test("error 帧 FIFO reject 最早未决（G103）；无未决 error → 广播"
   await p2;
   currentMockWs.emit("message", Buffer.from(JSON.stringify({ error: "broadcast error" })));
   assert.ok(seen.some(([t, d]) => t === "error" && d.error === "broadcast error"));
+});
+
+// ── 同一响应类型的并发命令（measured 2026-10-13）─────────────────────────
+//
+// One connection can carry two commands of the **same** type at once — the GUI's own
+// `listSessions` has four independent callers (startup `emrg:init`, the post-recovery
+// refresh, the `emrg:switchSession` not-found fallback, the renderer's
+// `emrg:listSessions`) — and the daemon answers **each frame it received**, one per
+// command. Keying the pending index by response type (`_pending.set(respType, entry)`)
+// made the older command's promise wait for an answer that could no longer reach it: it
+// rejected `command timeout` although the daemon had answered, the surplus frame found no
+// entry and fell into the broadcast branch, and the timeout callback's by-key cleanup
+// (`_pending.delete(respType)`) could delete a **newer** command's entry, leaving that one
+// to time out too. Measured on this host's own `~/.emrg/emrg-gui.log`: 18,075
+// `list_sessions failed: command timeout: list_sessions` lines, in runs 0.2–0.6 s apart —
+// the shape of N calls each rejected five seconds later. Three arms: the queue, the
+// identity-bound cleanup, and the error frame's FIFO choice.
+
+test("同类型两条命令同时在飞：各配一帧，两条都兑现", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  // The daemon answers per frame: two frames, one per command.
+  send({ type: "sessions_list", sessions: [{ session_id: "a" }] });
+  send({ type: "sessions_list", sessions: [{ session_id: "b" }] });
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.strictEqual(r1.sessions[0].session_id, "a", "最早的命令配最早的一帧");
+  assert.strictEqual(r2.sessions[0].session_id, "b");
+  assert.strictEqual(client._pending.size, 0);
+  assert.strictEqual(client._pendingFifo.length, 0);
+});
+
+test("超时只清掉自己那条：同类型后来者仍被答案兑现", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 30);
+  const timedOut = assert.rejects(p1, /command timeout: list_sessions/);
+  await new Promise((r) => setTimeout(r, 10));
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  await timedOut;
+  assert.strictEqual(client._pending.size, 1, "超时的那条不得带走后来者");
+  assert.strictEqual(client._pendingFifo.length, 1);
+  send({ type: "sessions_list", sessions: [{ session_id: "b" }] });
+  const r2 = await p2;
+  assert.strictEqual(r2.sessions[0].session_id, "b");
+  assert.strictEqual(client._pending.size, 0);
+  assert.strictEqual(client._pendingFifo.length, 0);
+});
+
+test("error 帧 reject 同类型里最早的那条，后来者仍活", async () => {
+  const client = new DaemonClient();
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const p1 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  const p2 = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ error: "boom" });
+  await assert.rejects(p1, /boom/);
+  assert.strictEqual(client._pending.size, 1, "p2 仍未决");
+  assert.strictEqual(client._pendingFifo.length, 1);
+  send({ type: "sessions_list", sessions: [{ session_id: "b" }] });
+  const r2 = await p2;
+  assert.strictEqual(r2.sessions[0].session_id, "b");
 });
 
 test("分组生命周期（G83+G104）：建组 → done 清理；>20 丢最老", async () => {

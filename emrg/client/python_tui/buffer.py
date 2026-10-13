@@ -149,16 +149,25 @@ class StylePool:
         self._ids[key] = idx
         return idx
 
-    def get(self, idx: int) -> RichStyle:
+    def get(self, idx: int) -> RichStyle | None:
         """Return the style at the given pool index.
 
-        Returns the default empty style (id 0) for idx == -1, which is the
-        sentinel used by write_frame to force a style transition on the first
-        diff cell. Python interprets -1 as the last list element by default,
-        so we guard against that here.
+        `-1` is **not** a style. It is the sentinel `write_frame` sets at the start of a
+        frame and every time it moves the cursor to a new line, meaning "the terminal's
+        attributes here are not known" — so it resolves to `None`, the value
+        `style_diff_sgr` already renders absolutely (reset, then the target style).
+
+        Answering the *default* style instead made the forced transition degenerate:
+        `style_diff_sgr(default, default)` is `""`, so a fresh row whose first cell is
+        default-styled emitted no SGR at all and the terminal kept whatever it was
+        carrying — a selected row's reverse video then bled into the rows below it, and
+        the row the selection left kept its highlight (report 2026-10-13).
+
+        Python interprets -1 as the last list element by default, so we guard against
+        that here as well.
         """
         if idx == -1:
-            return self._styles[0]
+            return None
         return self._styles[idx] if idx < len(self._styles) else self._styles[0]
 
     def transition(self, from_id: int, to_id: int) -> str:
@@ -198,6 +207,11 @@ class HyperlinkPool:
         return idx
 
     def get(self, idx: int) -> str | None:
+        # `-1` is the frame writer's "not known" sentinel, not a hyperlink: without this
+        # it resolves by negative indexing to the *last* interned URI, the same trap the
+        # style pool's lookup had.
+        if idx == -1:
+            return None
         if idx == 0:
             return None
         return self._strings[idx] if idx < len(self._strings) else None

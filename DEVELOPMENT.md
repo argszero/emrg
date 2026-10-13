@@ -319,6 +319,34 @@ gives you; the releases page has the pinned build). CI remains authoritative: th
 the same tool at the same version over the same files, not a second implementation of its
 rules.
 
+**The host-side counterpart of the release's retry bounds.** The release workflow retries
+several network steps a bounded number of times, and the number an operator reads in the
+log is the one they triage a lost release on. Two of those loops used to carry a second
+copy of their own bound — the loop counted with one number and the sentence printed
+another — and nothing in the suite read a message, so a widened loop left the sentence
+stale *after* the existing guard had been satisfied (issue #2210). One command answers
+whether any loop still does:
+
+```bash
+uv run --no-sync python3 scripts/check-retry-bounds.py          # every workflow in this checkout
+uv run --no-sync python3 scripts/check-retry-bounds.py --root <checkout>
+```
+
+It measures the **derivation**, not the spelling: for every retry loop, each value the
+loop presents as its bound — after the counter's slash, before the word "attempt(s)", or
+as the right operand of the counter's own `-lt`/`-le` — must equal the bound the loop
+iterates, with `$VAR` resolved from the nearest assignment above it. A stale literal is
+caught, and so is a variable that disagrees. Exit `0` = every claim agrees; `1` = one
+disagrees, and the file, the line, the claim, the bound *and the sentence itself* are
+printed so the fix is right there; `2` = **could not measure — never a pass**, with the
+reason: no workflow file, no retry loop at all, a bound variable with no assignment
+above it to read, or **a loop that names the counter in a spelling the reader does not
+classify** — `for attempt in 1 2 3 4` with `do` on the next line, or an `until` loop, or
+`for attempt in $(seq 1 4)`. That last reason is the point of the exit-2 contract rather
+than a corner of it: a loop whose bound cannot be read is exactly where the guard must
+not answer `OK`, and it prints the header and its line so the reader can rewrite the loop
+or teach the reader the spelling.
+
 **The host-side counterpart of the install step.** The daemon renders a built-in task
 template from its own `__file__`, and on a running install that is
 `~/.emrg/install/source/` — a directory the installer wrote, which an upgrade replaces

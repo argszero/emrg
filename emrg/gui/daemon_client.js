@@ -150,8 +150,10 @@ class DaemonClient {
     this.ws = null;
     this.connected = false;
     this._events = new Set(); // callbacks
-    this._pending = new Map(); // frameType → {resolve, reject, timer}
-    this._pendingFifo = [];
+    // frameType → [{resolve, reject, timer}] —— 每类型一条 FIFO 队列，不是单个 entry:
+    //同一类型可以有多条命令在飞（见 `sendCommandAndWait` 的注释，measured 2026-10-13）。
+    this._pending = new Map();
+    this._pendingFifo = []; // 全局到达顺序，给无 type 的 error 帧配最早的未决命令
     this._groups = new Map(); // requestId → {node, lastSeen, timer, own}
     this._currentStream = null; // {requestId, timer}
     this._activeToolCards = new Map(); // tool_call_id → info
@@ -883,37 +885,72 @@ class DaemonClient {
 
   // G93/G103：命令-响应配对（pending FIFO，按响应帧 type 配对）。
   // 命令类型 ≠ 响应类型（list_sessions → sessions_list 等），经映射表转换。
+  //
+  // **同一响应类型的多个未决命令排成队列，不是互相覆盖**（measured 2026-10-13）。
+  // 一连接上两条命令可以是同一类型（GUI 的 `listSessions` 有多个独立调用者：
+  // 启动 `emrg:init`、重连恢复、`emrg:switchSession` 的 not-found 回退、渲染层
+  // 的 `emrg:listSessions`），daemon 也**逐帧各答一次**——但按 type 键控
+  // (`_pending.set(respType, entry)`) 会让后一条顶掉前一条的 entry：
+  //   * 前一条的 promise 永远等不到答案，5s 后 reject `command timeout`，
+  //     而 daemon 其实答了（宿主日志 18,075 行 `list_sessions failed: command timeout`
+  //     就是这条的形状：连成一片、每条相隔 0.2–0.6s，正是「多次调用各自 5s 后超时」）；
+  //   * 多出来的那帧答案无 entry 可配 → 落进广播分支被丢掉；
+  //   * 更糟的是超时回调按**键**清理（`_pending.delete(respType)`），它删的是
+  //     *当时*该键上的 entry——若期间又来了同类型命令，删掉的是**那条新命令**的
+  //     entry，于是新命令既收不到答案（entry 不在 map 里）又不会超时（其 timer
+  //     仍在，5s 后才 reject），两条一起假超时。
+  // 所以：每类型一条 FIFO 队列，清理一律按 **entry 身份**。
+  // 两条同类型命令的响应体在协议上不可区分，因此「第一条帧配第一条命令」是能做
+  // 到的最强配对；对 `listSessions` 这类调用者，两者拿到的本来就是同一份数据。
   sendCommandAndWait(commandType, payload = {}, timeoutMs = PENDING_TIMEOUT_MS) {
     const respType = RESPONSE_TYPES[commandType] || commandType;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this._pending.delete(respType);
-        this._pendingFifo = this._pendingFifo.filter((p) => p.frameType !== respType);
+      const entry = { frameType: respType, resolve, reject, timer: null };
+      entry.timer = setTimeout(() => {
+        this._dropPending(entry);
         reject(new Error(`command timeout: ${commandType}`));
       }, timeoutMs);
-      const entry = { frameType: respType, resolve, reject, timer };
-      this._pending.set(respType, entry);
+      const queue = this._pending.get(respType);
+      if (queue) queue.push(entry);
+      else this._pending.set(respType, [entry]);
       this._pendingFifo.push(entry);
       this.sendCommand(commandType, payload);
     });
   }
 
+  /** Remove one entry from both index structures, by identity.
+   *
+   * By identity and not by key: a timer that has already fired belongs to the entry it
+   * was created for, and that entry may no longer be the head of its type's queue.
+   */
+  _dropPending(entry) {
+    const queue = this._pending.get(entry.frameType);
+    if (queue) {
+      const i = queue.indexOf(entry);
+      if (i >= 0) queue.splice(i, 1);
+      if (queue.length === 0) this._pending.delete(entry.frameType);
+    }
+    const j = this._pendingFifo.indexOf(entry);
+    if (j >= 0) this._pendingFifo.splice(j, 1);
+  }
+
   _resolvePending(frame) {
     // G103：error 帧无 type——FIFO reject 最早未决；无未决 → 返回 false 走广播
     if (frame.error) {
-      const entry = this._pendingFifo.shift();
+      const entry = this._pendingFifo[0];
       if (entry) {
-        this._pending.delete(entry.frameType);
+        this._dropPending(entry);
         clearTimeout(entry.timer);
         entry.reject(new Error(frame.error));
         return true;
       }
       return false;
     }
-    const entry = this._pending.get(frame.type);
+    // The oldest command of this response type owns this frame.
+    const queue = this._pending.get(frame.type);
+    const entry = queue && queue[0];
     if (entry) {
-      this._pending.delete(frame.type);
-      this._pendingFifo = this._pendingFifo.filter((p) => p !== entry);
+      this._dropPending(entry);
       clearTimeout(entry.timer);
       entry.resolve(frame);
       return true;
@@ -1063,6 +1100,37 @@ class DaemonClient {
     // 首丢 2026-09-02T07:26:10Z、末丢 2026-09-30T02:02:14Z——bug 一直活着。
     // 与 done/cancelled 幂等（渲染层清计时也是幂等的），故直接按原名转发。
     if (frame.type === "turn_start" || frame.type === "turn_end") {
+      this._emit(frame.type, frame);
+      return;
+    }
+    if (frame.type === "task_queued" || frame.type === "steer_committed") {
+      // The same seam as the turn frames above, for two more types (#2189). The
+      // daemon `_broadcast`s both to every connection subscribed to the session
+      // — `task_queued` when a task arrives for a busy session (`daemon.py:1557`,
+      // carrying `position`), `steer_committed` when a parked message is injected
+      // into the running turn (`daemon.py:3719`, carrying `request_id` and
+      // `timestamp`). The renderer has a handler for each (`daemonBridge.ts`
+      // `case "task_queued"` shows the queued notice; `case "steer_committed"`
+      // drops the injected request from the local resend map) and the TUI handles
+      // both (`app.py:1345` / `:1353`), so this layer was the only client that
+      // dropped them: they matched no branch, fell to the unknown-frame log at
+      // the bottom, and reached no renderer. The catch-all's list of *expected*
+      // drops (`templates_list` / `compact_result` / `projects_list`) never named
+      // them.
+      this._emit(frame.type, frame);
+      return;
+    }
+    if (frame.type === "queued_requeue" || frame.type === "queued_cancelled") {
+      // 同一条缝上的第三对（#2189 同一类）。daemon 的队列排空契约把这两个帧
+      // `_broadcast` 给订阅该会话的每个连接：干净收尾时 `queued_requeue`
+      // （`daemon.py:3873`，带 `request_ids`，即「该重发的那些请求」），
+      // 取消/出错/断连时 `queued_cancelled`（`daemon.py:3879`；clear_session 与
+      // delete_session 也各广播一次，`daemon.py:3270` / `:3305`）。
+      // 渲染层两个 `case` 都在（`daemonBridge.ts:696` / `:701`）：前者按
+      // `request_ids` 重发本地待发表，后者清空它并提示「排队消息已取消」——
+      // 中间层不转发，GUI 排队的消息就永远不重发、也不作废（TUI 侧同款在
+      // `app.py:1369` / `:1404`）。此前它们不匹配任何分支，落进下方兜底：
+      // 只记日志、不发事件，从渲染层看就是「什么都没发生」。
       this._emit(frame.type, frame);
       return;
     }

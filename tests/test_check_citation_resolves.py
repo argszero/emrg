@@ -99,6 +99,66 @@ def test_the_qualified_form_is_accepted(mod, tmp_path):
     assert (findings, unreadable) == ([], [])
 
 
+def test_a_qualified_citation_whose_class_is_absent_is_reported(mod, tmp_path):
+    """The qualified form is the most explicit citation there is, so it has to be read.
+
+    It was skipped outright until 2026-10-13 (`cyc20261013-212318`), by a branch whose
+    comment said the rule "cannot answer from the qualifier alone" - while it held the
+    module's AST in the line above.
+    """
+    root = _tree(tmp_path, "`tests/test_thing.py::TestGhost::test_inside_a_class`")
+    findings, _unreadable, _modules = mod.scan(root)
+    assert len(findings) == 1
+    assert findings[0].cited == "tests/test_thing.py::TestGhost::test_inside_a_class"
+    assert "no class by that name" in findings[0].reason
+
+
+def test_a_qualified_citation_naming_the_wrong_class_is_reported(mod, tmp_path):
+    """`TestHolder` really is defined - it just does not hold the name, and pytest says so.
+
+    The remedy is the class that does hold it, which is the one thing a reader cannot
+    derive from the citation or from a plain `not found`.
+    """
+    root = _tree(tmp_path, "`tests/test_thing.py::TestAnother::test_inside_a_class`")
+    (root / "tests" / "test_thing.py").write_text(
+        MODULE.replace("class TestHolder:", "class TestAnother:\n    def test_other(self):\n        pass\n\n\nclass TestHolder:"),
+        encoding="utf-8",
+    )
+    findings, _unreadable, _modules = mod.scan(root)
+    assert len(findings) == 1
+    assert findings[0].needed == "tests/test_thing.py::TestHolder::test_inside_a_class"
+
+
+def test_a_class_that_inherits_from_outside_the_module_is_unmeasurable(mod, tmp_path, capsys):
+    """The third answer, on the same subject: this reader cannot enumerate those methods.
+
+    A class whose base this module does not define may hold the name through the base,
+    so neither "it collects" nor "it does not" is readable from here. `2`, never `0` -
+    a subject the reader cannot classify is not a pass (`#2211`).
+    """
+    root = _tree(tmp_path, "`tests/test_thing.py::TestChild::test_inside_a_class`")
+    (root / "tests" / "test_thing.py").write_text(
+        "from somewhere import Base\n\n\nclass TestChild(Base):\n    def test_own(self):\n        pass\n",
+        encoding="utf-8",
+    )
+    assert mod.main([str(root)]) == 2
+    err = capsys.readouterr().err
+    assert "could not measure" in err and "TestChild" in err
+
+    # The control: the same class shape with its base defined *in* the module, so the
+    # reader can enumerate the methods it collects - the exclusion is the undefined
+    # base, not the class.
+    (root / "tests" / "test_thing.py").write_text(
+        "class Base:\n    def test_inherited(self):\n        pass\n\n\n"
+        "class TestChild(Base):\n    def test_own(self):\n        pass\n",
+        encoding="utf-8",
+    )
+    (root / "notes.md").write_text(
+        "`tests/test_thing.py::TestChild::test_inherited`\n", encoding="utf-8"
+    )
+    assert mod.main([str(root)]) == 0
+
+
 def test_a_module_level_test_needs_no_qualifier(mod, tmp_path):
     """The common case: 32 citations in this tree take this shape and collect."""
     root = _tree(tmp_path, "`tests/test_thing.py::test_at_module_level`")
@@ -135,10 +195,87 @@ def test_a_class_citation_is_not_flagged(mod, tmp_path):
     assert mod.scan(root) == ([], [], 1)
 
 
-def test_a_citation_whose_name_is_absent_is_left_to_another_rule(mod, tmp_path):
-    """A renamed test is a different defect, and guessing at it would be worse."""
+def test_a_citation_whose_name_is_absent_is_reported(mod, tmp_path):
+    """A citation naming nothing the module defines collects nothing, and is now read.
+
+    It was left alone until 2026-10-13 (`cyc20261013-212318`) as "another rule's"
+    question, and no other rule read it: `scripts/review-queue.py` had cited a renamed
+    test for as long as the green line claimed every citation collects.
+    """
     root = _tree(tmp_path, "`tests/test_thing.py::test_that_never_existed`")
-    assert mod.scan(root) == ([], [], 1)
+    findings, _unreadable, _modules = mod.scan(root)
+    assert len(findings) == 1
+    assert findings[0].cited == "tests/test_thing.py::test_that_never_existed"
+    assert "defines no test, class or method" in findings[0].reason
+    assert findings[0].needed == "", "there is no node id to name as the remedy"
+
+
+# --- quoted material: what a fixture holds is not a claim about this tree --------
+
+
+def _fixture_tree(tmp_path: Path, body: str) -> Path:
+    """A tree whose `tests/` holds the module under test plus a literal `body`.
+
+    The prose file's own citation is a module-level one that resolves, so the second
+    module is the only thing this tree asks about.
+    """
+    root = _tree(tmp_path, "`tests/test_thing.py::test_at_module_level`")
+    (root / "tests" / "test_quotes_output.py").write_text(body, encoding="utf-8")
+    return root
+
+
+def test_quoted_pytest_output_inside_a_literal_is_not_a_claim(mod, tmp_path):
+    """The lookalike that made the name rule need a scope at all.
+
+    `tests/test_run_mutation_arm.py` stubs pytest's output, and its node ids name a tree
+    some test built - `tests/test_bash_v2_boundary.py` is a module this checkout really
+    has, so the path check cannot exclude them.
+    """
+    root = _fixture_tree(
+        tmp_path,
+        'OUT = "FAILED tests/test_thing.py::test_absent - AssertionError\\n'
+        '1 failed, 3 passed in 0.5s\\n"\n',
+    )
+    findings, unreadable, modules = mod.scan(root)
+    assert (findings, unreadable, modules) == ([], [], 2)
+
+
+def test_a_literal_holding_a_bare_node_id_is_not_a_claim(mod, tmp_path):
+    """The other shape a fixture has: the expected node list, nothing else in it."""
+    root = _fixture_tree(
+        tmp_path, 'EXPECTED = ["tests/test_thing.py::test_absent"]\n'
+    )
+    findings, unreadable, modules = mod.scan(root)
+    assert (findings, unreadable, modules) == ([], [], 2)
+
+
+def test_a_citation_inside_prose_is_still_a_claim(mod, tmp_path):
+    """The half that keeps the exclusion from swallowing the rule.
+
+    One line of prose in the literal makes it documentation: a `run this to reproduce`
+    message and a dict of reasons are both claims about this tree, and a reader acts on
+    them.
+    """
+    root = _fixture_tree(
+        tmp_path,
+        'HINT = "run tests/test_thing.py::test_absent to reproduce\\n1 failed\\n"\n',
+    )
+    findings, _unreadable, _modules = mod.scan(root)
+    assert len(findings) == 1, "a citation inside a sentence is a claim, not quoted output"
+    assert findings[0].cited == "tests/test_thing.py::test_absent"
+
+
+def test_the_two_exclusions_are_counted_rather_than_dropped(mod, tmp_path, capsys):
+    """A narrowing nobody can see is how a green run stops meaning what it says."""
+    root = _tree(tmp_path, "`tests/test_thing.py::test_inside_a_class_`")
+    (root / "tests" / "test_quotes_output.py").write_text(
+        'OUT = "tests/test_thing.py::test_absent"\n', encoding="utf-8"
+    )
+    assert mod.main([str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "1 in quoted material" in out, out
+    assert "1 naming a family" in out, out
+    assert "citation(s) read as claims" in out, out
 
 
 # --- the exit-code contract, and the tree --------------------------------------

@@ -27,12 +27,14 @@ from emrg._stop_all import (
     _caller_context,
     _daemon_scan_pids,
     _port_is_open,
+    _read_token_file,
     _verify_posix,
     match_cmdline,
     scan_pids,
     stop_all,
     ws_graceful_shutdown,
 )
+from tests.bounded_read import DEADLINE_SECONDS, within
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -55,7 +57,7 @@ class TestPureStdlib:
         src = (REPO_ROOT / "emrg" / "_stop_all.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         allowed = {
-            "base64", "json", "os", "re", "secrets", "signal", "socket",
+            "base64", "json", "os", "re", "secrets", "signal", "socket", "stat",
             "subprocess", "sys", "time", "pathlib", "platform", "ctypes", "ast",
             "pytest", "annotations", "__future__", "winreg", "datetime",
         }
@@ -1438,3 +1440,151 @@ class TestStopAllHermeticityGuard:
         assert getattr(stop_mod, name).__name__ == f"_no_real_{name}", (
             f"conftest {name} guard missing — real {name} reachable from tests"
         )
+
+
+class TestTheTokenReadAsksItsSubjectsKind:
+    """Issue #2140: the token read must not open a subject it has not asked about.
+
+    `stop_daemon` used to read `~/.emrg/emrgd.token` inside `except (OSError, ValueError)`, which
+    answers only the **raising** kinds. A FIFO raises nothing at the open — it waits for a writer —
+    so `emrg stop`, the one command whose purpose is to terminate processes, would never return.
+    The read now lives in `_read_token_file`, which asks the kind first; this class drives **that
+    function only**, never `stop_daemon`, so nothing here reaches real teardown.
+
+    The FIFO arm is the discriminating one and it is gated on `os.mkfifo`, so on Windows it skips
+    and only the controls below run. That is stated rather than papered over: the controls pin the
+    contract the guard must not narrow, they do **not** cover the guard. A FIFO-free arm cannot
+    discriminate here the way it does for `abort_runs` — a directory is the one cross-platform
+    non-regular subject available, and it raises `IsADirectoryError`, which the pre-guard handler
+    already caught, so both versions answer `""`.
+    """
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_token_answers_empty_instead_of_blocking_at_the_open(self, tmp_path):
+        token = tmp_path / "emrgd.token"
+        os.mkfifo(token)
+        # The deadline is the assertion: an unguarded `read_text` here does not return, and
+        # `within` turns that into a failure naming the cause rather than a wedged run.
+        assert within(DEADLINE_SECONDS, lambda: _read_token_file(token)) == ""
+
+    def test_the_control_with_a_regular_token_file(self, tmp_path):
+        """The kind is the axis: the same reader still returns the token it was written."""
+        token = tmp_path / "emrgd.token"
+        token.write_text("  deadbeef\n", encoding="utf-8")
+        assert _read_token_file(token) == "deadbeef"
+
+    def test_a_missing_token_still_answers_empty(self, tmp_path):
+        """The contract the guard must not narrow — absent is this module's normal case.
+
+        FIFO-free on purpose, so it is one of the two arms the Windows leg actually runs.
+        """
+        assert _read_token_file(tmp_path / "absent.token") == ""
+
+    def test_a_directory_token_answers_empty(self, tmp_path):
+        """The other FIFO-free control, and the one that pins *why* it cannot discriminate.
+
+        A directory made the pre-guard version raise `IsADirectoryError`, which its own handler
+        caught — so this arm is green with and without the kind check, and is a control rather
+        than coverage. Saying so is the point: an arm reported as covering the guard while
+        passing either way is the defect `tests/test_abort_runs.py` records.
+        """
+        token = tmp_path / "emrgd.token"
+        token.mkdir()
+        assert _read_token_file(token) == ""
+
+
+class TestTheStopLogAsksItsSubjectsKind:
+    """Issue #2152: the stop log's own open must ask the kind, like the token read beside it.
+
+    `_open_stop_log` opened `stop_all-<YYYYMMDD-HHMMSS>.log` inside `except OSError`, which
+    answers only the **raising** kinds. A FIFO raises nothing at the open — it waits for a
+    writer — and this call sits at the top of `stop_all()`, before any step and before the tee
+    exists, so the subject's kind decided whether `emrg stop` returned at all.
+
+    The name is second-resolution and computed from `datetime.now()`, which is why the FIFO arm
+    plants the whole window around the call rather than one name: whichever second the call
+    lands on, the subject is already there. Driving this function needs no new seam — it reads
+    `$EMRG_STOP_LOG_DIR` (`TestStopLogDirIsNotHostState`), so nothing here touches host state and
+    nothing reaches real teardown.
+
+    The FIFO arm is gated on `os.mkfifo`, so the Windows leg skips it and runs only the controls
+    below. That is stated rather than papered over: the controls pin what the guard must not
+    narrow, they do **not** cover the guard.
+    """
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no FIFOs")
+    def test_a_fifo_at_the_logs_own_name_answers_none_instead_of_blocking(self, tmp_path, monkeypatch):
+        import datetime as _dt
+
+        from emrg import _stop_all as stop_mod
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(logs))
+        # The name is built from `datetime.now()` inside the call, so the window is planted
+        # around the clock this test reads: a single name would be a race, not an arm.
+        base = _dt.datetime.now()
+        planted = 0
+        for delta in range(-5, 31):
+            name = f"stop_all-{(base + _dt.timedelta(seconds=delta)).strftime('%Y%m%d-%H%M%S')}.log"
+            fifo = logs / name
+            if not fifo.exists():
+                os.mkfifo(fifo)
+                planted += 1
+        assert planted, "no FIFO was planted, so this arm has no subject"
+
+        # The deadline is the assertion: an unguarded `open(..., "a")` here does not return, and
+        # `within` turns that into a failure naming the cause rather than a wedged run.
+        assert within(DEADLINE_SECONDS, stop_mod._open_stop_log) is None
+
+    def test_the_control_with_no_fifo_still_returns_a_handle(self, tmp_path, monkeypatch):
+        """The kind is the axis: with nothing planted the log is still opened and written.
+
+        FIFO-free on purpose, so it is one of the arms the Windows leg actually runs.
+        """
+        from emrg import _stop_all as stop_mod
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(logs))
+        handle = stop_mod._open_stop_log()
+        assert handle is not None
+        name = handle.name
+        handle.close()
+        assert Path(name).parent == logs
+        assert Path(name).name.startswith("stop_all-")
+
+    def test_a_directory_at_the_logs_own_name_answers_none(self, tmp_path, monkeypatch):
+        """The FIFO-free control, and the one that pins *why* it cannot discriminate.
+
+        A directory made the pre-guard version raise `IsADirectoryError`, which its own handler
+        already caught — so this arm is green with and without the kind check and is a control
+        rather than coverage. Saying so is the point: an arm reported as covering the guard while
+        passing either way is the defect `tests/test_abort_runs.py` records.
+        """
+        import datetime as _dt
+
+        from emrg import _stop_all as stop_mod
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(logs))
+        base = _dt.datetime.now()
+        for delta in range(-5, 31):
+            name = f"stop_all-{(base + _dt.timedelta(seconds=delta)).strftime('%Y%m%d-%H%M%S')}.log"
+            (logs / name).mkdir()
+        assert within(DEADLINE_SECONDS, stop_mod._open_stop_log) is None
+
+    def test_the_makedirs_failure_arm_still_answers_none(self, monkeypatch, tmp_path):
+        """The contract the guard must not narrow, pinned beside the existing arm.
+
+        `_open_stop_log` already answered `None` for every failure it could see; adding the kind
+        ask must not turn any of them into something else.
+        """
+        from emrg import _stop_all as stop_mod
+
+        def boom(*a, **k):
+            raise OSError("cannot create logs dir")
+
+        monkeypatch.setattr(stop_mod.os, "makedirs", boom)
+        assert stop_mod._open_stop_log() is None
