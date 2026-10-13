@@ -342,22 +342,53 @@ _DISPATCH_MARK = "## Evolution Cycle"
 _HISTORY_NAME = re.compile(r"history(?:_\d{6})?\.jsonl")
 
 
+def sessions_root(record_root: Path) -> Path:
+    """The `sessions` directory of the `.emrg` root that owns a record directory.
+
+    A record's dispatch corpus sits in the `sessions` directory of the **same `.emrg`
+    root** as the record, and a record root comes in two scopes since D9 and #2221: the
+    project one (`.emrg/memory`) and a session's (`.emrg/sessions/<session>/memory`).
+    Looking beside the root answers that correctly for the first and invents nothing for
+    the second — `<session>/sessions` was never a corpus, but the derivation produced it
+    anyway, so the reading named a directory that does not exist as one it *could not
+    read* (issue #2222). Both scopes belong to the same `.emrg` root, so both answer with
+    the same directory and the difference disappears where it was introduced.
+
+    Without a `.emrg` ancestor the caller's own corpus is answered from **beside** it —
+    the convention the tests rely on to stay off the machine's real sessions
+    (`--cycles-log <tmp>/records` reads `<tmp>/sessions`), kept because a corpus of one's
+    own has no `.emrg` root to be found and no reason to be read from elsewhere.
+    """
+    for parent in Path(record_root).parents:
+        if parent.name == ".emrg":
+            return parent / "sessions"
+    return Path(record_root).parent / "sessions"
+
+
 def resolve_session_dirs(
     override: str | None = None, cycles_logs: Sequence[Path] | None = None
 ) -> tuple[Path, ...]:
     """The session directories to read dispatches from.
 
-    The override (`--sessions-dir` / `$EMRG_SESSIONS_DIR`) wins; otherwise the sibling
-    `sessions` directory of each cycle-record root, so the dispatches are read from the
-    same `.emrg` root as the records and there is no second constant to keep in step —
-    a caller that pointed `--cycles-log` at a corpus of its own is answered from beside
-    it, which is also what keeps a test off the machine's real sessions.
+    The override (`--sessions-dir` / `$EMRG_SESSIONS_DIR`) wins; otherwise each record
+    root's own `.emrg` sessions directory (`sessions_root`), so the dispatches are read
+    from the same `.emrg` root as the records and there is no second constant to keep in
+    step — a caller that pointed `--cycles-log` at a corpus of its own is answered from
+    beside it, which is also what keeps a test off the machine's real sessions.
+
+    Duplicates collapse: the project root and every session root under one `.emrg` name
+    the same corpus, and a directory listed twice is a reading that looks like two.
     """
     raw = override or os.environ.get("EMRG_SESSIONS_DIR")
     if raw:
         return tuple(Path(part) for part in raw.split(os.pathsep) if part)
     roots = tuple(cycles_logs) if cycles_logs else DEFAULT_CYCLES_LOGS
-    return tuple(Path(root).parent / "sessions" for root in roots)
+    found: list[Path] = []
+    for root in roots:
+        candidate = sessions_root(Path(root))
+        if candidate not in found:
+            found.append(candidate)
+    return tuple(found)
 
 
 def dispatch_ids(dirs: Sequence[Path] | None = None) -> tuple[list[str], list[str]]:
