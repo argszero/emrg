@@ -61,6 +61,13 @@ APPLE_REFUSAL = "Error: HTTP status code: 401. Invalid credentials."
 REFUSAL_CLAIM = "the SUBMISSION was refused"
 TRANSPORT_CLAIM = "TRANSPORT failure"
 
+# The third outcome's own sentence. It is not a refusal and not the transport-exhausted
+# shape, and until this pin existed it was reported with the transport sentence — three of
+# whose clauses are false on that path (one submit WAS taken, Apple DID answer, and the pkg
+# WAS uploaded, contradicting the warning printed directly above).
+UPLOAD_ID_CLAIM = "Apple ACCEPTED the upload"
+TRANSPORT_ONLY_CLAIMS = ("Apple never answered", "nothing was uploaded")
+
 _XCRUN_STUB = '''#!/usr/bin/env python3
 """Stand in for xcrun, and answer notarytool the way the scenario says."""
 import json, os, sys
@@ -305,7 +312,9 @@ def test_a_connection_lost_after_an_upload_id_is_not_re_sent(tmp_path) -> None:
     """The retry's own hazard: Apple may have accepted the upload before the wait dropped.
 
     A submission id in the output is what proves the upload landed, so re-sending there
-    would submit the pkg twice. The arm pins that the id suppresses the retry.
+    would submit the pkg twice. The arm pins that the id suppresses the retry — and that
+    the suppression is reported with the sentence its own cause earned, because the
+    transport sentence is false here in three of its clauses.
     """
     result = _run_step(tmp_path, "lost_after_id")
     assert _submits(result) == 1, (
@@ -316,3 +325,19 @@ def test_a_connection_lost_after_an_upload_id_is_not_re_sent(tmp_path) -> None:
         "the step suppressed the retry without saying so, so the log cannot explain why the "
         f"failure was not retried.\noutput={result.output!r}"
     )
+    assert UPLOAD_ID_CLAIM in result.output, (
+        "the outcome where Apple accepted an upload and its verdict was never read was "
+        "reported with another outcome's sentence — measured on the head before this pin, "
+        f"the transport sentence ran here.\noutput={result.output!r}"
+    )
+    assert TRANSPORT_CLAIM not in result.output, (
+        "the upload-id outcome was told it was a TRANSPORT failure. On this path exactly one "
+        "submit was taken (so 'every attempt was retried' is false), Apple answered with an "
+        "id and 'Successfully uploaded' (so 'Apple never answered' is false), and the upload "
+        f"was accepted (so 'nothing was uploaded' is false).\noutput={result.output!r}"
+    )
+    for clause in TRANSPORT_ONLY_CLAIMS:
+        assert clause not in result.output, (
+            f"the upload-id outcome printed {clause!r} — a claim about a run where the pkg "
+            f"was not uploaded and Apple did answer.\noutput={result.output!r}"
+        )

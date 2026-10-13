@@ -498,9 +498,26 @@ jobs:
           }
           NOTARY_RC=0
           NOTARY_OUT=""
+          # One attempt is one `notarytool submit`. The bound is stated once so the message
+          # below can print the count the loop actually took instead of a literal that goes
+          # stale the moment the bound moves (`Agent.md`: a derived number is never written
+          # where a guard can measure it; issue #2199).
+          ATTEMPTS=3
+          # The third outcome, and the only one this step can reach where the retry is
+          # suppressed: Apple ACCEPTED the upload and returned a submission id, and the wait
+          # then lost the connection. It is neither a refusal nor the transport-exhausted
+          # shape, so the caller has to be able to tell it apart from both - and it must not
+          # be reported with the transport sentence, three of whose clauses are false here
+          # (one submit WAS taken, Apple DID answer, the pkg WAS uploaded).
+          #
+          # A flag beside NOTARY_RC rather than a return code: NOTARY_RC has to keep
+          # reporting the submit's own exit code for the message below, and the caller runs
+          # under the job's `-e`, where a non-zero return from `notary_submit` would abort
+          # the step before it could speak at all.
+          NOTARY_UNREAD_UPLOAD_ID=0
           notary_submit() {
             local attempt
-            for attempt in 1 2 3; do
+            for (( attempt=1; attempt<=ATTEMPTS; attempt++ )); do
               NOTARY_RC=0
               NOTARY_OUT="$(xcrun notarytool submit "$PKG" \
                 --apple-id "$APPLE_ID" \
@@ -516,19 +533,32 @@ jobs:
               fi
               if notary_accepted_an_upload "$NOTARY_OUT"; then
                 echo "::warning::the connection was lost after Apple returned a submission id - a credential verdict may still be readable from that submission, so it is NOT re-sent"
+                NOTARY_UNREAD_UPLOAD_ID=1
                 return 0
               fi
-              if [ "$attempt" -lt 3 ]; then
-                echo "::warning::the exchange with Apple's notary service did not complete (attempt ${attempt}/3) - retrying in $((attempt * 20))s"
+              if [ "$attempt" -lt "$ATTEMPTS" ]; then
+                echo "::warning::the exchange with Apple's notary service did not complete (attempt ${attempt}/${ATTEMPTS}) - retrying in $((attempt * 20))s"
                 sleep $((attempt * 20))
               fi
             done
             return 0
           }
           notary_submit
+          if [ "$NOTARY_UNREAD_UPLOAD_ID" -ne 0 ]; then
+            # Measured on this step's own `lost_after_id` arm before this branch existed: the
+            # transport sentence ran here, and it told the operator that "every attempt was
+            # retried (3)" when exactly one was taken (zero sleeps), that "Apple never
+            # answered" when Apple had returned an id and "Successfully uploaded", and that
+            # "nothing was uploaded" when the upload was accepted - contradicting the warning
+            # printed directly above it, which says a verdict "may still be readable from
+            # that submission". Exiting here also keeps the parse below from reporting an
+            # unread verdict as one that failed.
+            echo "::error::xcrun notarytool submit exited $NOTARY_RC after Apple ACCEPTED the upload and returned a submission id (the JSON line above). This is neither a refusal nor the transport-exhausted failure: exactly one submit was taken, Apple DID answer, and the pkg WAS uploaded - it is NOT re-sent, because a second submit would submit it twice. What was NOT reached is the verdict: the wait then lost the connection, so no credential was judged and no notarization verdict was read. Read that verdict with xcrun notarytool log <the submission id from the line above> --apple-id \"$APPLE_ID\" --team-id \"$MACOS_NOTARY_TEAM_ID\" --password <the app-specific password>, or wait for the submission to finish and then re-run this particular job. The tag need not be re-pushed."
+            exit 1
+          fi
           if [ "$NOTARY_RC" -ne 0 ]; then
             if notary_lost_connection "$NOTARY_OUT"; then
-              echo "::error::xcrun notarytool submit exited $NOTARY_RC and the exchange with Apple never completed - the connection was lost, and every attempt was retried (3). This is a TRANSPORT failure, not a refusal and not a notarization verdict: Apple never answered, so no credential was judged and nothing was uploaded. Re-run the release run's failed jobs (gh run rerun <the run id> --failed); the tag need not be re-pushed. If you want the credentials ruled out anyway, ask Apple directly with APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
+              echo "::error::xcrun notarytool submit exited $NOTARY_RC and the exchange with Apple never completed - the connection was lost, and every attempt was retried (${ATTEMPTS}). This is a TRANSPORT failure, not a refusal and not a notarization verdict: Apple never answered, so no credential was judged and nothing was uploaded. Re-run the release run's failed jobs (gh run rerun <the run id> --failed); the tag need not be re-pushed. If you want the credentials ruled out anyway, ask Apple directly with APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
             else
               echo "::error::xcrun notarytool submit exited $NOTARY_RC - the SUBMISSION was refused, so this is not a notarization verdict. Apple's own reply is the output above. Usual causes: an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement that needs accepting. A verdict failure looks different: it takes minutes, exits 0, and reports status=Invalid. Reproduce it at home before re-tagging, with the same three variables this step sends: APPLE_ID=... MACOS_NOTARY_APP_PASSWORD=... MACOS_NOTARY_TEAM_ID=... python3 scripts/check-notary-credentials.py (exit 0 the credentials work / 1 Apple refused them, and prints its reply / 2 the exchange did not complete, so no verdict was reached - never a pass)."
             fi
