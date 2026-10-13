@@ -28,6 +28,7 @@ here is about wall-clock time.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -112,6 +113,16 @@ if scenario == "refused":
 if scenario == "transport_once":
     if submit_no > 1:
         accepted()
+    sys.stderr.write(os.environ["LOST_CONNECTION"] + "\\n")
+    sys.exit(68)
+
+if scenario == "transport_then_accepted":
+    # Attempt one loses the connection WITHOUT an id, so the loop retries; attempt two is
+    # accepted and then loses the WAIT. This is the accepted-upload branch reached on
+    # attempt 2 - the shape a sentence claiming "exactly one submit was taken" is false on.
+    if submit_no > 1:
+        json.dump({"id": "sub-9", "message": "Successfully uploaded", "status": "In Progress"}, sys.stdout)
+        sys.stdout.write("\\n")
     sys.stderr.write(os.environ["LOST_CONNECTION"] + "\\n")
     sys.exit(68)
 
@@ -341,3 +352,42 @@ def test_a_connection_lost_after_an_upload_id_is_not_re_sent(tmp_path) -> None:
             f"the upload-id outcome printed {clause!r} — a claim about a run where the pkg "
             f"was not uploaded and Apple did answer.\noutput={result.output!r}"
         )
+
+
+@_posix_shell_only
+def test_the_accepted_upload_states_the_count_the_loop_actually_took(tmp_path) -> None:
+    """A count in an operator-facing sentence is read from the loop, never asserted.
+
+    The accepted-upload branch is reached on attempt 2 whenever attempt 1 lost the
+    connection *without* an id and the loop retried, so a sentence claiming "exactly one
+    submit was taken" is false on that very run — and it contradicts the ::warning:: the
+    step printed one line above it, which already says `(attempt 1/3)`. That contradiction
+    is what this outcome's own sentence exists to remove, so the count has to come from the
+    loop (`attempt`) rather than from a literal beside it.
+
+    The arm compares the number the sentence prints against the number of `notarytool
+    submit` calls the stub recorded — a comparison rather than a second literal, so it
+    survives a change to the retry bound and would have failed on the literal.
+    """
+    result = _run_step(tmp_path, "transport_then_accepted")
+    submits = _submits(result)
+    assert submits == 2, (
+        "the scenario did not reach the accepted-upload branch on attempt two, so this arm "
+        f"measures nothing: calls={result.calls!r}"
+    )
+    assert UPLOAD_ID_CLAIM in result.output, (
+        "the accepted-upload outcome was not reported with its own sentence, so the count it "
+        f"states cannot be read.\noutput={result.output!r}"
+    )
+    match = re.search(r"(\d+) submit attempt\(s\) were taken", result.output)
+    assert match is not None, (
+        "the sentence no longer states how many submit attempts were taken; the reader of a "
+        f"failed release cannot tell this shape from an exhausted retry loop.\n"
+        f"output={result.output!r}"
+    )
+    assert int(match.group(1)) == submits, (
+        f"the sentence says {match.group(1)} submit attempt(s) were taken, but the stub "
+        f"recorded {submits} — the count is written as a literal instead of read from the "
+        f"loop, and it goes stale the moment the retry path is taken.\n"
+        f"calls={result.calls!r}\noutput={result.output!r}"
+    )

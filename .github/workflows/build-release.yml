@@ -515,6 +515,13 @@ jobs:
           # under the job's `-e`, where a non-zero return from `notary_submit` would abort
           # the step before it could speak at all.
           NOTARY_UNREAD_UPLOAD_ID=0
+          # How many `notarytool submit` calls this run took, carried out of the loop for the
+          # same reason `ATTEMPTS` is a variable: `attempt` is `local` to `notary_submit`, so
+          # it is gone by the time the message below runs, and a sentence that states the
+          # count must read it rather than assert a literal. The accepted-upload branch is
+          # reachable on attempt 2, not only on attempt 1 (one attempt may lose the connection
+          # without an id and be retried), so the count is genuinely not always one.
+          NOTARY_SUBMITS_TAKEN=0
           notary_submit() {
             local attempt
             for (( attempt=1; attempt<=ATTEMPTS; attempt++ )); do
@@ -534,6 +541,7 @@ jobs:
               if notary_accepted_an_upload "$NOTARY_OUT"; then
                 echo "::warning::the connection was lost after Apple returned a submission id - a credential verdict may still be readable from that submission, so it is NOT re-sent"
                 NOTARY_UNREAD_UPLOAD_ID=1
+                NOTARY_SUBMITS_TAKEN=$attempt
                 return 0
               fi
               if [ "$attempt" -lt "$ATTEMPTS" ]; then
@@ -553,7 +561,7 @@ jobs:
             # printed directly above it, which says a verdict "may still be readable from
             # that submission". Exiting here also keeps the parse below from reporting an
             # unread verdict as one that failed.
-            echo "::error::xcrun notarytool submit exited $NOTARY_RC after Apple ACCEPTED the upload and returned a submission id (the JSON line above). This is neither a refusal nor the transport-exhausted failure: exactly one submit was taken, Apple DID answer, and the pkg WAS uploaded - it is NOT re-sent, because a second submit would submit it twice. What was NOT reached is the verdict: the wait then lost the connection, so no credential was judged and no notarization verdict was read. Read that verdict with xcrun notarytool log <the submission id from the line above> --apple-id \"$APPLE_ID\" --team-id \"$MACOS_NOTARY_TEAM_ID\" --password <the app-specific password>, or wait for the submission to finish and then re-run this particular job. The tag need not be re-pushed."
+            echo "::error::xcrun notarytool submit exited $NOTARY_RC after Apple ACCEPTED the upload and returned a submission id (the JSON line above). This is neither a refusal nor the transport-exhausted failure: ${NOTARY_SUBMITS_TAKEN} submit attempt(s) were taken, Apple DID answer the last one, and the pkg WAS uploaded - it is NOT re-sent, because another submit would submit it twice. What was NOT reached is the verdict: the wait then lost the connection, so no credential was judged and no notarization verdict was read. Read that verdict with xcrun notarytool log <the submission id from the line above> --apple-id \"$APPLE_ID\" --team-id \"$MACOS_NOTARY_TEAM_ID\" --password <the app-specific password>, or wait for the submission to finish and then re-run this particular job. The tag need not be re-pushed."
             exit 1
           fi
           if [ "$NOTARY_RC" -ne 0 ]; then
