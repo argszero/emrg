@@ -1655,19 +1655,32 @@ def test_the_sessions_override_reaches_the_window(mod, monkeypatch, capsys, tmp_
     elsewhere = _session_history(tmp_path / "elsewhere", [_dispatch_line(GAP_CYCLE)])
     argv = ["1", "--cycle", CYCLE, "--cycles-log", str(records)]
 
-    rc = _run(mod, monkeypatch, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
-              FakeFresh(), argv + ["--sessions-dir", str(elsewhere)])
+    # Each run installs both seams, and `_install` binds its fake to the sibling it
+    # replaces by calling the *patched* name — so a second run over the first run's seams
+    # would hand the new fake the old fake as its "real" module (`'FakeVotes' object has
+    # no attribute 'Verdict'`), which is a fact about this fixture and not about the flag.
+    # A nested context undoes exactly what that run installed. It is not `undo()`:
+    # `monkeypatch.undo()` undoes the autouse ledger seam too, and the second run then
+    # reads the machine's `~/.emrg/rants.jsonl` — absent on a CI runner, where the tool
+    # answers `unmeasurable` and exits 2, and present on the host that wrote this, where
+    # it exits 0. Measured: run 38411916623, both legs, 1 failed / 4976 passed.
+    with monkeypatch.context() as first:
+        rc = _run(mod, first, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
+                  FakeFresh(), argv + ["--sessions-dir", str(elsewhere)])
     assert rc == 0
     assert "abstain" not in capsys.readouterr().out
 
-    # Undone first: `_install` binds each fake to the sibling it replaces by calling the
-    # patched name, so a second run over the first run's seams would hand the new fake
-    # the *old fake* as its "real" module (`'FakeVotes' object has no attribute
-    # 'Verdict'`), which is a fact about this fixture and not about the flag.
-    monkeypatch.undo()
     monkeypatch.setenv("EMRG_SESSIONS_DIR", str(elsewhere))
     rc = _run(mod, monkeypatch, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
               FakeFresh(), argv)
+    # The seam, not only the exit code: an exit code is a fact about the machine as much
+    # as about the flag (that is exactly how the run above went green here and red on
+    # CI), so the property this test rests on — every invocation read the ledger through
+    # the fixture — is asserted directly, and holds on a host with the file or without it.
+    assert isinstance(mod.open_rant_rows, FakeLedger), (
+        "this test ran the tool against the machine's own ~/.emrg/rants.jsonl: the ledger "
+        "seam was undone, so the verdict below is about this host's files, not the flag"
+    )
     assert rc == 0
     assert "abstain" not in capsys.readouterr().out
 
