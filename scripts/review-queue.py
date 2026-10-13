@@ -487,10 +487,28 @@ def corpus_read_failure(dirs: Sequence[Path], unreadable: Sequence[str]) -> str:
     directory that refused to list - leaves the ids incomplete and has to be said out
     loud. `exists()` and not `is_dir()` for exactly that first case: a regular file at the
     corpus path is not "absent", and it is not readable as a corpus either.
+
+    The test is applied **per entry, not to the set** (issue #2224's mixed case). A set that
+    holds one corpus that is there and one path that is not leaves the absent member's own
+    reason in `unreadable` - `dispatch_ids` records one, and its docstring says an absent
+    directory "is not an error" - so a set-level test passes on the present member and then
+    hands the *absent* one's reason back as the reason a corpus could not be read. Printed,
+    it says that a path with nothing at it failed to open, and "no dispatch was consulted
+    either" while the present corpus was walked. So the reasons kept are exactly those that
+    do not name an absent corpus directory.
+
+    The match is anchored at `"<path> ("`, the shape `dispatch_ids` writes, and not a bare
+    prefix: with `/tmp/a` absent and a file at `/tmp/ab`, `startswith("/tmp/a")` would drop
+    `/tmp/ab`'s genuine reason. In the other direction, a reason naming a **session**
+    directory or a **history** under a corpus is kept - it cannot be the absent member,
+    because `dispatch_ids` only descends into a directory that listed successfully.
     """
-    if not any(Path(directory).exists() for directory in dirs):
-        return ""
-    return "; ".join(unreadable)
+    absent = tuple(str(directory) for directory in dirs if not Path(directory).exists())
+    return "; ".join(
+        reason
+        for reason in unreadable
+        if not any(reason.startswith(f"{directory} (") for directory in absent)
+    )
 
 
 def _dispatch_lines(history: Path, unreadable: list[str]) -> Iterator[str]:

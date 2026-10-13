@@ -1811,7 +1811,8 @@ def test_the_corpus_membership_test_is_the_filesystem_not_the_error_text(mod, tm
     a_file = tmp_path / "afile"
     a_file.write_text("x", encoding="utf-8")
 
-    assert mod.corpus_read_failure((tmp_path / "nowhere",), ["nowhere (No such file)"]) == ""
+    absent = tmp_path / "nowhere"
+    assert mod.corpus_read_failure((absent,), [f"{absent} (No such file)"]) == ""
     assert mod.corpus_read_failure((empty_dir,), []) == ""
     assert mod.corpus_read_failure((a_file,), [f"{a_file} (Not a directory)"]) == (
         f"{a_file} (Not a directory)"
@@ -1820,6 +1821,67 @@ def test_the_corpus_membership_test_is_the_filesystem_not_the_error_text(mod, tm
     assert mod.corpus_read_failure(
         (empty_dir, a_file), [f"{a_file} (Not a directory)"]
     ) == f"{a_file} (Not a directory)"
+
+
+def test_a_mixed_set_reports_only_the_corpus_that_is_there(mod, tmp_path):
+    """Issue #2224, the mixed case: the absent member is not the failure.
+
+    The two tests above pin the homogeneous sets. This is the set that mixes them, and the
+    shape the helper had wrong: the filesystem test was applied to the **set**, so a corpus
+    that is there made the guard pass and the *absent* member's reason - which
+    `dispatch_ids` records, and whose docstring calls absence "not an error" - came back as
+    the reason a corpus could not be read. The clause then reads "The dispatch corpus could
+    not be read (<a path with nothing at it>), so no dispatch was consulted either" while
+    the present corpus was walked, which is three false statements in the one sentence this
+    change exists to make true - and master printed the silent clause for that set.
+
+    Driven through `dispatch_ids`' **real output**, never a hand-written list, because that
+    output is exactly where the absent member's reason lives: a list written for the purpose
+    omits it, which is why the homogeneous tests above cannot see this.
+    """
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    present = tmp_path / "present"
+    present.mkdir()
+    absent = tmp_path / "nowhere"
+    a_file = tmp_path / "notdir"
+    a_file.write_text("not a directory\n", encoding="utf-8")
+
+    for seats in ((present, absent), (absent, present)):
+        _ids, unreadable = mod.dispatch_ids(seats)
+        assert any(str(absent) in reason for reason in unreadable), (
+            "the premise: `dispatch_ids` records the absent member in `unreadable`"
+        )
+        assert mod.corpus_read_failure(seats, unreadable) == "", (
+            "a set that also holds a corpus that is there must not report the path with "
+            "nothing at it as a measurement that failed"
+        )
+
+    # The other direction, so a helper that always answered "" for a mixed set cannot
+    # pass: a corpus that is there and refuses to list is named whatever it is mixed with.
+    for seats in ((a_file, absent), (absent, a_file), (present, a_file), (a_file, present)):
+        _ids, unreadable = mod.dispatch_ids(seats)
+        failure = mod.corpus_read_failure(seats, unreadable)
+        assert str(a_file) in failure, (seats, unreadable)
+        assert str(absent) not in failure, (seats, unreadable)
+
+    # A prefix collision is not a match: with `a` absent and a file at `ab`, a bare
+    # `startswith` on the absent path would drop `ab`'s genuine reason.
+    prefixed_absent = tmp_path / "a"
+    prefixed_file = tmp_path / "ab"
+    prefixed_file.write_text("x", encoding="utf-8")
+    seats = (prefixed_absent, prefixed_file)
+    _ids, unreadable = mod.dispatch_ids(seats)
+    failure = mod.corpus_read_failure(seats, unreadable)
+    assert f"{prefixed_file} (" in failure, unreadable
+    assert f"{prefixed_absent} (" not in failure, unreadable
+
+    # And the clause the reader is shown follows the same reading.
+    mixed = os.pathsep.join([str(present), str(absent)])
+    clause = mod.own_window(CYCLE, None, str(records), mixed).inferred_clause()
+    assert "could not be read" not in clause, clause
+    assert mod.own_window(CYCLE, None, str(records), mixed).dispatch_unread == ""
 
 
 def test_the_dispatch_corpus_comes_from_the_emrg_root_that_owns_the_records(mod, tmp_path):
