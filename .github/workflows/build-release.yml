@@ -106,13 +106,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # `set -e` is load-bearing: the preflight's exit 2 (not measurable) must fail
-          # this step too, never pass it as "nothing to check".
-          python3 scripts/check-notary-credentials.py || {
-            rc=$?
-            echo "::error::the notarization preflight answered $rc -- 1 means Apple REFUSED these credentials (an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted); 2 means the exchange did not complete, so no verdict was reached. Either way this tag cannot publish a macOS product, and the four-platform build would be spent before saying so. Run the same command at home with the same three variables to read Apple's own reply."
-            exit 1
-          }
+          # The preflight asks Apple a question **over the network**, so its exit 2 ("the
+          # exchange did not complete, so no verdict was reached") is also what a transport
+          # answer produces: the exchange's own 60 s bound, an `OSError` running `xcrun`, a
+          # 5xx, a DNS failure. This step is on the build job's path (`build: needs:
+          # [verify-tag, verify-credentials]`, and a failed dependency does not run it), and
+          # `release` needs `build` -- so one such blip skips the build, skips the release,
+          # and leaves the pushed tag with no release at all (issue #2201; the same
+          # consequence issue #2197 removes at the `Staple pkg` step and #2199/#2200 at the
+          # `Notarize pkg` step).
+          #
+          # So a `2` is retried, bounded; a `1` is Apple's verdict on the credential and is
+          # NEVER retried (only a human can change it); and an exchange that stays
+          # unmeasurable through every attempt still fails this step, because "could not
+          # measure" must never read as "nothing to check" -- the retry removes the flake,
+          # never the verdict (the rule PR #2198 states for the sibling step).
+          attempts=3
+          attempt=1
+          while [ "$attempt" -le "$attempts" ]; do
+            rc=0
+            python3 scripts/check-notary-credentials.py || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            if [ "$rc" -eq 1 ]; then
+              echo "::error::the notarization preflight answered 1 -- Apple REFUSED these credentials (an expired or revoked app-specific password, an Apple ID or team ID that does not match, or a Developer Program agreement waiting to be accepted). This tag cannot publish a macOS product, and the four-platform build would be spent before saying so. Run the same command at home with the same three variables to read Apple's own reply."
+              exit 1
+            fi
+            if [ "$attempt" -lt "$attempts" ]; then
+              delay=$((attempt * 15))
+              echo "the notarization preflight answered ${rc} on attempt ${attempt}/${attempts} -- the exchange did not reach a verdict, which a transport blip produces; retrying in ${delay}s"
+              sleep "$delay"
+            fi
+            attempt=$((attempt + 1))
+          done
+          echo "::error::the notarization preflight answered ${rc} on every one of ${attempts} attempts -- the exchange never completed, so no verdict was reached (2 is this tool's code for a question it could not answer; 1, Apple's refusal, is reported above without a retry). This tag cannot publish a macOS product, and the four-platform build would be spent before saying so. Run the same command at home with the same three variables to read Apple's own reply."
+          exit 1
 
   build:
     needs: [verify-tag, verify-credentials]
