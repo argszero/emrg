@@ -508,8 +508,32 @@ jobs:
             echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg, and a release missing its macOS product must not be reported as success"
             exit 1
           fi
-          xcrun stapler staple "$PKG"
-          xcrun stapler validate "$PKG"
+          # Both stapler calls fetch/attach Apple's ticket over the network
+          # (api.apple-cloudkit.com), so either can fail for a reason that has nothing to do
+          # with the artifact. A red macOS leg skips `release` (`needs: build`) and leaves a
+          # bare tag, which the upgrade chain cannot see - it reads the releases API only.
+          # Measured 2026-10-13, run 38353839071 (tag v0.3.10): `staple` succeeded, the
+          # following `validate` lost the connection ~6 s in and exited 68, and the release
+          # was lost to a re-run. Retry the transport; a permanent failure still reddens the
+          # step, it just takes a bounded number of attempts (errors below in the log).
+          # `spctl` below is deliberately NOT retried: it is the Gatekeeper acceptance
+          # verdict, not ticket transport, and it is not what failed here.
+          stapler_retry() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                echo "::warning::$* failed (attempt ${attempt}/5) - retrying in $((attempt * 15))s"
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "::error::$* failed on all 5 attempts - the last error is above"
+            return 1
+          }
+          stapler_retry xcrun stapler staple "$PKG"
+          stapler_retry xcrun stapler validate "$PKG"
           # P3 终验（rant 验收 + 设计文档 §5.1）：spctl 确认 Gatekeeper 接受
           # （签名 + 公证 + staple 全链路的最终裁决；期望输出 "accepted"）
           # ⚠️ --type install 必需（#477 教训）：spctl 默认类型为 execute，
