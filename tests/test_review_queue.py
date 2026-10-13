@@ -986,9 +986,9 @@ def test_it_does_not_spell_the_words_itself(mod):
     Read with `ast`, not with a substring search: the docstring above `terminal`
     **quotes** the old spelling while explaining why it is gone, and a text search
     cannot tell a rule's explanation from a rule's violation. (The first version of
-    this leg was written that way and failed on its own prose — the same lesson
-    `scripts/check_read_parse_guards.py` records about reading what a call is fed
-    rather than the line it sits on.)
+    this leg was written that way and failed on its own prose — the same quoted-form
+    false positive `scripts/check-citation-resolves.py` records, whose first draft
+    quoted the broken citation verbatim and whose tool then reported itself.)
     """
     tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
     copies = [
