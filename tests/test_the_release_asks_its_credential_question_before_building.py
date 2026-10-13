@@ -25,7 +25,9 @@ file pins the four properties that make it a gate rather than a second opinion:
   secret names, not a set of its own;
 * it fails closed on **every** non-zero answer, exit 2 included, and the fail-closed
   behaviour is *executed* rather than read: the step's own `run:` text is driven with a
-  stand-in preflight that answers 0, 1 and 2;
+  stand-in preflight that answers 0, 1 and 2 — with a `2` asked again first, because a
+  transport blip answers `2` as readily as credentials trouble does, and giving up skips
+  the build and the release (issue #2201). A `1` is Apple's verdict and is never retried;
 * it is skipped exactly where the notarize step is skipped, so a host who never
   configured notarization keeps the documented degradation instead of gaining a release
   blocker — and it does not run at all on a branch dispatch, where there is no tag to
@@ -172,21 +174,48 @@ def test_the_gate_does_not_run_where_there_is_no_tag() -> None:
 
 # ── The arms: the step's own text, driven ─────────────────────────────────────
 
-#: What the stand-in preflight answers. `sys.exit` is the whole stand-in: the gate's
-#: behaviour under a code is the property, never the exchange that produces it.
-_STAND_IN = """\
+#: What the stand-in preflight answers. It answers a *sequence* of codes, one per
+#: invocation, recording how many times it was asked: the retry is a property of the step,
+#: so "how many times did the preflight get asked" is the reading that decides it, in both
+#: directions — a code that must be asked again, and the two that must not. The last code
+#: repeats, so a single-code sequence is a stand-in that always answers that code.
+_STAND_IN_SEQUENCE = """\
+import os
 import sys
-print("stand-in preflight (this file never reaches Apple)")
-sys.exit({rc})
+from pathlib import Path
+
+state = Path(os.environ["PREFLIGHT_STATE_FILE"])
+asked = int(state.read_text(encoding="utf-8")) if state.exists() else 0
+asked += 1
+state.write_text(str(asked), encoding="utf-8")
+codes = [int(code) for code in os.environ["PREFLIGHT_CODES"].split(",")]
+code = codes[min(asked, len(codes)) - 1]
+print(f"stand-in preflight: invocation {asked} answers {code}")
+sys.exit(code)
 """
 
 
-def _run_the_gate(rc: int, tmp_path: Path) -> subprocess.CompletedProcess:
-    """Execute the gate step's own `run:` text with a stand-in answering `rc`.
+def _asked_file(tmp_path: Path) -> Path:
+    return tmp_path / "preflight-asked.txt"
+
+
+def _times_asked(tmp_path: Path) -> int:
+    """How many times the stand-in preflight was invoked (0 when it never was)."""
+    state = _asked_file(tmp_path)
+    return int(state.read_text(encoding="utf-8")) if state.exists() else 0
+
+
+def _run_the_gate_text(
+    stand_in_text: str, tmp_path: Path, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """Execute the gate step's own `run:` text against the stand-in preflight given.
 
     The stand-in lives at the *relative* path the step's own text names
     (`scripts/check-notary-credentials.py`) inside a temporary cwd, so the text is executed
     unchanged and the real preflight — which would ask Apple — cannot be reached.
+
+    A `sleep` that returns at once goes first on `PATH`: the step's retry delays are real
+    seconds, and a guard that waits them is slower without measuring anything more.
     """
     if shutil.which("bash") is None:  # pragma: no cover - a POSIX-less host
         pytest.skip("no bash on PATH: this file drives a workflow step's shell text, which it cannot run")
@@ -200,21 +229,45 @@ def _run_the_gate(rc: int, tmp_path: Path) -> subprocess.CompletedProcess:
 
     stand_in = tmp_path / "scripts" / PREFLIGHT
     stand_in.parent.mkdir(parents=True, exist_ok=True)
-    stand_in.write_text(_STAND_IN.format(rc=rc), encoding="utf-8")
+    stand_in.write_text(stand_in_text, encoding="utf-8")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    fast_sleep = bindir / "sleep"
+    fast_sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fast_sleep.chmod(0o755)
 
     script = tmp_path / "step.sh"
     script.write_text(textwrap.dedent(script_text), encoding="utf-8")
+
+    env = {
+        "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "HOME": str(tmp_path),
+    }
+    env.update(extra_env or {})
 
     # `shell: bash` is what the step declares, and GitHub runs it as `bash -e {0}`; the
     # step's own `set -euo pipefail` then applies from inside.
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-e", str(script)],
         cwd=tmp_path,
-        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)},
+        env=env,
         capture_output=True, text=True,
         # The step prints UTF-8; the locale codec of the host running this test is not a
         # decoder for it (issue #1132, and this suite's locale-independence guard).
         encoding="utf-8", errors="replace", timeout=120,
+    )
+
+
+def _run_the_gate(rc: int, tmp_path: Path) -> subprocess.CompletedProcess:
+    """Execute the gate step's own `run:` text with a stand-in that always answers `rc`."""
+    return _run_the_gate_text(
+        _STAND_IN_SEQUENCE,
+        tmp_path,
+        extra_env={
+            "PREFLIGHT_STATE_FILE": str(_asked_file(tmp_path)),
+            "PREFLIGHT_CODES": str(rc),
+        },
     )
 
 
@@ -239,6 +292,13 @@ def test_a_refused_credential_stops_the_release_before_any_build(tmp_path) -> No
     assert errors and "answered 1" in errors[0], (
         "the gate failed without saying that Apple refused the credential (the preflight's "
         f"own reading is the only actionable half). Output: "
+        f"{(result.stdout + result.stderr).strip()[:300]!r}"
+    )
+    assert _times_asked(tmp_path) == 1, (
+        "the gate asked the preflight more than once after Apple refused the credential — a "
+        "`1` is a verdict on the credential, and only a human can change it, so re-asking "
+        "spends the window and cannot change the answer. Asked "
+        f"{_times_asked(tmp_path)} time(s). Output: "
         f"{(result.stdout + result.stderr).strip()[:300]!r}"
     )
 
@@ -269,6 +329,13 @@ def test_a_credential_that_could_not_be_measured_stops_it_too(tmp_path) -> None:
         "reader cannot tell a refused credential from an exchange that never reached a "
         f"verdict. Output: {(result.stdout + result.stderr).strip()[:300]!r}"
     )
+    asked = _times_asked(tmp_path)
+    assert 1 < asked <= 5, (
+        "an exchange that never reaches a verdict must be asked again (a transport blip "
+        "answers `2` too) and the attempts must be **bounded** — asking once gives up on a "
+        f"flake that would have cleared, and asking without end hangs the tag run. Asked "
+        f"{asked} time(s). Output: {(result.stdout + result.stderr).strip()[:300]!r}"
+    )
 
 
 @pytest.mark.skipif(
@@ -288,4 +355,48 @@ def test_an_accepted_credential_lets_the_tag_run_proceed(tmp_path) -> None:
     assert not _error_lines(result), (
         "the gate reported an ::error:: for an accepted credential: "
         f"{(result.stdout + result.stderr).strip()[:300]!r}"
+    )
+    assert _times_asked(tmp_path) == 1, (
+        "the gate asked the preflight again after Apple accepted the credentials — a `0` "
+        "is the verdict this gate exists to get, so asking a second time is a wasted "
+        f"exchange. Asked {_times_asked(tmp_path)} time(s)."
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash on the Windows runner is WSL's, not the shell these steps run under in "
+    "CI (measured 2026-10-02, PR #1812)",
+)
+def test_a_transient_answer_is_asked_again_before_the_release_is_given_up(tmp_path) -> None:
+    """A `2` is also what a transport blip answers, and this gate is on the release's path.
+
+    The preflight asks Apple **over the network**, so its own contract (issue #2201) has a
+    `2` for a 5xx, a dropped connection, a DNS failure and its own 60 s timeout — not only
+    for credentials trouble. Giving up on the first `2` skips `build`, skips `release`, and
+    leaves the pushed tag with no release at all, which is the state issue #2197 removes one
+    carrier over. So the step asks again: the first answer here is `2` and the second is
+    `0`, and the run must proceed with the preflight asked exactly twice.
+    """
+    result = _run_the_gate_text(
+        _STAND_IN_SEQUENCE,
+        tmp_path,
+        extra_env={
+            "PREFLIGHT_STATE_FILE": str(_asked_file(tmp_path)),
+            "PREFLIGHT_CODES": "2,0",
+        },
+    )
+    assert _times_asked(tmp_path) == 2, (
+        "the step did not ask the preflight a second time after it answered 2 — a single "
+        "transport blip then skips the build, skips the release, and leaves the tag bare. "
+        f"Output: {(result.stdout + result.stderr).strip()[:300]!r}"
+    )
+    assert result.returncode == 0, (
+        "the step failed after the preflight answered 2 and then 0 — the retry removes the "
+        f"flake, never the release. Output: "
+        f"{(result.stdout + result.stderr).strip()[:300]!r}"
+    )
+    assert not _error_lines(result), (
+        "the step reported an ::error:: for an exchange that succeeded on its second "
+        f"attempt: {(result.stdout + result.stderr).strip()[:300]!r}"
     )
