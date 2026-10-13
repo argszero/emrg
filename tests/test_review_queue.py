@@ -1752,6 +1752,63 @@ def test_the_dispatch_corpus_defaults_to_the_records_sibling(mod, tmp_path):
     assert mod.resolve_session_dirs("/elsewhere", (root,)) == (Path("/elsewhere"),)
 
 
+def test_the_dispatch_corpus_comes_from_the_emrg_root_that_owns_the_records(mod, tmp_path):
+    """Issue #2222: a record root's corpus is the `.emrg` root's `sessions`, not the
+    directory beside the root.
+
+    The derivation looked beside each record root, which was right while the corpus had
+    one root (`<checkout>/.emrg/memory` → `<checkout>/.emrg/sessions`). #2221 made the
+    default several roots, one of them a session's (`.../.emrg/sessions/<id>/memory`),
+    whose sibling — `<id>/sessions` — was never a corpus at all. So the reading invented
+    a directory and then reported it as one it could not read.
+
+    Both scopes belong to the same `.emrg` root and must answer with the same directory,
+    once: two entries naming one corpus is a reading that looks like two.
+    """
+    checkout = tmp_path / "proj"
+    project_root = checkout / ".emrg" / "memory"
+    session_root = checkout / ".emrg" / "sessions" / "s1" / "memory"
+    project_root.mkdir(parents=True)
+    session_root.mkdir(parents=True)
+
+    assert mod.resolve_session_dirs(None, (project_root,)) == (
+        checkout / ".emrg" / "sessions",
+    )
+    assert mod.resolve_session_dirs(None, (session_root,)) == (
+        checkout / ".emrg" / "sessions",
+    ), "a session root's corpus is its `.emrg` root's sessions, not a directory beside it"
+    assert mod.resolve_session_dirs(None, (project_root, session_root)) == (
+        checkout / ".emrg" / "sessions",
+    ), "one corpus named by two roots is one directory, not two"
+
+
+def test_a_session_scoped_corpus_is_read_rather_than_lost(mod, tmp_path):
+    """The other half of the same mistake, and the one that loses dispatches outright.
+
+    A caller naming a session's memory directory as its record corpus had its dispatches
+    read from `<session>/sessions` — absent — so the window silently fell back to the
+    records alone, with the corpus two levels up never consulted and no fault printed.
+    The histories are written where `dispatch_ids` looks, and they are found now.
+    """
+    checkout = tmp_path / "proj"
+    session_root = checkout / ".emrg" / "sessions" / "s1" / "memory"
+    session_root.mkdir(parents=True)
+    history = checkout / ".emrg" / "sessions" / "s1" / "history_260917.jsonl"
+    history.write_text(
+        json.dumps({
+            "type": "message", "role": "user", "timestamp": "2026-09-17T22:03:00",
+            "content": "## Evolution Cycle\n\ncycle cyc20260917-220300 of the task",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    dirs = mod.resolve_session_dirs(None, (session_root,))
+    assert dirs == (checkout / ".emrg" / "sessions",), dirs
+    ids, unreadable = mod.dispatch_ids(dirs)
+    assert ids == ["cyc20260917-220300"], ids
+    assert unreadable == [], unreadable
+
+
 def test_the_sessions_override_reaches_the_window(mod, monkeypatch, capsys, tmp_path):
     """`--sessions-dir` / `$EMRG_SESSIONS_DIR` name the dispatch corpus somewhere else, and
     both have to reach `main`'s reading rather than only the parser: the flag is the
