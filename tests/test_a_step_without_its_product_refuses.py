@@ -83,6 +83,14 @@ _ARTIFACT_PATTERN = re.compile(r"EMRG-[^\s'\"]*")
 #: step that gets past its subject check still cannot sign, notarize or talk to Apple.
 _STUBBED_TOOLS = ("xcrun", "codesign", "security", "productsign", "powershell", "spctl")
 
+#: Tools whose only job is to wait, stubbed to a quiet success rather than a refusal. The
+#: Staple step retries a lost ticket service five times, 15 s apart (measured 2026-10-13,
+#: `tests/test_release_staple_survives_a_lost_ticket_service.py`), and with a refusing stub
+#: its ``sleep`` would either abort the retry loop under ``-e`` or spend this file's whole
+#: subprocess budget as wall clock. Nothing this guard asserts is about waiting, so the
+#: delay is cut here exactly as it is cut in that file — the step bodies are untouched.
+_NOOP_TOOLS = ("sleep",)
+
 #: The environment every step is run with: the secrets the `if:` conditions read, so a
 #: step is not skipped for the wrong reason when its body is executed by hand.
 _STEP_ENV = {
@@ -155,6 +163,11 @@ def _run_step(tmp_path: Path, step: dict, *, product: str | None) -> subprocess.
     for tool in _STUBBED_TOOLS:
         stub = stubs / tool
         stub.write_text(f"#!/bin/sh\necho 'stub: {tool} refuses to run'\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+
+    for tool in _NOOP_TOOLS:
+        stub = stubs / tool
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         stub.chmod(0o755)
 
     script = tmp_path / "step.sh"
