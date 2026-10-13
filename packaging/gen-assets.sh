@@ -75,7 +75,7 @@ render_svg_to_png() {
     "/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"; do
     if [ -n "$chrome" ] && command -v "$chrome" >/dev/null 2>&1 || [ -x "$chrome" ] 2>/dev/null; then
       renderer_found=1
-      echo "    renderer: $chrome (headless, HTML wrapper, opaque white bg)"
+      echo "    renderer: $chrome (headless, HTML wrapper, transparent bg)"
       HTML="$OUT/.icon-render.html"
       # cygpath the wrapper page URL too — on Windows Git Bash $HTML is an MSYS
       # path (/c/Users/...), and file:///c/Users/... (missing drive colon) fails
@@ -86,9 +86,21 @@ render_svg_to_png() {
       if command -v cygpath >/dev/null 2>&1; then
         PAGE_URL="file:///$(cygpath -m "$HTML")"
       fi
+      # ⚡ rant 2026-10-13T17:45:42 (host: the app icon has a white ring around it):
+      #    this wrapper used to paint an OPAQUE WHITE page, so every transparent
+      #    region of the SVG was baked to white and the screenshot was written
+      #    with no alpha channel at all (icon.png came out colortype 2/RGB,
+      #    1024x1024, corners #FFFFFF). Everything derived from it inherited the
+      #    white — icon-512/256, every entry of icon.icns, every size of
+      #    icon.ico — and macOS 26, which clips the icon into its own rounded
+      #    tile, showed it as a white border around the shape.
+      #    A transparent page plus the matching --default-background-color (see
+      #    the invocation below) keeps the SVG's own transparency, and
+      #    check_icon_opaque now refuses a flattened or alpha-less render so the
+      #    white cannot come back unnoticed.
       cat > "$HTML" <<HTMLEOF
 <!DOCTYPE html><html><head><meta charset="utf-8">
-<style>html,body{margin:0;padding:0;background:#fff}</style></head>
+<style>html,body{margin:0;padding:0;background:transparent}</style></head>
 <body><img src="$SVG_URL" width="1024" height="1024"></body></html>
 HTMLEOF
       TIMEOUT_CMD=""
@@ -102,6 +114,7 @@ HTMLEOF
       if $TIMEOUT_CMD "$chrome" --headless --disable-gpu --hide-scrollbars \
           --force-device-scale-factor=1 --allow-file-access-from-files \
           $NO_SANDBOX \
+          --default-background-color=00000000 \
           --screenshot="$OUT/icon.png" --window-size=1024,1024 \
           "$PAGE_URL" >/dev/null 2>&1 \
           && check_icon_opaque; then
@@ -134,6 +147,10 @@ HTMLEOF
 #    alpha channel; if >90% of pixels are transparent, the renderer failed.
 #    Returns 0 when the icon is opaque enough (accepted), 1 when blank (caller
 #    falls back to the next renderer).
+#    ⚡ The opposite direction is checked too (rant 2026-10-13T17:45:42): a
+#    render that lost its alpha channel, or whose corners are opaque, has a
+#    background baked in and is rejected the same way — see the rules at the
+#    end of the body.
 #    ⚡ Filter-aware decode (v0.2.29 Build Release lesson): rsvg-convert /
 #    Chrome emit adaptively-filtered PNG rows (Sub/Up/Average/Paeth). A naive
 #    "strip filter byte" read returns deltas, not pixels — a fully opaque icon
@@ -152,17 +169,44 @@ if (w, h) != (1024, 1024):
     sys.exit(1)
 print(f"    icon.png OK: {w}x{h}")
 
-if bpp == 4:
-    ratio = pngutil.opaque_ratio(w, h, bpp, px)
-    print(f"    icon.png alpha: {ratio:.1%} opaque")
-    if ratio < 0.10:
+# ⚡ rant 2026-10-13T17:45:42 — the gap this closes: every rule above only ever
+#    refused a render that was TOO transparent, so one that flattened the
+#    transparent canvas to opaque white passed every gate and shipped. The two
+#    rules below are the reverse direction: the render must still have an alpha
+#    channel, and the design's corners must still be see-through.
+if bpp != 4:
+    sys.stderr.write(
+        "ERROR: icon.png has NO alpha channel (colortype 2/RGB) — the render "
+        "flattened the transparent background to a solid colour, which macOS then "
+        "shows as a border around the icon once it clips it into a rounded tile. "
+        "Falling back to next renderer (gap closed for rant 2026-10-13T17:45:42).\n"
+    )
+    sys.exit(1)
+
+ratio = pngutil.opaque_ratio(w, h, bpp, px)
+print(f"    icon.png alpha: {ratio:.1%} opaque")
+if ratio < 0.10:
+    sys.stderr.write(
+        f"ERROR: icon.png is {1-ratio:.1%} transparent — renderer failed to paint "
+        "the SVG. Falling back to next renderer (see rant 2026-08-12T17:25:28).\n"
+    )
+    sys.exit(1)
+
+# icon.svg paints a rounded rect inset from the canvas and carries no background
+# of its own, so all four corners of a correct render are fully transparent. An
+# opaque corner means a background colour was baked in (the white ring).
+CORNERS = (("top-left", 0, 0), ("top-right", w - 1, 0),
+           ("bottom-left", 0, h - 1), ("bottom-right", w - 1, h - 1))
+for name, cx, cy in CORNERS:
+    o = (cy * w + cx) * 4
+    if px[o + 3] != 0:
         sys.stderr.write(
-            f"ERROR: icon.png is {1-ratio:.1%} transparent — renderer failed to paint "
-            "the SVG. Falling back to next renderer (see rant 2026-08-12T17:25:28).\n"
+            f"ERROR: icon.png's {name} corner is opaque (alpha={px[o + 3]}, "
+            f"rgb={tuple(px[o:o + 3])}) — a background was baked into the render. "
+            "Falling back to next renderer (rant 2026-10-13T17:45:42).\n"
         )
         sys.exit(1)
-else:
-    print(f"    icon.png alpha: colortype={'RGB' if bpp == 3 else bpp} (no alpha channel) — assumed opaque")
+print("    icon.png corners: all four transparent")
 PYEOF
 }
 
@@ -188,21 +232,35 @@ echo "==> iconutil → icon.icns (macOS only; skipped on Linux/Windows)"
 if command -v iconutil >/dev/null 2>&1; then
   ICONSET="$OUT/icon.iconset"
   mkdir -p "$ICONSET"
-  # iconutil wants specific sizes
-  for s in 16 32 128 256 512; do
-    python3 - "$OUT/icon.png" "$ICONSET/icon_${s}x${s}.png" "$s" <<'PYEOF'
+  # ⚡ rant 2026-10-13T17:45:42: this block used to render 16/32/128/256/512 and
+  #    then `cp` each 1x file onto its own `@2x` name. iconutil validates an
+  #    entry's pixel size against its name and SILENTLY DROPS a mismatch, so
+  #    those copies never landed: the shipped icon.icns had no
+  #    icon_512x512@2x (1024 — the ic10 entry) and no icon_32x32@2x (64), and
+  #    its largest image was 512. Every entry is now rendered at its real size.
+  python3 - "$OUT/icon.png" "$ICONSET" <<'PYEOF'
 import os, sys
 sys.path.insert(0, os.environ.get("PNGUTIL_DIR", os.path.join(os.path.dirname(sys.argv[1]), "..")))
 import pngutil
 
-src, dst, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
+src, iconset = sys.argv[1], sys.argv[2]
 w, h, bpp, px = pngutil.read_png(src)
 rgba = pngutil.to_rgba(w, h, bpp, px)
-pngutil.write_png(dst, size, size, pngutil.resize_area(rgba, w, h, size, size))
+
+# The iconset's fixed set: each @2x slot is double the pixels of its 1x slot.
+for name, size in (
+    ("icon_16x16.png", 16), ("icon_16x16@2x.png", 32),
+    ("icon_32x32.png", 32), ("icon_32x32@2x.png", 64),
+    ("icon_128x128.png", 128), ("icon_128x128@2x.png", 256),
+    ("icon_256x256.png", 256), ("icon_256x256@2x.png", 512),
+    ("icon_512x512.png", 512), ("icon_512x512@2x.png", 1024),
+):
+    if size > w:
+        continue
+    scaled = rgba if size == w else pngutil.resize_area(rgba, w, h, size, size)
+    pngutil.write_png(f"{iconset}/{name}", size, size, scaled)
+    print(f"    {name}: {size}x{size}")
 PYEOF
-    cp "$ICONSET/icon_${s}x${s}.png" "$ICONSET/icon_${s}x${s}@2x.png" 2>/dev/null || true
-  done
-  # icns needs exact 16/32/128/256/512 + @2x
   iconutil -c icns "$ICONSET" -o "$OUT/icon.icns"
   rm -rf "$ICONSET"
   echo "    wrote $OUT/icon.icns"
