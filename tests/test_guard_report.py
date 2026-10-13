@@ -100,6 +100,7 @@ SWEPT = {
     "check-merge-landed.py",
     "check-node-test-count.py",
     "check-rant-citations.py",
+    "check-retry-bounds.py",
     "check-undefined-names.py",
     "check-workflows.py",
     "check_nonlocal.py",

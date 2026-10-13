@@ -604,16 +604,22 @@ jobs:
           # verdict, not ticket transport, and it is not what failed here.
           stapler_retry() {
             local attempt
-            for attempt in 1 2 3 4 5; do
+            # The bound is stated once, and every sentence below reads it - the last one
+            # included, because a summary printed after `done` is the sentence an operator
+            # triaging a lost release reads (issue #2210). A second copy is a number
+            # nothing measures, and it is the copy that goes stale.
+            # `scripts/check-retry-bounds.py` measures exactly that, over this file.
+            local attempts=5
+            for (( attempt=1; attempt<=attempts; attempt++ )); do
               if "$@"; then
                 return 0
               fi
-              if [ "$attempt" -lt 5 ]; then
-                echo "::warning::$* failed (attempt ${attempt}/5) - retrying in $((attempt * 15))s"
+              if [ "$attempt" -lt "$attempts" ]; then
+                echo "::warning::$* failed (attempt ${attempt}/${attempts}) - retrying in $((attempt * 15))s"
                 sleep $((attempt * 15))
               fi
             done
-            echo "::error::$* failed on all 5 attempts - the last error is above"
+            echo "::error::$* failed on all ${attempts} attempts - the last error is above"
             return 1
           }
           stapler_retry xcrun stapler staple "$PKG"
@@ -719,10 +725,14 @@ jobs:
           n="${#found[@]}"
           api() { gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq "$1"; }
           exists=""
-          for attempt in 1 2 3 4 5 6; do
+          # The bound is stated once and the message reads it (scripts/check-retry-bounds.py):
+          # this step polls for a release the previous job creates, so widening the poll
+          # must move what the log says, not leave a second copy behind (issue #2210).
+          attempts=6
+          for (( attempt=1; attempt<=attempts; attempt++ )); do
             exists="$(api .tag_name 2>/dev/null || true)"
             [ -n "$exists" ] && break
-            echo "the release for ${tag} is not readable yet (attempt ${attempt}/6)"
+            echo "the release for ${tag} is not readable yet (attempt ${attempt}/${attempts})"
             sleep 10
           done
           if [ -z "$exists" ]; then
