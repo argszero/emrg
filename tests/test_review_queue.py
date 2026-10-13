@@ -1752,6 +1752,76 @@ def test_the_dispatch_corpus_defaults_to_the_records_sibling(mod, tmp_path):
     assert mod.resolve_session_dirs("/elsewhere", (root,)) == (Path("/elsewhere"),)
 
 
+def test_a_corpus_that_is_there_and_cannot_be_read_is_not_an_absent_one(mod, tmp_path):
+    """Issue #2224: an absent corpus is a state; a corpus that failed to open is a
+    measurement that failed, and the two must not read the same.
+
+    `dispatch_ids` has always produced the second half of that distinction in its
+    `unreadable` list, and every caller dropped it — so the disclosure a records-only
+    window owes its reader was printed whether the corpus was absent (the CI shape, and
+    documented as *not* a failure) or unreadable (ids silently incomplete). Measured
+    2026-10-14 before this test: an absent corpus and a regular file at the corpus path
+    produced byte-identical output.
+
+    The membership test is the filesystem, not the error text: `exists()`, so that a file
+    where a directory was expected counts as *there* (it is not absent, and it is not
+    readable as a corpus either).
+    """
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    # A corpus that is present and cannot be listed: a regular file at its path.
+    a_file = tmp_path / "notdir"
+    a_file.write_text("not a directory\n", encoding="utf-8")
+    absent = tmp_path / "nowhere"
+
+    for state, where in (("absent", absent), ("unreadable", a_file)):
+        window = mod.own_window(CYCLE, None, str(records), str(where))
+        assert window.inferred is True, (state, window)
+        clause = window.inferred_clause()
+        if state == "absent":
+            assert window.dispatch_unread == "", (state, window.dispatch_unread)
+            assert "could not be read" not in clause, clause
+        else:
+            assert window.dispatch_unread, "the reason a present corpus failed is kept"
+            assert "could not be read" in clause, clause
+            assert str(where) in clause, "the corpus that failed is named, not implied"
+
+    # And the distinction reaches the reader through the note it is printed in.
+    as_text = {
+        state: mod.window_note(mod.own_window(CYCLE, None, str(records), str(where)))
+        for state, where in (("absent", absent), ("unreadable", a_file))
+    }
+    assert as_text["absent"] != as_text["unreadable"], (
+        "the note must not read the same for a corpus that is not there and one that "
+        "could not be opened"
+    )
+    assert "could not be read" not in as_text["absent"], as_text["absent"]
+
+
+def test_the_corpus_membership_test_is_the_filesystem_not_the_error_text(mod, tmp_path):
+    """A unit check on `corpus_read_failure`, because its one rule is the whole point.
+
+    `exists()` and not `is_dir()`: an empty directory that *is* there is a corpus with no
+    dispatches (a state), a file at the path is a corpus that cannot be opened (a
+    failure), and a path with nothing at it is the CI shape (a state, silent).
+    """
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    a_file = tmp_path / "afile"
+    a_file.write_text("x", encoding="utf-8")
+
+    assert mod.corpus_read_failure((tmp_path / "nowhere",), ["nowhere (No such file)"]) == ""
+    assert mod.corpus_read_failure((empty_dir,), []) == ""
+    assert mod.corpus_read_failure((a_file,), [f"{a_file} (Not a directory)"]) == (
+        f"{a_file} (Not a directory)"
+    ), "a path that exists is not absent, whatever the error says"
+    # Two corpora, one unreadable: the reason survives the other half being fine.
+    assert mod.corpus_read_failure(
+        (empty_dir, a_file), [f"{a_file} (Not a directory)"]
+    ) == f"{a_file} (Not a directory)"
+
+
 def test_the_dispatch_corpus_comes_from_the_emrg_root_that_owns_the_records(mod, tmp_path):
     """Issue #2222: a record root's corpus is the `.emrg` root's `sessions`, not the
     directory beside the root.

@@ -458,21 +458,39 @@ def dispatch_ids(dirs: Sequence[Path] | None = None) -> tuple[list[str], list[st
 #: dirs rather than the caller's argument, so two spellings of one corpus share an entry.
 #: A caller that writes to a corpus and re-reads it inside one process must clear this
 #: first; nothing in this tool does, and every test names a corpus of its own.
-_DISPATCHED_IDS: dict[tuple[str, ...], list[str]] = {}
+_DISPATCHED_IDS: dict[tuple[str, ...], tuple[list[str], list[str]]] = {}
 
 
-def dispatched_ids(dirs: Sequence[Path] | None = None) -> list[str]:
-    """`dispatch_ids`'s ids for one corpus, read once per process (see `_DISPATCHED_IDS`).
+def dispatched_ids(dirs: Sequence[Path] | None = None) -> tuple[list[str], list[str]]:
+    """`dispatch_ids`'s whole reading for one corpus, read once per process.
 
-    The unreadable half is deliberately not cached and not returned: what a caller acts
-    on is the ids, and a corpus that could not be read answers with none of them - the
-    same window the records alone give, which the caller then discloses as `inferred`.
+    Both halves are cached and both are returned: the reading is a pure function of what
+    is on disk, so caching the ids alone made the caller re-read the corpus to learn
+    *why* an id was missing — which is the half that says whether a corpus was absent (a
+    state) or could not be read (a measurement that failed).
     """
     resolved = resolve_session_dirs() if dirs is None else tuple(dirs)
     key = tuple(str(directory) for directory in resolved)
     if key not in _DISPATCHED_IDS:
-        _DISPATCHED_IDS[key] = dispatch_ids(resolved)[0]
-    return _DISPATCHED_IDS[key]
+        _DISPATCHED_IDS[key] = dispatch_ids(resolved)
+    ids, unreadable = _DISPATCHED_IDS[key]
+    return list(ids), list(unreadable)
+
+
+def corpus_read_failure(dirs: Sequence[Path], unreadable: Sequence[str]) -> str:
+    """The reason a dispatch corpus **that is there** could not be read (empty otherwise).
+
+    Membership is decided by the filesystem rather than by the error text: a corpus is
+    absent when nothing is at its path, which is the state a checkout shaped like CI's is
+    in and is not reported as a failure (issue #2216's acceptance), while a path that
+    holds something the reading could not open - a file where a directory was expected, a
+    directory that refused to list - leaves the ids incomplete and has to be said out
+    loud. `exists()` and not `is_dir()` for exactly that first case: a regular file at the
+    corpus path is not "absent", and it is not readable as a corpus either.
+    """
+    if not any(Path(directory).exists() for directory in dirs):
+        return ""
+    return "; ".join(unreadable)
 
 
 def _dispatch_lines(history: Path, unreadable: list[str]) -> Iterator[str]:
@@ -602,6 +620,12 @@ class Window:
     the state the records alone leave: the gap is real or unverifiable, never confirmed
     otherwise. `previous` keeps the id the boundary was read from, so the reading can
     name it.
+
+    `dispatch_unread` names a dispatch corpus that **is there and could not be read**,
+    which is a third answer and not the same one as an absent corpus: a checkout shaped
+    like CI's has no sessions and that is a state, while a corpus that exists and failed
+    to open leaves the ids *incomplete* — so the clause must not say no dispatch names
+    the cycle when a dispatch may sit in a file nobody could read.
     """
 
     start: datetime | None = None
@@ -609,6 +633,7 @@ class Window:
     unresolved: str = ""
     previous: str = ""
     inferred: bool = False
+    dispatch_unread: str = ""
 
     @property
     def applied(self) -> bool:
@@ -630,12 +655,28 @@ class Window:
         if not self.inferred:
             return ""
         named = f", the start of {self.previous}" if self.previous else ""
+        # What closes the gap is a *read* dispatch corpus, so the clause has to say
+        # which of the two states it is in rather than assume the good one. A corpus that
+        # is there and could not be read is the case this family treats as loudly as any
+        # other: the ids come back incomplete, so "no dispatch names it" is a claim about
+        # files nobody opened (issue #2224).
+        if self.dispatch_unread:
+            consulted = (
+                "The dispatch corpus could not be read "
+                f"({self.dispatch_unread}), so no dispatch was consulted either, and this "
+                "window reaches further back than the clause does - a head pushed inside "
+                "such a gap reads `abstain` where it would have been votable"
+            )
+        else:
+            consulted = (
+                "A cycle that ran and wrote no record is not named there, so where no "
+                "dispatch names it either this window reaches further back than the "
+                "clause does - a head pushed inside such a gap reads `abstain` where it "
+                "would have been votable"
+            )
         return (
             "the own-window clause was read off the cycle records, not named by a "
-            f"caller: the window starts {self.window_start_text()}{named}. A cycle that "
-            "ran and wrote no record is not named there, so where no dispatch names it "
-            "either this window reaches further back than the clause does - a head "
-            "pushed inside such a gap reads `abstain` where it would have been votable "
+            f"caller: the window starts {self.window_start_text()}{named}. {consulted} "
             "(issue #2214)"
         )
 
@@ -792,8 +833,11 @@ def own_window(
         return abstain_window(cycle, prev_cycle, "named by --prev-cycle", inferred=False)
     previous, where = previous_cycle(cycle, roots)
     window = abstain_window(cycle, previous, where, inferred=True)
-    return with_dispatches(
-        window, cycle, dispatched_ids(resolve_session_dirs(sessions_dir, roots))
+    corpora = resolve_session_dirs(sessions_dir, roots)
+    ids, unreadable = dispatched_ids(corpora)
+    return replace(
+        with_dispatches(window, cycle, ids),
+        dispatch_unread=corpus_read_failure(corpora, unreadable),
     )
 
 
