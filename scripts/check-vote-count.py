@@ -648,7 +648,12 @@ def own_login(author: str | None) -> bool:
 
 
 def review_queue():
-    """The sibling that owns the window: `abstain_window`, `previous_cycle`, `instant`.
+    """The sibling that owns the window: `own_window`, `abstain_window`, `instant`.
+
+    `own_window` rather than its two halves, because the clause is one rule and the
+    window this counter voids a vote on has to be the one the queue printed and the
+    poster refused on (issue #2218) — resolving it here from the records alone reached
+    a boundary a whole cycle too early wherever a dispatched cycle wrote no record.
 
     Loaded by path, the way this family loads its siblings — the scripts here are
     hyphenated and are not importable modules — and registered in `sys.modules`
@@ -702,6 +707,10 @@ def own_head_window(
       cycle's own start when it cannot — `abstain_window`'s narrowed form, and the
       reason says which of the two was applied, because a window that could not be
       widened is a strictly weaker reading and must not pass as the stronger one.
+      It is read through `review-queue.own_window`, the *only* producer of it, so the
+      counter reaches the same boundary the queue does: resolved from the records alone
+      it was too early for 20 of the corpus's 350 cycle records (measured 2026-10-14),
+      which voided a vote the queue would have called votable (issue #2218).
     * **An unresolvable window is not passed.** A cycle id that names no instant
       leaves nothing to compare, and the direction that costs a delay is preferred
       to the one that spends a vote (the sibling's rule, `cast-vote.py`'s refusal).
@@ -719,8 +728,7 @@ def own_head_window(
     if not cycle:  # a caller error, not a reading: only a resolved cycle is asked about
         raise ValueError("own_head_window needs the vote's cycle id")
     queue = review_queue()
-    previous, where = queue.previous_cycle(cycle, queue.resolve_cycle_logs(cycles_log))
-    window = queue.abstain_window(cycle, previous, where, inferred=True)
+    window = queue.own_window(cycle, cycles_log=cycles_log)
     if not window.applied:
         return True, (
             "the head's own window cannot be decided from this vote's cycle "
