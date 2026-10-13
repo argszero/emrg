@@ -351,6 +351,21 @@ def _sandbox_from(data: dict) -> SandboxConfig:
     )
 
 
+#: The three shapes of "this reader could not read the file", in **one home**: the two
+#: section loaders below catch the same set, and a second spelling of it drifts.
+#:
+#: * `OSError` — a missing file, a permission bit, a directory, a FIFO (`NotARegularFile`
+#:   is an `OSError` on purpose, so its refusal lands in this handler);
+#: * `tomllib.TOMLDecodeError` — the format's own parse error;
+#: * `UnicodeDecodeError` — bytes that are not UTF-8. It is a **`ValueError`, not an
+#:   `OSError`**, so a tuple spelled `(OSError, TOMLDecodeError)` reads like "every way
+#:   reading this file can fail" and lets this one escape: measured 2026-10-14
+#:   (`cyc20261014-044441`) on master `6aebd45f`, a config holding one non-UTF-8 byte made
+#:   both loaders raise out of `EmrgServer.__init__`, where their docstrings promise the
+#:   defaults that the directory and the FIFO beside them already get.
+_UNREADABLE_CONFIG = (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError)
+
+
 def load_sandbox_config() -> SandboxConfig:
     """Load only the ``[sandbox]`` section.
 
@@ -364,7 +379,7 @@ def load_sandbox_config() -> SandboxConfig:
     if cfg_path.exists():
         try:
             data = tomllib.loads(_read_config_text(cfg_path))
-        except (OSError, tomllib.TOMLDecodeError):
+        except _UNREADABLE_CONFIG:
             data = {}
         cfg = _sandbox_from(data)
     return cfg
@@ -381,7 +396,7 @@ def load_update_config() -> UpdateConfig:
         return UpdateConfig()
     try:
         data = tomllib.loads(_read_config_text(cfg_path))
-    except (OSError, tomllib.TOMLDecodeError):
+    except _UNREADABLE_CONFIG:
         return UpdateConfig()
     update_data = data.get("update", {})
     return UpdateConfig(

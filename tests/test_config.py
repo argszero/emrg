@@ -407,6 +407,34 @@ def test_the_section_loaders_degrade_on_a_fifo_subject(tmp_path, monkeypatch):
     assert within(DEADLINE_SECONDS, cfg_mod.load_update_config) == cfg_mod.UpdateConfig()
 
 
+def test_the_section_loaders_degrade_on_an_undecodable_subject(tmp_path, monkeypatch):
+    """The third shape of "could not read it": bytes that are not UTF-8.
+
+    Measured 2026-10-14 (`cyc20261014-044441`) on master `6aebd45f`: a config holding one
+    non-UTF-8 byte made **both** readers raise `UnicodeDecodeError` out of
+    `EmrgServer.__init__`, where the directory and the FIFO beside them are answered with
+    defaults. `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so the handler
+    spelled `(OSError, TOMLDecodeError)` — which reads like "every way reading this file
+    can fail" — covered two of the three shapes and let the third escape.
+
+    The control is the *same document* with the offending byte replaced: these readers are
+    not merely returning a default for every file they are handed.
+    """
+    cfg_path = tmp_path / ".emrg" / "config.toml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    document = b'[sandbox]\npwsh_path = "/opt/pwsh"\n[update]\nenabled = false\n'
+
+    cfg_path.write_bytes(document + b"# \xff\xfe\n")
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+
+    assert within(DEADLINE_SECONDS, cfg_mod.load_sandbox_config) == cfg_mod.SandboxConfig()
+    assert within(DEADLINE_SECONDS, cfg_mod.load_update_config) == cfg_mod.UpdateConfig()
+
+    cfg_path.write_bytes(document)
+    assert cfg_mod.load_sandbox_config().pwsh_path == "/opt/pwsh"
+    assert cfg_mod.load_update_config().enabled is False
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO needs os.mkfifo (POSIX)")
 def test_ensure_config_never_opens_a_non_regular_subject(tmp_path, monkeypatch):
     """The writer is the one open in the module that needs no guard — and this pins why.
