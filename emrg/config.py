@@ -471,33 +471,15 @@ CONFIG_FILE_MODE = 0o600
 PLACEHOLDER_API_KEY = "sk-..."
 
 
-def ensure_config() -> None:
-    """Create the default config file if it doesn't exist, and keep it private.
-
-    The one writer of the config file, and the one open in this module that needs no kind
-    guard — measured, not assumed (issue #2103): its first act is the ``exists()`` return
-    below, and ``exists()`` is **true** for a FIFO, a socket and a directory alike, so a
-    non-regular subject never reaches the ``write_text``. Guarding it would be code no
-    reading can reach.
-
-    Two rules, one file. The kind rule is the paragraph above; the **permission** rule is
-    :data:`CONFIG_FILE_MODE`, applied to a file this function creates *and* to one it finds
-    already there — an install made before the rule existed keeps its ``0644`` otherwise,
-    and the plaintext key a user adds to it is readable by every other local user for the
-    life of that install. Tightening a mode is one-way-safe: the owner keeps full access,
-    and nothing reads the mode.
-    """
-    cfg_path = config_path()
-
-    if cfg_path.exists():
-        _make_config_private(cfg_path)
-        return
-
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text("""[llm]
+#: The first-run config file as one text: what :func:`ensure_config` writes when no entry point
+#: has created ``~/.emrg/config.toml`` before it. A module constant rather than a literal inline in
+#: the call because its ``api_key`` line is **rendered from** :data:`PLACEHOLDER_API_KEY` — a
+#: sentinel this module states once — and because the carrier guard reads this text as the real
+#: thing a host is given rather than re-deriving it from the source.
+CONFIG_TEMPLATE = f"""[llm]
 # OpenAI-compatible API endpoint
 base_url = "https://api.deepseek.com"
-api_key = "sk-..."
+api_key = "{PLACEHOLDER_API_KEY}"
 model = "deepseek-chat"
 max_tokens = 8192
 temperature = 0.7
@@ -524,7 +506,33 @@ name = "deepseek-r1"
 model = "deepseek-reasoner"
 context_window = 65536
 vision = false
-""", encoding="utf-8")
+"""
+
+
+def ensure_config() -> None:
+    """Create the default config file if it doesn't exist, and keep it private.
+
+    The one writer of the config file, and the one open in this module that needs no kind
+    guard — measured, not assumed (issue #2103): its first act is the ``exists()`` return
+    below, and ``exists()`` is **true** for a FIFO, a socket and a directory alike, so a
+    non-regular subject never reaches the ``write_text``. Guarding it would be code no
+    reading can reach.
+
+    Two rules, one file. The kind rule is the paragraph above; the **permission** rule is
+    :data:`CONFIG_FILE_MODE`, applied to a file this function creates *and* to one it finds
+    already there — an install made before the rule existed keeps its ``0644`` otherwise,
+    and the plaintext key a user adds to it is readable by every other local user for the
+    life of that install. Tightening a mode is one-way-safe: the owner keeps full access,
+    and nothing reads the mode.
+    """
+    cfg_path = config_path()
+
+    if cfg_path.exists():
+        _make_config_private(cfg_path)
+        return
+
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
     _make_config_private(cfg_path)
     print(f"Default config created at {cfg_path}", file=sys.stderr)
     print("Edit it to set your API key and model.", file=sys.stderr)
