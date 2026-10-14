@@ -197,13 +197,20 @@ def runs_for_tag(tag: str, repo: str) -> list[dict]:
 
 
 def _no_run_for_tag(tag: str, repo: str) -> int:
-    """No run came back for the tag: the release decides which absence this is.
+    """No run came back for the tag: the release, then the tag, decide which absence this is.
 
     A run this guard could not read is not the same state as a tag nothing was ever
     published for, and the two must not arrive as the same verdict: only the second has a
     remedy, and the remedy for the second -- `git push origin :refs/tags/<tag>` -- would
     delete the tag of a live release. So the release is asked about first, and a release
     that exists turns this into an unmeasured build half (rc 2), never a fault.
+
+    With no release either, the **tag** answers which of the two remaining states this is
+    (issue #2240, measured 2026-10-14): a tag GitHub never received was never cut, and its
+    first step is `git tag -a <tag>`, while a tag that is there whose run never started is
+    the one the re-push remedy is for. Both are rc 1 -- nothing is published either way --
+    but a remedy a reader cannot run is a remedy that costs a step, and printing one for
+    both causes is what this branch used to do.
     """
     release = release_for_tag(tag, repo)
     if release is not None:
@@ -220,11 +227,26 @@ def _no_run_for_tag(tag: str, repo: str) -> int:
             f"`gh run list --branch {tag}` and compare them against this release."
         )
         return 2
+    if not tag_exists(tag, repo):
+        print(
+            f"FAULT: no `{WORKFLOW}` run exists for {tag} -- read by the tag's own branch, "
+            f"so not a window over the workflow's runs -- no release exists for the tag, "
+            f"and the tag itself is not on GitHub either (`repos/{repo}/git/ref/tags/{tag}` "
+            f"answers 404): nothing has been cut for this version yet. Cut it on the commit "
+            f"that declares it and push it -- that push is the workflow's only trigger -- "
+            f"with `git tag -a {tag} -m \"{tag}\" && git push origin {tag}` (the push alone "
+            f"is enough if the tag already exists locally). Note that "
+            f"`git push origin :refs/tags/{tag}` prints `- [deleted] {tag}` and exits 0 even "
+            f"for a ref that never existed, so its output is not evidence this tag was ever "
+            f"pushed."
+        )
+        return 1
     print(
         f"FAULT: no `{WORKFLOW}` run exists for {tag} -- read by the tag's own branch, so "
         f"not a window over the workflow's runs -- and no release exists for the tag "
-        f"either. That workflow is the only thing that creates a release, so nothing was "
-        f"published for this tag. Re-trigger it by pushing the tag again "
+        f"either, although the tag itself IS on GitHub. That workflow is the only thing "
+        f"that creates a release, so nothing was published for this tag: the tag push "
+        f"started no run, or its run was deleted. Re-trigger it by pushing the tag again "
         f"(`git push origin :refs/tags/{tag} && git push origin {tag}`) and watch the "
         f"run it starts."
     )
@@ -273,6 +295,35 @@ def release_for_tag(tag: str, repo: str) -> dict | None:
     if not isinstance(payload, dict):
         raise GhError(None, ["api", f"releases/tags/{tag}"], "the answer was not an object")
     return payload
+
+
+def tag_exists(tag: str, repo: str) -> bool:
+    """Has the tag itself reached GitHub? -- the third cause of "no run came back".
+
+    A tag push is the workflow's only trigger, so nothing can be published for a tag
+    GitHub never received, and a version that has not been cut yet and a tag whose push
+    event was dropped are two different states with different first steps. Measured
+    2026-10-14 (`cyc20261014-103240`) while pre-flighting the v0.3.11 release: asked about
+    a version nothing had been tagged for, the guard answered "Re-trigger it by pushing the
+    tag again (`git push origin :refs/tags/v0.3.11 && git push origin v0.3.11`)" -- and the
+    second half of that command cannot run on a checkout with no such tag (`error: src
+    refspec v0.3.11 does not match any`), because a version not yet released is exactly a
+    version not yet tagged. The first half is no help either, and its output is a trap:
+    `git push origin :refs/tags/<tag>` prints `- [deleted] <tag>` and exits 0 for a ref
+    that **never existed** (measured against `v9.9.9-nonexistent`), so "deleted" is not
+    evidence the tag was ever there.
+
+    False is the definite absence (HTTP 404), the same distinction `release_for_tag`
+    draws and for the same reason: every other failure propagates, so "not on GitHub" and
+    "could not ask" never arrive as one value.
+    """
+    try:
+        _gh_json(["api", f"repos/{repo}/git/ref/tags/{tag}"])
+    except GhError as exc:
+        if exc.http_status == 404:
+            return False
+        raise
+    return True
 
 
 def latest_tag(repo: str) -> tuple[str, str]:
