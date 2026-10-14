@@ -7383,6 +7383,91 @@ def _provider_slug(base_url: str) -> str:
         return base_url
 
 
+#: How much of the file's tail is read to find the last recorded event — the size the read
+#: **starts** at, not a premise about how long a record may be. The last record is all the
+#: append needs, so the read begins at the end of the file and doubles until it holds a
+#: complete last line or reaches the start of the file; a record longer than this window is
+#: therefore still answered by a bounded read, rather than by the full count this change
+#: removes. Measured on this host 2026-10-14: 346,950 records of 123–422 bytes, so the
+#: first window already held about ten of them.
+_USAGE_ANCHOR_TAIL_BYTES = 4096
+
+
+def _last_usage_anchor_total(path: Path) -> int | None:
+    """The cumulative count the file's **last** line records, or `None` if unanswerable.
+
+    `None` means "the tail does not answer", never "zero": an absent or empty file, a
+    last line that is not JSON (a partial write from a killed process, a file whose
+    writer stopped mid-line), a record with no numeric `total` (an older writer), an
+    unreadable file, a subject that is not a regular file, and a `total` that is not an
+    int all return it. The caller counts the lines in exactly those cases, so the ordinary
+    file — which is every file this daemon writes — costs a bounded read and the odd one
+    stays exact.
+
+    Why the tail rather than the count it replaces (issue #2236): the append runs once
+    per anchored LLM round, and counting paid a **full read** of a file that grows
+    without bound. Measured on this host 2026-10-14 (`cyc20261014-090801`):
+    `~/.emrg/logs/usage-anchor.jsonl` at 101 MiB / 346,195 lines cost **35.8 ms** per
+    append, against **0.066 ms** for this read — ~540×, on the round path, and the file
+    gained ~2.35 MiB/day (43 days of events, ~10k/day).
+    """
+    # Asked here, not only in the caller: an open is not a read, and a FIFO as this
+    # subject would block the daemon's event loop at the open (see
+    # `tests/test_every_opener_asks_its_subject_kind.py`). The caller's refusal is a
+    # policy about the *append*; this helper's is what makes it safe for any caller.
+    if _non_regular_kind(path) is not None:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            end = fh.tell()
+            window = _USAGE_ANCHOR_TAIL_BYTES
+            while True:
+                start = max(0, end - window)
+                fh.seek(start)
+                tail = fh.read().decode("utf-8", "replace")
+                lines = [line for line in tail.splitlines() if line.strip()]
+                # The last line is complete when something precedes it inside the window
+                # (then it starts after a line break the window holds) or the window
+                # already reaches the file's start. Without this the read would silently
+                # fall back to the counting this change exists to remove, for a record
+                # longer than the window — a regression the answer would hide, because
+                # the count returns the same number, only slower.
+                if start == 0 or len(lines) >= 2:
+                    break
+                window *= 2
+    except OSError:
+        return None  # first event / unreadable file — the caller counts nothing
+    if not lines:
+        return None  # empty file
+    try:
+        record = json.loads(lines[-1])
+    except ValueError:
+        return None  # a fragment, or a line the writer did not finish
+    total = record.get("total") if isinstance(record, dict) else None
+    # `bool` is an `int` in Python, and `True` here would mean a count of 1.
+    if isinstance(total, int) and not isinstance(total, bool):
+        return total
+    return None
+
+
+def _count_usage_anchor_events(path: Path) -> int:
+    """The number of lines the file holds — the fallback the tail cannot always answer.
+
+    Reached only for a file whose last line carries no usable `total` (see above), which
+    is why it may read to EOF: it is the rare path, not the per-round one. It asks the
+    kind for the same reason its sibling does — no opener here may sit in a scope that
+    never asked — and answers 0, which is the count of a subject it cannot read.
+    """
+    if _non_regular_kind(path) is not None:
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return 0  # first event / unreadable file — start the count at 0
+
+
 def _append_usage_anchor_event(record: dict, path: Path | None = None) -> int:
     """Append a countable usage-anchor event (one JSON line) and return the
     cumulative total (community feedback 2026-08-26T07:18:29 — heinrichneb:
@@ -7391,8 +7476,10 @@ def _append_usage_anchor_event(record: dict, path: Path | None = None) -> int:
     rotation, unlike the per-process in-memory dedupe set).
 
     ``total`` is the cumulative event count, so the metric is readable as a
-    plain number without parsing every line. Callers swallow OSError — a
-    stats write must never take the daemon down.
+    plain number without parsing every line. It is read off the last line's own
+    ``total`` rather than by counting — same value, a bounded read instead of a full
+    one (issue #2236; the measurement is in `_last_usage_anchor_total`). Callers swallow
+    OSError — a stats write must never take the daemon down.
     """
     path = path or _USAGE_ANCHOR_STATS_PATH
     # Refused before the count below, and not inside its `except`: this subject is
@@ -7403,12 +7490,9 @@ def _append_usage_anchor_event(record: dict, path: Path | None = None) -> int:
     kind = _non_regular_kind(path)
     if kind is not None:
         raise OSError(f"{path} is {kind}, not a regular file")
-    total = 0
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            total = sum(1 for _ in fh)
-    except OSError:
-        pass  # first event / unreadable file — start the count at 0
+    total = _last_usage_anchor_total(path)
+    if total is None:
+        total = _count_usage_anchor_events(path)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {**record}
