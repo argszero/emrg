@@ -94,6 +94,11 @@ name = "gpt-4o"
 model = "gpt-4o"
 context_window = 128000
 vision = true
+
+# The TUI's terminal theme. `auto` (the default) detects the terminal background and follows it;
+# set `light` or `dark` to override a detection that guesses wrong.
+[client]
+theme = "auto"
 ```
 
 **Live reload — no restart needed.** The daemon watches `~/.emrg/config.toml`: every couple of seconds it **reads the file and hashes it**, parses it only when the hash moved, and applies the edit **in place** to the running process. Every key in `[llm]` moves for subsequent requests:
@@ -120,6 +125,8 @@ config.toml change rejected (previous config kept): [update] delay_minutes is st
 ```
 
 **Update checking** (`[update]` section): `enabled = true|false` (default true) enables the periodic GitHub release check, and `delay_minutes` (default 1440) is how long after a release is published it becomes eligible (set `1` for immediate). Both keys are **hot-reloaded** like `[llm]`: edit the file and the reloader assigns the new values within a couple of seconds, so the next upgrade check reads them — no daemon restart. That check runs every 5 minutes, and the interval is **not** configurable. The program only *triggers*: it never downloads an installer package, it starts an agent session (`emrg-upgrade`) that installs the equivalent of the release from the local evolution repo.
+
+**Terminal theme** (`[client] theme`): the TUI used to name terminal-palette colours (`cyan`, `green`, `magenta`, `red`, `dim`) directly, so the terminal decided what they were and the accents were only readable on a dark background (rant 2026-10-14T14:48:32, issue #2246). `theme` is `auto` (the default), `dark` or `light`; anything else is read as `auto` — a colour is not worth refusing to start a client over. On `auto` the client asks the terminal which background it has: `COLORFGBG` when it is set (free, and only a palette index), else an OSC 11 query with a bounded timeout so a terminal that never answers cannot hang the client — and when neither says, today's dark appearance is kept. On a light background the accents are replaced by a contrast-checked palette and `yellow`/`white` — which cannot reach the ratio without changing meaning — are dropped to the terminal's own foreground rather than reinterpreted. The key is read by the client, not the daemon, so it is not hot-reloaded: a change takes effect when the next client starts.
 
 **Which shell tool runs** (`[sandbox]` section): the **dialect is decided by the platform**, and the daemon mounts that dialect's executor. On Windows the daemon registers a **`pwsh`** tool; everywhere else it registers **`bash`**. Exactly one shell tool is ever registered, and the platform's is the only one that exists — Windows has no `bash` tool row at all (Git for Windows ships `bash.exe` under `…\Git\bin` while the installer puts `…\Git\cmd` on `PATH`, so "bash is on PATH on Windows" is not a fact to rely on). The system prompt is rendered from the tool that was actually registered, so it never advertises a dialect the platform does not run.
 

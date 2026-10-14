@@ -117,6 +117,13 @@ class Terminal:
 
     def __post_init__(self) -> None:
         self._enter_raw_mode()
+        # Resolve the theme here: this is the earliest point that is both inside raw mode and
+        # before any reader exists, so the OSC 11 probe's reply cannot be delivered to the client
+        # as keystrokes (rant 2026-10-14T14:48:32, issue #2246). `ensure_theme` is once per
+        # process — the terminal is asked once, and every later render reads the cached answer.
+        from emrg.client.python_tui.theme import ensure_theme
+
+        ensure_theme()
         # PR #205's add_reader+fcntl(stdin, O_NONBLOCK) leaks to stdout on
         # macOS (pty fd sharing). Force stdout back to blocking write.
         # R123: fcntl is None on Windows — skip (no fcntl available).
