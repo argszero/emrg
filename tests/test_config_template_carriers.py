@@ -262,3 +262,167 @@ def test_the_gui_reader_keys_on_the_same_sentinel():
         f"PLACEHOLDER_API_KEY ({PLACEHOLDER_API_KEY!r}), so the setup wizard stops opening "
         f"for the placeholder the product writes; it now returns: {returned}"
     )
+
+
+# ── the release build's injection of the template (issue #2265) ────────────────
+#
+# A fresh install meets the setup wizard because the first-run template's `api_key`
+# is the placeholder. The host asked for EMRG to work as soon as it is installed and
+# supplied the values to do it with; they are a secret, so a release build takes them
+# from **build secrets** and writes them into the carriers it packages
+# (`packaging/inject_llm_config.py`). A build secret can reach two of the three
+# carriers above; the third is fetched from the repository at install time and no
+# secret is ever in scope for it (issue #2265's stated limitation).
+
+#: carrier (repo-relative) -> the path the **built tree** carries it at, which is what
+#: the workflow step patches. `emrg/config.py` is staged by `build-runtime.sh` under
+#: `dist/runtime/source/` (so the checkout's own copy is never touched); the GUI's
+#: `main.js` is packed by electron-builder from the project directory, so there its
+#: working-tree path is the one that ships.
+_RELEASE_INJECTION_TARGETS = {
+    "emrg/config.py": "dist/runtime/source/emrg/config.py",
+    "emrg/gui/main.js": "emrg/gui/main.js",
+}
+
+#: The carriers a release build cannot reach, named so that their absence from the map
+#: above is a decision rather than an omission. `install.sh` is the `curl … | bash`
+#: installer: it carries the template but fetches and runs it from the repository at
+#: install time, so no build secret can patch it.
+_UNREACHABLE_BY_BUILD = {"install.sh"}
+
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build-release.yml"
+INJECTOR = REPO_ROOT / "packaging" / "inject_llm_config.py"
+
+#: the pattern that lifts a carrier's template out of its **source text** (rather than
+#: the rendered text `_template` returns for the python carrier). The injected text is
+#: what a fresh install would hold, so this is the reading that can compare the two.
+_SOURCE_TEMPLATE = {
+    "emrg/config.py": r'CONFIG_TEMPLATE = f"""(.*?)"""',
+    "emrg/gui/main.js": r"const CONFIG_TEMPLATE = `(.*?)`;",
+}
+
+
+def _injector_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("inject_llm_config", INJECTOR)
+    assert spec is not None and spec.loader is not None, f"{INJECTOR} could not be loaded"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_carrier_a_build_can_reach_has_an_injection_target():
+    """The reachable carriers and the injection map are held to each other, both ways.
+
+    A fourth carrier copied from one of these introduces a builder that ships the
+    placeholder unless the map is widened; a carrier that left the map (renamed, or its
+    writer deleted) is caught here too. The exclusion is checked against the census so a
+    typo in ``_UNREACHABLE_BY_BUILD`` fails rather than silently shrinking the set.
+    """
+    discovered = _discovered_carriers()
+    assert _UNREACHABLE_BY_BUILD <= discovered, (
+        f"_UNREACHABLE_BY_BUILD names {sorted(_UNREACHABLE_BY_BUILD - discovered)}, which "
+        f"the carrier census does not find; the exclusion has drifted from the carriers"
+    )
+    reachable = discovered - _UNREACHABLE_BY_BUILD
+    assert reachable == set(_RELEASE_INJECTION_TARGETS), (
+        f"the carriers a build secret can reach are {sorted(reachable)}, but the release "
+        f"injection targets {sorted(_RELEASE_INJECTION_TARGETS)}; every reachable carrier "
+        f"must be injected, or the build ships the placeholder silently"
+    )
+
+
+def test_the_release_workflow_injects_into_every_reachable_carrier():
+    """The workflow step is read back out of the file, not assumed from the map above.
+
+    The step must name exactly the built-tree paths of the reachable carriers, and it
+    must feed the variables the injector reads (both directions: a renamed secret in the
+    workflow, or a renamed variable in the script, fails here).
+    """
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8")).get("jobs")
+    assert isinstance(jobs, dict), f"{WORKFLOW} carries no `jobs` mapping"
+    steps = jobs["build"]["steps"]
+    steps = [s for s in steps if "inject_llm_config.py" in (s.get("run") or "")]
+    assert len(steps) == 1, (
+        f"expected exactly one step in build-release.yml's build job running "
+        f"packaging/inject_llm_config.py, found {len(steps)}"
+    )
+    step = steps[0]
+
+    match = re.search(r"packaging/inject_llm_config\.py\s+(\S.*)$", step["run"], re.M)
+    assert match is not None, (
+        f"the injection step names no carriers: {step['run']!r}; every reachable carrier "
+        f"must be an argument or nothing is injected into it"
+    )
+    names = match.group(1).split()
+    assert set(names) == set(_RELEASE_INJECTION_TARGETS.values()), (
+        f"the injection step patches {sorted(names)}, but the reachable carriers live at "
+        f"{sorted(_RELEASE_INJECTION_TARGETS.values())}; a carrier left out ships the "
+        f"placeholder"
+    )
+
+    module = _injector_module()
+    variables = {var for _, var in module.FIELDS}
+    env = step.get("env") or {}
+    assert set(env) == variables, (
+        f"the step feeds {sorted(env)} but the injector reads {sorted(variables)}; a "
+        f"secret the step does not pass is a value the release cannot carry"
+    )
+    for var in variables:
+        assert f"secrets.{var}" in env[var], (
+            f"the step does not take {var} from a build secret (it is {env[var]!r}); the "
+            f"release build can only inject a value a secret carries"
+        )
+
+
+def test_the_injector_moves_only_the_top_level_llm_keys():
+    """The injector against each reachable carrier's own text, in both directions.
+
+    Injection must move the top-level ``[llm]`` keys (what makes a fresh install usable)
+    and must **not** touch the ``[[llm.models]]`` entries below them -- replacing every
+    ``model = "..."`` would rewrite the switch list ``/model`` and the GUI read. The
+    second arm is the no-op: with no value set the text is returned byte-for-byte, which
+    is the "adding the secret names before the values is safe" promise.
+    """
+    module = _injector_module()
+    for rel, pattern in _SOURCE_TEMPLATE.items():
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        before = tomllib.loads(re.search(pattern, source, re.S).group(1))
+
+        injected, changed, missing = module.inject(
+            source,
+            [("base_url", "https://example.invalid/v1"), ("api_key", "FAKE-KEY"), ("model", "fake-model")],
+        )
+        assert not missing, f"{rel}: the injector found nothing to patch for {missing}"
+        assert set(changed) == {"base_url", "api_key", "model"}, (rel, changed)
+        after = tomllib.loads(re.search(pattern, injected, re.S).group(1))
+        assert after["llm"]["api_key"] == "FAKE-KEY", rel
+        assert after["llm"]["base_url"] == "https://example.invalid/v1", rel
+        assert after["llm"]["model"] == "fake-model", rel
+        assert after["llm"]["models"] == before["llm"]["models"], (
+            f"{rel}: the injection changed the [[llm.models]] entries, which are the switch "
+            f"list /model and the GUI read; only the top-level keys may move"
+        )
+
+        untouched, changed_none, missing_none = module.inject(
+            source, [("base_url", None), ("api_key", None), ("model", None)]
+        )
+        assert untouched == source and changed_none == [] and missing_none == [], (
+            f"{rel}: with no value set the injector changed the text; a build without a "
+            f"secret must be byte-identical to one without this step"
+        )
+
+
+def test_the_injector_refuses_a_carrier_that_lost_its_llm_block():
+    """A carrier whose ``[llm]`` block is gone is a fault, not a silent skip.
+
+    The whole point of the step is that the placeholder does not ship; an injector that
+    reported nothing when it patched nothing would leave a release shipping the setup
+    wizard while its own log said it had run.
+    """
+    module = _injector_module()
+    _, changed, missing = module.inject("no template here\n", [("api_key", "FAKE-KEY")])
+    assert changed == [] and missing == ["api_key"], (changed, missing)

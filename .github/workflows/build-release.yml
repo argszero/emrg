@@ -285,6 +285,33 @@ jobs:
         shell: bash
         run: bash packaging/build-runtime.sh
 
+      # ── 首启模板注入（issue #2265）────────────────────────────
+      # A fresh install writes its first-run config from a template whose `api_key` is the
+      # placeholder `sk-...` (emrg.config.PLACEHOLDER_API_KEY), so a new host meets the setup
+      # wizard before the product does anything. The values that make it usable are a secret,
+      # so nothing can be done about this in source -- a key written into the repository is a
+      # key in its history forever. This step is the other half: it takes them from build
+      # secrets and writes them into the two carriers a release ships.
+      #
+      # The two carriers are the ones a build secret can reach. The python carrier is the
+      # **staged** runtime source (build-runtime.sh copied `emrg/` under `dist/runtime/source/`
+      # just above), so the checkout's own `emrg/config.py` is never touched. The GUI carrier
+      # is the working-tree `main.js`, which electron-builder packs below; CI never commits it,
+      # and the third carrier -- `install.sh`, fetched from the repository at run time -- is
+      # deliberately not named here because no build secret can reach it (issue #2265's stated
+      # limitation).
+      #
+      # With no secret configured the script opens nothing for writing, so the artefacts are
+      # byte-identical to a build without this step: naming the secrets here before their
+      # values exist is safe.
+      - name: Inject the build's LLM defaults into the first-run template
+        shell: bash
+        env:
+          EMRG_LLM_BASE_URL: ${{ secrets.EMRG_LLM_BASE_URL }}
+          EMRG_LLM_MODEL: ${{ secrets.EMRG_LLM_MODEL }}
+          EMRG_LLM_API_KEY: ${{ secrets.EMRG_LLM_API_KEY }}
+        run: python3 packaging/inject_llm_config.py dist/runtime/source/emrg/config.py emrg/gui/main.js
+
       # ── CRLF 断言（rant 2026-08-13T09:44:32）────────────────
       # git blob 的 *.cmd 是 LF，工作区 CRLF 靠 .gitattributes checkout 转换；
       # 若 CI 检出未应用 .gitattributes，build-runtime 拷到的就是 LF →
