@@ -772,8 +772,10 @@ def own_head_window(
         return True, (
             "the head's own window cannot be decided from this vote's cycle: the "
             f"cycle-record corpus could not be read ({window.corpus_shortfall}), so the "
-            f"boundary above this cycle's own start ({window.window_start_text()}) was "
-            f"never measured, and the head was pushed {push_time} - below it. The wider "
+            "start of the cycle before this one - the boundary the wider window uses, "
+            f"which is earlier than this cycle's own start "
+            f"({window.window_start_text()}) - was never measured, and the head was pushed "
+            f"{push_time}, before that start. The wider "
             "window this clause asks about would have decided that push, and a boundary "
             "nobody measured is not passed, because the narrowed window below it credits "
             "a vote cast inside the one that was never read (issue #2275)"

@@ -822,8 +822,10 @@ def abstain_window(cycle: str, previous: str, where: str,
             start=own,
             source=f"this cycle only (started {own.isoformat(timespec='seconds')})",
             unresolved=(
-                f"{corpus_shortfall} could not be read, so the boundary above this "
-                f"cycle's own start was never measured - a head pushed before "
+                f"{corpus_shortfall} could not be read, so the start of the cycle "
+                "before this one - the boundary the wider window uses, earlier than this "
+                f"cycle's own start ({own.isoformat(timespec='seconds')}) - was never "
+                f"measured: a head pushed before "
                 f"{own.isoformat(timespec='seconds')} may be inside the window this vote's "
                 "cycle treats as its own, and an end nobody measured is not passed "
                 "(issue #2275)"
@@ -1686,7 +1688,8 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                 kind="abstain",
                 why=f"head pushed {reading.head_pushed_at}, before the window this cycle "
                     f"treats as its own ({window.source}), and the boundary above it was "
-                    f"never measured - the record corpus could not be listed "
+                    "never measured - the start of the cycle before this one is the "
+                    f"boundary the wider window uses, and the record corpus could not be listed "
                     f"({window.corpus_shortfall}), so whether this push falls inside the "
                     "window the clause asks about cannot be decided from here; a boundary "
                     "nobody measured is not passed, because the narrowed window below it "

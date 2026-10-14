@@ -628,8 +628,9 @@ def own_head_window(
         return (
             f"the head {head[:8]} was pushed {push_time}, below the window this cycle "
             f"treats as its own, which starts {window.window_start_text()} "
-            f"({window.source}) - and the boundary above that start was never measured, "
-            f"because the cycle-record corpus could not be read "
+            f"({window.source}) - and the boundary the wider window uses, the start of the "
+            "cycle before this one, which is earlier than that start, was never "
+            f"measured, because the cycle-record corpus could not be read "
             f"({window.corpus_shortfall}). Whether the push falls inside the window this "
             "clause asks about cannot be decided from here, and a boundary nobody measured "
             "is not passed: the narrowed window would credit a vote cast inside the one "
