@@ -413,6 +413,54 @@ def test_load_and_start_competition_task(tmp_path):
     assert snapshot["templates"] == {"competition-task": "competition_prompt.md"}
 
 
+def test_load_and_start_ios_app_task(tmp_path):
+    """`ios-app` tasks start a TaskHandler with the `ios-app` template.
+
+    Rant 2026-10-14T14:16:40 (issue #2251): `ios-app` is a built-in task type — EMRG as
+    the product owner of iOS apps. Like `competition` it reuses the shared TaskHandler, so
+    the only thing that can be wrong is the wiring, and the failure mode is a crash at
+    start: a type whose template is missing or misnamed.
+
+    The rendered prompt is checked too, because a wiring test that only compares file names
+    passes on a template that renders to nothing — the two rejection-risk checkpoints and
+    the six-phase loop are the whole point of the type, and one of them is named here rather
+    than left to `tests/test_prompt_templates.py`, which cannot know which prose matters.
+    """
+    snapshot = asyncio.run(_boot(tmp_path, [
+        {"name": "ios-app-task", "type": "ios-app",
+         "config": {"project": "iosapps"},
+         "interval": 3600, "enabled": True},
+    ]))
+
+    assert snapshot["coros"] == 2  # the handler plus the reconcile loop
+    assert snapshot["templates"] == {"ios-app-task": "ios_app_prompt.md"}
+
+    from emrg.server.scheduler import TASK_TEMPLATES
+
+    text = (Path(__file__).resolve().parent.parent / "emrg" / "server"
+            / TASK_TEMPLATES["ios-app"]).read_text(encoding="utf-8")
+    assert "extra_prompt" in text, (
+        "the ios-app template must say that instance values (team id, key path, budget) "
+        "come from extra_prompt — hard-coding them per instance is the defect #2251 names"
+    )
+    # Both checkpoints, by the text that carries each — not by counting occurrences of the
+    # word "checkpoint". The first draft did count them (`text.count("checkpoint") >= 2`)
+    # and a mutation arm that deleted one survived: the template says "checkpoint" five
+    # times, so removing one leaves four and the assertion is blind to *which* was lost.
+    # A count of a word is not a reading of the requirement. These two sentences are the
+    # requirement: the assessment runs at inception, and again against the built artefact.
+    for where, phrase in (
+        ("inception", "Phase 2 — Rejection-risk assessment"),
+        ("pre-submission, against the build actually being submitted",
+         "Re-run §2 against the build"),
+    ):
+        assert phrase in text, (
+            f"the ios-app template must state the rejection-risk assessment at {where}; "
+            f"{phrase!r} is missing. One checkpoint alone lets a build ship with an "
+            f"ungrounded clause, which is the defect #2251 exists to prevent"
+        )
+
+
 def test_load_and_start_promote_task(tmp_path):
     """Promote tasks start a TaskHandler with the promote template."""
     snapshot = asyncio.run(_boot(tmp_path, [

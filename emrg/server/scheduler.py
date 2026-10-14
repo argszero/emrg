@@ -179,6 +179,7 @@ TASK_TEMPLATES: dict[str, str] = {
     "promote": "promote_prompt.md",
     "journal": "journal_prompt.md",
     "competition": "competition_prompt.md",
+    "ios-app": "ios_app_prompt.md",
 }
 
 # ── Task CRUD constants (rant 2026-08-12T18:23:15 P2) ─────────────

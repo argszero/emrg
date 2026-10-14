@@ -14,9 +14,12 @@ The class this applies to
 The **instruction class**: prose a reader is expected to *act on* - the built-in
 task-prompt templates, the evolution template, the upgrade/vibe-check prompts, the
 GUI redesign spec, and the CI README the host reads to set the release Secrets.
-Twelve files: the ten of the 2026-09-16 measurement - 49 citation sites over 35
+Its membership is the enumeration in `INSTRUCTION_FILES`, and the sentence below
+gives the history rather than a live count, because a count written here goes stale
+on the next task type - `ios_app_prompt.md` joined on 2026-10-14 (#2251) and moved it
+again. The ten files of the 2026-09-16 measurement - 49 citation sites over 35
 distinct timestamps on that day's tree, counted
-as `len({t for s in sites for t in s.timestamps})` over `scan_tree` - plus two the
+as `len({t for s in sites for t in s.timestamps})` over `scan_tree` - plus the two the
 class was missing until 2026-10-05, `competition_prompt.md` and
 `prompts/memory_compaction.j2` (see `missing_templates` for the reading that
 catches the omission). The same tree
@@ -160,6 +163,7 @@ INSTRUCTION_FILES = (
     ".github/workflows/README.md",         # tells the host which Secrets to set
     "emrg/server/competition_prompt.md",   # a task template added 2026-10-03 (#1822)
     "emrg/server/evolution_prompt.md",     # swept: the red line covers the running copy
+    "emrg/server/ios_app_prompt.md",       # a task template added 2026-10-14 (#2251)
     "emrg/server/journal_prompt.md",
     "emrg/server/open_source_prompt.md",
     "emrg/server/promote_prompt.md",

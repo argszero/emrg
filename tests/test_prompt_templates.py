@@ -1133,6 +1133,7 @@ def test_no_template_names_a_memory_root_other_than_the_two() -> None:
     floor = {
         "competition_prompt.md": 1,
         "evolution_prompt.md": 1,
+        "ios_app_prompt.md": 2,
         "journal_prompt.md": 2,
         "open_source_prompt.md": 3,
         "paper_prompt.md": 1,
