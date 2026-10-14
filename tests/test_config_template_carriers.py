@@ -17,10 +17,13 @@ with ``install.sh`` never saw the setting, and the next key added to one carrier
 would silently skip the others.
 
 **The carriers are discovered, not listed.** Any tracked file holding both of
-the template's own lines — its ``api_key`` placeholder and its
+the template's own lines — its ``[llm]`` heading and its
 ``auto_compact_threshold`` default — is a copy of this template, whatever it is
 called and wherever it lives, so a fourth writer copied from one of these is
-caught. Two exclusions are rules, named here because both were measured:
+caught. Neither marker is the sentinel, so a constant that moves does not stop
+discovery: the reading that reports it is the placeholder test below, which fails
+with the two values side by side. Two exclusions are rules, named here because
+both were measured:
 
 * **``*.md``** — a document writes nothing, and ``DEVELOPMENT.md``'s block is
   deliberately a *different* example (its second ``[[llm.models]]`` entry is
@@ -36,6 +39,15 @@ What must agree is the **settings**, not the text: each carrier keeps its own
 comments and ordering (``install.sh`` addresses the host per key, the others
 document the block once). ``tomllib`` is the reading — the template is TOML, so
 the same parse the product performs is what is compared.
+
+**One setting carries a rule rather than a value** (issue #2256, and #2262 after
+it): ``api_key`` is :data:`emrg.config.PLACEHOLDER_API_KEY`, the sentinel meaning
+"the host has not set one yet". Three carriers write it and two read it — the
+GUI's ``isKeyConfigured`` decides whether to open its wizard, and
+``LlmClient._headers`` refuses the request rather than spending it. The sentinel
+is stated **once** in this repository, in ``emrg/config.py``; every other home is
+held to it by the two tests at the end of this file, one for the writers and one
+for the reader that lives in another language.
 """
 
 from __future__ import annotations
@@ -49,16 +61,28 @@ from emrg.config import PLACEHOLDER_API_KEY
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# The two lines every copy of this template necessarily carries: the placeholder
-# secret and the last top-level key. Together they are what makes "this file
-# writes the first-run config" decidable from the file's text.
-_PLACEHOLDER = 'api_key = "sk-..."'
+# The two lines every copy of this template necessarily carries: the section heading
+# and the last top-level key. Together they are what makes "this file writes the
+# first-run config" decidable from the file's text.
+#
+# Neither is the sentinel, and that is deliberate (issue #2262). A marker derived
+# from `PLACEHOLDER_API_KEY` would leave this module holding no copy of the value —
+# but it would also make a constant that moved *stop discovery*, so the population
+# check would fail with "the carriers are the three named here" when the real
+# finding is "the templates and the constant disagree". Keeping the marker on the
+# template's own shape lets that second reading be the loud one, from the test
+# below, while discovery stays stable. The sentinel is stated once, in
+# `emrg/config.py`, and nowhere in this file.
+_HEADING = "[llm]"
 _DEFAULT = "auto_compact_threshold = 0.0"
 
 # carrier path -> the pattern that lifts its template literal out of it. Each is
-# anchored on `[llm]`, so a match is the template and not a stray quote.
+# anchored on `[llm]`, so a match is the template and not a stray quote. The python
+# carrier's entry is `None`: its template is an f-string in `emrg/config.py`, so it
+# is read by importing the rendered text — the same string `ensure_config` writes —
+# rather than by a pattern over source that would have to re-derive it.
 _EXTRACTORS = {
-    "emrg/config.py": r'write_text\("""(\[llm\].*?)"""',
+    "emrg/config.py": None,
     "emrg/gui/main.js": r"const CONFIG_TEMPLATE = `(\[llm\].*?)`;",
     "install.sh": r"<<'EMRGCONF'\n(\[llm\].*?)\nEMRGCONF",
 }
@@ -96,17 +120,25 @@ def _discovered_carriers() -> set[str]:
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if _PLACEHOLDER in text and _DEFAULT in text:
+        if _HEADING in text and _DEFAULT in text:
             found.add(rel)
     return found
 
 
 def _template(rel: str) -> str:
+    pattern = _EXTRACTORS[rel]
+    if pattern is None:
+        # The python carrier, read as the product renders it. Its *source* spelling is
+        # still pinned by `test_the_carriers_write_the_placeholder_the_request_path_
+        # refuses`, which compares this rendered text's `api_key` to the constant.
+        from emrg.config import CONFIG_TEMPLATE
+
+        return CONFIG_TEMPLATE
     text = (REPO_ROOT / rel).read_text(encoding="utf-8")
-    match = re.search(_EXTRACTORS[rel], text, re.S)
+    match = re.search(pattern, text, re.S)
     assert match is not None, (
         f"no first-run config template could be lifted out of {rel} — the pattern "
-        f"{_EXTRACTORS[rel]!r} has gone stale, and a stale pattern is not a pass"
+        f"{pattern!r} has gone stale, and a stale pattern is not a pass"
     )
     return match.group(1)
 
@@ -185,3 +217,48 @@ def test_the_carriers_write_the_placeholder_the_request_path_refuses():
             f"emrg.config.PLACEHOLDER_API_KEY — the value `_headers` refuses — is "
             f"{PLACEHOLDER_API_KEY!r}; one of the two has to move with the other"
         )
+
+
+#: The GUI's reader of the sentinel, lifted out of `main.js` by its own body. Anchored on
+#: the definition and closed by a line that is exactly two spaces of indentation, which is
+#: where that function ends in the file; a stale pattern fails the match assert rather than
+#: passing over nothing.
+_GUI_READER = re.compile(r"function isKeyConfigured\(key\)\s*\{(.*?)\n  \}", re.S)
+
+
+def test_the_gui_reader_keys_on_the_same_sentinel():
+    """The other reader of the sentinel, in another language, held to the same string.
+
+    Issue #2256's table names two readers: ``emrg/gui/main.js::isKeyConfigured`` (G117,
+    which opens the setup wizard) and ``LlmClient._headers`` (which refuses the request).
+    Only the second was pinned when that fix landed. Renaming the GUI's comparison left this
+    whole module green — measured on master `f33bbc7e` with
+    ``run-mutation-arm.py --file emrg/gui/main.js --old 'key !== "sk-..."' --new
+    'key !== "some-other-placeholder"'`` → **SURVIVED, 4 passed**. The drift that hides there
+    is silent: move the constant and the writers' test above forces every template to follow,
+    the refusal follows with the constant, and the GUI stops recognising the key the product
+    writes — two halves of one rule, consistent with each other and wrong together.
+
+    `main.js` cannot import the constant, so the comparison is read out of the source. What
+    the assert reads is the **returned expression**, not the function's text: the sentinel also
+    appears in that function's comment, and a guard a comment can satisfy is not a guard.
+    """
+    text = (REPO_ROOT / "emrg" / "gui" / "main.js").read_text(encoding="utf-8")
+    match = _GUI_READER.search(text)
+    assert match is not None, (
+        "the body of `isKeyConfigured` could not be lifted out of emrg/gui/main.js — the "
+        "pattern has gone stale, and a stale pattern is not a pass"
+    )
+    returned = [
+        line.strip() for line in match.group(1).splitlines()
+        if line.strip().startswith("return")
+    ]
+    assert returned, (
+        "no `return` line inside isKeyConfigured — the wizard's rule cannot be read, and "
+        "this is not a pass"
+    )
+    assert any(f'"{PLACEHOLDER_API_KEY}"' in line for line in returned), (
+        "the GUI's isKeyConfigured no longer compares the key against "
+        f"PLACEHOLDER_API_KEY ({PLACEHOLDER_API_KEY!r}), so the setup wizard stops opening "
+        f"for the placeholder the product writes; it now returns: {returned}"
+    )
