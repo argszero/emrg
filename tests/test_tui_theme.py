@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import os
+import select
 import sys
 
 import pytest
@@ -340,6 +341,65 @@ def test_the_da1_sentinel_ends_the_wait_early():
         elapsed = time.monotonic() - started
         assert rgb is None
         assert elapsed < 1.0, f"the sentinel did not end the wait: {elapsed:.2f}s"
+    finally:
+        os.close(master); os.close(slave); os.close(devnull)
+
+
+@_needs_posix_tty
+def test_the_probe_reads_the_sentinel_reply_that_follows_the_colour(monkeypatch):
+    """The colour reply ends the *question*, not the *read*.
+
+    A terminal that writes the two answers separately — Apple Terminal does — leaves the DA1 reply
+    behind if the probe returns the moment it parses the colour, and the client's input reader then
+    takes that 7-byte ``ESC[?1;2c`` for keystrokes (v0.3.12; host, 2026-10-14T22:39:49). So the
+    probe must go on reading until the sentinel has been consumed, and that is what this pins: the
+    second chunk is read. The chunks are injected rather than timed, so the reading does not depend
+    on how fast a pty delivers two writes.
+
+    The POSIX marker is not about the pty this test does *not* use: the read loop under test is
+    unreachable on Windows, because ``probe_background`` imports ``termios`` inside the body that
+    ends in ``except Exception: return None``, so an absent ``termios`` returns before any read.
+    Marking it is the honest reading — the assertion's subject does not exist there — and this
+    test failed on the Windows leg of CI until it was marked (run 38597530783).
+    """
+    chunks = iter([b"\x1b]11;rgb:ffff/ffff/ffff\x07", b"\x1b[?1;2c"])
+    read: list[bytes] = []
+
+    def fake_read(fd, n):
+        chunk = next(chunks, b"")
+        read.append(chunk)
+        return chunk
+
+    fd = os.open(os.devnull, os.O_RDONLY)
+    try:
+        monkeypatch.setattr(theme.os, "read", fake_read)
+        monkeypatch.setattr(theme.select, "select", lambda r, w, x, t: (list(r), [], []))
+        rgb = theme.probe_background(150, stdin=_FakeIn(fd), stdout=_FakeOut(fd))
+    finally:
+        os.close(fd)
+
+    assert rgb == WHITE, "the colour reply is still the answer the probe returns"
+    assert read == [b"\x1b]11;rgb:ffff/ffff/ffff\x07", b"\x1b[?1;2c"], (
+        f"the sentinel reply was left unread: {read!r}"
+    )
+
+
+@_needs_posix_tty
+def test_the_probe_leaves_nothing_queued_when_both_answers_arrive():
+    """The end-to-end shape on a real pty: asked two questions, queue empty afterwards."""
+    master, slave = os.openpty()
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.write(master, b"\x1b]11;rgb:ffff/ffff/ffff\x07\x1b[?1;2c")
+        rgb = theme.probe_background(500, stdin=_FakeIn(slave), stdout=_FakeOut(devnull))
+        assert rgb == WHITE
+        left = b""
+        while select.select([slave], [], [], 0)[0]:
+            chunk = os.read(slave, 64)
+            if not chunk:
+                break
+            left += chunk
+        assert left == b"", f"{left!r} was left for the input reader to take for keystrokes"
     finally:
         os.close(master); os.close(slave); os.close(devnull)
 
