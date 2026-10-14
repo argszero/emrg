@@ -2308,6 +2308,52 @@ def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_pa
     assert "inside the window" not in out, out
 
 
+def test_an_unreadable_corpus_does_not_credit_the_vote_the_readable_one_voids(
+    mod, monkeypatch, capsys, tmp_path
+):
+    """Issue #2275: two answers that render alike must not answer alike.
+
+    "no cycle record before this cycle in <dir>" is a **measurement** — the corpus was
+    listed and holds nothing earlier — and the narrower window that follows is the intended
+    reading (`_pinned_cycle_records` is that same state). A corpus that could not be listed
+    answers nothing, and the window falls back to the narrow one all the same; the vote below
+    is then *credited* where the readable corpus voids it. Measured 2026-10-15 on #2271 with
+    `EMRG_CYCLES_LOG=/nonexistent`: `2/3` with the vote `OK - counts`, against `1/3` and
+    `VOID` from the real corpus.
+
+    Both arms are the same vote, head and pusher, and differ only in whether the corpus can
+    be listed — so a counter that refused every window fails the second assertion and one
+    that never measured fails the third.
+    """
+    corpus = tmp_path / "cycles"
+    corpus.mkdir()
+    (corpus / "cycle-20260911-090000.md").write_text("# a cycle record\n", encoding="utf-8")
+    vote_at = _push(2026, 9, 11, 10, 30)
+    # Inside the previous cycle's start (09:00), before the voting cycle's (10:00) — the
+    # one shape where the wide and narrow windows disagree.
+    pushed = _push(2026, 9, 11, 9, 30)
+    gh = FakeGh([_approve("cyc20260911-100000", vote_at)], push_time=pushed)
+
+    # (a) the corpus that can be listed: the clause voids the vote
+    rc = _run(mod, monkeypatch, gh, ["1", "--cycles-log", str(corpus)])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 0/3" in out, out
+    assert "VOID cyc20260911-100000" in out, out
+    assert "cyc20260911-090000" in out, "the reason must name the window it applied"
+
+    # (b) the same vote, the same head, a corpus that cannot be listed at all: no boundary
+    #     was measured, so the narrow one may not stand in for it
+    rc = _run(mod, monkeypatch, gh, ["1", "--cycles-log", str(tmp_path / "gone")])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 0/3" in out, out
+    assert "OK   cyc20260911-100000" not in out, (
+        f"a vote was credited on a window nobody measured: {out}"
+    )
+    assert "could not be read" in out and "2275" in out, out
+
+
 def test_the_counter_reads_the_window_the_queue_reads(mod, monkeypatch, capsys, tmp_path):
     """Issue #2218 at the counter: the same clause, resolved from **both** corpora.
 

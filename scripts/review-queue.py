@@ -585,8 +585,8 @@ def instant(text: str) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str]:
-    """`(the cycle immediately before `cycle`, where it was found)`.
+def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str, str]:
+    """`(the cycle immediately before `cycle`, where it was found, why the corpus fell short)`.
 
     The newest cycle record whose id sorts before this cycle's; ids are fixed width,
     so string order is time order, and a file's `<date>-<time>` stem is turned back
@@ -595,15 +595,30 @@ def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str]:
     session); a caller may name several too, and the newest record wins *across* them —
     which is the only reading that is right when the writers do not all use one root.
 
-    `("", reason)` when there is none — an unresolvable window is the one input this
+    `("", reason, ...)` when there is none — an unresolvable window is the one input this
     reading must not invent, because inventing it spends a vote. A directory that
     cannot be read is named in the answer rather than passed over: an answer drawn
     from the readable half is still an answer, but a reader has to know which half
     it came from.
+
+    The third element is that half, **structurally**, and it is the difference between two
+    answers `where` renders in the same kind of words (issue #2275): "no cycle record
+    before this cycle" is a **measurement** — the corpus was listed and holds no earlier
+    record — while a root that could not be listed at all leaves the boundary
+    *unmeasured*, and a boundary nobody measured must not be replaced by the narrower
+    reading that credits a vote. So it is the reasons of the roots that were **not
+    listed** (an absent path and an unreadable one alike: neither answered), joined with
+    `'; '`, and `""` only when every named root was listed. A root that was listed and
+    merely holds nothing is not a shortfall — that is the case that legitimately narrows
+    the window, and `tests/test_check_vote_count.py`'s fixture is built on it.
+
+    A caller that named **no** root gets a shortfall too, which is the same fact
+    (`"no cycle-record directory was named"`): nothing was measured, so nothing may be
+    narrowed off.
     """
     logs = tuple(Path(entry) for entry in (cycles_logs or ()))
     if not logs:
-        return "", "no cycle-record directory was named"
+        return "", "no cycle-record directory was named", "no cycle-record directory was named"
     found: dict[str, Path] = {}
     unreadable: list[str] = []
     for log in logs:
@@ -617,11 +632,12 @@ def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str]:
             if match:
                 found.setdefault("cyc" + match.group(1), log)
     named = ", ".join(str(log) for log in logs)
+    shortfall = "; ".join(unreadable)
     if not found:
         if len(unreadable) == len(logs):
-            return "", f"{'; '.join(unreadable)} could not be read"
-        detail = f" ({'; '.join(unreadable)} could not be read)" if unreadable else ""
-        return "", f"no cycle record before {cycle} in {named}{detail}"
+            return "", f"{shortfall} could not be read", shortfall
+        detail = f" ({shortfall} could not be read)" if unreadable else ""
+        return "", f"no cycle record before {cycle} in {named}{detail}", shortfall
     earlier = sorted(entry for entry in found if entry < cycle)
     where = (
         str(found[earlier[-1]])
@@ -629,8 +645,8 @@ def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str]:
         else f"no cycle record before {cycle} in {named}"
     )
     if unreadable:
-        where += f" ({'; '.join(unreadable)} could not be read)"
-    return (earlier[-1], where) if earlier else ("", where)
+        where += f" ({shortfall} could not be read)"
+    return (earlier[-1], where, shortfall) if earlier else ("", where, shortfall)
 
 
 @dataclass
@@ -657,6 +673,12 @@ class Window:
     like CI's has no sessions and that is a state, while a corpus that exists and failed
     to open leaves the ids *incomplete* — so the clause must not say no dispatch names
     the cycle when a dispatch may sit in a file nobody could read.
+
+    `corpus_shortfall` is the same fact about the **record** corpus — the roots that
+    were not listed, absent ones included, because neither answered — and it decides the
+    window rather than qualifying it: no record corpus that could be listed means no
+    boundary was measured, so no window may be narrowed off it (issue #2275). It stays
+    on the window once resolved so the reading keeps saying which corpus fell short.
     """
 
     start: datetime | None = None
@@ -665,6 +687,7 @@ class Window:
     previous: str = ""
     inferred: bool = False
     dispatch_unread: str = ""
+    corpus_shortfall: str = ""
 
     @property
     def applied(self) -> bool:
@@ -713,7 +736,7 @@ class Window:
 
 
 def abstain_window(cycle: str, previous: str, where: str,
-                   inferred: bool = False) -> Window:
+                   inferred: bool = False, corpus_shortfall: str = "") -> Window:
     """The window, from the previous cycle's id — or a narrower one that says so.
 
     The previous cycle's start is preferred because it is the wider window: a head
@@ -726,6 +749,30 @@ def abstain_window(cycle: str, previous: str, where: str,
     it was looked up in the record corpus, `False` when the caller named it. It moves
     the window's *reading* and not its extent — see `Window.inferred` for what a
     record-only resolution cannot see.
+
+    `corpus_shortfall` is `previous_cycle`'s third element: the roots that were not
+    listed, or the fact that none was named. It changes the answer only when **no
+    earlier record was found**, and there it is decisive (issue #2275). Falling back to
+    this cycle's own start is a reading of the corpus — "listed, and it holds nothing
+    earlier" — and a corpus that could not be listed has not made that statement. The
+    two render in the same words (`where` says "no cycle record before …" in both),
+    which is how an unreadable corpus came to *credit* a vote the readable corpus voids:
+    `check-vote-count.py 2271 --cycle <id>` read the cycle id as a directory path, and
+    the window it narrowed to counted a vote cast inside the real window.
+
+    So with a shortfall and no `previous`, the window is left **unresolved** — no
+    `start` at all, which is the state both tools already treat as "this vote cannot be
+    counted" (`own_head_window`) and "this vote must not be posted"
+    (`cast-vote.py`'s refusal). That is the same direction the family takes for an
+    unresolvable cycle id, and the one the clause's own accounting prefers: a delay
+    costs less than a vote spent on a boundary nobody measured. A boundary that *was*
+    found is still used, shortfall or not — `previous_cycle` answers with the newest
+    record across every readable root, so a named root that could not be listed can
+    only have made that boundary too *early*, which is the wide direction.
+
+    **A resolved boundary stays a reading even beside a shortfall**, and a caller that
+    named its own boundary (`--prev-cycle`, `inferred=False`) is not second-guessed:
+    neither asked the records what only the records answer.
     """
     own = cycle_start(cycle)
     start = cycle_start(previous)
@@ -735,6 +782,21 @@ def abstain_window(cycle: str, previous: str, where: str,
             source=f"previous cycle {previous}" + (f" ({where})" if where else ""),
             previous=previous,
             inferred=inferred,
+            corpus_shortfall=corpus_shortfall,
+        )
+    if corpus_shortfall and not previous:
+        return Window(
+            start=None,
+            source="",
+            unresolved=(
+                f"the cycle-record corpus could not be read ({corpus_shortfall}), so there "
+                "is no measured boundary for this vote's cycle - a window narrowed to this "
+                "cycle's own start would credit a vote cast inside the one nobody measured "
+                "(issue #2275)"
+            ),
+            previous=previous,
+            inferred=inferred,
+            corpus_shortfall=corpus_shortfall,
         )
     if own is not None:
         return Window(
@@ -743,9 +805,11 @@ def abstain_window(cycle: str, previous: str, where: str,
             unresolved=where or "the previous cycle was not determined",
             previous=previous,
             inferred=inferred,
+            corpus_shortfall=corpus_shortfall,
         )
     return Window(start=None, source="", unresolved=where or f"{cycle!r} is not a cycle id",
-                  previous=previous, inferred=inferred)
+                  previous=previous, inferred=inferred,
+                  corpus_shortfall=corpus_shortfall)
 
 
 def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Window:
@@ -809,12 +873,19 @@ def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Wi
     from_records = (
         f"the newest record is {window.start.isoformat(timespec='seconds')}"
         if window.start is not None
-        else "no cycle record exists before this cycle"
+        else (
+            f"the record corpus could not be read ({window.corpus_shortfall}), so this "
+            "boundary is the dispatch corpus's own answer"
+            if window.corpus_shortfall
+            else "no cycle record exists before this cycle"
+        )
     )
     return Window(
         start=boundary,
         source=f"previous cycle {earlier[-1]} (dispatched, no cycle record; {from_records})",
         unresolved="",
+        previous=window.previous,
+        corpus_shortfall=window.corpus_shortfall,
     )
 
 
@@ -862,8 +933,9 @@ def own_window(
         # a different question from one that asked the records, and the dispatches are
         # not consulted for it.
         return abstain_window(cycle, prev_cycle, "named by --prev-cycle", inferred=False)
-    previous, where = previous_cycle(cycle, roots)
-    window = abstain_window(cycle, previous, where, inferred=True)
+    previous, where, shortfall = previous_cycle(cycle, roots)
+    window = abstain_window(cycle, previous, where, inferred=True,
+                            corpus_shortfall=shortfall)
     corpora = resolve_session_dirs(sessions_dir, roots)
     ids, unreadable = dispatched_ids(corpora)
     return replace(

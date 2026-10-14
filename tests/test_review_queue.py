@@ -1334,15 +1334,17 @@ def test_a_corpus_split_across_two_roots_is_read_whole(mod, tmp_path):
     (legacy / "cycle-20260917-100000.md").write_text("x", encoding="utf-8")
     (project / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
 
-    frozen, _ = mod.previous_cycle(CYCLE, (legacy,))
+    frozen, _, frozen_gap = mod.previous_cycle(CYCLE, (legacy,))
     assert frozen == "cyc20260917-100000", "the older root alone is the frozen reading"
+    assert frozen_gap == "", "the root was listed, so nothing fell short"
 
     for order in ((project, legacy), (legacy, project)):
-        previous, where = mod.previous_cycle(CYCLE, order)
+        previous, where, gap = mod.previous_cycle(CYCLE, order)
         assert previous == PREV_CYCLE, (
             f"the newest record wins across the roots, in either order ({order})"
         )
         assert where == str(project), "the answer names the root it came from"
+        assert gap == "", "both roots were listed"
 
 
 def test_a_root_that_cannot_be_read_is_named_rather_than_passed_over(mod, tmp_path):
@@ -1354,15 +1356,29 @@ def test_a_root_that_cannot_be_read_is_named_rather_than_passed_over(mod, tmp_pa
     (project / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
     missing = tmp_path / "gone"
 
-    previous, where = mod.previous_cycle(CYCLE, (project, missing))
+    previous, where, gap = mod.previous_cycle(CYCLE, (project, missing))
     assert previous == PREV_CYCLE
     assert str(missing) in where and "could not be read" in where
+    assert str(missing) in gap, "the root that answered nothing is reported structurally"
 
     # Nothing readable at all: the reason is the read failure, not "no record" —
     # the two are different facts and only one of them is a gap in the corpus.
-    previous, where = mod.previous_cycle(CYCLE, (missing,))
+    previous, where, gap = mod.previous_cycle(CYCLE, (missing,))
     assert previous == ""
     assert "could not be read" in where and "no cycle record" not in where
+    assert str(missing) in gap and "No such file" in gap, (
+        "an absent root is one that answered nothing, and this is the element a "
+        "window is narrowed on (issue #2275)"
+    )
+
+    # A root that **is** there and was listed, holding nothing earlier, is the other
+    # fact: the corpus answered, so nothing fell short and the narrow window stands.
+    empty = tmp_path / "listed-and-empty"
+    empty.mkdir()
+    previous, where, gap = mod.previous_cycle(CYCLE, (empty,))
+    assert previous == ""
+    assert "no cycle record before" in where
+    assert gap == "", "listed and empty is a measurement, not a shortfall"
 
 
 def test_the_cycle_log_override_names_one_root_or_several(mod, monkeypatch, tmp_path):
@@ -1634,6 +1650,71 @@ def test_the_recordless_cycle_itself_is_still_an_abstain(
     assert rc == 0
     assert "abstain" in out
     assert GAP_CYCLE in out  # the cycle the window was resolved to, named on the row
+
+
+def test_an_unreadable_corpus_leaves_the_window_unresolved_rather_than_narrowed(mod):
+    """Issue #2275: the two answers that read alike, and only one of which narrows.
+
+    `abstain_window` has two ways to end up without a previous cycle, and it used to treat
+    them the same — fall back to this cycle's own start, the documented *narrower* reading.
+    That is a reading of the corpus ("listed, and it holds nothing earlier") and only one of
+    the two states has a corpus that was listed: a shortfall means the boundary was never
+    measured, so narrowing it *credits* votes a measured corpus voids.
+
+    Both directions are pinned here, because the rule is the difference between them and a
+    test that only knew the unreadable arm would be answered by a tool that refused every
+    window. The consumed behaviour (`applied` False) is what both readers key on:
+    `own_head_window` will not count a vote on such a window and `cast-vote.py` refuses to
+    post one.
+    """
+    # (a) the corpus could not be listed: no boundary, so no window
+    unresolved = mod.abstain_window(
+        CYCLE, "", "gone (No such file or directory) could not be read",
+        inferred=True, corpus_shortfall="gone (No such file or directory)",
+    )
+    assert unresolved.applied is False, "a shortfall must not be narrowed into a window"
+    assert mod.cycle_start(CYCLE).isoformat(timespec="seconds") not in unresolved.source
+    assert "gone" in unresolved.unresolved and "2275" in unresolved.unresolved, (
+        f"the reason must name the corpus that fell short: {unresolved.unresolved!r}"
+    )
+
+    # (b) the same absence of a previous cycle, from a corpus that **was** listed: the
+    #     narrow window stands, and it is the fixture `test_check_vote_count.py` is built on
+    narrowed = mod.abstain_window(
+        CYCLE, "", f"no cycle record before {CYCLE} in /listed/and/empty", inferred=True,
+    )
+    assert narrowed.applied is True, "a listed corpus that answers 'nothing earlier' narrows"
+    assert narrowed.window_start_text() == mod.cycle_start(CYCLE).isoformat(timespec="seconds")
+
+    # (c) a boundary that **was** found survives a shortfall: `previous_cycle` answers with
+    #     the newest record across every readable root, so a root that could not be listed
+    #     can only have made that boundary too early - the wide direction, which blocks
+    #     rather than credits
+    resolved = mod.abstain_window(
+        CYCLE, PREV_CYCLE, "/some/records", inferred=True,
+        corpus_shortfall="gone (No such file or directory)",
+    )
+    assert resolved.applied is True
+    assert resolved.corpus_shortfall == "gone (No such file or directory)", (
+        "a resolved window still says which corpus fell short"
+    )
+
+
+def test_a_dispatch_that_resolves_an_unresolved_window_keeps_the_shortfall(mod):
+    """The dispatch corpus is a measured boundary, so it may fill one in — and the window
+    must go on saying which corpus it could not read, rather than reading as an ordinary
+    records-only resolution (issue #2275)."""
+    unresolved = mod.abstain_window(
+        CYCLE, "", "gone (No such file or directory) could not be read",
+        inferred=True, corpus_shortfall="gone (No such file or directory)",
+    )
+    moved = mod.with_dispatches(unresolved, CYCLE, [PREV_CYCLE])
+    assert moved.applied is True, "a dispatched id is its cycle's start, so it is exact"
+    assert moved.window_start_text() == mod.cycle_start(PREV_CYCLE).isoformat(
+        timespec="seconds"
+    )
+    assert moved.corpus_shortfall == "gone (No such file or directory)"
+    assert "gone" in moved.source, f"the source must name it: {moved.source!r}"
 
 
 def test_a_dispatch_older_than_the_record_does_not_move_the_window(mod):
