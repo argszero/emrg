@@ -417,16 +417,6 @@ class SessionSelector(Widget):
             return self.sessions[self.selected_index].get("session_id", "")
         return None
 
-    def window(self, size: int) -> tuple[int, int]:
-        """The half-open range of session indices on screen, holding the selection.
-
-        `size` is the number of list rows the caller can actually show — derived
-        from the context's height, never a module constant: the terminal draws only
-        the tail of what a widget emits and pushes the rest into native scrollback,
-        so a fixed window is right only for one terminal size (rant 2026-10-14T14:09:10).
-        """
-        return windowed_range(len(self.sessions), self.selected_index, size)
-
     def render(self, ctx):
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")

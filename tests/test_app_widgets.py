@@ -1081,6 +1081,29 @@ def test_the_windowing_rule_has_one_producer():
     assert len(hits) == 1, f"the window arithmetic is written {len(hits)} times: {hits}"
 
 
+def test_the_orphaned_session_selector_window_stays_removed():
+    """#2248 left `SessionSelector.window` behind with no caller, and its shape was the defect.
+
+    It delegated to `windowed_range` but computed no *plan*: it charged neither the title
+    row nor the two edge markers `SessionSelector.render` draws, so a caller that picked it
+    up would emit `chrome + 2 + size` rows for a budget of `avail`. That is the "emits more
+    rows than the area holds" regression #2244/#2248 exist to prevent, which is why the
+    orphan was deleted rather than kept as an unused compatibility API — and why the removal
+    is named here, so it cannot come back as one.
+    """
+    from emrg.client.widgets import SessionSelector, ToolSelector
+
+    assert not hasattr(SessionSelector, "window"), (
+        "SessionSelector.window is back: it is a window of rows with no plan, so anything "
+        "calling it emits more rows than the height it was handed — lay out through "
+        "`window_plan` in `render` instead"
+    )
+    # The other pre-#2248 copy is a live API, and removing it would be the mistake in the
+    # other direction: `ToolSelector.render` and two tests call it, and it subtracts its own
+    # chrome and detail rows — that is a plan, not a bare range.
+    assert hasattr(ToolSelector, "window")
+
+
 def test_windowed_range_keeps_the_selection_inside_for_every_size():
     """The property the helper exists to guarantee, over the whole parameter space.
 
