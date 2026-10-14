@@ -502,6 +502,19 @@ def corpus_read_failure(dirs: Sequence[Path], unreadable: Sequence[str]) -> str:
     `/tmp/ab`'s genuine reason. In the other direction, a reason naming a **session**
     directory or a **history** under a corpus is kept - it cannot be the absent member,
     because `dispatch_ids` only descends into a directory that listed successfully.
+
+    **One overlap is left**, and it is silent rather than false: a reason string carries
+    its path's parentheses unescaped, so with `/tmp/a` absent and a file at `/tmp/a (copy)`
+    the *present* member's genuine reason starts with `"/tmp/a ("` too and is dropped with
+    the absent one (measured 2026-10-14, `cyc20261014-081405`). Master printed nothing for
+    that set either, so this is the reach of the disclosure and not a regression, and it
+    takes a corpus directory literally named `<another corpus> (…)` to arise. Closing it
+    needs the reasons **attributed to their directory by `dispatch_ids`** - the loop that
+    knows which member produced which - because an exact string comparison does not reach
+    both shapes: `reason.split(" (", 1)[0] == directory` fixes nothing here and reports an
+    *absent* directory whose own name carries a `" ("` as a corpus that failed to read.
+    `tests/test_review_queue.py::test_an_absent_corpus_is_never_disclosed_whatever_its_name_carries`
+    refuses that trade.
     """
     absent = tuple(str(directory) for directory in dirs if not Path(directory).exists())
     return "; ".join(

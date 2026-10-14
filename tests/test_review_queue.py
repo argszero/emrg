@@ -1884,6 +1884,48 @@ def test_a_mixed_set_reports_only_the_corpus_that_is_there(mod, tmp_path):
     assert mod.own_window(CYCLE, None, str(records), mixed).dispatch_unread == ""
 
 
+def test_an_absent_corpus_is_never_disclosed_whatever_its_name_carries(mod, tmp_path):
+    """The rule the whole helper exists for, stated as a property over the naming.
+
+    `corpus_read_failure` may name a corpus that is there and would not open; it may
+    **never** name one that is not there. Every test above checks that on a path with an
+    ordinary name, and a reason string is `"<path> (<error>)"` - so a path that itself
+    carries a `" ("` makes the two shapes overlap, and the membership test is where that
+    shows. Measured 2026-10-14 (cycle `cyc20261014-081405`): the comparison suggested on
+    issue #2224's PR thread, `reason.split(" (", 1)[0] == directory`, satisfies every
+    ordinary case above and **discloses an absent directory** whose name carries the
+    parenthetical, which is the defect #2224 removed. It was suggested by two reviewers
+    and repeated by an approving vote, so prose alone is what stood between this tree and
+    that regression; this test is what stands there instead.
+    """
+    absent_paren = tmp_path / "a (copy)"  # not on disk, and its name holds " ("
+    (tmp_path / "z").write_text("x", encoding="utf-8")  # there, unlistable
+    (tmp_path / "w").mkdir()                           # there, an empty corpus
+    others = {"a file, unlistable": tmp_path / "z", "an empty corpus": tmp_path / "w",
+              "nothing there, an ordinary name": tmp_path / "v"}
+    for label, other in others.items():
+        seats = (absent_paren, other)
+        _ids, unreadable = mod.dispatch_ids(seats)
+        assert any(str(absent_paren) in reason for reason in unreadable), (
+            "the premise, with " + label + ": `dispatch_ids` records the absent member",
+            unreadable,
+        )
+        failure = mod.corpus_read_failure(seats, unreadable)
+        assert str(absent_paren) not in failure, (
+            f"an absent corpus directory was reported as one that could not be read, "
+            f"beside {label}: {failure!r}"
+        )
+
+    # The other direction, so a helper that named nothing at all cannot pass: the present
+    # file beside that absent directory is still disclosed, by its own path.
+    present_file = tmp_path / "z"
+    failure = mod.corpus_read_failure(
+        (absent_paren, present_file),
+        [f"{absent_paren} (No such file)", f"{present_file} (Not a directory)"],
+    )
+    assert failure == f"{present_file} (Not a directory)", failure
+
+
 def test_the_dispatch_corpus_comes_from_the_emrg_root_that_owns_the_records(mod, tmp_path):
     """Issue #2222: a record root's corpus is the `.emrg` root's `sessions`, not the
     directory beside the root.
