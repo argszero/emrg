@@ -51,11 +51,13 @@ class RenderContext:
     Attributes:
         width: Available columns for this render region.
         height: Available **rows** for this render region, when the caller knows them.
-            `0` means "not stated" and a widget that scrolls must then render unbounded
-            (it cannot invent a bound it was not given). The terminal supplies the chat
-            area's height, which is the bound every non-scrolling widget has to respect:
-            the viewport draws only the tail of what it is handed and pushes the rest
-            into native scrollback, where it is never redrawn (rant 2026-10-14T14:09:10).
+            `0` means "not stated": a widget that cannot scroll then renders unbounded,
+            because it must not invent a bound it was not given. The terminal fills this
+            per region — each region's own row budget, which is what a widget that emits a
+            window has to respect: the viewport draws only the **tail** of what it is
+            handed and pushes the rest into native scrollback, where it is never redrawn
+            (rants 2026-10-14T14:09:10 for the chat bound, 2026-10-14T15:28:56 for the
+            composer's).
         style: Default style to apply (cascades like Ratatui's Line.style).
     """
 
