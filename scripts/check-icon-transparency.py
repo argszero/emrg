@@ -179,8 +179,14 @@ def find_icons(subject: Path):
         if not named:
             continue
         candidate = plist.parent / "Resources" / named
-        if candidate.is_file():
-            preferred.append(candidate)
+        # `CFBundleIconFile` is written both with and without the `.icns` extension --
+        # the platform appends it -- so testing only the value as given prefers the
+        # plist's icon for one spelling and silently falls back to `sorted(rglob)`
+        # for the other. Both spellings name the file the platform renders.
+        for cand in (candidate, candidate.with_name(candidate.name + ".icns")):
+            if cand.is_file():
+                preferred.append(cand)
+                break
     found = sorted(set(subject.rglob("*.icns")))
     ordered = preferred + [p for p in found if p not in preferred]
     if ordered:

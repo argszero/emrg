@@ -167,8 +167,33 @@ def test_the_app_bundle_is_read_through_the_plist_named_icon(tmp_path):
     app = app_bundle(tmp_path, icns((b"ic10", rgba_png(64, corner=(255, 255, 255, 255)))))
     code, out = run(app)
     assert code == 1, out
-    assert "Info.plist" not in out or True  # the subject is the named file, not any file
     assert "OPAQUE" in out
+
+
+def test_the_plist_named_icon_is_preferred_in_both_spellings(tmp_path):
+    """The preference must not depend on how `CFBundleIconFile` is spelled.
+
+    `CFBundleIconFile` is written both as `AppIcon.icns` and as `AppIcon` (the platform
+    appends the extension), so each bundle below carries a second icon that sorts
+    **before** the named one: only a preference that actually fires puts the named file
+    first, whichever way the plist spells it. Measured 2026-10-14
+    (`cyc20261014-134816`) on the tree before this fix: the extension-less spelling read
+    `AAA.icns` first, and a `preferred = []` arm left all 14 tests green.
+    """
+    for tag, declared in (("with-ext", "AppIcon.icns"), ("no-ext", "AppIcon")):
+        app = tmp_path / tag / "EMRG.app"
+        (app / "Contents" / "Resources").mkdir(parents=True)
+        (app / "Contents" / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleIconFile": declared}))
+        # the named icon is OPAQUE (rc 1); the decoy that sorts first is clear
+        (app / "Contents" / "Resources" / "AppIcon.icns").write_bytes(
+            icns((b"ic10", rgba_png(64, corner=(255, 255, 255, 255)))))
+        (app / "Contents" / "Resources" / "AAA.icns").write_bytes(
+            icns((b"ic10", rgba_png(64))))
+        code, out = run(app)
+        assert code == 1, (declared, out)
+        first = [ln.strip() for ln in out.splitlines() if ln.strip().endswith(".icns")][0]
+        assert first == str(app / "Contents" / "Resources" / "AppIcon.icns"), (declared, out)
 
 
 def test_a_plist_that_names_a_missing_icon_falls_back_to_the_found_icns(tmp_path):
