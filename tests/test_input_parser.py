@@ -1,5 +1,7 @@
 """Tests for InputParser — byte-stream → complete key sequences, including UTF-8."""
 
+import logging
+
 from emrg.client.python_tui.events import InputParser, _utf8_len
 
 
@@ -212,6 +214,12 @@ class TestLongCsiSequences:
         assert results[0] == b"\x1b[1;5C"
         assert b"".join(results[1:]) == b"hello"
 
+    def test_option_left_consumed_whole(self):
+        """ESC[1;3D (Option+Left) — the third sequence the host's report names."""
+        results = self._drained_after(b"\x1b[1;3D")
+        assert results[0] == b"\x1b[1;3D"
+        assert b"".join(results[1:]) == b"hello"
+
     def test_sgr_mouse_report_consumed_whole(self):
         """ESC[<0;10;5M — an SGR mouse press, longer than six bytes."""
         results = self._drained_after(b"\x1b[<0;10;5M")
@@ -241,6 +249,39 @@ class TestLongCsiSequences:
             parser = InputParser()
             assert parser.feed(marker) == [marker]
             assert not parser.has_pending()
+
+
+class TestStuckBufferIsDropped:
+    """A buffer that only grows must not be held for ever — it is dropped, with a warning.
+
+    Consuming every complete sequence (above) is the fix for the sequences that reach the buffer.
+    This is the backstop for every other way a buffer can fail to drain: whatever it holds, the
+    next keystroke must still be text rather than the next thing appended to a stuck sequence.
+    """
+
+    def _stuck_parser(self):
+        parser = InputParser()
+        # `ESC[` then payload with no final byte (0x40-0x7E) at all: an incomplete sequence that
+        # no amount of later input can complete within any sane bound.
+        parser.feed(b"\x1b[" + b"0" * 5000)
+        return parser
+
+    def test_a_buffer_past_the_cap_is_dropped_and_typing_resumes(self):
+        parser = self._stuck_parser()
+        assert not parser.has_pending(), "the stuck buffer was kept"
+        assert parser.feed(b"hello") == [b"h", b"e", b"l", b"l", b"o"]
+
+    def test_dropping_the_stuck_buffer_is_logged(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="emrg.client.python_tui.events"):
+            self._stuck_parser()
+        assert any("dropping" in r.getMessage() for r in caplog.records), caplog.text
+
+    def test_a_buffer_under_the_cap_still_waits(self):
+        """The cap must not become an eager flush: an ordinary incomplete sequence still waits."""
+        parser = InputParser()
+        assert parser.feed(b"\x1b[") == []
+        assert parser.has_pending()
+        assert parser.feed(b"A") == [b"\x1b[A"]
 
 
 # ── Legacy Windows scan codes (rant 2026-08-07T10:38:21) ──

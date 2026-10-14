@@ -14,9 +14,20 @@ and add Kitty protocol support progressively.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
+
+logger = logging.getLogger(__name__)
+
+#: How much a sequence that never completes may hold before it is dropped rather than kept.
+#: ``feed`` drains every complete sequence it is given, so the buffer holds only an *incomplete*
+#: one — a handful of bytes. A buffer past this is not waiting for the rest of anything; it is
+#: stuck, and holding it is how a bad branch became a client nobody could type into again
+#: (v0.3.12; host, 2026-10-14T22:39:49): the buffer only grew, and nothing could recover it
+#: in-process. A stuck buffer is now discarded, with a warning, so the next keystroke is text.
+_MAX_BUFFER_BYTES = 4096
 
 
 class KeyName(Enum):
@@ -467,6 +478,19 @@ class InputParser:
                 results.append(seq)
             else:
                 break
+
+        # Nothing consumed means the head of the buffer is an incomplete sequence and waiting is
+        # right — unless the buffer has grown past anything a sequence could legitimately need,
+        # which is the one state that never recovers: every later byte is appended to a sequence
+        # that cannot complete, so the input line is dead for the rest of the process. Drop it
+        # (and say so) rather than hold it for ever.
+        if len(self._buf) > _MAX_BUFFER_BYTES:
+            logger.warning(
+                "input parser: dropping %d buffered byte(s) that no sequence consumed: %r",
+                len(self._buf),
+                bytes(self._buf[:32]),
+            )
+            self._buf.clear()
 
         return results
 
