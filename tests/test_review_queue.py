@@ -1267,6 +1267,56 @@ def test_a_head_pushed_two_cycles_back_is_still_votable(mod, monkeypatch, capsys
     assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
 
 
+def test_a_push_below_a_window_whose_far_end_was_never_measured_is_not_a_vote(
+    mod, monkeypatch, capsys, tmp_path
+):
+    """Issue #2275 at the row, and the arm the CI leg found: a narrowed window decides only
+    the half below its start.
+
+    22:05 is after the previous cycle began (21:59:29) and before this one did (22:11:17),
+    so the *widened* window is what decides it — and where the records could not be listed
+    that end was never measured. The row said `vote` there, inviting a vote the poster
+    refuses and the counter voids; it says `abstain` now, naming the corpus to pass.
+
+    Its control is the sibling test below, and the pair is split because the fakes are
+    installed per test: a second `_run` in one test re-installs them onto the first fake,
+    which reads as an unreadable count rather than as the row under test (measured while
+    writing this — the `read-first` row it produced is the trap, not the finding).
+    """
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
+    _run(
+        mod, monkeypatch, votes, FakeFresh(),
+        ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path / "gone")],
+    )
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if line.startswith("#1 "))
+    assert "abstain" in row, f"a boundary nobody measured is not passed: {row}"
+    assert "cast-vote.py" not in row, "never the command that spends the vote"
+    assert "--cycles-log" in out, "the remedy is the corpus this window needs, named"
+    assert "never measured" in out, "and the reason says which end was missing"
+
+
+def test_a_push_below_a_measured_narrow_window_is_still_a_vote(
+    mod, monkeypatch, capsys, tmp_path
+):
+    """The control for the row above, and the case the whole narrowing rests on: a corpus
+    that **was** listed and holds no earlier record has measured the boundary — it answered
+    "nothing earlier" — so a push below this cycle's own start is the ordinary votable head
+    it has always been. Without this arm a tool that abstained on every window it could not
+    widen would pass, and the narrowed window would stop being a reading at all."""
+    listed = tmp_path / "listed-and-empty"
+    listed.mkdir()
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 5))
+    _run(
+        mod, monkeypatch, votes, FakeFresh(),
+        ["1", "--cycle", CYCLE, "--cycles-log", str(listed)],
+    )
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if line.startswith("#1 "))
+    assert "vote" in row and "abstain" not in row, row
+    assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
+
+
 def test_a_head_this_cycle_pushed_is_not_merged_either(mod, monkeypatch, capsys):
     """The other thing the clause withholds: `3/3` at a head one pushed is not this
     cycle's merge, so the merge command must not be printed either."""
@@ -1652,39 +1702,50 @@ def test_the_recordless_cycle_itself_is_still_an_abstain(
     assert GAP_CYCLE in out  # the cycle the window was resolved to, named on the row
 
 
-def test_an_unreadable_corpus_leaves_the_window_unresolved_rather_than_narrowed(mod):
-    """Issue #2275: the two answers that read alike, and only one of which narrows.
+def test_a_window_whose_far_end_was_never_measured_says_so(mod):
+    """Issue #2275: the two answers that read alike, and only one of which decided the push.
 
-    `abstain_window` has two ways to end up without a previous cycle, and it used to treat
-    them the same — fall back to this cycle's own start, the documented *narrower* reading.
-    That is a reading of the corpus ("listed, and it holds nothing earlier") and only one of
-    the two states has a corpus that was listed: a shortfall means the boundary was never
-    measured, so narrowing it *credits* votes a measured corpus voids.
+    `abstain_window` has two ways to end up without a previous cycle, and it treated them
+    the same — fall back to this cycle's own start, the documented *narrower* reading.
+    That is a reading of the corpus ("listed, and it holds nothing earlier") and only one
+    of the two states has a corpus that was listed: where the records could not be listed,
+    the *far end* was never measured, and the narrowed window's lower half is then all it
+    knows — a push at or after the start is inside every candidate window, a push below it
+    is a push the wider window would have decided.
 
-    Both directions are pinned here, because the rule is the difference between them and a
-    test that only knew the unreadable arm would be answered by a tool that refused every
-    window. The consumed behaviour (`applied` False) is what both readers key on:
-    `own_head_window` will not count a vote on such a window and `cast-vote.py` refuses to
-    post one.
+    So the narrowed window is kept in both states — the queue's `abstain` row for a head
+    this cycle pushed is sound and must survive, which is what the CI leg measured when a
+    first cut of this fix refused to apply a window at all — and the difference is carried
+    by `boundary_unmeasured`, the one property the counter and the poster both ask. Arms
+    (b) and (c) are the controls: a corpus that **was** listed narrows for real, and a
+    resolved boundary is not made undecided by a shortfall somewhere else.
     """
-    # (a) the corpus could not be listed: no boundary, so no window
-    unresolved = mod.abstain_window(
+    # (a) the records could not be listed: the narrow window stands, its far end does not
+    unmeasured = mod.abstain_window(
         CYCLE, "", "gone (No such file or directory) could not be read",
         inferred=True, corpus_shortfall="gone (No such file or directory)",
     )
-    assert unresolved.applied is False, "a shortfall must not be narrowed into a window"
-    assert mod.cycle_start(CYCLE).isoformat(timespec="seconds") not in unresolved.source
-    assert "gone" in unresolved.unresolved and "2275" in unresolved.unresolved, (
-        f"the reason must name the corpus that fell short: {unresolved.unresolved!r}"
+    assert unmeasured.applied is True, "this cycle's own start needs no corpus"
+    assert unmeasured.window_start_text() == mod.cycle_start(CYCLE).isoformat(timespec="seconds")
+    assert unmeasured.boundary_unmeasured is True, (
+        "the boundary above the start was never measured, and this is what both readers ask"
+    )
+    assert "gone" in unmeasured.unresolved and "2275" in unmeasured.unresolved, (
+        f"the reason must name the corpus that fell short: {unmeasured.unresolved!r}"
     )
 
-    # (b) the same absence of a previous cycle, from a corpus that **was** listed: the
-    #     narrow window stands, and it is the fixture `test_check_vote_count.py` is built on
+    # (b) the control: the same absence of a previous cycle, from a corpus that **was**
+    #     listed. The narrow window stands and it *was* measured — the legitimate case
+    #     `test_check_vote_count.py`'s fixture is built on, and the one a tool that
+    #     refused every narrowed window would break
     narrowed = mod.abstain_window(
         CYCLE, "", f"no cycle record before {CYCLE} in /listed/and/empty", inferred=True,
     )
-    assert narrowed.applied is True, "a listed corpus that answers 'nothing earlier' narrows"
+    assert narrowed.applied is True
     assert narrowed.window_start_text() == mod.cycle_start(CYCLE).isoformat(timespec="seconds")
+    assert narrowed.boundary_unmeasured is False, (
+        "a listed corpus that answers 'nothing earlier' measured the far end"
+    )
 
     # (c) a boundary that **was** found survives a shortfall: `previous_cycle` answers with
     #     the newest record across every readable root, so a root that could not be listed
@@ -1698,22 +1759,31 @@ def test_an_unreadable_corpus_leaves_the_window_unresolved_rather_than_narrowed(
     assert resolved.corpus_shortfall == "gone (No such file or directory)", (
         "a resolved window still says which corpus fell short"
     )
+    assert resolved.boundary_unmeasured is False, (
+        "the far end is what `previous` supplied, so nothing about it is undecided"
+    )
 
 
-def test_a_dispatch_that_resolves_an_unresolved_window_keeps_the_shortfall(mod):
-    """The dispatch corpus is a measured boundary, so it may fill one in — and the window
-    must go on saying which corpus it could not read, rather than reading as an ordinary
-    records-only resolution (issue #2275)."""
-    unresolved = mod.abstain_window(
+def test_a_dispatch_that_fills_in_the_boundary_measures_the_far_end(mod):
+    """The dispatch corpus is a measured boundary, so it may fill one in — and a window it
+    filled in is decided, while the window must go on saying which corpus it could not read
+    rather than reading as an ordinary records-only resolution (issue #2275)."""
+    unmeasured = mod.abstain_window(
         CYCLE, "", "gone (No such file or directory) could not be read",
         inferred=True, corpus_shortfall="gone (No such file or directory)",
     )
-    moved = mod.with_dispatches(unresolved, CYCLE, [PREV_CYCLE])
+    assert unmeasured.boundary_unmeasured is True  # the state the dispatch corpus repairs
+
+    moved = mod.with_dispatches(unmeasured, CYCLE, [PREV_CYCLE])
     assert moved.applied is True, "a dispatched id is its cycle's start, so it is exact"
     assert moved.window_start_text() == mod.cycle_start(PREV_CYCLE).isoformat(
         timespec="seconds"
     )
     assert moved.corpus_shortfall == "gone (No such file or directory)"
+    assert moved.boundary_unmeasured is False, (
+        "a dispatched id *is* the boundary, so the far end is now measured - a window that "
+        "went on refusing every push below its start would strand votes the corpus reached"
+    )
     assert "gone" in moved.source, f"the source must name it: {moved.source!r}"
 
 

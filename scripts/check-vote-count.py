@@ -742,7 +742,7 @@ def own_head_window(
             f"the head's own window cannot be decided from push time {push_time!r}, "
             "which is not an instant (issue #1408)"
         )
-    if pushed < window.start:
+    if pushed < window.start and not window.boundary_unmeasured:
         return False, ""
     # The clause is about a head *this* instance pushed, and the window is only a proxy
     # for that: a head the peer pushed inside a gap between this host's cycles fell inside
@@ -759,6 +759,24 @@ def own_head_window(
         return False, (
             f"counts - the head was pushed by {pusher}, which is not a login this "
             "instance pushes under, so the own-head clause is not asked of it"
+        )
+    if pushed < window.start:
+        # Reached only where `boundary_unmeasured` let the push through the return above,
+        # and it is the state that made this fix necessary (issue #2275): the window is
+        # real but its *far end* is not, so a push below the narrowed start is a push the
+        # wider window would have decided - the clause cannot say "outside" from an end
+        # nobody measured, and `(True, why)` is how both tools refuse to decide. The
+        # wording is this state's own and not the in-window sentence below: a reason that
+        # says "at or after <start>" about a push *before* it is false, and this family
+        # has paid for a reason that named the wrong cause.
+        return True, (
+            "the head's own window cannot be decided from this vote's cycle: the "
+            f"cycle-record corpus could not be read ({window.corpus_shortfall}), so the "
+            f"boundary above this cycle's own start ({window.window_start_text()}) was "
+            f"never measured, and the head was pushed {push_time} - below it. The wider "
+            "window this clause asks about would have decided that push, and a boundary "
+            "nobody measured is not passed, because the narrowed window below it credits "
+            "a vote cast inside the one that was never read (issue #2275)"
         )
     narrowed = (
         f"; the window could not be widened to the cycle before this one ({window.unresolved})"

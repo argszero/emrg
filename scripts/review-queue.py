@@ -675,10 +675,14 @@ class Window:
     the cycle when a dispatch may sit in a file nobody could read.
 
     `corpus_shortfall` is the same fact about the **record** corpus — the roots that
-    were not listed, absent ones included, because neither answered — and it decides the
-    window rather than qualifying it: no record corpus that could be listed means no
-    boundary was measured, so no window may be narrowed off it (issue #2275). It stays
-    on the window once resolved so the reading keeps saying which corpus fell short.
+    were not listed, absent ones included, because neither answered — and on this window
+    it is not a qualification but a **limit on what the window decided** (issue #2275):
+    the narrowed window's `start` is this cycle's own id, which no corpus supplies, while
+    its far end is the previous cycle's, which only the records answer. So a corpus that
+    could not be listed leaves that boundary unmeasured, and `boundary_unmeasured` is the
+    one producer of that reading — the counter asks it before it credits a vote whose
+    push falls below `start`, and the poster asks it before it posts one. It stays on the
+    window once resolved so the reading keeps saying which corpus fell short.
     """
 
     start: datetime | None = None
@@ -692,6 +696,24 @@ class Window:
     @property
     def applied(self) -> bool:
         return self.start is not None
+
+    @property
+    def boundary_unmeasured(self) -> bool:
+        """Was the boundary the clause asks about ever measured?
+
+        `False` for a window whose far end a corpus answered — either the records (a
+        record was found for the cycle before this one) or the dispatch corpus (a
+        dispatched id reached the boundary, which clears `unresolved` and is exact, since
+        a cycle's id *is* its start). `True` only where the record corpus could not be
+        listed **and** nothing reached that boundary. The narrowed window is still
+        sound where it decided something: a push at or after its `start` (this cycle's own
+        id) is inside **every** candidate window, so `abstain` there is right. A push
+        *before* `start` is the one the wider window would have decided — the boundary it
+        needed, the start of the cycle before this one, is earlier than `start` and comes
+        from the records alone — and no reader may report a decision nobody took (issue
+        #2275).
+        """
+        return bool(self.corpus_shortfall and self.unresolved)
 
     def window_start_text(self) -> str:
         """The window's start as one readable instant (empty when unapplied)."""
@@ -784,25 +806,30 @@ def abstain_window(cycle: str, previous: str, where: str,
             inferred=inferred,
             corpus_shortfall=corpus_shortfall,
         )
-    if corpus_shortfall and not previous:
-        return Window(
-            start=None,
-            source="",
-            unresolved=(
-                f"the cycle-record corpus could not be read ({corpus_shortfall}), so there "
-                "is no measured boundary for this vote's cycle - a window narrowed to this "
-                "cycle's own start would credit a vote cast inside the one nobody measured "
-                "(issue #2275)"
-            ),
-            previous=previous,
-            inferred=inferred,
-            corpus_shortfall=corpus_shortfall,
-        )
     if own is not None:
+        # The narrowed window, and the one case where its two ends are not equally
+        # measured: `start` is this cycle's own id, which no corpus supplies, so a head
+        # pushed at or after it is inside **every** candidate window and `abstain` is
+        # sound. The far end — the cycle before this one — comes from the records, so
+        # where those could not be listed it was never measured, and the narrowed window
+        # is then no longer a statement about a head pushed *before* `start`: the wider
+        # window it stands in for would have decided that push, and only one direction of
+        # the comparison survives (issue #2275). Which is why the shortfall stays on the
+        # reading rather than being spent here: `boundary_unmeasured` is what the counter
+        # and the poster ask before they credit or post on this window, and a window that
+        # answered "votable" from an end nobody measured is the defect this closes.
         return Window(
             start=own,
             source=f"this cycle only (started {own.isoformat(timespec='seconds')})",
-            unresolved=where or "the previous cycle was not determined",
+            unresolved=(
+                f"{corpus_shortfall} could not be read, so the boundary above this "
+                f"cycle's own start was never measured - a head pushed before "
+                f"{own.isoformat(timespec='seconds')} may be inside the window this vote's "
+                "cycle treats as its own, and an end nobody measured is not passed "
+                "(issue #2275)"
+                if corpus_shortfall
+                else where or "the previous cycle was not determined"
+            ),
             previous=previous,
             inferred=inferred,
             corpus_shortfall=corpus_shortfall,
@@ -867,6 +894,30 @@ def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Wi
         # checkout that has a session corpus — the ordinary shape here, measured
         # 2026-10-13 while resolving issue #2216: 1798 dispatched ids, the newest the
         # record's own answer — which is how a caveat that matters gets skimmed.
+        if window.boundary_unmeasured:
+            # The third case, and the one neither of the above answers: this window is the
+            # **narrowed fallback** (`abstain_window` found no record *and* the corpus could
+            # not be listed), so "exactly as the records gave them" says nothing about it —
+            # no record answered at all. A dispatched id *is* the boundary the records owed
+            # (`cycle_start` of the cycle before this one), so adopting it here does not
+            # drag a resolved window backwards; it supplies the measurement that was
+            # missing. It is also the **wider** window, earlier than this cycle's own start,
+            # and that is the point of taking it: without it the narrowed window can only
+            # abstain on a push below its start, which is a *delay* — while the counter's
+            # and the poster's `boundary_unmeasured` refusal is what stands in the meantime.
+            # A dispatch corpus that reached this boundary has answered the question the
+            # records could not, so the window stops saying an end nobody measured is
+            # undecided (issue #2275).
+            return Window(
+                start=boundary,
+                source=(
+                    f"previous cycle {earlier[-1]} (dispatched; the record corpus could "
+                    f"not be read ({window.corpus_shortfall}))"
+                ),
+                unresolved="",
+                previous=earlier[-1],
+                corpus_shortfall=window.corpus_shortfall,
+            )
         if boundary == window.start:
             return replace(window, inferred=False)
         return window
@@ -1615,6 +1666,33 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
                     "counts as one's own as well, because every cycle on a host is the same "
                     "instance running again; the next vote here (and the merge) has to come "
                     f"from a later cycle; {decided}",
+                command=f"{RUNNER} scripts/check-vote-count.py {pr}",
+            )
+        if (
+            pushed is not None
+            and pushed < window.start
+            and window.boundary_unmeasured
+            and not other_pusher
+        ):
+            # The other half of the same defect (issue #2275), and the half the row above
+            # cannot reach: this push is *below* the narrowed start, so the widened window
+            # is the one that decides it - and that window's far end was never measured,
+            # because the record corpus could not be listed. A row saying `vote` here
+            # invites a vote the poster refuses and the counter voids, which is the class
+            # this family keeps fixing: the remedy has to be right for its own cause. So
+            # the row reports the abstention the unmeasured boundary imposes, and names
+            # the corpus to pass rather than a command that would spend nothing but time.
+            return Action(
+                kind="abstain",
+                why=f"head pushed {reading.head_pushed_at}, before the window this cycle "
+                    f"treats as its own ({window.source}), and the boundary above it was "
+                    f"never measured - the record corpus could not be listed "
+                    f"({window.corpus_shortfall}), so whether this push falls inside the "
+                    "window the clause asks about cannot be decided from here; a boundary "
+                    "nobody measured is not passed, because the narrowed window below it "
+                    "would credit a vote cast inside the one that was never read - pass "
+                    "`--cycles-log DIR` (or `--prev-cycle <id>`) to have the full window "
+                    f"applied; {decided}",
                 command=f"{RUNNER} scripts/check-vote-count.py {pr}",
             )
         if other_pusher and pushed is not None:

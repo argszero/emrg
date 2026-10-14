@@ -618,6 +618,25 @@ def own_head_window(
             f"({push_time!r}) is not an instant. Nothing was posted"
         ), note
 
+    if window.boundary_unmeasured and pushed < window.start:
+        # Issue #2275's posting half: the narrowed window is real, its far end is not, and
+        # this push falls below the start — so whether it is inside the window this cycle
+        # treats as its own was never decided. Posting under it spends a vote the counter
+        # voids, which is the one thing this tool exists to prevent; the counter takes the
+        # same branch (both ask `Window.boundary_unmeasured`), so the two readings cannot
+        # disagree about the same head.
+        return (
+            f"the head {head[:8]} was pushed {push_time}, below the window this cycle "
+            f"treats as its own, which starts {window.window_start_text()} "
+            f"({window.source}) - and the boundary above that start was never measured, "
+            f"because the cycle-record corpus could not be read "
+            f"({window.corpus_shortfall}). Whether the push falls inside the window this "
+            "clause asks about cannot be decided from here, and a boundary nobody measured "
+            "is not passed: the narrowed window would credit a vote cast inside the one "
+            "that was never read. Nothing was posted. Pass the corpus the window needs - "
+            f"`--cycles-log DIR` (or `--prev-cycle <id>`) - and ask again (issue #2275)"
+        ), note
+
     if pushed >= window.start:
         # The same disclosure the report carries, from the same producer: a window read
         # off the records can be wider than the clause, and here that costs a *posted
