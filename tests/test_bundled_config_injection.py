@@ -69,7 +69,7 @@ def _run(root: Path, env: dict[str, str], *extra: str) -> subprocess.CompletedPr
     clean.update(env)
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--source-root", str(root), *extra],
-        env=clean, capture_output=True, text=True,
+        env=clean, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
 
 
