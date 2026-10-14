@@ -452,6 +452,24 @@ def load_update_config() -> UpdateConfig:
 #: ``0o600``), which is the defect this constant closes.
 CONFIG_FILE_MODE = 0o600
 
+#: The ``api_key`` every first-run template carries. It is a **sentinel**, not a key: it means
+#: "the host has not set one yet", and the writers below put it there on purpose so that an
+#: unedited install is recognisable rather than merely wrong.
+#:
+#: Three writers state it — the template :func:`ensure_config` writes below,
+#: ``emrg/gui/main.js::CONFIG_TEMPLATE`` (the packaged GUI, which cannot spawn a python) and
+#: ``install.sh::generate_config_template`` (the ``curl … | bash`` installer, which runs before
+#: either) — and, until this constant existed, exactly **one** reader honoured it:
+#: ``emrg/gui/main.js::isKeyConfigured`` (G117), which treats it as unconfigured and opens the
+#: setup wizard. The path that spends the request, ``emrg.server.llm.LlmClient._headers``, did
+#: not, so a CLI first run sent ``Bearer sk-...`` and reported the provider's 401 as a provider
+#: fault (issue #2256). A fourth writer belongs here, not with a literal copied from a neighbour.
+#:
+#: ``tests/test_config_template_carriers.py`` holds the readers and the writers against each
+#: other: it reads this value out of every carrier its discovery finds, so the template text and
+#: this constant cannot drift one edit apart.
+PLACEHOLDER_API_KEY = "sk-..."
+
 
 def ensure_config() -> None:
     """Create the default config file if it doesn't exist, and keep it private.

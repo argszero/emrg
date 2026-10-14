@@ -22,7 +22,7 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from emrg import __version__
-from emrg.config import LlmConfig
+from emrg.config import PLACEHOLDER_API_KEY, LlmConfig, config_path
 
 
 # ── 错误信息脱敏（20260807-0107）────────────────────────────
@@ -436,6 +436,34 @@ class LlmClient:
         return payload
 
     def _headers(self) -> dict:
+        """The request headers, or a refusal if the key is the first-run placeholder.
+
+        This is the single place ``api_key`` becomes a request, so it is the place the sentinel
+        is worth recognising: ``~/.emrg/config.toml`` is created holding
+        :data:`emrg.config.PLACEHOLDER_API_KEY`, and a host who has not edited it yet gets, by
+        the old behaviour, a request spent on it and the provider's own puzzled 401 back — the
+        product's own placeholder reported as a provider fault (issue #2256). The GUI never hit
+        this, because ``main.js::isKeyConfigured`` (G117) intercepts the same value and opens
+        the setup wizard; the CLI and TUI have no equivalent, so the refusal belongs here rather
+        than in a client that may not be running.
+
+        Refusing is the honest reading, not a convenience: the value is one this tree wrote to
+        mean "no key", no provider can accept it, and the message can name the file the host has
+        to edit — which the 401 cannot.
+
+        An **empty** key is left alone. An OpenAI-compatible endpoint on localhost (Ollama,
+        vLLM) takes no key at all, and ``LlmConfig.api_key`` defaults to ``""``, so a refusal
+        on empty would break a configuration that works today. The GUI's extra check on empty
+        is its own consumer's rule — it decides whether to open a wizard, not whether a request
+        is doomed — and is not repeated here.
+        """
+        if self.config.api_key.strip() == PLACEHOLDER_API_KEY:
+            raise RuntimeError(
+                f"no API key is configured: {config_path()} still holds the first-run "
+                f"placeholder {PLACEHOLDER_API_KEY!r}, which no provider accepts. Set your key "
+                "— the GUI's Settings page writes it, or edit that file's [llm] api_key — and "
+                "send the message again."
+            )
         return {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
