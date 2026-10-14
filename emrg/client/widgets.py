@@ -334,14 +334,55 @@ class SessionSelector(Widget):
             return self.sessions[self.selected_index].get("session_id", "")
         return None
 
+    def window(self, size: int) -> tuple[int, int]:
+        """The half-open range of session indices on screen, holding the selection.
+
+        `size` is the number of list rows the caller can actually show — derived
+        from the context's height, never a module constant: the terminal draws only
+        the tail of what a widget emits and pushes the rest into native scrollback,
+        so a fixed window is right only for one terminal size (rant 2026-10-14T14:09:10).
+        """
+        n = len(self.sessions)
+        if n <= size:
+            return 0, n
+        size = max(1, size)
+        start = min(max(0, self.selected_index - size // 2), n - size)
+        return start, start + size
+
     def render(self, ctx):
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")
-        lines.append(Line(
-            spans=[Span("○ ", style="dim"), Span("Select a session (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
-            style=ctx.style,
-        ))
-        for i, s in enumerate(self.sessions):
+        avail = getattr(ctx, "height", 0) or 0
+        n = len(self.sessions)
+        # Layout, stated once because it *is* the invariant: the emitted rows may
+        # never exceed `avail`. The title takes a row only when two are available,
+        # and the two edge markers are afforded only when the window that is left
+        # still holds at least one session row — a marker row is not worth hiding
+        # the selection for. `avail == 0` means the caller stated no height, and
+        # the list is rendered whole rather than against an invented bound.
+        if not avail:
+            title_rows, start, end, markers = 1, 0, n, False
+        else:
+            title_rows = 1 if avail >= 2 else 0
+            room = avail - title_rows
+            if n <= room:
+                start, end, markers = 0, n, False
+            else:
+                size = room - 2 if room - 2 >= 1 else room
+                markers = room - 2 >= 1
+                start, end = self.window(size)
+        if title_rows:
+            lines.append(Line(
+                spans=[Span("○ ", style="dim"), Span("Select a session (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
+                style=ctx.style,
+            ))
+        if markers and start > 0:
+            lines.append(Line(
+                spans=[Span(f"  ↑ {start} more", style="dim")],
+                style=ctx.style,
+            ))
+        for i in range(start, end):
+            s = self.sessions[i]
             sid = s.get("session_id", "?")
             title = s.get("title", "")
             # 显示列表**排序所依据**的时刻（rant 2026-09-30T10:27:20）：行序按最后活动
@@ -368,6 +409,11 @@ class SessionSelector(Widget):
                     Span(label, style=ctx.style),
                 ]
             lines.append(Line(spans=spans, style=ctx.style))
+        if markers and end < len(self.sessions):
+            lines.append(Line(
+                spans=[Span(f"  ↓ {len(self.sessions) - end} more", style="dim")],
+                style=ctx.style,
+            ))
         self._dirty = False
         return lines
 
@@ -393,9 +439,14 @@ class ToolSelector(Widget):
     the detail shows the output to the end rather than a prefix.
     """
 
-    #: Rows of the list kept on screen. Chosen so the list plus a typical detail
-    #: fit an 80×24 terminal; the selected row is always inside the window.
-    WINDOW = 10
+    #: Rows the detail block below the list needs at minimum (blank, `tool:`,
+    #: `input:`, `output:`, one body row) and the list's own chrome (two header
+    #: rows plus the two edge markers).  The list window is what is *left* over,
+    #: not a constant: the terminal draws only the tail of what a widget emits,
+    #: so a fixed 10 was right for one terminal size and wrong for every other
+    #: (rant 2026-10-14T14:09:10).
+    LIST_CHROME_ROWS = 4
+    DETAIL_MIN_ROWS = 5
 
     def __init__(self, cards: list[ToolCard] | None = None):
         self.cards: list[ToolCard] = list(cards or [])
@@ -428,14 +479,22 @@ class ToolSelector(Widget):
             return self.cards[self.selected_index]
         return None
 
-    def window(self) -> tuple[int, int]:
-        """The half-open range of card indices on screen, containing the selection."""
+    def window(self, ctx) -> tuple[int, int]:
+        """The half-open range of card indices on screen, containing the selection.
+
+        The list's size comes from the context's available height, minus this
+        widget's own chrome and the minimum the detail block needs — the detail is
+        unbounded by design (it is the only view from which an older tool's output
+        can be read), so the list yields to it rather than assuming room.
+        """
         n = len(self.cards)
-        if n <= self.WINDOW:
+        avail = getattr(ctx, "height", 0) or 0
+        size = n if not avail else max(1, avail - self.LIST_CHROME_ROWS - self.DETAIL_MIN_ROWS)
+        if n <= size:
             return 0, n
-        start = min(self.selected_index - self.WINDOW // 2, n - self.WINDOW)
+        start = min(max(0, self.selected_index - size // 2), n - size)
         start = max(0, start)
-        return start, start + self.WINDOW
+        return start, start + size
 
     @staticmethod
     def _duration(card: ToolCard) -> str:
@@ -455,7 +514,7 @@ class ToolSelector(Widget):
             style=ctx.style,
         ))
 
-        start, end = self.window()
+        start, end = self.window(ctx)
         if start > 0:
             lines.append(Line(
                 spans=[Span(f"  ↑ {start} more", style="dim")],
@@ -928,6 +987,7 @@ class ChatHistory(Widget):
         self.rows: list[Widget] = []
         self._line_cache: list[list | None] = []  # row.render() 结果缓存，与 rows 一一对应
         self._dirty = True
+        self._cache_height: int | None = None  # 缓存行渲染时的可用高度
 
     @property
     def dirty(self): return self._dirty
@@ -1014,6 +1074,16 @@ class ChatHistory(Widget):
         # 防御：缓存长度与 rows 对齐（正常路径 add/remove 已同步维护）
         while len(self._line_cache) < len(self.rows):
             self._line_cache.append(None)
+        # A row's line count can depend on the height it was handed — a selector
+        # windows itself against the space it has (rant 2026-10-14T14:09:10) — and
+        # a height change is not a dirty flag: after a resize or a composer that
+        # grew a row, serving the old cache would keep a window sized for a screen
+        # the terminal no longer has.  Width needs no such key: the terminal
+        # already clears this cache on resize.
+        height = getattr(ctx, "height", 0)
+        if height != self._cache_height:
+            self._line_cache = [None] * len(self.rows)
+            self._cache_height = height
         for i, row in enumerate(self.rows):
             if isinstance(row, Widget):
                 cached = self._line_cache[i]

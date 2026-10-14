@@ -295,6 +295,27 @@ class Terminal:
             "composer",
             self._composer_budget(max_vp, len(prompt_lines) + len(status_lines)),
         )
+        # The chat bound every widget that cannot scroll has to respect.  The viewport
+        # draws only the tail of what it is handed and pushes the overflow into
+        # native scrollback, which is written once and never redrawn — so a widget
+        # that emits more rows than the chat area holds loses the rows above the
+        # fold, selection highlight included (rant 2026-10-14T14:09:10).
+        #
+        # Injected here, before the chat region renders, because the chat's own
+        # line count feeds `viewport_height` below: handing the widget the height
+        # it will actually get is what breaks that circularity, and this is the
+        # largest chat area the terminal can ever show (`max_vp`, computed once
+        # above so the row budgets cannot drift apart through two copies of it).
+        # `fixed_rows` is recomputed at its original site below; the values are the
+        # same, and this is the same expression.  The chat area the viewport then
+        # shows is `viewport_height - fixed_rows` with `viewport_height <= max_vp`,
+        # so this bound is never smaller than the room that is left — except on a
+        # terminal so short the ≥8/¼-screen floor below takes over, where it is
+        # conservative: a smaller window, never a lost row.
+        ctx.height = max(
+            0,
+            max_vp - (len(prompt_lines) + len(composer_lines) + len(status_lines)),
+        )
         # rant 2026-08-28T22:53:24 — composer height must track the composer's
         # actual rendered line count, not a hard-coded 3.  A multiline input
         # (text containing "\n", e.g. pasted text or pressing Enter first)
