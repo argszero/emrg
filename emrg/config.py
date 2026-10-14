@@ -462,12 +462,19 @@ CONFIG_FILE_MODE = 0o600
 #: either) — and, until this constant existed, exactly **one** reader honoured it:
 #: ``emrg/gui/main.js::isKeyConfigured`` (G117), which treats it as unconfigured and opens the
 #: setup wizard. The path that spends the request, ``emrg.server.llm.LlmClient._headers``, did
-#: not, so a CLI first run sent ``Bearer sk-...`` and reported the provider's 401 as a provider
-#: fault (issue #2256). A fourth writer belongs here, not with a literal copied from a neighbour.
+#: not, so a CLI first run sent this placeholder as its bearer token and reported the provider's
+#: 401 as a provider fault (issue #2256). A fourth writer belongs here, not with a literal copied
+#: from a neighbour.
 #:
 #: ``tests/test_config_template_carriers.py`` holds the readers and the writers against each
 #: other: it reads this value out of every carrier its discovery finds, so the template text and
 #: this constant cannot drift one edit apart.
+#:
+#: This module states the value **once** (issue #2262): the template :func:`ensure_config` writes
+#: is an f-string that interpolates this constant, rather than a second literal twenty lines
+#: below it. The two carriers that cannot import it — ``emrg/gui/main.js`` (JavaScript) and
+#: ``install.sh`` (shell, and it runs before either) — still carry the literal, which is what the
+#: census above is for: it compares every carrier's *parsed* ``api_key`` with this constant.
 PLACEHOLDER_API_KEY = "sk-..."
 
 
@@ -494,10 +501,10 @@ def ensure_config() -> None:
         return
 
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text("""[llm]
+    cfg_path.write_text(f"""[llm]
 # OpenAI-compatible API endpoint
 base_url = "https://api.deepseek.com"
-api_key = "sk-..."
+api_key = "{PLACEHOLDER_API_KEY}"
 model = "deepseek-chat"
 max_tokens = 8192
 temperature = 0.7

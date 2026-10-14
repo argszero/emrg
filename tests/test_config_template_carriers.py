@@ -52,13 +52,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The two lines every copy of this template necessarily carries: the placeholder
 # secret and the last top-level key. Together they are what makes "this file
 # writes the first-run config" decidable from the file's text.
-_PLACEHOLDER = 'api_key = "sk-..."'
+#
+# The placeholder line is looked for in **either** form a carrier may state it in —
+# the literal value, or an f-string slot naming the constant. `emrg/config.py` is
+# the second kind since issue #2262: it can import the constant, so it interpolates
+# it rather than repeating the value twenty lines below it, and its *source* then
+# holds `api_key = "{PLACEHOLDER_API_KEY}"` instead of the literal. Both forms are
+# built from `PLACEHOLDER_API_KEY` here rather than restated, so the value keeps one
+# home in this file too — which is the defect #2262 was filed about.
+_FSLOT = "{PLACEHOLDER_API_KEY}"
+_PLACEHOLDER_FORMS = (f'api_key = "{PLACEHOLDER_API_KEY}"', f'api_key = "{_FSLOT}"')
 _DEFAULT = "auto_compact_threshold = 0.0"
 
 # carrier path -> the pattern that lifts its template literal out of it. Each is
-# anchored on `[llm]`, so a match is the template and not a stray quote.
+# anchored on `[llm]`, so a match is the template and not a stray quote. The
+# optional `f` is what makes `emrg/config.py`'s interpolated template readable at
+# all: its literal is `f"""…"""`, and a pattern that assumed a bare triple quote
+# would extract nothing from the one carrier that states the value once.
 _EXTRACTORS = {
-    "emrg/config.py": r'write_text\("""(\[llm\].*?)"""',
+    "emrg/config.py": r'write_text\(f?"""(\[llm\].*?)"""',
     "emrg/gui/main.js": r"const CONFIG_TEMPLATE = `(\[llm\].*?)`;",
     "install.sh": r"<<'EMRGCONF'\n(\[llm\].*?)\nEMRGCONF",
 }
@@ -96,7 +108,7 @@ def _discovered_carriers() -> set[str]:
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if _PLACEHOLDER in text and _DEFAULT in text:
+        if any(form in text for form in _PLACEHOLDER_FORMS) and _DEFAULT in text:
             found.add(rel)
     return found
 
@@ -108,7 +120,13 @@ def _template(rel: str) -> str:
         f"no first-run config template could be lifted out of {rel} — the pattern "
         f"{_EXTRACTORS[rel]!r} has gone stale, and a stale pattern is not a pass"
     )
-    return match.group(1)
+    # The slot is **rendered**, not compared. What a host's file ends up holding is the
+    # f-string's output, and `emrg/config.py` is the carrier that states the value as a
+    # slot (issue #2262). Parsing the raw slot would compare the literal
+    # `{PLACEHOLDER_API_KEY}` against the constant and fail the assertion below — and it
+    # would keep passing if the constant were ever changed to that literal, which is the
+    # shape that makes a render the honest reading rather than a convenience.
+    return match.group(1).replace(_FSLOT, PLACEHOLDER_API_KEY)
 
 
 def _differences(left, right, prefix: str = "") -> list[str]:
@@ -185,3 +203,58 @@ def test_the_carriers_write_the_placeholder_the_request_path_refuses():
             f"emrg.config.PLACEHOLDER_API_KEY — the value `_headers` refuses — is "
             f"{PLACEHOLDER_API_KEY!r}; one of the two has to move with the other"
         )
+
+
+# ── the GUI's reader, which cannot import the constant ─────────────────────────────
+#
+# `emrg/gui/main.js::isKeyConfigured` is the **other** reader of the sentinel (G117: it treats the
+# placeholder as unconfigured and opens the setup wizard). The census above cannot hold it: that
+# census reads *template carriers*, and this is a reader — it does not write a config, it decides
+# about one. Measured 2026-10-14 (issue #2262) on master `f33bbc7e`: renaming the comparison there
+# left this whole module green, so the two halves of one rule could drift apart silently and
+# *consistently* — move the constant, the writers' arm forces every template to follow, the
+# refusal follows with the constant, and the GUI stops opening its wizard for the key the product
+# actually writes. Two halves agreeing with each other and wrong together is exactly the failure
+# a census is supposed to make loud, so this reader gets an arm of its own.
+_GUI_READER_FILE = "emrg/gui/main.js"
+_GUI_READER = re.compile(r"function isKeyConfigured\(key\)\s*\{(.*?)\n  \}", re.S)
+
+
+def _code_only(body: str) -> str:
+    """`body` with its line comments removed.
+
+    A guard a comment can satisfy is not a guard, and this function names the sentinel in its own
+    comment (`// G117：占位符 … 视为未配置`) — so a reading of the raw body would keep passing
+    on a function whose comparison had been deleted. Scoped deliberately to one function's body,
+    where no `//` occurs inside a string literal.
+    """
+    return "\n".join(line.split("//")[0] for line in body.splitlines())
+
+
+def test_the_gui_reader_compares_against_the_placeholder_it_must_recognise():
+    """The second reader of the sentinel, held to the same value — in code, not in prose.
+
+    This arm is built to fail in all three directions the value can go missing, and each was
+    verified with a mutation arm when it landed: the comparison **renamed** to another value, the
+    comparison **dropped** (leaving the comment behind), and the sentinel surviving **only in the
+    comment** around where it used to be. The comment strip is what makes the third one fail, and
+    the operator check is what stops a body that merely mentions the value somewhere from passing.
+    """
+    text = (REPO_ROOT / _GUI_READER_FILE).read_text(encoding="utf-8")
+    match = _GUI_READER.search(text)
+    assert match is not None, (
+        f"`isKeyConfigured` could not be lifted out of {_GUI_READER_FILE} — the pattern "
+        f"{_GUI_READER.pattern!r} has gone stale, and a stale pattern is not a pass"
+    )
+    code = _code_only(match.group(1))
+    assert PLACEHOLDER_API_KEY in code, (
+        f"{_GUI_READER_FILE}'s isKeyConfigured does not compare the key against "
+        f"emrg.config.PLACEHOLDER_API_KEY ({PLACEHOLDER_API_KEY!r}) in its code. The comparison "
+        "was renamed, dropped, or left only in the comment above it — and the GUI then stops "
+        "opening its setup wizard for the key this product writes, while the census above stays "
+        "green because it follows the constant rather than this reader."
+    )
+    assert re.search(r"[!=]=", code), (
+        f"{_GUI_READER_FILE}'s isKeyConfigured names the sentinel but states no comparison in its "
+        "code — the value has to be *compared*, not merely mentioned"
+    )
