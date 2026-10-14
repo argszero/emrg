@@ -443,11 +443,22 @@ def test_load_and_start_ios_app_task(tmp_path):
         "the ios-app template must say that instance values (team id, key path, budget) "
         "come from extra_prompt — hard-coding them per instance is the defect #2251 names"
     )
-    assert text.count("checkpoint") >= 2, (
-        "the rejection-risk gate has two checkpoints (inception and pre-submission); a "
-        "template naming one of them lets the other be skipped, which is how a build ships "
-        "with an ungrounded clause"
-    )
+    # Both checkpoints, by the text that carries each — not by counting occurrences of the
+    # word "checkpoint". The first draft did count them (`text.count("checkpoint") >= 2`)
+    # and a mutation arm that deleted one survived: the template says "checkpoint" five
+    # times, so removing one leaves four and the assertion is blind to *which* was lost.
+    # A count of a word is not a reading of the requirement. These two sentences are the
+    # requirement: the assessment runs at inception, and again against the built artefact.
+    for where, phrase in (
+        ("inception", "Phase 2 — Rejection-risk assessment"),
+        ("pre-submission, against the build actually being submitted",
+         "Re-run §2 against the build"),
+    ):
+        assert phrase in text, (
+            f"the ios-app template must state the rejection-risk assessment at {where}; "
+            f"{phrase!r} is missing. One checkpoint alone lets a build ship with an "
+            f"ungrounded clause, which is the defect #2251 exists to prevent"
+        )
 
 
 def test_load_and_start_promote_task(tmp_path):
