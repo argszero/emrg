@@ -1416,9 +1416,22 @@ def test_a_root_that_cannot_be_read_is_named_rather_than_passed_over(mod, tmp_pa
     previous, where, gap = mod.previous_cycle(CYCLE, (missing,))
     assert previous == ""
     assert "could not be read" in where and "no cycle record" not in where
-    assert str(missing) in gap and "No such file" in gap, (
+    assert str(missing) in gap, (
         "an absent root is one that answered nothing, and this is the element a "
         "window is narrowed on (issue #2275)"
+    )
+    # …and the reason is carried with it, asserted as a *shape* rather than quoted.
+    # Quoting it was the first form of this line, and it reddened `test-windows`
+    # (`38624384175`, job `116059703359`): the text is the operating system's, and the
+    # listing that fails here reaches Windows' own error formatting — "The system cannot
+    # find the file specified" — where a *file open* for the same absent path reaches the
+    # C runtime's errno table instead and says "No such file or directory" on both
+    # platforms. So the same `OSError.strerror` is two different strings depending on
+    # which call raised it, and a test may not name either.
+    reason = gap[len(str(missing)):].strip()
+    assert reason.startswith("(") and reason.endswith(")") and len(reason) > 2, (
+        "the root that answered nothing has to say why, and a bare path does not: "
+        f"{gap!r}"
     )
 
     # A root that **is** there and was listed, holding nothing earlier, is the other
