@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from emrg.config import LlmConfig
+from emrg.config import PLACEHOLDER_API_KEY, LlmConfig, config_path
 from emrg.server.llm import (
     CONTENT_FILTER_ERROR,
     CONTENT_FILTER_FINISH,
@@ -72,6 +72,73 @@ def test_headers_user_agent(client):
     """Headers include a User-Agent string."""
     h = client._headers()
     assert "emrg" in h["User-Agent"].lower()
+
+
+# ── the first-run placeholder (issue #2256) ──────────────────────
+#
+# `~/.emrg/config.toml` is created holding `api_key = "sk-..."`, and three carriers write
+# that value on purpose. Only the GUI read it back as "unconfigured" (`main.js`,
+# `isKeyConfigured`/G117) — the CLI path spent a request on it and surfaced the provider's
+# 401. The arms below pin the refusal, the direction that must not move with it, and the
+# agreement between the constant and the templates that write it.
+
+
+def test_headers_refuse_the_first_run_placeholder():
+    """The sentinel means "no key", so no request is built from it.
+
+    The message has to be actionable on its own: it names the file the host edits and the
+    value it is complaining about, which is the half a provider's 401 cannot say.
+    """
+    probe = LlmClient(LlmConfig(base_url="https://api.example.com/v1", api_key=PLACEHOLDER_API_KEY))
+    with pytest.raises(RuntimeError) as excinfo:
+        probe._headers()
+
+    message = str(excinfo.value)
+    assert "no API key is configured" in message
+    assert PLACEHOLDER_API_KEY in message
+    assert str(config_path()) in message, (
+        "the refusal must name the file the host has to edit — that is what it buys over the "
+        f"provider's own error: {message!r}"
+    )
+
+
+def test_a_whitespace_padded_placeholder_is_still_the_placeholder():
+    """`strip()` is deliberate: a hand-edited line keeps whatever spacing the host typed."""
+    probe = LlmClient(LlmConfig(api_key=f"  {PLACEHOLDER_API_KEY}  "))
+    with pytest.raises(RuntimeError):
+        probe._headers()
+
+
+def test_headers_carry_an_empty_key_unchanged():
+    """The direction that must not move: an empty key is not this refusal's subject.
+
+    An OpenAI-compatible endpoint on localhost (Ollama, vLLM) takes no key at all, and
+    `LlmConfig.api_key` defaults to `""` — a refusal here would break a configuration that
+    works today.
+    """
+    probe = LlmClient(LlmConfig(base_url="http://localhost:11434/v1", api_key=""))
+    assert probe._headers()["Authorization"] == "Bearer "
+
+
+def test_the_placeholder_costs_no_request():
+    """The refusal sits before the request, and that is the whole point of it.
+
+    Asserted as "the transport was never reached" rather than as "an exception was raised":
+    a refusal that still spent the call would raise the same exception one round-trip later.
+    """
+    import asyncio
+
+    probe = LlmClient(LlmConfig(base_url="https://api.example.com/v1", api_key=PLACEHOLDER_API_KEY))
+    fake = _FakeHttpClient([_FakeResponse(401, b'{"error": {"message": "invalid key"}}')])
+    probe._client = fake
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(probe.chat([{"role": "user", "content": "hi"}]))
+
+    assert fake.calls == 0, (
+        "a request was spent on a key this tree wrote to mean 'no key' — a refusal that still "
+        "made the call would raise the same exception one round-trip later"
+    )
 
 
 # ── _make_payload ────────────────────────────────────────────────

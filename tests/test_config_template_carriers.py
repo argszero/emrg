@@ -45,6 +45,8 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+from emrg.config import PLACEHOLDER_API_KEY
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The two lines every copy of this template necessarily carries: the placeholder
@@ -162,4 +164,24 @@ def test_the_carriers_configure_the_same_settings():
             f"{rel} and {reference} are two copies of one first-run template and "
             f"must configure the same settings; they differ in "
             f"{', '.join(_differences(settings[reference], settings[rel]))}"
+        )
+
+
+def test_the_carriers_write_the_placeholder_the_request_path_refuses():
+    """The writers of the sentinel and the reader that now honours it, held together.
+
+    ``emrg.config.PLACEHOLDER_API_KEY`` is the value ``emrg.server.llm.LlmClient._headers``
+    refuses before building a request (issue #2256). If a carrier's template spelled the
+    placeholder even slightly differently, that refusal would be dead code with every test
+    green: the constant would name a value no file holds, and the CLI first run would go back
+    to spending a request on its own placeholder. The comparison is made from the *parsed*
+    template, so it reads what a host's config file would hold rather than the file's text.
+    """
+    for rel in _EXTRACTORS:
+        parsed = tomllib.loads(_template(rel))
+        written = parsed.get("llm", {}).get("api_key")
+        assert written == PLACEHOLDER_API_KEY, (
+            f"{rel}'s template stores api_key={written!r}, but "
+            f"emrg.config.PLACEHOLDER_API_KEY — the value `_headers` refuses — is "
+            f"{PLACEHOLDER_API_KEY!r}; one of the two has to move with the other"
         )
