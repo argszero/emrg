@@ -289,6 +289,12 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
 #: Answers about something other than a working tree, so the rule does not apply - each
 #: with what it reads instead, because "not a tree reader" is a claim like any other.
 NOT_TREE_READERS = {
+    "check-icon-transparency.py": (
+        "reads the icon file or directory it is given as an argument (a shipped artifact, "
+        "an .app bundle, an .icns or a .png) - a working tree is not its subject, and the "
+        "path it read is printed first instead (rant 2026-10-14T09:18:05: the icon comes "
+        "out of the artifact, which is what had no tool)"
+    ),
     "check-vote-count.py": "reads reviews and mergeability from the GitHub API",
     "check-pr-base.py": "reads the base each PR declares on the GitHub API",
     "check-issue-links.py": (
