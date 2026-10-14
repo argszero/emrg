@@ -20,7 +20,9 @@ What it reads -- anything that holds an icon, and nothing that does not:
 Exit contract, the one this repository's guards share: 0 every icon is clear; 1 a fault --
 an icon whose corner block is not fully transparent, named with the value read; 2 the
 subject could not be measured at all. A fault outranks an unmeasured subject, because it
-is a fact about a subject that *was* read.
+is a fact about a subject that *was* read. An unexpected failure inside the tool answers 2
+through `_entry` as well: `1` is this tool's fault code, so a traceback left to Python's
+default would report "this artifact is the unfixed one" about a file that was never read.
 
 Why the corners: the design insets its rounded rect (56px on a 1024 canvas), so the canvas
 corners are outside the art on every representation. An opaque corner block therefore means
@@ -36,6 +38,7 @@ import argparse
 import plistlib
 import struct
 import sys
+import traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -138,16 +141,28 @@ def measure_icns(path: Path, indent="    "):
     raw = path.read_bytes()
     fault = measured = False
     raw_only = []
+    undecodable = []
     for ctype, payload in icns_chunks(raw):
+        name = ctype.decode("ascii", "replace")
         if ctype in ICNS_PNG_TYPES and payload[:8] == b"\x89PNG\r\n\x1a\n":
             size = ICNS_PNG_TYPES[ctype]
-            f, m = check_png_bytes(payload, f"{ctype.decode('ascii', 'replace')} ({size}px)",
-                                   indent=indent)
+            f, m = check_png_bytes(payload, f"{name} ({size}px)", indent=indent)
             fault, measured = fault or f, measured or m
-        elif ctype[:2] == b"ic" and ctype not in ICNS_PNG_TYPES:
-            raw_only.append(ctype.decode("ascii", "replace"))
+        elif ctype in ICNS_PNG_TYPES:
+            # Declared as a PNG-typed representation but holding something else. Named for
+            # the same reason the raw entries below are: an entry nobody read is not an
+            # entry that passed, and this one used to be dropped in silence while its
+            # siblings were reported.
+            undecodable.append(
+                f"{name} ({ICNS_PNG_TYPES[ctype]}px, payload {payload[:4]!r})"
+            )
+        elif ctype[:2] == b"ic":
+            raw_only.append(name)
     if raw_only:
         print(f"{indent}not decoded (raw ARGB, not PNG): {', '.join(sorted(set(raw_only)))}")
+    if undecodable:
+        print(f"{indent}not decoded (PNG-typed entry whose payload is not a PNG): "
+              f"{', '.join(sorted(set(undecodable)))}")
     if not measured:
         print(f"{indent}not measured: no PNG-typed representation in {path.name}")
     return fault, measured
@@ -214,6 +229,26 @@ def check_subject(subject: Path):
     return False, False
 
 
+def _entry() -> int:
+    """`main`, with an unexpected failure reported as this tool's unmeasurable answer.
+
+    Python exits `1` for an unhandled exception, and `1` is a **verdict** in this tool's
+    exit table, while `2` is the code for "the question could not be answered". A caller
+    that checks the code - which is how this family composes, one gate running another or
+    reading its `rc` - would otherwise read a crash as a verdict. Byte-identical in every
+    tool of the family, and `tests/test_a_crash_is_a_measurement_error.py` pins that.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - reported as unmeasurable, never swallowed
+        traceback.print_exc()
+        print(
+            f"{Path(__file__).name}: could not measure - {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2  # cause: tool-failed
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("subjects", nargs="+", help="a .icns, a .png, or a directory holding an icon")
@@ -242,4 +277,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_entry())

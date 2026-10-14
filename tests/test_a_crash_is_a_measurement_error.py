@@ -47,6 +47,13 @@ SCRIPTS = REPO_ROOT / "scripts"
 #: the credentials"** — a verdict code — so an uncaught exception was read as Apple's
 #: refusal. Measured on the invocation `DEVELOPMENT.md` recommends for that tool, with the
 #: named file absent: traceback, exit 1.
+#: `check-icon-transparency.py` joined 2026-10-14 (`cyc20261014-125204`), the same shape
+#: one day later: it loads no sibling either -- `packaging/pngutil.py` arrives through
+#: `sys.path`, not through `spec_from_file_location` -- so the derivation below cannot
+#: reach it, and it answers **1 = "a corner block is not fully transparent"**, a verdict
+#: code. Measured on this host at that cycle's head, on a text file carried under a `.icns`
+#: name: traceback, exit 1, and no `FAULT` line -- a file nobody could read, reported to
+#: the host as the white ring.
 TOOLS = [
     "check-merge-freshness.py",
     "check-vote-count.py",
@@ -59,6 +66,7 @@ TOOLS = [
     "run-mutation-arm.py",
     "check-notary-credentials.py",
     "check-install-drift.py",
+    "check-icon-transparency.py",
 ]
 
 

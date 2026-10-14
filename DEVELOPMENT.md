@@ -267,6 +267,15 @@ bash packaging/gen-assets.sh   # icon.svg → png/icns/ico (idempotent)
 
 Renderer priority: `rsvg-convert` → Chrome/Chromium headless → `sips` (last resort, glow may be lost). Requires macOS `iconutil` for `.icns` (skipped with a notice on Linux/Windows).
 
+**The host's own render is the one that decides what the host sees.** CI installs librsvg on every leg, so `gen-assets.sh` takes the `rsvg-convert` route there; a host without it takes the Chrome-headless fallback, and the two renders can differ (measured on 0.3.10, same version, two artifacts: the published pkg's `icon.icns` was alpha 0 at all four corners while the host's installed app was opaque white — the ring). Read the icon that was really built, from the artifact or from the app, instead of reading the source or trusting a green CI:
+
+```bash
+uv run --no-sync python3 scripts/check-icon-transparency.py <path>
+# a .png, a .icns, or a directory: an .app bundle, an expanded .pkg, a dist/ tree
+```
+
+Exit `0` = every representation read is fully transparent at all four corner blocks; `1` = one is not, and the corner values are printed (that reading is the white ring); `2` = nothing could be read — no icon under the subject, or a container this tool does not open — **never a pass**. An artifact's icon is reached with `pkgutil --expand <pkg> <dir>`, then the component's `Payload` through `gunzip -dc Payload | cpio -i -d`; the Linux `tar.gz` carries no icon at all, so point the tool at an `.app` or an `.icns` rather than at that archive.
+
 **The host-side counterpart of the installer's compiled-extension guard** (#1544). The macOS build signs the app with `com.apple.security.cs.disable-library-validation` so a pip-installed C extension can load; the installer asserts that entitlement's **shape**, and this command asserts its **effect** — a wheel's `.so` really imports under the bundled interpreter. Run it before reporting "packaging is broken", or after an install, to tell the two apart:
 
 ```bash

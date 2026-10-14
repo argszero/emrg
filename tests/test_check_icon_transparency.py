@@ -201,6 +201,52 @@ def test_a_container_the_tool_cannot_open_is_not_a_pass(tmp_path):
     assert "pkgutil --expand" in out
 
 
+def test_a_file_that_is_not_an_icns_is_unmeasurable_not_a_fault(tmp_path):
+    """A crash used to leave with `1`, which is this tool's FAULT code.
+
+    Measured at the head before this arm (`cyc20261014-125204`): a file that is not an icns
+    container at all, carried under a `.icns` name, left `ValueError` uncaught -- so a
+    truncated download or a mis-named path was reported to the host as `1`, the code whose
+    meaning in this tool's own exit contract is "a corner block is not fully transparent
+    (the white ring)". The two directions are pinned together: the prose is the family's,
+    and the fault verdict is *not* printed about a subject nobody read.
+    """
+    icon = tmp_path / "icon.icns"
+    icon.write_text("this is not an icns container at all\n")
+    code, out = run(icon)
+    assert code == 2, out
+    assert "check-icon-transparency.py: could not measure - ValueError" in out, out
+    assert "FAULT" not in out
+
+
+def test_a_png_typed_entry_that_is_not_a_png_is_named(tmp_path):
+    """An entry nobody read is not an entry that passed.
+
+    The raw-typed entries (`ic04`/`ic05`) are named rather than dropped, and a PNG-typed
+    entry whose payload is something else was dropped **in silence**: measured before this
+    arm (`cyc20261014-125204`), a container of a clear `ic12` beside a junk `ic10` printed
+    no line for the `ic10` at all and ended `OK: every icon read ... is fully transparent`.
+    The code is unchanged by it -- an unread entry is the normal state of every real icns
+    (no decoder here reads `ic04`/`ic05`) -- so what is pinned is the line, and the arm
+    below is the half where nothing readable is left.
+    """
+    icon = tmp_path / "icon.icns"
+    icon.write_bytes(icns((b"ic12", rgba_png(64)), (b"ic10", b"not a png at all")))
+    code, out = run(icon)
+    assert "not decoded (PNG-typed entry whose payload is not a PNG): ic10 (1024px, " in out, out
+    assert code == 0, out
+
+
+def test_an_icns_whose_only_png_typed_entry_is_unreadable_is_not_a_pass(tmp_path):
+    """The other direction of the arm above: nothing readable is rc 2, never a pass."""
+    icon = tmp_path / "icon.icns"
+    icon.write_bytes(icns((b"ic10", b"not a png at all")))
+    code, out = run(icon)
+    assert code == 2, out
+    assert "not decoded (PNG-typed entry whose payload is not a PNG)" in out, out
+    assert "not measured" in out
+
+
 def test_a_fault_outranks_an_unmeasured_subject(tmp_path):
     """One subject read and opaque, one unreadable: the fact about the read one wins."""
     opaque = tmp_path / "icon.png"
