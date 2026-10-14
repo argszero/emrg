@@ -327,6 +327,49 @@ def test_chat_history_line_cache_remove_sync():
     assert len(chat.rows) == 2
 
 
+class _HeightAwareWidget(Widget):
+    """A row whose line count depends on the height it is handed — a selector."""
+
+    def __init__(self):
+        self.heights: list[int] = []
+        self._dirty = True
+
+    @property
+    def dirty(self): return self._dirty
+    @dirty.setter
+    def dirty(self, v): self._dirty = v
+
+    def render(self, ctx):
+        self.heights.append(getattr(ctx, "height", 0))
+        self._dirty = False
+        return [Line(spans=[Span(f"h{h}")]) for h in [getattr(ctx, "height", 0)] * max(1, getattr(ctx, "height", 0) or 1)]
+
+
+def test_chat_history_re_renders_a_row_when_the_height_changes():
+    """A height change is not a dirty flag, so the cache needs its own key.
+
+    A selector windows itself against the space it was given, so serving the cache
+    after a resize would keep a window sized for a screen the terminal no longer
+    has — the row would be clean, cached, and wrong (rant 2026-10-14T14:09:10).
+    """
+    chat = ChatHistory()
+    row = _HeightAwareWidget()
+    chat.add(row)
+
+    tall = chat.render(RenderContext(width=80, height=20))
+    assert len(tall) == 20
+    assert row.heights == [20]
+
+    # Same height → still cached, no second render
+    chat.render(RenderContext(width=80, height=20))
+    assert row.heights == [20]
+
+    # Resize → the row re-renders at the new height rather than serving the old one
+    short = chat.render(RenderContext(width=80, height=4))
+    assert len(short) == 4
+    assert row.heights == [20, 4]
+
+
 # ── Modifier-prefixed CSI arrows (rant 2026-08-21T11:36:56) ─────────────────
 
 
@@ -449,8 +492,8 @@ def _text(line: Line) -> str:
     return "".join(s.text for s in line.spans)
 
 
-def _rendered(widget, width: int = 80) -> list[str]:
-    return [_text(line) for line in widget.render(RenderContext(width=width))]
+def _rendered(widget, width: int = 80, height: int = 0) -> list[str]:
+    return [_text(line) for line in widget.render(RenderContext(width=width, height=height))]
 
 
 def make_card(name: str = "bash", command: str = "ls -la", status: str = "done",
@@ -562,31 +605,168 @@ def test_tool_selector_windows_a_long_list_and_keeps_the_selection_on_screen():
 
     Without a window, forty tool calls would push the selected row off the top of
     the viewport — which is exactly the defect the old in-place expansion had.
+    The height is stated explicitly: with `height=0` ("not stated") the widget
+    renders the whole list rather than inventing a bound it was not given.
     """
     cards = [make_card(command=f"cmd {i}") for i in range(40)]
     sel = ToolSelector(cards)
 
     # Opens on the last card, so everything hidden is *above* the window.
-    lines = _rendered(sel)
+    lines = _rendered(sel, height=24)
     assert any("↑" in t and "more" in t for t in lines)
     assert not any("↓" in t and "more" in t for t in lines)
     assert any(f"cmd {sel.selected_index}" in t for t in lines)
 
     # At the top of the list the markers swap sides — and the row is still shown.
     sel.selected_index = 0
-    lines = _rendered(sel)
+    lines = _rendered(sel, height=24)
     assert any("cmd 0" in t for t in lines)
     assert any("↓" in t and "more" in t for t in lines)
     assert not any("↑" in t and "more" in t for t in lines)
 
 
+def test_tool_selector_list_rows_fit_the_height_it_is_given():
+    """The list half is bounded by the height; the detail half is not.
+
+    The detail is deliberately unbounded — it is the only view from which a whole
+    tool output can be read (`test_tool_selector_shows_the_whole_output_not_a_prefix`
+    pins that) — so the invariant is that the list *yields*, not that the frame fits.
+    """
+    sel = ToolSelector([make_card(command=f"cmd {i}") for i in range(40)])
+    for height in (12, 24, 40):
+        for index in (0, 20, 39):
+            sel.selected_index = index
+            lines = _rendered(sel, height=height)
+            list_rows = [t for t in lines if "cmd " in t or "more" in t]
+            assert len(list_rows) <= height - ToolSelector.DETAIL_MIN_ROWS, (height, index)
+            assert any(f"cmd {index}" in t for t in list_rows)
+
+
 def test_tool_selector_window_bounds_are_inside_the_list():
     sel = ToolSelector([make_card(command=f"cmd {i}") for i in range(40)])
+    ctx = RenderContext(width=80, height=24)
     for index in (0, 1, 20, 38, 39):
         sel.selected_index = index
-        start, end = sel.window()
+        start, end = sel.window(ctx)
         assert 0 <= start < end <= 40
         assert start <= index < end
+
+
+def test_tool_selector_window_follows_the_height_it_is_given():
+    """No second magic number: the same terminal height must move both lists.
+
+    `WINDOW = 10` was a constant chosen for one terminal size, which is the
+    defect the session list had in a different spelling (rant 2026-10-14T14:09:10).
+    """
+    sel = ToolSelector([make_card(command=f"cmd {i}") for i in range(60)])
+    sel.selected_index = 30
+    wide = sel.window(RenderContext(width=80, height=40))
+    narrow = sel.window(RenderContext(width=80, height=16))
+    assert wide[1] - wide[0] > narrow[1] - narrow[0]
+    # the selection still lands inside both
+    assert wide[0] <= 30 < wide[1]
+    assert narrow[0] <= 30 < narrow[1]
+
+
+# ── SessionSelector windowing (rant 2026-10-14T14:09:10) ─────────────────
+#
+# The selector used to emit every row and let the terminal draw the tail, so a
+# selection above the fold was not on screen at all — no row, no highlight.
+# These assert on the frame the widget emits, with the height the terminal
+# actually hands it, because the exit-code-shaped check cannot see this defect:
+# the widget was always "correct", it just emitted more than could be shown.
+
+
+def _rendered_at(widget, height: int, width: int = 120) -> list[Line]:
+    return widget.render(RenderContext(width=width, height=height))
+
+
+def _highlighted(lines: list[Line]) -> list[str]:
+    """The text of every row the widget marked as the selection."""
+    out = []
+    for ln in lines:
+        for sp in ln.spans:
+            if getattr(sp.style, "reverse", False):
+                out.append(sp.text)
+    return out
+
+
+def _twenty_sessions():
+    from emrg.client.widgets import SessionSelector
+    return SessionSelector([
+        make_session(f"s_{i:02d}", "2026-05-01T08:30:00", updated=f"2026-05-{i+1:02d}T09:00:00")
+        for i in range(20)
+    ])
+
+
+def _visible(lines: list[Line], height: int) -> list[Line]:
+    """The part of an emitted frame the terminal actually paints.
+
+    `terminal.render` shows the **tail**: `chat_lines = all_chat_lines[-max_chat:]`,
+    with everything above it pushed into native scrollback, written once and never
+    redrawn.  So "the widget emitted the row" is not the property under test — "the
+    row is in the tail" is, and it is the one that fails when windowing is removed.
+    """
+    return lines[-height:] if height else lines
+
+
+def test_session_selector_keeps_the_selection_on_screen_at_both_ends():
+    """Index 0 is the failing case: its row was pushed out of the viewport.
+
+    The assertion is about the *painted* frame, not the emitted one: with 20
+    sessions and a 15-row area the tail holds ~13 rows, so the old unbounded
+    renderer put session 0 in scrollback with no highlight on screen at all.
+    """
+    for index in (0, 19):
+        sel = _twenty_sessions()
+        sel.selected_index = index
+        lines = _rendered_at(sel, height=15)
+        painted = _visible(lines, 15)
+        marked = _highlighted(painted)
+        assert marked, f"nothing highlighted at index {index}"
+        assert any(f"s_{index:02d}" in t for t in marked), (index, marked)
+        # and the highlighted row is one that is actually painted
+        assert any(f"s_{index:02d}" in _text(ln) for ln in painted)
+
+
+def test_session_selector_emits_no_more_lines_than_the_height():
+    """The invariant: more rows than the chat area holds are lost silently."""
+    sel = _twenty_sessions()
+    for height in (3, 8, 15, 24):
+        for index in range(20):
+            sel.selected_index = index
+            lines = _rendered_at(sel, height=height)
+            assert len(lines) <= height, (height, index, len(lines))
+
+
+def test_session_selector_marks_the_rows_it_hides():
+    sel = _twenty_sessions()
+    sel.selected_index = 19
+    text = "\n".join(_text(ln) for ln in _rendered_at(sel, height=15))
+    assert "↑ " in text and "more" in text       # rows above the window
+    assert "↓ " not in text                      # nothing below the last session
+
+    sel.selected_index = 0
+    text = "\n".join(_text(ln) for ln in _rendered_at(sel, height=15))
+    assert "↓ " in text and "more" in text
+    assert "↑ " not in text
+
+
+def test_session_selector_without_a_stated_height_renders_the_whole_list():
+    """`height=0` means "not stated" — no bound is invented for it."""
+    sel = _twenty_sessions()
+    lines = _rendered_at(sel, height=0)
+    assert len(lines) == 21  # title + every session
+    assert len(_highlighted(lines)) == 1
+
+
+def test_session_selector_still_renders_a_short_list_whole():
+    from emrg.client.widgets import SessionSelector
+    sel = SessionSelector([make_session("s_only", "2026-05-01T08:30:00")])
+    lines = _rendered_at(sel, height=15)
+    assert len(lines) == 2  # title + the one session, no markers
+    # "more" is the marker's word; the title's own "↑↓/j/k" hint is not a marker
+    assert "more" not in "\n".join(_text(ln) for ln in lines)
 
 
 def test_tool_selector_of_an_empty_session_has_nothing_selected():
