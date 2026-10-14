@@ -61,7 +61,10 @@ Named limits
 * **Nested functions are not nodes.** ``test_ws_e2e.py`` defines an ``async def _test()``
   inside dozens of arms; keyed at module level they merged, and one FIFO arm made 63 unrelated
   tests "reach" a primitive they never call. A nested body is still walked as part of the
-  function that holds it, so nothing it references is lost.
+  function that holds it, so nothing it references is lost -- and, since PR #2279's review,
+  nothing it *mentions* becomes the enclosing test's gate either: a gate is read off a
+  condition (`TestAWordIsNotAGate`), which is the hole this same walk opened while the reader
+  searched unparsed source.
 * A test that **shells out** to a ``mkfifo`` binary is not seen: a string is not a reference.
   Every call site today is in-process ``os.mkfifo(...)`` (measured 2026-10-15), so the gap is
   empty rather than merely small.
@@ -70,9 +73,16 @@ Named limits
   ``os.mkfifo`` -- is out of scope. The tree's rule there is the opposite one: the product
   refuses a FIFO *by kind*, on every platform, and its tests assert that by shape
   (``test_base_tool.py::test_non_regular_kind_judges_a_symlink_by_what_will_be_opened``).
-* The condition reader is a regex over the marker's source, not an evaluator. A gate written
-  in a spelling it does not know (``platform.system()``) is **reported**, which is the loud
-  direction: the file is fixed by admitting the spelling, and until then nothing is missed.
+* **The condition reader reads a condition, not a source.** It asks the two sites where a
+  gate can sit -- the condition of a ``skipif(...)`` call, and the test of an ``if`` -- and
+  matches a regex against that expression. It is not an evaluator, so a gate written in a
+  spelling it does not know (``platform.system()``) is **reported**; admitting the spelling
+  fixes the file. Both directions have been measured: a *word* naming the platform is not a
+  gate (the five controls in `TestAWordIsNotAGate`, all of which the reader that searched the
+  whole function called gated), and an unknown *spelling* of a real gate is reported rather
+  than passed. The earlier version of this bullet said "nothing is missed", and that sentence
+  was false in the second direction until PR #2279's review
+  (`cyc20261015-043845`) measured it.
 """
 
 from __future__ import annotations
@@ -80,6 +90,7 @@ from __future__ import annotations
 import ast
 import re
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
@@ -111,6 +122,10 @@ POSIX_MODULES = frozenset({"pty", "termios", "fcntl", "tty", "resource", "pwd", 
 #: What makes a skip a *platform* gate. A `skipif` about anything else -- a Python version, a
 #: missing binary -- is not one, which is the #2074 lesson read from the other side: a marker
 #: that is declared and *attached but about something else* protects nothing either.
+#:
+#: It is asked of a **condition**, never of a whole unparsed function: see `_gate_conditions`
+#: for why (a word is not a decision, and searching the source made an ungated arm pass by
+#: printing `os.name`).
 PLATFORM_CONDITION = re.compile(r"sys\.platform|\bos\.name\b|hasattr\(\s*(os|sys|platform)\s*,")
 
 
@@ -123,6 +138,53 @@ class Reading(NamedTuple):
     #: ``(lineno, name, primitives)`` for every test that needs a gate and carries one.
     gated: list[tuple[int, str, str]]
 
+
+
+def _gate_conditions(node: ast.AST) -> Iterator[ast.AST]:
+    """Every expression in `node` where a platform gate can sit.
+
+    A gate is a **decision**, so its only sites are a decision's own test: the condition of a
+    ``skipif(...)`` call, and the test of an ``if`` / an ``if``-expression. This is what the
+    check must read, and PR #2279's review is why (cycle `cyc20261015-043845`): the reader
+    used to search the **whole unparsed function**, so a platform word *anywhere* counted as
+    the gate and an arm could pass ungated by
+
+    * printing `os.name` beside the call (case 1),
+    * comparing two string constants that spell it -- `assert "os.name" == "os.name"` (case 2),
+    * mentioning it in a nested helper the test merely calls (case 3),
+    * listing it in `@pytest.mark.parametrize("p", [os.name, "nt"])` (case 4), or
+    * quoting it in some *other* `skipif`'s `reason=` (case 5, which is
+      `test_a_skipif_about_something_else_is_not_a_gate` with one word changed).
+
+    Each of the five is a control below, and each was measured reading `GATED` on the loose
+    reader and `UNGATED` on this one -- a guard whose subject is "the arm that forgets its
+    gate" cannot have an escape hatch that lets exactly that arm through.
+    """
+    for sub in ast.walk(node):
+        if (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "skipif"
+        ):
+            if sub.args:
+                yield sub.args[0]
+            for keyword in sub.keywords:
+                if keyword.arg in ("condition", "cond"):
+                    yield keyword.value
+        elif isinstance(sub, (ast.If, ast.IfExp)):
+            yield sub.test
+
+
+def _names_the_platform(node: ast.AST) -> bool:
+    """Whether one of `node`'s gate conditions names the platform."""
+    for condition in _gate_conditions(node):
+        try:
+            source = ast.unparse(condition)
+        except Exception:  # pragma: no cover - unparse only fails on exotic trees
+            continue
+        if PLATFORM_CONDITION.search(source):
+            return True
+    return False
 
 
 def _primitive_refs(node: ast.AST, *, unconditional_only: bool = False) -> set[str]:
@@ -199,11 +261,7 @@ def _platform_markers(tree: ast.Module) -> set[str]:
             value = node
         else:
             continue
-        try:
-            source = ast.unparse(value)
-        except Exception:  # pragma: no cover - unparse only fails on exotic trees
-            continue
-        if "skipif" not in source or not PLATFORM_CONDITION.search(source):
+        if not _names_the_platform(value):
             continue
         for target in targets:
             # An assignment binds a Name; a decorator factory is the function's own name.
@@ -220,17 +278,13 @@ def _module_gated(tree: ast.Module) -> bool:
             continue
         if not any(getattr(t, "id", "") == "pytestmark" for t in node.targets):
             continue
-        try:
-            source = ast.unparse(node.value)
-        except Exception:  # pragma: no cover
-            continue
-        if "skipif" in source and PLATFORM_CONDITION.search(source):
+        if _names_the_platform(node.value):
             return True
     return False
 
 
-def _body_source(node: ast.AST) -> str:
-    """The function's body as source, with its own docstring dropped.
+def _body_statements(node: ast.AST) -> list[ast.stmt]:
+    """The function's own statements, with its docstring dropped.
 
     The docstring has to go: it is where this tree *explains* a gate, so a mention of the
     primitive inside it must not read as the gate itself.
@@ -239,7 +293,12 @@ def _body_source(node: ast.AST) -> str:
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
         if isinstance(body[0].value.value, str):
             body = body[1:]
-    return "\n".join(ast.unparse(stmt) for stmt in body)
+    return body
+
+
+def _body_source(node: ast.AST) -> str:
+    """The function's body as source, for the one shape that is not a condition."""
+    return "\n".join(ast.unparse(stmt) for stmt in _body_statements(node))
 
 
 def _is_gated(node: ast.AST, markers: set[str], module_gated: bool) -> bool:
@@ -247,16 +306,17 @@ def _is_gated(node: ast.AST, markers: set[str], module_gated: bool) -> bool:
     if module_gated:
         return True
     for decorator in node.decorator_list:
-        try:
-            source = ast.unparse(decorator)
-        except Exception:  # pragma: no cover
-            continue
         if isinstance(decorator, ast.Name) and decorator.id in markers:
             return True
-        if PLATFORM_CONDITION.search(source):
+        if _names_the_platform(decorator):
             return True
-    body = _body_source(node)
-    return bool(PLATFORM_CONDITION.search(body)) or "pytest.skip(" in body
+    body = _body_statements(node)
+    if _names_the_platform(ast.Module(body=body, type_ignores=[])):
+        return True
+    # `pytest.skip(...)` is kept as a spelling of its own: the condition it is *under* is an
+    # `if` this reader already asks about, and a skip under no platform condition at all is a
+    # red on both legs rather than the one-leg red this file exists for.
+    return "pytest.skip(" in _body_source(node)
 
 
 def _index(path: Path) -> Reading:
@@ -557,6 +617,89 @@ class TestTheDetectorReadsBothDirections:
         ''')
         assert [row[1] for row in reading.ungated] == ["test_nothing_to_do_with_a_tty"], reading
         assert "module-level import pty" in reading.ungated[0][2], reading
+
+
+class TestAWordIsNotAGate:
+    """The quiet direction, one control per class PR #2279's review measured.
+
+    Each source below is an **ungated** arm: it calls `os.mkfifo` and nothing skips it on a
+    platform without FIFOs. Every one of them read `GATED` from the reader that searched the
+    whole unparsed function, so the suite was green while the guard's stated contract -- "fails
+    when a `test*` function reaches a POSIX-only primitive without one of those gates" -- was
+    false for a *class* of arms, not a site. These five are the classes; a reader that widens
+    again fails them.
+    """
+
+    def test_an_unrelated_statement_naming_the_platform_is_not_a_gate(self, tmp_path: Path) -> None:
+        reading = _index_source(tmp_path, '''
+            import os
+
+            def test_a_fifo_is_made(tmp_path):
+                print(os.name)
+                os.mkfifo(tmp_path / "pipe")
+        ''')
+        assert [row[1] for row in reading.ungated] == ["test_a_fifo_is_made"], reading
+
+    def test_a_string_constant_naming_the_platform_is_not_a_gate(self, tmp_path: Path) -> None:
+        reading = _index_source(tmp_path, '''
+            import os
+
+            def test_a_fifo_is_made(tmp_path):
+                assert "os.name" == "os.name"
+                os.mkfifo(tmp_path / "pipe")
+        ''')
+        assert [row[1] for row in reading.ungated] == ["test_a_fifo_is_made"], reading
+
+    def test_a_nested_helper_naming_the_platform_is_not_a_gate(self, tmp_path: Path) -> None:
+        """The other side of the walk the docstring credits: a nested body is *in* its test.
+
+        Its references must count -- and its mentions must not become the test's gate.
+        """
+        reading = _index_source(tmp_path, '''
+            import os
+            import sys
+
+            def test_a_fifo_is_made(tmp_path):
+                def note():
+                    return sys.platform
+                note()
+                os.mkfifo(tmp_path / "pipe")
+        ''')
+        assert [row[1] for row in reading.ungated] == ["test_a_fifo_is_made"], reading
+
+    def test_a_parametrize_argument_naming_the_platform_is_not_a_gate(self, tmp_path: Path) -> None:
+        reading = _index_source(tmp_path, '''
+            import os
+
+            import pytest
+
+            @pytest.mark.parametrize("p", [os.name, "nt"])
+            def test_a_fifo_is_made(tmp_path, p):
+                os.mkfifo(tmp_path / "pipe")
+        ''')
+        assert [row[1] for row in reading.ungated] == ["test_a_fifo_is_made"], reading
+
+    def test_a_reason_quoting_the_platform_is_not_a_condition(self, tmp_path: Path) -> None:
+        """`test_a_skipif_about_something_else_is_not_a_gate`, with one word moved into `reason=`.
+
+        The marker is still about the Python version; the platform word is prose inside the
+        message. Reading it as the condition re-opens #2074 from the other side.
+        """
+        reading = _index_source(tmp_path, '''
+            import os
+            import sys
+
+            import pytest
+
+            _needs_tomllib = pytest.mark.skipif(
+                sys.version_info < (3, 11), reason="needs os.name on py3.11"
+            )
+
+            @_needs_tomllib
+            def test_a_fifo_is_made(tmp_path):
+                os.mkfifo(tmp_path / "pipe")
+        ''')
+        assert [row[1] for row in reading.ungated] == ["test_a_fifo_is_made"], reading
 
 
 class TestTheSweptTree:
