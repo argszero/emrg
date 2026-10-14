@@ -16,6 +16,71 @@ from emrg.client.python_tui.widgets.chat_row import format_message_time
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown, UserMarkdown
 
 
+def windowed_range(count: int, selected: int, size: int) -> tuple[int, int]:
+    """The half-open ``[start, end)`` an on-screen window of ``size`` items occupies.
+
+    Kept as one function because this arithmetic had two hand-written copies before
+    issue #2248 (`SessionSelector.window` and `ToolSelector.window`), and the whole
+    point of the window is that the row ``selected`` names stays inside it: a second
+    copy is a second chance to get that wrong, in a place no reader looks.
+
+    The window is centred on the selection where it can be and clamped at both ends,
+    which is what keeps `start <= selected < end` true for every input — including
+    `size == 1`, where the caller has room for exactly the selected row.
+
+    An empty list has no window at all, and that is stated first rather than left to the
+    clamping: `min(size, count)` would otherwise floor at 1 and hand back `(0, 1)` for a
+    list of nothing, which a caller drawing `for i in range(start, end)` turns into an
+    `IndexError`. Caught by `test_windowed_range_keeps_the_selection_inside_for_every_size`
+    one cycle after the same shape was written by hand (issue #2248).
+    """
+    if count <= 0:
+        return 0, 0
+    size = max(1, min(size, count))
+    start = min(max(0, selected - size // 2), max(0, count - size))
+    return start, start + size
+
+
+def window_plan(avail: int, count: int, selected: int, *,
+                fixed_rows: int = 1) -> tuple[int, int, int, bool]:
+    """How a list widget lays itself out in ``avail`` rows. Returns a 4-tuple.
+
+    ``(chrome_rows, start, end, markers)`` — the rows the widget's own chrome (its
+    title, its rules) may spend, the half-open slice of the list to draw, and whether
+    the two edge markers are affordable.
+
+    This is the ONE producer of the rule every list selector obeys (issue #2244 for the
+    first two, #2248 for the rest): **the rows emitted may never exceed ``avail``**, the
+    row ``selected`` names is always among them, and rows left out are announced on the
+    edge they left by. It matters because the terminal paints only the *tail* of what a
+    widget emits and writes the rest into native scrollback once — never redrawn — so a
+    widget that emits more than the area holds loses the rows above the fold, the
+    reverse-video selection among them.
+
+    The two degenerate cases are stated rather than left to the caller, because both are
+    load-bearing:
+
+    - ``avail == 0`` means "the caller stated no height". The whole list is returned with
+      no markers: a widget must not invent a bound it was not given.
+    - When the markers would cost more than the room left, the list is cut *without* them
+      rather than announcing a window that no longer fits — a marker is not worth hiding
+      the rows it marks. Only a terminal too short to hold `fixed_rows + 1` rows reaches
+      this, and then the chrome yields instead: the list is what the caller asked for.
+    """
+    if avail <= 0:
+        return fixed_rows, 0, count, False
+    chrome = fixed_rows if avail > fixed_rows else 0
+    room = avail - chrome
+    if count <= room:
+        return chrome, 0, count, False
+    size = room - 2
+    if size >= 1:
+        start, end = windowed_range(count, selected, size)
+        return chrome, start, end, True
+    start, end = windowed_range(count, selected, max(1, room))
+    return chrome, start, end, False
+
+
 class InputWidget(Widget):
     #: The top and bottom rules the box always draws. A caller states the box's whole
     #: row budget through `RenderContext.height`, so these come out of it rather than
@@ -267,15 +332,28 @@ class RewindSelector(Widget):
     def render(self, ctx):
         lines: list[Line] = []
         pstyle = Style.parse("bold yellow")
-        lines.append(Line(
-            spans=[Span("↶ ", style="dim"), Span("Rewind session — select a message to rewind to (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
-            style=ctx.style,
-        ))
-        lines.append(Line(
-            spans=[Span("  " + "─" * (ctx.width - 4), style="dim")],
-            style=ctx.style,
-        ))
-        for i, m in enumerate(self.messages):
+        avail = getattr(ctx, "height", 0) or 0
+        n = len(self.messages)
+        # Two chrome rows (the title and the rule under it), paid for out of the same
+        # budget as the list and its markers (issue #2248).
+        chrome, start, end, markers = window_plan(avail, n, self.selected_index, fixed_rows=2)
+        if chrome >= 1:
+            lines.append(Line(
+                spans=[Span("↶ ", style="dim"), Span("Rewind session — select a message to rewind to (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
+                style=ctx.style,
+            ))
+        if chrome >= 2:
+            lines.append(Line(
+                spans=[Span("  " + "─" * (ctx.width - 4), style="dim")],
+                style=ctx.style,
+            ))
+        if markers and start > 0:
+            lines.append(Line(
+                spans=[Span(f"  ↑ {start} more", style="dim")],
+                style=ctx.style,
+            ))
+        for i in range(start, end):
+            m = self.messages[i]
             preview = m.get("preview", m.get("content", "")[:80])
             ts = m.get("timestamp", "")[:16].replace("T", " ")
             label = f"  [{i+1}] {preview}"
@@ -289,6 +367,11 @@ class RewindSelector(Widget):
             else:
                 spans = [Span("  ", style="dim"), Span(label, style=ctx.style)]
             lines.append(Line(spans=spans, style=ctx.style))
+        if markers and end < n:
+            lines.append(Line(
+                spans=[Span(f"  ↓ {n - end} more", style="dim")],
+                style=ctx.style,
+            ))
         self._dirty = False
         return lines
 
@@ -342,12 +425,7 @@ class SessionSelector(Widget):
         the tail of what a widget emits and pushes the rest into native scrollback,
         so a fixed window is right only for one terminal size (rant 2026-10-14T14:09:10).
         """
-        n = len(self.sessions)
-        if n <= size:
-            return 0, n
-        size = max(1, size)
-        start = min(max(0, self.selected_index - size // 2), n - size)
-        return start, start + size
+        return windowed_range(len(self.sessions), self.selected_index, size)
 
     def render(self, ctx):
         lines: list[Line] = []
@@ -355,22 +433,9 @@ class SessionSelector(Widget):
         avail = getattr(ctx, "height", 0) or 0
         n = len(self.sessions)
         # Layout, stated once because it *is* the invariant: the emitted rows may
-        # never exceed `avail`. The title takes a row only when two are available,
-        # and the two edge markers are afforded only when the window that is left
-        # still holds at least one session row — a marker row is not worth hiding
-        # the selection for. `avail == 0` means the caller stated no height, and
-        # the list is rendered whole rather than against an invented bound.
-        if not avail:
-            title_rows, start, end, markers = 1, 0, n, False
-        else:
-            title_rows = 1 if avail >= 2 else 0
-            room = avail - title_rows
-            if n <= room:
-                start, end, markers = 0, n, False
-            else:
-                size = room - 2 if room - 2 >= 1 else room
-                markers = room - 2 >= 1
-                start, end = self.window(size)
+        # never exceed `avail`. See `window_plan` for the two degenerate cases —
+        # `avail == 0` ("no height stated") and a terminal too short for the markers.
+        title_rows, start, end, markers = window_plan(avail, n, self.selected_index)
         if title_rows:
             lines.append(Line(
                 spans=[Span("○ ", style="dim"), Span("Select a session (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
@@ -490,11 +555,7 @@ class ToolSelector(Widget):
         n = len(self.cards)
         avail = getattr(ctx, "height", 0) or 0
         size = n if not avail else max(1, avail - self.LIST_CHROME_ROWS - self.DETAIL_MIN_ROWS)
-        if n <= size:
-            return 0, n
-        start = min(max(0, self.selected_index - size // 2), n - size)
-        start = max(0, start)
-        return start, start + size
+        return windowed_range(n, self.selected_index, size)
 
     @staticmethod
     def _duration(card: ToolCard) -> str:
@@ -623,11 +684,21 @@ class ProjectSelector(Widget):
     def render(self, ctx):
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")
-        lines.append(Line(
-            spans=[Span("○ ", style="dim"), Span("Select a project (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
-            style=ctx.style,
-        ))
-        for i, p in enumerate(self.projects):
+        avail = getattr(ctx, "height", 0) or 0
+        n = len(self.projects)
+        chrome, start, end, markers = window_plan(avail, n, self.selected_index)
+        if chrome:
+            lines.append(Line(
+                spans=[Span("○ ", style="dim"), Span("Select a project (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
+                style=ctx.style,
+            ))
+        if markers and start > 0:
+            lines.append(Line(
+                spans=[Span(f"  ↑ {start} more", style="dim")],
+                style=ctx.style,
+            ))
+        for i in range(start, end):
+            p = self.projects[i]
             name = p.get("name", "?")
             repo = p.get("repo", "")
             label = f"  {name}"
@@ -644,6 +715,11 @@ class ProjectSelector(Widget):
                     Span(label, style=ctx.style),
                 ]
             lines.append(Line(spans=spans, style=ctx.style))
+        if markers and end < n:
+            lines.append(Line(
+                spans=[Span(f"  ↓ {n - end} more", style="dim")],
+                style=ctx.style,
+            ))
         self._dirty = False
         return lines
 
@@ -691,13 +767,27 @@ class SandboxSelector(Widget):
     def render(self, ctx):
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")
-        lines.append(Line(
-            spans=[Span("○ ", style="dim"),
-                   Span("Select this session's sandbox tier (↑↓/j/k to move, Enter to confirm, Esc to cancel):",
-                        style="bold")],
-            style=ctx.style,
-        ))
-        for i, mode in enumerate(self.modes):
+        avail = getattr(ctx, "height", 0) or 0
+        n = len(self.modes)
+        # The list is the daemon's three-tier vocabulary, so this windows for the same
+        # reason as the rest and reaches it only on a very short terminal (issue #2248):
+        # the rule is the rule, and "too short to matter" is the assumption that made
+        # `ToolSelector.WINDOW = 10` look harmless.
+        chrome, start, end, markers = window_plan(avail, n, self.selected_index)
+        if chrome:
+            lines.append(Line(
+                spans=[Span("○ ", style="dim"),
+                       Span("Select this session's sandbox tier (↑↓/j/k to move, Enter to confirm, Esc to cancel):",
+                            style="bold")],
+                style=ctx.style,
+            ))
+        if markers and start > 0:
+            lines.append(Line(
+                spans=[Span(f"  ↑ {start} more", style="dim")],
+                style=ctx.style,
+            ))
+        for i in range(start, end):
+            mode = self.modes[i]
             label = f"  {mode}"
             if mode == self.current:
                 label += "  (current)"
@@ -712,6 +802,11 @@ class SandboxSelector(Widget):
                     Span(label, style=ctx.style),
                 ]
             lines.append(Line(spans=spans, style=ctx.style))
+        if markers and end < n:
+            lines.append(Line(
+                spans=[Span(f"  ↓ {n - end} more", style="dim")],
+                style=ctx.style,
+            ))
         self._dirty = False
         return lines
 
@@ -780,11 +875,21 @@ class TaskSelector(Widget):
     def render(self, ctx):
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")
-        lines.append(Line(
-            spans=[Span("○ ", style="dim"), Span(TASK_SELECTOR_TITLES[self.intent], style="bold")],
-            style=ctx.style,
-        ))
-        for i, t in enumerate(self.tasks):
+        avail = getattr(ctx, "height", 0) or 0
+        n = len(self.tasks)
+        chrome, start, end, markers = window_plan(avail, n, self.selected_index)
+        if chrome:
+            lines.append(Line(
+                spans=[Span("○ ", style="dim"), Span(TASK_SELECTOR_TITLES[self.intent], style="bold")],
+                style=ctx.style,
+            ))
+        if markers and start > 0:
+            lines.append(Line(
+                spans=[Span(f"  ↑ {start} more", style="dim")],
+                style=ctx.style,
+            ))
+        for i in range(start, end):
+            t = self.tasks[i]
             name = t.get("name", "?")
             running = t.get("running", False)
             next_in = t.get("next_run_in_seconds")
@@ -807,6 +912,11 @@ class TaskSelector(Widget):
                     Span(label, style=ctx.style),
                 ]
             lines.append(Line(spans=spans, style=ctx.style))
+        if markers and end < n:
+            lines.append(Line(
+                spans=[Span(f"  ↓ {n - end} more", style="dim")],
+                style=ctx.style,
+            ))
         self._dirty = False
         return lines
 
@@ -852,13 +962,23 @@ class ModelSelector(Widget):
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")
         active_marker = Style.parse("bold green")
-        lines.append(Line(
-            spans=[Span("○ ", style="dim"),
-                   Span("Select a model (↑↓/j/k to move, Enter to confirm, Esc to cancel):",
-                        style="bold")],
-            style=ctx.style,
-        ))
-        for i, m in enumerate(self.models):
+        avail = getattr(ctx, "height", 0) or 0
+        n = len(self.models)
+        chrome, start, end, markers = window_plan(avail, n, self.selected_index)
+        if chrome:
+            lines.append(Line(
+                spans=[Span("○ ", style="dim"),
+                       Span("Select a model (↑↓/j/k to move, Enter to confirm, Esc to cancel):",
+                            style="bold")],
+                style=ctx.style,
+            ))
+        if markers and start > 0:
+            lines.append(Line(
+                spans=[Span(f"  ↑ {start} more", style="dim")],
+                style=ctx.style,
+            ))
+        for i in range(start, end):
+            m = self.models[i]
             name = m.get("name", "?")
             ctx_win = m.get("context_window", 0)
             is_current = name == self.current
@@ -878,6 +998,11 @@ class ModelSelector(Widget):
                     Span(label, style=active_marker if is_current else ctx.style),
                 ]
             lines.append(Line(spans=spans, style=ctx.style))
+        if markers and end < n:
+            lines.append(Line(
+                spans=[Span(f"  ↓ {n - end} more", style="dim")],
+                style=ctx.style,
+            ))
         self._dirty = False
         return lines
 
@@ -962,11 +1087,26 @@ class CommandDropdown(Widget):
                 style=ctx.style,
             ))
         else:
-            lines.append(Line(
-                spans=[Span("  Commands (↑↓ to select, Enter to confirm, Esc to cancel):", style=dim_style)],
-                style=ctx.style,
-            ))
-            for i, cmd in enumerate(self._matching):
+            # This is the copy that overflows on this host with no invented fixture at
+            # all: `_COMMAND_HELP` holds more entries than a 24-row terminal has room
+            # for, so opening `/` used to push the title and the first commands out of
+            # the painted tail — with the cursor at index 0, nothing on screen was
+            # highlighted (issue #2248).
+            avail = getattr(ctx, "height", 0) or 0
+            n = len(self._matching)
+            chrome, start, end, markers = window_plan(avail, n, self.selected_index)
+            if chrome:
+                lines.append(Line(
+                    spans=[Span("  Commands (↑↓ to select, Enter to confirm, Esc to cancel):", style=dim_style)],
+                    style=ctx.style,
+                ))
+            if markers and start > 0:
+                lines.append(Line(
+                    spans=[Span(f"  ↑ {start} more", style=dim_style)],
+                    style=ctx.style,
+                ))
+            for i in range(start, end):
+                cmd = self._matching[i]
                 desc = _COMMAND_HELP.get(cmd, "")
                 label = f"  {cmd}"
                 if desc:
@@ -976,6 +1116,11 @@ class CommandDropdown(Widget):
                 else:
                     spans = [Span(label, style=cmd_style)]
                 lines.append(Line(spans=spans, style=ctx.style))
+            if markers and end < n:
+                lines.append(Line(
+                    spans=[Span(f"  ↓ {n - end} more", style=dim_style)],
+                    style=ctx.style,
+                ))
         self._dirty = False
         return lines
 
