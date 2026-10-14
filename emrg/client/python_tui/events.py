@@ -410,15 +410,23 @@ class InputParser:
                 # ESC CR or ESC LF = Option/Alt+Enter → newline (2 bytes)
                 if self._buf[1] in (0x0D, 0x0A):
                     consumed = 2
-                # Bracketed paste begin/end markers: ESC[200~ (6 bytes) / ESC[201~ (6 bytes)
-                elif self._buf[1] == 0x5B and len(self._buf) >= 6:
-                    if self._buf[2:6] == b"200~" or self._buf[2:6] == b"201~":
-                        consumed = 6
+                # CSI sequence: ESC [ ... final(0x40-0x7E). Search for the final byte;
+                # if it is not there yet, wait for more reads rather than consuming the
+                # ESC prematurely (that is what fixed the split bracketed-paste
+                # ESC[201~ leak).
+                #
+                # The scan is the *only* consumer of a CSI, bracketed paste included:
+                # ESC[200~ and ESC[201~ end at that `~` inside the same 6 bytes, so they
+                # need no branch of their own — and the branch they used to have was the
+                # defect. It read `elif self._buf[1] == 0x5B and len(self._buf) >= 6:`,
+                # which matched every CSI of 6 bytes or more *before* this scan could see
+                # it; when the six bytes were not a paste marker it matched nothing and
+                # left `consumed` at 0, so the bytes stayed in the buffer for good. A
+                # terminal's own reply (ESC[?1;2c, the DA1 answer the startup colour probe
+                # asks for) or an ordinary key like Ctrl+Right (ESC[1;5C) therefore
+                # wedged the input line: every later keystroke appended to a buffer that
+                # could never drain (v0.3.12; host, 2026-10-14T22:39:49).
                 elif self._buf[1] == 0x5B:
-                    # CSI sequence: ESC [ ... final(0x40-0x7E)
-                    # Search for the final byte. If not found, wait for more data
-                    # to avoid consuming ESC prematurely (fixes bracketed paste
-                    # [201~ leak when sequence arrives in multiple reads).
                     for i in range(2, len(self._buf)):
                         if 0x40 <= self._buf[i] <= 0x7E:
                             consumed = i + 1
