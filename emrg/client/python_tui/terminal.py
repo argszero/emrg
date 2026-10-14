@@ -19,7 +19,7 @@ try:
     import tty
 except ImportError:  # pragma: no cover - Windows
     termios = tty = None
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from emrg.client.python_tui.buffer import Buffer, CharPool, HyperlinkPool, StylePool, diff_buffers
@@ -167,6 +167,27 @@ class Terminal:
         if self._back_buffer:
             self._back_buffer.resize(w, h)
 
+    #: Rows the composer region may draw at minimum: its two separators plus one row of
+    #: text. Below that the box would be a pair of rules with nothing between them, which
+    #: reads as a broken terminal rather than as a small one.
+    COMPOSER_MIN_ROWS = 3
+
+    #: Rows the chat area keeps whatever the composer does. A long paste grows the box,
+    #: and without this floor it would grow until the conversation was off the screen.
+    MIN_CHAT_ROWS = 4
+
+    def _composer_budget(self, max_vp: int, reserved_rows: int) -> int:
+        """The rows the composer region may draw, its two separators included.
+
+        Measured from the terminal's height and the rows the other regions take, never
+        from the composer's own rendered line count: `fixed_rows` already contains
+        `len(composer_lines)`, so a budget read from there would be the answer it exists
+        to produce — and it is why the chat area's own height cannot be reused here
+        either (rant 2026-10-14T15:28:56, requirement 2).
+        """
+        return max(self.COMPOSER_MIN_ROWS,
+                   max_vp - reserved_rows - self.MIN_CHAT_ROWS)
+
     def mount(self, **widgets: Any) -> None:
         """Mount widgets into viewport regions.
 
@@ -238,13 +259,22 @@ class Terminal:
 
         # Cache last rendered output per widget so dirty=False doesn't blank it
 
-        def _get_lines(name: str) -> list[object]:
+        def _get_lines(name: str, height: int | None = None) -> list[object]:
+            """The lines this region draws.
+
+            `height` states the rows the region may emit, and `None` keeps whatever the
+            caller set on the shared context — so a single region can be given its own
+            budget without a second channel existing for the same idea. Each region is
+            handed its own context: a widget's bound is a property of the region, and
+            sharing one mutable object let the last writer decide for everyone.
+            """
             w = self._widgets.get(name)
             if w is None:
                 return []
+            region = ctx if height is None else replace(ctx, height=height)
             if full or getattr(w, "dirty", True):
                 try:
-                    lines = w.render(ctx)
+                    lines = w.render(region)
                     self._rendered_cache[name] = lines
                     return lines
                 except Exception:
@@ -252,9 +282,19 @@ class Terminal:
                     return self._rendered_cache.get(name, [])
             return self._rendered_cache.get(name, [])
 
+        # The largest the viewport can ever be. Computed once and reused, so the row
+        # budgets below and the layout below them cannot drift apart through two copies
+        # of the same expression.
+        max_vp = max(self.caps.height - 6, 4)  # leave 6 rows for native scrollback
         status_lines = _get_lines("status")[:1]
-        composer_lines = _get_lines("composer")[:10]
+        # The prompt region is drawn above the composer, so its row count is part of the
+        # composer's budget and has to be known first (each region is capped at one row
+        # by the slice below, so the bound is the count that will actually be drawn).
         prompt_lines = _get_lines("prompts")[:1]
+        composer_lines = _get_lines(
+            "composer",
+            self._composer_budget(max_vp, len(prompt_lines) + len(status_lines)),
+        )
         # rant 2026-08-28T22:53:24 — composer height must track the composer's
         # actual rendered line count, not a hard-coded 3.  A multiline input
         # (text containing "\n", e.g. pasted text or pressing Enter first)
@@ -279,7 +319,6 @@ class Terminal:
         old_vp_top = self.viewport.viewport_top
         old_vp_height = self.viewport.viewport_height
         fixed_rows = len(prompt_lines) + len(composer_lines) + len(status_lines)
-        max_vp = max(self.caps.height - 6, 4)  # leave 6 rows for native scrollback
         needed = min(len(all_chat_lines) + fixed_rows, max_vp)
         if needed > 0 and needed != self.viewport.viewport_height:
             new_vp_h = max(needed, max(8, self.caps.height // 4))  # min: 1/4 term, ≥8

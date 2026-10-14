@@ -17,6 +17,11 @@ from emrg.client.python_tui.widgets.markdown import StreamingMarkdown, UserMarkd
 
 
 class InputWidget(Widget):
+    #: The top and bottom rules the box always draws. A caller states the box's whole
+    #: row budget through `RenderContext.height`, so these come out of it rather than
+    #: being drawn on top of it (rant 2026-10-14T15:28:56).
+    SEPARATOR_ROWS = 2
+
     def __init__(self) -> None:
         self.text = ""; self.cursor = 0; self._dirty = True
     def insert(self, ch): self.text = self.text[:self.cursor] + ch + self.text[self.cursor:]; self.cursor += len(ch); self._dirty = True
@@ -83,10 +88,31 @@ class InputWidget(Widget):
         return rows
 
     def _cursor_vrow(self, available: int) -> int:
-        rows = self._visual_rows(available)
+        return self._vrow_of(self._visual_rows(available), self.cursor)
+
+    @staticmethod
+    def _vrow_of(rows: list, cursor: int) -> int:
+        """The visual row holding `cursor`, given rows from `_visual_rows`.
+
+        Split out so a caller that has already built the rows does not rebuild them:
+        the display and the keys must walk the same list (rant 2026-10-14T15:28:56).
+        """
         for i, (s, e) in enumerate(rows):
-            if s <= self.cursor <= e: return i
-        return len(rows) - 1
+            if s <= cursor <= e: return i
+        return max(0, len(rows) - 1)
+
+    @staticmethod
+    def _window_start(cursor_vrow: int, visible: int, total: int) -> int:
+        """The first visual row to draw, so that `cursor_vrow` is inside the window.
+
+        Overflow leaves from the **top**: the rows above the fold scroll out of the
+        box, which is what keeps the cursor's own row — and with it the cursor — on
+        the screen. Cutting the tail instead drops the newest rows, which is the
+        reported defect.
+        """
+        if total <= visible:
+            return 0
+        return max(0, min(cursor_vrow - visible + 1, total - visible))
 
     @staticmethod
     def _visual_offset_in_row(text: str, start: int, cursor: int) -> int:
@@ -146,74 +172,60 @@ class InputWidget(Widget):
     def dirty(self, v): self._dirty = v
     def render(self, ctx):
         pstyle = Style.parse("bold cyan"); sep_style = Style.parse("dim")
-        lines = [Line(spans=[Span("─" * ctx.width, style=sep_style)], style=ctx.style)]
-        raw = self.text.split("\n") if self.text else [""]
-        prompt = "> "; prompt_w = len(prompt)
-        available = max(1, ctx.width - prompt_w)
+        #: The two separators are part of the budget, not extra rows paid for out of it.
+        budget = max(0, getattr(ctx, "height", 0) or 0)
+        available = max(1, ctx.width - len("> "))
+        # One row model, shared with the keys: `_visual_rows` is what ↑/↓ move through
+        # (app.py routes them here with this same `available`), so the rows drawn are
+        # the rows the cursor is known to be on (rant 2026-10-14T15:28:56). `budget == 0`
+        # is "the caller stated no height" — the box then draws everything it has, which
+        # is the contract `RenderContext.height` documents.
+        rows = self._visual_rows(available)
+        total = len(rows)
+        visible = total if budget <= 0 else max(1, budget - self.SEPARATOR_ROWS)
+        top = self._window_start(self._vrow_of(rows, self.cursor), visible, total)
 
-        cr = None; cc = None; off = 0
-        for i, rl in enumerate(raw):
-            if off <= self.cursor <= off + len(rl): cr = i; cc = self.cursor - off
-            off += len(rl) + 1
-
-        for ri, txt in enumerate(raw):
-            if not txt:
-                if ri == cr:
-                    lines.append(Line(spans=[
-                        Span(prompt, style=pstyle),
-                        Span(" ", style=Style(reverse=True)),
-                    ], style=ctx.style))
-                else:
-                    lines.append(Line(spans=[
-                        Span(prompt, style=pstyle),
-                    ], style=ctx.style))
-                continue
-
-            # Split by display width, not character count (CJK-aware)
-            pos = 0
-            while pos < len(txt):
-                end = pos; w = 0
-                while end < len(txt):
-                    cw = cell_len(txt[end])
-                    if w + cw > available:
-                        break
-                    w += cw; end += 1
-                if end == pos:
-                    end = pos + 1
-                chunk = txt[pos:end]
-                chunk_end = end
-
-                if ri == cr:
-                    c = cc or 0
-                    if pos <= c < chunk_end:
-                        local = c - pos
-                        lines.append(Line(spans=[
-                            Span(prompt, style=pstyle),
-                            Span(chunk[:local], style=ctx.style),
-                            Span(chunk[local], style=Style(reverse=True)),
-                            Span(chunk[local+1:], style=ctx.style),
-                        ], style=ctx.style))
-                    elif c == chunk_end and chunk_end == len(txt):
-                        lines.append(Line(spans=[
-                            Span(prompt, style=pstyle),
-                            Span(chunk, style=ctx.style),
-                            Span(" ", style=Style(reverse=True)),
-                        ], style=ctx.style))
-                    else:
-                        lines.append(Line(spans=[
-                            Span(prompt, style=pstyle),
-                            Span(chunk, style=ctx.style),
-                        ], style=ctx.style))
-                else:
-                    lines.append(Line(spans=[
-                        Span(prompt, style=pstyle),
-                        Span(chunk, style=ctx.style),
-                    ], style=ctx.style))
-
-                pos = end
+        lines = [Line(spans=[Span(self._top_separator(ctx.width, top), style=sep_style)],
+                      style=ctx.style)]
+        prompt = "> "
+        for vi in range(top, min(top + visible, total)):
+            s, e = rows[vi]
+            chunk = self.text[s:e]
+            # A row ends its logical line when the character after it is a newline (or
+            # there is none) — that is what separates "wrapped" from "a new line of
+            # input", and it is the condition the cursor-at-the-end placeholder needs.
+            line_end = e >= len(self.text) or self.text[e] == "\n"
+            spans = [Span(prompt, style=pstyle)]
+            if s <= self.cursor < e:
+                local = self.cursor - s
+                spans.append(Span(chunk[:local], style=ctx.style))
+                spans.append(Span(chunk[local], style=Style(reverse=True)))
+                spans.append(Span(chunk[local + 1:], style=ctx.style))
+            elif self.cursor == e and line_end:
+                # The cursor sits past the row's last character: it needs a cell of its
+                # own, or the screen shows no cursor at all on an otherwise full row.
+                spans.append(Span(chunk, style=ctx.style))
+                spans.append(Span(" ", style=Style(reverse=True)))
+            else:
+                spans.append(Span(chunk, style=ctx.style))
+            lines.append(Line(spans=spans, style=ctx.style))
 
         lines.append(Line(spans=[Span("─" * ctx.width, style=sep_style)], style=ctx.style))
         self._dirty = False; return lines
+
+    def _top_separator(self, width: int, hidden_above: int) -> str:
+        """The top rule, announcing the rows that scrolled out of the box.
+
+        Requirement of rant 2026-10-14T15:28:56: a hidden row must be said out loud,
+        and saying it must not cost a row — so it rides the rule that is drawn anyway.
+        """
+        bar = "─" * width
+        if hidden_above <= 0:
+            return bar
+        hint = f" ↑ {hidden_above} more "
+        if cell_len(hint) >= width:
+            return bar
+        return "─" + hint + "─" * (width - cell_len(hint) - 1)
 
 
 class RewindSelector(Widget):

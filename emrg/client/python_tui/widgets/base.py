@@ -50,14 +50,22 @@ class RenderContext:
 
     Attributes:
         width: Available columns for this render region.
+        height: Available **rows** for this render region, when the caller knows them.
+            `0` means "not stated": a widget that cannot scroll then renders unbounded,
+            because it must not invent a bound it was not given. The terminal fills this
+            per region — the region's own row budget, which is what a widget that emits a
+            window has to respect: the viewport draws only the **tail** of what it is
+            handed and pushes the rest into native scrollback, where it is never redrawn
+            (rants 2026-10-14T14:09:10, 2026-10-14T15:28:56).
         style: Default style to apply (cascades like Ratatui's Line.style).
     """
 
     width: int
+    height: int = 0
     style: Style = field(default_factory=Style)
 
     def __repr__(self) -> str:
-        return f"RenderContext(w={self.width})"
+        return f"RenderContext(w={self.width}, h={self.height})"
 
 
 @runtime_checkable
