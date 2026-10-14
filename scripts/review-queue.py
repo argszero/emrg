@@ -1921,6 +1921,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="review-queue.py",
         description="For every open PR: its counted votes, and the next action for a cycle.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        # No prefix matching, so `--cycle` (which is `cast-vote.py`'s flag, not this
+        # tool's) cannot be bound to `--cycles-log` and read a cycle id as a
+        # directory path - the misparse that made an unreadable corpus narrow the
+        # abstention window into a *counted* vote (measured 2026-10-15, issue #2274).
+        allow_abbrev=False,
     )
     parser.add_argument(
         "prs",

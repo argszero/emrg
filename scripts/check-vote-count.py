@@ -2089,12 +2089,38 @@ def check_pr(
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `--cycle` is `cast-vote.py`'s flag — the id a vote is *cast* under — and this
+    # tool's own corpus flag is `--cycles-log`. With argparse's default prefix
+    # matching the two spellings were one argument, so `--cycle cyc20261015-014345`
+    # was read as `--cycles-log cyc20261015-014345`: a directory that does not
+    # exist. The corpus then could not be read, the abstention window narrowed to
+    # the vote cycle's own start, and a vote the real corpus **voids** was reported
+    # as counted - measured 2026-10-15 (`cyc20261015-014345`) on PR #2271, same
+    # head, exit 0 both ways: `2/3` with the flag against `1/3` without it (issue
+    # #2274). Refused by name rather than left to argparse, because the flag is a
+    # real one in the sibling tool and the reader needs to be told which one this
+    # tool takes.
+    for arg in argv:
+        if arg == "--cycle" or arg.startswith("--cycle="):
+            print(
+                "error: `--cycle` is `cast-vote.py`'s flag (the cycle id a vote is "
+                "cast under); this tool's cycle-record corpus flag is `--cycles-log "
+                "DIR`. Refusing rather than reading a cycle id as a directory path: "
+                "a corpus that cannot be read narrows the abstention window, which "
+                "counts a vote the real corpus voids (issue #2274).",
+                file=sys.stderr,
+            )
+            return 2
     parser = argparse.ArgumentParser(
         prog="check-vote-count.py",
         description="Count the LGTM votes that are still about a PR's current head.",
         # The default is rendered by argparse from `default=` below, so the help
         # line cannot go stale the way a hand-written "(default 3)" did.
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        # No prefix matching: `--cycles` is not `--cycles-log` and, more to the
+        # point, `--cycle` is not either (issue #2274).
+        allow_abbrev=False,
     )
     parser.add_argument("prs", nargs="+", type=int, help="pull request number(s)")
     parser.add_argument(

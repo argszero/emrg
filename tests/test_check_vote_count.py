@@ -2273,6 +2273,91 @@ def test_the_login_set_is_the_token_and_the_remotes(mod, monkeypatch):
     assert mod.own_login("pm25coder") is True
 
 
+def test_the_corpus_flag_is_not_reachable_by_the_siblings_spelling(mod, monkeypatch, capsys):
+    """Issue #2274: `--cycle <id>` must not be read as `--cycles-log <id>`.
+
+    `--cycle` is `cast-vote.py`'s flag — the id a vote is cast under — and this tool's
+    corpus flag is `--cycles-log`. With argparse's default prefix matching the two
+    spellings were one argument, so a cycle id became a directory path. Measured
+    2026-10-15 (`cyc20261015-014345`) on #2271, same head, exit 0 either way: `--cycle
+    cyc20261015-014345` printed `2/3` with the vote by `cyc20261015-005138` marked
+    `OK - counts`, where the readable corpus prints `1/3` and `VOID - cast inside the
+    window this vote's cycle treats as its own`. The unreadable corpus narrowed the
+    window, and the narrow reading is the *permissive* one.
+
+    Both directions are pinned: the trap is refused by name, and a longer option is
+    not reachable by a prefix at all. The second half below would run a real `gh` were
+    the prefix accepted again, so the seam is stubbed and the failure reads as what it
+    is rather than as a request this file's docstring promises not to make.
+    """
+    def _ran_a_command(*args, **kwargs):
+        raise AssertionError("the abbreviation was bound and a command ran")
+
+    monkeypatch.setattr(mod, "_gh_json", _ran_a_command)
+    monkeypatch.setattr(mod, "_gh_json_paginated", _ran_a_command)
+
+    assert mod.main(["2271", "--cycle", "cyc20261015-014345"]) == 2
+    err = capsys.readouterr().err
+    assert "--cycles-log" in err, f"the refusal must name this tool's flag: {err!r}"
+    assert "--cycle" in err, err
+
+    # The property rather than the one spelling: `--cycles` is a prefix of
+    # `--cycles-log` and, with matching on, was bound to it in silence.
+    caught: SystemExit | None = None
+    try:
+        mod.main(["2271", "--cycles", "somewhere"])
+    except SystemExit as exc:
+        caught = exc
+    if caught is None:
+        pytest.fail("the prefix was accepted: `--cycles` was bound to `--cycles-log`")
+    assert caught.code == 2
+
+
+def _load_sibling(name: str):
+    """Load a sibling script by path, the way this family's tests do."""
+    spec = importlib.util.spec_from_file_location(
+        f"abbrev_{name.replace('-', '_')}", REPO_ROOT / "scripts" / f"{name}.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    "name, argv",
+    [
+        # The arguments each sibling needs to get *past* its own parser, so that a
+        # bound prefix shows up as a command run rather than as a different refusal.
+        ("cast-vote", ["1", "--body-file", "-", "--cycles", "somewhere"]),
+        ("review-queue", ["--cycles", "somewhere"]),
+    ],
+)
+def test_no_family_parser_binds_a_long_option_by_prefix(name, argv, monkeypatch):
+    """The same flag family carries `--cycles-log`, so the same trap lives there.
+
+    Issue #2274's acceptance names all three carriers. `--cycles` is an unambiguous
+    prefix of `--cycles-log` on every one of them, so with argparse's default it was
+    silently accepted — the state that let a cycle id be read as a corpus directory.
+    `subprocess.run` is stubbed so that a regression is reported as a command that
+    ran, and never as a request this file's docstring promises not to make.
+    """
+    module = _load_sibling(name)
+
+    def _ran_a_command(*args, **kwargs):
+        raise AssertionError(f"{name}: the abbreviation was bound and a command ran")
+
+    monkeypatch.setattr(module.subprocess, "run", _ran_a_command)
+    caught: SystemExit | None = None
+    try:
+        module.main(argv)
+    except SystemExit as exc:
+        caught = exc
+    if caught is None:
+        pytest.fail("the prefix was accepted: `--cycles` was bound to `--cycles-log`")
+    assert caught.code == 2
+
+
 def test_the_previous_cycles_window_applies_too(mod, monkeypatch, capsys, tmp_path):
     """The wider end of the same window: the cycle *before* this one is this cycle.
 

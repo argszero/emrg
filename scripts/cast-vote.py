@@ -883,6 +883,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cast-vote.py",
         description="Post a review vote and confirm the vote counter counted it.",
+        # No prefix matching: this parser holds both `--cycle` (the id the vote is cast
+        # under) and `--cycles-log` (the corpus), so a prefix is one typo away from
+        # binding the wrong one, and the counter's own parser was measured reading
+        # `--cycle` as `--cycles-log` (2026-10-15, issue #2274).
+        allow_abbrev=False,
     )
     parser.add_argument("pr", type=int, help="pull request number")
     parser.add_argument(
