@@ -14,9 +14,20 @@ and add Kitty protocol support progressively.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
+
+logger = logging.getLogger(__name__)
+
+#: How much a sequence that never completes may hold before it is dropped rather than kept.
+#: ``feed`` drains every complete sequence it is given, so the buffer holds only an *incomplete*
+#: one — a handful of bytes. A buffer past this is not waiting for the rest of anything; it is
+#: stuck, and holding it is how a bad branch became a client nobody could type into again
+#: (v0.3.12; host, 2026-10-14T22:39:49): the buffer only grew, and nothing could recover it
+#: in-process. A stuck buffer is now discarded, with a warning, so the next keystroke is text.
+_MAX_BUFFER_BYTES = 4096
 
 
 class KeyName(Enum):
@@ -410,15 +421,23 @@ class InputParser:
                 # ESC CR or ESC LF = Option/Alt+Enter → newline (2 bytes)
                 if self._buf[1] in (0x0D, 0x0A):
                     consumed = 2
-                # Bracketed paste begin/end markers: ESC[200~ (6 bytes) / ESC[201~ (6 bytes)
-                elif self._buf[1] == 0x5B and len(self._buf) >= 6:
-                    if self._buf[2:6] == b"200~" or self._buf[2:6] == b"201~":
-                        consumed = 6
+                # CSI sequence: ESC [ ... final(0x40-0x7E). Search for the final byte;
+                # if it is not there yet, wait for more reads rather than consuming the
+                # ESC prematurely (that is what fixed the split bracketed-paste
+                # ESC[201~ leak).
+                #
+                # The scan is the *only* consumer of a CSI, bracketed paste included:
+                # ESC[200~ and ESC[201~ end at that `~` inside the same 6 bytes, so they
+                # need no branch of their own — and the branch they used to have was the
+                # defect. It read `elif self._buf[1] == 0x5B and len(self._buf) >= 6:`,
+                # which matched every CSI of 6 bytes or more *before* this scan could see
+                # it; when the six bytes were not a paste marker it matched nothing and
+                # left `consumed` at 0, so the bytes stayed in the buffer for good. A
+                # terminal's own reply (ESC[?1;2c, the DA1 answer the startup colour probe
+                # asks for) or an ordinary key like Ctrl+Right (ESC[1;5C) therefore
+                # wedged the input line: every later keystroke appended to a buffer that
+                # could never drain (v0.3.12; host, 2026-10-14T22:39:49).
                 elif self._buf[1] == 0x5B:
-                    # CSI sequence: ESC [ ... final(0x40-0x7E)
-                    # Search for the final byte. If not found, wait for more data
-                    # to avoid consuming ESC prematurely (fixes bracketed paste
-                    # [201~ leak when sequence arrives in multiple reads).
                     for i in range(2, len(self._buf)):
                         if 0x40 <= self._buf[i] <= 0x7E:
                             consumed = i + 1
@@ -459,6 +478,19 @@ class InputParser:
                 results.append(seq)
             else:
                 break
+
+        # Nothing consumed means the head of the buffer is an incomplete sequence and waiting is
+        # right — unless the buffer has grown past anything a sequence could legitimately need,
+        # which is the one state that never recovers: every later byte is appended to a sequence
+        # that cannot complete, so the input line is dead for the rest of the process. Drop it
+        # (and say so) rather than hold it for ever.
+        if len(self._buf) > _MAX_BUFFER_BYTES:
+            logger.warning(
+                "input parser: dropping %d buffered byte(s) that no sequence consumed: %r",
+                len(self._buf),
+                bytes(self._buf[:32]),
+            )
+            self._buf.clear()
 
         return results
 

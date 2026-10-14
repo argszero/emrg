@@ -1,5 +1,7 @@
 """Tests for InputParser — byte-stream → complete key sequences, including UTF-8."""
 
+import logging
+
 from emrg.client.python_tui.events import InputParser, _utf8_len
 
 
@@ -177,6 +179,109 @@ class TestInputParser:
         parser = InputParser()
         results = parser.feed(b"\x1bZ")
         assert results == [b"\x1bZ"]
+
+
+# ── CSI sequences of six bytes or more (host, 2026-10-14T22:39:49) ──
+#
+# The paste markers used to be tested by a branch of their own, placed *before* the
+# generic CSI final-byte scan and guarded on `len(self._buf) >= 6`. Any CSI of that
+# length that was not a paste marker matched it, matched no marker, and left the
+# sequence in the buffer with nothing consuming it — so the input line could never be
+# typed into again. These tests pin the drain for the three such sequences real
+# terminals actually send, and pin that the paste markers and split delivery still
+# behave as they did (`test_bracketed_paste_begin` / `_end` / `_wait` above).
+
+
+class TestLongCsiSequences:
+    def _drained_after(self, seq: bytes, typed: bytes = b"hello") -> list[bytes]:
+        """Feed ``seq`` then ``typed``; return what came out (buffer must be empty)."""
+        parser = InputParser()
+        results = parser.feed(seq)
+        assert not parser.has_pending(), f"{seq!r} left {bytes(parser._buf)!r} in the buffer"
+        results += parser.feed(typed)
+        assert not parser.has_pending()
+        return results
+
+    def test_device_attributes_reply_does_not_wedge(self):
+        """ESC[?1;2c — the DA1 answer to the startup colour probe's sentinel query."""
+        results = self._drained_after(b"\x1b[?1;2c")
+        assert results[0] == b"\x1b[?1;2c"
+        assert b"".join(results[1:]) == b"hello"
+
+    def test_modified_arrow_key_consumed_whole(self):
+        """ESC[1;5C (Ctrl+Right) — an ordinary keypress, six bytes long."""
+        results = self._drained_after(b"\x1b[1;5C")
+        assert results[0] == b"\x1b[1;5C"
+        assert b"".join(results[1:]) == b"hello"
+
+    def test_option_left_consumed_whole(self):
+        """ESC[1;3D (Option+Left) — the third sequence the host's report names."""
+        results = self._drained_after(b"\x1b[1;3D")
+        assert results[0] == b"\x1b[1;3D"
+        assert b"".join(results[1:]) == b"hello"
+
+    def test_sgr_mouse_report_consumed_whole(self):
+        """ESC[<0;10;5M — an SGR mouse press, longer than six bytes."""
+        results = self._drained_after(b"\x1b[<0;10;5M")
+        assert results[0] == b"\x1b[<0;10;5M"
+        assert b"".join(results[1:]) == b"hello"
+
+    def test_long_csi_split_across_reads_still_drains(self):
+        """The reply arriving in two reads must not leave a half-sequence behind."""
+        parser = InputParser()
+        assert parser.feed(b"\x1b[?1") == []
+        assert parser.has_pending()
+        assert parser.feed(b";2c") == [b"\x1b[?1;2c"]
+        assert parser.feed(b"hi") == [b"h", b"i"]
+        assert not parser.has_pending()
+
+    def test_partial_long_csi_waits_rather_than_eating_esc(self):
+        """A long CSI with no final byte yet is incomplete, not a wedge: it waits."""
+        parser = InputParser()
+        assert parser.feed(b"\x1b[?1;2") == []
+        assert parser.has_pending()  # '2' is not a final byte (0x40-0x7E)
+        assert parser.feed(b"c") == [b"\x1b[?1;2c"]
+        assert not parser.has_pending()
+
+    def test_paste_markers_still_consumed_as_six_bytes(self):
+        """The markers that used to have their own branch: still exactly six bytes."""
+        for marker in (b"\x1b[200~", b"\x1b[201~"):
+            parser = InputParser()
+            assert parser.feed(marker) == [marker]
+            assert not parser.has_pending()
+
+
+class TestStuckBufferIsDropped:
+    """A buffer that only grows must not be held for ever — it is dropped, with a warning.
+
+    Consuming every complete sequence (above) is the fix for the sequences that reach the buffer.
+    This is the backstop for every other way a buffer can fail to drain: whatever it holds, the
+    next keystroke must still be text rather than the next thing appended to a stuck sequence.
+    """
+
+    def _stuck_parser(self):
+        parser = InputParser()
+        # `ESC[` then payload with no final byte (0x40-0x7E) at all: an incomplete sequence that
+        # no amount of later input can complete within any sane bound.
+        parser.feed(b"\x1b[" + b"0" * 5000)
+        return parser
+
+    def test_a_buffer_past_the_cap_is_dropped_and_typing_resumes(self):
+        parser = self._stuck_parser()
+        assert not parser.has_pending(), "the stuck buffer was kept"
+        assert parser.feed(b"hello") == [b"h", b"e", b"l", b"l", b"o"]
+
+    def test_dropping_the_stuck_buffer_is_logged(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="emrg.client.python_tui.events"):
+            self._stuck_parser()
+        assert any("dropping" in r.getMessage() for r in caplog.records), caplog.text
+
+    def test_a_buffer_under_the_cap_still_waits(self):
+        """The cap must not become an eager flush: an ordinary incomplete sequence still waits."""
+        parser = InputParser()
+        assert parser.feed(b"\x1b[") == []
+        assert parser.has_pending()
+        assert parser.feed(b"A") == [b"\x1b[A"]
 
 
 # ── Legacy Windows scan codes (rant 2026-08-07T10:38:21) ──
