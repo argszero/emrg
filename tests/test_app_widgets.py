@@ -878,3 +878,247 @@ def test_the_tool_selector_closes_on_esc_before_the_turn_cancel_can_see_it():
     assert 'data == b"\\x1b"' in block          # Esc …
     assert "tool_sel.active = False" in block   # … closes the panel,
     assert "chat.remove(tool_sel.widget)" in block  # and takes it off the chat
+
+
+
+# ── every list selector windows itself (issue #2248) ─────────────────────────
+#
+# Five more copies of the #2244 defect lived in `emrg/client/widgets.py`: each emitted
+# one row per item and let the terminal draw the tail, so a selection above the fold was
+# on screen nowhere — no row, no highlight. An ordinary unit test cannot see it, because
+# the widget was not "wrong": it emitted every row it had, and the loss happened in the
+# terminal. The property is about the *painted* frame, so these read `lines[-avail:]` —
+# the tail rule `terminal.render` applies — and both degenerate cases (`height=0`, and a
+# terminal too short for the markers) are asserted rather than left implicit.
+
+
+def _rewind_case(count: int = 40):
+    from emrg.client.widgets import RewindSelector
+    widget = RewindSelector([
+        {"preview": f"msg {i}", "timestamp": "2026-05-01T08:30:00", "record_index": i}
+        for i in range(count)
+    ])
+    return widget, count
+
+
+def _project_case(count: int = 40):
+    from emrg.client.widgets import ProjectSelector
+    return ProjectSelector([make_project(f"proj{i}") for i in range(count)]), count
+
+
+def _task_case(count: int = 40):
+    from emrg.client.widgets import TaskSelector
+    return TaskSelector(
+        [{"name": f"task{i}", "interval": 60, "running": False} for i in range(count)]
+    ), count
+
+
+def _model_case(count: int = 40):
+    from emrg.client.widgets import ModelSelector
+    return ModelSelector([make_model(f"model{i}") for i in range(count)]), count
+
+
+def _command_case():
+    """No fixture at all: `CommandDropdown` builds its list from `_COMMAND_HELP`.
+
+    This is the case the issue calls out as reproducing with nothing invented — the app's
+    own command table is longer than a 24-row terminal's chat area, so opening `/` used to
+    push the title and the first commands out of the painted tail.
+    """
+    from emrg.client.widgets import CommandDropdown, _COMMAND_HELP
+    dropdown = CommandDropdown("/")
+    dropdown.visible = True
+    return dropdown, len(_COMMAND_HELP)
+
+
+def _sandbox_case():
+    """The honest edge case: a realistic list (the daemon's three tiers) that only
+    overflows on a terminal with two rows of room for it."""
+    from emrg.client.widgets import SandboxSelector
+    modes = ["read-only", "workspace-write", "danger-full-access"]
+    return SandboxSelector(modes, current="read-only"), len(modes)
+
+
+# (builder, rows the terminal gives the widget, rows of chrome the widget declares)
+CASES = [
+    pytest.param(_rewind_case, 15, 2, id="rewind"),
+    pytest.param(_project_case, 15, 1, id="project"),
+    pytest.param(_task_case, 15, 1, id="task"),
+    pytest.param(_model_case, 15, 1, id="model"),
+    pytest.param(_command_case, 15, 1, id="command-dropdown"),
+    pytest.param(_sandbox_case, 2, 1, id="sandbox-on-a-short-terminal"),
+]
+
+
+def _set(widget, index: int):
+    widget.selected_index = index
+    widget.dirty = True
+    return widget
+
+
+@pytest.mark.parametrize("builder,avail,chrome_rows", CASES)
+def test_every_list_selector_paints_the_selected_row(builder, avail, chrome_rows):
+    """The whole point of the window: the selection is on screen at both ends.
+
+    Index 0 is the failing case in every one of these — the old renderer emitted the
+    whole list, the terminal painted the tail, and the highlighted row was written into
+    scrollback, which is never redrawn.
+    """
+    widget, n = builder()
+    for index in (0, n - 1):
+        lines = _set(widget, index).render(RenderContext(width=120, height=avail))
+        assert len(_highlighted(lines)) == 1, f"index {index}: not exactly one selection"
+        assert _highlighted(_visible(lines, avail)), (
+            f"index {index} of {n} is not painted in the {avail} rows the terminal shows "
+            f"— its reverse-video row went into scrollback"
+        )
+
+
+@pytest.mark.parametrize("builder,avail,chrome_rows", CASES)
+def test_every_list_selector_emits_no_more_rows_than_it_was_given(builder, avail, chrome_rows):
+    """The invariant over every index and a spread of heights, including absurd ones."""
+    widget, n = builder()
+    for height in (1, 2, 3, avail, avail + 4):
+        for index in range(n):
+            lines = _set(widget, index).render(RenderContext(width=120, height=height))
+            assert len(lines) <= height, (height, index, len(lines))
+
+
+@pytest.mark.parametrize("builder,avail,chrome_rows", CASES)
+def test_every_list_selector_without_a_stated_height_renders_the_whole_list(builder, avail, chrome_rows):
+    """`height=0` is "no height stated": no bound is invented and no marker is printed."""
+    widget, n = builder()
+    lines = _set(widget, 0).render(RenderContext(width=120, height=0))
+    text = "\n".join(_text(ln) for ln in lines)
+    assert " more" not in text, text
+    assert len(_highlighted(lines)) == 1
+    assert len(lines) >= n, "every item must be drawn when no bound was given"
+
+
+@pytest.mark.parametrize("builder,avail,chrome_rows", CASES)
+def test_every_list_selector_announces_what_it_hides(builder, avail, chrome_rows):
+    """Rows left out are announced on the edge they left by — silence is the defect.
+
+    The marker is read as the line it *starts*, not as a substring: the dropdown's own
+    title reads "Commands (↑↓ to select, ...)", so a substring probe passes on a widget
+    that announces nothing.
+    """
+    from emrg.client.widgets import window_plan
+
+    widget, n = builder()
+    if n <= avail:
+        pytest.skip("this list fits the height it is given, so it hides nothing")
+    if not window_plan(avail, n, 0, fixed_rows=chrome_rows)[3]:
+        pytest.skip(f"{avail} rows cannot afford {chrome_rows} chrome row(s) and a marker")
+
+    def marks(index):
+        lines = _set(widget, index).render(RenderContext(width=120, height=avail))
+        return [t for t in (_text(ln).strip() for ln in lines) if t[:2] in ("↑ ", "↓ ")]
+
+    at_last = marks(n - 1)
+    assert at_last and at_last[0].startswith("↑ "), at_last       # rows above the window
+    assert not any(m.startswith("↓ ") for m in at_last), at_last  # nothing below the last
+
+    at_first = marks(0)
+    assert at_first and at_first[0].startswith("↓ "), at_first
+    assert not any(m.startswith("↑ ") for m in at_first), at_first
+
+
+@pytest.mark.parametrize("builder,avail,chrome_rows", CASES)
+def test_every_list_selector_states_the_number_of_rows_it_is_hiding(builder, avail, chrome_rows):
+    """A count that is not the number hidden is worse than no count, and neither edge
+    excuses the other.
+
+    The expected set comes from the one producer, with the chrome the widget itself
+    declares, and is compared as a *set* rather than one marker at a time — so a widget
+    that announces the right number above and a wrong one below fails here too. A widget
+    whose chrome changes fails loudly, on purpose.
+    """
+    from emrg.client.widgets import window_plan
+
+    widget, n = builder()
+    checked = 0
+    for index in (0, n - 1):
+        _, start, end, markers = window_plan(avail, n, index, fixed_rows=chrome_rows)
+        if not markers:
+            continue
+        lines = _set(widget, index).render(RenderContext(width=120, height=avail))
+        got = [t for t in (_text(ln).strip() for ln in lines) if t[:2] in ("↑ ", "↓ ")]
+        want = ([f"↑ {start} more"] if start else []) + ([f"↓ {n - end} more"] if end < n else [])
+        assert got == want, (index, got, want)
+        checked += 1
+    if not checked:
+        pytest.skip("this height cannot afford a marker at either end")
+
+
+def test_the_hosts_own_command_list_fits_the_tail_on_a_24_row_terminal():
+    """The issue's no-fixture reproduction, stated as its own test."""
+    from emrg.client.widgets import CommandDropdown, _COMMAND_HELP
+    dropdown = CommandDropdown("/")
+    dropdown.visible = True
+    assert len(_COMMAND_HELP) > 15, "this fixture stopped being longer than the area"
+
+    for index in (0, len(_COMMAND_HELP) - 1):
+        lines = _set(dropdown, index).render(RenderContext(width=120, height=15))
+        assert _highlighted(_visible(lines, 15)), f"index {index} has no painted highlight"
+
+
+# ── the one producer of the windowing rule ───────────────────────────────────
+
+
+def test_the_windowing_rule_has_one_producer():
+    """A second copy of this arithmetic is a second chance to lose the selection.
+
+    It was hand-written twice before #2248 (`SessionSelector.window` and
+    `ToolSelector.window`). The grep is about the *expression*, not a helper name: the
+    same arithmetic under another name is precisely the shape this guards.
+    """
+    import pathlib
+    import re
+
+    src = pathlib.Path(__file__).resolve().parent.parent / "emrg" / "client" / "widgets.py"
+    hits = re.findall(r"\w+\s*-\s*\w+\s*//\s*2", src.read_text(encoding="utf-8"))
+    assert len(hits) == 1, f"the window arithmetic is written {len(hits)} times: {hits}"
+
+
+def test_windowed_range_keeps_the_selection_inside_for_every_size():
+    """The property the helper exists to guarantee, over the whole parameter space.
+
+    The empty list is in here on purpose: `min(size, count)` floors at 1, so an
+    unguarded helper hands back `(0, 1)` for a list of nothing and the caller's
+    `for i in range(start, end)` raises `IndexError` on `items[0]`. That is not
+    hypothetical — it is what this test caught in the first draft of #2248.
+    """
+    from emrg.client.widgets import windowed_range
+    for count in (0, 1, 2, 5, 40):
+        for size in (0, 1, 2, 3, 10, 40, 100):
+            for selected in range(max(1, count)):
+                start, end = windowed_range(count, selected, size)
+                assert 0 <= start <= end <= count, (count, size, selected, start, end)
+                if count:
+                    assert start <= selected < end, (count, size, selected, start, end)
+
+
+def test_window_plan_states_both_degenerate_cases():
+    """`avail=0`, and a terminal too short to afford the chrome or the markers."""
+    from emrg.client.widgets import window_plan
+
+    # no height stated: the whole list, no markers, the chrome still charged for
+    assert window_plan(0, 40, 7) == (1, 0, 40, False)
+    # everything fits
+    assert window_plan(20, 5, 2) == (1, 0, 5, False)
+    # an empty list has nothing to draw, at any height
+    assert window_plan(15, 0, 0) == (1, 0, 0, False)
+    # a real window, with the markers affordable
+    chrome, start, end, markers = window_plan(15, 40, 7)
+    assert (chrome, markers) == (1, True) and start <= 7 < end and end - start == 12
+    # one row: the chrome yields and the list keeps the row the caller asked for
+    assert window_plan(1, 40, 7) == (0, 7, 8, False)
+    # two rows: the chrome is paid, and no marker is affordable beside it
+    assert window_plan(2, 40, 7) == (1, 7, 8, False)
+    # and the emitted rows never exceed what was given, at any height
+    for avail in range(0, 30):
+        for selected in (0, 3, 39):
+            chrome, start, end, markers = window_plan(avail, 40, selected)
+            emitted = chrome + (end - start) + (2 if markers else 0)
+            assert emitted <= avail or avail == 0, (avail, selected, emitted)
