@@ -126,6 +126,13 @@ fi
 "$PY_BIN" -m pip install --quiet --target "$DIST/lib" \
   rich httpx pyyaml jinja2 websockets
 
+# ── 4b. 内置默认 LLM 配置（宿主 2026-10-09「安装后马上就能用」）──
+# 仅当 EMRG_BUNDLED_* 存在时改写 source/ 里模板的 [llm] 段；一个都没配 → 脚本 no-op，
+# 产物与今天逐字节一致。值来自 GitHub Secrets，只落在 dist/（.gitignore:59），永不进仓库。
+# 失败即中止构建（set -e）：宁可这次发布没有内置 key，也不能发一个悄悄少了一段配置的包。
+echo "==> bundling default config (no-op unless EMRG_BUNDLED_* is set)"
+"$PY_BIN" "$ROOT/packaging/bundle_default_config.py" --source-root "$DIST/source"
+
 # ── 5. assets/LICENSE/version ──
 cp "$ROOT/LICENSE" "$DIST/assets/LICENSE" 2>/dev/null || echo "Apache-2.0" > "$DIST/assets/LICENSE"
 # Installable-skills catalog baseline (rant 2026-08-08T10:14:29): ship it in

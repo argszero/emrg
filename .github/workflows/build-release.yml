@@ -183,6 +183,18 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
       MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+      # 内置默认 LLM 配置（宿主 2026-10-09「安装后马上就能用」）：注入进每个安装包的
+      # 首次运行模板，使新装即带一份可用配置。**未配置时求值为空字符串 → 注入脚本 no-op，
+      # 产物与今天完全一致**，所以本组 Secret 是唯一的开关，加不加由宿主决定。
+      # 注意（宿主须知）：安装包是公开下载物，注入的 key 可被任何人从产物中取出——
+      # 请用可轮换、有额度上限的 key；key 本身不进 git 历史，只存在于 Secret 与产物中。
+      EMRG_BUNDLED_BASE_URL: ${{ secrets.EMRG_BUNDLED_BASE_URL }}
+      EMRG_BUNDLED_API_KEY: ${{ secrets.EMRG_BUNDLED_API_KEY }}
+      EMRG_BUNDLED_MODEL: ${{ secrets.EMRG_BUNDLED_MODEL }}
+      EMRG_BUNDLED_CONTEXT_WINDOW: ${{ secrets.EMRG_BUNDLED_CONTEXT_WINDOW }}
+      EMRG_BUNDLED_MAX_TOKENS: ${{ secrets.EMRG_BUNDLED_MAX_TOKENS }}
+      EMRG_BUNDLED_AUTO_COMPACT_THRESHOLD: ${{ secrets.EMRG_BUNDLED_AUTO_COMPACT_THRESHOLD }}
+      EMRG_BUNDLED_VISION: ${{ secrets.EMRG_BUNDLED_VISION }}
     steps:
       - uses: actions/checkout@v5
 
@@ -367,6 +379,16 @@ jobs:
       - name: Assert electron-builder sources resolve (emrg/gui)
         shell: bash
         run: python3 scripts/check-gui-package-refs.py
+
+      # ── 内置默认配置 → 打包 GUI 的源（宿主 2026-10-09「安装后马上就能用」）──
+      # 打包模式的 GUI 不 spawn python，它把首次运行模板内联在 emrg/gui/main.js 里
+      # （CONFIG_TEMPLATE，app.isPackaged 分支），而 electron-builder 是从工作区就地
+      # 打包这个文件的 —— 所以注入必须发生在它被打包之前，作用域也只给到 emrg/gui
+      # （给整个工作区会让文档/测试/会话记录里的模板副本一起被改写，实测 10 个文件）。
+      # 未配置 EMRG_BUNDLED_* → 脚本 no-op，产物与今天逐字节一致。
+      - name: Bundle default config into the packaged GUI source
+        shell: bash
+        run: python3 packaging/bundle_default_config.py --source-root emrg/gui
 
       # ── GUI dist（electron-builder；linux extraResources runtime §5 R64）──
       - name: Build GUI (electron-builder)
