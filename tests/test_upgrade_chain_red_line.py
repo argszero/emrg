@@ -26,23 +26,24 @@ no other actor is guaranteed to open. `MANIFESTO.md` is a project-context file, 
 of the **session cwd** — it is present for this repo's tasks and absent for every other
 project's.
 
-A third class: the six task templates, not only the evolution one
+A third class: the task templates, not only the evolution one
 ---------------------------------------------------------------
-Both carriers named above are one template and one session prompt. The scheduler ships
-**six** templates — `competition`, `evolution`, `journal`, `open_source`, `paper`,
-`promote` — and each is the instruction half of its own kind of session. A task cycle
-reads its own template, and the template's `### Forbidden` list is where a reader looks
-for a rule of exactly this class, which is why the templates restate the shared rules:
-the sibling `~/.emrg/config.toml` prohibition is in all six. Measured at master
+Both carriers named above are one template and one session prompt. The scheduler ships one
+template per task type it accepts — `emrg.server.scheduler.TASK_TEMPLATES` is that list, and
+the files globbed below are the ones it names — and each is the instruction half of its own
+kind of session. A task cycle reads its own template, and the template's `### Forbidden` list
+is where a reader looks for a rule of exactly this class, which is why the templates restate
+the shared rules: the sibling `~/.emrg/config.toml` prohibition is in every one of them.
+Measured at master
 `1716a630` (`cyc20260919-105421`): both permanent red lines were in **one** of the six
 (`evolution_prompt.md`); the other five matched neither `附则二` nor `附则三`. So a
 journal, paper, promote, competition or open_source cycle read the two permanent rules
 only where its session prompt happened to carry them — the original asymmetry of this
 file, five carriers over. Duplication is forced here: `TaskHandler._build_evolution_prompt`
 renders with `jinja2.Environment(undefined=Undefined).from_string(...)`, which has no
-loader, so no `{% include %}` can share one copy. That makes drift the live risk — five
-hand-copied clauses are five places to reword three of them — so this file pins one term
-set for all six carriers and one wording for the five task templates.
+loader, so no `{% include %}` can share one copy. That makes drift the live risk — the
+clauses are hand-copied once per template, so each is a place to reword the others — so this
+file pins one term set for every carrier and one wording for the task templates.
 
 Named limit
 -----------
@@ -67,7 +68,8 @@ EVOLUTION_TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
 #: Every task template the scheduler can be configured with — the class, not the instance.
 #: Taken from the directory rather than a literal list so a new task type is a new carrier
 #: the moment its template lands (the deficit this file exists for was "five carriers were
-#: never asked"); the count is asserted below so the glob cannot silently go empty.
+#: never asked"); the population is checked against the scheduler's registry below, so the
+#: glob can neither silently go empty nor miss a template that registry accepts.
 TASK_TEMPLATES = sorted((REPO_ROOT / "emrg" / "server").glob("*_prompt.md"))
 
 #: The heading of the 附则三 block in the host session prompt. The block runs to EOF.
@@ -93,9 +95,9 @@ UPGRADE_TERMS = (
 PERMANENCE = "not subject to any evolution mechanism"
 
 #: Terms of the 附则三 clause every template carrier must state. Written against
-#: `evolution_prompt.md`'s wording, which the five task templates now carry too — so this
-#: one list answers for all six, and a reword that drops a route from any of them fails
-#: here.
+#: `evolution_prompt.md`'s wording, which the other task templates now carry too — so this
+#: one list answers for every carrier, and a reword that drops a route from any of them
+#: fails here.
 SHARED_UPGRADE_TERMS = (
     "triggers the real auto-upgrade chain",   # the rule itself
     "UpgradeManager.tick()",                  # the in-process route
@@ -108,7 +110,7 @@ SHARED_UPGRADE_TERMS = (
 
 #: Terms of the sibling 附则二 clause every template carrier must state. Narrower than
 #: `SHARED_UPGRADE_TERMS` on purpose: `evolution_prompt.md`'s clause names the teardown-as-
-#: mocked-with-`test_shutdown_all_*` shape while the five task templates name the two
+#: mocked-with-`test_shutdown_all_*` shape while the other task templates name the two
 #: autouse fixtures, and both are truthful — so the shared set is the rule, the entry
 #: points, the provenance and the permanence, which every carrier states.
 SHARED_STOP_TERMS = (
@@ -125,7 +127,7 @@ SHARED_STOP_TERMS = (
 STOP_CLAUSE_MARK = "anything that stops or restarts the emrg server"
 UPGRADE_CLAUSE_MARK = "anything that triggers the real auto-upgrade chain"
 
-#: The five carriers that are not `evolution_prompt.md`. They are the ones that were silent
+#: The carriers that are not `evolution_prompt.md`. They are the ones that were silent
 #: before this cycle, and the ones that must therefore agree word for word.
 TASK_ONLY_TEMPLATES = tuple(t for t in TASK_TEMPLATES if t.name != "evolution_prompt.md")
 
@@ -383,10 +385,10 @@ def test_the_rendered_host_prompt_carries_the_rule_not_merely_the_template() -> 
 
 
 def test_every_task_template_states_both_permanent_red_lines() -> None:
-    """All six carriers state both rules — the check the five silent ones lacked.
+    """Every carrier states both rules — the check the silent ones lacked.
 
-    Every earlier check in this file reads `evolution_prompt.md` or `system.j2`. The five
-    other templates are as much a carrier of the rules as those two are, and until this
+    Every earlier check in this file reads `evolution_prompt.md` or `system.j2`. The other
+    templates are as much a carrier of the rules as those two are, and until this
     cycle nothing asked them: a journal, paper, promote, competition or open_source cycle
     received the two permanent red lines only through `system.j2`, which is a *different
     artifact* — the installed package's session prompt, not the template the source tree
@@ -429,10 +431,10 @@ def test_every_task_template_states_both_permanent_red_lines() -> None:
 
 
 def test_every_task_template_states_each_red_line_once() -> None:
-    """One statement per carrier, taken over *all six* rather than two.
+    """One statement per carrier, taken over *every* template rather than two.
 
     `test_neither_carrier_states_the_rule_twice` pins this for `system.j2`'s two blocks and
-    for `evolution_prompt.md`'s upgrade clause. The five task templates were pinned for
+    for `evolution_prompt.md`'s upgrade clause. The other task templates were pinned for
     neither rule, and they are the carriers most likely to grow a second copy: their
     §Forbidden lists already restate a shared rule (`~/.emrg/config.toml`), so appending
     "the red lines too" a second time is an ordinary-looking edit.
@@ -447,23 +449,23 @@ def test_every_task_template_states_each_red_line_once() -> None:
             )
 
 
-def test_the_five_task_templates_agree_word_for_word() -> None:
+def test_the_task_templates_agree_word_for_word() -> None:
     """The duplication that is forced must not become the drift that is optional.
 
     `TaskHandler._build_evolution_prompt` renders with
     `jinja2.Environment(undefined=Undefined).from_string(...)`, which has no loader — so
-    there is no `{% include %}` with which the five task templates could share one copy of
-    the clause, and the text is copied five times by construction. The presence check above
-    cannot see the consequence: reword any one copy as long as it keeps every load-bearing
-    term and that check stays green, while the five carriers now state five variants of the
-    same permanent rule — the "two copies free to drift apart" that
+    there is no `{% include %}` with which the task templates could share one copy of
+    the clause, and the text is copied once per carrier by construction. The presence check
+    above cannot see the consequence: reword any one copy as long as it keeps every
+    load-bearing term and that check stays green, while the carriers now state as many
+    variants of the same permanent rule — the "two copies free to drift apart" that
     `test_neither_carrier_states_the_rule_twice` refuses one level up. So the wording
     itself is the property: outside `evolution_prompt.md`, whose wording predates this and
-    is host-owned, the five must be identical.
+    is host-owned, the rest must be identical.
 
-    Named limit: this compares the five *to each other*, so a reword applied to all five in
-    one edit passes here — correctly, since one wording across the carriers is what is
-    asked; the term check above is what keeps such a reword from dropping a route.
+    Named limit: this compares the carriers *to each other*, so a reword applied to all of
+    them in one edit passes here — correctly, since one wording across the carriers is what
+    is asked; the term check above is what keeps such a reword from dropping a route.
     """
     by_wording: dict[str, dict[str, list[str]]] = {}
     for carrier in TASK_ONLY_TEMPLATES:
@@ -477,7 +479,7 @@ def test_the_five_task_templates_agree_word_for_word() -> None:
             by_wording.setdefault(mark, {}).setdefault(bullets[0], []).append(carrier.name)
     for mark, wordings in by_wording.items():
         assert len(wordings) == 1, (
-            f"the five task templates must state the {mark!r} clause in one wording; found "
+            f"the task templates must state the {mark!r} clause in one wording; found "
             f"{len(wordings)}: "
             + "; ".join(f"{names} carry {text[:70]!r}" for text, names in wordings.items())
         )
