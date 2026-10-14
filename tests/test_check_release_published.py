@@ -97,6 +97,14 @@ def _release(draft=False, prerelease=False, assets=("EMRG-0.3.5-macos-arm64.pkg"
     }
 
 
+def _tag_ref() -> dict:
+    """The `git/ref/tags/<tag>` payload for a tag that IS on GitHub (measured 2026-10-14)."""
+    return {
+        "ref": f"refs/tags/{TAG}",
+        "object": {"sha": "0" * 40, "type": "tag"},
+    }
+
+
 def _install(mod, monkeypatch, fake: FakeGh) -> None:
     monkeypatch.setattr(mod, "_gh", fake)
 
@@ -108,6 +116,7 @@ def _routes(**overrides):
             "jobs": overrides.get("jobs", [{"name": "build / macos", "conclusion": "success"}])
         },
         ("api", f"repos/{REPO}/releases/tags/{TAG}"): overrides.get("release", _release()),
+        ("api", f"repos/{REPO}/git/ref/tags/{TAG}"): overrides.get("tag_ref", _tag_ref()),
         ("api", f"repos/{REPO}/releases/latest"): overrides.get("latest", {"tag_name": TAG}),
     }
     routes.update(overrides.get("extra", {}))
@@ -117,16 +126,22 @@ def _routes(**overrides):
     return routes
 
 
-def _install_missing_release(mod, monkeypatch, routes) -> None:
+def _install_missing_release(mod, monkeypatch, routes, tag_on_github: bool = True) -> None:
     """`gh` answers 404 for this tag's release, and the routing table for everything else.
 
     404 is the *definite* absence (`release_for_tag` returns None for it), which is the
     state "nothing was ever published for this tag" -- distinct from a call that failed.
     The error is built the way `_gh` builds it from a real call: process code 1, the
     status in the message (measured 2026-09-29; `gh api` exits 1 for 404 and for 500).
+
+    `tag_on_github=False` also 404s the tag **ref** -- the state a version that has not
+    been cut yet is in (measured 2026-10-14 against `v0.3.11`), which is a different
+    remedy from a tag whose push started no run.
     """
     def _gh(args):
         if tuple(args[:2]) == ("api", f"repos/{REPO}/releases/tags/{TAG}"):
+            raise mod.GhError(1, args, "gh: Not Found (HTTP 404)", http_status=404)
+        if not tag_on_github and tuple(args[:2]) == ("api", f"repos/{REPO}/git/ref/tags/{TAG}"):
             raise mod.GhError(1, args, "gh: Not Found (HTTP 404)", http_status=404)
         return FakeGh({k: v for k, v in routes.items() if v is not None})(args)
 
@@ -215,7 +230,7 @@ def test_a_non_json_answer_is_not_measurable(mod, monkeypatch, capsys):
 
 
 def test_no_run_and_no_release_is_a_fault_naming_the_only_trigger(mod, monkeypatch, capsys):
-    """Both halves absent: nothing was published, so the re-push remedy is the right one."""
+    """Both halves absent, the tag present: the re-push remedy is the right one."""
     routes = _routes(runs=[])
     _install_missing_release(mod, monkeypatch, routes)
     code = mod.check(TAG, REPO)
@@ -225,6 +240,61 @@ def test_no_run_and_no_release_is_a_fault_naming_the_only_trigger(mod, monkeypat
     assert "only thing that creates a release" in out
     assert "git push origin" in out
     assert "no release exists for the tag either" in out
+    # The cause the remedy belongs to, named: the tag is there, its run is not.
+    assert "the tag itself IS on GitHub" in out
+
+
+def test_a_tag_that_is_not_on_github_is_not_told_to_re_push_it(mod, monkeypatch, capsys):
+    """The third cause, and the remedy that cannot run in it (issue #2240).
+
+    Measured 2026-10-14 (`cyc20261014-103240`) against the v0.3.11 release: asked about a
+    version nothing had been tagged for, this guard printed "Re-trigger it by pushing the
+    tag again (`git push origin :refs/tags/v0.3.11 && git push origin v0.3.11`)" — and the
+    second half of that line fails on a checkout with no such tag (`error: src refspec
+    v0.3.11 does not match any`), which is precisely the state "not tagged yet". The first
+    half cannot be read as a check either: `git push origin :refs/tags/<tag>` prints
+    `- [deleted] <tag>` and exits 0 for a ref that never existed.
+
+    So the arm asserts both halves: the remedy names cutting the tag, and the re-push form
+    -- the one that presumes a tag GitHub already has -- is not printed.
+    """
+    routes = _routes(runs=[])
+    _install_missing_release(mod, monkeypatch, routes, tag_on_github=False)
+    code = mod.check(TAG, REPO)
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "no `build-release.yml` run exists" in out
+    assert "the tag itself is not on GitHub" in out
+    assert f"git tag -a {TAG} -m \"{TAG}\"" in out
+    assert f"git push origin {TAG}" in out
+    # The other cause's remedy, and the trap in its first half, must not be printed here.
+    assert f":refs/tags/{TAG} &&" not in out
+    assert "Re-trigger it by pushing the tag again" not in out
+    assert "never existed" in out  # the trap is named, not repeated as advice
+
+
+def test_a_tag_read_that_fails_is_not_a_tag_that_is_absent(mod, monkeypatch, capsys):
+    """A 500 on the ref read must not become "the tag was never cut" -- it is unmeasured.
+
+    The distinction this file exists for, in the third reading: `tag_exists` returns False
+    only for the definite absence, and anything else propagates to `check`, which reports
+    rc 2 rather than sending a reader to `git tag -a` over a version that may be live.
+    """
+    routes = _routes(runs=[])
+    _install_missing_release(mod, monkeypatch, routes)
+    inner = mod._gh
+
+    def _gh(args):
+        if tuple(args[:2]) == ("api", f"repos/{REPO}/git/ref/tags/{TAG}"):
+            raise mod.GhError(1, args, "gh: Internal Server Error (HTTP 500)", http_status=500)
+        return inner(args)
+
+    monkeypatch.setattr(mod, "_gh", _gh)
+    code = mod.check(TAG, REPO)
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "not measurable" in out
+    assert "git tag -a" not in out
 
 
 def test_no_run_but_a_published_release_is_not_measurable_never_a_fault(
