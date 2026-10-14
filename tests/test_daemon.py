@@ -1517,6 +1517,104 @@ def test_usage_anchor_loss_event_is_countable(tmp_path, monkeypatch):
     assert e2["session"] == "s2" and e2["est"] == 60_000 and e2["total"] == 2
 
 
+class _NoFullRead:
+    """A handle for reading that refuses to be read to its end.
+
+    `total` is the cumulative line count, and the append used to obtain it by reading the
+    whole file — once per anchored LLM round, on a file that grows without bound. The
+    instrument for "it does not do that any more" is the read itself: iteration and a
+    zero-argument `read()` are the two spellings of "to EOF", and both fail here. Bounded
+    reads (the tail) and every other mode pass through untouched.
+    """
+
+    def __init__(self, handle):
+        self._handle = handle
+
+    def __iter__(self):
+        raise AssertionError(
+            "the stats file was read to EOF to count its lines — `total` is on the last "
+            "line, and counting a file that grows per round is the defect this pins "
+            "(issue #2236)")
+
+    def read(self, *args):
+        if not args:
+            raise AssertionError(
+                "the stats file was read to EOF (`read()` with no size) to count its "
+                "lines — issue #2236")
+        return self._handle.read(*args)
+
+    def __enter__(self):
+        self._handle.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._handle.__exit__(*exc)
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+
+def test_the_anchor_stats_total_costs_a_bounded_read(tmp_path, monkeypatch):
+    """The cumulative total comes from the file's tail, not from reading it to EOF.
+
+    Measured 2026-10-14 (`cyc20261014-090801`, issue #2236): this host's
+    `~/.emrg/logs/usage-anchor.jsonl` held 101 MiB / 346,195 lines, and the append paid a
+    full read of it — **35.8 ms** against **0.066 ms** for the tail — once per anchored
+    round, with the file gaining ~2.35 MiB/day. The value is unchanged, which is why the
+    arithmetic below is asserted beside the read: the pair fails a fix that is merely
+    faster and a fix that is merely correct.
+
+    Both appends are exercised, because they take different paths: the first finds no
+    file at all (the count of nothing), the second finds one and must take its `total`
+    from the tail.
+    """
+    real_open = open
+
+    def opener(file, mode="r", *args, **kwargs):
+        handle = real_open(file, mode, *args, **kwargs)
+        if "r" in mode and "b" not in mode and "+" not in mode:
+            return _NoFullRead(handle)
+        return handle
+
+    monkeypatch.setattr(daemon_mod, "open", opener, raising=False)
+    stats = tmp_path / "usage-anchor.jsonl"
+    assert daemon_mod._last_usage_anchor_total(stats) is None  # absent: no answer
+    assert daemon_mod._append_usage_anchor_event({"type": "probe"}, path=stats) == 1
+    # The file exists now, so this append is the one the guard is about.
+    assert daemon_mod._append_usage_anchor_event({"type": "probe"}, path=stats) == 2
+
+    totals = [json.loads(line)["total"] for line in
+              stats.read_text(encoding="utf-8").strip().splitlines()]
+    assert totals == [1, 2]
+
+
+def test_a_tail_that_cannot_answer_falls_back_to_counting(tmp_path):
+    """`total` stays exact on the files the tail cannot answer for.
+
+    The other direction of the same rule: a bounded read may never *replace* the count
+    with a guess. Two shapes reach the fallback and no more — a last line the writer did
+    not finish (a killed process, the shape measured here) and a record with no numeric
+    `total` (an older writer, or the `bool` that `isinstance(True, int)` would otherwise
+    accept as 1).
+    """
+    partial = tmp_path / "partial.jsonl"
+    partial.write_text(
+        json.dumps({"type": "x", "total": 1}) + "\n" + '{"type": "y", "tot',
+        encoding="utf-8")
+    assert daemon_mod._last_usage_anchor_total(partial) is None
+    # Two lines are on disk, so the next event is the third — counted, not guessed.
+    assert daemon_mod._append_usage_anchor_event({"type": "z"}, path=partial) == 3
+
+    for label, text in (
+        ("no total", json.dumps({"type": "x"}) + "\n"),
+        ("a bool total", json.dumps({"type": "x", "total": True}) + "\n"),
+    ):
+        legacy = tmp_path / f"{label.replace(' ', '-')}.jsonl"
+        legacy.write_text(text, encoding="utf-8")
+        assert daemon_mod._last_usage_anchor_total(legacy) is None, label
+        assert daemon_mod._append_usage_anchor_event({"type": "z"}, path=legacy) == 2, label
+
+
 def test_usage_anchor_stats_survive_restart(tmp_path, monkeypatch):
     """The metric must survive daemon restarts: the in-memory dedupe re-arms,
     but the append-only file keeps counting — the whole point of countable."""
