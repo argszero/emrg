@@ -1519,6 +1519,50 @@ def test_a_head_with_no_ci_run_cannot_be_judged_so_nothing_is_posted(
     )
 
 
+def test_a_corpus_that_cannot_be_listed_refuses_before_anything_is_posted(
+    mod, monkeypatch, capsys, body_file, tmp_path
+):
+    """Issue #2275 at the poster: a boundary nobody measured is not a boundary.
+
+    `--cycles-log` is named and `--prev-cycle` is not, so the window is resolved exactly as
+    the counter resolves it for a vote it counts (`review-queue.own_window` — one producer,
+    both readers). A root that can be **listed** and holds no earlier record is a
+    measurement: the clause narrows to this cycle's own start and the vote goes out (the
+    control below, and the reading the defect let through). A root that could not be listed
+    answers nothing, so there is no boundary to narrow — and this tool must stop on
+    `not window.applied` rather than post under the narrow one, which is the same branch
+    `own_head_window` keys on when it marks such a vote `VOID`.
+    """
+    path = body_file(f"{CYCLE} \u2014 \u2705 LGTM")
+    listed = tmp_path / "listed-and-empty"
+    listed.mkdir()
+
+    # (a) the control: listed, and it holds nothing earlier — a measurement, so the narrow
+    #     window stands and the vote is posted
+    control_gh = FakeGh()
+    rc = _run(
+        mod, monkeypatch,
+        FakeCounter(verdict_with(),
+                    verdict_with([vote()], counted=[True], valid_count=1)),
+        control_gh,
+        ["1255", "--cycles-log", str(listed), "--body-file", path],
+    )
+    _out, err = capsys.readouterr()
+    assert rc == 0, f"a listed corpus is a measured window, so the vote goes out: {err}"
+    assert control_gh.calls, "the control must actually post"
+
+    # (b) the same argv against a root that cannot be listed: no window, so no post
+    gh = FakeGh()
+    rc = _run(
+        mod, monkeypatch, FakeCounter(verdict_with()), gh,
+        ["1255", "--cycles-log", str(tmp_path / "gone"), "--body-file", path],
+    )
+    err = capsys.readouterr().err
+    assert gh.calls == [], "a vote must not be posted on a window nobody measured"
+    assert rc == 2
+    assert "could not be read" in err and "2275" in err, err
+
+
 def test_the_previous_cycle_is_read_from_the_cycle_records(
     mod, monkeypatch, capsys, body_file, tmp_path
 ):
