@@ -14,22 +14,29 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from emrg.client.python_tui.theme import themed_style
+
 if TYPE_CHECKING:
     from rich.style import Style as RichStyle
 
 
 def _normalize_style(s):
-    """Normalize a style value to a Rich Style object.
+    """Normalize a style value to a Rich Style object, themed for the terminal's background.
 
     Handles both Rich Style objects and string declarations like 'bold cyan'.
+
+    This is the single point every span and line style passes through (`write_lines_to_buffer`
+    calls it for both), which is why the theme lives here and not at the ~70 sites that name a
+    palette colour: no widget has to know a theme exists (rant 2026-10-14T14:48:32, issue #2246).
+    In dark mode `themed_style` is the identity, so this changes nothing about today's appearance.
     """
     if s is None:
         return None
     if isinstance(s, str):
         from rich.style import Style
 
-        return Style.parse(s)
-    return s
+        s = Style.parse(s)
+    return themed_style(s)
 
 
 class CellWidth(IntEnum):

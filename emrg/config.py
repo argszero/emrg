@@ -155,10 +155,30 @@ class SandboxConfig:
 
 
 @dataclass
+class ClientConfig:
+    """The ``[client]`` section — how a client draws itself.
+
+    It exists because the TUI's palette was unreadable in a light terminal (rant
+    2026-10-14T14:48:32, issue #2246): the colours were terminal-palette *names*,
+    so the terminal decided what they were, and that is only right on a dark one.
+    The host chose "detect first, a setting overrides", which makes this key an
+    override rather than the mechanism.
+
+    ``theme`` is one of ``auto`` (detect, the default), ``dark`` or ``light``.
+    A value that is none of those is read as ``auto`` — a theme is not worth
+    refusing to start a client over, and the client must survive a config the
+    daemon would also have to.
+    """
+
+    theme: str = "auto"
+
+
+@dataclass
 class EmrgConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    client: ClientConfig = field(default_factory=ClientConfig)
 
 
 
@@ -333,7 +353,26 @@ def load_config(path: Optional[Path] = None) -> EmrgConfig:
         delay_minutes=update_data.get("delay_minutes", 1440),
     )
 
-    return EmrgConfig(llm=llm, update=update, sandbox=_sandbox_from(data))
+    return EmrgConfig(llm=llm, update=update, sandbox=_sandbox_from(data),
+                      client=_client_from(data))
+
+
+def _client_from(data: dict) -> ClientConfig:
+    """Read the ``[client]`` section out of a parsed config file.
+
+    :param data: the parsed TOML document.
+    :returns: the section's value, defaulting to ``theme = "auto"``.
+    """
+    section = data.get("client", {})
+    if not isinstance(section, dict):
+        return ClientConfig()
+    theme = section.get("theme", "auto")
+    if not isinstance(theme, str) or theme.strip().lower() not in ("auto", "dark", "light"):
+        # Unknown or malformed: `auto` is the documented default and the safe reading. The client
+        # cannot fail to start over a colour, and silently forcing the wrong palette would be
+        # worse than detecting.
+        return ClientConfig()
+    return ClientConfig(theme=theme.strip().lower())
 
 
 def _sandbox_from(data: dict) -> SandboxConfig:

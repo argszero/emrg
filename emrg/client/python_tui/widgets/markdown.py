@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from rich.markdown import Markdown as RichMarkdown
 
+from emrg.client.python_tui.theme import code_theme
 from emrg.client.python_tui.widgets.base import Line, RenderContext, Widget
 from emrg.client.python_tui.widgets.chat_row import format_message_time
 
@@ -40,7 +41,9 @@ class Markdown(Widget):
         """Render markdown using Rich, convert to our Line/Span format."""
         from emrg.client.python_tui.rich_bridge import rich_renderable_to_lines
 
-        md = RichMarkdown(self.text, code_theme="monokai")
+        # The fenced-block theme follows the terminal: `monokai` is a dark theme, so on a light
+        # background it drew a black board in the middle of a white page (rant 2026-10-14T14:48:32).
+        md = RichMarkdown(self.text, code_theme=code_theme())
         lines = rich_renderable_to_lines(md, ctx.width)
         for line in lines:
             line.style = ctx.style
@@ -85,7 +88,7 @@ class UserMarkdown(Markdown):
         role_style = Style.parse(self._ROLE_STYLE)
         avail = max(1, ctx.width - len(prefix))
 
-        md = RichMarkdown(_preserve_line_breaks(self.text), code_theme="monokai")
+        md = RichMarkdown(_preserve_line_breaks(self.text), code_theme=code_theme())
         md_lines = rich_renderable_to_lines(md, avail)
         lines: list[Line] = []
         for i, line in enumerate(md_lines):
@@ -136,7 +139,8 @@ class StreamingMarkdown(Widget):
     until the fence closes) to avoid flickering syntax highlighting.
 
     Args:
-        code_theme: Pygments theme for code blocks (default: 'monokai').
+        code_theme: Pygments theme for code blocks. Empty (the default) follows the
+            resolved terminal theme; a value here overrides it.
 
     Usage:
         stream = StreamingMarkdown()
@@ -147,7 +151,7 @@ class StreamingMarkdown(Widget):
 
     _buffer: str = ""
     _dirty: bool = True
-    code_theme: str = "monokai"
+    code_theme: str = ""
     _last_rendered: list[Line] = field(default_factory=list)
     #: The daemon's moment for this reply. Empty while a turn is streaming — the
     #: value does not exist until the record is written — and set from the `done`
@@ -192,7 +196,7 @@ class StreamingMarkdown(Widget):
             last_fence = text.rfind("```")
             text = text[:last_fence]
 
-        md = RichMarkdown(text, code_theme=self.code_theme)
+        md = RichMarkdown(text, code_theme=self.code_theme or code_theme())
         lines = rich_renderable_to_lines(md, ctx.width)
         for line in lines:
             line.style = ctx.style
