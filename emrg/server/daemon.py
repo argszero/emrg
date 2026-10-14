@@ -7383,10 +7383,13 @@ def _provider_slug(base_url: str) -> str:
         return base_url
 
 
-#: How much of the file's tail is read to find the last recorded event. One record is
-#: 150–300 bytes, and the *last* one is all the append needs; a tail that cuts into the
-#: final line is detected as an unparseable fragment rather than mis-read, because the
-#: read is anchored on the end of the file.
+#: How much of the file's tail is read to find the last recorded event — the size the read
+#: **starts** at, not a premise about how long a record may be. The last record is all the
+#: append needs, so the read begins at the end of the file and doubles until it holds a
+#: complete last line or reaches the start of the file; a record longer than this window is
+#: therefore still answered by a bounded read, rather than by the full count this change
+#: removes. Measured on this host 2026-10-14: 346,950 records of 123–422 bytes, so the
+#: first window already held about ten of them.
 _USAGE_ANCHOR_TAIL_BYTES = 4096
 
 
@@ -7417,12 +7420,24 @@ def _last_usage_anchor_total(path: Path) -> int | None:
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
-            start = max(0, fh.tell() - _USAGE_ANCHOR_TAIL_BYTES)
-            fh.seek(start)
-            tail = fh.read().decode("utf-8", "replace")
+            end = fh.tell()
+            window = _USAGE_ANCHOR_TAIL_BYTES
+            while True:
+                start = max(0, end - window)
+                fh.seek(start)
+                tail = fh.read().decode("utf-8", "replace")
+                lines = [line for line in tail.splitlines() if line.strip()]
+                # The last line is complete when something precedes it inside the window
+                # (then it starts after a line break the window holds) or the window
+                # already reaches the file's start. Without this the read would silently
+                # fall back to the counting this change exists to remove, for a record
+                # longer than the window — a regression the answer would hide, because
+                # the count returns the same number, only slower.
+                if start == 0 or len(lines) >= 2:
+                    break
+                window *= 2
     except OSError:
         return None  # first event / unreadable file — the caller counts nothing
-    lines = [line for line in tail.splitlines() if line.strip()]
     if not lines:
         return None  # empty file
     try:

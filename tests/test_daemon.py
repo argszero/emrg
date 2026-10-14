@@ -1588,6 +1588,38 @@ def test_the_anchor_stats_total_costs_a_bounded_read(tmp_path, monkeypatch):
     assert totals == [1, 2]
 
 
+def test_a_record_longer_than_the_window_is_still_answered_by_a_bounded_read(
+        tmp_path, monkeypatch):
+    """The window is the size the read **starts** at, not a premise about a record's size.
+
+    A record taller than `_USAGE_ANCHOR_TAIL_BYTES` would otherwise leave the tail holding
+    one cut line, and the read would fall back to the count this change exists to remove —
+    silently, because a count returns the same number, only slower. That is the defect
+    wearing the fix's clothes, so the read doubles until it holds a complete last line.
+
+    Both halves are pinned: an iteration or a zero-argument `read()` on a text handle
+    raises (`_NoFullRead`), so the count is unreachable here; and the value can only come
+    from the tail, because counting this file's two lines would answer **3**, not 8.
+    """
+    stats = tmp_path / "usage-anchor.jsonl"
+    long_record = json.dumps({"type": "probe", "pad": "y" * 9000, "total": 7}) + "\n"
+    assert len(long_record) > daemon_mod._USAGE_ANCHOR_TAIL_BYTES
+    stats.write_text(json.dumps({"type": "probe", "pad": "x" * 9000}) + "\n" + long_record,
+                     encoding="utf-8")
+
+    real_open = open
+
+    def opener(file, mode="r", *args, **kwargs):
+        handle = real_open(file, mode, *args, **kwargs)
+        if "r" in mode and "b" not in mode and "+" not in mode:
+            return _NoFullRead(handle)
+        return handle
+
+    monkeypatch.setattr(daemon_mod, "open", opener, raising=False)
+    assert daemon_mod._last_usage_anchor_total(stats) == 7
+    assert daemon_mod._append_usage_anchor_event({"type": "probe"}, path=stats) == 8
+
+
 def test_a_tail_that_cannot_answer_falls_back_to_counting(tmp_path):
     """`total` stays exact on the files the tail cannot answer for.
 
