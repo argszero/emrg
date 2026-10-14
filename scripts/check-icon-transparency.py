@@ -12,7 +12,10 @@ What it reads -- anything that holds an icon, and nothing that does not:
   * a `.icns` -- every PNG-typed representation inside the container;
   * a directory (an `.app` bundle, an expanded `.pkg`, a `dist/` tree) -- walked for an
     `.icns`, preferring the one `Contents/Info.plist`'s `CFBundleIconFile` names, since
-    that is the file the platform renders;
+    that is the file the platform renders. A `*.icns` it meets that is **not** an icns
+    container -- macOS writes an AppleDouble `._x.icns` beside every file it copies, and an
+    expanded `.pkg` is full of them -- is named and skipped: a file that holds no icon must
+    not answer for the artifact (nor throw away the readings already taken beside it);
   * anything else (a `.pkg`, a `.tar.gz`) -- **not measured**, rc 2, with the command that
     extracts it. A container this tool cannot open is never a pass: the Linux `tar.gz`
     really does carry no icon at all, so "no icon found" must not read as "fine".
@@ -215,7 +218,23 @@ def check_subject(subject: Path):
         for icon in icons:
             print(f"  {icon}")
             if icon.suffix == ".icns":
-                f, m = measure_icns(icon, indent="    ")
+                try:
+                    f, m = measure_icns(icon, indent="    ")
+                except (ValueError, OSError) as exc:
+                    # A file named `*.icns` that is not an icns container: an AppleDouble
+                    # sidecar (`._icon.icns`) beside the real icon is the ordinary case --
+                    # macOS writes one for every file it copies, and this tool's own subject
+                    # list calls an expanded `.pkg` a legitimate directory subject. Letting
+                    # the exception out answered rc 2 for the whole run, which reported the
+                    # **artifact** as unmeasurable because a file that holds no icon sat
+                    # next to the icon -- and threw away the readings already taken, a fault
+                    # among them. The PNG branch below has always reported this case instead
+                    # of dying on it (`check_png_bytes` catches its own decode failure), so
+                    # this is the same answer for the icns branch: the file is named, and it
+                    # counts as nothing measured -- which still leaves `main` answering 2
+                    # when no other entry was readable.
+                    print(f"    {icon.name}: not measured ({exc})")
+                    continue
             else:
                 f, m = check_png_bytes(icon.read_bytes(), icon.name, indent="    ")
             fault, measured = fault or f, measured or m
