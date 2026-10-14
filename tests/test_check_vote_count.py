@@ -2383,6 +2383,43 @@ def test_the_void_reason_names_the_window_it_inferred_and_its_blind_spot(mod, tm
     assert "issue #2214" in why, why
 
 
+def test_the_void_reason_does_not_claim_another_tools_refusal(mod, tmp_path):
+    """One rule, two carriers, each saying it about its own subject.
+
+    The counter's subject is a review that **was** posted — that is the only thing it
+    reads — so its reason may not report a posting refusal. Measured 2026-10-14
+    (`cyc20261014-084051`), on #2231: two void rows that name posted reviews both ended
+
+        … so `cast-vote.py` refuses to post this vote (issue #1408).
+
+    and the sentence sent that cycle looking for how a refused vote had reached the ledger
+    before the row's own timestamp was read as the answer (issue #2234). The verdict is
+    pinned by the carrier comparison above; this arm pins the wording, in both directions:
+    the counter states the rule and its own verdict, and the poster still refuses the same
+    `(cycle, head)` pair.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "cycle-20260911-090000.md").write_text("x", encoding="utf-8")
+    log = str(corpus)
+    inside = _push(2026, 9, 11, 9, 30)  # inside the window the cycle above opens
+
+    counted, why = mod.own_head_window(
+        "cyc20260911-100000", push_time=inside, push_time_exact=True, cycles_log=log
+    )
+    assert counted is True, why
+    assert "cast inside the window" in why, why  # the clause is still named
+    assert "counts for nobody" in why, why  # …with this tool's verdict
+    assert "refuses to post" not in why, why  # …and not another tool's action
+
+    # The other carrier is unchanged: moving the sentence must not move the refusal.
+    cast_vote = _cast_vote()
+    refused, note = cast_vote.own_head_window(
+        "cyc20260911-100000", _Head(inside), cycles_log=log
+    )
+    assert refused, note
+
+
 def test_a_vote_by_another_instance_is_not_voided_by_this_hosts_window(
     mod, monkeypatch, capsys
 ):

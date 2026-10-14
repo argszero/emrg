@@ -766,12 +766,19 @@ def own_head_window(
         else ""
     )
     widened = f" {window.inferred_clause()}." if window.inferred else ""
+    # What this reason may say is bounded by what it is a reason *about*: this counter
+    # reads reviews that were posted, so a sentence saying `cast-vote.py` refused to post
+    # "this vote" names an action no tool took, on the vote the row reports (measured
+    # 2026-10-14, `cyc20261014-084051`: #2231's two void rows carried it, and it sent the
+    # cycle looking for how a refused vote had reached the ledger — issue #2234). The
+    # posting refusal is true where it lives, in `cast-vote.py::own_head_window`; the
+    # *state* clauses above stay, because both tools share the state.
     return True, (
         f"cast inside the window this vote's cycle treats as its own - the head was "
         f"pushed {push_time}, at or after {window.window_start_text()} ({window.source}"
         f"{narrowed}); a cycle does not vote on a head it pushed, and the window "
-        "immediately before it counts as its own, so `cast-vote.py` refuses to post "
-        f"this vote (issue #1408).{widened}"
+        "immediately before it counts as its own, so this vote counts for nobody "
+        f"(issue #1408).{widened}"
     )
 
 
