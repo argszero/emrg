@@ -17,20 +17,24 @@ tracked Python file**. It is the same quiet failure mode - a docstring saying "t
 mechanised by the guard in `scripts/<a guard>.py`" is read by whoever opens the file next, and
 the name is a pointer they will follow - and this tree had a live instance: `tests/test_review_queue.py`
 cited a guard that exists only on an unmerged branch, so `git log master -- <that path>` was empty.
-The class is discovered (`git ls-files '*.py'`) with two restrictions, each measured rather than
-guessed:
+The class is discovered (`git ls-files '*.py'`) with two restrictions. Each was measured before it
+was written down, and neither is justified here by a count: a count in prose goes stale silently -
+this paragraph's did, within the commit that wrote it - so what pins each restriction is the arm
+beside it, not a number above it.
 
-* **prose only** - docstrings and comments, never a string literal. Those same names appear
-  inside literals 11 times over 12 files (`check-some-other-guard.py`, `check-elsewhere.py`, ...),
+* **prose only** - docstrings and comments, never a string literal. The same names do appear
+  inside literals (`check-some-other-guard.py`, `check-elsewhere.py`, `check-gone-away.py`, ...),
   every one of them a fixture fed to a tool, and a fixture's data is not a claim about this tree -
-  the line `check-citation-resolves.py` draws for the same reason.
-* **the `check-` prefix**, which is what this repository names its guards. Over the 360 tracked
-  Python files, the wider prose class names 319 `scripts/...` references and 3 of them do not
-  resolve: the one above, a placeholder (`scripts/x.py`, five correct sentences about why a
-  printed command needs its runner) and a retired tool (`scripts/archive-memory-index.py`, whose
-  removal `tests/test_evolution_prompt_index_rule.py` asserts). Neither of those is a claim that
-  a file is there, and a rule that flagged them would need an exemption list - the shape this
-  file's own arms warn against.
+  the line `check-citation-resolves.py` draws for the same reason. How many such literals there
+  are is not a number this paragraph can state and stay true, so
+  `test_a_guard_named_in_a_string_literal_is_not_a_claim` is what holds the boundary.
+* **the `check-` prefix**, which is what this repository names its guards. The wider class - every
+  `scripts/<name>` named in a docstring or a comment - also flags names that are not claims about
+  this tree: a placeholder (`scripts/x.py`, five correct sentences about why a printed command
+  needs its runner) and a retired tool (`scripts/archive-memory-index.py`, whose removal
+  `tests/test_evolution_prompt_index_rule.py` asserts). Neither is a claim that a file is there,
+  and a rule that flagged them would need an exemption list - the shape this file's own arms warn
+  against - which is what the prefix buys.
 
 The boundary is a *spelling*, so it cuts both ways: a placeholder written `scripts/check-<dots>.py`
 is guard-shaped and this rule reports it as a missing file, which is how this paragraph's first
@@ -351,10 +355,12 @@ def test_a_missing_guard_is_reported_by_name() -> None:
 def test_a_guard_named_in_a_string_literal_is_not_a_claim() -> None:
     """The boundary that keeps this rule exempt from an exemption list.
 
-    A literal is where a fixture's data and this tree's printed messages live. Measured
-    2026-10-14: the same references appear inside literals 11 times over 12 files
-    (`check-some-other-guard.py`, `check-elsewhere.py`, ...), all of them fixtures, and a
-    whole-file search would report every one - and then need a list of names to forgive.
+    A literal is where a fixture's data and this tree's printed messages live. The same names do
+    appear inside literals (`check-some-other-guard.py`, `check-elsewhere.py`,
+    `check-gone-away.py`, ...), all of them fixtures, and a whole-file search would report every
+    one - and then need a list of names to forgive. No count is quoted, for the reason the
+    paragraph above gives: it changes with every fixture added, and this test is what pins the
+    boundary.
     """
     text = (
         'GONE = "scripts/check-some-other-guard.py"\n'
