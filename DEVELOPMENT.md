@@ -283,7 +283,19 @@ uv run --no-sync python3 scripts/check-icon-transparency.py <path>
 
 Exit `0` = every representation read is fully transparent at all four corner blocks; `1` = one is not, and the corner values are printed (that reading is the white ring); `2` = nothing could be read — no icon under the subject, or a container this tool does not open — **never a pass**. An artifact's icon is reached with `pkgutil --expand <pkg> <dir>`, then the component's `Payload` through `gunzip -dc Payload | cpio -i -d`; the Linux `tar.gz` carries no icon at all, so point the tool at an `.app` or an `.icns` rather than at that archive.
 
-**The release asserts this on the pkg it just built** (issue #2283). The macOS leg of `build-release.yml` expands `dist/artifacts/EMRG-*-macos-*.pkg`, runs the command above on the payload it extracted, and fails the job on exit `1` **and** on exit `2` — while the pkg is still unsigned and unpublished, so the white ring cannot reach a release at all. A generated `.icns` being non-empty (`test -s`, the step that renders it) is not this question: an opaque ring is non-empty. To reproduce CI's reading at home, run the two commands in the paragraph above on the published `.pkg` and compare — same tool, same route, same answer.
+**The release asserts this on the pkg it just built** (issue #2283). The macOS leg of `build-release.yml` expands `dist/artifacts/EMRG-*-macos-*.pkg`, runs the command above on the payload it extracted, and fails the job on exit `1` **and** on exit `2` — while the pkg is still unsigned and unpublished, so the white ring cannot reach a release at all. A generated `.icns` being non-empty (`test -s`, the step that renders it) is not this question: an opaque ring is non-empty.
+
+To reproduce CI's reading at home, run the same route on the published artifact — same tool, same answer. Measured on `v0.3.12` (`EMRG-0.3.12-macos-arm64.pkg`, sha256 `fdc0c380e2b1f273e0c41391568dbf6409c81b232a5655343c955097a0323de3`): every PNG representation of the shipped app reads alpha `0` at all four corners, rc `0`.
+
+```bash
+gh release download v<ver> -R argszero/emrg --pattern 'EMRG-<ver>-macos-arm64.pkg' --dir /tmp/emrg-pkg
+rm -rf /tmp/emrg-expanded
+pkgutil --expand /tmp/emrg-pkg/EMRG-<ver>-macos-arm64.pkg /tmp/emrg-expanded
+(cd /tmp/emrg-expanded/*.pkg && gunzip -dc Payload | cpio -i -d './emrg-gui/EMRG.app')
+uv run --no-sync python3 scripts/check-icon-transparency.py /tmp/emrg-expanded/*.pkg/emrg-gui/EMRG.app
+```
+
+The `rm -rf` is not decoration: `pkgutil --expand` **creates** its destination and refuses one that already exists — measured on `v0.3.12`, a second run prints `Error encountered while creating /tmp/emrg-expanded. Error 17: File exists` and exits `1`, a code this page otherwise reads as "the icon is opaque". The CI step is immune because it expands into a fresh `mktemp -d`. The payload also carries `._icon.icns` beside the icon — an AppleDouble sidecar (9798 B against the icon's 612824 B) that holds no icon at all; pointed at the `.app` the tool names it and still measures the icon, and a tree whose whole `.icns` population is sidecars answers `2`, never `0`.
 
 **The host-side counterpart of the installer's compiled-extension guard** (#1544). The macOS build signs the app with `com.apple.security.cs.disable-library-validation` so a pip-installed C extension can load; the installer asserts that entitlement's **shape**, and this command asserts its **effect** — a wheel's `.so` really imports under the bundled interpreter. Run it before reporting "packaging is broken", or after an install, to tell the two apart:
 
