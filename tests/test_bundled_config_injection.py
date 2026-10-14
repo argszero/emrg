@@ -18,17 +18,26 @@ Every test works on **copies under ``tmp_path``**: the script is pointed at a st
 this file creates, and the repository's own carriers are read only. Two of them drive the
 module in-process, the rest run it as a subprocess so the environment handling is the real
 one.
+
+A carrier's template is read **the way the product reads it** — CPython for ``config.py``,
+node for ``main.js`` — because the span lives inside a string literal and the bytes on disk
+are not the string that literal yields (issue #2272). A guard that parsed the file's text
+would share the blind spot it exists to cover.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "packaging" / "bundle_default_config.py"
@@ -83,20 +92,109 @@ VALUES = {
 }
 
 
+#: Node evaluates the carrier's own declaration, so no Python scanner of the file stands in
+#: for JS's escaping. The statement is located the way the carrier writes it — the literal
+#: closes on a line that is a backtick and a semicolon — and run in an empty context, where
+#: the only name it reads is the one it defines.
+_JS_READ = """
+const fs = require("fs");
+const vm = require("vm");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const start = src.indexOf("const CONFIG_TEMPLATE");
+const end = src.indexOf("\\n`;", start);
+if (start < 0 || end < 0) {
+  console.error("main.js no longer declares CONFIG_TEMPLATE the way this reading expects");
+  process.exit(2);
+}
+process.stdout.write(JSON.stringify(vm.runInNewContext(src.slice(start, end + 3) + "\\nCONFIG_TEMPLATE", {})));
+"""
+
+
+def _render_python_carrier(path: Path) -> str:
+    """The template a ``.py`` carrier holds, as **CPython** yields it.
+
+    ``runpy.run_path`` executes the module body, so the f-string is evaluated exactly as the
+    import the product performs would evaluate it — and a value the f-string reinterprets is
+    the ``NameError`` issue #2272 measured, raised here rather than read past. The file is a
+    staged copy: its body defines classes, functions and four constants and calls nothing, and
+    the names it imports resolve against this checkout.
+    """
+    namespace = runpy.run_path(str(path), run_name="staged_config_template")
+    template = namespace["CONFIG_TEMPLATE"]
+    assert isinstance(template, str), f"{path}: CONFIG_TEMPLATE is no longer a string"
+    return template
+
+
+def _node() -> str:
+    """The ``node`` that actually runs here, or a skip naming why the reading is unavailable.
+
+    ``shutil.which`` alone is not enough. On this host ``node`` is an ``asdf`` shim, which
+    resolves the toolchain through ``$HOME`` and exits 126 when ``HOME`` points elsewhere —
+    which is the environment a mutation arm runs its child in, so the probe decides between
+    "this reading is not available here" and a red that would be about the host rather than
+    about the carrier. The probe runs one trivial program; nothing about the carrier is read
+    before it answers.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip(
+            "no `node` on PATH: this reading evaluates the carrier's template literal in the "
+            "language the GUI ships in, and cannot do that without that language's runtime"
+        )
+    probe = subprocess.run(
+        [node, "-e", "0"],
+        capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace",
+    )
+    if probe.returncode != 0:
+        pytest.skip(
+            f"`{node}` is on PATH but cannot run here (exit {probe.returncode}): this reading "
+            "evaluates the carrier's template literal in the language the GUI ships in, and an "
+            "unavailable runtime is not a finding about the carrier"
+        )
+    return node
+
+
+def _render_js_carrier(path: Path) -> str:
+    """The template a ``.js`` carrier holds, as **node** yields it.
+
+    A different engine from any this repository writes in, which is the point: the escaping
+    the injection has to get right is JS's own, and no Python reading of the file can be the
+    judge of it.
+    """
+    node = _node()
+    harness = path.parent / "_render_template.js"
+    harness.write_text(_JS_READ, encoding="utf-8")
+    result = subprocess.run(
+        [node, str(harness), str(path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    assert result.returncode == 0, f"{path}: node could not evaluate it: {result.stderr}"
+    return json.loads(result.stdout)
+
+
+def _carrier_template(path: Path) -> str:
+    """The first-run template ``path`` holds, as the language that ships it yields it."""
+    if path.suffix == ".js":
+        return _render_js_carrier(path)
+    return _render_python_carrier(path)
+
+
 def _template_of(path: Path, module) -> dict:
     """The ``[llm]`` section of the template inside ``path``, parsed as TOML.
 
-    The span *begins* with the heading, so the parsed document has exactly one top-level
-    table, ``llm``; it is unwrapped here so callers name keys rather than the section that
-    holds them, and so a span that stopped opening that table is a failure and not a
-    silently different reading.
+    The span is taken from the **rendered** template, not from the file's bytes: both carriers
+    write it inside a string literal, so a value read out of the file is a value the carrier
+    may yet rewrite. The span *begins* with the heading, so the parsed document has exactly
+    one top-level table, ``llm``; it is unwrapped here so callers name keys rather than the
+    section that holds them, and so a span that stopped opening that table is a failure and
+    not a silently different reading.
     """
-    text = path.read_text(encoding="utf-8")
-    span = module.section_span(text)
-    assert span is not None, f"{path} no longer carries an [llm] template span"
+    rendered = _carrier_template(path)
+    span = module.section_span(rendered)
+    assert span is not None, f"{path} no longer renders an [llm] template span"
     start, end = span
-    parsed = tomllib.loads(text[start:end])
-    assert set(parsed) == {"llm"}, f"{path}: the span no longer opens the [llm] table"
+    parsed = tomllib.loads(rendered[start:end])
+    assert set(parsed) == {"llm"}, f"{path}: the rendered span no longer opens the [llm] table"
     return parsed["llm"]
 
 
@@ -128,7 +226,58 @@ def test_a_variable_named_after_no_key_is_not_a_configuration():
     assert module.env_overrides({"EMRG_BUNDLED_SOMETHING_ELSE": "x"}) == {}
 
 
+#: The spellings of a secret both carriers' literals reinterpret, from issue #2272's table and
+#: the two neighbours of the same mechanism it does not list: a **newline** (what
+#: ``gh secret set KEY < file`` appends, and which would end the assignment line) and a
+#: **backtick** (which closes a JS template literal). Read on the *rendered* template, so the
+#: assertion is about the string the product will write, not about the escaping.
+REINTERPRETED_VALUES = {
+    "brace": "sk-A{b}C9d8e7f6",
+    "double-quote": 'sk-A"B',
+    "backslash": "sk-A\\B",
+    "template-substitution": "sk-A${process.env.HOME}B",
+    "newline": "sk-A\nB",
+    "backtick": "sk-A`B",
+    "triple-single-quote": "sk-A'''B",
+}
+
+
 # ── the injected direction ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("shape,value", sorted(REINTERPRETED_VALUES.items()))
+def test_a_value_each_literal_reinterprets_reaches_both_carriers(tmp_path, shape, value):
+    """The value the carrier's own language would rewrite must come back out of it.
+
+    This is issue #2272's acceptance, one spelling at a time and on **both** carriers, because
+    the two literals reinterpret different characters — a brace is an f-string field and a
+    dollar brace a JS substitution — and a value escaped for one is not a value escaped for the
+    other. ``base_url`` rides along so the assertion is not about one key's line shape: every
+    override in the run has to come back equal.
+    """
+    module = _load_module()
+    root = _staged(tmp_path)
+    result = _run(root, {"EMRG_BUNDLED_API_KEY": value, "EMRG_BUNDLED_BASE_URL": value})
+    assert result.returncode == 0, result.stderr
+    for rel in CARRIERS:
+        parsed = _template_of(root / rel, module)
+        assert parsed["api_key"] == value, f"{rel} did not render the {shape} api_key"
+        assert parsed["base_url"] == value, f"{rel} did not render the {shape} base_url"
+
+
+def test_the_repository_carriers_render_them_too(tmp_path):
+    """The two real carriers, not a fixture shaped like them: the escape is written for these.
+
+    A staged tree holds copies, but the *literal each copy is inside* is the file's own — an
+    f-string here and a template literal there — so this drives the same two languages on the
+    same two files a release build patches.
+    """
+    module = _load_module()
+    root = _staged(tmp_path)
+    value = REINTERPRETED_VALUES["brace"]
+    assert _run(root, {"EMRG_BUNDLED_API_KEY": value}).returncode == 0
+    assert _template_of(root / CARRIERS[0], module)["api_key"] == value
+    assert _template_of(root / CARRIERS[1], module)["api_key"] == value
 
 
 def test_the_configured_values_reach_both_carriers(tmp_path):
@@ -219,10 +368,15 @@ def test_the_sentinel_and_the_readers_are_outside_the_span(tmp_path):
     for rel in CARRIERS:
         text = (root / rel).read_text(encoding="utf-8")
         start, end = module.section_span(text)
+        # The span's *bytes* are not the string the carrier yields, so the two assertions
+        # about what the template now says are read off the rendered span — the file's own
+        # language is what decides them (issue #2272). The assertions about the neighbours
+        # stay on the bytes, because those lines are the ones the patch must not touch.
+        rendered = module.render_span(text, module.literal_kind(text, start))
         # Every mention (prose included) survives, and the span's own assignment is gone.
         assert text.count("sk-...") == 2, f"{rel}: one of the two neighbours beside the span moved"
         assert 'api_key = "sk-..."' not in text, f"{rel}: the template still holds the sentinel"
-        assert 'model = "deepseek-flash"' in text[start:end], f"{rel}: the span kept its old model"
+        assert 'model = "deepseek-flash"' in rendered, f"{rel}: the span kept its old model"
         # The [[llm.models]] entries keep their own `model` lines — the same key name, one
         # section down, which a whole-file replacement would have overwritten.
         assert 'name = "deepseek-v3"' in text
@@ -286,21 +440,101 @@ def test_the_skipped_directories_are_read_relative_to_the_root(tmp_path):
 # ── the write is checked by reading it back ────────────────────────────────────────
 
 
+def _patched(tmp_path: Path, env: dict[str, str], rel: str = CARRIERS[0]) -> tuple[Path, str, str]:
+    """A staged tree patched with ``env``; returns the carrier, its text and its literal kind."""
+    module = _load_module()
+    root = _staged(tmp_path)
+    assert _run(root, env).returncode == 0
+    path = root / rel
+    text = path.read_text(encoding="utf-8")
+    span = module.section_span(text)
+    assert span is not None
+    return path, text, module.literal_kind(text, span[0])
+
+
 def test_the_read_back_finds_a_value_that_is_not_there(tmp_path):
     """Both directions, because a read-back that cannot fail proves nothing.
 
-    ``lines_missing`` is the only thing standing between "the patch ran" and "the artifact
-    has a key", so it is exercised on a tree that holds most overrides and lacks one — the
-    shape a half-applied write leaves — not only on the tree a write produced.
+    ``unlanded_keys`` is the only thing standing between "the patch ran" and "the artifact has
+    a key", so it is exercised on a rendered span that holds the value and on one asked for a
+    different value — the shape a half-applied write leaves — and not only on the tree a write
+    produced.
     """
     module = _load_module()
     keyed = {name.removeprefix("EMRG_BUNDLED_").lower(): value for name, value in VALUES.items()}
+    _path, text, kind = _patched(tmp_path, VALUES)
+    rendered = module.render_span(text, kind)
+    assert module.unlanded_keys(rendered, keyed) == []
+    assert module.unlanded_keys(rendered, {**keyed, "temperature": "0.25"}) == ["temperature"]
+
+
+def test_a_value_written_without_the_literal_layer_is_never_reported_as_landed(tmp_path):
+    """The direction the old check could not see, and the reason the check moved.
+
+    The bytes-on-disk reading asked whether the file *held* a line, and a value written as the
+    TOML text (the pre-#2272 shape) held exactly that line while the carrier's language
+    rewrote it. Here the staged fixture is given that write by hand: the f-string's braces stay
+    single, so no rendering of the file yields a template, and the check has no reading under
+    which this passed.
+    """
+    module = _load_module()
     root = _staged(tmp_path)
-    assert _run(root, VALUES).returncode == 0
-    text = (root / CARRIERS[0]).read_text(encoding="utf-8")
-    assert module.lines_missing(text, keyed) == []
-    assert module.lines_missing(text, {**keyed, "temperature": "0.25"}) == ["temperature"]
-    assert module.lines_missing("no span at all", keyed) == sorted(keyed)
+    path = root / CARRIERS[0]
+    text = path.read_text(encoding="utf-8")
+    naive = text.replace('api_key = "{PLACEHOLDER_API_KEY}"', 'api_key = "sk-A{b}C"')
+    assert naive != text, "the fixture no longer holds the sentinel assignment this test rewrites"
+    path.write_text(naive, encoding="utf-8")
+
+    span = module.section_span(naive)
+    assert span is not None
+    kind = module.literal_kind(naive, span[0])
+    with pytest.raises(module.LiteralError):
+        module.render_span(naive, kind)
+
+    # ... and the same tree through the script's own reading: the build stops rather than
+    # reporting the value it never wrote.
+    result = _run(root, {"EMRG_BUNDLED_API_KEY": "sk-A{b}C9d8e7f6"})
+    assert result.returncode == 0, result.stderr  # the patch itself re-encodes it correctly
+    assert _template_of(path, module)["api_key"] == "sk-A{b}C9d8e7f6"
+
+
+def test_a_write_that_does_not_land_stops_the_build(tmp_path, monkeypatch, capsys):
+    """The read-back is **wired** to the exit status, not merely defined.
+
+    ``unlanded_keys`` can be perfectly correct and reach nothing, and the failure it names is
+    silent: a release with no key looks exactly like a release from before the feature. So the
+    write is made to vanish — ``write_text`` is the single call between the patch and the
+    reading — and the check then runs on a file that still holds the sentinel, which is the
+    half-applied release this step exists to refuse. The status is the assertion, because
+    under ``set -e`` in a release build it is the only thing that stops the artifact.
+    """
+    module = _load_module()
+    root = _staged(tmp_path)
+    monkeypatch.setenv("EMRG_BUNDLED_API_KEY", "sk-a-key-that-never-landed")
+    monkeypatch.setattr(Path, "write_text", lambda self, *args, **kwargs: len(str(args[0])))
+    assert module.main(["--source-root", str(root)]) == 1
+    assert "did not land" in capsys.readouterr().err
+
+
+def test_a_carrier_whose_literal_cannot_be_named_stops_the_build(tmp_path):
+    """A literal the script cannot name is a stopped build, never a guessed escape.
+
+    Driven by mutating the *fixture* — the f-string prefix becomes ``r``, so a backslash in the
+    value would no longer be an escape — because no variable name can produce this on master.
+    The prefix is the whole reading: escaping a raw literal's backslashes writes a value the
+    carrier does not yield, which is the class of defect the two-layer encoding exists for.
+    """
+    root = _staged(tmp_path)
+    target = root / CARRIERS[0]
+    text = target.read_text(encoding="utf-8")
+    assert 'CONFIG_TEMPLATE = f"""' in text, "the carrier's literal prefix moved; re-point this test"
+    target.write_text(
+        text.replace('CONFIG_TEMPLATE = f"""', 'CONFIG_TEMPLATE = r"""', 1), encoding="utf-8"
+    )
+    result = _run(root, VALUES)
+    assert result.returncode == 1
+    assert "config.py" in result.stderr
+    assert "prefixed" in result.stderr
 
 
 # ── the inert direction, which is what ships today ─────────────────────────────────
