@@ -345,6 +345,7 @@ def test_the_da1_sentinel_ends_the_wait_early():
         os.close(master); os.close(slave); os.close(devnull)
 
 
+@_needs_posix_tty
 def test_the_probe_reads_the_sentinel_reply_that_follows_the_colour(monkeypatch):
     """The colour reply ends the *question*, not the *read*.
 
@@ -354,6 +355,12 @@ def test_the_probe_reads_the_sentinel_reply_that_follows_the_colour(monkeypatch)
     probe must go on reading until the sentinel has been consumed, and that is what this pins: the
     second chunk is read. The chunks are injected rather than timed, so the reading does not depend
     on how fast a pty delivers two writes.
+
+    The POSIX marker is not about the pty this test does *not* use: the read loop under test is
+    unreachable on Windows, because ``probe_background`` imports ``termios`` inside the body that
+    ends in ``except Exception: return None``, so an absent ``termios`` returns before any read.
+    Marking it is the honest reading — the assertion's subject does not exist there — and this
+    test failed on the Windows leg of CI until it was marked (run 38597530783).
     """
     chunks = iter([b"\x1b]11;rgb:ffff/ffff/ffff\x07", b"\x1b[?1;2c"])
     read: list[bytes] = []
