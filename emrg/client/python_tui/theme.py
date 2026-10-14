@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import select
 import sys
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -385,9 +386,12 @@ def probe_background(
     that fails, a terminal that stays silent. ``None`` is a measurement result — "not known" — and
     the caller turns it into "keep the dark appearance", never into a guess.
 
-    The wait ends on whichever comes first: the OSC 11 reply, the DA1 sentinel's reply, or the
-    timeout. The terminal's mode is restored in ``finally`` because a client that hangs is worse
-    than a client that does not know its background.
+    The wait ends on whichever comes first: the DA1 sentinel's reply, or the timeout. **Not on the
+    colour reply** — the probe wrote two queries, so it reads until both have been answered or the
+    bound runs out; a terminal that writes its answers separately (Apple Terminal does) would
+    otherwise leave the sentinel's reply in the queue, and the input reader takes a queued
+    reply for a keystroke. The terminal's mode is restored in ``finally`` because a client that
+    hangs is worse than a client that does not know its background.
     """
     stdin = stdin if stdin is not None else sys.stdin
     stdout = stdout if stdout is not None else sys.stdout
@@ -420,11 +424,18 @@ def probe_background(
         except Exception:  # noqa: BLE001
             return None
 
-        deadline = timeout_ms / 1000.0
+        # The bound is the whole wait, not one iteration of it. It has to be, now that the wait
+        # does not end at the colour reply: a terminal that answers OSC 11 but never answers the
+        # sentinel would otherwise pay the budget a second time, once per read.
+        deadline = time.monotonic() + timeout_ms / 1000.0
         buf = ""
+        rgb: Optional[tuple[int, int, int]] = None
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                ready, _, _ = select.select([fd_in], [], [], max(0.0, deadline))
+                ready, _, _ = select.select([fd_in], [], [], remaining)
             except Exception:  # noqa: BLE001 - Windows cannot select on a file descriptor
                 return None
             if not ready:
@@ -436,19 +447,21 @@ def probe_background(
             if not chunk:
                 break
             buf += chunk.decode("utf-8", "replace")
-            rgb = parse_osc11(buf)
-            if rgb is not None:
-                return rgb
+            if rgb is None:
+                rgb = parse_osc11(buf)
             if _DA1_PREFIX in buf and buf.rstrip().endswith("c"):
-                # The sentinel answered and no OSC 11 reply came with it: this terminal does not
-                # report its background, and nothing more is coming. Stop now — this is the whole
-                # reason the sentinel is sent, and it is what keeps the common case (a terminal
-                # with no OSC 11 support) from costing the full timeout.
+                # The sentinel answered. Both queries have now been read to the end, so the
+                # terminal's replies cannot be left in the queue for the input reader to take for
+                # keystrokes — which is what the colour reply alone did *not* guarantee: a
+                # terminal that writes the two answers separately (Apple Terminal does) leaves
+                # the DA1 reply behind, and that reply is a 7-byte `ESC[` sequence.
+                # Stopping here is what keeps a terminal with no OSC 11 support cheap, and a
+                # terminal that answers only the colour now costs the rest of the bound rather
+                # than its reply's leftovers.
                 break
-            # Otherwise keep waiting for the rest of a split reply, still inside the original
-            # bound: `select` is what makes the wait safe, so a partial answer needs no guessed
-            # grace period and a silent terminal still cannot hold the client.
-        return parse_osc11(buf)
+        # The colour, whenever it arrived; the second parse covers a reply that completed on the
+        # last read of a bounded wait.
+        return rgb if rgb is not None else parse_osc11(buf)
     except Exception:  # noqa: BLE001 - the probe must never take the client down with it
         return None
     finally:
