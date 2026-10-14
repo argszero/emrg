@@ -283,6 +283,19 @@ uv run --no-sync python3 scripts/check-icon-transparency.py <path>
 
 Exit `0` = every representation read is fully transparent at all four corner blocks; `1` = one is not, and the corner values are printed (that reading is the white ring); `2` = nothing could be read — no icon under the subject, or a container this tool does not open — **never a pass**. An artifact's icon is reached with `pkgutil --expand <pkg> <dir>`, then the component's `Payload` through `gunzip -dc Payload | cpio -i -d`; the Linux `tar.gz` carries no icon at all, so point the tool at an `.app` or an `.icns` rather than at that archive.
 
+**A release build now makes that reading itself** (issue #2283): the macOS leg's *The shipped icon must be transparent, measured from the pkg* step expands the `.pkg` it has just built with `pkgutil --expand`, takes the `.icns` under an `.app`'s `Contents/Resources` out of the component's `Payload` into a temp dir, and runs this tool on it — so the acceptance is answered before the artifact is uploaded rather than by hand afterwards. Both of the tool's non-zero codes fail the step: an opaque corner and a container that could not be read are different answers, and neither is a pass. The same route by hand, on a published artifact:
+
+```bash
+gh release download v<ver> -R argszero/emrg --pattern 'EMRG-<ver>-macos-arm64.pkg' --dir /tmp/emrg-pkg
+rm -rf /tmp/emrg-expanded && pkgutil --expand /tmp/emrg-pkg/EMRG-<ver>-macos-arm64.pkg /tmp/emrg-expanded
+(cd /tmp/emrg-expanded/*.pkg && gunzip -dc Payload | cpio -i -d './emrg-gui/EMRG.app')
+uv run --no-sync python3 scripts/check-icon-transparency.py /tmp/emrg-expanded/*.pkg/emrg-gui/EMRG.app
+```
+
+The `rm -rf` is not decoration: `pkgutil --expand` **creates** its destination and refuses a second run into one that exists — measured on `v0.3.12`, it prints `Error encountered while creating /tmp/emrg-expanded. Error 17: File exists` and exits `1`, a code this page otherwise reads as "the icon is opaque". The CI step is immune because it expands into a fresh `mktemp -d`.
+
+Measured on `v0.3.12` (`sha256 fdc0c380e2b1f273e0c41391568dbf6409c81b232a5655343c955097a0323de3`): all eight PNG representations of the shipped app read alpha 0 at all four corners, rc 0. The `.pkg` also carries `._icon.icns` beside the icon — an AppleDouble sidecar (9798 B against the icon's 612824 B), which the step's pattern skips on purpose: it is not an icon and the tool cannot decode one.
+
 **The host-side counterpart of the installer's compiled-extension guard** (#1544). The macOS build signs the app with `com.apple.security.cs.disable-library-validation` so a pip-installed C extension can load; the installer asserts that entitlement's **shape**, and this command asserts its **effect** — a wheel's `.so` really imports under the bundled interpreter. Run it before reporting "packaging is broken", or after an install, to tell the two apart:
 
 ```bash

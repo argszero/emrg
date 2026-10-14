@@ -280,3 +280,116 @@ def test_a_fault_outranks_an_unmeasured_subject(tmp_path):
     missing.write_bytes(b"x")
     code, out = run(opaque, missing)
     assert code == 1, out
+
+
+# ── the wiring: the release build makes this reading itself ────────────────────────
+#
+# Rant 2026-10-14T09:18:05 asks for the shipped icon to be read from the artifact, and
+# `cyc20261014-221638` measured what a hand-run costs: reading the wrong subject (a
+# gitignored local build), then recording that the icon inside the `.pkg` was never
+# measured at all. Nothing in CI would have noticed either way — the macOS leg asserted
+# only that the generated `.icns` is non-empty, which the white ring passes. So the
+# reading is wired into the step that builds the `.pkg` (issue #2283), and the wiring is
+# asserted here by reading the workflow's **parsed YAML**: an unrun tool is a step that
+# silently stopped, which is the shape this repository has paid for before (#1913).
+
+WORKFLOW = REPO / ".github" / "workflows" / "build-release.yml"
+
+
+def _icon_step() -> dict:
+    """The `build` job's step that runs this tool, from the workflow's parsed YAML."""
+    import yaml
+
+    steps = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["build"]["steps"]
+    running = [s for s in steps if "check-icon-transparency.py" in str(s.get("run", ""))]
+    assert len(running) == 1, (
+        f"the release build must run scripts/check-icon-transparency.py exactly once; "
+        f"{len(running)} step(s) do — an unwired tool is a release nobody measured"
+    )
+    return running[0]
+
+
+def _icon_pattern() -> str:
+    """The `.icns` pattern the step greps the payload listing with, as written."""
+    import re
+
+    body = _icon_step()["run"]
+    found = re.search(r"grep -E '([^']+)'", body)
+    assert found is not None, f"the step no longer greps the payload listing:\n{body}"
+    return found.group(1)
+
+
+def test_the_release_build_reads_the_shipped_icon():
+    """macOS-only (the `.pkg` exists nowhere else), and never allowed to fail softly."""
+    step = _icon_step()
+    assert step.get("if") == "runner.os == 'macOS'", step.get("if")
+    assert not step.get("continue-on-error"), (
+        "a step whose failure does not fail the job reports an opaque icon as a release"
+    )
+
+
+def test_the_step_lets_every_non_zero_code_fail_it():
+    """`1` (opaque) and `2` (unreadable) are different answers; neither is a pass."""
+    body = _icon_step()["run"]
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    assert lines[0] == "set -euo pipefail", lines[0]
+    invoking = [ln for ln in lines if "check-icon-transparency.py" in ln]
+    assert len(invoking) == 1, invoking
+    assert "|| true" not in invoking[0], (
+        f"the tool's verdict is swallowed by its own invocation: {invoking[0]}"
+    )
+    assert lines[-1] == invoking[0], (
+        "the tool's exit code must be the step's, so its invocation is the last command"
+    )
+
+
+def test_the_steps_subject_is_the_pkg_and_its_absence_is_named():
+    """The #1913 shape: a step that "skips" reports a release with no macOS product as
+    success, so a missing `.pkg` is an error naming the subject."""
+    body = _icon_step()["run"]
+    assert "EMRG-*-macos-*.pkg" in body, body
+    assert "::error::no EMRG-*-macos-*.pkg found in dist/artifacts" in body, body
+
+
+# Measured 2026-10-15 by expanding the published `v0.3.12` pkg
+# (`pkgutil --expand` then `gunzip -dc <Payload> | cpio -itv`) and reading every entry
+# whose name ends in `.icns` -- the whole listing is these two lines, and the app bundles
+# it carries are `EMRG.app`, its five `Contents/Frameworks/*.app` helpers, and the
+# hand-written `packaging/make-installer.sh` wrapper `emrg-gui/卸载 EMRG.app` (a bash
+# script bundle with no `Contents/Resources/` at all).
+#
+# `packaging/assets/icon.icns` does not appear here: it is the *input* `gen-assets.sh`
+# renders, and `make-installer.sh` copies it into `EMRG.app/Contents/Resources/` under
+# the name asserted below. It is kept as a counterexample because the pattern must read
+# the icon the *platform* renders, and a build-tree path is not that.
+MEASURED_ICNS_ENTRIES = [
+    "./emrg-gui/EMRG.app/Contents/Resources/icon.icns",
+    "./emrg-gui/EMRG.app/Contents/Resources/._icon.icns",
+]
+
+
+def test_the_pattern_takes_the_app_icon_and_not_its_appledouble_sidecar():
+    """One subject, and the sidecar is not it.
+
+    The `._icon.icns` AppleDouble sidecar is produced by the packaging step; matching it
+    would hand the tool a file it cannot decode -- rc 2 for a subject that is fine, and
+    the reading would be about the pattern rather than about the icon. Measured on
+    `v0.3.12`: the two entries above are the entire `.icns` population of the payload.
+    """
+    import re
+
+    pattern = re.compile(_icon_pattern())
+    taken = "./emrg-gui/EMRG.app/Contents/Resources/icon.icns"
+    assert pattern.search(taken), pattern.pattern
+    for skipped in (
+        "./emrg-gui/EMRG.app/Contents/Resources/._icon.icns",
+        # not inside an `.app` bundle: the generated source icon in the build tree
+        "./packaging/assets/icon.icns",
+    ):
+        assert not pattern.search(skipped), f"{pattern.pattern!r} also matched {skipped!r}"
+
+    selected = [e for e in MEASURED_ICNS_ENTRIES if pattern.search(e)]
+    assert selected == [taken], (
+        f"the pattern must select exactly the shipped app icon from a real payload "
+        f"listing; it selected {selected}"
+    )

@@ -460,6 +460,68 @@ jobs:
           ls -la
           test -s "$ZIP"
 
+      # ── 图标透明（macOS only，issue #2283；rant 2026-10-13T17:45:42 的白圈）──
+      # 发布验收要求「从产物而不是从生成它的脚本」确认图标透明，而**没有任何闸门读过它**：
+      # 上面那步只断言 `test -s packaging/assets/icon.icns`，而白圈恰好能过 `test -s`；
+      # `scripts/check-icon-transparency.py` 的 docstring 自己写着「白圈在本仓每个闸门
+      # 面前都不可见」。于是这一步在发布后被手工跑，实测跑了两次、完成零次：
+      # cyc20261014-221638 先读错主语（读的是 gitignore 的陈旧本机 icns），更正后如实
+      # 记下「.pkg 内图标未测」（142 MB / 15 分钟只下到 6.9 MB）。而产物就在本机——
+      # 实测整条路线 1.5 s：pkgutil --expand → payload 里取出那个 icns → 交给工具。
+      # 为什么这里量而不是宿主侧量：gen-assets.sh 在**哪里跑就在哪里渲染**（CI 装 librsvg，
+      # 宿主未必装，回落 Chrome headless 是另一条路径），所以宿主收到的是 CI 的渲染，
+      # 而那份拷贝就在本步刚打出来的 .pkg 里。
+      # 退出码 1 与 2 都失败：「图标不透」与「图标读不出来」是两个答案，都不是通过。
+      - name: The shipped icon must be transparent, measured from the pkg (macOS only)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
+          # 不跳过（issue #1913）：这一步的**主语**是 pkg，缺席时印 "skipping" + exit 0
+          # 等于给一次没有 macOS 产物的发布盖章。
+          if [ -z "$PKG" ]; then
+            echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg"
+            exit 1
+          fi
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+
+          pkgutil --expand "$PKG" "$WORK/expanded"
+          PAYLOAD="$(find "$WORK/expanded" -name Payload -type f | head -1)"
+          if [ -z "$PAYLOAD" ]; then
+            echo "::error::$PKG expanded to no Payload — there is nothing to read the icon from"
+            exit 1
+          fi
+
+          # payload 是 cpio+gzip，全解开要几百 MB 而主语只有几 MB，所以列一次、只取图标。
+          # `._*` 是 AppleDouble 副本（实测 ._icon.icns 9798 B 对 icon.icns 612824 B），
+          # 不是图标；`Resources/` 下不在 .app 里的那份（构建时生成的 assets/icon.icns）
+          # 也不是平台真正渲染的那个文件。
+          if ! LIST="$(gunzip -dc "$PAYLOAD" | cpio -it 2>/dev/null)"; then
+            echo "::error::could not list the payload of $PKG — the icon cannot be read from it"
+            exit 1
+          fi
+          printf '%s\n' "$LIST" > "$WORK/files.txt"
+          ICONS="$(grep -E '^\./.*\.app/Contents/Resources/[^/.][^/]*\.icns$' "$WORK/files.txt" || true)"
+          if [ -z "$ICONS" ]; then
+            echo "::error::$PKG carries no .icns inside an .app bundle — the app ships with no icon of its own"
+            exit 1
+          fi
+
+          mkdir -p "$WORK/payload"
+          subjects=()
+          while IFS= read -r entry; do
+            echo "reading $entry"
+            if ! (cd "$WORK/payload" && gunzip -dc "$PAYLOAD" | cpio -i -d "$entry" >/dev/null 2>&1); then
+              echo "::error::could not extract $entry from the payload of $PKG"
+              exit 1
+            fi
+            subjects+=("$WORK/payload/$entry")
+          done <<< "$ICONS"
+
+          python3 scripts/check-icon-transparency.py "${subjects[@]}"
+
       # ── pkg 签名（macOS only，P2；Secret 未配则跳过降级）──
       # ⚠️ productsign 需要 Developer ID Installer 身份（非 Application 身份）——
       # 实测 #462：MACOS_SIGNING_IDENTITY 配 Application 身份报
