@@ -396,10 +396,27 @@ def test_every_task_template_states_both_permanent_red_lines() -> None:
     The glob is asserted non-empty first: a `TASK_TEMPLATES` that resolved to no files
     would make the loop below pass over nothing, which is the failure mode this file's
     own control test exists to prevent.
+
+    The population is read from the scheduler's registry, not written as a literal (it was
+    `len(TASK_TEMPLATES) == 6` until the `ios-app` template landed, and the comment above
+    the glob already promised the opposite: "a new task type is a new carrier the moment
+    its template lands"). A count is a *derived* number, so it goes stale exactly when the
+    thing it describes grows — and the edit it forces is a test line, which is the edit
+    least likely to be reviewed as a change of meaning. Both directions are asserted, which
+    the literal could not do: a registered template the glob misses would have gone
+    unscanned, and a template file no task type can be configured with is dead weight here.
     """
-    assert len(TASK_TEMPLATES) == 6, (
-        "the six shipped task templates must all be found; found "
+    from emrg.server.scheduler import TASK_TEMPLATES as TASK_TYPE_REGISTRY
+
+    assert TASK_TEMPLATES, (
+        "the glob found no task templates at all; found "
         f"{[carrier.name for carrier in TASK_TEMPLATES]}"
+    )
+    registered = set(TASK_TYPE_REGISTRY.values())
+    found = {carrier.name for carrier in TASK_TEMPLATES}
+    assert found == registered, (
+        "the carriers this check reads and the templates the scheduler can be configured "
+        f"with disagree: unscanned={sorted(registered - found)}, unreachable={sorted(found - registered)}"
     )
     for carrier in TASK_TEMPLATES:
         section = _forbidden_section(carrier.read_text(encoding="utf-8"))
