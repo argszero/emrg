@@ -42,6 +42,16 @@ have corrupted:
 * the ``[[llm.models]]`` entries' own ``model = "…"`` lines — the same key name as the
   top-level one, one section down.
 
+The value is escaped for the **literal it lands in**, and which literal that is is read from
+the carrier itself (:func:`literal_kind`): ``emrg/config.py`` holds its span in an f-string,
+``emrg/gui/main.js`` in a template literal, a shell heredoc in neither. A value is not data
+until that literal has been evaluated — a ``{`` written into the f-string ships a ``NameError``
+when the runtime imports its own config module, and a ``${`` written into the template literal
+interpolates an expression at run time — so each kind is escaped the way its own language
+undoes, and the read-back parses the **rendered** span rather than the file's bytes. A carrier
+whose literal cannot be named stops the build: that is a shape this script has never seen, and
+guessing an escape is how a release ships a config module that will not import.
+
 Env vars, one per ``[llm]`` key this bundles (unset ⇒ that key is left as the template has
 it; a name that does not occur in the span is an **error**, never a silent no-op, because
 that is what a typo in a secret name looks like):
@@ -65,6 +75,7 @@ import argparse
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 #: ``[llm]`` key -> the environment variable that overrides it. The rule is "one variable
@@ -98,6 +109,145 @@ SECTION_END = "\n[[llm.models]]"
 _ASSIGNMENT = re.compile(r"^(?P<key>[a-z_]+) = (?P<value>.*)$", re.MULTILINE)
 
 _NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
+
+#: The characters a literal's opener can be spelled with, so the span's start can be walked
+#: back to it: Python's ``f``/``r``/``b``/``u`` prefixes and the three quote characters.
+_OPENER_CHARS = "\"'`fFrRbBuU"
+
+#: A shell heredoc introducer on the line above the span, delimiter quoted or not.
+_HEREDOC = re.compile(r"<<-?\s*(?P<quote>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)\s*$")
+
+#: The escapes Python undoes inside a literal. ``\\`` and ``\"`` are the two the TOML
+#: escaping produces; the rest are here so a carrier hand-edited by someone else is read the
+#: way Python reads it. An escape not listed keeps its backslash, which is also Python's rule.
+_PY_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'"}
+
+#: The escapes a JavaScript template literal undoes — and, unlike Python, an escape it does
+#: not know loses the backslash. ``\${`` is its own case, handled where it is read.
+_JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "`": "`", "$": "$"}
+
+
+class UnnameableLiteral(ValueError):
+    """The span's surrounding literal is not one this script knows how to escape for."""
+
+
+class UnreadableLiteral(ValueError):
+    """The span does not yield the text it looks like, so the rendered value is unknowable."""
+
+
+def _heredoc_kind(text: str, start: int) -> str | None:
+    """``plain`` for a quoted shell heredoc, ``None`` for anything else.
+
+    A quoted delimiter (``<<'EMRGCONF'``) passes the body through untouched, so an escape
+    written into it would arrive in the shipped config as a literal backslash; an unquoted one
+    expands ``$VAR`` and backticks, so a value cannot be written into it safely at all.
+    """
+    previous = text.rfind("\n", 0, start)
+    if previous < 0:
+        return None
+    match = _HEREDOC.search(text[text.rfind("\n", 0, previous) + 1:previous])
+    if match is None:
+        return None
+    return "plain" if match.group("quote") else None
+
+
+def literal_kind(text: str, start: int) -> str | None:
+    """Which literal the span at ``start`` is written into: ``plain``, ``fstring``,
+    ``template``, or ``None`` when it cannot be named.
+
+    This is the reading the rest of the script rests on. The assignment is data only once the
+    carrier's own language has evaluated the literal around it, and the two evaluated forms
+    undo different things: an f-string turns ``{{`` back into ``{`` and ``\\\\`` into ``\\``, a
+    template literal interpolates ``${`` and undoes ``\\${``. So the escape a value needs is a
+    fact about the bytes **before** the span, and it is read from there rather than assumed.
+    """
+    i = start
+    while i > 0 and text[i - 1] in _OPENER_CHARS:
+        i -= 1
+    opener = text[i:start]
+    if not opener:
+        return _heredoc_kind(text, start)
+    if "`" in opener:
+        return "template"
+    if opener.endswith(('"""', "'''")):
+        return "fstring" if "f" in opener[:-3].lower() else "plain"
+    if opener[-1] in "\"'":
+        return "fstring" if "f" in opener[:-1].lower() else "plain"
+    return None
+
+
+def rendered(text: str, start: int, end: int, kind: str) -> str:
+    """The span ``text[start:end]`` as the carrier's own language yields it.
+
+    For a plain literal that is the text itself; for the two evaluated forms it is the text
+    with the escapes its language undoes. A ``{`` or a ``${`` that is **not** escaped is not
+    guessed at: an f-string would substitute a name and a template literal would run an
+    expression, so what the product would read is unknowable from here and this raises — the
+    same rule as everywhere else, that a reading which cannot be taken is not a pass.
+    """
+    span = text[start:end]
+    if kind == "plain":
+        return span
+    out: list[str] = []
+    i = 0
+    while i < len(span):
+        ch = span[i]
+        if kind == "fstring":
+            if ch == "\\" and i + 1 < len(span):
+                out.append(_PY_ESCAPES.get(span[i + 1], span[i:i + 2]))
+                i += 2
+                continue
+            if ch in "{}":
+                if span[i:i + 2] in ("{{", "}}"):
+                    out.append(ch)
+                    i += 2
+                    continue
+                raise UnreadableLiteral(
+                    f"a replacement field in the f-string at offset {i}: {span[i:i + 24]!r}")
+        else:
+            if ch == "\\" and i + 1 < len(span):
+                if span[i + 1] == "$" and span[i + 2:i + 3] == "{":
+                    out.append("${")
+                    i += 3
+                    continue
+                out.append(_JS_ESCAPES.get(span[i + 1], span[i + 1]))
+                i += 2
+                continue
+            if ch == "`":
+                raise UnreadableLiteral(f"an unescaped backtick at offset {i}")
+            if ch == "$" and span[i + 1:i + 2] == "{":
+                raise UnreadableLiteral(
+                    f"a template interpolation at offset {i}: {span[i:i + 24]!r}")
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def source_value(raw: str, kind: str) -> str:
+    """``raw`` as the right-hand side of an assignment **inside** a literal of ``kind``.
+
+    :func:`toml_value` is the escaping the *rendered* template must hold; this is the extra
+    layer the carrier's own language needs to yield exactly that, and the order matters:
+
+    * an f-string undoes ``\\\\`` to ``\\`` and ``{{`` to ``{``, so the backslashes TOML needs
+      and the value's own braces are both doubled;
+    * a template literal undoes ``\\\\`` to ``\\``, ``\\`` + backtick to a backtick and
+      ``\\${`` to ``${``, so all three are escaped where they appear;
+    * a plain literal undoes nothing, which is the TOML escaping alone.
+    """
+    toml = toml_value(raw)
+    if kind == "plain":
+        return toml
+    if not (toml.startswith('"') and toml.endswith('"')):
+        # A number or a boolean is quoted by neither this nor the carrier's language: there
+        # is nothing inside it for an f-string or a template literal to reinterpret.
+        return toml
+    body = toml[1:-1]
+    if kind == "fstring":
+        return '"' + body.replace("{", "{{").replace("}", "}}").replace("\\", "\\\\") + '"'
+    if kind == "template":
+        return '"' + body.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${") + '"'
+    raise UnnameableLiteral(kind)
 
 
 def env_overrides(environ: dict[str, str] | None = None) -> dict[str, str]:
@@ -161,12 +311,19 @@ def patch_text(text: str, overrides: dict[str, str]) -> tuple[str, set[str]]:
     Returns the new text and the keys actually written. A requested key that does not occur
     in the span is a :class:`KeyError` — the caller turns it into an error, because the only
     two ways that happens are a typo in a variable name and a template whose key was
-    renamed, and both want a human, not a silently un-bundled release.
+    renamed, and both want a human, not a silently un-bundled release. A span this script
+    cannot escape for (no literal it can name around it) is an
+    :class:`UnnameableLiteral`, for the same reason: the value would be written as bare
+    text into whatever holds it.
     """
     span = section_span(text)
     if span is None:
         raise ValueError("no [llm] template span")
     start, end = span
+    kind = literal_kind(text, start)
+    if kind is None:
+        raise UnnameableLiteral(
+            "the [llm] span is not inside a literal this script can escape for")
     body = text[start:end]
     written: set[str] = set()
 
@@ -175,7 +332,7 @@ def patch_text(text: str, overrides: dict[str, str]) -> tuple[str, set[str]]:
         if key not in overrides:
             return match.group(0)
         written.add(key)
-        return f"{key} = {toml_value(overrides[key])}"
+        return f"{key} = {source_value(overrides[key], kind)}"
 
     patched = _ASSIGNMENT.sub(_replace, body)
     missing = sorted(set(overrides) - written)
@@ -219,11 +376,47 @@ def lines_missing(text: str, overrides: dict[str, str]) -> list[str]:
     exists to prevent — an artifact shipped with no key, which looks exactly like an artifact
     shipped before the feature — is silent. Empty means every override is on disk as the line
     the template now holds.
+
+    The comparison is against the **rendered** span, not the file's bytes: what the carrier
+    yields is the only thing the product reads, and the two differ wherever the value had to
+    be escaped for the literal around it. What is looked for there is :func:`toml_value` —
+    the rendered form is TOML source, so the carrier's own escaping has already been undone.
+    A span that renders as something other than text is an :class:`UnreadableLiteral` —
+    nothing here can be confirmed, so the caller must stop.
     """
     span = section_span(text)
-    body = text if span is None else text[span[0]:span[1]]
+    if span is None:
+        return sorted(overrides)
+    start, end = span
+    kind = literal_kind(text, start)
+    if kind is None:
+        return sorted(overrides)
+    body = rendered(text, start, end, kind)
     return sorted(k for k, v in overrides.items() if f"{k} = {toml_value(v)}" not in body)
 
+
+def toml_fault(text: str) -> str | None:
+    """Why ``text``'s rendered ``[llm]`` span is not a readable template, or ``None`` if it is.
+
+    A second reading, on purpose: :func:`lines_missing` answers "is the value there" and this
+    answers "does the file still read as the template it is". They fail apart — a value holding
+    a newline is written exactly as intended and still leaves a config no loader can parse —
+    and the artifact that reaches a host is the one that has to parse.
+    """
+    span = section_span(text)
+    if span is None:
+        return None
+    start, end = span
+    kind = literal_kind(text, start)
+    if kind is None:
+        return None
+    try:
+        parsed = tomllib.loads(rendered(text, start, end, kind))
+    except (tomllib.TOMLDecodeError, UnreadableLiteral) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if not isinstance(parsed.get("llm"), dict):
+        return "the span no longer opens the [llm] table"
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -265,12 +458,31 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        except UnnameableLiteral as exc:
+            print(
+                f"bundled default config: {path}: {exc.args[0]} — the value would be written "
+                "as bare text into the file's own literal, so the build stops rather than "
+                "guess an escape",
+                file=sys.stderr,
+            )
+            return 1
         except ValueError:
             print(f"bundled default config: {path} lost its [llm] template span", file=sys.stderr)
             return 1
         if not args.dry_run:
             path.write_text(patched, encoding="utf-8")
-            missing = lines_missing(path.read_text(encoding="utf-8"), overrides)
+            written_text = path.read_text(encoding="utf-8")
+            fault = toml_fault(written_text)
+            if fault:
+                print(
+                    f"bundled default config: {path} was written but its [llm] span no longer "
+                    f"reads as the template ({fault}) — the value reached the carrier's own "
+                    "literal unescaped, and a config the product cannot read is worse than "
+                    "none, so the build stops",
+                    file=sys.stderr,
+                )
+                return 1
+            missing = lines_missing(written_text, overrides)
             if missing:
                 print(
                     f"bundled default config: {path} was written but {', '.join(missing)} did "

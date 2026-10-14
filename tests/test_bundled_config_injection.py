@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import pwd
 import shutil
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "packaging" / "bundle_default_config.py"
@@ -301,6 +304,193 @@ def test_the_read_back_finds_a_value_that_is_not_there(tmp_path):
     assert module.lines_missing(text, keyed) == []
     assert module.lines_missing(text, {**keyed, "temperature": "0.25"}) == ["temperature"]
     assert module.lines_missing("no span at all", keyed) == sorted(keyed)
+
+
+# ── the value has to survive the literal it is written into ────────────────────────
+
+
+#: The spellings whose meaning is decided by the literal around them. A brace is a
+#: replacement field in an f-string and plain text in a template literal; ``${`` is the
+#: reverse; a backslash and a quote are what the TOML string itself has to escape, and a
+#: backtick closes the template literal unless it is escaped. Every one of them has to come
+#: back out of the carrier **rendered** exactly as it was handed in — issue #2272, where a
+#: brace reached the shipped `emrg/config.py` and made the runtime unable to import it.
+HOSTILE_VALUES = (
+    "sk-A{b}C9d8e7f6",
+    "sk-A{{b}}C",
+    "sk-A${process.env.HOME}B",
+    "sk-A`b`C",
+    'sk-A"B',
+    "sk-A\\B",
+)
+
+
+def _rendered_python(path: Path) -> str:
+    """The template inside an f-string carrier, as **Python itself** evaluates it.
+
+    `ast` and `eval` rather than the module's own ``rendered``: the claim under test is that
+    the carrier's literal is evaluated by its language, so the test evaluates it too, with
+    other machinery. Only module-level string constants are in scope, and no builtins — the
+    fixture is a copy of a repository file, but it is still evaluated, not merely read.
+    """
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    consts = {
+        name.id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        for name in node.targets
+        if isinstance(name, ast.Name)
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            try:
+                whole = eval(compile(ast.Expression(node), "<carrier>", "eval"),
+                             {"__builtins__": {}}, consts)
+            except NameError as exc:
+                # The defect itself, seen from here: an unescaped `{` in the bundled value
+                # became a replacement field, so the carrier cannot be evaluated at all —
+                # which at import time is `emrg.config` failing to load.
+                raise AssertionError(
+                    f"{path}: the template's f-string no longer evaluates ({exc}) — the "
+                    "bundled value was written into the literal unescaped") from None
+            if "[llm]" in whole:
+                return whole
+    raise AssertionError(f"no f-string template in {path}")
+
+
+def _rendered_javascript(path: Path) -> str:
+    """The template inside a JavaScript template literal, as node evaluates it.
+
+    ``HOME`` is passed back to the account's real home even when a harness has pinned it
+    (the mutation arms pin it to a temporary root), because a version manager's ``node`` is
+    a shim that reads ``$HOME`` to find its install and exits 126 without it — measured here
+    on ``~/.asdf/shims/node``. The child is a JavaScript evaluator, not a subject: it reads
+    the copy under ``tmp_path`` and nothing else, and the ``${process.env.HOME}`` a hostile
+    value would interpolate is exactly what the caller asserts must not survive.
+    """
+    env = dict(os.environ)
+    try:
+        env["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:  # pragma: no cover - an account with no passwd entry
+        pass
+    script = (
+        "const fs=require('fs');"
+        "const s=fs.readFileSync(process.argv[1],'utf8');"
+        "const m=s.match(/const CONFIG_TEMPLATE = (`[\\s\\S]*?`);/);"
+        "process.stdout.write(eval(m[1]));"
+    )
+    out = subprocess.run(["node", "-e", script, str(path)],
+                         capture_output=True, text=True, encoding="utf-8", env=env)
+    assert out.returncode == 0, (
+        f"node could not evaluate the template literal: rc={out.returncode} {out.stderr!r}")
+    return out.stdout
+
+
+def _llm_of(rendered: str) -> dict:
+    """The ``[llm]`` table of a **rendered** carrier, parsed as TOML."""
+    span = rendered[rendered.index("[llm]\n"):rendered.index("\n[[llm.models]]")]
+    return tomllib.loads(span)["llm"]
+
+
+def test_every_hostile_value_survives_the_python_carriers_f_string(tmp_path):
+    """The carrier that ships an unimportable module when this is wrong.
+
+    ``emrg/config.py``'s span is inside an f-string, so a ``{`` written into it is a
+    replacement field: the file parses, the bundler reports success, and `import emrg.config`
+    raises `NameError` on the way into a release. Measured against the pre-fix script, the
+    first value here reproduces exactly that.
+    """
+    for value in HOSTILE_VALUES:
+        root = _staged(tmp_path)
+        result = _run(root, {**VALUES, "EMRG_BUNDLED_API_KEY": value})
+        assert result.returncode == 0, (value, result.stderr)
+        assert _llm_of(_rendered_python(root / CARRIERS[0]))["api_key"] == value, (
+            f"config.py rendered a different key than the one bundled: {value!r}")
+
+
+def test_every_hostile_value_survives_the_gui_carriers_template_literal(tmp_path):
+    """The same claim on the other evaluated literal, where the failure is silent.
+
+    A ``${`` written into ``main.js``'s template literal interpolates at run time: `node
+    --check` passes, the file is valid JavaScript, and the key the GUI writes is simply not
+    the key that was bundled — measured as the host's `$HOME` in place of the expression.
+    """
+    if shutil.which("node") is None:
+        pytest.skip("node is not installed, so a template literal cannot be evaluated here")
+    for value in HOSTILE_VALUES:
+        root = _staged(tmp_path)
+        result = _run(root, {**VALUES, "EMRG_BUNDLED_API_KEY": value})
+        assert result.returncode == 0, (value, result.stderr)
+        assert _llm_of(_rendered_javascript(root / CARRIERS[1]))["api_key"] == value, (
+            f"main.js rendered a different key than the one bundled: {value!r}")
+
+
+def test_the_escape_is_read_from_the_carrier_not_assumed():
+    """One script, three literals: the kind is a fact about the bytes before the span."""
+    module = _load_module()
+    for rel, kind in (("emrg/config.py", "fstring"), ("emrg/gui/main.js", "template")):
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        start, _ = module.section_span(text)
+        assert module.literal_kind(text, start) == kind, f"{rel} is not a {kind} carrier"
+    for opener, expected in (("cat > cfg <<'EOF'\n", "plain"),
+                             ("cat > cfg <<\"EOF\"\n", "plain"),
+                             ("X = \"\"\"", "plain"),
+                             ("X = f\"\"\"", "fstring"),
+                             ("X = `", "template")):
+        text = f"{opener}[llm]\napi_key = \"sk-...\"\n\n[[llm.models]]\n"
+        assert module.literal_kind(text, text.index("[llm]\n")) == expected, opener
+    # An unquoted heredoc expands `$VAR` and backticks, and a span with no literal around it
+    # at all is a shape the script has never seen: both are named, neither is guessed at.
+    for unnameable in ("cat > cfg <<EOF\n", "X = [\n"):
+        text = f"{unnameable}[llm]\napi_key = \"sk-...\"\n\n[[llm.models]]\n"
+        assert module.literal_kind(text, text.index("[llm]\n")) is None, unnameable
+
+
+def test_a_carrier_whose_literal_cannot_be_named_stops_the_build(tmp_path):
+    """The escape is chosen from the kind, so an unnameable kind cannot be written into.
+
+    Guessing one is how the artifact gets a value that its own language reinterprets, which
+    is the defect this all exists for — so it is an error under ``set -e``, not a best effort.
+    """
+    root = _staged(tmp_path)
+    (root / "emrg" / "odd_writer.py").write_text(
+        "X = [\n[llm]\napi_key = \"sk-...\"\n\n[[llm.models]]\n", encoding="utf-8")
+    result = _run(root, VALUES)
+    assert result.returncode == 1
+    assert "odd_writer.py" in result.stderr
+    assert "bare text" in result.stderr
+
+
+def test_an_unescaped_value_is_a_fault_not_a_pass(tmp_path):
+    """Both directions of the read-back, on the exact output the pre-fix script produced.
+
+    The defect is invisible to a check that looks at the file's bytes: the line is there,
+    spelled as intended. So the fault reading is exercised on a carrier holding that line —
+    written by hand, because the fix cannot produce it — and on the same value patched
+    properly, where it must be silent. Without the second half, a check that always failed
+    would look like a check that works.
+    """
+    module = _load_module()
+    value = "sk-A{b}C9d8e7f6"
+    root = _staged(tmp_path)
+    result = _run(root, {**VALUES, "EMRG_BUNDLED_API_KEY": value})
+    assert result.returncode == 0, result.stderr
+    assert module.toml_fault((root / CARRIERS[0]).read_text(encoding="utf-8")) is None
+
+    broken = root / "emrg" / "unescaped.py"
+    broken.write_bytes((root / CARRIERS[0]).read_bytes().replace(
+        b'sk-A{{b}}C9d8e7f6', value.encode()))
+    fault = module.toml_fault(broken.read_text(encoding="utf-8"))
+    assert fault is not None, "the unescaped value read as a pass"
+    assert "replacement field" in fault
+    # The same span is what `lines_missing` refuses to answer for, rather than answering
+    # "present" because the bytes match what was written.
+    with pytest.raises(module.UnreadableLiteral):
+        module.lines_missing(broken.read_text(encoding="utf-8"), {"api_key": value})
 
 
 # ── the inert direction, which is what ships today ─────────────────────────────────
