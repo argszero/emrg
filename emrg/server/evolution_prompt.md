@@ -81,7 +81,7 @@ cd {{ source_dir }} && git pull origin master
 
 ### 1. Look
 
-**§1 is where the cycle reads the world.** The block below is the common set, and each subsection adds the calls its own reading needs. Think then judges from these lines rather than scanning the repository again — except where judging needs an instrument of its own (R2, R3). **The readings that answer one question are taken in one call (R10).**
+**§1 is where the cycle reads the world.** The block below is the common set, and each subsection adds the calls its own reading needs. Think then judges from these lines rather than scanning the repository again — except where judging needs an instrument of its own (R2, R3). **The readings that answer one question are issued together, in one round (R10).**
 
 ```bash
 cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
@@ -379,11 +379,13 @@ The `MEMORY.md` index is embedded into the session prompt verbatim, so its size 
 
 That index is the only memory path this prompt names, because the rule is about the file the daemon embeds: the index under `{{ source_dir }}/.emrg/memory/` is the one `_collect_memory_data` loads, and a path the writer and the loader disagree about is a path nobody reads.
 
-#### R10. One reading is one call
+#### R10. One round may carry several readings
 
 **A round is billed for the whole conversation, not for the slice it added.** Measured 2026-10-15 over the 45 cycles that finished in one day: the median cycle ran **66** rounds, the median round brought **545** new tokens — most rounds re-send everything already known to do one small thing. Rounds are where a cycle's cost lives (host decision, item (a) of rant 2026-10-15T12:35:03, the requirement recorded as issue #2290).
 
-So **what you already know you want to read, read in one call**: join the commands (`git status && gh pr list … && sed -n '1,40p' f`) and take one result. Two shapes stay apart, and neither licenses splitting a reading across rounds: a command whose **output decides the next command** — that is a judgement, not a read — and a joined form that risks the tool's timeout. **Batch reads; never batch a judgement.** Joining means one foreground command with `&&`: the background-process red line is not a batching technique, and no overlap, `&`, or "check later" is ever a saving.
+So **when no call's arguments depend on what another call returns, issue them together**: several tool calls in one round, of any tool the cycle has (`bash`, `read`, `grep`, `glob`), their answers arriving together. The unit is the **round** — the same unit every session is given (`emrg/server/prompts/system.j2`) — and the reason is cost: three calls in one round are billed as one round, not three. This is not speed and not parallelism; the daemon runs a round's calls one after another, so nothing here overlaps. One shape stays apart, and it is not a licence to split a reading across rounds: where one call's answer decides what the next should do, that is a judgement, and a judgement gets its own round; a round that would carry a call the shell tool may time out on is split for the same reason. **Batch readings; never batch a judgement.**
+
+Batching is bought with the round, never with the shell: the background-process red line in **Forbidden** below outranks this rule, and none of the forms it names is a batching technique here.
 
 **No round budget.** The host rejected a cap on rounds explicitly (item (c) of the same rant, 「c 没意义，肯定不行」 — it truncates long tasks). Nothing here licenses stopping early, skipping a step of §1–§4, or dropping a verification to save a round: the saving comes from asking for several things at once, never from asking for less.
 
