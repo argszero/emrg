@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -110,17 +111,29 @@ def _point_at(mod, monkeypatch, repo: Path) -> None:
     monkeypatch.setattr(mod.cast_vote(), "_REPO_ROOT", repo)
 
 
-@pytest.fixture
-def merged_repo(tmp_path: Path, mod, monkeypatch):
-    """A repo where a PR was merged onto a base that moved: head tree != landed tree.
+@pytest.fixture(scope="session")
+def _merged_repo_shape(tmp_path_factory):
+    """The `merged_repo` shape, **built once per session** — issue #2306.
 
-    The shape is the one this tool exists for, and it is built the way it really
-    happens. A branch is cut from `master`, `master` then receives an unrelated
-    commit (a parallel cycle merging something else), and the branch is merged into
-    the moved master. The merge commit's tree therefore contains both sides, while
-    the branch's own head carries only its half.
+    It is the same repository for every caller: the same three commits, the same merge,
+    the same five object ids. Building it per test therefore bought nothing and cost
+    eleven `git` processes each time (init, three configs, two adds, two commits, two
+    checkouts, the merge, five `rev-parse`s) — measured 280 spawned processes across this
+    file's nineteen tests, all of them in the *setup* phase.
+
+    That matters because the suite's cost is process creation, and it is paid worst on
+    Windows: the same run that takes 59 s here at twelve workers takes ~302 s on
+    `windows-2025` at the four it is given, and the whole of the difference is the cost of
+    spawning ~6,000 children. The shape is built here once and copied per test, which is
+    the shared-fixture remedy the ≤180 s rant names (`2026-10-15T11:08:07`, §五).
+
+    What the copies must keep is what the callers read: the object ids are identical in
+    every copy (the template is built before any copy exists and is never committed to),
+    and the template is copied *into* the test's own `tmp_path`, so a test that mutates
+    its repository cannot reach the next one.
     """
-    repo = tmp_path / "repo"
+    root = tmp_path_factory.mktemp("merged-repo-shape")
+    repo = root / "repo"
     _init_repo(repo)
     base = _commit(repo, "a.txt", "base\n", "base")
     _git(repo, "checkout", "-q", "-b", "feature")
@@ -129,15 +142,44 @@ def merged_repo(tmp_path: Path, mod, monkeypatch):
     _commit(repo, "other.txt", "parallel\n", "a parallel cycle merged something else")
     _git(repo, "merge", "-q", "--no-ff", "-m", "Merge the PR", "feature")
     merge_commit = _git(repo, "rev-parse", "HEAD")
-    _point_at(mod, monkeypatch, repo)
     return {
-        "repo": repo,
+        "template": repo,
         "base": base,
         "head": head,
         "merge_commit": merge_commit,
         "head_tree": _git(repo, "rev-parse", f"{head}^{{tree}}"),
         "base_tree": _git(repo, "rev-parse", f"{base}^{{tree}}"),
         "landed_tree": _git(repo, "rev-parse", f"{merge_commit}^{{tree}}"),
+    }
+
+
+@pytest.fixture
+def merged_repo(tmp_path: Path, mod, monkeypatch, _merged_repo_shape):
+    """A repo where a PR was merged onto a base that moved: head tree != landed tree.
+
+    The shape is the one this tool exists for, and it is built the way it really
+    happens. A branch is cut from `master`, `master` then receives an unrelated
+    commit (a parallel cycle merging something else), and the branch is merged into
+    the moved master. The merge commit's tree therefore contains both sides, while
+    the branch's own head carries only its half.
+
+    The repository itself is **copied** from `_merged_repo_shape` rather than rebuilt:
+    the shape is identical for every caller, and `git` reports the same ids for a copy as
+    for its source, so nothing a caller reads changes — only the eleven spawned processes
+    it used to take to produce it.
+    """
+    shape = _merged_repo_shape
+    repo = tmp_path / "repo"
+    shutil.copytree(shape["template"], repo)
+    _point_at(mod, monkeypatch, repo)
+    return {
+        "repo": repo,
+        "base": shape["base"],
+        "head": shape["head"],
+        "merge_commit": shape["merge_commit"],
+        "head_tree": shape["head_tree"],
+        "base_tree": shape["base_tree"],
+        "landed_tree": shape["landed_tree"],
     }
 
 
