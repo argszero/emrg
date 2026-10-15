@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -285,17 +286,70 @@ class TestRealInvocationSurface:
         monkeypatch.setattr(mod.subprocess, "run", no_gh)
         assert mod.main(["--repo", "argszero/emrg"]) == 2
 
-    def test_unreachable_repo_exits_2_not_0(self) -> None:
-        """With a bogus repo gh fails; the tool must not report a clean bill."""
+    def test_the_real_script_without_gh_exits_2_not_0(self, tmp_path) -> None:
+        """The tool cannot ask, so it must not report a clean bill — **offline**.
+
+        The behaviour this pins is the tool's contract: when the state cannot be
+        read the answer is 2 (unmeasurable), never 0 (clean). It used to be read by
+        running the script against `argszero/definitely-not-a-repo-xyz`, which made
+        a **real network round trip** — and that cost was the single largest in the
+        suite on one platform: 82.5s on the Windows leg (8% of its 1015s total),
+        2.0s on linux-arm, 0.0s where `gh` is absent (issue #2296 R3, rant
+        2026-10-15T11:08:07). Three readings of one test, all "correct", because
+        what it measured was GitHub's latency and whether `gh` was installed — not
+        the refusal the tool is supposed to make.
+
+        Now "cannot ask" is produced locally, by an empty `PATH`, so the same
+        refusal happens on every platform at the same cost and with the same rc.
+        The subprocess is still the real script (this class's subject is the
+        *invocation surface*, so an in-process monkeypatch would not be the same
+        reading — that half is `test_missing_gh_exits_2_not_1` above).
+        """
+        # An empty directory as PATH: `gh` is not findable, and nothing else the
+        # script does needs a findable binary (`sys.executable` is given absolute).
+        empty_path = tmp_path / "empty-path"
+        empty_path.mkdir()
+        env = dict(os.environ, PATH=str(empty_path))
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "--repo", "argszero/definitely-not-a-repo-xyz"],
             capture_output=True,
             text=True,
             encoding="utf-8",
+            env=env,
         )
-        # On a machine with no `gh` at all (e.g. the Windows runner) this is 2 as
-        # well - the code path is now the same, which is the point.
         assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+        # And it is the *right* 2. A crash would also leave the caller without an
+        # answer, but CPython reports an uncaught exception as rc 1 — which for this
+        # tool means "a PR is on a dead end", the wrong verdict. So the message is
+        # what distinguishes a measured refusal from an accident.
+        assert "gh is not available" in proc.stderr or "cannot determine PR bases" in proc.stderr, (
+            proc.stdout,
+            proc.stderr,
+        )
+
+    def test_unreachable_repo_exits_2_not_0(self, mod, monkeypatch, capsys) -> None:
+        """The other half of "cannot ask": `gh` runs and **answers no**.
+
+        This is the code path the old network test reached by a bogus repo — gh
+        exits non-zero, `_gh` raises, `main` returns 2 — and it was only ever
+        measurable by the network. Stubbed here, so the refusal the network test
+        claimed to pin is pinned offline, on the function that makes it.
+
+        The direction that keeps this honest: rc 1 would mean "a PR is on a dead
+        end", sending a reader to retarget a PR that does not exist, and rc 0 would
+        be a clean bill for a state that was never read.
+        """
+
+        class FakeProc:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: Not Found (HTTP 404)"
+
+        monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: FakeProc())
+        rc = mod.main(["--repo", "argszero/definitely-not-a-repo-xyz"])
+        err = capsys.readouterr().err
+        assert rc == 2, err
+        assert "gh failed" in err, err
 
 
 class TestTheSummaryCountsTheSelectionNotTheRepository:
