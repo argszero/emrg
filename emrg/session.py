@@ -217,6 +217,24 @@ def records_to_messages(records: list[dict]) -> list[dict]:
                     messages.append(msg)
                     i += 1
 
+        elif r.get("type") == "context":
+            # The turn's dynamic context — the clock, the write boundary, the
+            # memory indexes — as `_inject_context_message` sent it. Persisting
+            # it is what keeps a rebuilt request a prefix of the one the turn
+            # before it sent: it rides immediately before the user prompt, and a
+            # history that cannot reproduce it diverges exactly there, so the
+            # provider re-processes the entire previous turn as uncached prompt
+            # tokens (issue #2311; measured 2026-10-16 on this session, 87,440
+            # of 107,920 tokens uncached at one turn boundary, against 134-261
+            # for an ordinary round).
+            #
+            # It is deliberately not a `message` record: `append_message`
+            # counts only `type == "message"` toward `message_count`, and the
+            # client's history projection is an if/elif on `tool_result` /
+            # `message`, so this record reaches the model and no client.
+            messages.append({"role": "user", "content": r.get("content", "")})
+            i += 1
+
         elif r.get("type") == "summary":
             messages.append({
                 "role": "user",
