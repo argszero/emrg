@@ -1042,3 +1042,54 @@ def test_a_missing_path_still_says_path_not_found(tmp_path):
 
     assert result.error, result.content
     assert "path not found" in result.content, result.content
+
+
+# ── the declared boolean, read rather than decided by truthiness ───────────────
+#
+# `ignore_case` is declared `{"type": "boolean"}` and used to be read with
+# `arguments.get("ignore_case", False)`, whose truthiness gives the **opposite** of what a
+# caller quoting a boolean asks for: `"false"`, `"no"` and `"maybe"` are non-empty strings.
+# Measured 2026-10-15 (`cyc20261015-144218`) on master `14bf8085`, over a file holding
+# `NEEDLE` / `needle` / `NotNEEDLEatall`: `Found 1 matches` for the absent, `False`, `0`
+# and `""` spellings and `Found 3 matches` for `True`, `"true"`, `"false"`, `"False"` and
+# `"maybe"` — the wider search, given silently, to a caller who named the narrower one.
+# It is issue #1935's family (`edit.replace_all="false"`) at its third carrier, and the
+# reader is the same one: `emrg.tools.base.boolean_argument`.
+
+
+def _mixed_case(root: Path) -> Path:
+    """Three lines, so "how many" names which search ran: 2 or 3 says insensitive, 1 says sensitive."""
+    f = root / "mixed.txt"
+    f.write_text("NEEDLE\nneedle\nNotNEEDLEatall\n", encoding="utf-8")
+    return f
+
+
+@pytest.mark.parametrize("value", ["false", "False"])
+def test_ignore_case_reads_the_spelling_that_names_false(tmp_path, value):
+    f = _mixed_case(tmp_path)
+    result = _run(GrepTool().execute(
+        {"pattern": "needle", "path": str(f), "ignore_case": value}))
+
+    assert not result.error, result.content
+    assert "Found 1 matches" in result.content, result.content
+
+
+@pytest.mark.parametrize("value", [True, "true"])
+def test_ignore_case_still_searches_case_insensitively_when_asked(tmp_path, value):
+    """The control: the flag still does its job, in both spellings that name `true`."""
+    f = _mixed_case(tmp_path)
+    result = _run(GrepTool().execute(
+        {"pattern": "needle", "path": str(f), "ignore_case": value}))
+
+    assert not result.error, result.content
+    assert "Found 3 matches" in result.content, result.content
+
+
+@pytest.mark.parametrize("value", [0, 1, "yes", "", "maybe", 2.0, []])
+def test_grep_refuses_an_ignore_case_that_is_not_a_boolean(tmp_path, value):
+    f = _mixed_case(tmp_path)
+    result = _run(GrepTool().execute(
+        {"pattern": "needle", "path": str(f), "ignore_case": value}))
+
+    assert result.error, result.content
+    assert "ignore_case" in result.content and repr(value) in result.content

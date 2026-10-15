@@ -30,13 +30,25 @@ beside each tool (`tests/test_read_tool.py`, `tests/test_grep_tool.py`,
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import importlib
 import sys
+from pathlib import Path
 
 import pytest
 
 from emrg.server import scheduler
-from emrg.tools import bash_tool_v2, edit_tool, grep_tool, pwsh_tool_v2, read_tool
+from emrg.tools import (
+    bash_tool_v2,
+    edit_tool,
+    glob_tool,
+    grep_tool,
+    pwsh_tool_v2,
+    read_tool,
+    submit_rant_tool,
+    write_tool,
+)
 from emrg.tools.base import boolean_argument, count_argument
 
 #: (label, kwargs, expected value) for the helper's three answers.
@@ -192,6 +204,7 @@ DOMAINS = [
     (grep_tool.GrepTool(), "context_after", ("0 or more", "at least 0", ">= 0")),
     (grep_tool.GrepTool(), "max_results", ("at least 1", "1 or more", ">= 1")),
     (edit_tool.EditTool(), "replace_all", ("true or false",)),
+    (grep_tool.GrepTool(), "ignore_case", ("true or false",)),
     (bash_tool_v2.BashToolV2(), "timeout", ("positive",)),
     (pwsh_tool_v2.PwshToolV2(), "timeout", ("positive",)),
 ]
@@ -348,3 +361,203 @@ def test_a_description_claim_nothing_reads_is_the_class_this_file_closes():
     value, _ = boolean_argument({"replace_all": "false"}, "replace_all")
     assert value is False, "the old sentence claims this call is refused; it is not"
     assert "included) is refused" in old, "the fixture must carry the claim it names"
+
+
+# ── the table above names the carriers someone remembered ─────────────────────
+#
+# `DOMAINS` is a hand-written list: it holds the parameters a person added to it, so the
+# rule it states holds exactly where someone thought to write a row. That is how
+# `grep.ignore_case` stayed out of the family the file exists to close: it is declared
+# `{"type": "boolean"}`, read by truthiness, and answered the **wider** search for
+# `"false"`, `"no"` and `"maybe"` while every test here, every per-tool test and the
+# description test above stayed green. Measured 2026-10-15 (`cyc20261015-144218`) on
+# master `14bf8085`, on a file holding `NEEDLE` / `needle` / `NotNEEDLEatall`: `Found 1
+# matches` for the absent, `False`, `0` and `""` spellings, `Found 3 matches` for `True`,
+# `"true"`, `"false"`, `"False"` and `"maybe"`.
+#
+# So the subjects of this reading are **derived from the schemas** rather than listed:
+# the tool set the daemon registers, asked which of its parameters it declares as a
+# boolean. A rule that can be mechanised is mechanised, because a name list is a rule
+# about the past.
+#
+# The rule the sweep enforces: a parameter declared `boolean` is read through
+# `boolean_argument`, in the module that declares the tool. That is where every carrier
+# reads it today, and the constraint is stated here rather than assumed — a boolean read
+# by a helper elsewhere would fail this sweep, and the remedy is to read it beside the
+# declaration or to widen this reading deliberately.
+
+#: The tools the sweep is asked about, instantiated the way the `DOMAINS` table
+#: instantiates them. A **list this file pins**, not a derivation: nothing here reads the
+#: daemon's roster, so `test_the_sweeps_subject_is_the_registered_tool_set` asserts the
+#: roster is a **subset** of it — without that, a newly registered tool would carry a
+#: boolean straight into the sweep's blind spot and pass in silence. The subset rather than
+#: equality is what lets the list carry both shell dialects while any one host registers
+#: only the one it mounts, so the rule is read for both spellings wherever the suite runs.
+#: Neither dialect has a boolean parameter today.
+TOOL_SET = [
+    read_tool.ReadTool(),
+    write_tool.WriteTool(),
+    edit_tool.EditTool(),
+    glob_tool.GlobTool(),
+    grep_tool.GrepTool(),
+    submit_rant_tool.SubmitRantTool(),
+    bash_tool_v2.BashToolV2(),
+    pwsh_tool_v2.PwshToolV2(),
+]
+
+
+def test_the_sweeps_subject_is_the_registered_tool_set(tmp_path):
+    """The sweep's *parameters* are derived from the schemas; its *roster* is a typed list.
+
+    Deriving the parameters from `definition().parameters` closed one direction of the
+    defect and left the other open. `TOOL_SET` was eight names a person wrote, its comment
+    claimed it *was* "the tools the daemon registers (`emrg/server/daemon.py`)", and nothing
+    measured that claim — measured on the head this pin joins, with a probe tool registered
+    in `emrg/server/daemon.py`, every test in this file stayed green while the roster read
+    ``['bash', 'edit', 'glob', 'grep', 'probe', 'read', 'submit_rant', 'write']``. A boolean
+    arriving on a new tool is therefore invisible in silence: the same defect #2294 was
+    filed for, one level up — the subjects were mechanised and the subject *list* stayed
+    prose, which is the shape "a rule that can be mechanised is mechanised, because a name
+    list is a rule about the past" exists to prevent.
+
+    A **subset**, not equality, and that half is load-bearing: the daemon registers the shell
+    dialect this platform mounts, while a rule read in CI must cover both spellings, so
+    equality would make the sweep's reach depend on the host running it.
+
+    The second half is the assertion's own control. A roster entry the list omits must red
+    *this* check; without it, a green here would be indistinguishable from a matcher that
+    cannot fail, which is exactly how the `DOMAINS` table it replaced reported a green while
+    `grep.ignore_case` was read by truthiness.
+    """
+    from emrg.config import LlmConfig
+    from emrg.server.daemon import EmrgServer
+    from emrg.tools.base import ToolDefinition
+    from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
+
+    # Built the way the daemon builds one, with the same one redirection
+    # `tests/test_shell_tool_mount.py::_instantiate` makes so construction writes nothing
+    # of the host's. No daemon is started and nothing is torn down — this is an object.
+    server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    server._projects_log = tmp_path / "projects.yml"
+
+    listed = {t.definition().name for t in TOOL_SET}
+    registered = set(server.tools.names)
+    assert registered <= listed, (
+        "the daemon registers a tool this list does not name, so the sweep is never asked "
+        "about any boolean it declares and reads one by truthiness in silence — add it to "
+        f"TOOL_SET: {sorted(registered - listed)}"
+    )
+    assert listed - registered <= set(SHELL_TOOL_NAMES), (
+        "the only name the list may carry beyond the roster is the shell dialect this host "
+        "does not mount, which is there so both spellings are read wherever the suite runs: "
+        f"got {sorted(listed - registered)}"
+    )
+
+    class _Probe:
+        """A registry entry `TOOL_SET` does not name — the control, not a subject."""
+
+        def definition(self) -> ToolDefinition:
+            return ToolDefinition(
+                name="probe", description="control", parameters={"type": "object"}
+            )
+
+    server.tools.register(_Probe())
+    assert not set(server.tools.names) <= listed, (
+        "a registered tool the list omits must red the subset check; it did not, so the "
+        "green above is a matcher that cannot fail"
+    )
+
+
+def _boolean_parameters() -> list[tuple[object, str]]:
+    """`(tool, parameter)` for every parameter the tool set declares as a boolean.
+
+    Read out of `definition().parameters`, the schema the model receives — not out of
+    the readers, which is the whole point: a new parameter arrives in the schema first.
+    """
+    declared: list[tuple[object, str]] = []
+    for tool in TOOL_SET:
+        properties = tool.definition().parameters.get("properties", {})
+        for name, spec in properties.items():
+            if isinstance(spec, dict) and spec.get("type") == "boolean":
+                declared.append((tool, name))
+    return declared
+
+
+def _parameters_read_through_the_helper(source: str) -> set[str]:
+    """Every parameter name `source` hands to `boolean_argument`, as a literal.
+
+    The first positional argument is the arguments dict (a name, not a string), so the
+    parameter names are the string constants in the call — which is also what makes an
+    alias readable: `boolean_argument(arguments, "limit", "max_results")` names both.
+    """
+    read: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "boolean_argument"):
+            continue
+        for argument in node.args:
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                read.add(argument.value)
+    return read
+
+
+def test_the_sweep_reads_both_directions():
+    """The detector's own control: it must name a read call and stay silent without one.
+
+    A sweep whose matcher stopped matching would pass by reporting nothing, which is the
+    failure this file's own subject has already produced once (`DOMAINS` reporting green
+    while `grep.ignore_case` was read by truthiness). So the matcher is driven on all
+    three shapes, including the one that must **not** count: a name that appears beside
+    the call but is never handed to it.
+    """
+    assert _parameters_read_through_the_helper(
+        "ignore_case, refusal = boolean_argument(arguments, 'ignore_case', default=False)"
+    ) == {"ignore_case"}
+    assert _parameters_read_through_the_helper(
+        "v, r = boolean_argument(arguments, 'limit', 'line_limit')"
+    ) == {"limit", "line_limit"}
+    assert _parameters_read_through_the_helper(
+        "ignore_case = arguments.get('ignore_case', False)"
+    ) == set()
+    assert _parameters_read_through_the_helper(
+        "x = len('ignore_case')  # a string, not a call"
+    ) == set()
+
+
+def test_the_sweep_sees_the_carriers_this_file_already_pins():
+    """The derivation's own baseline: it must find the two carriers the behaviour tests name.
+
+    A sweep whose *derivation* stopped matching would report no subject and pass, which is
+    the empty-subject defect this repository has already paid for twice (a guard that reads
+    nothing is not a clean reading). The assertions are a **subset**, not an equality: a new
+    boolean parameter must never turn this red — it is `edit.replace_all` and
+    `grep.ignore_case`, the two this file pins behaviourally, that have to stay in view.
+    """
+    seen = {(tool.definition().name, parameter) for tool, parameter in _boolean_parameters()}
+    assert {("edit", "replace_all"), ("grep", "ignore_case")} <= seen, seen
+
+
+def test_every_declared_boolean_is_read_through_the_shared_reader():
+    """The reading `DOMAINS` cannot give: its subjects come from the schemas.
+
+    Fails on a parameter that is declared `boolean` anywhere in the tool set and read by
+    truthiness, by a hand-rolled spelling list, or by anything else that coerces a value
+    the domain does not admit — which is the defect `edit.replace_all="false"` paid for
+    (issue #1935) and `grep.ignore_case="false"` then reproduced at the next carrier.
+    """
+    unread = []
+    for tool, parameter in _boolean_parameters():
+        module = importlib.import_module(type(tool).__module__)
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        if parameter not in _parameters_read_through_the_helper(source):
+            unread.append(f"{tool.definition().name}.{parameter} ({module.__name__})")
+    assert unread == [], (
+        "a parameter the schema declares `\"type\": \"boolean\"` must be read through "
+        "`emrg.tools.base.boolean_argument`, in the module that declares the tool: it "
+        "reads the two spellings that name a value and refuses every other one, where "
+        "truthiness reads `\"false\"`, `\"no\"` and `\"maybe\"` as `True` and gives the "
+        "caller the opposite of what they asked for. Route it through the reader (or "
+        "widen this reading deliberately, in this file):\n  " + "\n  ".join(unread)
+    )
