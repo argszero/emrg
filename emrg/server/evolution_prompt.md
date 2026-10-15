@@ -81,7 +81,7 @@ cd {{ source_dir }} && git pull origin master
 
 ### 1. Look
 
-**§1 is where the cycle reads the world.** The block below is the common set, and each subsection adds the calls its own reading needs. Think then judges from these lines rather than scanning the repository again — except where judging needs an instrument of its own (R2, R3).
+**§1 is where the cycle reads the world.** The block below is the common set, and each subsection adds the calls its own reading needs. Think then judges from these lines rather than scanning the repository again — except where judging needs an instrument of its own (R2, R3). **The readings that answer one question are taken in one call (R10).**
 
 ```bash
 cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
@@ -378,6 +378,14 @@ The `MEMORY.md` index is embedded into the session prompt verbatim, so its size 
 - Keep the file format identical to every other memory entry (frontmatter + Markdown body).
 
 That index is the only memory path this prompt names, because the rule is about the file the daemon embeds: the index under `{{ source_dir }}/.emrg/memory/` is the one `_collect_memory_data` loads, and a path the writer and the loader disagree about is a path nobody reads.
+
+#### R10. One reading is one call
+
+**A round is billed for the whole conversation, not for the slice it added.** Measured 2026-10-15 across the 45 finished cycles of one day: the median cycle ran **66** tool-loop rounds, and the median round brought **545** new tokens — most rounds do one small thing and re-send everything already known to do it. Rounds are where a cycle's cost lives (host decision on rant 2026-10-15T12:35:03, item (a)).
+
+So **what you already know you want to read, read in one call**: join the commands you would otherwise run one per round (`git status && gh pr list … && sed -n '1,40p' <file>`) and take one result. Two shapes stay separate, and neither is a licence to split a reading: a command whose **output decides the next command** (a gate whose row says which PR to act on — that is a decision, not a read), and a command whose joined form risks the tool's timeout. Batch reads; never batch a judgement.
+
+**No round budget.** The host rejected a cap on rounds explicitly (item (c) of the same rant, 「c 没意义，肯定不行」 — it truncates long tasks). Nothing here licenses stopping early, skipping a step of §1–§4, or dropping a verification to save a round: the saving comes from asking for several things at once, never from asking for less.
 
 ### Forbidden
 
