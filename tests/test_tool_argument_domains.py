@@ -386,9 +386,14 @@ def test_a_description_claim_nothing_reads_is_the_class_this_file_closes():
 # by a helper elsewhere would fail this sweep, and the remedy is to read it beside the
 # declaration or to widen this reading deliberately.
 
-#: The tools the daemon registers (`emrg/server/daemon.py`), instantiated the way the
-#: `DOMAINS` table instantiates them: the shell tool is whichever dialect this platform
-#: mounts, so both spellings are read, and neither has a boolean parameter today.
+#: The tools the sweep is asked about, instantiated the way the `DOMAINS` table
+#: instantiates them. A **list this file pins**, not a derivation: nothing here reads the
+#: daemon's roster, so `test_the_sweeps_subject_is_the_registered_tool_set` asserts the
+#: roster is a **subset** of it — without that, a newly registered tool would carry a
+#: boolean straight into the sweep's blind spot and pass in silence. The subset rather than
+#: equality is what lets the list carry both shell dialects while any one host registers
+#: only the one it mounts, so the rule is read for both spellings wherever the suite runs.
+#: Neither dialect has a boolean parameter today.
 TOOL_SET = [
     read_tool.ReadTool(),
     write_tool.WriteTool(),
@@ -399,6 +404,68 @@ TOOL_SET = [
     bash_tool_v2.BashToolV2(),
     pwsh_tool_v2.PwshToolV2(),
 ]
+
+
+def test_the_sweeps_subject_is_the_registered_tool_set(tmp_path):
+    """The sweep's *parameters* are derived from the schemas; its *roster* is a typed list.
+
+    Deriving the parameters from `definition().parameters` closed one direction of the
+    defect and left the other open. `TOOL_SET` was eight names a person wrote, its comment
+    claimed it *was* "the tools the daemon registers (`emrg/server/daemon.py`)", and nothing
+    measured that claim — measured on the head this pin joins, with a probe tool registered
+    in `emrg/server/daemon.py`, every test in this file stayed green while the roster read
+    ``['bash', 'edit', 'glob', 'grep', 'probe', 'read', 'submit_rant', 'write']``. A boolean
+    arriving on a new tool is therefore invisible in silence: the same defect #2294 was
+    filed for, one level up — the subjects were mechanised and the subject *list* stayed
+    prose, which is the shape "a rule that can be mechanised is mechanised, because a name
+    list is a rule about the past" exists to prevent.
+
+    A **subset**, not equality, and that half is load-bearing: the daemon registers the shell
+    dialect this platform mounts, while a rule read in CI must cover both spellings, so
+    equality would make the sweep's reach depend on the host running it.
+
+    The second half is the assertion's own control. A roster entry the list omits must red
+    *this* check; without it, a green here would be indistinguishable from a matcher that
+    cannot fail, which is exactly how the `DOMAINS` table it replaced reported a green while
+    `grep.ignore_case` was read by truthiness.
+    """
+    from emrg.config import LlmConfig
+    from emrg.server.daemon import EmrgServer
+    from emrg.tools.base import ToolDefinition
+    from emrg.tools.shell_dialects import SHELL_TOOL_NAMES
+
+    # Built the way the daemon builds one, with the same one redirection
+    # `tests/test_shell_tool_mount.py::_instantiate` makes so construction writes nothing
+    # of the host's. No daemon is started and nothing is torn down — this is an object.
+    server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    server._projects_log = tmp_path / "projects.yml"
+
+    listed = {t.definition().name for t in TOOL_SET}
+    registered = set(server.tools.names)
+    assert registered <= listed, (
+        "the daemon registers a tool this list does not name, so the sweep is never asked "
+        "about any boolean it declares and reads one by truthiness in silence — add it to "
+        f"TOOL_SET: {sorted(registered - listed)}"
+    )
+    assert listed - registered <= set(SHELL_TOOL_NAMES), (
+        "the only name the list may carry beyond the roster is the shell dialect this host "
+        "does not mount, which is there so both spellings are read wherever the suite runs: "
+        f"got {sorted(listed - registered)}"
+    )
+
+    class _Probe:
+        """A registry entry `TOOL_SET` does not name — the control, not a subject."""
+
+        def definition(self) -> ToolDefinition:
+            return ToolDefinition(
+                name="probe", description="control", parameters={"type": "object"}
+            )
+
+    server.tools.register(_Probe())
+    assert not set(server.tools.names) <= listed, (
+        "a registered tool the list omits must red the subset check; it did not, so the "
+        "green above is a matcher that cannot fail"
+    )
 
 
 def _boolean_parameters() -> list[tuple[object, str]]:
