@@ -142,6 +142,39 @@ def test_the_rows_reach_the_session_in_the_context_message(tmp_path: Path) -> No
             "session that cannot read its own memory is the price the fix must not pay"
         )
     assert INDEX_HEADING in text
+    # Not merely the rows: the index reaches the model as the same bytes it holds on
+    # disk, capped by `_cap_memory_index` and by nothing else.
+    data = server._collect_memory_data(session)
+    assert data["project_memory_index"] in text, (
+        "the context message carries only part of the index — content loss is not a "
+        "cache win (issue #2292, the 'never cheaper by being thinner' constraint)"
+    )
+
+
+def test_a_row_written_inside_the_freeze_window_is_visible_at_once(tmp_path: Path) -> None:
+    """The freeze is about the clock; memory is not part of it (issue #2292, item 2).
+
+    `context_refresh_interval_ms` freezes the time snapshot so consecutive requests stay
+    byte-identical, and the writable-boundary line already rides *outside* it for the
+    same reason (rant 2026-10-09T09:43:39 §8): a host who changes the boundary mid-window
+    must not wait for it to expire. A memory row is stamped with no clock at all, so
+    freezing it would hide the row the agent just wrote — from the very next round, for
+    a window the host sets.
+    """
+    server = _make_server()
+    session = _session_with_an_index(tmp_path)
+    server.llm.config.context_refresh_interval_ms = 600_000
+
+    first = server._build_context_message(session)["content"]
+    assert ROW_ONE.strip() in first and ROW_TWO.strip() not in first
+
+    _append_a_row(session)
+    second = server._build_context_message(session)["content"]
+
+    assert ROW_TWO.strip() in second, (
+        "the row is invisible until the refresh window expires: the freeze is about "
+        "the clock, and memory must not be dragged into it"
+    )
 
 
 def test_the_block_does_not_shadow_the_context_marker(tmp_path: Path) -> None:
