@@ -205,7 +205,12 @@ class SubmitRantTool(ToolExecutor):
                             "Use it when you have decided to act on a rant "
                             "and need its whole text; an unfiltered read "
                             "without it is the scan view, which costs rows "
-                            "only (rant 2026-10-15T12:35:03 item (b))."
+                            "only (rant 2026-10-15T12:35:03 item (b)). "
+                            "Price it: on the queue measured 2026-10-15 "
+                            "(51 rants) an unfiltered read costs 19,736 "
+                            "characters, `full=True` costs **232,499** — so "
+                            "ask for one slice with `status=`, not the whole "
+                            "queue, unless you really mean every body."
                         ),
                     },
                     "progress": {

@@ -381,7 +381,7 @@ That index is the only memory path this prompt names, because the rule is about 
 
 #### R10. One reading is one call
 
-**A round is billed for the whole conversation, not for the slice it added.** Measured 2026-10-15 across the 45 finished cycles of one day: the median cycle ran **66** tool-loop rounds, and the median round brought **545** new tokens — most rounds do one small thing and re-send everything already known to do it. Rounds are where a cycle's cost lives (host decision on rant 2026-10-15T12:35:03, item (a)).
+**A round is billed for the whole conversation, not for the slice it added.** Measured 2026-10-15 across the 45 finished cycles of one day: the median cycle ran **66** tool-loop rounds, and the median round brought **545** new tokens — most rounds do one small thing and re-send everything already known to do it. Rounds are where a cycle's cost lives (host decision, item (a) of rant 2026-10-15T12:35:03, the requirement recorded as issue #2290).
 
 So **what you already know you want to read, read in one call**: join the commands you would otherwise run one per round (`git status && gh pr list … && sed -n '1,40p' <file>`) and take one result. Two shapes stay separate, and neither is a licence to split a reading: a command whose **output decides the next command** (a gate whose row says which PR to act on — that is a decision, not a read), and a command whose joined form risks the tool's timeout. Batch reads; never batch a judgement.
 
