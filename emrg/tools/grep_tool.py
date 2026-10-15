@@ -15,6 +15,7 @@ from pathlib import Path
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import (
     ToolExecutor,
+    boolean_argument,
     brace_alternation,
     count_argument,
     special_file_kind,
@@ -166,7 +167,11 @@ class GrepTool(ToolExecutor):
                     },
                     "ignore_case": {
                         "type": "boolean",
-                        "description": "Case-insensitive search (default: false).",
+                        "description": (
+                            "Case-insensitive search (default: false; true or false, and "
+                            "any other value is refused rather than read as its opposite "
+                            "- a quoted \"false\" is the value it names)."
+                        ),
                     },
                     "context_before": {
                         "type": "integer",
@@ -215,7 +220,24 @@ class GrepTool(ToolExecutor):
         # `limit`.
         search_path = arguments.get("path") or arguments.get("workdir") or "."
         file_glob = arguments.get("glob")
-        ignore_case = arguments.get("ignore_case", False)
+
+        # ── The declared boolean, refused rather than read by truthiness ──
+        #
+        # `arguments.get("ignore_case", False)` was read by truthiness, and the two
+        # spellings a caller reaches for when quoting a boolean name the *opposite* of
+        # what that read gives: `"false"` and `"no"` are non-empty strings, so both
+        # switched the search to case-insensitive — the caller excluded the wider search
+        # and got it anyway, silently. Measured 2026-10-15 (`cyc20261015-144218`) on
+        # master `14bf8085`: a file holding `NEEDLE` / `needle` / `NotNEEDLEatall`
+        # answered `Found 1 matches` for the absent, `False`, `0` and `""` spellings and
+        # `Found 3 matches` for `True`, `"true"`, `"false"`, `"False"` and `"maybe"` —
+        # an out-of-domain value read as a value, and the wider answer given with no
+        # refusal. This is issue #1935's family (`edit.replace_all="false"` replaced both
+        # occurrences) at the third carrier, and `boolean_argument` is the same entry
+        # point that closed the other two.
+        ignore_case, refusal = boolean_argument(arguments, "ignore_case", default=False)
+        if refusal is not None:
+            return ToolResult(name="grep", content=refusal, error=True)
 
         # ── The three counts, refused rather than reinterpreted ──
         #
