@@ -51,19 +51,22 @@ The following skills are available. When the user asks what skills you have or t
 
 {% if has_memories %}
 ## Memory
-{% if project_memory_index %}
+
+The index rows themselves are delivered in the per-round `[context]` message that
+follows this conversation, not in this prefix: writing a memory must not move the
+bytes of this prompt, which is what the provider's prompt cache matches on
+(issue #2292). Read them there, or with the `read` tool on the index path.
+
+{% if project_memory_index_path %}
 ### Project Memory (long-term, cross-session)
 Directory: `{{ project_memory_dir }}/`
 Index: `{{ project_memory_index_path }}`
-
-{{ project_memory_index }}
 {% endif %}
-{% if session_memory_index %}
+
+{% if session_memory_index_path %}
 ### Session Memory (this session only)
 Directory: `{{ session_memory_dir }}/`
 Index: `{{ session_memory_index_path }}`
-
-{{ session_memory_index }}
 {% endif %}
 
 **To read a memory**: use the `read` tool with the full path.

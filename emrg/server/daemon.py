@@ -257,6 +257,30 @@ MEMORY_INDEX_ROW_CAP = 100
 # session has not read yet. The rejected alternatives are at `_cap_memory_index`.
 MEMORY_INDEX_CAP_HEAD_CHARS = INDEX_SIZE_WARN // 4
 
+# The two memory context keys whose value is the **body** of an index — the whole of
+# the memory block that changes when a memory is written. They are deliberately kept
+# out of `_build_system_prompt`'s render context (rant 2026-10-15T12:57:39, issue
+# #2292): the system prompt is the prefix a provider's prompt cache matches on, and
+# rendering the bodies into it meant every written row moved the prefix's bytes from
+# the memory section onward. Measured on the session that filed the rant: the two
+# indexes occupied 47,351 of that prompt's 81,064 characters, and a further 14,695
+# static characters followed them, so one new row re-sent ~61,700 characters that had
+# not changed, on every request. The bodies ride in the per-round `[context]` message
+# instead (`_memory_context_block`) — the placement `current_time` took on 2026-08-23
+# (rant 2026-08-23T13:54:14), which is the precedent this follows.
+MEMORY_INDEX_BODY_KEYS = ("project_memory_index", "session_memory_index")
+
+
+def _static_memory_context(data: dict[str, Any]) -> dict[str, Any]:
+    """The memory keys a byte-stable prefix may carry — every one but the bodies.
+
+    A filter rather than a promise about the template: `system.j2` cannot render a
+    value its context does not hold, so this is what makes "writing a memory does not
+    move the prefix" structural instead of a convention a later template edit can
+    undo. Guarded by `tests/test_memory_block_leaves_the_prefix.py`.
+    """
+    return {k: v for k, v in data.items() if k not in MEMORY_INDEX_BODY_KEYS}
+
 # The reloadable fields a connected client *displays*, so a revision that moves one
 # of them must be broadcast rather than only logged (issue #1374).
 # Measured before this existed: `vision = true` edited into `~/.emrg/config.toml`
@@ -2381,10 +2405,15 @@ class EmrgServer:
             ]
 
         # ── Memory ──
+        # Only the static half (the paths and `has_memories`): the index *bodies* are
+        # what changes when a memory is written, and this prefix must stay byte-stable
+        # for the provider's prompt cache to match on it (rant 2026-10-15T12:57:39,
+        # issue #2292 — see `MEMORY_INDEX_BODY_KEYS`). They ride in the per-round
+        # `[context]` message instead.
         if session:
             mem = self._collect_memory_data(session)
             if mem:
-                ctx.update(mem)
+                ctx.update(_static_memory_context(mem))
 
         # ── History ──
         if session:
@@ -4855,7 +4884,7 @@ class EmrgServer:
     # ── Token estimation helpers ──────────────────────────────
 
     def _build_context_message(self, session: Session) -> dict | None:
-        """Return a user-role context message carrying the current time.
+        """Return a user-role context message: the clock, the write boundary, memory.
 
         Rant 2026-08-23T13:54:14: the system prompt prefix must stay
         byte-stable for prompt caching (current_time used to be rendered into
@@ -4865,6 +4894,12 @@ class EmrgServer:
         ``context_refresh_interval_ms`` (0 = always fresh), so consecutive
         requests within the window send byte-identical context and the
         prefix stays cached; after the window the time refreshes.
+
+        The memory indexes joined it on 2026-10-15 for the same reason and by the
+        same argument (rant 2026-10-15T12:57:39, issue #2292): they are the other
+        part of the block that changes while a session works, so rendering them
+        into the prefix made every memory write a cache miss. Unlike the clock they
+        are appended *outside* the frozen snapshot — see `_memory_context_block`.
         """
         interval_ms = getattr(self.llm.config, "context_refresh_interval_ms", 0)
         now = datetime.now().astimezone()
@@ -4878,7 +4913,48 @@ class EmrgServer:
         boundary = self._writable_boundary_line(session)
         if boundary:
             text = f"{text}\n{boundary}"
+        # The memory indexes ride here for the reason the clock does, and *after* the
+        # freeze for the reason the boundary line is: a memory written inside the
+        # refresh window must be visible in the very next round, not at its end.
+        memory = self._memory_context_block(session)
+        if memory:
+            text = f"{text}\n\n{memory}"
         return {"role": "user", "content": text}
+
+    def _memory_context_block(self, session: Session) -> str:
+        """The memory indexes as the per-round context carries them, or ``""``.
+
+        Rant 2026-10-15T12:57:39 (issue #2292): the indexes used to be rendered into
+        the system prefix, so writing a memory moved the bytes a provider's prompt
+        cache matches on — and everything behind them. Moving them here is the
+        placement `current_time` took on 2026-08-23 (rant 2026-08-23T13:54:14): a
+        trailing user message, rebuilt every round, leaving the prefix untouched.
+
+        Both indexes go through `_collect_memory_data`, so an index that cannot be
+        read still reaches the session as the same notice it always did — the section
+        is not silently dropped (see `_index_for_prompt`).
+        """
+        data = self._collect_memory_data(session)
+        if not data:
+            return ""
+        parts: list[str] = [
+            "## Memory index (re-read every round; it is kept out of the system "
+            "prefix so that writing a memory does not invalidate the prompt cache)"
+        ]
+        for body_key, title, dir_key, path_key in (
+            ("project_memory_index", "Project Memory (long-term, cross-session)",
+             "project_memory_dir", "project_memory_index_path"),
+            ("session_memory_index", "Session Memory (this session only)",
+             "session_memory_dir", "session_memory_index_path"),
+        ):
+            body = data.get(body_key)
+            if not body:
+                continue
+            parts.append(
+                f"### {title}\nDirectory: `{data[dir_key]}/`\n"
+                f"Index: `{data[path_key]}`\n\n{body}"
+            )
+        return "\n\n".join(parts)
 
     @staticmethod
     def _writable_boundary_line(session: Session) -> str:
