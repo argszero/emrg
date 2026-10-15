@@ -171,6 +171,59 @@ def _ensure_git_on_path(monkeypatch):
     monkeypatch.setenv("PATH", git_dir + os.pathsep + os.environ.get("PATH", ""))
 
 
+@pytest.fixture(scope="session")
+def run_guard_once():
+    """Run a guard against the real checkout **once per session**, keyed on the command.
+
+    Issue #2296 R2. The guards in ``scripts/check*.py`` that read this checkout are
+    among the suite's most expensive tests: ``check-undefined-names.py`` walks the whole
+    tree (~3.2 s here, and process creation costs 3-9x more on the Windows runner), and
+    three legs of ``tests/test_check_undefined_names.py`` ask it the *identical*
+    question — ``--root <checkout>``, same cwd, same answer — so two of those three runs
+    re-measure an answer already in hand. ``tests/test_a_tree_reading_guard_names_its_tree.py``
+    does the same to all seven members of the family: the verdict leg and the naming leg
+    both run ``[script]`` in ``REPO_ROOT``.
+
+    The **predicate is untouched**: the same command runs in the same cwd through the
+    same interpreter and the caller reads the same ``CompletedProcess``. Only the number
+    of times it runs changes, which is why the collected/passed/skipped counts are
+    identical with the cache on and off.
+
+    Safe to cache because a guard's verdict is a function of the tree it named, and
+    nothing in this suite mutates a subject between two asks: tests never write the
+    checkout, and they never write its ``.emrg/`` (the hermeticity fixtures above see to
+    the host's copy). Keyed on ``(argv, cwd)`` — so two different questions can never
+    share one answer, and a guard run from ``tmp_path`` (every naming leg's second cwd)
+    always runs for real.
+
+    **Session**-scoped, so under ``-n auto --dist loadfile`` it is per worker and shared
+    by every file that worker runs; the guaranteed hits are *within* a file, which is
+    exactly where the repetition is.
+    """
+    import subprocess
+    import sys
+
+    runs: dict[tuple[tuple[str, ...], str], subprocess.CompletedProcess] = {}
+
+    def run(argv, cwd, *, timeout: int = 180) -> subprocess.CompletedProcess:
+        key = (tuple(str(arg) for arg in argv), str(cwd))
+        proc = runs.get(key)
+        if proc is None:
+            proc = subprocess.run(
+                [sys.executable, *[str(arg) for arg in argv]],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+            runs[key] = proc
+        return proc
+
+    return run
+
+
 @pytest.fixture(autouse=True)
 def _guard_stop_all_hermeticity(monkeypatch, request):
     """⛔ Red line (host 2026-08-18T22:58, extended by rant 2026-08-25T10:42:47):
