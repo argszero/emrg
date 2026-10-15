@@ -13,6 +13,7 @@ curates rants.jsonl through the tool instead of hand-written rewrites.
 import asyncio
 import json
 import os
+import re
 
 import pytest
 
@@ -478,7 +479,37 @@ def test_cleanup_rants_keeps_pending_plus_10_completed(tmp_path):
     assert timestamps == sorted(timestamps)
 
 
-def test_the_list_action_returns_the_whole_message_not_a_summary(tmp_path, monkeypatch):
+def test_the_list_action_declares_every_argument_it_reads(tmp_path, monkeypatch):
+    """A parameter the renderer reads but the schema omits is one no caller can pass.
+
+    The scan-view default (rant 2026-10-15T12:35:03 item (b)) added `full`, and the whole
+    point of the change is that a caller *chooses* to pay for the text — so the switch has to
+    be visible in the schema the model is shown, not only in the code. A provider that
+    validates arguments against `parameters` drops an undeclared key silently, and the caller
+    gets the scan view while believing it asked for the text: the silent half of the defect
+    the `…` marker and the withheld note exist to prevent, moved up a layer.
+
+    Asserted by reading the renderer's own `arguments.get(...)` keys off the source, so the
+    test cannot drift into a list of names someone maintains by hand.
+    """
+    import inspect
+
+    import emrg.tools.submit_rant_tool as mod
+
+    d = SubmitRantTool().definition()
+    declared = set(d.parameters["properties"])
+    src = inspect.getsource(mod.SubmitRantTool._execute_list)
+    read = set(re.findall(r'arguments\.get\("([a-z_]+)"', src))
+    undeclared = sorted(read - declared)
+    assert not undeclared, (
+        f"`_execute_list` reads {undeclared} but the tool schema does not declare "
+        f"them — a caller cannot ask for what the code offers: {sorted(declared)}"
+    )
+    assert "full" in declared, "the scan-view escape hatch is the change's whole point"
+    assert d.parameters["properties"]["full"]["type"] == "boolean"
+
+
+def test_the_list_action_returns_the_whole_message_when_the_caller_asks(tmp_path, monkeypatch):
     """The message IS the rant, so a 100-character excerpt is not a reading of it.
 
     Measured 2026-09-17: the only rant in flight had a **3504**-character message and
@@ -492,6 +523,11 @@ def test_the_list_action_returns_the_whole_message_not_a_summary(tmp_path, monke
     Asserted on the *tail* of the message and on an interior line, because those are what
     a truncation at the front removes: a substring taken from the beginning passes under
     `[:100]` and would have made this test green over the defect it exists for.
+
+    The call shape changed on 2026-10-15 (rant 2026-10-15T12:35:03 item (b)): the whole text
+    is what a **named slice** buys — `full=True` here, `status=` in the sibling test — not
+    what every unfiltered read pays for. What this test pins is unchanged in substance: the
+    text the caller asked for arrives **line for line**, tail included.
 
     The fixture is synthetic and deliberately shaped like the real one (multi-paragraph
     body, long tail) — it quotes no host and names no real rant.
@@ -513,7 +549,8 @@ def test_the_list_action_returns_the_whole_message_not_a_summary(tmp_path, monke
          "message": "short rant"},
     ])
     tool = SubmitRantTool()
-    out = __import__("asyncio").run(tool.execute({"action": "list"})).content
+    out = __import__("asyncio").run(
+        tool.execute({"action": "list", "full": True})).content
 
     # Read the message back off the output instead of searching for the raw string: the
     # block is indented under its header line, so the message is present line by line and
@@ -539,6 +576,124 @@ def test_the_list_action_returns_the_whole_message_not_a_summary(tmp_path, monke
     assert header.endswith("…"), f"a truncated header must say so: {header[-60:]!r}"
     short_header = next(line for line in lines if line.startswith("2026-09-17T09:01:00"))
     assert not short_header.endswith("…"), f"a message that fits needs no marker: {short_header!r}"
+    # The read that asked for the text is not told it is being shown a scan view.
+    assert "scan view —" not in out, (
+        "the closing line belongs to a withheld read; a `full=True` call withheld nothing"
+    )
+
+
+def test_an_unfiltered_list_is_the_scan_view_and_names_the_call_that_returns_the_text(
+    tmp_path, monkeypatch,
+):
+    """The default read costs rows, and every withheld body says how to get it back.
+
+    Rant 2026-10-15T12:35:03 item (b), host decision 「就定 a + b（c 去掉）」 (2026-10-15
+    12:34:24, session `s_260727_1103_866d`): the queue is read to decide *which* rant to act
+    on, yet the read carried every body. Measured on the live queue the same day — 50 rants,
+    2 pending — an unfiltered `list` returned **26,208 characters (~7,280 tokens)** and
+    `list(status="pending")` returned **6,431**; the difference is bodies nobody had asked
+    for, re-paid in the transcript every round after.
+
+    Four things are asserted together, each failing alone:
+    (a) the body is absent from the default read — the cost;
+    (b) the row is still there and still bounded — the queue is whole, and `cleanup` decides
+        by recency and status, i.e. by the row, so dropping rows would break curation;
+    (c) the absence is **stated**, per row and once for the read, and each note names a call
+        that actually returns that text — the silent half of the 2026-09-17 defect, whose new
+        shape is a block that reads as "the queue holds nothing else";
+    (d) `full=True` returns every body line for line, so nothing this action ever printed
+        became unreachable.
+    """
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    work = ("the rant in flight, whose tail is the part a scan view drops"
+            + " work-tail-" + "w" * 400)
+    history = ("a completed rant's body, written when it was filed"
+               + " history-tail-" + "h" * 400)
+    _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-10-15T09:00:00+08:00", "project": "emrg",
+         "status": "in_progress", "progress": "Stage 1 landed (PR #1)",
+         "completed": None, "message": work},
+        {"timestamp": "2026-10-15T09:01:00+08:00", "project": "emrg",
+         "status": "completed", "progress": "done",
+         "completed": "2026-10-15T10:00:00+08:00", "message": history},
+    ])
+    tool = SubmitRantTool()
+    scan = __import__("asyncio").run(tool.execute({"action": "list"})).content
+    lines = scan.splitlines()
+
+    # (a) neither body is in the default read, whole or in part past the excerpt.
+    assert "work-tail-" + "w" * 400 not in scan, "the scan view must not pay for a body"
+    assert "history-tail-" + "h" * 400 not in scan
+    assert "    " + work.splitlines()[0] not in scan, (
+        "an indented body block is the shape the scan view must not take"
+    )
+
+    # (b) both rows are present, bounded, and excerpted — the queue is whole.
+    rows = [l for l in lines if l.startswith("2026-10-15T09:0")]
+    assert len(rows) == 2, f"one row per rant, completed ones included: {rows!r}"
+    assert all(len(r) < 400 for r in rows), [len(r) for r in rows]
+    assert any("status=in_progress" in r and "the rant in flight" in r for r in rows), rows
+    assert any("status=completed" in r for r in rows), rows
+
+    # (c) stated twice over: per row, naming the call that returns *that* row's text.
+    notes = [l for l in lines if l.startswith("    (text withheld")]
+    assert len(notes) == 2, f"one note per withheld body: {notes!r}"
+    assert any('status="in_progress"' in n for n in notes), (
+        f"a live rant's note must name the call that returns it: {notes!r}"
+    )
+    assert any('status="completed"' in n and "history" in n for n in notes), (
+        f"a completed rant's note says why it is history: {notes!r}"
+    )
+    assert "scan view — 2 row(s)" in scan, (
+        "the read itself says it showed rows only, and how many"
+    )
+
+    # (d) the way back, line for line.
+    full = __import__("asyncio").run(
+        tool.execute({"action": "list", "full": True})).content
+    flines = full.splitlines()
+    start = next(i for i, l in enumerate(flines) if l.startswith("2026-10-15T09:00:00"))
+    block = []
+    for line in flines[start + 1:]:
+        if line.startswith("    progress:") or (line and not line.startswith("    ")):
+            break
+        block.append(line[4:] if line.startswith("    ") else line)
+    assert "\n".join(block) == work, "full=True returns the body the scan view withheld"
+    assert "history-tail-" + "h" * 400 in full, "…for every rant, completed included"
+    assert "scan view —" not in full, "a read that withheld nothing says no such line"
+    assert len(full) > len(scan), "asking for the text costs more than scanning does"
+
+
+def test_project_alone_does_not_unlock_the_text(tmp_path, monkeypatch):
+    """A filter that narrows nothing on the cost's axis is not a request for the body.
+
+    The host's ruling named the unlock precisely: 「正文只在按 status 过滤或显式要求时给」 —
+    the text comes when the caller filters by **status** or asks explicitly (rant
+    2026-10-15T12:35:03 item (b)). `project=` is the odd one out, and deliberately so: it is
+    the dedup filter `promote_prompt.md` uses, and on the queue measured 2026-10-15 it
+    selects **48 of 50** rows — `list(project="emrg")` cost 24,539 characters against an
+    unfiltered 26,208, i.e. it narrowed the *subject*, not the cost. Printing bodies for it
+    would reintroduce the default-read cost on the one filter a template really passes.
+    """
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    body = "a pending rant in the project the caller named" + " tail-" + "t" * 400
+    _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-10-15T09:00:00+08:00", "project": "emrg",
+         "status": "pending", "progress": None, "completed": None, "message": body},
+        {"timestamp": "2026-10-15T09:01:00+08:00", "project": "other",
+         "status": "pending", "progress": None, "completed": None,
+         "message": "another project's rant"},
+    ])
+    tool = SubmitRantTool()
+    out = __import__("asyncio").run(
+        tool.execute({"action": "list", "project": "emrg"})).content
+    assert "2026-10-15T09:00:00" in out, "the filter still selects the row"
+    assert "another project" not in out, "…and excludes the other project's"
+    assert "tail-" + "t" * 400 not in out, (
+        "a project filter selects rows, not bodies: it must stay a scan view"
+    )
+    assert "scan view — 1 row(s)" in out
+    assert 'status="pending"' in out, "the note names the call that returns the text"
 
 
 def test_the_list_header_is_bounded_and_the_full_progress_follows_it(tmp_path, monkeypatch):
@@ -574,7 +729,8 @@ def test_the_list_header_is_bounded_and_the_full_progress_follows_it(tmp_path, m
          "status": "pending", "progress": "PR #1 submitted", "completed": None,
          "message": "short rant"},
     ])
-    out = __import__("asyncio").run(SubmitRantTool().execute({"action": "list"})).content
+    out = __import__("asyncio").run(
+        SubmitRantTool().execute({"action": "list", "full": True})).content
     lines = out.splitlines()
 
     header = next(l for l in lines if l.startswith("2026-09-17T09:00:00"))
@@ -674,9 +830,12 @@ def test_a_completed_body_is_withheld_and_one_call_returns_it(tmp_path, monkeypa
     )
 
     # (b) the disclosure: the withheld row says so and names the call that returns it. This is
-    #     the arm that keeps the next reader from concluding "this rant has no message".
-    withheld = [l for l in lines if "withheld" in l]
-    assert len(withheld) == 1, f"exactly the completed row is marked: {withheld!r}"
+    #     the arm that keeps the next reader from concluding "this rant has no message". Since
+    #     2026-10-15 (item (b) of rant 2026-10-15T12:35:03) the default read withholds every
+    #     body, so the completed row's note is the one that says *why* — history, not work —
+    #     and names `status="completed"`, the call that returns history whole.
+    withheld = [l for l in lines if "withheld" in l and "history" in l]
+    assert len(withheld) == 1, f"exactly the completed row is marked as history: {withheld!r}"
     assert 'status="completed"' in withheld[0], (
         f"the note has to name the one call that returns the text: {withheld[0]!r}"
     )

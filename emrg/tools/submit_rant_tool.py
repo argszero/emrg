@@ -12,14 +12,23 @@ rants.jsonl exclusively through this tool — never with hand-written
 bash/python rewrites (the 2026-08-18 incident: format drift to array rows,
 field loss, history pruning).
 
-Issue #1514 (2026-09-21): `list` prints the full text for every rant that is not
-`completed`, plus for every rant a `status=` filter selected, and prints one line where a
-completed body was withheld. The rows still list every rant, so the queue is whole and
-`cleanup` (which decides by recency and status, i.e. by the row) is unchanged;
-`status="completed"` returns the history whole, so nothing this action printed before
-becomes unreachable. The read used to cost the whole queue on every call — ~52 K
-characters on the queue measured in the issue — because no task template passes a filter
-on the axis the cost is on.
+Issue #1514 (2026-09-21): `list` withheld the body of every `completed` rant and printed
+one line in its place. The rows still list every rant, so the queue is whole and `cleanup`
+(which decides by recency and status, i.e. by the row) is unchanged; `status="completed"`
+returns the history whole, so nothing this action printed before became unreachable.
+
+Rant 2026-10-15T12:35:03 item (b) (host decision 12:34:24, 「就定 a + b（c 去掉）」): the
+same reasoning, one step further — **an unfiltered `list` is a scan, so it is scan rows
+only**, and the full text follows a *narrowing* the caller actually chose: `status=`, or
+`full=True`. #1514 fixed the history half of the cost and left the work half in place,
+because it reasoned that a caller reading the queue must have the text; that is true of a
+caller that **named the slice**, and false of the curation call, which decides which rants
+to act on from the row. Measured on the live host queue the same day (50 rants, 2 pending,
+48 completed): an unfiltered `list` returned **26,208 characters (~7,280 tokens)** of 50
+rows — 48 of them withheld — and `list(status="pending")`, the slice the curation flow
+actually reads, returned **6,431**. A cost re-paid every round the queue is in history. The
+read path stays whole: every withheld row names the call that returns its text, and
+`full=True` returns the queue exactly as #1514 left it.
 """
 
 from __future__ import annotations
@@ -84,9 +93,15 @@ _HISTORY_STATUS = "completed"
 #: `…` is: a reader who cannot tell "this rant has no message" from "this rant's message was
 #: withheld" cannot make the one call that returns it — which is how the earlier truncation
 #: stayed invisible for as long as it did. It names the remedy, not just the state.
-_WITHHELD_NOTE = (
-    '    (completed — text withheld as history; `action="list", status="completed"` '
-    "returns it)"
+_WITHHELD_NOTE = "    (text withheld — {why}; {remedy} returns it)"
+
+#: The closing line of a scan-only read. A caller that asked for the queue and got rows has
+#: to be able to tell "this is the scan view, the text is one call away" from "the queue
+#: holds nothing but these rows" — the silent half of the 2026-09-17 defect, in its new
+#: shape. Printed only when at least one body was actually withheld.
+_SCAN_ONLY_NOTE = (
+    "(scan view — {n} row(s), text withheld; `full=True`, or `status=` to name the slice "
+    "you are acting on, returns the text)"
 )
 
 
@@ -111,16 +126,18 @@ class SubmitRantTool(ToolExecutor):
                 "on it. Must obtain explicit user consent before calling — "
                 "clarify the target and polish the text, show the user the "
                 "result, and only then call. "
-                "**action=list**: list rants (optional status/project filters; "
-                "every rant gets a row carrying timestamp/project/status/a "
-                "progress excerpt/completed and a message excerpt — the scan "
-                "view — and the full message and progress follow as indented "
-                "blocks under it, **except on a row whose status is completed**: "
-                "that text is history, so it is withheld and replaced by a line "
-                "saying so. Pass `status=\"completed\"` to read it back whole, or "
-                "any `status=` to see the selected slice in full. It is the read "
-                "path the task templates point at, so it has to carry the text "
-                "they point it at for). "
+                "**action=list**: list rants (optional status/project/full "
+                "filters). Every rant gets a row carrying timestamp/project/"
+                "status/a progress excerpt/completed and a message excerpt — "
+                "the scan view, and the default for an unfiltered read, "
+                "because the queue is scanned to decide *which* rant to act "
+                "on. The full message and progress follow as indented blocks "
+                "under the row only when the caller named the slice it is "
+                "acting on — `status=`, or `full=True`; otherwise the row "
+                "carries a line naming the call that returns its text, so "
+                "nothing this action ever printed is unreachable. It is the "
+                "read path the task templates point at, so it has to carry "
+                "the text they point it at for — on the call that asks. "
                 "**action=update**: update a rant by its timestamp (status "
                 "follows the pending→in_progress→completed state machine, no "
                 "skipping; completed timestamp auto-written, and any explicit "
@@ -174,7 +191,21 @@ class SubmitRantTool(ToolExecutor):
                         "description": (
                             "For update: new status (pending→in_progress→"
                             "completed, no skipping). For list: optional "
-                            "status filter."
+                            "status filter — and naming it is what asks for "
+                            "that slice's full text, so `status=\"pending\"` "
+                            "is how a cycle reads the work in flight, and "
+                            "`status=\"completed\"` how it reads history."
+                        ),
+                    },
+                    "full": {
+                        "type": "boolean",
+                        "description": (
+                            "For list: print every selected rant's full "
+                            "message and progress, not just its scan row. "
+                            "Use it when you have decided to act on a rant "
+                            "and need its whole text; an unfiltered read "
+                            "without it is the scan view, which costs rows "
+                            "only (rant 2026-10-15T12:35:03 item (b))."
                         ),
                     },
                     "progress": {
@@ -317,6 +348,9 @@ class SubmitRantTool(ToolExecutor):
             status = str(status).strip() or None
         if project is not None:
             project = str(project).strip() or None
+        full = arguments.get("full")
+        if isinstance(full, str):
+            full = full.strip().lower() in ("1", "true", "yes", "y", "on")
         try:
             rants = list_rants(self._rants_log(), status=status, project=project)
         except Exception as e:  # noqa: BLE001
@@ -334,47 +368,44 @@ class SubmitRantTool(ToolExecutor):
                     + (f" (project={project})" if project else "")
                 ),
             )
-        # The message is the rant: `[…][:100]` used to be all of it that this action
-        # showed, and that was measured to be 100 of 3504 characters on the one rant in
-        # flight when it was looked at (2026-09-17) — 97% of the feedback dropped by the
-        # very path the task templates now route every read through (`paper_prompt.md`
-        # says to check the queue with `submit_rant(action="list")` and that there is no
-        # reason to open the file at all, "not even to read it"). A read path that cannot
-        # deliver the text is not a read path; the header line stays for scanning, and the
-        # message follows it whole — a cap here would be the same defect with a larger
-        # number in it, since nothing else can hand the caller the rest.
+        # The message is the rant, and the row is the scan view of it. `[…][:100]` used to
+        # be all this action showed, and that was measured to be 100 of 3504 characters on
+        # the one rant in flight (2026-09-17) — 97% of the feedback dropped by the very path
+        # the task templates route every read through (`paper_prompt.md` says to check the
+        # queue with `submit_rant(action="list")` and that there is no reason to open the
+        # file at all, "not even to read it"). A read path that cannot deliver the text is
+        # not a read path — so the text is always *reachable*, and what changed since is
+        # **which call pays for it**.
         #
-        # Measured cost on the same queue (11 rants, cleanup caps it at 10 completed plus
-        # the pending/in-progress ones; messages 3504 / 4031 / 3594 … chars): the whole
-        # queue went 15300 → 42725 characters. The filters were named as the way to narrow
-        # it, and the second half of that never happened: no task template passes a filter
-        # except promote's `project=`, and `project=` is **orthogonal to the axis the cost
-        # is on**. Measured 2026-09-21 (issue #1514): `list(project="emrg")` on the
-        # evolution host returns 9 rants, 9/9 completed — 100% history with the work at
-        # nil; over one session's whole history the calls averaged 17.4 K characters and
-        # were 19.4% of every tool-result character it ever saw.
+        # Issue #1514 (2026-09-21) fixed the history half: a `completed` rant's body is
+        # provenance, so it was withheld while its row stayed. The work half stayed in place
+        # — every pending / in_progress rant printed its whole message on every call,
+        # whatever the caller asked for. Measured on the live host queue 2026-10-15 (50
+        # rants, 2 pending, 48 completed): an unfiltered `list` returned **26,208 characters
+        # (~7,280 tokens)**, and `list(status="pending")` — the slice the curation flow
+        # decides on — returned **6,431**. The difference is bodies nobody asked for, re-paid
+        # in the transcript every round after.
         #
-        # So the scope is the fix, and a scope is not a cap. **The full text is printed for
-        # every rant that is not `completed`, and for every rant a `status=` filter
-        # selected** — a caller naming the slice is the narrowing mechanism this comment
-        # always nominated, while "the rows narrow it" was never true of any caller. Every
-        # row still lists every rant, completed ones included (the row is the queue, and
-        # `cleanup` decides by recency and status, i.e. by the row), and
-        # `status="completed"` returns the withheld history whole — so nothing this action
-        # ever printed becomes unreachable, which is the property the refusal above was
-        # protecting. A withheld body says so and names that call, because an absent block
-        # that looks like an empty message is the silent half of the 2026-09-17 defect.
+        # So the scope of the full text is a **narrowing the caller named**: `status=` (the
+        # host's own words, rant 2026-10-15T12:35:03 item (b): 「正文只在按 status 过滤或显式
+        # 要求时给」 — the text comes when the caller filters by status or asks explicitly),
+        # or `full=True`. `project=` deliberately does **not** unlock it: it is the dedup
+        # filter `promote_prompt.md` uses, and on the queue measured 2026-10-15 it selects
+        # 48 of 50 rows — it narrows the *subject*, not the cost. Every withheld row names
+        # the call that returns its body, and the read closes with a line saying it is a scan
+        # view at all: an absent block that reads as an empty message is the silent half of
+        # the 2026-09-17 defect, and an absent *whole* block that reads as "the queue holds
+        # nothing else" is its new shape.
         #
-        # `progress` is bounded in the header too, and for the same reason it is *not*
-        # dropped there: it is a one-line field of the row (the prompt curates with it), but
-        # printed whole it **was** the row — 1651 of that 1743-character header on the rant
-        # in flight. So the row keeps an excerpt, and the whole value follows in a `progress:`
-        # block after the message, on the same rule the message follows — and it is withheld
-        # with the message on a completed row, since a completed rant's progress is the
-        # longer of the two fields (measured: 5008 characters on one of the queue's
-        # completed rants, against a 739-character message).
+        # `progress` is bounded in the row too, and for the same reason it is *not* dropped
+        # there: it is a one-line field of the scan view (the prompt curates with it), but
+        # printed whole it **was** the row — 1651 of a 1743-character header on the rant in
+        # flight. So the row keeps an excerpt, and the whole value follows in a `progress:`
+        # block wherever the message follows.
         status_selected = status is not None
+        text_selected = status_selected or bool(full)
         lines = []
+        withheld = 0
         for r in rants:
             message = (r.get("message") or "").strip()
             progress = (r.get("progress") or "").strip()
@@ -385,8 +416,16 @@ class SubmitRantTool(ToolExecutor):
                 f"status={r.get('status')} | progress={progress_row} | "
                 f"completed={r.get('completed')} | {summary}"
             )
-            if not status_selected and (r.get("status") or "") == _HISTORY_STATUS:
-                lines.append(_WITHHELD_NOTE)
+            if not text_selected:
+                withheld += 1
+                history = (r.get("status") or "") == _HISTORY_STATUS
+                lines.append(_WITHHELD_NOTE.format(
+                    why="history, not work" if history else "this is the scan view",
+                    remedy=(
+                        'status="completed"' if history
+                        else f'status="{r.get("status")}"'
+                    ),
+                ))
                 continue
             lines.append(
                 _indented(message) if message
@@ -395,10 +434,10 @@ class SubmitRantTool(ToolExecutor):
             if progress:
                 lines.append("    progress:")
                 lines.append(_indented(progress, "      "))
-        return ToolResult(
-            name="submit_rant",
-            content=f"{len(rants)} rant(s):\n" + "\n".join(lines),
-        )
+        content = f"{len(rants)} rant(s):\n" + "\n".join(lines)
+        if withheld:
+            content += "\n" + _SCAN_ONLY_NOTE.format(n=withheld)
+        return ToolResult(name="submit_rant", content=content)
 
     def _execute_update(self, arguments: dict) -> ToolResult:
         timestamp = str(arguments.get("timestamp", "") or "").strip()
