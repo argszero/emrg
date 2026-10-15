@@ -16,6 +16,18 @@ unguarded, ``test-windows`` went red on ``AttributeError``, and the ``ubuntu`` l
 throughout. The reviewer's sentence names the defect exactly -- *"the marker is defined and
 never applied"*.
 
+**The same leg has a second, unrelated failure mode**, and this file covers it too: a test
+that starts a POSIX shell. Nothing raises ``AttributeError`` and ``shutil.which("bash") is
+None`` is **not** the guard, because on ``windows-2025`` a bare ``bash`` resolves to the WSL
+launcher ``C:\\Windows\\System32\\bash.exe`` -- ``CreateProcess`` searches System32 before
+``PATH`` -- which exists, cannot run a script, and answers *"Windows Subsystem for Linux has
+no installed distributions."* So the arm reddens on one leg and passes on the other, exactly
+the shape above. Paid for on 2026-10-02 (``#1812``, whose ``skipif`` reasons carry the
+measurement, restated by hand in five files), and again on 2026-10-15: ``#2287``'s new
+``tests/test_check_release_artifact_version.py`` ran the step body with
+``subprocess.run(["bash", ...])`` and no platform gate, ``test-windows`` red on CI run
+``38678530149`` while ``test`` passed.
+
 Nothing holds that today. The convention is carried by **prose**: test files repeat the
 reasoning in their own docstrings ("The FIFO arm carries an ``os.mkfifo`` gate, so it skips
 where there are no FIFOs"), and every call site carries a hand-written gate. A new arm that
@@ -25,7 +37,9 @@ says so.
 What is asserted
 ----------------
 Every ``test*`` function under ``tests/`` that reaches a POSIX-only primitive -- **directly,
-or through a same-file helper** -- must carry a gate. A gate is one of:
+or through a same-file helper** -- must carry a gate. A *primitive* is an attribute or module
+that exists only on POSIX (``os.mkfifo``, ``pty``, …), or a POSIX shell started by its bare
+name in a ``subprocess`` argv. A gate is one of:
 
 * a decorator written inline whose condition names the platform, e.g.
   ``@pytest.mark.skipif(sys.platform == "win32", reason=...)``;
@@ -67,7 +81,18 @@ Named limits
   searched unparsed source.
 * A test that **shells out** to a ``mkfifo`` binary is not seen: a string is not a reference.
   Every call site today is in-process ``os.mkfifo(...)`` (measured 2026-10-15), so the gap is
-  empty rather than merely small.
+  empty rather than merely small. A shell *started* by bare name **is** seen -- that is the
+  reference ``_bare_shell_program`` reads -- so the two are not the same gap.
+* ``import subprocess as sp`` and then ``sp.run(["bash", ...])`` is not seen: the reference
+  reader keys on the module's own name, as it does for ``os.mkfifo``. Every shell site in this
+  tree imports ``subprocess`` by its name (measured 2026-10-15: four files, twelve arms), so
+  the gap is empty today; an alias would have to be introduced deliberately.
+* A shell resolved through ``shutil.which("bash")`` and passed as ``[shell, ...]`` is **not**
+  reported, and that is a decision rather than a gap: the caller chose a program, and this
+  reader cannot decide what ``which`` returned on the runner. Those arms are still red on the
+  Windows leg (the launcher is on ``PATH`` there), which is why the four sites that use the
+  spelling carry the platform gate as well -- ``test_check_notary_credentials.py`` instead
+  probes the shell at runtime and skips when it answers no.
 * A helper **imported from another test module** is not followed -- the graph is same-file.
 * A POSIX dependency reached through **product** code -- a tool that itself calls
   ``os.mkfifo`` -- is out of scope. The tree's rule there is the opposite one: the product
@@ -118,6 +143,31 @@ POSIX_ATTRIBUTES = frozenset(
 #: **collection** of the whole file, which no per-test gate placed below it can repair -- so
 #: it is a finding for every test in that file, not for the import's own line.
 POSIX_MODULES = frozenset({"pty", "termios", "fcntl", "tty", "resource", "pwd", "grp"})
+
+#: Programs that are a POSIX shell, reached by a **bare name** as a subprocess's own argv[0].
+#:
+#: The second kind of POSIX dependency, and a different mechanism from the attributes above:
+#: nothing raises `AttributeError`, and `shutil.which("bash") is None` -- the guard this tree
+#: had written by hand four times -- is **not** sufficient, because on the `windows-2025` leg
+#: a bare `bash` resolves to the WSL launcher `C:\Windows\System32\bash.exe`, which exists and
+#: cannot run: `CreateProcess` searches System32 before `PATH`, so the arm starts a program
+#: that answers `Windows Subsystem for Linux has no installed distributions.` and never runs
+#: the script. The arm is red on one leg and green on the other, which is the shape this file
+#: exists for.
+#:
+#: Paid for on 2026-10-02 (`#1812`, whose `skipif` reasons carry the measurement, and which
+#: five files restate by hand -- three as a gate's reason, two as a comment or a runtime
+#: probe), and again on 2026-10-15: `#2287`'s new
+#: `tests/test_check_release_artifact_version.py` runs the step body with
+#: `subprocess.run(["bash", ...])` and no platform gate, `test-windows` red on CI run
+#: `38678530149` while `test` passed.
+POSIX_SHELL_PROGRAMS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
+#: The `subprocess` entry points whose first argument is an argv. A shell invoked in any of
+#: them is a POSIX dependency; a list holding a shell name that is handed to *product* code
+#: (`confine(["bash", "-c", command])`) is not one, which is why the reader keys on both the
+#: module and the entry point rather than on the string.
+SUBPROCESS_ENTRY_POINTS = frozenset({"run", "call", "check_call", "check_output", "Popen"})
 
 #: What makes a skip a *platform* gate. A `skipif` about anything else -- a Python version, a
 #: missing binary -- is not one, which is the #2074 lesson read from the other side: a marker
@@ -187,6 +237,32 @@ def _names_the_platform(node: ast.AST) -> bool:
     return False
 
 
+def _bare_shell_program(call: ast.Call) -> str | None:
+    """The POSIX shell this call starts **by bare name**, if it starts one.
+
+    Only a *literal* program is reported. `subprocess.run([shell, ...])` with `shell` bound
+    beforehand is not a reference: the caller chose a path, and the tree's arms that do it
+    pass `shutil.which("bash")`, which is a reading of this host rather than the launcher
+    Windows would pick. That shape still needs the platform gate -- the four sites here carry
+    both -- but the string is not what this reader can decide, and reporting it would report
+    the sites that got it *more* right than the one that got caught.
+    """
+    func = call.func
+    if not isinstance(func, ast.Attribute) or func.attr not in SUBPROCESS_ENTRY_POINTS:
+        return None
+    if not (isinstance(func.value, ast.Name) and func.value.id == "subprocess"):
+        return None
+    if not call.args:
+        return None
+    argv = call.args[0]
+    if not isinstance(argv, (ast.List, ast.Tuple)) or not argv.elts:
+        return None
+    first = argv.elts[0]
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        return first.value if first.value in POSIX_SHELL_PROGRAMS else None
+    return None
+
+
 def _primitive_refs(node: ast.AST, *, unconditional_only: bool = False) -> set[str]:
     """The POSIX-only names this subtree reaches, as rendered strings.
 
@@ -215,6 +291,10 @@ def _primitive_refs(node: ast.AST, *, unconditional_only: bool = False) -> set[s
             elif isinstance(sub, ast.ImportFrom) and sub.module:
                 if sub.module.split(".")[0] in POSIX_MODULES:
                     hits.add(f"from {sub.module} import ...")
+            elif isinstance(sub, ast.Call):
+                program = _bare_shell_program(sub)
+                if program is not None:
+                    hits.add(f"a {program!r} by bare name")
             walk(sub)
 
     walk(node)
@@ -243,16 +323,30 @@ def _call_targets(node: ast.AST, owner: str | None) -> set[tuple]:
 
 
 def _platform_markers(tree: ast.Module) -> set[str]:
-    """Module-level names bound to a platform gate, in either of the tree's two spellings.
+    """Names bound to a platform gate, in either of the tree's two spellings.
 
     A value -- ``_needs_mkfifo = pytest.mark.skipif(not hasattr(os, "mkfifo"), ...)`` -- and a
     **decorator factory**, which is how ``test_memory.py`` writes the same thing:
 
         def _needs_mkfifo(func):
             return pytest.mark.skipif(not hasattr(os, "mkfifo"), ...)(func)
+
+    Both at module level and inside a **class body**, because a test class may carry its own
+    marker: ``test_config.py``'s ``TestTheInstallerWritesTheConfigPrivate`` binds ``posix_only``
+    in the class body and decorates four of its arms with it (one of them reaching a shell).
+    Read at module level only, that gate is invisible and the sweep reports an arm that *has*
+    the gate -- the failure direction that costs a correct site a rewrite, and it is why the
+    class body is walked here rather than only ``tree.body``.
     """
     markers: set[str] = set()
-    for node in tree.body:
+
+    def scopes(body: list[ast.stmt]) -> Iterator[ast.stmt]:
+        for node in body:
+            yield node
+            if isinstance(node, ast.ClassDef):
+                yield from scopes(node.body)
+
+    for node in scopes(tree.body):
         if isinstance(node, ast.Assign):
             targets = node.targets
             value = node.value
@@ -390,10 +484,28 @@ def _index(path: Path) -> Reading:
 
     ungated: list[tuple[int, str, str]] = []
     gated: list[tuple[int, str, str]] = []
+    # The label names what the arm **reaches**, not only what it calls directly. Most of this
+    # tree's arms reach the primitive through a same-file helper (`_run_step`, `_fifo`), and
+    # the row used to read "a same-file call" -- which sends a reader to the helper for a
+    # reason the message never states. Measured: three of the four bare-shell sites reach one
+    # this way and none of them named it.
+    reached = {id(node): set(refs[id(node)]) for node in funcs}
+    changed = True
+    while changed:
+        changed = False
+        for node in funcs:
+            through: set[str] = set()
+            for target in edges[id(node)]:
+                for other in by_key.get(target, ()):
+                    through |= reached[id(other)]
+            if not through <= reached[id(node)]:
+                reached[id(node)] |= through
+                changed = True
+
     for node in funcs:
         if id(node) not in needs or not node.name.startswith("test"):
             continue
-        primitives = ", ".join(sorted(refs[id(node)] | file_level)) or "a same-file call"
+        primitives = ", ".join(sorted(reached[id(node)] | file_level)) or "a same-file call"
         row = (node.lineno, node.name, primitives)
         (gated if _is_gated(node, markers, module_gated) else ungated).append(row)
     return Reading(path=path, ungated=ungated, gated=gated)
@@ -619,6 +731,105 @@ class TestTheDetectorReadsBothDirections:
         assert "module-level import pty" in reading.ungated[0][2], reading
 
 
+class TestTheShellPrimitive:
+    """The second POSIX dependency: a shell started **by bare name** on the Windows leg.
+
+    `C:\\Windows\\System32\\bash.exe` is WSL's launcher, `CreateProcess` searches System32
+    before `PATH`, and `shutil.which("bash") is None` is therefore not a guard there -- the
+    launcher exists and answers `Windows Subsystem for Linux has no installed distributions.`
+    These controls drive the reader in both directions on the four shapes the tree holds.
+    """
+
+    UNGATED = '''
+        import subprocess
+
+        def _run_step(script):
+            return subprocess.run(["bash", "--noprofile", "--norc", str(script)])
+
+        def test_the_step_refuses(tmp_path):
+            assert _run_step(tmp_path / "step.sh")
+    '''
+
+    def test_an_arm_that_starts_bash_by_bare_name_is_reported(self, tmp_path: Path) -> None:
+        reading = _index_source(tmp_path, self.UNGATED)
+        assert [row[1] for row in reading.ungated] == ["test_the_step_refuses"], reading
+        assert "'bash' by bare name" in reading.ungated[0][2], reading
+
+    def test_the_same_helper_behind_a_platform_gate_is_silent(self, tmp_path: Path) -> None:
+        reading = _index_source(tmp_path, '''
+            import subprocess
+            import sys
+
+            import pytest
+
+            def _run_step(script):
+                return subprocess.run(["bash", "--noprofile", "--norc", str(script)])
+
+            @pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="bash on the Windows runner is WSL's, not the shell these steps run under",
+            )
+            def test_the_step_refuses(tmp_path):
+                assert _run_step(tmp_path / "step.sh")
+        ''')
+        assert reading.ungated == [], reading
+        assert [row[1] for row in reading.gated] == ["test_the_step_refuses"], reading
+        assert "'bash' by bare name" in reading.gated[0][2], reading
+
+    def test_a_marker_bound_in_the_class_body_is_a_gate(self, tmp_path: Path) -> None:
+        """`test_config.py`'s spelling, live: the marker is a class attribute, not a module one.
+
+        Read at module level only, this arm reads UNGATED -- a correct site reported, which is
+        the direction that costs a rewrite of working code.
+        """
+        reading = _index_source(tmp_path, '''
+            import os
+
+            import pytest
+
+            class TestTheInstallerWritesTheConfigPrivate:
+                posix_only = pytest.mark.skipif(os.name == "nt", reason="no POSIX permission bits")
+
+                @posix_only
+                def test_the_created_config_file_is_private(self, tmp_path):
+                    import subprocess
+                    subprocess.run(["bash", str(tmp_path / "gen.sh")])
+        ''')
+        assert reading.ungated == [], reading
+        assert [row[1] for row in reading.gated] == [
+            "test_the_created_config_file_is_private"
+        ], reading
+
+    def test_a_shell_resolved_by_which_is_not_a_literal_program(self, tmp_path: Path) -> None:
+        """The shape the tree's other four sites use, and the reason they are not reported.
+
+        `[shell, ...]` is a program the *caller* chose, read off this host; the bare name is
+        what Windows resolves for itself. Reporting the resolved shape would report the sites
+        that got it more right than the one that was caught -- and it is still a red on the
+        Windows leg, which is why those four carry the platform gate as well.
+        """
+        reading = _index_source(tmp_path, '''
+            import shutil
+            import subprocess
+
+            def test_the_step_refuses(tmp_path):
+                shell = shutil.which("bash")
+                subprocess.run([shell, "--noprofile", str(tmp_path / "step.sh")])
+        ''')
+        assert reading.ungated == [], reading
+        assert reading.gated == [], reading
+
+    def test_a_shell_name_handed_to_product_code_is_not_a_reference(self, tmp_path: Path) -> None:
+        """`confine(["bash", "-c", ...])` builds an argv for the sandbox; it starts nothing."""
+        reading = _index_source(tmp_path, '''
+            def test_the_command_is_confined():
+                confined = confine(["bash", "-c", "echo hi"], policy)
+                assert confined.argv[0] == "bash"
+        ''')
+        assert reading.ungated == [], reading
+        assert reading.gated == [], reading
+
+
 class TestAWordIsNotAGate:
     """The quiet direction, one control per class PR #2279's review measured.
 
@@ -722,6 +933,37 @@ class TestTheSweptTree:
         readings = {r.path.name: r for r in _sweep()}
         gated = {row[1] for row in readings["test_grep_tool.py"].gated}
         assert "test_a_directory_holding_a_fifo_is_still_searched" in gated, gated
+
+    def test_the_sweep_sees_the_shell_sites_it_was_extended_for(self) -> None:
+        """The new class's own baseline: a detector that stopped matching must not pass.
+
+        The four names below are the sites this extension was written for, and each is gated --
+        three by a `skipif` on the Python's own wording, one (`test_config.py`) by a marker
+        bound in the **class body**, which is the spelling this extension had to learn to
+        read. The label is asserted too: an arm that reaches the shell through a helper must
+        say so, not "a same-file call".
+
+        It is a **subset**, not an equality, and that was measured rather than reasoned: written
+        as `set(seen) == {those four}` it went red on the fifth file the moment one arrived --
+        PR #2287's `tests/test_check_release_artifact_version.py`, whose three shell arms carry
+        the same platform gate the four below do. A correct site must never turn this red; the
+        arm that *forgets* its gate is `test_every_posix_arm_in_the_suite_carries_its_gate`,
+        which reads the ungated half and needs no name list.
+        """
+        readings = {r.path.name: r for r in _sweep()}
+        seen = {
+            name: [row[1] for row in reading.gated if "bare name" in row[2]]
+            for name, reading in readings.items()
+        }
+        seen = {name: rows for name, rows in seen.items() if rows}
+        assert {
+            "test_a_step_without_its_product_refuses.py",
+            "test_appimage_update_info.py",
+            "test_config.py",
+            "test_the_release_asks_its_credential_question_before_building.py",
+        } <= set(seen), seen
+        labels = {row[1]: row[2] for row in readings["test_a_step_without_its_product_refuses.py"].gated}
+        assert "'bash' by bare name" in labels["test_a_step_that_finds_no_product_refuses_rather_than_skipping"], labels
 
     def test_every_posix_arm_in_the_suite_carries_its_gate(self) -> None:
         readings = [reading for reading in _sweep() if reading.ungated]
