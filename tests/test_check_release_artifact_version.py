@@ -550,8 +550,26 @@ def _step_body() -> str:
     raise AssertionError(f"no step named {STEP_NAME!r} in the release job")
 
 
+#: The Windows leg has no `bash` to run the step under: `C:\Windows\System32\bash.exe` is
+#: WSL's launcher, `CreateProcess` searches System32 before `PATH`, and it answers
+#: `Windows Subsystem for Linux has no installed distributions.` (unsigned UTF-16LE, exit 1)
+#: rather than running anything. `shutil.which("bash") is None` is therefore *not* a gate
+#: there -- the launcher exists and is found. These three arms carry the platform gate the
+#: same-shaped arms carry in `tests/test_a_step_without_its_product_refuses.py` (`:207`,
+#: `:230`) and `tests/test_release_end_state.py`; the step is `shell: bash` on the runner
+#: whose job actually invokes it, and the tool's own forty readings below stay ungated
+#: because they run the tool in-process.
+_WINDOWS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash on the Windows runner is WSL's launcher, not the shell the step runs under",
+)
+
+
 def _run_step(body: str, workspace: Path, ref_name: str) -> subprocess.CompletedProcess:
     """Execute the step as GitHub's `shell: bash` would, in a tree the caller built."""
+    if shutil.which("bash") is None:  # pragma: no cover - a POSIX-less host
+        pytest.skip("no bash on PATH: this guard drives the step's shell text, which it cannot run")
+
     script = workspace / "step.sh"
     script.write_text(textwrap.dedent(body), encoding="utf-8")
     env = {"GITHUB_REF_NAME": ref_name, "PATH": "/usr/bin:/bin"}
@@ -576,6 +594,7 @@ def release_job_tree(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@_WINDOWS
 def test_the_step_reads_a_matching_artifact_and_exits_zero(release_job_tree: Path) -> None:
     write_tar_gz(release_job_tree / "artifacts" / f"EMRG-{GOOD}-linux-x86_64.tar.gz", GOOD)
     proc = _run_step(_step_body(), release_job_tree, f"v{GOOD}")
@@ -583,6 +602,7 @@ def test_the_step_reads_a_matching_artifact_and_exits_zero(release_job_tree: Pat
     assert f"asserting version {GOOD} (from tag v{GOOD}) inside 1 artifact(s)" in proc.stdout
 
 
+@_WINDOWS
 def test_the_step_fails_on_a_stale_artifact(release_job_tree: Path) -> None:
     """The release must not be created from products that disagree with the tag."""
     write_tar_gz(release_job_tree / "artifacts" / f"EMRG-{GOOD}-linux-x86_64.tar.gz", STALE)
@@ -592,6 +612,7 @@ def test_the_step_fails_on_a_stale_artifact(release_job_tree: Path) -> None:
     assert "::error::an artifact declares a version other than" in proc.stdout
 
 
+@_WINDOWS
 def test_the_step_refuses_when_its_subject_is_absent(release_job_tree: Path) -> None:
     """Issue #1913's shape: a step whose subject is missing refuses, never skips.
 
