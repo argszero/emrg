@@ -21,9 +21,9 @@ What it reads -- anything that holds an icon, and nothing that does not:
     extracting it writes none of them as siblings -- BSD `cpio` consumes them as extended
     attributes (the extracted `icon.icns` carries `com.apple.cs.*`), so the `.app` an
     ordinary expand-then-extract hands a reader holds the icon alone. A subject *can* hold
-    one -- naming that entry for extraction creates it as a file of its own, and a directory
-    copied by a tool that keeps AppleDouble siblings beside the files does too -- and then
-    the guard is what keeps a file nobody can decode from answering for the artifact;
+    one -- naming that entry for extraction creates it as a file of its own (measured) --
+    and then the guard is what keeps a file nobody can decode from answering for the
+    artifact;
   * anything else (a `.pkg`, a `.tar.gz`) -- **not measured**, rc 2, with the command that
     extracts it. A container this tool cannot open is never a pass: the Linux `tar.gz`
     really does carry no icon at all, so "no icon found" must not read as "fine".
