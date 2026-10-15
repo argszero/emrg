@@ -274,7 +274,7 @@ jobs:
       - name: Python tests (regression gate)
         run: |
           uv sync --frozen
-          uv run pytest tests/ -v
+          uv run pytest tests/ -v -n auto --dist loadfile
 
       # ── GUI tests ────────────────────────────────────────────
       - name: GUI unit tests

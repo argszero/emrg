@@ -107,7 +107,13 @@ jobs:
           bwrap --ro-bind / / -- true
           echo "bwrap runs: the Linux cases below measure rather than skip."
       - run: uv sync
-      - run: uv run pytest tests/ -v
+      # `-n auto --dist loadfile` (issue #2296 R1/R2): the suite is dominated by
+      # subprocess-spawning tests, so wall time is bought back with workers. `loadfile`
+      # rather than xdist's default `load`, because a whole-tree guard's verdict is cached
+      # per session (`run_guard_once` in tests/conftest.py) and one file's legs must land
+      # on one worker for that to hit. Parallelism buys time, not results: the counts are
+      # the serial run's counts, so the suite's own total is measured, never written here.
+      - run: uv run pytest tests/ -v -n auto --dist loadfile
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
@@ -176,7 +182,7 @@ jobs:
         with:
           node-version: "22"
       - name: Python tests (Windows)
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -v -n auto --dist loadfile
       # v0.2.97 教训（Build Release 35479263507）：GUI 单测此前只在 ubuntu 的 `test`
       # job 跑过——Windows 上要等 tag 触发的 Build Release 才第一次执行。两条 #1276
       # 测试真的拉起了 daemon；POSIX 删得掉活进程 cwd 所在的目录，Windows 删不掉
