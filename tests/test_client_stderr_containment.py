@@ -148,6 +148,31 @@ def test_a_handler_that_captured_the_terminal_is_repointed(screen, monkeypatch):
     assert "internal detail" in _crash_log(cwd).read_text(encoding="utf-8")
 
 
+@contextlib.contextmanager
+def _level(logger, level):
+    """Set a logger's level through ``setLevel``, so its ``isEnabledFor`` cache goes too.
+
+    Measured 2026-10-15 (issue #2296). ``monkeypatch.setattr(logger, "level", logging.DEBUG)``
+    writes the attribute and leaves ``logger._cache`` alone; ``isEnabledFor`` answers out of
+    that cache, so a ``False`` cached for DEBUG during any *earlier* call made while the level
+    was higher survives the change and the record under test is never emitted. ``Logger.setLevel``
+    is the only setter that clears the cache.
+
+    Why this is worth four lines rather than an edit at the call site: the symptom is a
+    **silent drop**, not a leak — with the stale entry the record reaches neither the screen
+    nor the crash log, so the arm reads as an empty log rather than as a violation. And
+    whether the entry exists depends on what ran earlier **in the same process**, which is
+    exactly what `-n auto --dist loadfile` reassigns run to run: observed 1 run in 8 parallel
+    and never serially.
+    """
+    previous = logger.level
+    logger.setLevel(level)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
+
+
 def test_a_handler_on_a_named_logger_is_repointed(screen, monkeypatch):
     """A ``StreamHandler`` binds ``sys.stderr`` at construction — on *any* logger.
 
@@ -160,23 +185,87 @@ def test_a_handler_on_a_named_logger_is_repointed(screen, monkeypatch):
     screen, cwd = screen
     logger = logging.getLogger("websockets.client")
     monkeypatch.setattr(logger, "handlers", [])
-    monkeypatch.setattr(logger, "level", logging.DEBUG)
 
-    with _screen(screen):
-        handler = logging.StreamHandler()      # binds the *object* sys.stderr (= screen)
-        logger.addHandler(handler)             # a named logger, not root
+    with _level(logger, logging.DEBUG):
+        # The premise of every assertion below: this record is emitted at all. Without it
+        # a logger that swallowed the record would leave the screen *and* the log empty,
+        # and the arms would fail on a message about the log rather than about the cause.
+        assert logger.isEnabledFor(logging.DEBUG), (
+            "the record under test is not enabled — a stale `isEnabledFor` cache, or a "
+            "level this test did not set through `setLevel`"
+        )
 
-        guard = client_app._contain_stderr_for_tui()
-        try:
-            logger.debug("> %s", "frame")
-        finally:
-            guard.restore()
+        with _screen(screen):
+            handler = logging.StreamHandler()  # binds the *object* sys.stderr (= screen)
+            logger.addHandler(handler)         # a named logger, not root
 
-        assert handler.stream is screen, "the terminal must be handed back"
+            guard = client_app._contain_stderr_for_tui()
+            try:
+                logger.debug("> %s", "frame")
+            finally:
+                guard.restore()
 
-    assert screen.getvalue() == "", "a named logger's record reached the screen"
-    # the handler *formats* the record; only ``handleError`` echoes the raw message
-    assert "> frame" in _crash_log(cwd).read_text(encoding="utf-8")
+            assert handler.stream is screen, "the terminal must be handed back"
+
+        assert screen.getvalue() == "", "a named logger's record reached the screen"
+        # the handler *formats* the record; only ``handleError`` echoes the raw message
+        assert "> frame" in _crash_log(cwd).read_text(encoding="utf-8")
+
+
+def test_a_poisoned_level_cache_cannot_swallow_the_record(screen, monkeypatch):
+    """The arm above reaches the stale cache only when a neighbour happens to create it.
+
+    So the poisoned state is built here **on purpose** and the real subject is driven from
+    it. This is what makes `_level` a guarded helper rather than a story: put the attribute
+    assignment back and this test fails on an empty crash log — the same silent drop that
+    was intermittent under `-n auto --dist loadfile` (issue #2296).
+
+    The poisoning writes the attribute **on purpose**, so `monkeypatch.setattr` is not the
+    way back — it restores by assignment too, leaving the level moved. And a logger's level
+    is **process-global**: measured 2026-10-15, leaving ``websockets.client`` at DEBUG turned
+    five tests in three other files red as soon as the worker split put one of them in this
+    process (the `test-windows` leg of run 38708589495, while `test` passed — `--dist
+    loadfile` decides per run which files share a worker; serially the same shape reproduces
+    by running this file first). So the restore goes through ``setLevel`` in a ``finally``.
+    The autouse fence in ``tests/conftest.py`` is the backstop for any *other* test that
+    moves a named logger, not this file's excuse for not putting its own level back.
+    """
+    screen, cwd = screen
+    logger = logging.getLogger("websockets.client")
+    monkeypatch.setattr(logger, "handlers", [])
+
+    original = logger.level
+    try:
+        logger.level = logging.WARNING
+        assert logger.isEnabledFor(logging.DEBUG) is False, (
+            "premise: asking while the level is higher must poison `_cache`"
+        )
+        logger.level = logging.DEBUG  # what ``monkeypatch.setattr`` does: the cache is untouched
+        assert logger.isEnabledFor(logging.DEBUG) is False, (
+            "premise: the attribute assignment left the stale entry in place"
+        )
+
+        with _level(logger, logging.DEBUG):
+            assert logger.isEnabledFor(logging.DEBUG) is True, (
+                "`setLevel` is the setter that clears the cache; without it the record below "
+                "is dropped and reaches neither stream"
+            )
+
+            with _screen(screen):
+                handler = logging.StreamHandler()
+                logger.addHandler(handler)
+
+                guard = client_app._contain_stderr_for_tui()
+                try:
+                    logger.debug("> %s", "frame")
+                finally:
+                    guard.restore()
+
+            assert screen.getvalue() == "", "a named logger's record reached the screen"
+
+        assert "> frame" in _crash_log(cwd).read_text(encoding="utf-8")
+    finally:
+        logger.setLevel(original)
 
 
 def test_containment_leaves_the_last_resort_handler_alone(screen, monkeypatch):

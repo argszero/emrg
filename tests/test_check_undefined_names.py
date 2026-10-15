@@ -49,6 +49,19 @@ def _run(root: Path, *extra: str) -> subprocess.CompletedProcess:
     )
 
 
+def _checkout_verdict(run_guard_once) -> subprocess.CompletedProcess:
+    """`_run(REPO_ROOT)`, asked **once per session** instead of once per test.
+
+    Three legs of `TestTheVerdictOnThisCheckout` want this checkout's verdict, and the
+    command is byte-identical each time -- `--root <checkout>`, same cwd, same
+    interpreter. The guard walks every module in the tree (~3.2 s here, 3-9x that where
+    process creation is expensive), so two of the three runs bought nothing (issue #2296
+    R2). `run_guard_once` keys on `(argv, cwd)`, so this is the same reading with the
+    repetition removed; the assertions in the three legs are unchanged.
+    """
+    return run_guard_once([str(SCRIPT), "--root", str(REPO_ROOT)], REPO_ROOT)
+
+
 def _reported(proc: subprocess.CompletedProcess) -> str:
     """The guard's report with separators normalised.
 
@@ -525,31 +538,31 @@ class TestItStaysSilent:
 
 
 class TestTheVerdictOnThisCheckout:
-    def test_the_tree_read_is_named_before_the_verdict(self) -> None:
-        proc = _run(REPO_ROOT)
+    def test_the_tree_read_is_named_before_the_verdict(self, run_guard_once) -> None:
+        proc = _checkout_verdict(run_guard_once)
 
         assert proc.stdout.splitlines()[0] == f"tree: {REPO_ROOT}"
 
-    def test_this_checkout_carries_no_unbound_read(self) -> None:
+    def test_this_checkout_carries_no_unbound_read(self, run_guard_once) -> None:
         """The half that was missing from the family's first guards.
 
         A guard correct in itself is not a guard if nothing reads its verdict on the tree
         being changed -- `check_nonlocal.py` reported the v0.3.6 crash for as long as it
         shipped and no CI job and no test ever looked at its exit code.
         """
-        proc = _run(REPO_ROOT)
+        proc = _checkout_verdict(run_guard_once)
 
         assert proc.returncode == 0, (
             "the guard names a defect in this checkout:\n" + proc.stdout + proc.stderr
         )
         assert "OK:" in proc.stdout
 
-    def test_the_report_and_the_exit_code_are_one_answer(self, tmp_path) -> None:
+    def test_the_report_and_the_exit_code_are_one_answer(self, tmp_path, run_guard_once) -> None:
         """rc 1 must carry a finding line, and rc 0 must not."""
         bad = _tree(tmp_path, bad="def f():\n    return nowhere_at_all()\n")
 
         dirty = _run(bad)
-        clean = _run(REPO_ROOT)
+        clean = _checkout_verdict(run_guard_once)
 
         assert (dirty.returncode, "ERROR:" in dirty.stdout) == (1, True)
         assert (clean.returncode, "ERROR:" in clean.stdout) == (0, False)

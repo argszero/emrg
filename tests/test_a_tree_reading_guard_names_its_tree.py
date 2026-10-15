@@ -339,6 +339,13 @@ NOT_TREE_READERS = {
         "would answer anything (the repo it read is printed first instead, as "
         "check-issue-links.py does)"
     ),
+    "check-suite-durations.py": (
+        "reads each CI leg's Python-suite step duration out of the GitHub API's own step "
+        "records (`started_at`/`completed_at`) - the subject is the remote run queue, and "
+        "no local tree's name would answer anything about a Windows runner's wall clock "
+        "(the repo, and each run it read, are printed first instead, as check-issue-links.py "
+        "does). Added by issue #2296 R4"
+    ),
 }
 
 
@@ -478,7 +485,7 @@ def test_every_guard_in_the_family_is_classified() -> None:
     )
 
 
-def test_every_runnable_guard_comes_back_clean_on_this_checkout() -> None:
+def test_every_runnable_guard_comes_back_clean_on_this_checkout(run_guard_once) -> None:
     """The leg that was missing when a released client crashed on every Enter.
 
     `check_nonlocal.py` exists for exactly one defect class, was correct, and printed
@@ -524,7 +531,9 @@ def test_every_runnable_guard_comes_back_clean_on_this_checkout() -> None:
     `.emrg/`, rc 2 — stayed green.
     """
     for name in RUN_HERE:
-        proc = _run([str(SCRIPTS_DIR / name)], cwd=REPO_ROOT)
+        # Session-cached: the naming leg below asks every one of these the same question
+        # (`[script]` in `REPO_ROOT`), so the second ask reads this answer (issue #2296 R2).
+        proc = run_guard_once([str(SCRIPTS_DIR / name)], REPO_ROOT)
         out = proc.stdout + proc.stderr
         subjects = SUBJECT_MAY_BE_ABSENT.get(name)
         if subjects is None:
@@ -558,7 +567,7 @@ def test_every_runnable_guard_comes_back_clean_on_this_checkout() -> None:
         )
 
 
-def test_a_tree_reading_guard_names_its_own_checkout_whatever_the_cwd(tmp_path) -> None:
+def test_a_tree_reading_guard_names_its_own_checkout_whatever_the_cwd(tmp_path, run_guard_once) -> None:
     """The first line names the tree that answered — not the directory it was launched from.
 
     Launched from `tmp_path`, a guard that reported its caller's working directory would
@@ -569,13 +578,15 @@ def test_a_tree_reading_guard_names_its_own_checkout_whatever_the_cwd(tmp_path) 
     for name in RUN_HERE:
         script = SCRIPTS_DIR / name
 
-        here = _run([str(script)], cwd=REPO_ROOT)
+        here = run_guard_once([str(script)], REPO_ROOT)
         assert _first_line(here) == f"tree: {REPO_ROOT}", (
             f"{name}: first line is {_first_line(here)!r}, not `tree: {REPO_ROOT}` — a "
             "guard that reads a tree must say which one before it says anything else "
             f"(rc={here.returncode}, stderr={here.stderr.strip()[:200]!r})"
         )
 
+        # Not cached: `tmp_path` is this test's own, so this cwd is asked once and only
+        # here — the cache would have nothing to hand back anyway (issue #2296 R2).
         elsewhere = _run([str(script)], cwd=tmp_path)
         named = _named_root(elsewhere)
         assert named, (
