@@ -937,11 +937,18 @@ class TestTheSweptTree:
     def test_the_sweep_sees_the_shell_sites_it_was_extended_for(self) -> None:
         """The new class's own baseline: a detector that stopped matching must not pass.
 
-        The four files below are every one in this tree that starts a shell by bare name, and
-        each is gated -- three by a `skipif` on the Python's own wording, one
-        (`test_config.py`) by a marker bound in the **class body**, which is the spelling this
-        extension had to learn to read. The label is asserted too: an arm that reaches the
-        shell through a helper must say so, not "a same-file call".
+        The four names below are the sites this extension was written for, and each is gated --
+        three by a `skipif` on the Python's own wording, one (`test_config.py`) by a marker
+        bound in the **class body**, which is the spelling this extension had to learn to
+        read. The label is asserted too: an arm that reaches the shell through a helper must
+        say so, not "a same-file call".
+
+        It is a **subset**, not an equality, and that was measured rather than reasoned: written
+        as `set(seen) == {those four}` it went red on the fifth file the moment one arrived --
+        PR #2287's `tests/test_check_release_artifact_version.py`, whose three shell arms carry
+        the same platform gate the four below do. A correct site must never turn this red; the
+        arm that *forgets* its gate is `test_every_posix_arm_in_the_suite_carries_its_gate`,
+        which reads the ungated half and needs no name list.
         """
         readings = {r.path.name: r for r in _sweep()}
         seen = {
@@ -949,12 +956,12 @@ class TestTheSweptTree:
             for name, reading in readings.items()
         }
         seen = {name: rows for name, rows in seen.items() if rows}
-        assert set(seen) == {
+        assert {
             "test_a_step_without_its_product_refuses.py",
             "test_appimage_update_info.py",
             "test_config.py",
             "test_the_release_asks_its_credential_question_before_building.py",
-        }, seen
+        } <= set(seen), seen
         labels = {row[1]: row[2] for row in readings["test_a_step_without_its_product_refuses.py"].gated}
         assert "'bash' by bare name" in labels["test_a_step_that_finds_no_product_refuses_rather_than_skipping"], labels
 
