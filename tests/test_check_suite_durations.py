@@ -285,11 +285,19 @@ def test_a_missing_gh_is_rc_2_offline(tmp_path) -> None:
     """
     empty = tmp_path / "empty-path"
     empty.mkdir()
+    # `errors="replace"`, the same convention as `run_guard_once` in
+    # `tests/conftest.py` and as `test_check_pr_base.py`'s sibling spawn below:
+    # a strict decode of a child's stderr raises on a host whose system language
+    # is not English and leaves `proc.stderr` as `None`, which turns this row red
+    # for its own plumbing rather than for the refusal it pins. (This script's
+    # refusal carries no OS text, so the row is green today either way; the
+    # keyword is what keeps it green when the message gains one.)
     proc = subprocess.run(
         [sys.executable, str(SCRIPT)],
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
         env=dict(os.environ, PATH=str(empty)),
     )
 

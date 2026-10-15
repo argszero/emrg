@@ -310,11 +310,23 @@ class TestRealInvocationSurface:
         empty_path = tmp_path / "empty-path"
         empty_path.mkdir()
         env = dict(os.environ, PATH=str(empty_path))
+        # `errors="replace"` is load-bearing, not decoration. The child's refusal
+        # interpolates the **OS's own** `FileNotFoundError` text, and on a Windows
+        # host whose system language is not English the child writes that text in
+        # the host's ANSI code page (measured on GBK/cp936:
+        # `b"...gh is not available on this machine ([WinError 2] \xcf\xb5\xcd\xb3...)"`).
+        # A strict decode then raises inside `subprocess`'s reader thread,
+        # `proc.stderr` comes back `None`, and the assertion below dies on
+        # `TypeError: argument of type 'NoneType' is not iterable` - a red row for
+        # this test's plumbing rather than for the behaviour it pins. Same
+        # convention as `_gh` in the script itself, and as
+        # `tests/conftest.py::run_guard_once`.
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "--repo", "argszero/definitely-not-a-repo-xyz"],
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             env=env,
         )
         assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
