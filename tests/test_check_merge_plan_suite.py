@@ -48,6 +48,7 @@ import ast
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import time
 import sys
@@ -238,20 +239,36 @@ def _two_branch_conflict_on(repo: Path, name: str) -> None:
     _git(repo, "commit", "-qam", "theirs")
 
 
-@pytest.fixture
-def queue(tmp_path: Path) -> tuple[Path, Path]:
-    """A checkout on `master` plus a local bare remote, as GitHub would be.
+@pytest.fixture(scope="session")
+def _queue_shape(tmp_path_factory):
+    """The `queue` shape, built **once per session** — issue #2308.
 
-    PR heads are fetched by the tool from `refs/pull/<N>/head`, so the remote has
-    to expose exactly that, whatever the branch is called locally.
+    Every caller gets the same checkout at the same commit on `master`, with the same bare
+    remote holding the same refs, so building it per test bought nothing and cost about ten
+    `git` processes each time: `init` plus three configs, two writes and a `add`/`commit`/
+    `rev-parse`, the bare `init`, the `remote add` and the `push`. Measured across this
+    file's forty callers: **410 spawned processes in the setup phase alone**.
+
+    That is worth removing because the suite's cost is process creation and it is paid worst
+    on Windows — the same run that takes ~59 s here at twelve workers takes ~351 s on
+    `windows-2025` at the four it is given, and the whole difference is the cost of spawning
+    children. Sharing the shape is the remedy the ≤180 s rant names (`2026-10-15T11:08:07`,
+    §六); the fixture's 88 %-in-bodies sibling entry in issue #2306 is explicit that this
+    route caps well short of the target on its own.
+
+    The shape is copied per test, never handed out, so a test cannot reach it; `queue`
+    re-points the copy's remote at the copy's own bare repo, which is what makes sharing
+    safe here — a copy that kept the template's remote URL would push into the shared object
+    and cross-contaminate the next test.
     """
-    repo = tmp_path / "repo"
+    root = tmp_path_factory.mktemp("plan-queue-shape")
+    repo = root / "repo"
     _init_repo(repo)
     _write(repo, "tests/test_seed.py", "def test_seed():\n    assert True\n")
     _write(repo, "README.md", "base\n")
     _commit(repo, "base")
 
-    origin = tmp_path / "origin.git"
+    origin = root / "origin.git"
     subprocess.run(
         ["git", "init", "--bare", "-q", str(origin)],
         check=True,
@@ -261,6 +278,28 @@ def queue(tmp_path: Path) -> tuple[Path, Path]:
     )
     _git(repo, "remote", "add", "origin", str(origin))
     _git(repo, "push", "-q", "origin", "master")
+    return {"repo": repo, "origin": origin}
+
+
+@pytest.fixture
+def queue(tmp_path: Path, _queue_shape) -> tuple[Path, Path]:
+    """A checkout on `master` plus a local bare remote, as GitHub would be.
+
+    PR heads are fetched by the tool from `refs/pull/<N>/head`, so the remote has
+    to expose exactly that, whatever the branch is called locally.
+
+    Both halves are **copied** from `_queue_shape` rather than rebuilt (issue #2308).
+    `git` reports the same object ids and the same refs for a copy as for its source, and the
+    two copies land inside this test's own `tmp_path`, so a test that commits, branches or
+    pushes cannot touch the next test's repositories. The copy's remote is re-pointed at the
+    copy's own bare repo, because a copied `remote.origin.url` would otherwise still name the
+    template's — and a push would then rewrite the shared object every later test reads.
+    """
+    repo = tmp_path / "repo"
+    origin = tmp_path / "origin.git"
+    shutil.copytree(_queue_shape["repo"], repo)
+    shutil.copytree(_queue_shape["origin"], origin)
+    _git(repo, "remote", "set-url", "origin", str(origin))
     return repo, origin
 
 
