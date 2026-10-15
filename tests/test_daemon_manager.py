@@ -121,6 +121,24 @@ class TestStartDaemon:
 
 # ── check_and_restart_if_stale ───────────────────────────────
 
+def _shrink_restart_windows(monkeypatch) -> None:
+    """Shrink the two waits `check_and_restart_if_stale` serves out before it gives up.
+
+    The two tests that drive a pid which never dies take the timeout branch by design,
+    and the windows were literals in the loop (`range(50)` × `0.2`, then `range(10)` ×
+    `0.2`), so each of them slept **12 s** out for real — 24 s of every suite leg this
+    file runs on, for one branch of one function. They are names on the module now, so
+    the tests wait the shipped *behaviour* at a test-sized scale.
+
+    `PID_POLL_SECONDS` shrinks with them: the loop asks the pid once per poll, and a
+    window shorter than the poll would ask it zero times — which would quietly stop
+    testing the wait rather than merely shortening it.
+    """
+    monkeypatch.setattr(daemon_manager, "GRACEFUL_SHUTDOWN_SECONDS", 0.05)
+    monkeypatch.setattr(daemon_manager, "FORCE_KILL_SECONDS", 0.05)
+    monkeypatch.setattr(daemon_manager, "PID_POLL_SECONDS", 0.01)
+
+
 class TestCheckAndRestartIfStale:
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.is_running", return_value=True)
@@ -325,9 +343,16 @@ class TestCheckAndRestartIfStale:
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_restart_force_kills_stuck_old_pid(
             self, mock_connect, mock_kill, mock_cleanup, mock_running,
-            mock_src, tmp_path):
+            mock_src, tmp_path, monkeypatch):
         """rant 12:49:09 ② — old daemon never dies on SIGTERM → SIGKILL fallback,
-        and cleanup still happens after the kill."""
+        and cleanup still happens after the kill.
+
+        The pid never dies, so this test takes the timeout branch **on purpose** — and
+        it used to pay both windows in real `asyncio.sleep` (10s + 2s, measured 12.08s).
+        The windows are names on `daemon_manager` so they can be shrunk here; what is
+        asserted is that the fallback happened, never how long it was given.
+        """
+        _shrink_restart_windows(monkeypatch)
         token_file = tmp_path / "emrgd.token"
         token_file.write_text("token\n")
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
@@ -367,9 +392,14 @@ class TestCheckAndRestartIfStale:
         Both signals asserted are `SIGTERM` here, and that is the point rather
         than a coincidence: with no force signal to escalate to, the fallback
         must still *make* the call with the strongest force the platform has.
+
+        The windows are shrunk for the same reason as in its sibling above: this test
+        drives a pid that never dies, so it used to sleep both of them out (12.09s
+        measured) to assert something about *which signal* was sent.
         """
         import signal as real_signal
 
+        _shrink_restart_windows(monkeypatch)
         token_file = tmp_path / "emrgd.token"
         token_file.write_text("token\n")
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
@@ -392,6 +422,56 @@ class TestCheckAndRestartIfStale:
             "the graceful signal, then the fallback — the fallback must ask for "
             f"the force this platform has: {forces}")
         assert mock_cleanup.called, "and the port file is still released after it"
+
+    def test_the_restart_windows_are_the_shipped_ones(self):
+        """The host's wait, pinned: 10s for SIGTERM, 2s for the force kill.
+
+        The two tests above shrink these names to run in milliseconds, and a name a test
+        may shrink is a name a later edit may *change* — for the host, silently, in the
+        path whose whole job is to not spawn a second daemon while the old one is still
+        dying (rant 2026-08-18T12:49:09 ②). So the values a restart really waits are
+        asserted here, away from the tests that patch them.
+        """
+        assert daemon_manager.GRACEFUL_SHUTDOWN_SECONDS == 10.0
+        assert daemon_manager.FORCE_KILL_SECONDS == 2.0
+        assert daemon_manager.PID_POLL_SECONDS == 0.2
+
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=1e12)
+    @patch("emrg.client.daemon_manager.is_running", return_value=True)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_the_waits_read_the_names_rather_than_a_literal(
+            self, mock_connect, mock_kill, mock_cleanup, mock_running,
+            mock_src, tmp_path, monkeypatch):
+        """The windows are what the restart sleeps on — the parameterisation itself.
+
+        A pid that never dies takes this path through **both** windows, so shrinking the
+        names has to shrink the call. The bound is deliberately loose — 1.0s against the
+        **12.13s** the literals cost when this reading was armed (measured, not
+        estimated), and 10x the windows as patched here: it is a reading of *which* value
+        drives the wait, not a stopwatch on a runner, and what it must catch is a revert
+        to `range(50) × asyncio.sleep(0.2)`.
+        """
+        import time as real_time
+
+        _shrink_restart_windows(monkeypatch)
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
+        mock_connect.return_value = FakeWS([_ping_pong_frame()])
+        mock_kill.side_effect = lambda pid, sig: None  # pid stays "alive" forever
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(token_file)):
+            started = real_time.monotonic()
+            asyncio.run(daemon_manager.check_and_restart_if_stale())
+            elapsed = real_time.monotonic() - started
+
+        assert elapsed < 1.0, (
+            "the restart served out a wait its own module no longer names — the two "
+            "windows on `daemon_manager` are what this path sleeps on, and shrinking "
+            f"them must shrink the call; it took {elapsed:.2f}s"
+        )
 
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.cleanup_server")

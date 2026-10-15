@@ -19,6 +19,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
@@ -80,6 +81,22 @@ def is_running() -> bool:
 # `emrg server`；成功连接后归零。
 _MAX_SPAWN_ATTEMPTS = 3
 _spawn_attempts = 0
+
+# ── The stale-restart path's two windows (`check_and_restart_if_stale`) ──────────
+# A restart SIGTERMs the old daemon, waits for its pid to disappear, force-kills it if
+# it did not, and waits again before releasing the port file. The *lengths* below are
+# product behaviour, and they are names rather than literals inside the loop because a
+# test has to be able to shrink them: two tests drive a pid that never dies on purpose
+# (`os.kill` patched to answer "alive" forever), so they take the timeout branch and
+# used to sleep both windows out for real — 12.08s and 12.09s, measured on this
+# checkout, i.e. 24s of every suite leg on every platform, twice per leg, for one
+# branch of one function. A test may shrink what it waits *for*; the shipped values are
+# pinned by
+# `tests/test_daemon_manager.py::TestCheckAndRestartIfStale::test_the_restart_windows_are_the_shipped_ones`
+# so this cannot quietly become a shorter wait for the host.
+GRACEFUL_SHUTDOWN_SECONDS = 10.0
+FORCE_KILL_SECONDS = 2.0
+PID_POLL_SECONDS = 0.2
 
 
 async def start_daemon() -> subprocess.Popen:
@@ -729,11 +746,23 @@ async def check_and_restart_if_stale() -> None:
                 def _old_pid_alive() -> bool:
                     return _old_daemon_alive(server_pid)
 
-                for _ in range(50):  # up to 10s for graceful shutdown
-                    await asyncio.sleep(0.2)
+                # Both waits below read their *length* from the names at the top of this
+                # module rather than from literals in the loop, and that is a test-facing
+                # property, not tidiness. Two tests in `tests/test_daemon_manager.py` exist
+                # to drive a pid that never dies (`os.kill` patched to answer "alive"
+                # forever), so they take the timeout branch on purpose and used to pay both
+                # windows in real `asyncio.sleep`: 12.08s and 12.09s, measured on this
+                # checkout — 24s of every leg, on both workers, on every platform, for one
+                # branch of one function. The wait is the behaviour under test; its length
+                # is a tuning value a test may shrink, so it is a name here.
+                let_it_die = time.monotonic() + GRACEFUL_SHUTDOWN_SECONDS
+                died = False
+                while time.monotonic() < let_it_die:
+                    await asyncio.sleep(PID_POLL_SECONDS)
                     if not _old_pid_alive():
+                        died = True
                         break
-                else:
+                if not died:
                     # SIGTERM didn't work — force kill
                     logger.warning("old daemon (pid=%d) didn't die, sending SIGKILL", server_pid)
                     # Windows has no `signal.SIGKILL` (measured — the AttributeError
@@ -746,8 +775,9 @@ async def check_and_restart_if_stale() -> None:
                         os.kill(server_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
                     except (ProcessLookupError, OSError):
                         pass
-                    for _ in range(10):  # up to 2s for SIGKILL to land
-                        await asyncio.sleep(0.2)
+                    let_the_kill_land = time.monotonic() + FORCE_KILL_SECONDS
+                    while time.monotonic() < let_the_kill_land:
+                        await asyncio.sleep(PID_POLL_SECONDS)
                         if not _old_pid_alive():
                             break
                 # Old daemon is gone — now safe to remove its port file
