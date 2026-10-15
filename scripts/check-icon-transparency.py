@@ -12,7 +12,18 @@ What it reads -- anything that holds an icon, and nothing that does not:
   * a `.icns` -- every PNG-typed representation inside the container;
   * a directory (an `.app` bundle, an expanded `.pkg`, a `dist/` tree) -- walked for an
     `.icns`, preferring the one `Contents/Info.plist`'s `CFBundleIconFile` names, since
-    that is the file the platform renders;
+    that is the file the platform renders. A `*.icns` it meets that is **not** an icns
+    container is named and skipped: a file that holds no icon must not answer for the
+    artifact (nor throw away the readings already taken beside it). Measured 2026-10-15, on
+    the published `v0.3.12` payload, because the first version of this sentence guessed at
+    where such a file comes from and guessed wrong: the payload **lists** 64 AppleDouble
+    entries, `./emrg-gui/EMRG.app/Contents/Resources/._icon.icns` (9798 B) among them, but
+    extracting it writes none of them as siblings -- BSD `cpio` consumes them as extended
+    attributes (the extracted `icon.icns` carries `com.apple.cs.*`), so the `.app` an
+    ordinary expand-then-extract hands a reader holds the icon alone. A subject *can* hold
+    one -- naming that entry for extraction creates it as a file of its own (measured) --
+    and then the guard is what keeps a file nobody can decode from answering for the
+    artifact;
   * anything else (a `.pkg`, a `.tar.gz`) -- **not measured**, rc 2, with the command that
     extracts it. A container this tool cannot open is never a pass: the Linux `tar.gz`
     really does carry no icon at all, so "no icon found" must not read as "fine".
@@ -215,7 +226,25 @@ def check_subject(subject: Path):
         for icon in icons:
             print(f"  {icon}")
             if icon.suffix == ".icns":
-                f, m = measure_icns(icon, indent="    ")
+                try:
+                    f, m = measure_icns(icon, indent="    ")
+                except (ValueError, OSError) as exc:
+                    # A file named `*.icns` that is not an icns container. Letting the
+                    # exception out answered rc 2 for the whole run, which reported the
+                    # **artifact** as unmeasurable because a file that holds no icon sat
+                    # next to the icon -- and threw away the readings already taken, a fault
+                    # among them. A directory subject really can hold one: the `v0.3.12`
+                    # payload lists `./emrg-gui/EMRG.app/Contents/Resources/._icon.icns`
+                    # (9798 B, magic `00 05 16 07`) beside the icon, and naming it for
+                    # extraction creates it (measured 2026-10-15; the ordinary extraction
+                    # writes none of the archive's 64 AppleDouble entries -- BSD `cpio`
+                    # applies them as extended attributes). The PNG branch below has always
+                    # reported this case instead of dying on it (`check_png_bytes` catches
+                    # its own decode failure), so this is the same answer for the icns
+                    # branch: the file is named, and it counts as nothing measured -- which
+                    # still leaves `main` answering 2 when no other entry was readable.
+                    print(f"    {icon.name}: not measured ({exc})")
+                    continue
             else:
                 f, m = check_png_bytes(icon.read_bytes(), icon.name, indent="    ")
             fault, measured = fault or f, measured or m

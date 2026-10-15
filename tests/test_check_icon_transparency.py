@@ -206,6 +206,27 @@ def test_a_plist_that_names_a_missing_icon_falls_back_to_the_found_icns(tmp_path
     assert "other.icns" in out
 
 
+def test_a_sidecar_the_walk_meets_is_reported_not_fatal(tmp_path):
+    """macOS writes an AppleDouble `._x.icns` beside every file it copies; a pkg's app is copied a lot.
+
+    Measured 2026-10-15 (`cyc20261015-072903`), before this arm: a **clear** `icon.icns`
+    sitting beside a `._icon.icns` sidecar made the directory subject answer rc 2 -- "could
+    not measure" -- and threw away the reading already taken, so an app whose icon IS
+    transparent was reported as an artifact nobody could read. The PNG branch has always
+    reported this case instead of dying on it (`check_png_bytes` catches its own decode
+    failure), so the icns branch now answers the same way: the sidecar is named, and it
+    counts as nothing measured.
+    """
+    app = app_bundle(tmp_path, icns((b"ic12", rgba_png(64))))
+    (app / "Contents" / "Resources" / "._icon.icns").write_bytes(
+        b"\x00\x05\x16\x07AppleDouble, not an icns container"
+    )
+    code, out = run(app)
+    assert code == 0, out
+    assert "._icon.icns: not measured" in out, out
+    assert "-> clear" in out, out
+
+
 # ── never a pass ─────────────────────────────────────────────────────────────
 
 def test_a_directory_with_no_icon_is_not_a_pass(tmp_path):
@@ -215,6 +236,16 @@ def test_a_directory_with_no_icon_is_not_a_pass(tmp_path):
     code, out = run(tmp_path)
     assert code == 2, out
     assert "not measurable" in out
+
+
+def test_a_tree_whose_only_icns_is_not_a_container_is_still_not_a_pass(tmp_path):
+    """The other direction of the sidecar arm: naming a file that holds no icon is not reading one."""
+    resources = tmp_path / "EMRG.app" / "Contents" / "Resources"
+    resources.mkdir(parents=True)
+    (resources / "._icon.icns").write_bytes(b"\x00\x05\x16\x07AppleDouble")
+    code, out = run(tmp_path)
+    assert code == 2, out
+    assert "not measurable" in out and "FAULT" not in out, out
 
 
 def test_a_container_the_tool_cannot_open_is_not_a_pass(tmp_path):
