@@ -329,6 +329,13 @@ NOT_TREE_READERS = {
         "would answer anything (the repo it read is printed first instead, as "
         "check-issue-links.py does)"
     ),
+    "check-suite-durations.py": (
+        "reads each CI leg's Python-suite step duration out of the GitHub API's own step "
+        "records (`started_at`/`completed_at`) - the subject is the remote run queue, and "
+        "no local tree's name would answer anything about a Windows runner's wall clock "
+        "(the repo, and each run it read, are printed first instead, as check-issue-links.py "
+        "does). Added by issue #2296 R4"
+    ),
 }
 
 
