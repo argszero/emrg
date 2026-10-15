@@ -611,6 +611,12 @@ def test_an_unreadable_index_costs_the_section_not_the_turn(tmp_path):
     through the same reader. The read is asserted to **really fail** first, so
     the guard cannot pass by never being reached: a fixture that decodes would
     make the two assertions below vacuous rather than the guard proven.
+
+    Since 2026-10-15 (issue #2292) the section reaches the session through the
+    per-round `[context]` message rather than the system prompt, so the last
+    reading below follows the notice to its new carrier — the two calls that used
+    to be one. Both are still driven, because the raise this test is about comes
+    from `_build_system_prompt`'s own first line either way.
     """
     server = _make_server()
     session = Session.create_with_id("mem-unreadable", tmp_path)
@@ -637,8 +643,14 @@ def test_an_unreadable_index_costs_the_section_not_the_turn(tmp_path):
     # The exit point itself, driven once: `_build_system_prompt` is the first line
     # of `_run_tool_loop`, so this is the call whose raise cost the whole turn.
     prompt = server._build_system_prompt(session)
-    assert "could not be read" in prompt, (
-        "the prompt must carry the notice, not raise before the LLM request"
+    assert "could not be read" not in prompt, (
+        "the prefix must stay byte-stable, which is why the indexes left it "
+        "(issue #2292); the notice belongs to the carrier that holds the rows"
+    )
+    context = server._build_context_message(session)
+    assert context is not None and "could not be read" in context["content"], (
+        "the notice must reach the session in the message that now carries the index — "
+        "a section silently dropped is the other way this guard can read green"
     )
 
 
