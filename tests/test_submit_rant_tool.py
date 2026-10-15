@@ -500,6 +500,11 @@ def test_the_list_action_declares_every_argument_it_reads(tmp_path, monkeypatch)
     declared = set(d.parameters["properties"])
     src = inspect.getsource(mod.SubmitRantTool._execute_list)
     read = set(re.findall(r'arguments\.get\("([a-z_]+)"', src))
+    # `full` is read through the shared reader rather than `arguments.get`, and a guard
+    # that knew only the first spelling would stop seeing it the moment it moved — the
+    # read would be invisible, so an undeclared name handed to the helper would pass.
+    # Both spellings, so the guard reads the *call* and not one of its forms.
+    read |= set(re.findall(r'boolean_argument\(\s*arguments,\s*"([a-z_]+)"', src))
     undeclared = sorted(read - declared)
     assert not undeclared, (
         f"`_execute_list` reads {undeclared} but the tool schema does not declare "
@@ -507,6 +512,84 @@ def test_the_list_action_declares_every_argument_it_reads(tmp_path, monkeypatch)
     )
     assert "full" in declared, "the scan-view escape hatch is the change's whole point"
     assert d.parameters["properties"]["full"]["type"] == "boolean"
+
+
+def test_full_is_read_by_the_shared_reader_so_a_bad_spelling_is_refused(tmp_path, monkeypatch):
+    """A declared boolean the caller spells out of range is a caller error, not a value.
+
+    `full` was read by a hand-rolled spelling list — `full.strip().lower() in
+    ("1","true","yes","y","on")`, else `bool(full)` — so **nothing was refused** and the two
+    out-of-domain readings were both wrong in the direction this action exists to fix
+    (issue #1935's family, measured on this branch 2026-10-15):
+
+    * `full="maybe"` — a caller who asked for the text — printed the **scan view** and said
+      nothing, which is exactly the silent withholding the `…` marker and the withheld note
+      were added to prevent, living inside the parameter that adds the escape hatch;
+    * `full=2.0` printed the full body from a value the schema does not admit.
+
+    The repository already has this rule and this reader: `emrg.tools.base.boolean_argument`
+    reads the two spellings that name a value and refuses everything else, naming the
+    parameter and the value. #2294 extends that rule to every parameter a tool declares
+    `"type": "boolean"`, so this carrier is read by the shared reader like `edit.replace_all`
+    — which costs the lenient spellings (`"yes"`, `1`, `"on"`) that used to work. That is the
+    decision this test pins rather than a silent narrowing.
+
+    The discriminator is the *body marker*: a refused call must not have printed the text,
+    an accepted one must, and a scan view must show its own name — so the three answers are
+    told apart by what they returned, not by an exit code.
+    """
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    # The marker sits in the **tail**: the scan view's row carries a ~100-character excerpt
+    # of the message's head, so a head marker appears in both readings and could not tell
+    # them apart. What only the full read has is the end of the body — and what only the scan
+    # has is its own line saying it withheld something.
+    _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-10-15T09:00:00+08:00", "project": "emrg",
+         "status": "pending", "progress": None, "completed": None,
+         "message": "head-excerpt " + "a" * 120 + " tail-marker-" + "z" * 300},
+    ])
+    tool = SubmitRantTool()
+
+    def answer(**kwargs):
+        return asyncio.run(tool.execute({"action": "list", **kwargs}))
+
+    # The two spellings that name a value do what they say: the whole body, tail included,
+    # and no line claiming anything was withheld...
+    for spelling in (True, "true"):
+        out = answer(full=spelling).content
+        assert "tail-marker" in out, (
+            f"full={spelling!r} is a spelling the shared reader honours, so it must "
+            f"return the text"
+        )
+        assert "scan view —" not in out, "a read that withheld nothing says no such line"
+    # ...the other value's spelling, and an absent parameter, are the scan view: the tail is
+    # gone, and the read says so...
+    for out in (answer(), answer(full=False), answer(full="false")):
+        assert "tail-marker" not in out.content, "a scan view must not print the body"
+        assert "scan view" in out.content, "a read that withheld must say so"
+
+    # ...and everything else is refused, with the parameter and the value named. `"maybe"`
+    # and `2.0` are the two the old path read *wrong*; the rest are the lenient spellings
+    # the shared reader does not admit.
+    for value in ("maybe", "yes", "on", "y", "no", "1", 1, 0, 2.0, []):
+        result = answer(full=value)
+        assert result.error, (
+            f"full={value!r} was accepted and read as a value rather than refused — the "
+            f"reader's domain is a `bool` or the strings 'true'/'false'"
+        )
+        assert "full" in result.content and "true or false" in result.content, (
+            f"the refusal must name the parameter and the domain: {result.content!r}"
+        )
+        assert "tail-marker" not in result.content, (
+            f"full={value!r} was refused but the read printed the body anyway"
+        )
+
+    # The schema tells the caller the domain before it errs — the same sentence the
+    # `replace_all` carrier is held to, read out of the schema rather than a literal here.
+    desc = SubmitRantTool().definition().parameters["properties"]["full"]["description"]
+    assert "true" in desc and "false" in desc and "refused" in desc, (
+        f"the `full` description no longer states the domain or the refusal: {desc!r}"
+    )
 
 
 def test_the_list_action_returns_the_whole_message_when_the_caller_asks(tmp_path, monkeypatch):

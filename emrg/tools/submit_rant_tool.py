@@ -42,7 +42,7 @@ from emrg.server.rants import (
     update_rant,
 )
 from emrg.server.tool_types import ToolDefinition, ToolResult
-from emrg.tools.base import ToolExecutor, non_regular_kind
+from emrg.tools.base import ToolExecutor, boolean_argument, non_regular_kind
 
 _ACTIONS = ("submit", "list", "update", "cleanup")
 
@@ -210,7 +210,10 @@ class SubmitRantTool(ToolExecutor):
                             "(51 rants) an unfiltered read costs 19,736 "
                             "characters, `full=True` costs **232,499** — so "
                             "ask for one slice with `status=`, not the whole "
-                            "queue, unless you really mean every body."
+                            "queue, unless you really mean every body. "
+                            "Pass `true` or `false`; any other spelling is "
+                            "refused rather than read as its opposite (issue "
+                            "#1935's family, #2294)."
                         ),
                     },
                     "progress": {
@@ -353,9 +356,18 @@ class SubmitRantTool(ToolExecutor):
             status = str(status).strip() or None
         if project is not None:
             project = str(project).strip() or None
-        full = arguments.get("full")
-        if isinstance(full, str):
-            full = full.strip().lower() in ("1", "true", "yes", "y", "on")
+        # Read by the shared reader, not by truthiness — issue #1935's family, which
+        # #2294's schema-derived sweep extends to every parameter a tool declares
+        # `"type": "boolean"`. This one was a hand-rolled spelling list, so nothing was
+        # refused and two out-of-domain values were read *wrong*: measured on this
+        # branch 2026-10-15, `full="maybe"` — a caller who asked for the text — printed
+        # the scan view and said nothing, and `full=2.0` printed the full 222,654
+        # characters of a value the schema does not admit. The silence is the defect
+        # this action's scan view exists to remove, living inside the parameter that
+        # adds it.
+        full, refusal = boolean_argument(arguments, "full", default=False)
+        if refusal is not None:
+            return ToolResult(name="submit_rant", content=refusal, error=True)
         try:
             rants = list_rants(self._rants_log(), status=status, project=project)
         except Exception as e:  # noqa: BLE001
@@ -408,7 +420,7 @@ class SubmitRantTool(ToolExecutor):
         # flight. So the row keeps an excerpt, and the whole value follows in a `progress:`
         # block wherever the message follows.
         status_selected = status is not None
-        text_selected = status_selected or bool(full)
+        text_selected = status_selected or full
         lines = []
         withheld = 0
         for r in rants:
