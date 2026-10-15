@@ -1542,7 +1542,15 @@ def test_a_blob_input_is_not_a_conflicting_step(mod, tmp_path, monkeypatch):
     that evidence (and can end in the refusal that says every open PR conflicts),
     and the paths named there come from a report that was never read. Real git, so
     the shape is measured rather than described.
+
+    git translates its own messages, so the assertion on its sentence below is a host
+    dependency unless the locale is pinned: measured 2026-10-16 on a host with
+    `LC_MESSAGES=zh_CN.UTF-8`, git answered `不是可以合并的东西` and this arm failed on a
+    tree that is fine. `_run` inherits this process's environment, so pinning it here
+    reaches the subprocess the product starts.
     """
+    monkeypatch.setenv("LC_ALL", "C")
+    monkeypatch.setenv("LANG", "C")
     repo = tmp_path / "blob"
     repo.mkdir()
     _git(mod, repo, "init", "-q", "-b", "master")

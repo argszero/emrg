@@ -836,7 +836,7 @@ class TestAgainstRealGitHistory:
         assert re.fullmatch(r"[0-9a-f]{40}", conflict.stdout.splitlines()[0])
         assert any("\tf.txt" in line for line in conflict.stdout.splitlines())
 
-    def test_the_probe_answers_the_way_real_git_does(self, tmp_path) -> None:
+    def test_the_probe_answers_the_way_real_git_does(self, tmp_path, monkeypatch) -> None:
         """The arm that would have caught a substring reading, on a real process.
 
         The arms above carry a stderr this file writes, which is why they could not
@@ -849,7 +849,16 @@ class TestAgainstRealGitHistory:
         This is also the arm that fails when git's diagnostic changes shape - if the
         usage block stops arriving with the error line, the premise the probe's rule
         rests on is gone and the row says so instead of quietly passing.
+
+        That premise is a *shape*, so the locale is pinned: git translates the usage
+        block's header and option descriptions, and measured 2026-10-16 on a host
+        with `LC_MESSAGES=zh_CN.UTF-8` the block arrives as
+        `用法：git merge-tree ...` - the same block, in another language - so the
+        assertion below was measuring the host's locale rather than git's behaviour.
+        `_git` and the `merge_tree` closure both inherit this process's environment.
         """
+        monkeypatch.setenv("LC_ALL", "C")
+        monkeypatch.setenv("LANG", "C")
         repo = tmp_path / "r"
         repo.mkdir()
         self._git(repo, "init", "-q", "-b", "main")

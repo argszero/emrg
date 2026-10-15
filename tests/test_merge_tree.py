@@ -346,7 +346,7 @@ class TestAgainstRealGit:
             mod.merged_tree_sha(a, b, run=run)
 
     def test_a_depth_one_clone_turns_one_merge_into_unrelated_histories(
-        self, mod, tmp_path
+        self, mod, tmp_path, monkeypatch
     ) -> None:
         """The same two commits, two answers, one variable: the clone's boundary.
 
@@ -360,7 +360,16 @@ class TestAgainstRealGit:
 
         The clone is a repository this test creates and cuts itself, so nothing outside
         `tmp_path` is read or written.
+
+        git translates its own messages, so the diagnosis assertion below is a host
+        dependency unless the locale is pinned: measured 2026-10-16 on a host with
+        `LC_MESSAGES=zh_CN.UTF-8`, git answered `拒绝合并无关的历史` and this arm failed on
+        a tree that is fine - the product's own diagnosis was still right and still
+        named the repair. `_git` and the `run` closure below both inherit this
+        process's environment, so pinning it here reaches each subprocess.
         """
+        monkeypatch.setenv("LC_ALL", "C")
+        monkeypatch.setenv("LANG", "C")
         repo, a, b = self._conflict_on(tmp_path, "plain.txt")
         clone = tmp_path / "shallow"
         self._git(

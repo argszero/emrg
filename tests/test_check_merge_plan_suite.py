@@ -1270,7 +1270,16 @@ class TestTheConflictedPathsAreTheRealFiles:
         A tab in the name makes the stage block quote it *and* makes the prose below
         the block tab-separated, which is the whole defect: measured here on real
         git, with the old reading run over the same bytes as a control arm.
+
+        git translates its own messages, so the prose assertion below is a host
+        dependency unless the locale is pinned: measured 2026-10-16 on a host with
+        `LC_MESSAGES=zh_CN.UTF-8`, git answered `自动合并 f<TAB>tab.txt` and this arm
+        failed on a tree that is fine - while the product reading it pins answered
+        the same paths either way. Pinned, so the subject stays the *shape* git
+        prints rather than the host's language.
         """
+        monkeypatch.setenv("LC_ALL", "C")
+        monkeypatch.setenv("LANG", "C")
         repo = tmp_path / "tab-conflict"
         tab_name = "f\ttab.txt"
         _two_branch_conflict_on(repo, tab_name)
