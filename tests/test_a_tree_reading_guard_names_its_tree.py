@@ -289,6 +289,16 @@ NAMES_ITS_TREE_BUT_IS_NOT_RUN_HERE = {
 #: Answers about something other than a working tree, so the rule does not apply - each
 #: with what it reads instead, because "not a tree reader" is a claim like any other.
 NOT_TREE_READERS = {
+    "check-release-artifact-version.py": (
+        "reads the artifact it is given as an argument (a runtime tarball, an .app bundle, "
+        "an expanded payload directory, an .asar or a version.txt) and compares the version "
+        "the product declares with the version the release claims - the claim is an "
+        "argument, not a tree, and the tag it came from exists only once the host cuts the "
+        "release. Each subject it read is printed first, as check-icon-transparency.py does; "
+        "the one working-tree file it opens is this checkout's emrg/gui/package.json, read "
+        "lazily for the app's own name and only when a subject is an .asar (issue "
+        "#2286: the release asserted the version three times and never inside a product)"
+    ),
     "check-icon-transparency.py": (
         "reads the icon file or directory it is given as an argument (a shipped artifact, "
         "an .app bundle, an .icns or a .png) - a working tree is not its subject, and the "

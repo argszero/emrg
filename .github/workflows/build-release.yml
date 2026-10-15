@@ -779,10 +779,59 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The job's only input until now was the downloaded artifact set; this assertion
+      # needs the *tool*, so the job checks the tree out. The script is stdlib-only
+      # (argparse/json/plistlib/struct/tarfile), so the runner's own python3 is enough --
+      # no `uv sync`, and no dependency on the runtime the release is shipping.
+      #
+      # ⚠️ The order is load-bearing, not cosmetic: `actions/checkout`'s default
+      # `clean: true` runs `git clean -ffdx` over the workspace, and `artifacts/` is
+      # untracked -- a checkout placed **after** `download-artifact` would delete the
+      # files this step exists to read, and the assertion would report "no artifacts".
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
+      # ── 版本断言：读产物自己声明的版本，不读源码 ─────────────────────
+      # 发布链把版本断言了三次，没有一次在产物内部：`tests/test_version_sync.py` 比的是
+      # 八个**源码**声明，`check-release-tag.py` 比的是 tag 与**被 tag 的那棵树**，
+      # `check-release-published.py` 读的是 release 的**元数据**（draft/prerelease/资产
+      # **名字**）—— 它从不打开任何一个资产。所以一个装着旧版本的产物能过全部三道。
+      # 而代价是有名字的：`build-runtime.sh:141` 写的 `version.txt` 来自**构建的树**，
+      # `UpgradeManager.tick` 拿它与 `target.lstrip("v")` 比 —— 名字与产物不一致的 release
+      # 会让每个装了它的宿主每 tick 重跑一次升级会话，且后续版本修不好它。
+      # 这一步跑在 **release 创建之前**：一次不匹配的发布一旦上线就是宿主侧的故障，
+      # 而这里失败只是重跑一次构建。主语是本次下载的产物集，ubuntu 腿能读的那件是
+      # Linux 的 runtime 归档（stdlib `tarfile`，无需解包工具）；读不出任何声明就是失败，
+      # 不是跳过 —— 产物集里没有 version.txt 正是这条断言要报告的状态。
+      - name: Assert the artifacts declare the version the tag names
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # nullglob, for the reason the publish check below already gives: without it an
+          # unmatched glob stays a literal and every comparison below would run against a
+          # file that does not exist.
+          shopt -s nullglob
+          candidates=(artifacts/EMRG-*-linux-*.tar.gz)
+          shopt -u nullglob
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "::error::no EMRG-*-linux-*.tar.gz among the downloaded artifacts — this step's subject is an artifact that declares a version, and a release whose artifacts cannot be read must not be reported as success"
+            exit 1
+          fi
+          echo "asserting version ${version} (from tag ${GITHUB_REF_NAME}) inside ${#candidates[@]} artifact(s)"
+          rc=0
+          python3 scripts/check-release-artifact-version.py "$version" "${candidates[@]}" || rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "::error::an artifact declares a version other than ${version} — the release name and its product disagree, and every host that installs it re-triggers the upgrade session forever. The values are printed above."
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::no artifact's version could be read — 'could not measure' is not a pass: check that the Linux leg's runtime archive carries runtime/version.txt"
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::scripts/check-release-artifact-version.py exited ${rc}, which is neither this tool's fault code (1) nor its unmeasurable one (2) — the tool itself failed, so nothing was read about the artifacts."
+          fi
+          exit "$rc"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

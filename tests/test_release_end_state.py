@@ -65,14 +65,27 @@ def _release_steps() -> list[dict]:
     return steps
 
 
+#: The end-state step's own name. Selecting it by name is what keeps this file's executed
+#: arm pointed at one subject: `release` carried exactly one `run:` step until #2286 added
+#: the artifact-version assertion, so "there is exactly one, on purpose" stopped being a
+#: fact about the job and became a claim about the count of steps — a count any later step
+#: would break without changing anything this guard cares about.
+END_STATE_STEP_NAME = "Confirm the release is published, complete, and Latest"
+
+
 def _end_state_step() -> dict:
-    """The one step of `release` that is a script — there is exactly one, on purpose."""
-    scripts = [s for s in _release_steps() if isinstance(s, dict) and s.get("run")]
-    assert len(scripts) == 1, (
-        f"expected exactly one `run:` step in `release`, got {len(scripts)} — the executed "
-        "arm below runs *that* step, so a second script would make it measure an unnamed one"
+    """The `release` step that verifies the published end state, named — not counted."""
+    matches = [
+        s
+        for s in _release_steps()
+        if isinstance(s, dict) and s.get("run") and s.get("name") == END_STATE_STEP_NAME
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one `run:` step named {END_STATE_STEP_NAME!r} in `release`, got "
+        f"{len(matches)} — the executed arm below runs *that* step, so a second one or a "
+        "rename makes it measure an unnamed one"
     )
-    return scripts[0]
+    return matches[0]
 
 
 def _uncommented(body: str) -> str:
