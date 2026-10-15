@@ -750,13 +750,14 @@ def test_an_unfiltered_list_is_the_scan_view_and_names_the_call_that_returns_the
 def test_project_alone_does_not_unlock_the_text(tmp_path, monkeypatch):
     """A filter that narrows nothing on the cost's axis is not a request for the body.
 
-    The host's ruling named the unlock precisely: 「正文只在按 status 过滤或显式要求时给」 —
-    the text comes when the caller filters by **status** or asks explicitly (rant
-    2026-10-15T12:35:03 item (b)). `project=` is the odd one out, and deliberately so: it is
-    the dedup filter `promote_prompt.md` uses, and on the queue measured 2026-10-15 it
-    selects **48 of 50** rows — `list(project="emrg")` cost 24,539 characters against an
-    unfiltered 26,208, i.e. it narrowed the *subject*, not the cost. Printing bodies for it
-    would reintroduce the default-read cost on the one filter a template really passes.
+    The unlock is named precisely: the text comes when the caller filters by **status** or asks
+    explicitly. That sentence is the wording of rant 2026-10-15T12:35:03 item (b)
+    (「正文只在按 status 过滤或显式要求时给」), which writes out the host's decision of the same
+    day, 2026-10-15T12:34:24: 「就定 a + b（c 去掉）」. `project=` is the odd one out, and
+    deliberately so: it is the dedup filter `promote_prompt.md` uses, and on the queue measured
+    2026-10-15 it selects **48 of 50** rows — `list(project="emrg")` cost 24,539 characters
+    against an unfiltered 26,208, i.e. it narrowed the *subject*, not the cost. Printing bodies
+    for it would reintroduce the default-read cost on the one filter a template really passes.
     """
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     body = "a pending rant in the project the caller named" + " tail-" + "t" * 400

@@ -404,15 +404,17 @@ class SubmitRantTool(ToolExecutor):
         # in the transcript every round after.
         #
         # So the scope of the full text is a **narrowing the caller named**: `status=` (the
-        # host's own words, rant 2026-10-15T12:35:03 item (b): 「正文只在按 status 过滤或显式
-        # 要求时给」 — the text comes when the caller filters by status or asks explicitly),
-        # or `full=True`. `project=` deliberately does **not** unlock it: it is the dedup
-        # filter `promote_prompt.md` uses, and on the queue measured 2026-10-15 it selects
-        # 48 of 50 rows — it narrows the *subject*, not the cost. Every withheld row names
-        # the call that returns its body, and the read closes with a line saying it is a scan
-        # view at all: an absent block that reads as an empty message is the silent half of
-        # the 2026-09-17 defect, and an absent *whole* block that reads as "the queue holds
-        # nothing else" is its new shape.
+        # host's decision, quoted as the instrument finds it, 2026-10-15T12:34:24:
+        # 「就定 a + b（c 去掉）」 — item (a) is the scan row, item (b) the text on demand, and
+        # rant 2026-10-15T12:35:03 item (b) writes that requirement out as
+        # 「正文只在按 status 过滤或显式要求时给」 — the text comes when the caller filters by
+        # status or asks explicitly), or `full=True`. `project=` deliberately does **not**
+        # unlock it: it is the dedup filter `promote_prompt.md` uses, and on the queue
+        # measured 2026-10-15 it selects 48 of 50 rows — it narrows the *subject*, not the
+        # cost. Every withheld row names the call that returns its body, and the read closes
+        # with a line saying it is a scan view at all: an absent block that reads as an empty
+        # message is the silent half of the 2026-09-17 defect, and an absent *whole* block
+        # that reads as "the queue holds nothing else" is its new shape.
         #
         # `progress` is bounded in the row too, and for the same reason it is *not* dropped
         # there: it is a one-line field of the scan view (the prompt curates with it), but
