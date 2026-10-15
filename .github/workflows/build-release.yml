@@ -460,6 +460,52 @@ jobs:
           ls -la
           test -s "$ZIP"
 
+      # ── 图标透明性：读本次构建的 pkg（issue #2283）──────────────────
+      # 这一步的主语是**这个 pkg 里的那份 icon.icns**。上面 `Generate icon assets` 只断言
+      # 文件非空（`test -s`），而烤进白边的渲染同样非空 —— 它通过本仓库跑的每一条门禁，宿主
+      # 装完却看见白圈（rant 2026-10-13T17:45:42）。实测 2026-10-14（发布版 v0.3.12 的 pkg，
+      # sha256 fdc0c380e2b1f273e0c41391568dbf6409c81b232a5655343c955097a0323de3）：展开后
+      # 读它的 payload 花 1.5 秒，8 个 PNG 表示全 `clear`；把同一个图标换成不透明的合成 pkg
+      # 读出来是 `FAULT`（rc 1）。所以这条验收在上传前、在产物本身上就能满足。
+      # 两个失败答案在语义上不同，且都不是通过：rc 1「图标不透明」，rc 2「读不出来」。
+      - name: Assert the pkg's icon kept its transparency (macOS only)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
+          # 不跳过（issue #1913）：这一步的主语就是 pkg。缺席时印 "skipping" + exit 0
+          # 等于给一次**没有 macOS 产物**的发布盖章。
+          if [ -z "$PKG" ]; then
+            echo "::error::no EMRG-*-macos-*.pkg found in dist/artifacts — this step's subject is the pkg, and a release missing its macOS product must not be reported as success"
+            exit 1
+          fi
+          ROOT="$(mktemp -d "${TMPDIR:-/tmp}/emrg-icon-XXXXXX")"
+          # pkg 是 productbuild 的 distribution 套一个组件包（packaging/make-installer.sh），
+          # 所以 app 在组件的 Payload 里：`pkgutil --expand` + gzip/cpio —— 与 DEVELOPMENT.md
+          # 写给宿主的那条路完全一致，本地读和这里读是同一次读数。
+          pkgutil --expand "$PKG" "$ROOT/expanded"
+          mkdir -p "$ROOT/payload"
+          found=0
+          while IFS= read -r -d '' payload; do
+            found=1
+            (cd "$ROOT/payload" && gunzip -dc "$payload" | cpio -i -d --quiet)
+          done < <(find "$ROOT/expanded" -name Payload -type f -print0)
+          if [ "$found" -eq 0 ]; then
+            echo "::error::expanded $PKG but it carries no component Payload — the icon cannot be read out of this artifact, and a subject that cannot be read is not a pass"
+            exit 1
+          fi
+          rc=0
+          uv run --no-sync python3 scripts/check-icon-transparency.py "$ROOT/payload" || rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "::error::$PKG ships an icon that is opaque at its corners (the values are printed above) — the render baked a background in, which is the white ring of rant 2026-10-13T17:45:42. Re-render with packaging/gen-assets.sh, and read the result back with this same command before cutting the tag again."
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::no icon could be read out of $PKG — the payload was extracted, but the tool found nothing it reads under it, or what it found would not decode. 'could not measure' is not a pass: check that the GUI build put EMRG.app's Resources/icon.icns into the payload."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::scripts/check-icon-transparency.py exited $rc, which is neither this tool's fault code (1) nor its unmeasurable one (2) — the tool itself failed, so nothing was read about the artifact."
+          fi
+          exit "$rc"
+
       # ── pkg 签名（macOS only，P2；Secret 未配则跳过降级）──
       # ⚠️ productsign 需要 Developer ID Installer 身份（非 Application 身份）——
       # 实测 #462：MACOS_SIGNING_IDENTITY 配 Application 身份报
