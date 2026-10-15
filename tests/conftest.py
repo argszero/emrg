@@ -23,6 +23,7 @@ immediately instead of the pollution being discovered later (precedent:
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -302,6 +303,69 @@ def _guard_stop_log_is_not_host_state(monkeypatch, _stop_log_scratch):
     overrides it as usual.
     """
     monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(_stop_log_scratch))
+
+
+# ── a logger's level is process-global state ──────────────────────────────────
+#
+# Issue #2296. `-n auto --dist loadfile` puts several test *files* in one worker
+# process, so a level one file moves is read by whichever file runs there next —
+# and which one that is moves run to run. Measured 2026-10-15 on the head of #2297:
+# a named logger left at DEBUG turned five tests in three other files red, on the
+# `test-windows` leg only (run 38708589495), while the `test` leg passed. Serially
+# the same shape reproduces by running the leaking file first, which is exactly why
+# the order the suite had before the split hid it.
+
+
+def _named_logger_levels() -> dict[str, int]:
+    """The level of every named logger that exists right now.
+
+    Discovered rather than listed: a hand-written set of names omits the member a
+    future leak uses, and no rule inside the list can see the omission.
+    ``logging.Logger.manager.loggerDict`` is CPython's own registry, so this reads
+    the class itself. The root logger is deliberately out of scope — pytest's own
+    logging plugin saves and restores it around every test phase, and two owners of
+    one value is how a restore gets clobbered.
+    """
+    return {
+        name: logger.level
+        for name, logger in list(logging.Logger.manager.loggerDict.items())
+        if isinstance(logger, logging.Logger)
+    }
+
+
+def _restore_named_logger_levels(before: dict[str, int]) -> list[str]:
+    """Put back what ``before`` recorded; return the names that had actually moved.
+
+    ``setLevel`` rather than an attribute write: it is the only setter that clears
+    the logger's ``isEnabledFor`` cache, so one call closes the stale-cache half of
+    the defect (#2296) as well as the level half. A logger *created* during the test
+    is left where it is — it began at ``NOTSET``, and what it holds afterwards is the
+    subject's own doing rather than the test's leak.
+    """
+    moved: list[str] = []
+    for name, level in before.items():
+        logger = logging.Logger.manager.loggerDict.get(name)
+        if isinstance(logger, logging.Logger) and logger.level != level:
+            logger.setLevel(level)
+            moved.append(name)
+    return moved
+
+
+@pytest.fixture(autouse=True)
+def _fence_the_named_logger_levels():
+    """Put every **named** logger's level back after each test (issue #2296).
+
+    A level is process-global state, so a test that writes one is not merely untidy:
+    it writes into every later test's environment in that worker, and the parallel
+    split is what decides which tests those are. Nothing here judges the product's
+    own level handling — a test that sets a level and reads it back still sees
+    exactly what the subject did. This only undoes what the *test* moved.
+    """
+    before = _named_logger_levels()
+    try:
+        yield
+    finally:
+        _restore_named_logger_levels(before)
 
 
 # ── the daemon is EMRG's life core: no suite run may signal it ────────────────

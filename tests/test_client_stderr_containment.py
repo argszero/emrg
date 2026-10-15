@@ -219,39 +219,53 @@ def test_a_poisoned_level_cache_cannot_swallow_the_record(screen, monkeypatch):
     it. This is what makes `_level` a guarded helper rather than a story: put the attribute
     assignment back and this test fails on an empty crash log — the same silent drop that
     was intermittent under `-n auto --dist loadfile` (issue #2296).
+
+    The poisoning writes the attribute **on purpose**, so `monkeypatch.setattr` is not the
+    way back — it restores by assignment too, leaving the level moved. And a logger's level
+    is **process-global**: measured 2026-10-15, leaving ``websockets.client`` at DEBUG turned
+    five tests in three other files red as soon as the worker split put one of them in this
+    process (the `test-windows` leg of run 38708589495, while `test` passed — `--dist
+    loadfile` decides per run which files share a worker; serially the same shape reproduces
+    by running this file first). So the restore goes through ``setLevel`` in a ``finally``.
+    The autouse fence in ``tests/conftest.py`` is the backstop for any *other* test that
+    moves a named logger, not this file's excuse for not putting its own level back.
     """
     screen, cwd = screen
     logger = logging.getLogger("websockets.client")
     monkeypatch.setattr(logger, "handlers", [])
 
-    logger.level = logging.WARNING
-    assert logger.isEnabledFor(logging.DEBUG) is False, (
-        "premise: asking while the level is higher must poison `_cache`"
-    )
-    logger.level = logging.DEBUG  # what ``monkeypatch.setattr`` does: the cache is untouched
-    assert logger.isEnabledFor(logging.DEBUG) is False, (
-        "premise: the attribute assignment left the stale entry in place"
-    )
-
-    with _level(logger, logging.DEBUG):
-        assert logger.isEnabledFor(logging.DEBUG) is True, (
-            "`setLevel` is the setter that clears the cache; without it the record below "
-            "is dropped and reaches neither stream"
+    original = logger.level
+    try:
+        logger.level = logging.WARNING
+        assert logger.isEnabledFor(logging.DEBUG) is False, (
+            "premise: asking while the level is higher must poison `_cache`"
+        )
+        logger.level = logging.DEBUG  # what ``monkeypatch.setattr`` does: the cache is untouched
+        assert logger.isEnabledFor(logging.DEBUG) is False, (
+            "premise: the attribute assignment left the stale entry in place"
         )
 
-        with _screen(screen):
-            handler = logging.StreamHandler()
-            logger.addHandler(handler)
+        with _level(logger, logging.DEBUG):
+            assert logger.isEnabledFor(logging.DEBUG) is True, (
+                "`setLevel` is the setter that clears the cache; without it the record below "
+                "is dropped and reaches neither stream"
+            )
 
-            guard = client_app._contain_stderr_for_tui()
-            try:
-                logger.debug("> %s", "frame")
-            finally:
-                guard.restore()
+            with _screen(screen):
+                handler = logging.StreamHandler()
+                logger.addHandler(handler)
 
-        assert screen.getvalue() == "", "a named logger's record reached the screen"
+                guard = client_app._contain_stderr_for_tui()
+                try:
+                    logger.debug("> %s", "frame")
+                finally:
+                    guard.restore()
 
-    assert "> frame" in _crash_log(cwd).read_text(encoding="utf-8")
+            assert screen.getvalue() == "", "a named logger's record reached the screen"
+
+        assert "> frame" in _crash_log(cwd).read_text(encoding="utf-8")
+    finally:
+        logger.setLevel(original)
 
 
 def test_containment_leaves_the_last_resort_handler_alone(screen, monkeypatch):

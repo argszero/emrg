@@ -10,6 +10,7 @@ BOTH states (#455 lesson):
 """
 from __future__ import annotations
 
+import logging
 import ntpath
 from pathlib import Path
 
@@ -562,3 +563,92 @@ def test_other_os_attributes_pass_through_unchanged():
     assert installed.getpid() == os.getpid()
     assert installed.path is os.path
     assert installed.sep == os.sep
+
+
+# ── a logger's level is process-global state (issue #2296) ────────────────────
+#
+# `-n auto --dist loadfile` puts several test *files* in one worker process, so a
+# level one file moves is read by whichever file runs there next — and which one
+# that is moves run to run. Measured 2026-10-15 on the head of #2297: a named
+# logger left at DEBUG turned five tests in three other files red on the
+# `test-windows` leg (run 38708589495) while `test` passed.
+#
+# Pinned in BOTH directions, the way the section above is: a level a test moved
+# must come back, and a level it did not touch must be left alone.
+
+
+def test_the_logger_level_fence_is_wired_autouse(request):
+    """The fixture is applied to every test, not merely defined.
+
+    Read off pytest's own resolution of this node rather than off the source: a
+    fixture declared and never applied is no fixture — the same defect as a
+    `skipif` that is never evaluated — and `request.fixturenames` is the set
+    pytest actually built for this test.
+    """
+    assert "_fence_the_named_logger_levels" in request.fixturenames, (
+        "the named-logger level fence is not autouse, so a level one test moves "
+        "reaches whatever test runs next in this worker"
+    )
+
+
+def test_the_logger_level_fence_puts_a_moved_level_back():
+    """Positive control: a level this test moves is put back to what it found.
+
+    The subject is named in the reading, so it cannot pass vacuously: `moved` has
+    to contain the logger the test moved, and a bare green assertion would not.
+    """
+    from tests.conftest import _named_logger_levels, _restore_named_logger_levels
+
+    logger = logging.getLogger("websockets.client")
+    before = _named_logger_levels()
+    found = before["websockets.client"]
+    moved_to = logging.CRITICAL if found != logging.CRITICAL else logging.DEBUG
+    try:
+        logger.level = moved_to
+        assert logger.level == moved_to, "premise: the level moved"
+        moved = _restore_named_logger_levels(before)
+    finally:
+        logger.setLevel(found)
+
+    assert "websockets.client" in moved, (
+        f"the fence reported nothing moved while the frame logger had been moved: {moved}"
+    )
+    assert logger.level == found, "the fence did not put the moved level back"
+
+
+def test_the_logger_level_fence_leaves_an_untouched_level_alone():
+    """Negative control: only what moved is written back.
+
+    A fence that restored every logger unconditionally would also `setLevel` the
+    ones nobody moved — clearing caches the subject may be relying on, and
+    reporting a change that did not happen. The empty list is the reading.
+    """
+    from tests.conftest import _named_logger_levels, _restore_named_logger_levels
+
+    before = _named_logger_levels()
+    assert _restore_named_logger_levels(before) == [], (
+        "the fence rewrote levels that had not moved"
+    )
+
+
+def test_the_logger_level_fence_ignores_a_logger_created_after_the_snapshot():
+    """A logger the test itself created is left where the subject put it.
+
+    `emrg` creates loggers lazily, so a test that drives a sink and reads the level
+    back is reading the product's own action, not a leak — the fence must not undo
+    it.
+    """
+    from tests.conftest import _named_logger_levels, _restore_named_logger_levels
+
+    name = "emrg.test.fence.fresh"
+    before = _named_logger_levels()
+    fresh = logging.getLogger(name)
+    fresh.setLevel(logging.WARNING)
+    try:
+        assert name not in before, "premise: the logger is newer than the snapshot"
+        assert _restore_named_logger_levels(before) == [], (
+            "the fence rewrote a logger that did not exist when it took the snapshot"
+        )
+        assert fresh.level == logging.WARNING, "a logger created during the test was reset"
+    finally:
+        logging.Logger.manager.loggerDict.pop(name, None)
