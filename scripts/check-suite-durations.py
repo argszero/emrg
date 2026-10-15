@@ -206,6 +206,11 @@ def read_legs(repo: str, run: dict) -> list[dict]:
                 "job": job.get("name") or "(unnamed job)",
                 "step": step.get("name") or "",
                 "seconds": step_seconds(step),
+                # Carried raw so a reader can check this file's arithmetic against the
+                # platform's own two instants, and so a PR can quote them without
+                # re-asking the API.
+                "started_at": step.get("started_at"),
+                "completed_at": step.get("completed_at"),
                 "conclusion": job.get("conclusion"),
             })
     return legs
@@ -291,8 +296,16 @@ def main(argv: list[str]) -> int:
                         "carries no started_at/completed_at, so its time is unknown"
                     )
                 verdict = "OVER" if seconds > args.budget else "ok"
-                print(f"  {leg['job']}: {seconds:.1f}s — {verdict}")
-                row = {**leg, "workflow": label, "run": run.get("id"), "seconds": seconds}
+                print(
+                    f"  {leg['job']}: {seconds:.1f}s "
+                    f"({leg['started_at']} -> {leg['completed_at']}) - {verdict}"
+                )
+                row = {
+                    **leg,
+                    "workflow": label,
+                    "run": run.get("id"),
+                    "seconds": seconds,
+                }
                 reading.append(row)
                 if seconds > args.budget:
                     over.append(row)
@@ -308,7 +321,7 @@ def main(argv: list[str]) -> int:
     if over:
         print(
             f"OVER: {len(over)} of {len(reading)} suite step(s) exceed "
-            f"{args.budget}s — {', '.join(sorted({row['job'] for row in over}))}"
+            f"{args.budget}s - {', '.join(sorted({row['job'] for row in over}))}"
         )
         return 1
 
