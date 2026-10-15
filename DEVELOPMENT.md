@@ -283,6 +283,17 @@ uv run --no-sync python3 scripts/check-icon-transparency.py <path>
 
 Exit `0` = every representation read is fully transparent at all four corner blocks; `1` = one is not, and the corner values are printed (that reading is the white ring); `2` = nothing could be read — no icon under the subject, or a container this tool does not open — **never a pass**. An artifact's icon is reached with `pkgutil --expand <pkg> <dir>`, then the component's `Payload` through `gunzip -dc Payload | cpio -i -d`; the Linux `tar.gz` carries no icon at all, so point the tool at an `.app` or an `.icns` rather than at that archive.
 
+**Does the version inside the artifact name the version the release claims?** (#2286 — the host-side counterpart of the release job's `Assert the artifacts declare the version the tag names` step.) The chain asserted the version three times and never inside a product: `tests/test_version_sync.py` and `bump-version.py --check` compare the eight *source* declarations, `check-release-tag.py` compares the tag with the tagged *tree*, and `check-release-published.py` reads the release's *metadata* — draft, prerelease, asset **names** — without opening one. The artifacts' `version.txt` comes from the built tree (`packaging/build-runtime.sh`), and `UpgradeManager.tick` compares that installed file with `target.lstrip("v")`, so a release whose name and product disagree re-triggers the upgrade session on every tick, forever. Read the product itself:
+
+```bash
+uv run --no-sync python3 scripts/check-release-artifact-version.py 0.3.13 <subject> [<subject> …]
+uv run --no-sync python3 scripts/check-release-artifact-version.py --from-tag v0.3.13 dist/artifacts/EMRG-*-linux-*.tar.gz
+# a subject is a runtime .tar.gz, an .app bundle, an expanded payload directory,
+# an .asar, or a version.txt
+```
+
+Exit `0` = every declaration read names the claimed version; `1` = one names a different one (both values printed — this is the case where the bundle was rebuilt and the packaged GUI dist was not); `2` = nothing could be read — a container this tool does not open, a path that is not there, a header that will not parse — **never a pass**. Two readings the hand-run got wrong, and the tool now gets right: the app's manifest is selected by its own package **name**, because a real `app.asar` holds eight `package.json` files and a dependency's version is not the product's; and a declaration that was **read** but claims nothing (the payload's `卸载 EMRG.app` declares no version at all) is a note, not rc 2, while an unreadable one is never washed out by a readable sibling. The `.pkg` is reached the same way as the icon above — `pkgutil --expand`, then `gunzip -dc Payload | cpio -i -d` — and pointing this tool at the resulting directory runs the identical reading CI runs.
+
 **The host-side counterpart of the installer's compiled-extension guard** (#1544). The macOS build signs the app with `com.apple.security.cs.disable-library-validation` so a pip-installed C extension can load; the installer asserts that entitlement's **shape**, and this command asserts its **effect** — a wheel's `.so` really imports under the bundled interpreter. Run it before reporting "packaging is broken", or after an install, to tell the two apart:
 
 ```bash
