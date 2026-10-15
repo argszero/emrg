@@ -91,7 +91,8 @@ _spawn_attempts = 0
 # used to sleep both windows out for real — 12.08s and 12.09s, measured on this
 # checkout, i.e. 24s of every suite leg on every platform, twice per leg, for one
 # branch of one function. A test may shrink what it waits *for*; the shipped values are
-# pinned by `tests/test_daemon_manager.py::test_the_restart_windows_are_the_shipped_ones`
+# pinned by
+# `tests/test_daemon_manager.py::TestCheckAndRestartIfStale::test_the_restart_windows_are_the_shipped_ones`
 # so this cannot quietly become a shorter wait for the host.
 GRACEFUL_SHUTDOWN_SECONDS = 10.0
 FORCE_KILL_SECONDS = 2.0

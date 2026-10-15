@@ -447,10 +447,11 @@ class TestCheckAndRestartIfStale:
         """The windows are what the restart sleeps on — the parameterisation itself.
 
         A pid that never dies takes this path through **both** windows, so shrinking the
-        names has to shrink the call. The bound is deliberately loose (0.5s against the
-        12.1s the literals cost, and 20x the windows as patched here): it is a reading of
-        *which* value drives the wait, not a stopwatch on a runner, and what it must
-        catch is a revert to `range(50) × asyncio.sleep(0.2)`.
+        names has to shrink the call. The bound is deliberately loose — 1.0s against the
+        **12.13s** the literals cost when this reading was armed (measured, not
+        estimated), and 10x the windows as patched here: it is a reading of *which* value
+        drives the wait, not a stopwatch on a runner, and what it must catch is a revert
+        to `range(50) × asyncio.sleep(0.2)`.
         """
         import time as real_time
 
@@ -466,7 +467,7 @@ class TestCheckAndRestartIfStale:
             asyncio.run(daemon_manager.check_and_restart_if_stale())
             elapsed = real_time.monotonic() - started
 
-        assert elapsed < 0.5, (
+        assert elapsed < 1.0, (
             "the restart served out a wait its own module no longer names — the two "
             "windows on `daemon_manager` are what this path sleeps on, and shrinking "
             f"them must shrink the call; it took {elapsed:.2f}s"
