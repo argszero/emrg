@@ -2940,6 +2940,60 @@ class TestWSHistoryRecords:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_a_context_record_reaches_no_client(self):
+        """Issue #2311: the per-round `[context]` message is storage, not conversation.
+
+        The daemon persists the context message a turn sends so that a later rebuild is
+        a prefix of it (the prompt-cache fix), which puts a new record type in
+        `history.jsonl`. Both list_history modes decide what to answer one record at a
+        time — records mode by `tool_result` / `message`, the default by
+        `type == "message"` — so a client must receive neither the context's text nor a
+        row that would render it as a user bubble the host never typed.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_records_ctx"
+                seeded = list(self.CONVERSATION[:2])
+                seeded.insert(0, {
+                    "type": "context", "role": "user", "timestamp": "2026-09-20T00:00:30",
+                    "content": "[context] Current time: 2026-09-20T00:00:30+08:00\n"
+                               "## Memory index\n- a row the host never typed",
+                })
+                self._seed(cwd, sid, seeded)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        records = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_records": True,
+                        })
+                        assert [m["kind"] for m in records["messages"]] == [
+                            "message", "message",
+                        ], (
+                            "records mode emitted a row for the context record: "
+                            f"{records['messages']}"
+                        )
+                        assert records["messages"][0]["record_index"] == 1, (
+                            "record_index must still be the record's real position in "
+                            "history.jsonl — the context record occupies 0"
+                        )
+
+                        default = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_assistant": True,
+                        })
+                        assert [m["content"] for m in default["messages"]] == ["u1", "a1"], (
+                            "the default mode sent the context record to a client: "
+                            f"{default['messages']}"
+                        )
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
 
 class TestWSTaskWire:
     """GUI task CRUD wire frames — task type field contract (rant 2026-08-14T21:48:00).

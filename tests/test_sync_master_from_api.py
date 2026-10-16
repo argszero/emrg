@@ -12,6 +12,7 @@ import base64
 import importlib.util
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 
 from pathlib import Path
@@ -442,3 +443,130 @@ def test_an_object_name_ref_creates_no_ref():
     # A short hex string is a branch name, not an object name: it cannot be a full
     # object name, and refusing it would break a real branch called `deadbeef`.
     assert not mod._is_object_name("deadbeef")
+
+
+# ----------------------------------- materialized commits owe their trees (#2310)
+
+
+def test_materialized_commits_without_trees_are_named():
+    """A commit being present is not the same question as its tree being present.
+
+    `has_object` asks `git cat-file -e <sha>^{commit}`, so the walk stops at a commit
+    whose *tree* it never checked. Measured 2026-10-16 on this checkout: `7ca5f07`,
+    written by that day's master sync, answered `fatal: not a tree object` while
+    `9ea8317`, written by the same walk, listed fine. The predicate is a parameter so
+    the answer about a layout can be asked without a repository, exactly as
+    `_absent_parents`' is - and the empty input is the no-op run, which must owe
+    nothing rather than report something.
+    """
+    mod = _load_module()
+    tree_a, tree_b = "a" * 40, "b" * 40
+    pairs = [("c" * 40, tree_a), ("d" * 40, tree_b)]
+
+    assert mod._materialized_without_trees(pairs, present=lambda t: t == tree_a) \
+        == [("d" * 40, tree_b)]
+    assert mod._materialized_without_trees(pairs, present=lambda t: True) == []
+    assert mod._materialized_without_trees([], present=lambda t: False) == []
+
+
+def test_script_ensures_the_trees_of_the_commits_it_materialized():
+    """The tree sha is already in the response the walk read, so knowing which trees
+    the run owes costs no extra request; the ref update stays last, so a tree that
+    cannot be made readable moves no ref."""
+    content = SCRIPT.read_text(encoding="utf-8")
+    assert 'materialized.append((sha, body["tree"]["sha"]))' in content
+    assert "_materialized_without_trees(" in content
+    assert "this run materialized" in content
+
+
+def test_a_materialized_chain_leaves_every_commit_readable_as_a_tree(tmp_path, monkeypatch):
+    """Acceptance 1 of issue #2310, measured on a synthetic chain rather than claimed.
+
+    Both commits here are materialized by this run and their trees **differ**, so
+    fetching only the tree of the commit `--ref` named cannot answer for the other -
+    which is the whole defect, and what makes this reading discriminate. Under the
+    old behaviour `t1` stayed absent and `git ls-tree <c1>` failed.
+    """
+    mod = _load_module()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    _git("init", "-q", cwd=src)
+    _git("config", "user.name", "Test Author", cwd=src)
+    _git("config", "user.email", "test@example.com", cwd=src)
+
+    (src / "a.txt").write_text("alpha\n", encoding="utf-8")
+    _git("add", ".", cwd=src)
+    t1 = _git("write-tree", cwd=src).stdout.decode().strip()
+    r = _git("commit-tree", t1, "-m", "first", cwd=src, env=GIT_ENV)
+    assert r.returncode == 0, r.stderr
+    c1 = r.stdout.decode().strip()
+
+    (src / "a.txt").write_text("beta\n", encoding="utf-8")
+    _git("add", ".", cwd=src)
+    t2 = _git("write-tree", cwd=src).stdout.decode().strip()
+    r = _git("commit-tree", t2, "-p", c1, "-m", "second", cwd=src, env=GIT_ENV)
+    assert r.returncode == 0, r.stderr
+    c2 = r.stdout.decode().strip()
+    assert t1 != t2
+
+    views, trees, blobs = {}, {}, {}
+    for sha in (c1, c2):
+        raw = _git("cat-file", "commit", sha, cwd=src).stdout
+        views[sha] = _api_view_of(raw, src)
+    for tree_sha in (t1, t2):
+        entries = _tree_entries(src, tree_sha)
+        trees[tree_sha] = entries
+        for e in entries:
+            if e["type"] == "blob":
+                blobs[e["sha"]] = _git("cat-file", "blob", e["sha"], cwd=src).stdout
+
+    def fake_get(url: str) -> dict:
+        if url.endswith("/commits/master"):
+            return {"sha": c2}
+        if "/git/commits/" in url:
+            return {"tree": {"sha": views[url.rsplit("/", 1)[1]]["tree"]}}
+        if "/commits/" in url:
+            v = views[url.rsplit("/", 1)[1]]
+            return {
+                "sha": url.rsplit("/", 1)[1],
+                "commit": {
+                    "verification": {"payload": None, "signature": None},
+                    "tree": {"sha": v["tree"]},
+                    "author": {"name": v["author"][0], "email": v["author"][1],
+                               "date": v["author"][2]},
+                    "committer": {"name": v["committer"][0], "email": v["committer"][1],
+                                  "date": v["committer"][2]},
+                    "message": v["message"],
+                },
+                "parents": [{"sha": p} for p in v["parents"]],
+            }
+        if "/git/trees/" in url:
+            return {"tree": trees[url.rsplit("/", 1)[1]], "truncated": False}
+        if "/git/blobs/" in url:
+            sha = url.rsplit("/", 1)[1]
+            return {"content": base64.b64encode(blobs[sha]).decode("ascii"),
+                    "encoding": "base64"}
+        raise AssertionError(f"unexpected API call: {url}")
+
+    monkeypatch.setattr(mod, "api_get", fake_get)
+
+    target = tmp_path / "target"
+    target.mkdir()
+    _git("init", "-q", cwd=target)
+    _git("config", "user.name", "Test Author", cwd=target)
+    _git("config", "user.email", "test@example.com", cwd=target)
+    monkeypatch.chdir(target)
+    monkeypatch.setattr(sys, "argv",
+                        ["sync-master-from-api.py", "--repo", "owner/repo",
+                         "--ref", "master"])
+
+    assert mod.main() == 0
+
+    # Every commit this run wrote is readable as a tree - not only the named one.
+    for sha in (c1, c2):
+        assert _git("cat-file", "-e", sha + "^{tree}", cwd=target).returncode == 0, sha
+        r = _git("ls-tree", sha, cwd=target)
+        assert r.returncode == 0, f"{sha[:7]} is not readable as a tree: {r.stderr}"
+    assert _git("rev-parse", "refs/heads/master",
+                cwd=target).stdout.decode().strip() == c2

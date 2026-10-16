@@ -400,7 +400,8 @@ def test_the_scrub_happens_once_per_turn(tmp_path, monkeypatch):
 
     assert sends == 2, "one refusal, one scrub, one re-send"
     assert any("error" in f for f in frames), "then the refusal is reported"
-    assert len(session._read_history()) == 8, (
+    surviving = [r for r in session._read_history() if r.get("type") != "context"]
+    assert len(surviving) == 8, (
         "exactly one record removed, the other seven left for the host to keep"
     )
 
@@ -429,7 +430,10 @@ def test_a_scrub_does_not_touch_a_healthier_session(tmp_path, monkeypatch):
     _drive_loop(tmp_path, monkeypatch, server, session, stream)
 
     assert asked == [], "an unclassified failure is not a content refusal"
-    surviving = [r.get("content") for r in session._read_history()]
+    surviving = [
+        r.get("content") for r in session._read_history()
+        if r.get("type") != "context"
+    ]
     assert len(surviving) == 9, "the eight records and the turn's own prompt"
     assert any(TRIGGER in text for text in surviving), (
         "the trigger is still there — nothing searched, nothing removed"
