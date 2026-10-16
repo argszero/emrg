@@ -638,15 +638,21 @@ def own_head_window(
             f"`--cycles-log DIR` (or `--prev-cycle <id>`) - and ask again (issue #2275)"
         ), note
 
-    if pushed >= window.start:
+    if window.covers(pushed):
         # The same disclosure the report carries, from the same producer: a window read
         # off the records can be wider than the clause, and here that costs a *posted
         # vote* rather than a reading - this refusal is the one place a cycle cannot
         # simply re-read next cycle (issue #2214).
+        #
+        # Both ends of the span, not its start alone (issue #2334). A posting cycle is the
+        # newest one, so its far bound is open and this is the comparison it always was;
+        # the far end is asked all the same, because the predicate the three carriers share
+        # is the one place that difference is allowed to live.
         widened = f" {window.inferred_clause()}." if window.inferred else ""
+        far = f", until {window.window_end_text()}" if window.end is not None else ""
         return (
             f"the head {head[:8]} was pushed {push_time}, inside the window this cycle "
-            f"treats as its own, which starts {window.window_start_text()} "
+            f"treats as its own, which starts {window.window_start_text()}{far} "
             f"({window.source}) - a cycle does not vote on a head it pushed, and the "
             "window immediately before this one counts as its own as well, because every "
             f"cycle on a host is the same instance running again.{widened} "

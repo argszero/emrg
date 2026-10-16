@@ -1159,6 +1159,95 @@ def test_a_head_pushed_by_the_previous_cycle_is_an_abstain(mod, monkeypatch, cap
     assert PREV_CYCLE in out
 
 
+def test_the_window_ends_where_the_following_cycle_begins(mod, tmp_path):
+    """Issue #2334: the span has a far bound, and it is the *next* cycle's start.
+
+    Without one the span reaches forward without limit, so a head pushed by a later cycle
+    was reported as this cycle's own work: on 2026-10-16 `cyc20261016-181619`, which pushed
+    nothing, was voided on a head `cyc20261016-183420` pushed, and release PR #2326 waited
+    a cycle at 2/3 for the vote.
+    """
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    (records / "cycle-20260917-223000.md").write_text("x", encoding="utf-8")
+
+    window = mod.own_window(CYCLE, None, str(records), None)
+
+    assert window.start == mod.cycle_start(PREV_CYCLE), "the start is unchanged by #2334"
+    assert window.end == mod.cycle_start("cyc20260917-223000"), (
+        "the far bound is the instant the cycle after this one began"
+    )
+    assert window.window_end_text() == mod.cycle_start(
+        "cyc20260917-223000"
+    ).isoformat(timespec="seconds")
+    assert window.covers(mod.instant("2026-09-17T22:20:00+08:00")) is True
+    assert window.covers(mod.instant("2026-09-17T22:35:00+08:00")) is False, (
+        "a head pushed by the cycle that followed this one is that cycle's work, so this "
+        "cycle's clause has nothing to say about it"
+    )
+
+
+def test_a_window_with_no_later_cycle_is_open_at_its_far_end(mod, tmp_path):
+    """The state every posting cycle is in: nothing follows it yet, so the span stays open.
+
+    This is the arm that keeps #2334 from becoming a window with no cycle to close it — an
+    open far end is not an unmeasured one, and the `None` must not be read as "closed at
+    once", which would refuse every vote a cycle ever casts.
+    """
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+
+    window = mod.own_window(CYCLE, None, str(records), None)
+
+    assert window.end is None
+    assert window.window_end_text() == ""
+    assert window.covers(mod.instant("2026-09-17T23:59:00+08:00")) is True
+
+
+def test_a_head_pushed_by_a_later_cycle_is_not_an_abstain_row(mod, monkeypatch, capsys,
+                                                              tmp_path):
+    """The row half: the queue asks the same far bound the counter voices a vote on.
+
+    The control is `test_a_head_pushed_past_a_corpus_with_no_later_cycle_reads_abstain`:
+    the same push instant, only the corpus apart — an arm that fails in either direction is
+    what a clause with a start and no end cannot pass.
+    """
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+    (records / "cycle-20260917-223000.md").write_text("x", encoding="utf-8")
+
+    pushed = _push(2026, 9, 17, 22, 35)  # after 22:30:00, the next cycle's start
+    rc = _run(mod, monkeypatch, FakeVotes(reviews=[], push=pushed), FakeFresh(),
+              ["1", "--cycle", CYCLE, "--cycles-log", str(records)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"cast-vote.py 1 --cycle {CYCLE}" in out, out
+    assert "inside the window this cycle treats as its own" not in out, out
+
+
+def test_a_head_pushed_past_a_corpus_with_no_later_cycle_reads_abstain(mod, monkeypatch,
+                                                                      capsys, tmp_path):
+    """The control for the row test above, and the over-blocking #2334 is about.
+
+    Same push instant, same cycle, and a corpus that holds no cycle after this one: the
+    span then has no far bound and the head is inside it. Kept as its own test because the
+    queue's run installs the counter it reads as a sibling — a second `_run` in one test
+    reads the first run's fake — so a control arm here has to be a test of its own.
+    """
+    only_prev = tmp_path / "only-prev"
+    only_prev.mkdir()
+    (only_prev / f"cycle-{PREV_CYCLE[3:]}.md").write_text("x", encoding="utf-8")
+
+    pushed = _push(2026, 9, 17, 22, 35)
+    _run(mod, monkeypatch, FakeVotes(reviews=[], push=pushed), FakeFresh(),
+         ["1", "--cycle", CYCLE, "--cycles-log", str(only_prev)])
+    out = capsys.readouterr().out
+    assert "inside the window this cycle treats as its own" in out, out
+
+
 def test_a_head_another_instance_pushed_is_not_this_cycles_own(mod, monkeypatch, capsys):
     """The clause is about a head *this* instance pushed; the window only proxies that.
 

@@ -619,18 +619,7 @@ def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str, str]:
     logs = tuple(Path(entry) for entry in (cycles_logs or ()))
     if not logs:
         return "", "no cycle-record directory was named", "no cycle-record directory was named"
-    found: dict[str, Path] = {}
-    unreadable: list[str] = []
-    for log in logs:
-        try:
-            names = [entry.name for entry in log.iterdir()]
-        except OSError as exc:
-            unreadable.append(f"{log} ({exc.strerror or exc})")
-            continue
-        for name in names:
-            match = _CYCLE_RECORD.fullmatch(name)
-            if match:
-                found.setdefault("cyc" + match.group(1), log)
+    found, unreadable = _cycle_record_ids(cycles_logs)
     named = ", ".join(str(log) for log in logs)
     shortfall = "; ".join(unreadable)
     if not found:
@@ -647,6 +636,66 @@ def previous_cycle(cycle: str, cycles_logs) -> tuple[str, str, str]:
     if unreadable:
         where += f" ({shortfall} could not be read)"
     return (earlier[-1], where, shortfall) if earlier else ("", where, shortfall)
+
+
+def _cycle_record_ids(cycles_logs) -> tuple[dict[str, Path], list[str]]:
+    """Every cycle id the record corpus holds, and the roots that were **not listed**.
+
+    The one scan both boundary resolvers read — `previous_cycle` takes the newest id below
+    this cycle's, `following_cycle` the earliest id above it — because a window is one span
+    and its two ends must see the same corpus. Resolved from two separate readings of the
+    roots, the same head reads one way in the queue and another at the poster, which is the
+    divergence this family has already paid for once (issue #2218).
+
+    A root that cannot be listed is *named* rather than passed over: an answer drawn from
+    the readable half is still an answer, but a reader has to know which half it came from.
+    """
+    found: dict[str, Path] = {}
+    unreadable: list[str] = []
+    for log in tuple(Path(entry) for entry in (cycles_logs or ())):
+        try:
+            names = [entry.name for entry in log.iterdir()]
+        except OSError as exc:
+            unreadable.append(f"{log} ({exc.strerror or exc})")
+            continue
+        for name in names:
+            match = _CYCLE_RECORD.fullmatch(name)
+            if match:
+                found.setdefault("cyc" + match.group(1), log)
+    return found, unreadable
+
+
+def following_cycle(cycle: str, cycles_logs) -> tuple[str, str, str]:
+    """`(the cycle that follows `cycle`, where it was found, why the corpus fell short)`.
+
+    The **earliest** cycle record whose id sorts after this cycle's; ids are fixed width,
+    so string order is time order. This is the window's far bound, and the clause needs it
+    because a cycle's run ends where the next cycle begins: a head pushed at or after that
+    instant was pushed by that later cycle, so it is not this one's own work however the
+    clock reads (issue #2334).
+
+    `("", reason, ...)` when there is none — the *ordinary* state here rather than an
+    accident: the newest cycle is the one posting a vote and nothing follows it yet, so its
+    span stays open at the far end. The third element keeps `previous_cycle`'s meaning (the
+    roots that were not listed), and its direction is the safe one: a corpus nobody could
+    read has not said there is no later cycle either, so the bound stays open, which leaves
+    the window **wide** — a delay, never a vote credited.
+    """
+    found, unreadable = _cycle_record_ids(cycles_logs)
+    named = ", ".join(str(log) for log in (cycles_logs or ()))
+    shortfall = "; ".join(unreadable)
+    later = sorted(entry for entry in found if entry > cycle)
+    if later:
+        where = str(found[later[0]])
+    else:
+        where = (
+            f"no cycle record after {cycle} in {named}"
+            if named
+            else "no cycle-record directory was named"
+        )
+    if unreadable:
+        where += f" ({shortfall} could not be read)"
+    return (later[0], where, shortfall) if later else ("", where, shortfall)
 
 
 @dataclass
@@ -692,10 +741,35 @@ class Window:
     inferred: bool = False
     dispatch_unread: str = ""
     corpus_shortfall: str = ""
+    #: The far bound of the span: the instant the **next** cycle started, or `None` while
+    #: this cycle is the newest — its run has not ended, which is the state every cycle is
+    #: in when it posts a vote. A head pushed at or after this instant was pushed by that
+    #: later cycle, so it is not this cycle's own work however the clock reads (issue
+    #: #2334).
+    end: datetime | None = None
 
     @property
     def applied(self) -> bool:
         return self.start is not None
+
+    def covers(self, pushed: datetime) -> bool:
+        """Is this push inside the run of the cycle whose head-window this is?
+
+        The clause is about a head **this** cycle pushed, and a cycle's run ends where the
+        next cycle begins: the span is `[start, end)`, with `end` open while this cycle is
+        the newest — nothing after it exists to take the run over, so every push since its
+        start is its own. The reason a far bound is needed at all is that without one the
+        span reaches *forward* without limit, and a head pushed by a later cycle was
+        reported as this one's own work (issue #2334: `cyc20261016-181619` was voided on a
+        head `cyc20261016-183420` pushed).
+
+        One predicate, asked by all three carriers — the queue that prints the verdict,
+        the counter that voids a posted vote, the poster that refuses to spend one — so
+        the same head cannot read `vote` in one and be voided by another.
+        """
+        if self.start is None:
+            return False
+        return pushed >= self.start and (self.end is None or pushed < self.end)
 
     @property
     def boundary_unmeasured(self) -> bool:
@@ -718,6 +792,16 @@ class Window:
     def window_start_text(self) -> str:
         """The window's start as one readable instant (empty when unapplied)."""
         return self.start.isoformat(timespec="seconds") if self.start else ""
+
+    def window_end_text(self) -> str:
+        """The window's far bound as one readable instant (empty when it has none).
+
+        Empty in two states a reader must not confuse: a cycle whose span is still open
+        because nothing followed it — the state every posting cycle is in — and a window
+        that could not be applied at all. Both leave the span open above, which is the
+        safe reading, so neither invents an instant.
+        """
+        return self.end.isoformat(timespec="seconds") if self.end else ""
 
     def inferred_clause(self) -> str:
         """The sentence a records-only resolution owes its reader (empty otherwise).
@@ -758,7 +842,8 @@ class Window:
 
 
 def abstain_window(cycle: str, previous: str, where: str,
-                   inferred: bool = False, corpus_shortfall: str = "") -> Window:
+                   inferred: bool = False, corpus_shortfall: str = "",
+                   following: str = "") -> Window:
     """The window, from the previous cycle's id — or a narrower one that says so.
 
     The previous cycle's start is preferred because it is the wider window: a head
@@ -795,12 +880,24 @@ def abstain_window(cycle: str, previous: str, where: str,
     **A resolved boundary stays a reading even beside a shortfall**, and a caller that
     named its own boundary (`--prev-cycle`, `inferred=False`) is not second-guessed:
     neither asked the records what only the records answer.
+
+    `following` is the cycle *after* this one, and it closes the span at the far end: a
+    head pushed from the next cycle's start onward was pushed by that cycle, not by this
+    one, so the clause has nothing to say about it (issue #2334). It is `""` for the newest
+    cycle — the state every posting cycle is in — and the span is then open above, which is
+    right: nothing has taken the run over yet.
     """
     own = cycle_start(cycle)
     start = cycle_start(previous)
+    # The far bound, and it is the cycle *after* this one rather than the one before: a
+    # cycle's run ends where the next cycle begins, so a push from that instant onward
+    # belongs to that later cycle (issue #2334). `""` — no later cycle — leaves the span
+    # open, which is the state this cycle is in while it is the one running.
+    end = cycle_start(following)
     if start is not None:
         return Window(
             start=start,
+            end=end,
             source=f"previous cycle {previous}" + (f" ({where})" if where else ""),
             previous=previous,
             inferred=inferred,
@@ -820,6 +917,7 @@ def abstain_window(cycle: str, previous: str, where: str,
         # answered "votable" from an end nobody measured is the defect this closes.
         return Window(
             start=own,
+            end=end,
             source=f"this cycle only (started {own.isoformat(timespec='seconds')})",
             unresolved=(
                 f"{corpus_shortfall} could not be read, so the start of the cycle "
@@ -838,7 +936,7 @@ def abstain_window(cycle: str, previous: str, where: str,
         )
     return Window(start=None, source="", unresolved=where or f"{cycle!r} is not a cycle id",
                   previous=previous, inferred=inferred,
-                  corpus_shortfall=corpus_shortfall)
+                  corpus_shortfall=corpus_shortfall, end=end)
 
 
 def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Window:
@@ -981,14 +1079,20 @@ def own_window(
         it also stays clear when `prev_cycle` named the boundary.
     """
     roots = resolve_cycle_logs(cycles_log)
+    # The far bound is resolved for **every** caller, `--prev-cycle` included. Naming the
+    # lower boundary says which question the caller asked about the *start*; the span's
+    # other end is a fact of the corpus either way, and a caller that named its start did
+    # not thereby claim the run of every cycle that followed it (issue #2334).
+    following, _following_where, _following_shortfall = following_cycle(cycle, roots)
     if prev_cycle:
         # The caller's own answer, taken as named: a caller that named its boundary asked
         # a different question from one that asked the records, and the dispatches are
         # not consulted for it.
-        return abstain_window(cycle, prev_cycle, "named by --prev-cycle", inferred=False)
+        return abstain_window(cycle, prev_cycle, "named by --prev-cycle", inferred=False,
+                              following=following)
     previous, where, shortfall = previous_cycle(cycle, roots)
     window = abstain_window(cycle, previous, where, inferred=True,
-                            corpus_shortfall=shortfall)
+                            corpus_shortfall=shortfall, following=following)
     corpora = resolve_session_dirs(sessions_dir, roots)
     ids, unreadable = dispatched_ids(corpora)
     return replace(
@@ -1659,7 +1763,7 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO,
             if reading.head_pusher
             else "the head carries no pusher reading, so the clause is kept"
         )
-        if pushed is not None and pushed >= window.start and not other_pusher:
+        if pushed is not None and window.covers(pushed) and not other_pusher:
             return Action(
                 kind="abstain",
                 why=f"head pushed {reading.head_pushed_at}, inside the window this cycle "
