@@ -279,3 +279,115 @@ def test_reference_presentation_is_a_third_citation_axis():
     assert "Check how the references are *presented*" in text
     # Both review templates collect it, or the requirement has no slot to land in.
     assert text.count("- **Reference presentation** (read in the rendered form)") == 2
+
+
+# --- The RSI failure-list gates (rant 2026-10-16T11:33:13, issue #2318) -------
+#
+# A 2026-08 study (Princeton; Kirgis / Kapoor et al., reported by MIT Technology
+# Review) gave an agent six days, $3,000 of API budget, a GPU, an isolated VM and
+# open network against two unpublished NeurIPS 2026 submissions — both were
+# rejected, with the engineering judged complete and the research judged poor.
+# Its five failure modes are gaps in this prompt, where the bar rewarded the
+# wrong behaviour. Each gate is pinned on the side that has to execute it: a bar
+# stated only for the author has no reviewer, and one stated only for the
+# reviewer is discovered after the work is already done.
+#
+# Each pin names the *rule*, never the topic — a bare `"synthetic" in text` would
+# stay green on a sentence that merely mentions the word, which is the shape
+# these guards exist to refuse.
+
+
+def test_gate1_a_contradiction_needs_the_studys_detectable_effect():
+    """Failure mode 1: a contradiction was paid for without being tested.
+
+    The bar called a result contradicting a registered prior "a strong novelty
+    signal" and never asked whether the contradiction clears the study's own
+    noise — the one reward an agent that kills its own hypotheses collects for
+    free. The requirement has to sit where the reward is paid, so the census-cap
+    exemption that lifts the N3 cap is conditional on it too.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    # Review item #15, the #7(b) exemption, and the author's #14: both sides.
+    assert text.count("minimum effect this study can detect") == 3
+    assert text.count('**"no information"**') == 2
+    assert "Exemption (b) is conditional" in text
+    assert "a contradiction inside the study's own noise is not a signal" in text
+    assert "a contradiction inside the study's own noise is not a novelty signal" in text
+
+
+def test_gate2_a_barren_direction_has_a_stop_go_checkpoint():
+    """Failure mode 2: the only exit from a barren direction was a clock.
+
+    `in-preparation > 60 days without submission` is an editor's administrative
+    rule; the prompt had no scientific checkpoint at which the direction must be
+    judged. The three outcomes are named here because "reconsider the direction"
+    is not a decision.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "**Stop-go review (mandatory checkpoint" in text
+    assert "what result would **falsify** this direction" in text
+    assert "**downgrade to case study**" in text
+    assert "abandon, with a failure memo" in text
+    # It says which clock it is not: the administrative one cannot stand in.
+    assert "it is not a substitute for this judgement" in text
+
+
+def test_gate3_a_revision_must_move_the_research_not_the_wording():
+    """Failure mode 3: the revision step asked for a reply, not for research.
+
+    Point-by-point responses + a change summary is a receipt for answering; the
+    reviewed study's agent narrowed its claims and added caveats instead of
+    fixing its method — which is exactly what those instructions permit. So the
+    classification is on both sides: the author may not mark a wording-only
+    round complete, and the editor must confirm a research-level change landed.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "must NOT be marked `[revision-complete]`" in text
+    assert "landed by a **research-level change**" in text
+    assert "at least one requested change must be a **research-level change**" in text
+    assert (
+        "a revision that moved only the wording has not answered a review that "
+        "asked for research" in text
+    )
+
+
+def test_gate4_synthetic_data_is_not_evidence_about_the_real_world():
+    """Failure mode 4: nothing forbade toy data from carrying a real claim.
+
+    The bar required a baseline and asked for n, but never said that synthetic
+    data can only demonstrate a pipeline — so a hypothesis tested on a tiny
+    synthetic set passed every item on the list. Both sides carry it.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "does **not** support any conclusion about a real population" in text
+    assert "It is **not** evidence about a real population" in text
+    # Visible outside the phases, as the citation gate is.
+    assert "synthetic data may prove a pipeline but never a claim about the real world" in text
+
+
+def test_gate5_a_self_improvement_claim_has_an_admissible_shape():
+    """Failure mode 5: our own bar rejected every honest self-improvement paper.
+
+    "Comparing the system to its own before/after state does NOT count" is right
+    for an ordinary experiment and fatal for a paper about a system improving
+    itself — and deleting it would readmit any study that merely spent more.
+    So it is *limited*: unchanged for everyone else, admissible here only with
+    the four requirements, of which the same-budget control is the load-bearing
+    one. Its twin is this repo's own rule that a guard must redden when the fix
+    is reverted.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    # Unchanged for every other manuscript — the old anchor still holds.
+    assert "comparing the system to its own before/after state does NOT count" in text
+    # Limited on both sides, so neither actor reads it as a blanket ban.
+    assert "it is not a licence to reject a paper whose subject is the system improving itself" in text
+    assert "it is not a blanket ban on papers whose subject is the system's own improvement" in text
+    # All four requirements, on both sides.
+    assert text.count("which layer changed") == 2
+    assert text.count("what triggers a round") == 2
+    assert text.count("what got worse or did not move") == 2
+    assert "plus** a non-self-improving control at the same budget" in text
+    assert "a same-budget non-self-improving control" in text
+    # Held out by definition: an evaluation set inside the loop measures the loop.
+    assert text.count("**held-out set** that never entered the improvement loop") == 2
+
