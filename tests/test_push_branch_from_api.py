@@ -19,6 +19,8 @@ import json
 import os
 import pytest
 import subprocess
+import time as _real_time
+import urllib as _real_urllib
 import urllib.error
 
 from pathlib import Path
@@ -392,16 +394,60 @@ def test_push_fails_loud_and_touches_no_refs_when_commit_rejected(tmp_path):
 # api` - was unreachable while every 4xx was retried with 5 s + 10 s of backoff.
 
 
+def _stub_time(calls):
+    """The module's `time`, with `sleep` recorded and everything else unchanged.
+
+    `mod.time` is replaced, never `mod.time.sleep`. The script does `import time`,
+    so `mod.time` IS the process's `time` module: patching its `sleep` made the
+    recorder collect the sleeps of every other sleeper alive in the worker. On the
+    Linux CI leg a leftover poller put 1131 entries (0.001, 0.002, 0.004 … 0.05)
+    into `calls["sleep"]` during these four tests and turned three of them red -
+    the assertion had been a statement about the process, not about `api()`.
+    """
+    class _Time:
+        sleep = staticmethod(lambda seconds: calls["sleep"].append(seconds))
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    return _Time()
+
+
+def _stub_urllib(fake_urlopen):
+    """The module's `urllib`, with `request.urlopen` faked and the rest forwarded."""
+    class _Request:
+        urlopen = staticmethod(fake_urlopen)
+
+        def __getattr__(self, name):
+            return getattr(_real_urllib.request, name)
+
+    class _Urllib:
+        request = _Request()
+
+        def __getattr__(self, name):
+            return getattr(_real_urllib, name)
+
+    return _Urllib()
+
+
 def _stub_one_call(monkeypatch, mod, error):
-    """Make `api()` see `error` from urlopen, recording requests and sleeps."""
+    """Make `api()` see `error` from urlopen, recording requests and sleeps.
+
+    Both stubs replace an attribute *of the script module*, never an attribute of
+    the shared module it points at: the script does `import time` / `import urllib`,
+    so `mod.time.sleep` and `mod.urllib.request.urlopen` are the process's own, and
+    patching those collects (or intercepts) the calls of every other caller alive in
+    the worker. Measured on the Linux leg: a leftover poller put 1131 entries into
+    `calls["sleep"]` and turned three of these four tests red.
+    """
     calls = {"urlopen": 0, "sleep": []}
 
     def fake_urlopen(req, timeout=None):
         calls["urlopen"] += 1
         raise error
 
-    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(mod.time, "sleep", lambda seconds: calls["sleep"].append(seconds))
+    monkeypatch.setattr(mod, "urllib", _stub_urllib(fake_urlopen))
+    monkeypatch.setattr(mod, "time", _stub_time(calls))
     return calls
 
 
