@@ -3440,11 +3440,39 @@ def _silence_frames(handler, tmp_path, monkeypatch, frames, *, delays=None):
     none. `delays` maps a frame index to how long the socket stays silent before
     that frame arrives, which is how a test puts a pause *inside* a step rather
     than at the end of the script.
+
+    Frames are handed over from a list, so this socket has no latency of its own
+    to model: real time spent between two of them is the *handler's* work, and the
+    watchdog's clock is frozen against exactly that (`_FrozenClock`).
     """
     import json as _json
+    import time as _time
 
     from emrg.server import scheduler as mod
     delays = delays or {}
+
+    class _FrozenClock:
+        """The watchdog's clock, standing still while the scripted frames arrive.
+
+        The cycle reads `time.monotonic` from `emrg.server.scheduler`, and the bound
+        this suite shrinks to milliseconds is compared against *that* clock — so a
+        real clock made the ending a reading of the CI runner. Measured (head
+        `5f8654a9`, run 38902200116, leg `test`): a scheduling gap between two
+        scripted frames crossed the 50 ms bound and a cycle that had done nothing
+        wrong ended `stalled`, with both tool frames already read. Frozen, the only
+        waits that move are the code's own: `asyncio.wait_for` still times out after
+        the bound the code computed, which is what the silence tests below read, and
+        a `delays` pause is still real time the socket takes.
+
+        `time.time`, `sleep` and the rest stay the real module's: the scheduler
+        schedules with `time.time`, and `asyncio`'s timers are not ours to fake.
+        """
+
+        def monotonic(self) -> float:
+            return 0.0
+
+        def __getattr__(self, name):
+            return getattr(_time, name)
 
     class _SilentWS:
         def __init__(self):
@@ -3471,6 +3499,7 @@ def _silence_frames(handler, tmp_path, monkeypatch, frames, *, delays=None):
         return _SilentWS()
 
     handler._build_evolution_prompt = lambda: "test prompt"
+    monkeypatch.setattr(mod, "time", _FrozenClock())
     monkeypatch.setattr(mod, "connect_to_server", _fake_connect)
     return handler
 
@@ -3682,6 +3711,55 @@ def test_a_queued_request_that_is_served_inside_the_wait_is_a_normal_cycle(
     assert reason == handler._CLEAN_END, (
         "a cycle that started after being queued is an ordinary completed cycle "
         f"— got {reason!r}"
+    )
+    assert len(handler.evolutions) == 1, "it ran, so it counts"
+
+
+def test_the_handlers_own_work_between_frames_is_not_silence(
+    tmp_path, monkeypatch,
+):
+    """A frame already in hand is not a silent socket, however long the loop takes.
+
+    Measured (head 5f8654a9, run 38902200116, leg `test`): this script ended
+    `stalled` with `tools=2` — both tool frames read, the terminal one not yet — so
+    the watchdog fired *after* the daemon had answered, on the work this loop does
+    between two frames (the per-tool heartbeat write, which is a file write) taking
+    longer than the 50 ms bound this suite shrinks to on a loaded runner. Nothing
+    was silent on the wire: these frames are handed over from a list.
+
+    So the bound must read the socket, not the runner's scheduler — the per-frame
+    clock is frozen against the latter (`_FrozenClock`), and the write below is the
+    former's honest opposite number: real work, no silence.
+    """
+    import time as _time
+
+    from emrg.server import scheduler as mod
+
+    monkeypatch.setattr(mod, "_ROUND_SILENCE_SECONDS", 0.05)
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    _silence_frames(handler, tmp_path, monkeypatch, frames=[
+        {"type": "task_queued", "request_id": "evolution-x", "session_id": "s",
+         "position": 1},
+        {"type": "steer_committed", "request_id": "evolution-x", "session_id": "s"},
+        {"type": "tool_start", "tool_name": "bash", "arguments": {"command": "true"}},
+        {"type": "tool_end", "tool_name": "bash", "content": "ok", "error": False},
+        {"request_id": "evolution-x", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ])
+    real_write = handler._write_heartbeat
+
+    def _slow_write(status):
+        _time.sleep(0.2)  # 4x the bound: a loaded runner's write, not a silent socket
+        return real_write(status)
+
+    monkeypatch.setattr(handler, "_write_heartbeat", _slow_write)
+
+    reason = asyncio.run(handler._run_evolution_cycle())
+
+    assert reason == handler._CLEAN_END, (
+        "every frame this cycle's own turn needed arrived, and the daemon had "
+        "answered before the slow work began; how long this loop took between two "
+        f"frames is not the cycle going silent — got {reason!r}"
     )
     assert len(handler.evolutions) == 1, "it ran, so it counts"
 
