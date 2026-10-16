@@ -54,6 +54,11 @@ import urllib.request
 API = "https://api.github.com"
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+#: The HTTP statuses worth a retry: GitHub's own transient answers. Every other
+#: status is the reply the caller asked for - `404` and `422` are how this tool
+#: asks "is this object on the remote yet?", so retrying them retries the answer.
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
 _TOKEN: str | None = None  # resolved once by _auth_token(), held in memory only
 
 _AUTHOR_RE = re.compile(r"^(.*) <(.*)> (\d+) ([+-]\d{4})$")
@@ -91,9 +96,11 @@ def _auth_token() -> str | None:
 def api(method: str, path: str, body: dict | None = None) -> dict:
     """Call the GitHub REST API, authenticated when a token is available.
 
-    Transient network errors (URLError: timeout/reset — github.com and even
-    api.github.com are flaky on this host) are retried up to 3 times with
-    backoff; HTTP errors are passed through for the caller to handle.
+    A transient failure - a timeout, a reset, or one of GitHub's own transient
+    statuses - is retried up to 3 times with backoff. Every other HTTP status is
+    the answer the caller asked for and is raised at once: the caller reads 404
+    and 422 as control flow ("this commit is not on the remote yet"), so spending
+    5 s + 10 s before handing them over is time bought for nobody.
     """
     url = API + path
     headers = {"User-Agent": "emrg-push-branch-from-api",
@@ -111,11 +118,12 @@ def api(method: str, path: str, body: dict | None = None) -> dict:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
                 return json.loads(raw) if raw else {}
-        except urllib.error.URLError as e:
-            if attempt == 2:
-                raise
-            time.sleep(5 * (attempt + 1))
         except urllib.error.HTTPError as e:
+            # `HTTPError` IS a `URLError`, so this handler must come first. With the
+            # network handler ahead of it this branch was unreachable and every 4xx was
+            # retried three times with 5 s + 10 s of backoff (measured 2026-10-16,
+            # `cyc20261016-183420`: a 422 answered in 0.5 s took 17.5 s), which the
+            # caller pays on exactly the probes it makes by design.
             if e.code in (401, 403) and not token:
                 out = subprocess.run(["gh", "api", "-X", method, path,
                                       "--input", "-"], input=json.dumps(body or {}),
@@ -123,7 +131,16 @@ def api(method: str, path: str, body: dict | None = None) -> dict:
                                      encoding="utf-8", errors="replace")
                 if out.returncode == 0 and out.stdout.strip():
                     return json.loads(out.stdout)
+            if e.code in RETRYABLE_STATUSES and attempt < 2:
+                time.sleep(5 * (attempt + 1))
+                continue
             raise
+        except urllib.error.URLError as e:
+            # Not an HTTP answer at all: a timeout, a reset, a DNS failure - the
+            # failures of a flaky link rather than the server's reply.
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
     raise RuntimeError("unreachable")  # pragma: no cover
 
 
@@ -279,6 +296,25 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
     obj_map: dict[str, str] = {}
     if base:
         obj_map[base] = base
+        # Everything reachable from the base commit's tree is already on the remote:
+        # git shas are content-addressed, and `base` is only ever set from an existing
+        # branch ref or a `GET /commits/{sha}` the remote answered - so re-uploading
+        # that half is a POST whose answer is known before it is sent. Measured
+        # 2026-10-16 (`cyc20261016-183420`): an 8-file version bump uploaded 745
+        # objects (707 blobs + 38 trees) and did not finish inside a 10-minute window,
+        # where the objects the base does not already carry are **11**. This walk costs
+        # 0.02 s on that tree.
+        #
+        # Named limit: this holds while the remote is a complete repository, which is
+        # what makes "the base's objects are on the remote" true. Against a remote
+        # missing part of its own history the skip could omit an object it lacks, and
+        # nothing would say so - GitHub's create-tree accepts entries it cannot resolve.
+        for line in git(
+            "rev-list", "--objects", f"{base}^{{tree}}", cwd=cwd
+        ).decode("utf-8").splitlines():
+            present = line.split(" ", 1)[0]
+            if present:
+                obj_map[present] = present
 
     def remote_sha(sha: str, kind: str) -> str:
         if sha in obj_map:

@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 import os
+import pytest
 import subprocess
 import urllib.error
 
@@ -380,3 +381,144 @@ def test_push_fails_loud_and_touches_no_refs_when_commit_rejected(tmp_path):
     assert fake.refs == {}           # ref never touched
     r = _git("rev-parse", "refs/heads/feature/bad", cwd=repo)
     assert r.returncode != 0         # local ref never created
+
+
+# ------------------------------------------------- what a failed call costs
+#
+# `api()` retries what is worth retrying. The two defects these tests pin were
+# measured on 2026-10-16 (`cyc20261016-183420`), during the outage this tool
+# exists for: `HTTPError` is a `URLError`, the network handler stood ahead of the
+# HTTP one, and so the HTTP branch - which reads 401/403 and falls back to `gh
+# api` - was unreachable while every 4xx was retried with 5 s + 10 s of backoff.
+
+
+def _stub_one_call(monkeypatch, mod, error):
+    """Make `api()` see `error` from urlopen, recording requests and sleeps."""
+    calls = {"urlopen": 0, "sleep": []}
+
+    def fake_urlopen(req, timeout=None):
+        calls["urlopen"] += 1
+        raise error
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: calls["sleep"].append(seconds))
+    return calls
+
+
+def test_a_four_xx_is_an_answer_and_is_not_retried(monkeypatch):
+    """404 and 422 are this tool's own control flow: they must cost one request.
+
+    A 422 is how `push_branch` learns "this commit is not on the remote yet", and it
+    asks that question once per ancestor. Spending 15 s on each answer is the cost
+    the fix removed (measured: a 422 answered in 0.5 s took 17.5 s).
+    """
+    mod = _load_module()
+    calls = _stub_one_call(monkeypatch, mod, _http_error(422, b'{"message":"no"}'))
+
+    with pytest.raises(urllib.error.HTTPError):
+        mod.api("GET", "/repos/x/commits/deadbeef")
+
+    assert calls["urlopen"] == 1, "a 4xx was requested more than once"
+    assert calls["sleep"] == [], "a 4xx was slept on"
+
+
+def test_a_not_found_is_an_answer_and_is_not_retried(monkeypatch):
+    """The other half of the control flow: the branch/commit existence probes."""
+    mod = _load_module()
+    calls = _stub_one_call(monkeypatch, mod, _http_error(404))
+
+    with pytest.raises(urllib.error.HTTPError):
+        mod.api("GET", "/repos/x/git/refs/heads/feature/x")
+
+    assert calls["urlopen"] == 1
+    assert calls["sleep"] == []
+
+
+def test_a_transient_status_is_still_retried(monkeypatch):
+    """The control: the fix does not turn a flaky server into an immediate failure."""
+    mod = _load_module()
+    calls = _stub_one_call(monkeypatch, mod, _http_error(503))
+
+    with pytest.raises(urllib.error.HTTPError):
+        mod.api("GET", "/repos/x/git/refs/heads/y")
+
+    assert calls["urlopen"] == 3
+    assert calls["sleep"] == [5, 10]
+
+
+def test_a_network_failure_is_still_retried(monkeypatch):
+    """And the handler that has to stay: a reset/timeout is not an answer at all."""
+    mod = _load_module()
+    calls = _stub_one_call(monkeypatch, mod, urllib.error.URLError("reset by peer"))
+
+    with pytest.raises(urllib.error.URLError):
+        mod.api("GET", "/repos/x/git/refs/heads/y")
+
+    assert calls["urlopen"] == 3
+    assert calls["sleep"] == [5, 10]
+
+
+def test_without_a_token_a_401_falls_back_to_gh(monkeypatch):
+    """The branch the handler order had made unreachable."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "_auth_token", lambda: None)
+    calls = _stub_one_call(monkeypatch, mod, _http_error(401))
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, '{"sha": "abc"}', "")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    assert mod.api("GET", "/repos/x/git/refs/heads/y") == {"sha": "abc"}
+    assert calls["urlopen"] == 1
+    assert seen["argv"][:3] == ["gh", "api", "-X"]
+
+
+# ------------------------------------------------- what a push uploads
+
+
+def test_a_push_onto_an_existing_remote_base_uploads_only_what_is_missing(tmp_path):
+    """A one-file change must not re-upload every object in the tree.
+
+    Measured 2026-10-16 (`cyc20261016-183420`) on the release branch: the tool
+    uploaded 745 objects (707 blobs + 38 trees) for an 8-file version bump and did
+    not finish inside a 10-minute window, where the objects the remote's own base
+    commit does not already carry are 11. Everything reachable from the base is
+    already there - git shas are content-addressed and the remote serves that commit
+    - so the upload is a POST whose answer is known.
+    """
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "a/b.txt", b"nested\n")
+    _write_file(repo, "top.txt", b"top\n")
+    base = _commit_all(repo, "root commit")
+    _commit_all(repo, "child commit", new_file="c.txt")
+
+    fake = FakeGitHub(repo)
+    fake.refs["refs/heads/feature/test"] = base   # the remote already serves the base
+    fake.objects[base] = ("commit", b"<pre-existing>")
+
+    orig_api = mod.api
+    mod.api = fake
+    try:
+        result = mod.push_branch("x", "feature/test", "HEAD", False, cwd=repo)
+    finally:
+        mod.api = orig_api
+
+    assert result["result"] == "pushed"
+    assert result["content_identical"] is True
+
+    blob_posts = [p for m, p in fake.log if m == "POST" and p == "/repos/x/git/blobs"]
+    assert len(blob_posts) == 1, (
+        f"a one-file change against a base the remote already has uploaded "
+        f"{len(blob_posts)} blob(s) - re-uploading the whole tree is what made this "
+        "tool unusable inside a 10-minute window"
+    )
+    # The control, so the assertion above cannot be satisfied by uploading nothing:
+    # the tree the change produced still has to be created, and the new blob with it.
+    assert [p for m, p in fake.log if m == "POST" and p == "/repos/x/git/trees"], (
+        "the new tree was never created"
+    )
+    assert result["sha"] in fake.objects, "the new commit was never created"
