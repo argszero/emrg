@@ -102,17 +102,43 @@ release installer" means for this version.
         must show an mtime AFTER this build started (within the last few
         minutes). If app.asar is missing or its mtime is old, the build did
         NOT run — DO NOT proceed to copy; report and roll back.
-     e. **Re-seal the bundle + clear xattrs (REQUIRED — rant
-        2026-08-25T09:18:19)**: electron-builder's `dir` target only ad-hoc
-        signs the main binary, leaving the bundle unsealed (`codesign -d`
-        shows `Identifier=Electron`, `Info.plist=not bound`,
+     e. **Seal the bundle with a STABLE IDENTITY + clear xattrs (REQUIRED —
+        the re-seal is rant 2026-08-25T09:18:19 (PR #968); the identity is
+        rant 2026-10-16T12:03:58 (issue #2322))**: electron-builder's `dir`
+        target only ad-hoc signs the main binary, leaving the bundle unsealed
+        (`codesign -d` shows
+        `Identifier=Electron`, `Info.plist=not bound`,
         `Sealed Resources=none`), and the artifact carries xattrs such as
         `com.apple.provenance`. On macOS 26 a deployed copy combining
         provenance/quarantine attributes with an invalid signature is judged
-        malware and moved to Trash. Fix the BUILT ARTIFACT before any copy:
-        - `codesign --force --deep --sign - --timestamp=none "{{ upgrade_work }}/emrg/gui/dist/mac-arm64/EMRG.app"`
-          (full ad-hoc re-sign — seals the bundle: Info.plist bound, sealed
-          resources present; `codesign -d` then shows `Identifier=com.emrg.gui`)
+        malware and moved to Trash. Seal the BUILT ARTIFACT before any copy —
+        through the repo's own step, NEVER a hand-written `codesign`:
+        - `bash "{{ upgrade_work }}/packaging/sign-local-app.sh" "{{ upgrade_work }}/emrg/gui/dist/mac-arm64/EMRG.app"`
+          It seals the bundle (Info.plist bound, sealed resources present) and
+          chooses the signing identity itself, deterministically: the machine's
+          codesigning certificate when it holds one, ad-hoc only when it does
+          not. An ad-hoc signature carries no certificate, so macOS keys the app
+          by the *hash of its binary* — which every rebuild changes — and the
+          host's macOS privacy grants (Screen Recording, Accessibility, …) stop
+          matching, so the host must re-authorise EMRG after every upgrade. A
+          certificate moves that identity onto the certificate, where a rebuild
+          cannot move it.
+          It signs with `--timestamp=none`, so an upgrade with no network still
+          completes. **Read its output and put the `sign-local-app: identity=…`
+          line in the upgrade log** — that line is the next upgrade's answer to
+          "will the host's grants still match?", and `identity=adhoc` means they
+          will NOT; never hide it. Its exit codes:
+          - `0` — sealed and verified (`codesign --verify --deep --strict`
+            passed). Proceed. The bundle may be sealed with a certificate or,
+            loudly, ad-hoc.
+          - `1` — the bundle does not verify after signing. Do NOT copy; report
+            and roll back.
+          - `2` — `codesign` is unavailable, so nothing was sealed or verified.
+            Proceed with the artifact as the build left it and record that no
+            signature check was possible.
+          If the script is absent from the target tree, do NOT hand-write a
+          `codesign` call: report it and roll back rather than copy a bundle
+          nobody sealed.
         - `xattr -cr "{{ upgrade_work }}/emrg/gui/dist/mac-arm64/EMRG.app"`
           (clear extended attributes so ditto does not propagate them)
         Sanity-check before copying:
@@ -155,10 +181,15 @@ session, explicitly tell the host: upgrade to {{ target_tag }} is complete
 - Do NOT modify the evolution repo {{ source_repo }}'s worktree or branches
   (read-only source). All write operations happen in {{ upgrade_work }} /
   {{ install_dir }} / {{ backup_dir }}.
-- Do NOT touch Developer ID signing / notarization (release-side
-  responsibility). The local upgrade uses ad-hoc re-signing only (step 3c) —
-  it is REQUIRED for Gatekeeper compatibility on macOS 26, not a replacement
-  for the release installer's Developer ID / notary chain.
+- Do NOT touch the release's Developer ID signing / notarization (release-side
+  responsibility), do NOT hand-write a `codesign` invocation, and do NOT pass
+  `--options runtime` (hardening the local build lets library validation block
+  Electron's bundled native libraries — the one way this step could stop the GUI
+  from launching). The local upgrade seals the built bundle through
+  `packaging/sign-local-app.sh` (step 3e): REQUIRED for Gatekeeper compatibility
+  on macOS 26, and not a replacement for the release installer's Developer ID /
+  notary chain. The identity that script chooses is what keeps the host's macOS
+  privacy grants alive across upgrades (issue #2322, rant 2026-10-16T12:03:58).
 - The MANIFESTO highest principle applies: never write, restore or introduce
   any test/script/code path that stops or restarts emrg server / emrgd.
   Step 5 ("do not restart the daemon") is the natural extension of that
