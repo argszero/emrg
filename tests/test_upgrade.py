@@ -717,6 +717,12 @@ def test_upgrade_prompt_gui_build_steps_are_separate_and_gated() -> None:
 # bundle 未密封 + 带 com.apple.provenance 等 xattr；macOS 26 把"未密封 + 隔离属性"
 # 的部署副本判为恶意软件移入废纸篓。该修复是 prompt-only——本守卫把 re-seal →
 # copy → verify 的顺序与命令钉死，未来编辑若删除/调换这些步骤立即红。
+#
+# rant 2026-10-16T12:03:58 (issue #2322)：re-seal 本身没错，签的**身份**错——adhoc
+# 签名没有证书，macOS 只能按二进制哈希认这个 App，于是每次升级重建都变成"另一个
+# App"，宿主在「隐私与安全性」里给过的授权全部失配。身份选择必须由
+# `packaging/sign-local-app.sh` 决定（脚本那边有行为守卫），本守卫钉死三件事：prompt
+# 只走脚本、不复写 codesign 调用、必须把 `sign-local-app: identity=` 那行写进升级日志。
 def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
     prompt = (Path(__file__).parent.parent / "emrg/server/prompts/upgrade_prompt.j2").read_text(
         encoding="utf-8"
@@ -725,12 +731,13 @@ def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
 
     # 1. re-seal（3e）必须在 Replace/copy 之前：产物先修好再复制。
     reseal = next(
-        (ln for ln in lines if "codesign --force --deep --sign -" in ln), None
+        (ln for ln in lines if "packaging/sign-local-app.sh" in ln), None
     )
     assert reseal is not None, (
-        "upgrade_prompt.j2 must re-seal the built bundle (codesign --force --deep "
-        "--sign -) before copying — rant 2026-08-25T09:18:19 (macOS 26 moves "
-        "unsealed+xattr copies to Trash as malware)."
+        "upgrade_prompt.j2 must seal the built bundle through "
+        "packaging/sign-local-app.sh before copying — rant 2026-08-25T09:18:19 "
+        "(macOS 26 moves unsealed+xattr copies to Trash as malware) and rant "
+        "2026-10-16T12:03:58 (an ad-hoc seal is what voids the host's privacy grants)."
     )
     replace = next(
         (ln for ln in lines if ln.strip().startswith("4.") and "Replace" in ln), None
@@ -738,12 +745,30 @@ def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
     assert replace is not None, "upgrade_prompt.j2 must contain the Replace step"
     reseal_idx, replace_idx = lines.index(reseal), lines.index(replace)
     assert reseal_idx < replace_idx, (
-        "re-seal (3e) must happen BEFORE the Replace/copy step — copying an "
+        "the seal (3e) must happen BEFORE the Replace/copy step — copying an "
         f"unsealed bundle ships the malware-flagged artifact (got reseal={reseal_idx} "
         f"replace={replace_idx})"
     )
 
-    # 2. 构建产物的 xattr 清除必须在复制前（ditto 会传播 xattr）。
+    # 2. 身份选择必须交给脚本，prompt 不得复写 codesign 调用。prompt 里写死的
+    #    codesign 签名行会把身份决定权交回给"读模板的 agent"，那正是 #2322 要修的
+    #    东西（每次升级各自决定 = 每次升级身份都可能不同）。
+    hand_written = [ln for ln in lines if "codesign --force" in ln]
+    assert not hand_written, (
+        "upgrade_prompt.j2 must not hand-write a codesign signing invocation — the "
+        "identity belongs to packaging/sign-local-app.sh, where one deterministic "
+        f"rule picks it. Found: {hand_written}"
+    )
+
+    # 3. `sign-local-app: identity=` 必须被要求写进升级日志：下一轮升级判断"宿主
+    #    授权还配不配得上"就读这一行，adhoc 的后果必须留在记录里，不许静默。
+    assert "sign-local-app: identity=" in prompt, (
+        "upgrade_prompt.j2 must require the `sign-local-app: identity=…` line in the "
+        "upgrade log — identity=adhoc means the host re-authorises EMRG after this "
+        "upgrade, and a silent downgrade is half the reported defect (issue #2322)."
+    )
+
+    # 4. 构建产物的 xattr 清除必须在复制前（ditto 会传播 xattr）。
     xattr_build = next(
         (ln for ln in lines if 'xattr -cr "{{ upgrade_work }}' in ln), None
     )
@@ -755,7 +780,7 @@ def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
         "built-artifact xattr clear must precede the Replace/copy step"
     )
 
-    # 3. 运行副本的 xattr 清除必须存在（step 4 copy 后）。
+    # 5. 运行副本的 xattr 清除必须存在（step 4 copy 后）。
     xattr_run = next(
         (ln for ln in lines if "xattr -cr ~/Applications/EMRG.app" in ln), None
     )
@@ -764,7 +789,7 @@ def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
         "(xattr -cr ~/Applications/EMRG.app) after copying."
     )
 
-    # 4. verify：3e sanity + step5 install/run 双检 = 至少 3 次 codesign --verify
+    # 6. verify：3e sanity + step5 install/run 双检 = 至少 3 次 codesign --verify
     verify = [ln for ln in lines if "codesign --verify --deep --strict" in ln]
     assert len(verify) >= 3, (
         "upgrade_prompt.j2 must verify signatures at least 3 times (pre-copy sanity "
