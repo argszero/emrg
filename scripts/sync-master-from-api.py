@@ -309,6 +309,28 @@ def _object_exists(sha: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+def _materialized_without_trees(commits: list[tuple[str, str]],
+                                present=_object_exists) -> list[tuple[str, str]]:
+    """The `(commit, tree)` pairs whose tree this repo still cannot read.
+
+    `has_object` asks `git cat-file -e <sha>^{commit}`, so a commit the walk writes
+    is present to `git log` while its *tree* may be absent - and every command that
+    reads content refuses such a commit outright (`git ls-tree`, `git rev-parse
+    <sha>^{tree}`, a checkout, the three-way merge a review needs). The walk used to
+    verify the root tree of the commit `--ref` **named** and nothing else, so the
+    commits it materialized itself came back with a commit object and no content.
+
+    Measured 2026-10-16 on this checkout: `7ca5f07`, materialized by that day's
+    master sync, answered `fatal: not a tree object` while `9ea8317`, written by the
+    same walk, listed fine - the two cases are distinguishable, which is what makes
+    this a reading rather than a complaint.
+
+    `present` is a parameter so the answer about a layout can be asked without a
+    repository, exactly as `_absent_parents`' is.
+    """
+    return [(c, t) for c, t in commits if not present(t)]
+
+
 def _fetch_blob(repo: str, blob_sha: str) -> None:
     """Fetch one missing blob via the Git Data API, writing it byte-exact."""
     if _object_exists(blob_sha):
@@ -381,6 +403,9 @@ def main() -> int:
     # Walk the commit chain, reconstructing missing commits until a known one.
     sha = head
     created = 0
+    # (commit, its tree) for each commit this run writes: the API response already
+    # carries the tree sha, so knowing which trees the run owes costs no request.
+    materialized: list[tuple[str, str]] = []
     while sha and not has_object(sha):
         c = api_get(f"{API}/repos/{repo}/commits/{sha}")
         body = c["commit"]
@@ -412,6 +437,7 @@ def main() -> int:
         if got != sha:
             raise RuntimeError(f"reconstruction mismatch: want {sha}, got {got} — aborting (no refs touched)")
         created += 1
+        materialized.append((sha, body["tree"]["sha"]))
         print(f"  + {sha[:7]} ({body['author']['name']}, {body['message'].splitlines()[0][:60]})")
         parents = [p["sha"] for p in c["parents"]]
         if len(parents) == 1:
@@ -445,6 +471,27 @@ def main() -> int:
             raise SystemExit(f"tree mismatch or missing objects for {head[:7]} "
                              f"(want {tree}, got {local_tree.stdout.strip() or 'NONE'}) — "
                              "run `git fetch` when https returns")
+
+    # Every commit this run wrote must be readable as a *tree*, not only the one
+    # `--ref` named. A commit whose tree is absent is the same incomplete graph the
+    # parent check above names, one level down: git answers as if it were whole
+    # until a caller asks for content, and then `git checkout <it>` dies with
+    # "Could not read <tree>" - which is how a review's merge base failed on
+    # 2026-10-16, for #2307 and #2309 both (issue #2310).
+    gaps = _materialized_without_trees(materialized)
+    if gaps and not args.no_fetch_objects:
+        for commit, tree_sha in gaps:
+            print(f"  tree {tree_sha[:7]} of materialized {commit[:7]} missing locally "
+                  "- fetching blobs/trees via Git Data API")
+            _fetch_tree(repo, tree_sha)
+    still = _materialized_without_trees(materialized)
+    if still:
+        why = ("--no-fetch-objects was given" if args.no_fetch_objects
+               else "the API did not supply them")
+        raise SystemExit(
+            "tree(s) missing for commit(s) this run materialized: "
+            + ", ".join(c[:7] for c, _ in still)
+            + f" ({why}) - run `git fetch` when https returns (no refs touched)")
 
     if _is_object_name(args.ref):
         # The commit is materialized above, which is what a `--ref <sha>` caller
