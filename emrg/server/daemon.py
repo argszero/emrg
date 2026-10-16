@@ -4080,6 +4080,27 @@ class EmrgServer:
         system_prompt = self._build_system_prompt(session)
         history_messages = session.get_messages_for_llm()
 
+        # Build this turn's dynamic context once, persist it, then send those
+        # same bytes. It is stored *before* the user record because that is the
+        # position `_inject_context_message` puts it in the request, and a
+        # rebuilt history reproduces it only if it was written there: the
+        # context used to live only in the live request, so every later rebuild
+        # filled that slot with a different message and the provider re-processed
+        # the whole previous turn as uncached prompt tokens (issue #2311;
+        # measured 2026-10-16 on this session — 87,440 of 107,920 tokens
+        # uncached at one turn boundary, against 134-261 for an ordinary round).
+        context_message = self._build_context_message(session)
+        if context_message:
+            # No `role` field: the record is a *frame*, and `records_to_messages`
+            # is the one place that decides it reads as a user message. Storing a
+            # `role` here would make it match every reader that selects history
+            # records by `role == "user"` — measured: it broke a guard asking for
+            # "the user record" of a turn, which then found two.
+            session.append_message({
+                "type": "context",
+                "content": context_message.get("content", ""),
+            })
+
         # Persist user message (with image references if present). The moment is
         # stamped here, once, and then travels to the clients in the frame below —
         # the *same string* the record holds, so the row a client shows live and
@@ -4112,7 +4133,9 @@ class EmrgServer:
         # Rant 2026-08-23T13:54:14: dynamic context (current time) is injected
         # as a trailing user message, NOT rendered into the system prefix —
         # the prefix stays byte-stable so the prompt cache hits on round 1.
-        self._inject_context_message(session, messages)
+        # The message was just built and persisted above; the same one goes in,
+        # so the stored bytes are the sent bytes (issue #2311).
+        self._inject_context_message(session, messages, context_message)
         tools_base = self.tools.to_openai_tools() if allow_tools else []
         # P1 (rant 21:55:37): injection rounds do NOT consume the round budget;
         # force_ask latches "an Ask message was injected outside the round-top
@@ -4987,11 +5010,21 @@ class EmrgServer:
             f"workspace for writing): {listed} — you cannot add to or widen these."
         )
 
-    def _inject_context_message(self, session: Session, messages: list[dict]) -> None:
+    def _inject_context_message(
+        self, session: Session, messages: list[dict], ctx: dict | None = None
+    ) -> None:
         """Insert the dynamic-context message before the user prompt.
 
         Keeps the final user turn as the actual instruction while the context
         (time snapshot) rides in the message stream right after history.
+
+        ``ctx`` is the message to insert when the caller already built it. The
+        turn's opener builds it once, persists that text as a ``context`` record
+        and passes the very same dict here, so what a later turn's rebuild
+        reproduces is byte-for-byte what was sent (issue #2311). The other
+        callers — the auto-compact rebuild, the overlong retry and the
+        content-risk probe — build their own, because their history is not the
+        one the turn was opened on.
 
         Rant 2026-09-20T18:33:52: the frame goes immediately before a *final
         user message*, or at the very end -- never inside an assistant
@@ -5007,7 +5040,7 @@ class EmrgServer:
         rides right after history and the byte-stable system prefix is left
         alone.
         """
-        ctx = self._build_context_message(session)
+        ctx = ctx if ctx is not None else self._build_context_message(session)
         if ctx is None:
             return
         if messages and messages[-1].get("role") == "user":
