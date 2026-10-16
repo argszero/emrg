@@ -703,14 +703,14 @@ def own_head_window(
       An unknown one - an empty string, or no login that can be read - keeps the clause,
       so this can only ever un-void a push that is provably someone else's, never credit
       a self-review.
-    * **The window.** The previous cycle's start when its record can be found, this
-      cycle's own start when it cannot — `abstain_window`'s narrowed form, and the
-      reason says which of the two was applied, because a window that could not be
-      widened is a strictly weaker reading and must not pass as the stronger one.
-      It is read through `review-queue.own_window`, the *only* producer of it, so the
-      counter reaches the same boundary the queue does: resolved from the records alone
-      it was too early for 20 of the corpus's 350 cycle records (measured 2026-10-14),
-      which voided a vote the queue would have called votable (issue #2218).
+    * **The window.** The span is this cycle's own run: from its own start to the start
+      of the cycle that follows it. It is read through `review-queue.own_window`, the
+      *only* producer of it, so the counter reaches the same boundary the queue does
+      (issue #2218). Only a push inside the run is this cycle's own work: one below the
+      start was pushed by somebody else before this cycle began, and one at or after the
+      far end belongs to the cycle that followed (issue #2334). The host ruled the wider
+      near bound away on 2026-10-16T22:18:15 - a head the *previous* cycle pushed is not
+      this cycle's own work either.
     * **An unresolvable window is not passed.** A cycle id that names no instant
       leaves nothing to compare, and the direction that costs a delay is preferred
       to the one that spends a vote (the sibling's rule, `cast-vote.py`'s refusal).
@@ -742,20 +742,15 @@ def own_head_window(
             f"the head's own window cannot be decided from push time {push_time!r}, "
             "which is not an instant (issue #1408)"
         )
-    # The clause's span has **two** ends: inside is `start <= pushed < end`, and a push at
-    # or after the far end belongs to the cycle that followed this one, so it is not this
+    # The clause's span has **two** ends: inside is `start <= pushed < end`. A push at or
+    # after the far end belongs to the cycle that followed this one, so it is not this
     # cycle's work and the vote counts (issue #2334). Without the far end the span reached
     # forward without limit: `cyc20261016-181619`, which pushed nothing, had its vote on a
     # head `cyc20261016-183420` pushed voided, and the release PR #2326 waited a cycle at
-    # 2/3 for it.
-    #
-    # `below_unmeasured` keeps issue #2275's state apart from that answer: a push *below*
-    # the start is the one boundary that was never measured, and it is not the same finding
-    # as a push above the far end - the narrowed window credits a vote where the one that
-    # was never read would have voided it, while a push above the far end is outside a span
-    # whose other end *was* measured.
-    below_unmeasured = window.boundary_unmeasured and pushed < window.start
-    if not window.covers(pushed) and not below_unmeasured:
+    # 2/3 for it. A push *before* the start is outside for the same reason in the other
+    # direction: it was pushed by somebody else before this cycle ran, and the host ruled
+    # the previous cycle's window away on 2026-10-16T22:18:15, so the vote counts.
+    if not window.covers(pushed):
         return False, ""
     # The clause is about a head *this* instance pushed, and the window is only a proxy
     # for that: a head the peer pushed inside a gap between this host's cycles fell inside
@@ -773,32 +768,6 @@ def own_head_window(
             f"counts - the head was pushed by {pusher}, which is not a login this "
             "instance pushes under, so the own-head clause is not asked of it"
         )
-    if pushed < window.start:
-        # Reached only where `boundary_unmeasured` let the push through the return above,
-        # and it is the state that made this fix necessary (issue #2275): the window is
-        # real but its *far end* is not, so a push below the narrowed start is a push the
-        # wider window would have decided - the clause cannot say "outside" from an end
-        # nobody measured, and `(True, why)` is how both tools refuse to decide. The
-        # wording is this state's own and not the in-window sentence below: a reason that
-        # says "at or after <start>" about a push *before* it is false, and this family
-        # has paid for a reason that named the wrong cause.
-        return True, (
-            "the head's own window cannot be decided from this vote's cycle: the "
-            f"cycle-record corpus could not be read ({window.corpus_shortfall}), so the "
-            "start of the cycle before this one - the boundary the wider window uses, "
-            f"which is earlier than this cycle's own start "
-            f"({window.window_start_text()}) - was never measured, and the head was pushed "
-            f"{push_time}, before that start. The wider "
-            "window this clause asks about would have decided that push, and a boundary "
-            "nobody measured is not passed, because the narrowed window below it credits "
-            "a vote cast inside the one that was never read (issue #2275)"
-        )
-    narrowed = (
-        f"; the window could not be widened to the cycle before this one ({window.unresolved})"
-        if window.unresolved
-        else ""
-    )
-    widened = f" {window.inferred_clause()}." if window.inferred else ""
     far = f", until {window.window_end_text()}" if window.end is not None else ""
     # What this reason may say is bounded by what it is a reason *about*: this counter
     # reads reviews that were posted, so a sentence saying `cast-vote.py` refused to post
@@ -808,12 +777,10 @@ def own_head_window(
     # posting refusal is true where it lives, in `cast-vote.py::own_head_window`; the
     # *state* clauses above stay, because both tools share the state.
     return True, (
-        f"cast inside the window this vote's cycle treats as its own - the head was "
+        f"cast inside the run this vote's cycle treats as its own - the head was "
         f"pushed {push_time}, at or after {window.window_start_text()}{far} "
-        f"({window.source}"
-        f"{narrowed}); a cycle does not vote on a head it pushed, and the window "
-        "immediately before it counts as its own, so this vote counts for nobody "
-        f"(issue #1408).{widened}"
+        f"({window.source}); a cycle does not vote on a head it pushed, so this vote "
+        "counts for nobody (issue #1408)."
     )
 
 
