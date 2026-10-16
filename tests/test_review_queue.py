@@ -1181,8 +1181,11 @@ def test_the_window_ends_where_the_following_cycle_begins(mod, tmp_path):
     assert window.window_end_text() == mod.cycle_start(
         "cyc20260917-223000"
     ).isoformat(timespec="seconds")
-    assert window.covers(mod.instant("2026-09-17T22:20:00+08:00")) is True
-    assert window.covers(mod.instant("2026-09-17T22:35:00+08:00")) is False, (
+    # Both probes are built in the host's own zone, the way `_push` builds one, because
+    # `cycle_start` reads a cycle id as *local* wall clock: an `instant("…+08:00")` here
+    # asserts a property only a +08 host has — green there, red on the UTC CI legs (#2335).
+    assert window.covers(datetime(2026, 9, 17, 22, 20, tzinfo=LOCAL)) is True
+    assert window.covers(datetime(2026, 9, 17, 22, 35, tzinfo=LOCAL)) is False, (
         "a head pushed by the cycle that followed this one is that cycle's work, so this "
         "cycle's clause has nothing to say about it"
     )
@@ -1203,7 +1206,8 @@ def test_a_window_with_no_later_cycle_is_open_at_its_far_end(mod, tmp_path):
 
     assert window.end is None
     assert window.window_end_text() == ""
-    assert window.covers(mod.instant("2026-09-17T23:59:00+08:00")) is True
+    # Local wall clock again, for the reason spelled out in the far-bound guard above.
+    assert window.covers(datetime(2026, 9, 17, 23, 59, tzinfo=LOCAL)) is True
 
 
 def test_a_head_pushed_by_a_later_cycle_is_not_an_abstain_row(mod, monkeypatch, capsys,
