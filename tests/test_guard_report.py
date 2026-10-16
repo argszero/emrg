@@ -96,6 +96,7 @@ SWEPT = {
     "check-citation-resolves.py",
     "check-doc-count.py",
     "check-install-drift.py",
+    "check-markdown-table-pipes.py",
     "check-memory-index.py",
     "check-merge-landed.py",
     "check-node-test-count.py",

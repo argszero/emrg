@@ -202,6 +202,7 @@ uv run python -m emrg     # launch TUI
 uv run python -c "from emrg.client.app import run_client"   # import check
 uv run python -m emrg --help
 uv run --no-sync python3 scripts/check-rant-citations.py    # every citation names its public record
+uv run --no-sync python3 scripts/check-markdown-table-pipes.py   # no table cell hides an unescaped `|` in a code span
 uv run --no-sync python3 scripts/run-mutation-arm.py \
     --file <file> --old <text> --new <text> \
     --node <pytest node id> --expect <the assertion text>   # one judged mutation arm
@@ -219,6 +220,18 @@ covers the **running** copy — the one resolved from the loaded module, i.e.
 are swept like every other file's and the frozen-debt list is empty (the mechanisms that
 hold a site out of the rule are exercised by synthetic tests rather than by a real
 entry). `--measure` prints the whole inventory.
+
+`scripts/check-markdown-table-pipes.py` answers one question about this repository's
+tracked markdown: does any table cell hide an **unescaped `|` inside a code span**?
+GFM splits a table row on its pipes and a code span does not protect one, so such a row
+renders as more cells than its header and the table breaks there on github.com — while
+the raw source still reads as tidy columns, which is what makes the drift invisible in
+the file (issue #2324: the README's `/skills` row carried
+`` `/skills available|install|update` `` where `README.cn.md` already had the escaped
+`` `/skills available\|install\|update` ``). It exits `0` when the rule holds (naming how
+many files it read), `1` on a violation, and `2` when nothing could be measured — a root
+that is not a directory, a checkout whose file listing failed, no markdown read at all,
+or an undecodable file; `2` is not a pass. Point it at another tree with `--root`.
 
 `scripts/run-mutation-arm.py` runs **one mutation arm and judges it** — the evidence that a test depends
 on the line it claims to test. Break the line and the test must die; a test that survives it is not

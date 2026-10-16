@@ -107,6 +107,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 #: the checkout it stands in.
 RUN_HERE = (
     "check-doc-count.py",
+    "check-markdown-table-pipes.py",
     "check-memory-index.py",
     "check-rant-citations.py",
     "check-retry-bounds.py",
@@ -164,6 +165,7 @@ TAKES_A_TREE_ARGUMENT = "check-citation-resolves.py"
 #: pointed either at a tree.
 POINTABLE_AT_A_TREE = {
     "check-citation-resolves.py": (),
+    "check-markdown-table-pipes.py": ("--root",),
     "check-retry-bounds.py": ("--root",),
     "check_unbound_reads.py": ("--root",),
     "check-undefined-names.py": ("--root",),
