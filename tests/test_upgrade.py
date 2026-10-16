@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -712,6 +713,39 @@ def test_upgrade_prompt_gui_build_steps_are_separate_and_gated() -> None:
 
 
 
+# `codesign` asks for a signature with `--sign` / `-s`, or with a getopt short-option
+# cluster that carries one (`-fs` == `-f -s`). Everything else it does with a signature —
+# `-d`/`--display`, `--verify --deep --strict`, `-r-` — only reads one. The rule is stated
+# over *tokens*, because a substring test cannot tell `-s` from `--strict`: a matcher that
+# reads the line rather than its tokens reports the readings the prompt legitimately
+# performs (`codesign --verify --deep --strict …`) as hand-written signing calls.
+def _hand_written_codesign_lines(prompt: str) -> list[str]:
+    """Lines of `prompt` that hand-write a `codesign` **signing** invocation.
+
+    A line qualifies when it mentions `codesign` and carries a signing option:
+    `--sign`, `--sign=…`, `-s`, or a single-dash cluster containing `s`. Double-dash
+    long options are compared whole, so `--strict` is not a signing option; the
+    readings (`-d`, `--verify`) are not signing options either.
+
+    The identity must come from `packaging/sign-local-app.sh` (issue #2322: an ad-hoc
+    seal has no stable identity, so every upgrade voids the host's macOS privacy
+    grants), which is why the template may not spell the invocation itself.
+    """
+    found = []
+    for line in prompt.splitlines():
+        if "codesign" not in line:
+            continue
+        tokens = re.findall(r"[^\s`\"'()]+", line)
+        for token in tokens:
+            if token == "--sign" or token.startswith("--sign="):
+                found.append(line.strip())
+                break
+            if token.startswith("-") and not token.startswith("--") and "s" in token[1:]:
+                found.append(line.strip())
+                break
+    return found
+
+
 # ── upgrade_prompt.j2 macOS re-seal chain guard (R2250) ───────────────────
 # rant 2026-08-25T09:18:19：electron-builder dir 产物只有主二进制 ad-hoc 签名，
 # bundle 未密封 + 带 com.apple.provenance 等 xattr；macOS 26 把"未密封 + 隔离属性"
@@ -753,11 +787,18 @@ def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
     # 2. 身份选择必须交给脚本，prompt 不得复写 codesign 调用。prompt 里写死的
     #    codesign 签名行会把身份决定权交回给"读模板的 agent"，那正是 #2322 要修的
     #    东西（每次升级各自决定 = 每次升级身份都可能不同）。
-    hand_written = [ln for ln in lines if "codesign --force" in ln]
+    #
+    #    The rule lives in `_hand_written_codesign_lines` and is driven from two
+    #    sides: this template, and the synthetic shapes the tests below feed it. It
+    #    used to be `"codesign --force" in ln` — one spelling — so a hand-written
+    #    `codesign --sign - …` line left this guard green (measured 2026-10-16,
+    #    issue #2330: 1 passed mutated, 1 failed for the `--force` spelling).
+    hand_written = _hand_written_codesign_lines(prompt)
     assert not hand_written, (
         "upgrade_prompt.j2 must not hand-write a codesign signing invocation — the "
         "identity belongs to packaging/sign-local-app.sh, where one deterministic "
-        f"rule picks it. Found: {hand_written}"
+        f"rule picks it. Found: {hand_written}. If a line here is prose quoting the "
+        "forbidden form, name the script instead of spelling the command."
     )
 
     # 3. `sign-local-app: identity=` 必须被要求写进升级日志：下一轮升级判断"宿主
@@ -794,6 +835,51 @@ def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
     assert len(verify) >= 3, (
         "upgrade_prompt.j2 must verify signatures at least 3 times (pre-copy sanity "
         f"+ install + run copy). Found {len(verify)}: {verify}"
+    )
+
+
+# The rule above is only as good as the spellings it knows, and the template's own text
+# can only ever exercise the ones it happens to contain — the deleted `"codesign --force"`
+# matcher passed the whole suite while admitting every other order (issue #2330). So the
+# rule is driven from the forbidden side too, on shapes written here rather than in the
+# template. These two tests are the reason clause 2 can be read as a rule and not as a
+# statement about today's file.
+@pytest.mark.parametrize(
+    "line",
+    [
+        'bash -c \'codesign --sign - "$APP"\'',
+        'bash -c \'codesign -s - "$APP"\'',
+        'bash -c \'codesign -fs - "$APP"\'',
+        'bash -c \'codesign --sign=- "$APP"\'',
+        'bash -c \'codesign --force --deep --sign "Apple Development: x" "$APP"\'',
+        'bash -c \'codesign --deep --sign - --timestamp=none "$APP"\'',
+        'run `codesign --sign "$IDENTITY" EMRG.app` to seal the bundle',
+    ],
+)
+def test_every_signing_spelling_is_read_as_a_hand_written_call(line: str) -> None:
+    assert _hand_written_codesign_lines(line) == [line.strip()], (
+        "a hand-written codesign signing invocation in this spelling must be caught — "
+        "it hands the identity decision back to the reader of the template (issue #2330)"
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'bash -c \'codesign -d -r- "$APP"\'',
+        '`codesign --verify --deep --strict "{{ upgrade_work }}/EMRG.app"`',
+        # `--strict` must not read as `-s`: a token test, not a substring test.
+        '`codesign --verify --deep --strict ~/Applications/EMRG.app` must pass',
+        "through the repo's own step, NEVER a hand-written `codesign`:",
+        "`codesign` is unavailable, so nothing was sealed or verified.",
+        "chooses the signing identity itself — the machine's codesigning certificate",
+        "If the script is absent from the target tree, do NOT hand-write a `codesign` call",
+    ],
+)
+def test_the_readings_the_prompt_performs_are_not_signing_calls(line: str) -> None:
+    assert _hand_written_codesign_lines(line) == [], (
+        "this line only reads or mentions a signature — reporting it as a hand-written "
+        "signing call would redden the guard for a template that is doing the right thing"
     )
 
 
