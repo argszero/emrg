@@ -48,6 +48,15 @@ Behavior:
   * verifies the root tree sha matches the remote; if content objects are
     missing, fetches missing blobs/trees via the Git Data API (disable with
     --no-fetch-objects) and re-verifies - fail-loud only if still mismatched
+  * the commits this run **materialized** each get their own tree ensured too.
+    Only the *head's* tree was fetched, so an ancestor's arrived by accident -
+    whichever subtrees a later commit happened to share - leaving a commit
+    present to `git log` and unreadable to `git ls-tree`. That state is worse
+    than an absent commit: a merge base in it makes `git checkout --detach`
+    fail, and every landing-diff tool with it (measured 2026-10-16, #2310).
+    The tree sha comes from the API response the reconstruction already read,
+    so a run that materializes nothing makes no extra request; a tree that
+    still cannot be read stops the run before any ref moves.
   * updates refs/heads/<ref> and refs/remotes/origin/<ref>; a `--ref` that is a
     full 40-hex object name creates no ref at all - a ref named after a sha
     shadows it, so `git rev-parse <sha>` answers ambiguously and the tools that
@@ -381,6 +390,10 @@ def main() -> int:
     # Walk the commit chain, reconstructing missing commits until a known one.
     sha = head
     created = 0
+    # (commit, its tree) for every commit *this run* writes - see the tree-ensure
+    # block after the head's root tree is verified, which is the only place their
+    # trees used to be thought about, and then only for the head.
+    materialized: list[tuple[str, str]] = []
     while sha and not has_object(sha):
         c = api_get(f"{API}/repos/{repo}/commits/{sha}")
         body = c["commit"]
@@ -412,6 +425,7 @@ def main() -> int:
         if got != sha:
             raise RuntimeError(f"reconstruction mismatch: want {sha}, got {got} — aborting (no refs touched)")
         created += 1
+        materialized.append((sha, body["tree"]["sha"]))
         print(f"  + {sha[:7]} ({body['author']['name']}, {body['message'].splitlines()[0][:60]})")
         parents = [p["sha"] for p in c["parents"]]
         if len(parents) == 1:
@@ -445,6 +459,32 @@ def main() -> int:
             raise SystemExit(f"tree mismatch or missing objects for {head[:7]} "
                              f"(want {tree}, got {local_tree.stdout.strip() or 'NONE'}) — "
                              "run `git fetch` when https returns")
+
+    # The commits materialized above got a commit object and nothing else: the
+    # block just above materializes the *head's* tree, so any other one arrives by
+    # accident - whichever subtrees a later commit happens to share. A commit
+    # present to `git log` and unreadable to `git ls-tree` is worse than an absent
+    # one: a merge base in that state makes `git checkout --detach` fail and takes
+    # every landing-diff tool with it (measured 2026-10-16, #2310). Each tree's sha
+    # came from the API response the reconstruction already read, so this asks for
+    # nothing extra; `_fetch_tree` returns immediately on a tree already present.
+    absent_trees = [(c, t) for c, t in materialized if not _object_exists(t)]
+    if absent_trees:
+        if not args.no_fetch_objects:
+            for commit_sha, tree_sha in absent_trees:
+                print(f"  tree {tree_sha[:7]} of materialized commit {commit_sha[:7]} "
+                      f"missing locally - fetching blobs/trees via Git Data API")
+                _fetch_tree(repo, tree_sha)
+        unreadable = [(c, t) for c, t in absent_trees if not _object_exists(t)]
+        if unreadable:
+            remedy = ("re-run without `--no-fetch-objects`" if args.no_fetch_objects
+                      else "run `git fetch` when https returns")
+            raise SystemExit(
+                "materialized commit(s) "
+                + ", ".join(c[:7] for c, _ in unreadable)
+                + " have no readable tree ("
+                + ", ".join(t[:7] for _, t in unreadable)
+                + ") — no refs touched; " + remedy)
 
     if _is_object_name(args.ref):
         # The commit is materialized above, which is what a `--ref <sha>` caller

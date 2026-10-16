@@ -11,7 +11,9 @@ refs。核心风险 = 重建逻辑产生错误 sha（→ 本地历史与上游�
 import base64
 import importlib.util
 import os
+import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 
 from pathlib import Path
@@ -442,3 +444,186 @@ def test_an_object_name_ref_creates_no_ref():
     # A short hex string is a branch name, not an object name: it cannot be a full
     # object name, and refusing it would break a real branch called `deadbeef`.
     assert not mod._is_object_name("deadbeef")
+
+
+# ----------------------------------------- materialized commits keep their trees
+
+
+def _commit_api_body(raw: bytes, repo: Path) -> dict:
+    """The commits-API response for one unsigned commit, shaped as `main()` reads
+    it: a null verification payload (nothing signed), the tree/parents/identities
+    the field-rebuild needs, and `parents` at the top level."""
+    view = _api_view_of(raw, repo)
+    return {
+        "commit": {
+            "tree": {"sha": view["tree"]},
+            "verification": {"payload": "", "signature": None},
+            "message": view["message"],
+            "author": {"name": view["author"][0], "email": view["author"][1],
+                       "date": view["author"][2]},
+            "committer": {"name": view["committer"][0], "email": view["committer"][1],
+                          "date": view["committer"][2]},
+        },
+        "parents": [{"sha": p} for p in view["parents"]],
+    }
+
+
+def _source_chain(tmp_path: Path) -> dict:
+    """A two-commit source repo (`a.txt`, then `b.txt`) with the API views a sync
+    run reads: both commits are unsigned, so the walk takes the field-rebuild path
+    a live PR head takes when GitHub keeps no payload for it."""
+    src = tmp_path / "src"
+    src.mkdir()
+    _git("init", "-q", cwd=src)
+    _git("config", "user.name", "Test Author", cwd=src)
+    _git("config", "user.email", "test@example.com", cwd=src)
+    (src / "a.txt").write_text("alpha\n", encoding="utf-8")
+    _git("add", "a.txt", cwd=src)
+    assert _git("commit", "-m", "first", cwd=src, env=GIT_ENV).returncode == 0
+    c1 = _git("rev-parse", "HEAD", cwd=src).stdout.decode().strip()
+    (src / "b.txt").write_text("beta\n", encoding="utf-8")
+    _git("add", "b.txt", cwd=src)
+    assert _git("commit", "-m", "second", cwd=src, env=GIT_ENV).returncode == 0
+    c2 = _git("rev-parse", "HEAD", cwd=src).stdout.decode().strip()
+
+    t1 = _git("rev-parse", c1 + "^{tree}", cwd=src).stdout.decode().strip()
+    t2 = _git("rev-parse", c2 + "^{tree}", cwd=src).stdout.decode().strip()
+    trees: dict[str, list] = {}
+    blobs: dict[str, bytes] = {}
+    bodies: dict[str, dict] = {}
+    for commit, tree in ((c1, t1), (c2, t2)):
+        entries = _tree_entries(src, tree)
+        trees[tree] = entries
+        for e in entries:
+            if e["type"] == "blob":
+                blobs[e["sha"]] = _git("cat-file", "blob", e["sha"], cwd=src).stdout
+        bodies[commit] = _commit_api_body(
+            _git("cat-file", "commit", commit, cwd=src).stdout, src)
+    return {"src": src, "c1": c1, "c2": c2, "t1": t1, "t2": t2,
+            "trees": trees, "blobs": blobs, "bodies": bodies}
+
+
+def _prepare_run(mod, monkeypatch, tmp_path, chain, ref, *extra):
+    """A fresh target repo, a fake Git Data API over `chain`, argv for `--ref
+    <ref>`. Returns (target, the URLs asked for) - the call log is the reading
+    acceptance 2 needs."""
+    target = tmp_path / "target"
+    target.mkdir()
+    _git("init", "-q", cwd=target)
+    _git("config", "user.name", "Test Author", cwd=target)
+    _git("config", "user.email", "test@example.com", cwd=target)
+
+    prefix = f"{mod.API}/repos/owner/repo"
+    tree_of = {chain["c1"]: chain["t1"], chain["c2"]: chain["t2"]}
+    calls: list[str] = []
+
+    def fake_get(url: str) -> dict:
+        calls.append(url)
+        if url == f"{prefix}/commits/{ref}":
+            return {"sha": chain["c2"]}
+        m = re.fullmatch(re.escape(prefix) + r"/commits/([0-9a-f]{40})", url)
+        if m:
+            return chain["bodies"][m.group(1)]
+        m = re.fullmatch(re.escape(prefix) + r"/git/commits/([0-9a-f]{40})", url)
+        if m:
+            return {"tree": {"sha": tree_of[m.group(1)]}}
+        m = re.fullmatch(re.escape(prefix) + r"/git/trees/([0-9a-f]{40})", url)
+        if m:
+            return {"tree": chain["trees"][m.group(1)], "truncated": False}
+        m = re.fullmatch(re.escape(prefix) + r"/git/blobs/([0-9a-f]{40})", url)
+        if m:
+            return {"content": base64.b64encode(chain["blobs"][m.group(1)]).decode("ascii"),
+                    "encoding": "base64"}
+        raise AssertionError(f"unexpected API call: {url}")
+
+    monkeypatch.setattr(mod, "api_get", fake_get)
+    monkeypatch.setattr(sys, "argv",
+                        ["sync-master-from-api.py", "--repo", "owner/repo",
+                         "--ref", ref, *extra])
+    monkeypatch.chdir(target)
+    return target, calls
+
+
+def test_a_materialized_commit_keeps_its_tree(tmp_path, monkeypatch):
+    """Acceptance 1 of #2310, measured rather than claimed.
+
+    The walk writes a commit object per missing commit but materialized only the
+    *head's* tree, so an ancestor's arrived by accident - whichever subtrees a
+    later commit happened to share. `7ca5f07` on this checkout answered `git log`
+    and failed `git ls-tree` / `git rev-parse <sha>^{tree}`, and two PRs reviewed
+    on 2026-10-16 paid for it: `#2307`'s merge base `ed43249a` and `#2309`'s
+    `d6ea4695` failed `git checkout --detach`, so `check-merge-landing-diff.py`
+    could not read either PR. The discriminating reading is that the same walk
+    over the same objects leaves the ancestor unreadable before the change and
+    readable after it.
+    """
+    mod = _load_module()
+    chain = _source_chain(tmp_path)
+    target, _ = _prepare_run(mod, monkeypatch, tmp_path, chain, "sync-test")
+
+    assert mod.main() == 0
+
+    for commit, tree in ((chain["c1"], chain["t1"]), (chain["c2"], chain["t2"])):
+        r = _git("rev-parse", commit + "^{tree}", cwd=target)
+        assert r.returncode == 0, (commit, r.stderr)
+        assert r.stdout.decode().strip() == tree
+        assert _git("ls-tree", commit, cwd=target).returncode == 0
+    # The ref lands on the head, not on the ancestor that was walked through.
+    r = _git("rev-parse", "refs/heads/sync-test", cwd=target)
+    assert r.returncode == 0 and r.stdout.decode().strip() == chain["c2"]
+
+
+def test_a_run_that_materializes_nothing_asks_for_no_tree(tmp_path, monkeypatch):
+    """Acceptance 2 of #2310: the tree sha comes from a response the walk already
+    read, so a run that writes no commit must not grow a request. The target is
+    fetched from the source first, which is the `head already present locally`
+    path - a run whose scan of what it materialized is empty."""
+    mod = _load_module()
+    chain = _source_chain(tmp_path)
+    target, calls = _prepare_run(mod, monkeypatch, tmp_path, chain, "sync-test")
+    branch = _git("symbolic-ref", "--short", "HEAD",
+                  cwd=chain["src"]).stdout.decode().strip()
+    assert _git("fetch", str(chain["src"]), branch, cwd=target).returncode == 0
+    assert _git("cat-file", "-e", chain["c2"] + "^{tree}",
+                cwd=target).returncode == 0
+
+    assert mod.main() == 0
+
+    fetched = [u for u in calls if "/git/trees/" in u or "/git/blobs/" in u]
+    assert fetched == []
+
+
+def test_no_fetch_objects_states_the_gap_and_moves_no_ref(tmp_path, monkeypatch):
+    """Acceptance 3 and 4 of #2310: under `--no-fetch-objects` a tree that cannot
+    be read is *stated*, never silently tolerated, and no ref moves for it.
+
+    The target here holds a tree identical to the head's (same paths, same bytes,
+    so the same object), which makes the head's own check pass and leaves the
+    ancestor's tree as the only gap - precisely the case that had no reading at
+    all before this change.
+    """
+    import pytest
+
+    mod = _load_module()
+    chain = _source_chain(tmp_path)
+    target, _ = _prepare_run(mod, monkeypatch, tmp_path, chain, "sync-test",
+                             "--no-fetch-objects")
+    (target / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (target / "b.txt").write_text("beta\n", encoding="utf-8")
+    _git("add", "a.txt", "b.txt", cwd=target)
+    assert _git("commit", "-m", "same content", cwd=target,
+                env=GIT_ENV).returncode == 0
+    assert _git("rev-parse", "HEAD^{tree}",
+                cwd=target).stdout.decode().strip() == chain["t2"]
+
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+
+    message = str(exc.value)
+    assert chain["c1"][:7] in message and chain["t1"][:7] in message
+    assert "--no-fetch-objects" in message
+    # No ref moved, and the gap is real rather than papered over: the ancestor's
+    # tree is still unreadable, so the run said so instead of pretending.
+    for ref in ("refs/heads/sync-test", "refs/remotes/origin/sync-test"):
+        assert _git("rev-parse", "-q", "--verify", ref, cwd=target).returncode != 0
+    assert _git("rev-parse", chain["c1"] + "^{tree}", cwd=target).returncode != 0
