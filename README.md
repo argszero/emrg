@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>The AI coding agent that writes code — and rewrites <em>itself</em>.</strong>
+  <strong>The personal agent for recursive self-improvement (RSI) — an AI that codes for you, and rewrites <em>itself</em>.</strong>
 </p>
 
 <p align="center">
@@ -25,6 +25,8 @@
 **What if your coding assistant got better every time you used it?**
 
 EMRG is an experiment in *autonomous self-improvement*: an AI agent that helps you code — reading files, running commands, making edits — and **every `/rant` you send drives it to improve itself**. Tell it what bothers you, and the next evolution cycle writes the fix and ships it. Fully open source, fully transparent.
+
+**Recursive self-improvement (RSI)** is an AI that improves itself — and, the part that matters, whose improvements make the *next* improvement easier. EMRG is that idea as a **personal agent**: it runs on your machine, behind your own API key, and keeps its state — sessions, memory, logs — on your disk; the model call is the only thing that leaves it. **The boundary, stated plainly: EMRG rewrites its own code, its prompts and its toolchain — never the model weights.** Every change passes the test suite, is reviewed by three independent evolution cycles, and is released at a host's word.
 
 > *"EMRG is an experiment in self-evolving AI agent architecture."* — [MANIFESTO](MANIFESTO.md)
 >
@@ -174,12 +176,15 @@ In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is share
 | Sandboxed execution | ❌ | ❌ | ✅ | ✅ *read-only / workspace-write / danger-full-access* | ~ *protectedBoxPaths + /workspace* |
 | Subagents | ❌ | ❌ | ✅ | ❌ | ✅ *assistants/automations* |
 | Web UI | ❌ | ❌ | ✅ *browser* | ✅ *Electron* | ✅ *Electron* |
-| **Self-evolution** | ❌ | ❌ | ❌ | ✅ *autonomous* | ❌ |
+| **Recursive self-improvement (RSI)** | ❌ | ❌ | ❌ | ✅ *autonomous — code, prompts, toolchain* | ❌ |
+| **Personal agent** *your machine, your key, your data* | ~ *local CLI, hosted model, your account* | ~ *local CLI, hosted model* | ~ *local harness, hosted model* | ✅ *local agent, your key, its state on your disk* | ~ *local app, hosted service* |
 | **Background daemon** | ❌ | ❌ | ❌ | ✅ *persistent* | ✅ *host + node-agent-coordinator* |
 | **Learns from rants** | ❌ | ❌ | ❌ | ✅ */rant → PR* | ❌ |
 | **Open source** | ❌ | ✅ *Apache-2.0* | ✅ *MIT* | ✅ *MIT* | ❌ *commercial* |
 
 > *DeepSeek Harness is a plugin-based agent harness with deep engineering (sandboxing, subagents, workflows) — but it does not evolve itself. EMRG ships its own three-tier sandbox (read-only / workspace-write / danger-full-access) and closes the loop: self-evolution, a persistent background daemon, and rant-driven improvement. Grok Bot is a commercial Electron app by Anysphere with plugin/assistant ecosystems, but is not open source and does not self-evolve.*
+>
+> *The `Personal agent` row marks where the agent and its state live. The other agents also run locally; their columns carry a gloss rather than a verdict, because how they hold your data is theirs to state, not ours to score.*
 
 EMRG doesn't just keep up — it catches up on its own.
 
@@ -189,6 +194,9 @@ EMRG doesn't just keep up — it catches up on its own.
 
 **Is this real — does it actually modify its own code?**<br>
 Yes. The evolution cycle reads the evolution prompt, reviews rants + issues + competitor tools, makes source changes, runs tests, and submits a PR. If tests fail, it rolls back.
+
+**Is this recursive self-improvement?**<br>
+Yes, in the sense the term is meant: the system rewrites its own code, prompts and toolchain, and each change makes the next one easier to make. No, in the sense that would be dishonest to claim: **it never touches model weights**. And the loop is *measured* rather than asserted — see the [measured feedback loop](#rant-driven-evolution-the-core-feature): `python scripts/reader_fix_latency.py` walks the real closed issues, follows each to its earliest merged fix, and reports the median issue-to-merge time.
 
 **Can it break itself?**<br>
 Every change is validated by `pytest` and an import check before commit. Failed changes are discarded; the worst case is a rollback.
