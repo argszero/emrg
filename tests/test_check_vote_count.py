@@ -2138,6 +2138,45 @@ def test_a_vote_cast_inside_the_voting_cycles_own_window_does_not_count(
     assert "inside the window" not in out, out
 
 
+def test_a_vote_on_a_head_pushed_by_a_later_cycle_counts(mod, monkeypatch, capsys, tmp_path):
+    """Issue #2334: the span's far bound, and the release PR it unblocked.
+
+    Measured 2026-10-16 on #2326: the head `54d9f18a` was pushed by `cyc20261016-183420`
+    (18:34:20), while the ✅ under it was cast by `cyc20261016-181619` — a cycle that began
+    at 18:16:19 and pushed nothing. With a start and no end the span ran forward to the
+    reading instant, the push fell inside it, and a vote by a cycle that had done no such
+    work was voided: the release PR waited a cycle at 2/3.
+
+    The window ends where the *next* cycle begins, so that push belongs to the cycle that
+    made it. The two arms differ in the corpus alone — the push instant is the same one —
+    so an instrument that voided everything, or nothing, fails one of them.
+    """
+    pushed = _push(2026, 9, 11, 9, 0)  # 09:00, pushed by the cycle that followed this one
+    vote_at = _push(2026, 9, 11, 10, 0)
+
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / "cycle-20260911-083000.md").write_text("x", encoding="utf-8")
+    later = FakeGh([_approve("cyc20260911-080000", vote_at)], push_time=pushed)
+    rc = _run(mod, monkeypatch, later,
+              ["1", "--min-votes", "1", "--cycles-log", str(records)])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "READY 1/1" in out, out
+    assert "inside the window" not in out, out
+
+    # the control: the same vote, the same push, and a corpus that holds no later cycle —
+    # so the span has no far bound to stop it, which is the reading #2334 corrects
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    no_later = FakeGh([_approve("cyc20260911-080000", vote_at)], push_time=pushed)
+    rc = _run(mod, monkeypatch, no_later,
+              ["1", "--min-votes", "1", "--cycles-log", str(empty)])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "VOID cyc20260911-080000 - cast inside the window" in out, out
+
+
 def test_a_vote_on_a_head_another_instance_pushed_inside_the_window_counts(
     mod, monkeypatch, capsys
 ):

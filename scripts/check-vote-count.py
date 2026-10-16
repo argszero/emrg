@@ -742,7 +742,20 @@ def own_head_window(
             f"the head's own window cannot be decided from push time {push_time!r}, "
             "which is not an instant (issue #1408)"
         )
-    if pushed < window.start and not window.boundary_unmeasured:
+    # The clause's span has **two** ends: inside is `start <= pushed < end`, and a push at
+    # or after the far end belongs to the cycle that followed this one, so it is not this
+    # cycle's work and the vote counts (issue #2334). Without the far end the span reached
+    # forward without limit: `cyc20261016-181619`, which pushed nothing, had its vote on a
+    # head `cyc20261016-183420` pushed voided, and the release PR #2326 waited a cycle at
+    # 2/3 for it.
+    #
+    # `below_unmeasured` keeps issue #2275's state apart from that answer: a push *below*
+    # the start is the one boundary that was never measured, and it is not the same finding
+    # as a push above the far end - the narrowed window credits a vote where the one that
+    # was never read would have voided it, while a push above the far end is outside a span
+    # whose other end *was* measured.
+    below_unmeasured = window.boundary_unmeasured and pushed < window.start
+    if not window.covers(pushed) and not below_unmeasured:
         return False, ""
     # The clause is about a head *this* instance pushed, and the window is only a proxy
     # for that: a head the peer pushed inside a gap between this host's cycles fell inside
@@ -786,6 +799,7 @@ def own_head_window(
         else ""
     )
     widened = f" {window.inferred_clause()}." if window.inferred else ""
+    far = f", until {window.window_end_text()}" if window.end is not None else ""
     # What this reason may say is bounded by what it is a reason *about*: this counter
     # reads reviews that were posted, so a sentence saying `cast-vote.py` refused to post
     # "this vote" names an action no tool took, on the vote the row reports (measured
@@ -795,7 +809,8 @@ def own_head_window(
     # *state* clauses above stay, because both tools share the state.
     return True, (
         f"cast inside the window this vote's cycle treats as its own - the head was "
-        f"pushed {push_time}, at or after {window.window_start_text()} ({window.source}"
+        f"pushed {push_time}, at or after {window.window_start_text()}{far} "
+        f"({window.source}"
         f"{narrowed}); a cycle does not vote on a head it pushed, and the window "
         "immediately before it counts as its own, so this vote counts for nobody "
         f"(issue #1408).{widened}"
