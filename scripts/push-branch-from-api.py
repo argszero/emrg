@@ -21,7 +21,11 @@ This script automates that recipe:
     the existing branch head, or the first ancestor the remote already has
     (GET /repos/{repo}/commits/{sha})
   * uploads blobs (raw bytes, byte-exact) and trees (structured entries,
-    children referenced by their *remote* sha) bottom-up
+    children referenced by their *remote* sha) bottom-up - **only the ones the
+    remote base does not already carry**: everything reachable from the base
+    commit's tree is there by definition, so re-uploading it is a request whose
+    answer is known (an 8-file bump re-uploaded 745 objects before this, and did
+    not finish inside a 10-minute window)
   * recreates commits via the structured endpoint, deriving author/committer
     name, email and epoch+offset from the local raw object (gotcha 3), with the
     message passed without a trailing newline
