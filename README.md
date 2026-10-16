@@ -156,7 +156,7 @@ In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is share
 | `/delete [id]` | Delete a session — no args for interactive picker |
 | `/rewind` | Rewind conversation to a history point |
 | `/trigger` | Trigger an evolution task — interactive picker (manage tasks in GUI Settings → Scheduled tasks) |
-| `/skills` | List loaded skills; `/skills available|install|update` |
+| `/skills` | List loaded skills; `/skills available\|install\|update` |
 | `/version` | Show EMRG version and instance info |
 | `Esc` | Interrupt a running response mid-stream |
 | `Ctrl+C` / `exit` | Quit |
