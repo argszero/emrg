@@ -360,6 +360,21 @@ def _read(mod, monkeypatch, votes, fresh, *, number=1, cycle=None, prs=()):
     return mod.main(argv)
 
 
+def _rows(out: str) -> str:
+    """The rows of a queue run - the `#<number> ...` lines - and nothing printed around them.
+
+    A run also prints a `tree: <root> on <branch> (<sha>)` header before the rows, a
+    `N PR(s): ...` summary after them, and standalone `note:` lines (which may name a
+    verdict the rows do not). A claim about what a *row* says therefore has to be read
+    from the rows: asserting it over the whole document makes the verdict a function of
+    the checkout's branch name. Measured 2026-10-17 - a branch named for the verdict a row
+    was meant to withhold (`fix/abstain-window-far-bound`) put that word into the header
+    and reddened seven assertions here while every row read `vote`, so the branch had to
+    be renamed. Read the row, and the branch name cannot decide it.
+    """
+    return "\n".join(line for line in out.splitlines() if line.startswith("#"))
+
+
 # --- the vote branch: the ordinary case first ------------------------------
 
 
@@ -1266,7 +1281,7 @@ def test_a_head_another_instance_pushed_is_not_this_cycles_own(mod, monkeypatch,
     rc = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "abstain" not in out
+    assert "abstain" not in _rows(out)
     assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
 
 
@@ -1315,7 +1330,7 @@ def test_a_full_count_at_another_instances_head_is_mergeable(mod, monkeypatch, c
     out = _run(mod, monkeypatch, votes, FakeFresh(), ["1", "--cycle", CYCLE])
     printed = capsys.readouterr().out
     assert out == 0
-    assert "abstain" not in printed
+    assert "abstain" not in _rows(printed)
     assert "3/3 valid votes" in printed
     assert "gh pr merge 1" in printed
 
@@ -1356,7 +1371,7 @@ def test_a_head_pushed_two_cycles_back_is_still_votable(mod, monkeypatch, capsys
     _run(mod, monkeypatch, votes, fresh,
          ["1", "--cycle", CYCLE, "--prev-cycle", PREV_CYCLE])
     out = capsys.readouterr().out
-    assert "abstain" not in out
+    assert "abstain" not in _rows(out)
     assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
 
 
@@ -1434,7 +1449,7 @@ def test_an_inexact_push_time_never_decides_the_window(mod, monkeypatch, capsys)
     _run(mod, monkeypatch, votes, fresh, ["1", "--cycle", CYCLE])
     out = capsys.readouterr().out
     assert "unblock" in out
-    assert "abstain" not in out
+    assert "abstain" not in _rows(out)
 
 
 def test_the_previous_cycle_is_read_from_the_cycle_records(mod, monkeypatch, capsys,
@@ -1686,7 +1701,7 @@ def test_an_unresolvable_previous_cycle_narrows_the_window_and_says_so(
     _run(mod, monkeypatch, votes, fresh,
          ["1", "--cycle", CYCLE, "--cycles-log", str(tmp_path)])
     out = capsys.readouterr().out
-    assert "abstain" not in out  # not a claim the tool cannot support
+    assert "abstain" not in _rows(out)  # not a claim the tool cannot support
     assert "note: the abstention window could not be widened" in out
     # Also inferred (the lookup ran and found nothing), so the two notes meet here:
     # the narrowed one is the stronger statement and takes the line.
@@ -1782,7 +1797,7 @@ def test_a_recordless_cycle_is_the_immediately_preceding_one_not_the_older_recor
     ])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "abstain" not in out
+    assert "abstain" not in _rows(out)
     assert f"cast-vote.py 1 --cycle {CYCLE}" in out
 
 
@@ -2309,7 +2324,7 @@ def test_the_sessions_override_reaches_the_window(mod, monkeypatch, capsys, tmp_
         rc = _run(mod, first, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
                   FakeFresh(), argv + ["--sessions-dir", str(elsewhere)])
     assert rc == 0
-    assert "abstain" not in capsys.readouterr().out
+    assert "abstain" not in _rows(capsys.readouterr().out)
 
     monkeypatch.setenv("EMRG_SESSIONS_DIR", str(elsewhere))
     rc = _run(mod, monkeypatch, FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 1)),
@@ -2323,7 +2338,7 @@ def test_the_sessions_override_reaches_the_window(mod, monkeypatch, capsys, tmp_
         "seam was undone, so the verdict below is about this host's files, not the flag"
     )
     assert rc == 0
-    assert "abstain" not in capsys.readouterr().out
+    assert "abstain" not in _rows(capsys.readouterr().out)
 
 
 # ── one window, three carriers (issue #2218) ────────────────────────────────
@@ -2470,11 +2485,35 @@ def test_without_a_cycle_the_clause_is_not_applied(mod, monkeypatch, capsys):
     # verdict the clause would withhold (`abstain`), so the old whole-output proxy would
     # now fail on the note that exists to make the reading honest. What must not happen
     # is a row reading `abstain`, and that is what is asserted.
-    rowlines = [line for line in out.splitlines() if line.startswith("#")]
-    assert rowlines, out
-    assert all("abstain" not in line for line in rowlines), rowlines
+    assert _rows(out), out
+    assert "abstain" not in _rows(out)
     assert "vote" in out
     assert f"pushed {pushed}" in out
+
+
+def test_a_branch_name_carrying_a_verdict_does_not_decide_a_row(mod, monkeypatch, capsys):
+    """The trap, reproduced where it fires: a run's header names the checkout's branch.
+
+    Measured 2026-10-17 - a branch named `fix/abstain-window-far-bound` put the word the
+    rows withheld into the `tree:` header, so seven verdict assertions read the document
+    and failed while every row read `vote`; the branch was renamed to dodge it. The header
+    is a reading about the *tree* (the family's convention: name the tree before the
+    verdict), and a verdict claim is about a *row* - which is why `_rows` exists. This
+    drives the tool with that branch name and asserts the claim the seven sites make, so
+    the name can no longer decide whether they pass.
+    """
+    monkeypatch.setattr(
+        mod, "local_tree",
+        lambda: ("/some/checkout", "fix/abstain-window-far-bound", "0" * 40),
+    )
+    votes = FakeVotes(reviews=[], push=_push(2026, 9, 17, 22, 30), pusher=OTHER_LOGIN)
+    rc = _read(mod, monkeypatch, votes, FakeFresh())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "fix/abstain-window-far-bound" in out, (
+        "the header must really carry the branch name, or this guards nothing"
+    )
+    assert "abstain" not in _rows(out), _rows(out)
 
 
 def test_without_a_cycle_the_report_says_the_clause_was_not_applied(mod, monkeypatch, capsys):
