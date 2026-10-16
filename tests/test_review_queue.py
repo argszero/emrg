@@ -1893,6 +1893,50 @@ def test_a_dispatch_that_fills_in_the_boundary_measures_the_far_end(mod):
     assert "gone" in moved.source, f"the source must name it: {moved.source!r}"
 
 
+def test_a_window_the_dispatch_corpus_moves_keeps_its_far_bound(mod):
+    """Both exits of `with_dispatches` build a **fresh** `Window`, so any field the
+    constructor is not handed is dropped silently — and the far bound is not a function of
+    the boundary being moved: the cycle *after* this one began where it began either way.
+
+    Measured 2026-10-17 on this host: the ordinary exit lost it, so a head the next cycle
+    pushed read `abstain` again — issue #2334's defect, back on the path the corpus takes
+    most often (it moves the boundary whenever a dispatched cycle is newer than the newest
+    record, which is the case the corpus exists for). The guard beside this one could not
+    catch it: it resolves a window with no `following`, so there was no far bound to lose.
+    """
+    following = "cyc20260917-223000"  # the next cycle: the span's far bound
+    window = mod.abstain_window(CYCLE, PREV_CYCLE, "/some/records", inferred=True,
+                                following=following)
+    assert window.end == mod.cycle_start(following)
+
+    # Exit 1 — a dispatched cycle between the record and this cycle's own id moves the
+    # start up to it, and the span must still end where the next cycle began.
+    moved = mod.with_dispatches(window, CYCLE, [PREV_CYCLE, GAP_CYCLE])
+    assert moved.window_start_text() == mod.cycle_start(GAP_CYCLE).isoformat(
+        timespec="seconds")
+    assert moved.end == window.end, (
+        "the far bound is the start of the cycle *after* this one, which moving the near "
+        "end does not touch"
+    )
+    assert moved.covers(datetime(2026, 9, 17, 22, 35, tzinfo=LOCAL)) is False, (
+        "22:35 local is past the next cycle's start, so that head is that cycle's work "
+        "however far up the near end was moved"
+    )
+
+    # Exit 2 — the same move where the record corpus could not be read at all, which is
+    # the exit that repairs an unmeasured start.
+    unmeasured = mod.abstain_window(
+        CYCLE, "", "gone (No such file or directory) could not be read",
+        inferred=True, corpus_shortfall="gone (No such file or directory)",
+        following=following,
+    )
+    assert unmeasured.boundary_unmeasured is True
+    repaired = mod.with_dispatches(unmeasured, CYCLE, [PREV_CYCLE])
+    assert repaired.end == mod.cycle_start(following), (
+        "supplying the start the records could not measure says nothing about the far end"
+    )
+
+
 def test_a_dispatch_older_than_the_record_does_not_move_the_window(mod):
     """The refinement runs one way. Where a record exists it is the answer, so an id
     from before it — a stale quotation, a re-delivered prompt of an older cycle — must

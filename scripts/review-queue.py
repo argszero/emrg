@@ -1017,6 +1017,11 @@ def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Wi
                 unresolved="",
                 previous=earlier[-1],
                 corpus_shortfall=window.corpus_shortfall,
+                # Both exits here build a **fresh** window rather than a `replace`, so
+                # every field the constructor is not handed is dropped silently. The far
+                # bound is not a function of the boundary being moved — the next cycle's
+                # start is the same fact either way — so it is carried (issue #2334).
+                end=window.end,
             )
         if boundary == window.start:
             return replace(window, inferred=False)
@@ -1037,6 +1042,11 @@ def with_dispatches(window: Window, cycle: str, dispatched: Sequence[str]) -> Wi
         unresolved="",
         previous=window.previous,
         corpus_shortfall=window.corpus_shortfall,
+        # The far bound moves with the window and not with its start: `boundary` is a
+        # dispatched cycle *before* this one, so it cannot be at or past `end`, which is
+        # the cycle *after* this one. Dropping it here would put the span back to having
+        # no far end, which is the defect `end` exists to close (issue #2334).
+        end=window.end,
     )
 
 
