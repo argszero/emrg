@@ -42,7 +42,14 @@ Named limits
 
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
+import time
+import tempfile
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
@@ -66,6 +73,10 @@ FUNNEL_TERMS: tuple[str, ...] = (
     # the guard, not a byte-measuring count.
     "scripts/check-memory-index.py",
     "measures bytes rather than characters",
+    # The veto on 2026-10-17 measured this one: the placeholder as first written carried an
+    # apostrophe, so the block a cycle pastes did not parse.
+    "one token",
+    "space between the date and the time, not `T`",   # measured: the T form answers 0
 )
 
 #: The new prompt-drift section, the rule it carries, and the two prohibitions that make it
@@ -82,6 +93,12 @@ DRIFT_TERMS: tuple[str, ...] = (
     "A block classified as instance configuration is never quoted",
     "Never edit `tasks.yml`",                         # the host's file
     "template first, deletion afterwards",            # order, so no rule is lost between
+    # The veto on 2026-10-17 ran `_template_task_context`: a top-level block *does* render
+    # when `config:` carries none, so "never rendered" would have made a cycle skip a block
+    # that is in the prompt.
+    "precedence, not exclusion",
+    "when `config:` carries none",
+    "names that copy in a warning",
 )
 
 #: The decision section must name the new source, or the reading produces nothing.
@@ -201,3 +218,130 @@ def test_the_decision_names_the_new_source() -> None:
     section = _section(_template(), DECISION)
     assert section, f"{DECISION!r} is missing from the template"
     assert DECISION_TERM in section, "§2.3 must name the prompt-drift reading among its sources"
+
+
+#: Every fenced shell block in the template is a command a cycle is expected to paste.
+_BASH_BLOCK = re.compile(r"```bash\n(.*?)```", re.S)
+
+#: A placeholder is one angle-bracketed token. The pin below is that it never carries a
+#: quote character: substituted inside the quotes a block already has, one apostrophe ends
+#: the quoting and the rest of the block becomes a syntax error.
+_PLACEHOLDER = re.compile(r"<[^<>\n]*>")
+
+
+def _bash_blocks() -> list[str]:
+    blocks = _BASH_BLOCK.findall(_template())
+    assert blocks, "the template carries no ```bash block, so this reading has no subject"
+    return blocks
+
+
+def test_no_placeholder_carries_a_quote() -> None:
+    """Measured 2026-10-17: the step-0 block shipped a placeholder reading `<that project's
+    bookmark time>`. The apostrophe closed the single quote around it, and `bash -n` on the
+    block exited 2 — so the one line §1.5 calls "the step that is never skipped" was the one
+    line that could not run as printed. A whole value is substituted for a placeholder, never
+    a fragment of one, so the placeholder itself needs no quoting characters.
+    """
+    offenders = [
+        (index, found)
+        for index, block in enumerate(_bash_blocks(), 1)
+        for found in _PLACEHOLDER.findall(block)
+        if "'" in found or '"' in found
+    ]
+    assert not offenders, (
+        "a placeholder carries a quote character, which breaks the quoting of the block it "
+        f"sits in: {offenders}"
+    )
+
+
+def test_the_placeholder_rule_discriminates() -> None:
+    """Both directions: the quoted form must be reported, the fixed form must not be."""
+    broken = "find <project>/.emrg -newermt '<that project's bookmark time>' -print"
+    fixed = "find <project>/.emrg -newermt '<bookmark-time>' -print"
+    assert [m for m in _PLACEHOLDER.findall(broken) if "'" in m], (
+        "the shipped defect must be recognised as a quoted placeholder"
+    )
+    assert not [m for m in _PLACEHOLDER.findall(fixed) if "'" in m], (
+        "the corrected placeholder must not be reported"
+    )
+
+
+def test_every_shell_block_parses() -> None:
+    """`bash -n` over every block, placeholders neutralised.
+
+    Neutralising is what makes the reading about the block rather than about the
+    placeholder's text: `<N>` and `<branch>` are not shell syntax, and neither is a value a
+    cycle would substitute. The named limit is that a neutralised placeholder no longer
+    tests its quoting — that is the pin above, on the text as shipped.
+    """
+    if shutil.which("bash") is None:  # pragma: no cover - a POSIX-less host
+        pytest.skip("no bash on this host, so the blocks' syntax cannot be parsed here")
+    failures = []
+    for index, block in enumerate(_bash_blocks(), 1):
+        source = _PLACEHOLDER.sub("X", block)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "block.sh"
+            path.write_text(source, encoding="utf-8")
+            done = subprocess.run(
+                ["bash", "-n", str(path)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        if done.returncode != 0:
+            first = (done.stderr.strip().splitlines() or ["(no stderr)"])[0]
+            failures.append((index, block.strip().splitlines()[0][:70], first))
+    assert not failures, f"the template prints a block that does not parse: {failures}"
+
+
+
+def test_the_step_zero_line_finds_a_file_that_changed(tmp_path: Path) -> None:
+    """The block as shipped, substituted and run, on a tree whose answer is known.
+
+    A block can parse and still answer a constant, which is the reading neither pin above
+    gives. This arm substitutes a value of the shape the template prescribes and asserts the
+    file it should find is in the output, so a predicate that has stopped discriminating is
+    caught even though `bash -n` would still pass.
+
+    Named limits, both of them the reason this is not the whole guard:
+    * the **format** is pinned by the text term in `FUNNEL_TERMS`, not here - this arm always
+      supplies a space-separated value, so it cannot fail because a cycle was told to use
+      the `T` form. What that costs was measured 2026-10-17 on this host: over one project's
+      memory, `-newermt '2026-10-17T16:00:00'` answered 0 files where the space form answered
+      9, a step 0 that reports nothing changed for every project for ever.
+    * it proves the shipped line answers on the host that runs it. A BSD `find` mis-parses
+      the `T` form and a GNU one may not, so no single arm fixes the format everywhere.
+    """
+    if shutil.which("bash") is None:  # pragma: no cover - a POSIX-less host
+        pytest.skip("no bash on this host, so the block cannot be run here")
+
+    block = next((b for b in _bash_blocks() if "-newermt" in b), "")
+    assert block, "the template no longer carries a -newermt block for step 0"
+
+    memory = tmp_path / "proj" / ".emrg" / "memory"
+    memory.mkdir(parents=True)
+    saved = memory / "MEMORY.md"
+    saved.write_text("# an index\n", encoding="utf-8")
+
+    bookmark = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 3600))
+    # The block's first line cats the host's project list; that is a reading of this host,
+    # not part of the question this arm asks, so it stays out of the script.
+    script = "\n".join(
+        line for line in block.splitlines() if not line.strip().startswith("cat ")
+    )
+    script = script.replace("<project>", str(tmp_path / "proj")).replace(
+        "<bookmark-time>", bookmark
+    )
+
+    done = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert str(saved) in done.stdout, (
+        "the shipped step-0 line did not find a file modified an hour after the bookmark "
+        f"time; stdout={done.stdout!r} stderr={done.stderr!r}"
+    )
