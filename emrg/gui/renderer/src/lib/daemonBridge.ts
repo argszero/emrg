@@ -58,6 +58,11 @@ export interface QueuedData {
   position?: number;
   request_id?: string;
   request_ids?: string[];
+  /**
+   * daemon 写下这条消息时那一刻。`steer_committed`（排队消息被注入当前回合）与
+   * `user_message`（新消息落盘）都带它 —— 用户行的时刻只从这里来（rant 2026-10-17T10:03:08）。
+   */
+  timestamp?: string;
 }
 export interface ErrorData {
   message?: string;
@@ -653,6 +658,15 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         }));
         break;
       }
+      case "user_message": {
+        // 新消息落盘的回执：这一行是客户端乐观画出来的，时刻只有 daemon 知道
+        // （`daemon.py` 的 `user_message` 帧带 `request_id` + `timestamp`）。
+        // 中间层此前把它当无人认领的帧丢掉，于是用户行的时钟永远空着 ——
+        // 现在按帧点名的那一行补上，别的客户端的行认不到就什么也不做。
+        const rid = (data as QueuedData).request_id;
+        if (rid) transcript.stampUserMessage(rid, (data as QueuedData).timestamp, sid);
+        break;
+      }
       case "message_delta":
         transcript.handleDelta(data.chunks || [data], sid);
         break;
@@ -691,6 +705,9 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
           if (idx >= 0) q.splice(idx, 1);
           if (q.length === 0) queuedSends.delete(k);
         }
+        // 排队的消息被注入时，daemon 才把它写进会话并记下那一刻 —— 这一行从发送起就在
+        // 屏幕上（乐观绘制），时间到这里才补得上（rant 2026-10-17T10:03:08）。
+        if (rid) transcript.stampUserMessage(rid, (data as QueuedData).timestamp, sid);
         break;
       }
       case "queued_requeue": {

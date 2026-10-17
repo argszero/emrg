@@ -541,3 +541,48 @@ describe("TranscriptView", () => {
     expect(viewport.scrollTop).toBe(0);
   });
 });
+
+/**
+ * 消息行上的时刻（rant 2026-10-17T10:03:08 → issue #2340）。断言读的是**渲染产物**：
+ * 类型上有没有字段、store 里有没有值，都不算 —— 宿主看的是屏幕上那一行。
+ */
+describe("消息时刻", () => {
+  it("用户行与助手行各显示 daemon 给的那个 HH:MM", async () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("hi", "s1", {
+      requestId: "req-1",
+      timestamp: "2026-10-17T10:27:55.123456+08:00",
+    });
+    store.handleDelta([{ request_id: "req-1", content: "hello" }], "s1");
+    store.handleDone({ request_id: "req-1", timestamp: "2026-10-17T10:28:09+08:00" }, "s1");
+    const { container } = setup(store, "s1");
+
+    const times = Array.from(container.querySelectorAll(".msg-time")).map((el) => el.textContent);
+    expect(times).toEqual(["10:27", "10:28"]);
+    // 完整日期挂在悬停上，行上只留时钟
+    expect(container.querySelector(".msg.user .msg-time")!.getAttribute("title")).toBe(
+      "2026-10-17 10:27",
+    );
+    // 助手正文照旧渲染（时间元素没把消息顶掉）
+    await waitFor(() => expect(screen.getByText("hello")).toBeInTheDocument());
+  });
+
+  it("没有时刻的行不渲染任何时间元素：不是空括号，不是 Invalid Date，不是 NaN", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("no clock", "s1"); // 帧还没来（或本就没有时刻的老记录）
+    store.handleDelta([{ request_id: "r1", content: "reply" }], "s1");
+    store.handleDone({ request_id: "r1", timeout: true }, "s1"); // 取消：没有回复落盘
+    const { container } = setup(store, "s1");
+
+    expect(container.querySelector(".msg-time")).toBeNull();
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(/Invalid|NaN|\(\)|（）|\[\]/);
+  });
+
+  it("坏时刻同样什么都不画（记录可读性由格式器裁决，视图不做第二次猜测）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("bad clock", "s1", { requestId: "req-1", timestamp: "not a date" });
+    const { container } = setup(store, "s1");
+    expect(container.querySelector(".msg-time")).toBeNull();
+  });
+});

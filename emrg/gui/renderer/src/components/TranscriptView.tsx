@@ -11,6 +11,7 @@ import {
 } from "../lib/transcript";
 import { createMarkdownRenderer, type MarkdownRenderer, type StreamState } from "../lib/markdown";
 import { canLoadOlder, scrollCompensation, shouldLoadOlder } from "../lib/history";
+import { formatMessageTime, messageTimeTitle } from "../lib/utils";
 import { toolPhrases } from "../lib/copywriting";
 import { useI18n, type TranslateFn } from "../lib/i18n";
 import { MarkdownText } from "./MarkdownText";
@@ -228,6 +229,7 @@ function EntryView({ entry, index, t, md, store, sid }: EntryViewProps): ReactNo
       return (
         <div className="msg user">
           <MarkdownText text={entry.text} md={md} stripMark={false} />
+          <MessageTime stamp={entry.timestamp} />
         </div>
       );
     case "system":
@@ -241,12 +243,38 @@ function EntryView({ entry, index, t, md, store, sid }: EntryViewProps): ReactNo
   }
 }
 
+/**
+ * 消息行上的时刻（rant 2026-10-17T10:03:08）：`HH:MM`，值只来自 daemon。
+ *
+ * 缺时刻/坏时刻渲染成**没有这个元素**，而不是空括号、`Invalid Date` 或 `NaN` ——
+ * 老记录本就没有时间，而“缺陷只在渲染里看得见”正是空串要避免的。完整日期在 `title` 上，
+ * 行上只留时钟（与 TUI 同口径）。
+ */
+function MessageTime({ stamp }: { stamp?: string }) {
+  const clock = formatMessageTime(stamp);
+  if (!clock) return null;
+  return (
+    <span className="msg-time" title={messageTimeTitle(stamp)}>
+      {clock}
+    </span>
+  );
+}
+
 /** 助手消息：每文本段一个 .msg.assistant 节点（chat.js createAssistantNode 语义） */
 function AssistantView({ entry, t, md }: { entry: AssistantEntry; t: TranslateFn; md: MarkdownRenderer }) {
+  const last = entry.segments.length - 1;
   return (
     <>
       {entry.segments.map((seg, i) => (
-        <AssistantSegmentView key={i} entry={entry} segment={seg} t={t} md={md} />
+        <AssistantSegmentView
+          key={i}
+          entry={entry}
+          segment={seg}
+          t={t}
+          md={md}
+          // 时刻属于这条消息，不属于每一段：一轮被工具切成多段时，只有最后一段显示它
+          stamp={i === last ? entry.timestamp : undefined}
+        />
       ))}
     </>
   );
@@ -266,11 +294,14 @@ function AssistantSegmentView({
   segment,
   t,
   md,
+  stamp,
 }: {
   entry: AssistantEntry;
   segment: AssistantSegment;
   t: TranslateFn;
   md: MarkdownRenderer;
+  /** daemon 写下这条回复的时刻（只在最后一段传入）；缺席则这一行不显示时间 */
+  stamp?: string;
 }) {
   // 块投影 host：引擎把「✦ + .md-stream」写入此节点（streamProject 返回 true 后显示；
   // React 不管理其 children，避免与引擎增量 DOM 冲突）
@@ -335,6 +366,7 @@ function AssistantSegmentView({
           </>
         )}
       </div>
+      <MessageTime stamp={stamp} />
     </div>
   );
 }

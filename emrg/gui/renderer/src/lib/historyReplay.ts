@@ -48,9 +48,17 @@ export type HistoryRecord = HistoryMessageRecord | HistoryToolResultRecord;
 
 /** 回放写入端：实时那一组 handler（TranscriptStore 直接满足）。 */
 export interface ReplaySink {
-  addUserMessage(text: string, sid?: string | null): void;
+  /**
+   * `meta.timestamp` 是**记录里** daemon 写下的时刻（rant 2026-10-17T10:03:08）。回放把它
+   * 原样交给 store，于是重开一个会话看到的时间与一直开着时同一条消息看到的一样 ——
+   * 客户端的时钟从头到尾没有参与。
+   */
+  addUserMessage(text: string, sid?: string | null, meta?: { requestId?: string; timestamp?: string }): void;
   handleDelta(chunks: Array<{ request_id?: string; content?: string }>, sid?: string | null): void;
-  handleDone(data: { request_id?: string; content?: string }, sid?: string | null): void;
+  handleDone(
+    data: { request_id?: string; content?: string; timestamp?: string },
+    sid?: string | null,
+  ): void;
   handleToolStart(
     data: { request_id?: string; tool_call_id: string; tool_name: string; intent?: string; arguments?: unknown },
     sid?: string | null,
@@ -114,9 +122,17 @@ export function replayHistoryRecords(
   let rid: string | null = null;
   let turnOpen = false;
 
+  let assistantStamp: string | undefined;
+
   const closeTurn = (): void => {
-    if (rid && turnOpen) sink.handleDone({ request_id: rid }, sid);
+    if (rid && turnOpen) {
+      sink.handleDone(
+        assistantStamp ? { request_id: rid, timestamp: assistantStamp } : { request_id: rid },
+        sid,
+      );
+    }
     turnOpen = false;
+    assistantStamp = undefined;
   };
 
   for (const r of records) {
@@ -124,7 +140,12 @@ export function replayHistoryRecords(
       // 实时顺序：上一轮的 done 先到，用户才接着发下一条。
       closeTurn();
       rid = `hist-${r.record_index ?? "u"}`;
-      sink.addUserMessage(r.content ?? "", sid);
+      // 用户行的时刻来自记录本身（此前 `timestamp` 类型上有、映射处被丢掉）。
+      // meta 与实时那一路同形状：id 一定有，时刻有才写 —— 不塞 `timestamp: undefined`,
+      // 否则同一个「还没有时刻」在两路上是两个不同的对象。
+      const meta: { requestId?: string; timestamp?: string } = { requestId: rid };
+      if (r.timestamp) meta.timestamp = r.timestamp;
+      sink.addUserMessage(r.content ?? "", sid, meta);
       continue;
     }
 
@@ -137,6 +158,9 @@ export function replayHistoryRecords(
         sink.handleDelta([{ request_id: rid, content }], sid);
         turnOpen = true;
       }
+      // 这一轮回复的时刻：收尾的 done 带上它，行上才显示得出来。空正文的助手记录
+      // （只带 tool_calls 的那种）没有可见的行，记下来也无处显示，跳过。
+      if (content && r.timestamp) assistantStamp = r.timestamp;
       for (const tc of r.tool_calls ?? []) {
         const callId = tc?.id ?? "";
         const name = tc?.function?.name ?? "";
