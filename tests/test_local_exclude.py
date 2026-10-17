@@ -65,8 +65,8 @@ def _exclude_file(repo: Path) -> Path:
 
 def _runtime_dir(repo: Path) -> None:
     """What this instance writes into a directory it works in."""
-    (repo / ".emrg" / "sessions" / "emrg-evolution-emrg-task").mkdir(parents=True)
-    (repo / ".emrg" / "sessions" / "emrg-evolution-emrg-task" / "history.jsonl").write_text(
+    (repo / ".emrg" / "sessions" / "emrg-task").mkdir(parents=True)
+    (repo / ".emrg" / "sessions" / "emrg-task" / "history.jsonl").write_text(
         "{}\n", encoding="utf-8"
     )
 
@@ -77,7 +77,7 @@ def _runtime_file(repo: Path) -> str:
     A file rather than the bare directory: git ignores what it can see, and an
     empty directory is invisible to it either way.
     """
-    return str(repo / ".emrg" / "sessions" / "emrg-evolution-emrg-task" / "history.jsonl")
+    return str(repo / ".emrg" / "sessions" / "emrg-task" / "history.jsonl")
 
 
 def _ignored(repo: Path, path: str) -> bool:

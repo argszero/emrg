@@ -13,7 +13,7 @@ const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 const crypto = require("crypto");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
-const { generateSessionId, SESSION_ID_RE } = require("./daemon_client");
+const { generateSessionId, isSessionId } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
 const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = require("./gui-state");
 const { externalNavPolicy } = require("./nav-policy");
@@ -283,8 +283,10 @@ vision = false
 
   // ── IPC（G102/G114 输入校验）────────────────────────────
 
+  // 宿主 2026-10-17：不再按"命名方案"校验会话 id，只保留路径安全（见 daemon_client.js
+  // 的 `isSessionId`）——任务会话的 id 就是任务名，白名单会把它挡在门外。
   function validateSessionId(id) {
-    return typeof id === "string" && SESSION_ID_RE.test(id);
+    return isSessionId(id);
   }
 
   function validateText(t) {

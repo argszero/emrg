@@ -675,7 +675,7 @@ def test_evolution_handler_status_last_run_fields():
     # rant 2026-08-18T21:32:32: recent_runs present, empty before any run
     assert st["recent_runs"] == []
     # rant 2026-08-21T17:46:12: task→session link fields (GUI open-session action)
-    assert st["session_id"] == "emrg-evolution-test"
+    assert st["session_id"] == "test"
     assert st["project"] == ""  # config={} → empty project name
     assert st["project_path"] == "test"  # fallback path = name
     # rant 2026-08-22T07:18:35: started_at = per-CYCLE start epoch (set at tick
@@ -2652,7 +2652,7 @@ def test_the_name_rule_is_about_the_path_not_the_case(tmp_path):
     """It refuses what could escape a directory, and nothing else.
 
     The task name is a file name (`task-runs/<name>.jsonl`, `<name>.heartbeat.json`,
-    `next-run/<name>.json`) and a session id (`emrg-evolution-{name}`), so separators,
+    `next-run/<name>.json`) and a session id (the name itself), so separators,
     traversal, spaces, control characters and over-length are unsafe. Case is not: it
     was never a safety property, and treating it as one killed a live host task.
     """

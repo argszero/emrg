@@ -186,7 +186,7 @@ TASK_TEMPLATES: dict[str, str] = {
 #
 # 这条规则是**路径安全**规则，不是命名风格规则。任务名同时是文件名与会话 id：
 # `~/.emrg/logs/task-runs/<name>.jsonl`、`<name>.heartbeat.json`、`~/.emrg/next-run/
-# <name>.json`、会话 id `emrg-evolution-{name}`。所以它必须挡住分隔符、跳转、空格与
+# <name>.json`、会话 id `{name}`。所以它必须挡住分隔符、跳转、空格与
 # 超长——那些会逃出目录或造出非法文件名。大小写不在其中。
 #
 # 原先只收小写，于是一条**已经在 tasks.yml 里**的记录被加载器每个 tick 拒绝：
@@ -930,7 +930,7 @@ class TaskHandler:
             "repo": repo,
             "repo_url": repo_url,
             "repo_configured": repo_configured,
-            "session_id": f"emrg-evolution-{self.name}",
+            "session_id": self.name,
             "source_dir": path or self.name,
             "sandbox": sandbox,
             # The template follows the record's type, so changing a task's type in
@@ -976,7 +976,7 @@ class TaskHandler:
 
     @property
     def _session_id(self) -> str:
-        return self._derived.get("session_id", f"emrg-evolution-{self.name}")
+        return self._derived.get("session_id", self.name)
 
     @property
     def _source_dir(self) -> str:
@@ -2513,7 +2513,7 @@ class TaskHandler:
             # rant 2026-08-21T17:46:12: expose the task→session link so the GUI
             # tasks panel can add an "open session" action. All in-memory —
             # project name (config.project), resolved project path, and the
-            # fixed task session_id (emrg-evolution-{name}).
+            # fixed task session_id (the task name).
             "project": self._project_name,
             "project_path": self.project_path,
             "session_id": self._session_id,
@@ -3306,7 +3306,7 @@ class TaskScheduler:
             "saturation": {},
             "project": project,
             "project_path": _resolve_project_path(project) if project else "",
-            "session_id": f"emrg-evolution-{record.get('name')}",
+            "session_id": record.get("name"),
         }
 
     def total_evolutions(self) -> int:
@@ -3427,7 +3427,7 @@ class TaskScheduler:
             return False, f"invalid sandbox {sandbox!r} (expected one of {', '.join(SANDBOX_MODES)})"
         tasks = self._read_table()
         # 名字即文件名与会话 id，而 macOS/Windows 的文件系统不区分大小写：`Foo` 与
-        # `foo` 会写进同一个 `<name>.jsonl`、同一个 `emrg-evolution-{name}` 会话。
+        # `foo` 会写进同一个 `<name>.jsonl`、同一个 `{name}` 会话。
         # 允许大写之后这种重名才可能出现，所以这道唯一性比较必须忽略大小写。
         if any(str(t.get("name", "")).lower() == name.lower() for t in tasks):
             return False, (
